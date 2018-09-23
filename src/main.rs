@@ -6,7 +6,7 @@ use rand::Rng;
 
 const ELEMENTS: usize = 1000*1000*1000/64;
 
-fn main() {
+fn query1() {
     let mut data: Vec<i64> = vec![0; ELEMENTS];
     for i in 0..ELEMENTS {
         data[i] = rand::thread_rng().gen();
@@ -21,6 +21,10 @@ fn main() {
     let end = SystemTime::now();
     let duration = end.duration_since(start)
         .expect("Time went backwards");
-    println!("Result: {}", ones);
-    println!("Duration: {:?}", duration);
+    println!("Query 1 result: {}", ones);
+    println!("Query 1 duration: {:?}", duration);
+}
+
+fn main() {
+    query1();
 }
