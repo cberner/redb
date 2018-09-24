@@ -7,3 +7,4 @@ authors = ["Christopher Berner <christopherberner@gmail.com>"]
 
 [dependencies]
 rand = "0.3.14"
+chrono = "0.4.6"
