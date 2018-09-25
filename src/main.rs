@@ -27,7 +27,8 @@ fn query1() {
     let duration = end.duration_since(start)
         .expect("Time went backwards");
     println!("Query 1 result: {}", ones);
-    println!("Query 1 duration: {:?}", duration);
+    println!("Query 1 duration: {:.1}ms", duration.as_secs() as f32 * 1000.0 +
+        (duration.subsec_nanos() as f32 / 1000.0 / 1000.0));
 }
 
 fn query2() {
@@ -55,7 +56,7 @@ fn query2() {
     for i in 0..MAX_PASSENGERS {
         println!("{}: {}", i, sums[i] / counts[i] as f32);
     }
-    println!("Query 2 duration: {:?}", duration);
+    println!("Query 2 duration: {:?}ms", duration.as_secs() * 1000 + (duration.subsec_nanos() / 1000 / 1000) as u64);
 }
 
 fn query3() {
@@ -85,7 +86,7 @@ fn query3() {
         let year = i / MAX_PASSENGERS + 1970;
         println!("{}, {}: {}", passengers, year, counts[i]);
     }
-    println!("Query 3 duration: {:?}", duration);
+    println!("Query 3 duration: {:?}ms", duration.as_secs() * 1000 + (duration.subsec_nanos() / 1000 / 1000) as u64);
 }
 
 fn query4() {
@@ -119,7 +120,7 @@ fn query4() {
         let year = i / (MAX_PASSENGERS * 100) + 1970;
         println!("{}, {}, {}: {}", passengers, year, distance, counts[i]);
     }
-    println!("Query 4 duration: {:?}", duration);
+    println!("Query 4 duration: {:?}ms", duration.as_secs() * 1000 + (duration.subsec_nanos() / 1000 / 1000) as u64);
 }
 
 fn main() {
