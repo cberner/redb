@@ -2,6 +2,7 @@ extern crate rand;
 extern crate chrono;
 
 use std::time::SystemTime;
+use std::rc::Rc;
 
 use rand::Rng;
 
@@ -9,6 +10,102 @@ use chrono::{NaiveDate, Datelike, NaiveDateTime};
 
 const ELEMENTS: usize = 1000*1000*1000;
 const MAX_PASSENGERS: usize = 10;
+
+trait Column {
+    fn data(&self) -> &Vec<i64>;
+}
+
+struct BooleanNotNullColumn {
+    data: Vec<i64>
+}
+
+impl Column for BooleanNotNullColumn {
+    fn data(&self) -> &Vec<i64> {
+        &self.data
+    }
+}
+
+struct Int64Column {
+    data: Vec<i64>
+}
+
+impl Column for Int64Column {
+    fn data(&self) -> &Vec<i64> {
+        &self.data
+    }
+}
+
+struct Table {
+    columns: Vec<Rc<Column>>
+}
+
+impl Table {
+    fn table_scan(&self) -> ScanOperator {
+        ScanOperator {
+            columns: self.columns.clone()
+        }
+    }
+}
+impl Table {
+    fn query(&self) -> Query {
+        Query {
+            operator: Box::new(self.table_scan())
+        }
+    }
+}
+
+trait Operator {
+    fn execute(&self) -> Vec<Rc<Column>>;
+}
+
+struct ScanOperator {
+    columns: Vec<Rc<Column>>
+}
+
+impl Operator for ScanOperator {
+    fn execute(&self) -> Vec<Rc<Column>> {
+        self.columns.clone()
+    }
+}
+
+struct BooleanNotNullGroupByCountOperator {
+    group_by: Vec<Rc<Column>>
+}
+
+impl Operator for BooleanNotNullGroupByCountOperator {
+    fn execute(&self) -> Vec<Rc<Column>> {
+        assert!(self.group_by.len() == 1);
+        let data = &self.group_by[0].data();
+        let ones = data.iter()
+            .map(|x| x.count_ones())
+            .fold(0, |sum, x| sum + x);
+        let column_data = vec![(ones as i64), (data.len() * 64) as i64 - ones as i64];
+        let output = Int64Column {
+            data: column_data
+        };
+        vec![Rc::new(output)]
+    }
+}
+
+struct Query {
+    operator: Box<Operator>
+}
+
+impl Query {
+    fn count_group_by(&self, columns: &[usize]) -> Query {
+        assert!(columns.len() == 1);
+        let group_by = Box::new(BooleanNotNullGroupByCountOperator {
+            group_by: self.operator.execute().clone()
+        });
+        Query {
+            operator: group_by
+        }
+    }
+
+    fn execute(&self) -> Vec<Rc<Column>> {
+        self.operator.execute()
+    }
+}
 
 fn query1() {
     let elements = ELEMENTS / 64;
@@ -19,14 +116,23 @@ fn query1() {
 
     let start = SystemTime::now();
 
-    let ones = data.iter()
-        .map(|x| x.count_ones())
-        .fold(0, |sum, x| sum + x);
+    let column = BooleanNotNullColumn {
+        data: data
+    };
+
+    let table = Table {
+        columns: vec![Rc::new(column)]
+    };
+
+    let q1 = table.query();
+    let q2 = q1.count_group_by(&[0 as usize]);
+    let op_output = q2.execute();
+    let result = op_output[0].data();
 
     let end = SystemTime::now();
     let duration = end.duration_since(start)
         .expect("Time went backwards");
-    println!("Query 1 result: {}", ones);
+    println!("Query 1 result: {:?}", result);
     println!("Query 1 duration: {:.1}ms", duration.as_secs() as f32 * 1000.0 +
         (duration.subsec_nanos() as f32 / 1000.0 / 1000.0));
 }
