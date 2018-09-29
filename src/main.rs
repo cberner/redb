@@ -12,7 +12,17 @@ const ELEMENTS: usize = 1000*1000*1000;
 const MAX_PASSENGERS: usize = 10;
 
 trait Column {
-    fn data(&self) -> &Vec<i64>;
+    fn i64_data(&self) -> &Vec<i64> {
+        panic!();
+    }
+
+    fn u8_data(&self) -> &Vec<u8> {
+        panic!();
+    }
+
+    fn f32_data(&self) -> &Vec<f32> {
+        panic!();
+    }
 }
 
 struct BooleanNotNullColumn {
@@ -20,7 +30,27 @@ struct BooleanNotNullColumn {
 }
 
 impl Column for BooleanNotNullColumn {
-    fn data(&self) -> &Vec<i64> {
+    fn i64_data(&self) -> &Vec<i64> {
+        &self.data
+    }
+}
+
+struct Float32Column {
+    data: Vec<f32>
+}
+
+impl Column for Float32Column {
+    fn f32_data(&self) -> &Vec<f32> {
+        &self.data
+    }
+}
+
+struct UInt8Column {
+    data: Vec<u8>
+}
+
+impl Column for UInt8Column {
+    fn u8_data(&self) -> &Vec<u8> {
         &self.data
     }
 }
@@ -30,7 +60,7 @@ struct Int64Column {
 }
 
 impl Column for Int64Column {
-    fn data(&self) -> &Vec<i64> {
+    fn i64_data(&self) -> &Vec<i64> {
         &self.data
     }
 }
@@ -75,7 +105,7 @@ struct BooleanNotNullGroupByCountOperator {
 impl Operator for BooleanNotNullGroupByCountOperator {
     fn execute(&self) -> Vec<Rc<Column>> {
         assert!(self.group_by.len() == 1);
-        let data = &self.group_by[0].data();
+        let data = &self.group_by[0].i64_data();
         let ones = data.iter()
             .map(|x| x.count_ones())
             .fold(0, |sum, x| sum + x);
@@ -84,6 +114,45 @@ impl Operator for BooleanNotNullGroupByCountOperator {
             data: column_data
         };
         vec![Rc::new(output)]
+    }
+}
+
+struct UInt8GroupByF32AverageOperator {
+    group_by: Vec<Rc<Column>>,
+    avg: Vec<Rc<Column>>
+}
+
+impl Operator for UInt8GroupByF32AverageOperator {
+    fn execute(&self) -> Vec<Rc<Column>> {
+        assert!(self.group_by.len() == 1);
+        assert!(self.avg.len() == 1);
+
+        let mut sums: [f32; 256] = [0.0; 256];
+        let mut counts: [u32; 256] = [0; 256];
+
+        let group_column = &self.group_by[0].u8_data();
+        let avg_column = &self.avg[0].f32_data();
+
+        for i in 0..group_column.len() {
+            sums[group_column[i] as usize] += avg_column[i];
+            counts[group_column[i] as usize] += 1;
+        }
+
+        let mut groups: Vec<u8> = vec![];
+        let mut avgs: Vec<f32> = vec![];
+        for i in 0..256 {
+            if counts[i] > 0 {
+                groups.push(i as u8);
+                avgs.push(sums[i] / counts[i] as f32);
+            }
+        }
+        let groups_output = UInt8Column {
+            data: groups
+        };
+        let avgs_output = Float32Column {
+            data: avgs
+        };
+        vec![Rc::new(groups_output), Rc::new(avgs_output)]
     }
 }
 
@@ -96,6 +165,19 @@ impl Query {
         assert!(columns.len() == 1);
         let group_by = Box::new(BooleanNotNullGroupByCountOperator {
             group_by: self.operator.execute().clone()
+        });
+        Query {
+            operator: group_by
+        }
+    }
+
+    fn group_by_avg(&self, group_by_columns: &[usize], avg_columns: &[usize]) -> Query {
+        assert!(group_by_columns.len() == 1);
+        assert!(avg_columns.len() == 1);
+        let mut columns = self.operator.execute().clone();
+        let group_by = Box::new(UInt8GroupByF32AverageOperator {
+            group_by: vec![columns.remove(group_by_columns[0])],
+            avg: vec![columns.remove(avg_columns[0] - 1)]
         });
         Query {
             operator: group_by
@@ -127,7 +209,7 @@ fn query1() {
     let q1 = table.query();
     let q2 = q1.count_group_by(&[0 as usize]);
     let op_output = q2.execute();
-    let result = op_output[0].data();
+    let result = op_output[0].i64_data();
 
     let end = SystemTime::now();
     let duration = end.duration_since(start)
@@ -145,22 +227,32 @@ fn query2() {
         total_fare[i] = rand::thread_rng().gen_range(1.0, 100.0);
     }
 
-    let mut sums: [f32; MAX_PASSENGERS] = [0.0; MAX_PASSENGERS];
-    let mut counts: [u32; MAX_PASSENGERS] = [0; MAX_PASSENGERS];
-
     let start = SystemTime::now();
 
-    for i in 0..ELEMENTS {
-        sums[num_passengers[i] as usize] += total_fare[i];
-        counts[num_passengers[i] as usize] += 1;
-    }
+    let passengers_column = UInt8Column {
+        data: num_passengers
+    };
+
+    let fare_column = Float32Column {
+        data: total_fare
+    };
+
+    let table = Table {
+        columns: vec![Rc::new(passengers_column), Rc::new(fare_column)]
+    };
+
+    let q1 = table.query();
+    let q2 = q1.group_by_avg(&[0 as usize], &[1 as usize]);
+    let op_output = q2.execute();
+    let result = op_output[1].f32_data();
+
 
     let end = SystemTime::now();
     let duration = end.duration_since(start)
         .expect("Time went backwards");
     println!("Query 2 result:");
     for i in 0..MAX_PASSENGERS {
-        println!("{}: {}", i, sums[i] / counts[i] as f32);
+        println!("{}: {}", i, result[i]);
     }
     println!("Query 2 duration: {:?}ms", duration.as_secs() * 1000 + (duration.subsec_nanos() / 1000 / 1000) as u64);
 }
