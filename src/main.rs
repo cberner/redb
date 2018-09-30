@@ -214,6 +214,59 @@ impl Operator for UInt8YearGroupByCountOperator {
     }
 }
 
+struct UInt8YearAndDistanceGroupByCountOperator {
+    uint8_column: Rc<Column>,
+    timestamp_column: Rc<Column>,
+    distance_column: Rc<Column>
+}
+
+impl Operator for UInt8YearAndDistanceGroupByCountOperator {
+    fn execute(&self) -> Vec<Rc<Column>> {
+        const GROUPS: usize = MAX_PASSENGERS * 100 * 100;
+        let mut counts: [u32; GROUPS] = [0; GROUPS];
+
+        let u8_data = self.uint8_column.u8_data();
+        let timestamp_data = self.timestamp_column.timestamp_data();
+        let distance_data = self.distance_column.f32_data();
+
+        for i in 0..u8_data.len() {
+            let c1 = u8_data[i] as usize;
+            let year = (timestamp_data[i].date().year() - 1970) as usize;
+            let distance = distance_data[i] as usize;
+            counts[(MAX_PASSENGERS * 100 * year + 100 * c1 + distance) as usize] += 1;
+        }
+
+        let mut u8_values: Vec<u8> = vec![];
+        let mut year_values: Vec<i64> = vec![];
+        let mut distance_values: Vec<i64> = vec![];
+        let mut count_values: Vec<i64> = vec![];
+        for i in 0..GROUPS {
+            if counts[i] > 0 {
+                let distance = i % 100;
+                let u8_value = (i % MAX_PASSENGERS * 100) / 100;
+                let year = i / (MAX_PASSENGERS * 100) + 1970;
+                u8_values.push(u8_value as u8);
+                year_values.push(year as i64);
+                distance_values.push(distance as i64);
+                count_values.push(counts[i] as i64);
+            }
+        }
+        let u8_output = UInt8Column {
+            data: u8_values
+        };
+        let year_output = Int64Column {
+            data: year_values
+        };
+        let distance_output = Int64Column {
+            data: distance_values
+        };
+        let count_output = Int64Column {
+            data: count_values
+        };
+        vec![Rc::new(u8_output), Rc::new(year_output), Rc::new(distance_output), Rc::new(count_output)]
+    }
+}
+
 struct Query {
     operator: Box<Operator>
 }
@@ -234,6 +287,18 @@ impl Query {
         let group_by = Box::new(UInt8YearGroupByCountOperator {
             uint8_column: columns[u8_column].clone(),
             timestamp_column: columns[year_column].clone()
+        });
+        Query {
+            operator: group_by
+        }
+    }
+
+    fn count_group_by_extract_year_and_distance(&self, u8_column: usize, year_column: usize, distance_column: usize) -> Query {
+        let columns = self.operator.execute().clone();
+        let group_by = Box::new(UInt8YearAndDistanceGroupByCountOperator {
+            uint8_column: columns[u8_column].clone(),
+            timestamp_column: columns[year_column].clone(),
+            distance_column: columns[distance_column].clone()
         });
         Query {
             operator: group_by
@@ -375,26 +440,38 @@ fn query4() {
         trip_distance[i] = rand::thread_rng().gen_range(0.1, 100.0);
     }
 
-    let mut counts: [u32; MAX_PASSENGERS * (2018 - 1970) * 100] = [0; MAX_PASSENGERS * (2018 - 1970) * 100];
-
     let start = SystemTime::now();
 
-    for i in 0..ELEMENTS {
-        let passengers = num_passengers[i] as usize;
-        let year = (pickup_timestamp[i].date().year() - 1970) as usize;
-        let distance = trip_distance[i] as usize;
-        counts[(MAX_PASSENGERS * 100 * year + 100 * passengers + distance) as usize] += 1;
-    }
+    let passengers_column = UInt8Column {
+        data: num_passengers
+    };
+
+    let pickup_timestamp_column = TimestampColumn {
+        data: pickup_timestamp
+    };
+
+    let distance_column = Float32Column {
+        data: trip_distance
+    };
+
+    let table = Table {
+        columns: vec![Rc::new(passengers_column), Rc::new(pickup_timestamp_column), Rc::new(distance_column)]
+    };
+
+    let q1 = table.query();
+    let q2 = q1.count_group_by_extract_year_and_distance(0, 1, 2);
+    let op_output = q2.execute();
 
     let end = SystemTime::now();
     let duration = end.duration_since(start)
         .expect("Time went backwards");
     println!("Query 4 (first 10) result:");
     for i in 0..10 {
-        let distance = i % 100;
-        let passengers = (i % MAX_PASSENGERS * 100) / 100;
-        let year = i / (MAX_PASSENGERS * 100) + 1970;
-        println!("{}, {}, {}: {}", passengers, year, distance, counts[i]);
+        let passengers = op_output[0].u8_data()[i];
+        let year = op_output[1].i64_data()[i];
+        let distance = op_output[2].i64_data()[i];
+        let count = op_output[3].i64_data()[i];
+        println!("{}, {}, {}: {}", passengers, year, distance, count);
     }
     println!("Query 4 duration: {:?}ms", duration.as_secs() * 1000 + (duration.subsec_nanos() / 1000 / 1000) as u64);
 }
