@@ -23,6 +23,20 @@ trait Column {
     fn f32_data(&self) -> &Vec<f32> {
         panic!();
     }
+
+    fn timestamp_data(&self) -> &Vec<NaiveDateTime> {
+        panic!();
+    }
+}
+
+struct TimestampColumn {
+    data: Vec<NaiveDateTime>
+}
+
+impl Column for TimestampColumn {
+    fn timestamp_data(&self) -> &Vec<NaiveDateTime> {
+        &self.data
+    }
 }
 
 struct BooleanNotNullColumn {
@@ -156,6 +170,50 @@ impl Operator for UInt8GroupByF32AverageOperator {
     }
 }
 
+struct UInt8YearGroupByCountOperator {
+    uint8_column: Rc<Column>,
+    timestamp_column: Rc<Column>
+}
+
+impl Operator for UInt8YearGroupByCountOperator {
+    fn execute(&self) -> Vec<Rc<Column>> {
+        const GROUPS: usize = 256 * 256;
+        let mut counts: [u32; GROUPS] = [0; GROUPS];
+
+        let u8_data = self.uint8_column.u8_data();
+        let timestamp_data = self.timestamp_column.timestamp_data();
+
+        for i in 0..u8_data.len() {
+            let c1 = u8_data[i] as usize;
+            let year = (timestamp_data[i].date().year() - 1970) as usize;
+            counts[(256 * year + c1) as usize] += 1;
+        }
+
+        let mut u8_values: Vec<u8> = vec![];
+        let mut year_values: Vec<i64> = vec![];
+        let mut count_values: Vec<i64> = vec![];
+        for i in 0..GROUPS {
+            if counts[i] > 0 {
+                let u8_value = i % 256;
+                let year = i / 256 + 1970;
+                u8_values.push(u8_value as u8);
+                year_values.push(year as i64);
+                count_values.push(counts[i] as i64);
+            }
+        }
+        let u8_output = UInt8Column {
+            data: u8_values
+        };
+        let year_output = Int64Column {
+            data: year_values
+        };
+        let count_output = Int64Column {
+            data: count_values
+        };
+        vec![Rc::new(u8_output), Rc::new(year_output), Rc::new(count_output)]
+    }
+}
+
 struct Query {
     operator: Box<Operator>
 }
@@ -165,6 +223,17 @@ impl Query {
         assert!(columns.len() == 1);
         let group_by = Box::new(BooleanNotNullGroupByCountOperator {
             group_by: self.operator.execute().clone()
+        });
+        Query {
+            operator: group_by
+        }
+    }
+
+    fn count_group_by_extract_year(&self, u8_column: usize, year_column: usize) -> Query {
+        let columns = self.operator.execute().clone();
+        let group_by = Box::new(UInt8YearGroupByCountOperator {
+            uint8_column: columns[u8_column].clone(),
+            timestamp_column: columns[year_column].clone()
         });
         Query {
             operator: group_by
@@ -265,24 +334,33 @@ fn query3() {
         pickup_timestamp[i] = NaiveDateTime::from_timestamp(rand::thread_rng().gen_range(1, (2018 - 1970)*365*24*60*60), 0);
     }
 
-    let mut counts: [u32; MAX_PASSENGERS * (2018 - 1970)] = [0; MAX_PASSENGERS * (2018 - 1970)];
-
     let start = SystemTime::now();
 
-    for i in 0..ELEMENTS {
-        let passengers = num_passengers[i] as usize;
-        let year = (pickup_timestamp[i].date().year() - 1970) as usize;
-        counts[(MAX_PASSENGERS * year + passengers) as usize] += 1;
-    }
+    let passengers_column = UInt8Column {
+        data: num_passengers
+    };
+
+    let pickup_timestamp_column = TimestampColumn {
+        data: pickup_timestamp
+    };
+
+    let table = Table {
+        columns: vec![Rc::new(passengers_column), Rc::new(pickup_timestamp_column)]
+    };
+
+    let q1 = table.query();
+    let q2 = q1.count_group_by_extract_year(0, 1);
+    let op_output = q2.execute();
 
     let end = SystemTime::now();
     let duration = end.duration_since(start)
         .expect("Time went backwards");
     println!("Query 3 (first 10) results:");
     for i in 0..10 {
-        let passengers = i % MAX_PASSENGERS;
-        let year = i / MAX_PASSENGERS + 1970;
-        println!("{}, {}: {}", passengers, year, counts[i]);
+        let passengers = op_output[0].u8_data()[i];
+        let year = op_output[1].i64_data()[i];
+        let count = op_output[2].i64_data()[i];
+        println!("{}, {}: {}", passengers, year, count);
     }
     println!("Query 3 duration: {:?}ms", duration.as_secs() * 1000 + (duration.subsec_nanos() / 1000 / 1000) as u64);
 }
