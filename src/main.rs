@@ -39,16 +39,6 @@ impl Column for TimestampColumn {
     }
 }
 
-struct BooleanNotNullColumn {
-    data: Vec<i64>
-}
-
-impl Column for BooleanNotNullColumn {
-    fn i64_data(&self) -> &Vec<i64> {
-        &self.data
-    }
-}
-
 struct Float32Column {
     data: Vec<f32>
 }
@@ -98,6 +88,42 @@ impl Table {
     }
 }
 
+struct Table1<T> {
+    column1: Rc<Vec<T>>
+}
+
+impl<T: 'static> Table1<T> {
+    fn table_scan(&self) -> ScanOperator1<T> {
+        ScanOperator1 {
+            column1: self.column1.clone()
+        }
+    }
+
+    fn query(&self) -> Query1<T> {
+        Query1 {
+            operator: Box::new(self.table_scan())
+        }
+    }
+}
+
+trait Operator1<T> {
+    fn execute(&self) -> (Rc<Vec<T>>,);
+}
+
+trait Operator2<T, U> {
+    fn execute(&self) -> (Rc<Vec<T>>, Rc<Vec<U>>);
+}
+
+struct ScanOperator1<T> {
+    column1: Rc<Vec<T>>
+}
+
+impl<T> Operator1<T> for ScanOperator1<T> {
+    fn execute(&self) -> (Rc<Vec<T>>,) {
+        (self.column1.clone(),)
+    }
+}
+
 trait Operator {
     fn execute(&self) -> Vec<Rc<Column>>;
 }
@@ -113,21 +139,16 @@ impl Operator for ScanOperator {
 }
 
 struct BooleanNotNullGroupByCountOperator {
-    group_by: Vec<Rc<Column>>
+    group_by_bits: Rc<Vec<i64>>
 }
 
-impl Operator for BooleanNotNullGroupByCountOperator {
-    fn execute(&self) -> Vec<Rc<Column>> {
-        assert!(self.group_by.len() == 1);
-        let data = &self.group_by[0].i64_data();
-        let ones = data.iter()
+impl Operator2<bool, i64> for BooleanNotNullGroupByCountOperator {
+    fn execute(&self) -> (Rc<Vec<bool>>, Rc<Vec<i64>>) {
+        let ones = self.group_by_bits.iter()
             .map(|x| x.count_ones())
             .fold(0, |sum, x| sum + x);
-        let column_data = vec![(ones as i64), (data.len() * 64) as i64 - ones as i64];
-        let output = Int64Column {
-            data: column_data
-        };
-        vec![Rc::new(output)]
+        let output = vec![(ones as i64), (self.group_by_bits.len() * 64) as i64 - ones as i64];
+        (Rc::new(vec![true, false]), Rc::new(output))
     }
 }
 
@@ -267,21 +288,42 @@ impl Operator for UInt8YearAndDistanceGroupByCountOperator {
     }
 }
 
+struct Query1<T> {
+    operator: Box<Operator1<T>>
+}
+
+impl Query1<i64> {
+    fn count_group_by(&self) -> Query2<bool, i64> {
+        let group_by = Box::new(BooleanNotNullGroupByCountOperator {
+            group_by_bits: self.operator.execute().0.clone()
+        });
+        Query2 {
+            operator: group_by
+        }
+    }
+}
+
+impl<T> Query1<T> {
+    fn execute(&self) -> (Rc<Vec<T>>,) {
+        self.operator.execute()
+    }
+}
+
+struct Query2<T, U> {
+    operator: Box<Operator2<T, U>>
+}
+
+impl<T, U> Query2<T, U> {
+    fn execute(&self) -> (Rc<Vec<T>>, Rc<Vec<U>>) {
+        self.operator.execute()
+    }
+}
+
 struct Query {
     operator: Box<Operator>
 }
 
 impl Query {
-    fn count_group_by(&self, columns: &[usize]) -> Query {
-        assert!(columns.len() == 1);
-        let group_by = Box::new(BooleanNotNullGroupByCountOperator {
-            group_by: self.operator.execute().clone()
-        });
-        Query {
-            operator: group_by
-        }
-    }
-
     fn count_group_by_extract_year(&self, u8_column: usize, year_column: usize) -> Query {
         let columns = self.operator.execute().clone();
         let group_by = Box::new(UInt8YearGroupByCountOperator {
@@ -332,18 +374,14 @@ fn query1() {
 
     let start = SystemTime::now();
 
-    let column = BooleanNotNullColumn {
-        data: data
-    };
-
-    let table = Table {
-        columns: vec![Rc::new(column)]
+    let table = Table1 {
+        column1: Rc::new(data)
     };
 
     let q1 = table.query();
-    let q2 = q1.count_group_by(&[0 as usize]);
+    let q2 = q1.count_group_by();
     let op_output = q2.execute();
-    let result = op_output[0].i64_data();
+    let result = op_output.1;
 
     let end = SystemTime::now();
     let duration = end.duration_since(start)
