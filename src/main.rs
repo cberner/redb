@@ -11,83 +11,6 @@ use chrono::{NaiveDate, Datelike, NaiveDateTime};
 const ELEMENTS: usize = 1000*1000*1000;
 const MAX_PASSENGERS: usize = 10;
 
-trait Column {
-    fn i64_data(&self) -> &Vec<i64> {
-        panic!();
-    }
-
-    fn u8_data(&self) -> &Vec<u8> {
-        panic!();
-    }
-
-    fn f32_data(&self) -> &Vec<f32> {
-        panic!();
-    }
-
-    fn timestamp_data(&self) -> &Vec<NaiveDateTime> {
-        panic!();
-    }
-}
-
-struct TimestampColumn {
-    data: Vec<NaiveDateTime>
-}
-
-impl Column for TimestampColumn {
-    fn timestamp_data(&self) -> &Vec<NaiveDateTime> {
-        &self.data
-    }
-}
-
-struct Float32Column {
-    data: Vec<f32>
-}
-
-impl Column for Float32Column {
-    fn f32_data(&self) -> &Vec<f32> {
-        &self.data
-    }
-}
-
-struct UInt8Column {
-    data: Vec<u8>
-}
-
-impl Column for UInt8Column {
-    fn u8_data(&self) -> &Vec<u8> {
-        &self.data
-    }
-}
-
-struct Int64Column {
-    data: Vec<i64>
-}
-
-impl Column for Int64Column {
-    fn i64_data(&self) -> &Vec<i64> {
-        &self.data
-    }
-}
-
-struct Table {
-    columns: Vec<Rc<Column>>
-}
-
-impl Table {
-    fn table_scan(&self) -> ScanOperator {
-        ScanOperator {
-            columns: self.columns.clone()
-        }
-    }
-}
-impl Table {
-    fn query(&self) -> Query {
-        Query {
-            operator: Box::new(self.table_scan())
-        }
-    }
-}
-
 struct Table1<T> {
     column1: Rc<Vec<T>>
 }
@@ -126,6 +49,28 @@ impl<T: 'static, U: 'static> Table2<T, U> {
     }
 }
 
+struct Table3<T, U, V> {
+    column1: Rc<Vec<T>>,
+    column2: Rc<Vec<U>>,
+    column3: Rc<Vec<V>>
+}
+
+impl<T: 'static, U: 'static, V: 'static> Table3<T, U, V> {
+    fn table_scan(&self) -> ScanOperator3<T, U, V> {
+        ScanOperator3 {
+            column1: self.column1.clone(),
+            column2: self.column2.clone(),
+            column3: self.column3.clone()
+        }
+    }
+
+    fn query(&self) -> Query3<T, U, V> {
+        Query3 {
+            operator: Box::new(self.table_scan())
+        }
+    }
+}
+
 trait Operator1<T> {
     fn execute(&self) -> (Rc<Vec<T>>,);
 }
@@ -136,6 +81,10 @@ trait Operator2<T, U> {
 
 trait Operator3<T, U, V> {
     fn execute(&self) -> (Rc<Vec<T>>, Rc<Vec<U>>, Rc<Vec<V>>);
+}
+
+trait Operator4<T, U, V, W> {
+    fn execute(&self) -> (Rc<Vec<T>>, Rc<Vec<U>>, Rc<Vec<V>>, Rc<Vec<W>>);
 }
 
 struct ScanOperator1<T> {
@@ -159,17 +108,15 @@ impl<T, U> Operator2<T, U> for ScanOperator2<T, U> {
     }
 }
 
-trait Operator {
-    fn execute(&self) -> Vec<Rc<Column>>;
+struct ScanOperator3<T, U, V> {
+    column1: Rc<Vec<T>>,
+    column2: Rc<Vec<U>>,
+    column3: Rc<Vec<V>>
 }
 
-struct ScanOperator {
-    columns: Vec<Rc<Column>>
-}
-
-impl Operator for ScanOperator {
-    fn execute(&self) -> Vec<Rc<Column>> {
-        self.columns.clone()
+impl<T, U, V> Operator3<T, U, V> for ScanOperator3<T, U, V> {
+    fn execute(&self) -> (Rc<Vec<T>>, Rc<Vec<U>>, Rc<Vec<V>>) {
+        (self.column1.clone(), self.column2.clone(), self.column3.clone())
     }
 }
 
@@ -257,25 +204,25 @@ impl Operator3<u8, i64, i64> for UInt8YearGroupByCountOperator {
 }
 
 struct UInt8YearAndDistanceGroupByCountOperator {
-    uint8_column: Rc<Column>,
-    timestamp_column: Rc<Column>,
-    distance_column: Rc<Column>
+    uint8_column: Rc<Vec<u8>>,
+    timestamp_column: Rc<Vec<NaiveDateTime>>,
+    distance_column: Rc<Vec<f32>>
 }
 
-impl Operator for UInt8YearAndDistanceGroupByCountOperator {
-    fn execute(&self) -> Vec<Rc<Column>> {
+impl Operator4<u8, i64, i64, i64> for UInt8YearAndDistanceGroupByCountOperator {
+    fn execute(&self) -> (Rc<Vec<u8>>, Rc<Vec<i64>>, Rc<Vec<i64>>, Rc<Vec<i64>>) {
         const GROUPS: usize = MAX_PASSENGERS * 100 * 100;
         let mut counts: [u32; GROUPS] = [0; GROUPS];
 
-        let u8_data = self.uint8_column.u8_data();
-        let timestamp_data = self.timestamp_column.timestamp_data();
-        let distance_data = self.distance_column.f32_data();
-
-        for i in 0..u8_data.len() {
-            let c1 = u8_data[i] as usize;
-            let year = (timestamp_data[i].date().year() - 1970) as usize;
-            let distance = distance_data[i] as usize;
-            counts[(MAX_PASSENGERS * 100 * year + 100 * c1 + distance) as usize] += 1;
+        assert!(self.uint8_column.len() == self.timestamp_column.len());
+        assert!(self.uint8_column.len() == self.distance_column.len());
+        for i in 0..self.uint8_column.len() {
+            unsafe {
+                let c1 = *self.uint8_column.get_unchecked(i) as usize;
+                let year = (self.timestamp_column.get_unchecked(i).date().year() - 1970) as usize;
+                let distance = *self.distance_column.get_unchecked(i) as usize;
+                counts[(MAX_PASSENGERS * 100 * year + 100 * c1 + distance) as usize] += 1;
+            }
         }
 
         let mut u8_values: Vec<u8> = vec![];
@@ -293,19 +240,7 @@ impl Operator for UInt8YearAndDistanceGroupByCountOperator {
                 count_values.push(counts[i] as i64);
             }
         }
-        let u8_output = UInt8Column {
-            data: u8_values
-        };
-        let year_output = Int64Column {
-            data: year_values
-        };
-        let distance_output = Int64Column {
-            data: distance_values
-        };
-        let count_output = Int64Column {
-            data: count_values
-        };
-        vec![Rc::new(u8_output), Rc::new(year_output), Rc::new(distance_output), Rc::new(count_output)]
+        (Rc::new(u8_values), Rc::new(year_values), Rc::new(distance_values), Rc::new(count_values))
     }
 }
 
@@ -350,6 +285,30 @@ impl<T, U, V> Query3<T, U, V> {
     }
 }
 
+impl Query3<u8, NaiveDateTime, f32> {
+    fn count_group_by_extract_year_and_distance(&self) -> Query4<u8, i64, i64, i64> {
+        let columns = self.operator.execute();
+        let group_by = Box::new(UInt8YearAndDistanceGroupByCountOperator {
+            uint8_column: columns.0,
+            timestamp_column: columns.1,
+            distance_column: columns.2
+        });
+        Query4 {
+            operator: group_by
+        }
+    }
+}
+
+struct Query4<T, U, V, W> {
+    operator: Box<Operator4<T, U, V, W>>
+}
+
+impl<T, U, V, W> Query4<T, U, V, W> {
+    fn execute(&self) -> (Rc<Vec<T>>, Rc<Vec<U>>, Rc<Vec<V>>, Rc<Vec<W>>) {
+        self.operator.execute()
+    }
+}
+
 impl Query2<u8, f32> {
     fn group_by_avg(&self) -> Query2<u8, f32> {
         let columns = self.operator.execute();
@@ -373,28 +332,6 @@ impl Query2<u8, NaiveDateTime> {
         Query3 {
             operator: group_by
         }
-    }
-}
-
-struct Query {
-    operator: Box<Operator>
-}
-
-impl Query {
-    fn count_group_by_extract_year_and_distance(&self, u8_column: usize, year_column: usize, distance_column: usize) -> Query {
-        let columns = self.operator.execute().clone();
-        let group_by = Box::new(UInt8YearAndDistanceGroupByCountOperator {
-            uint8_column: columns[u8_column].clone(),
-            timestamp_column: columns[year_column].clone(),
-            distance_column: columns[distance_column].clone()
-        });
-        Query {
-            operator: group_by
-        }
-    }
-
-    fn execute(&self) -> Vec<Rc<Column>> {
-        self.operator.execute()
     }
 }
 
@@ -499,24 +436,14 @@ fn query4() {
 
     let start = SystemTime::now();
 
-    let passengers_column = UInt8Column {
-        data: num_passengers
-    };
-
-    let pickup_timestamp_column = TimestampColumn {
-        data: pickup_timestamp
-    };
-
-    let distance_column = Float32Column {
-        data: trip_distance
-    };
-
-    let table = Table {
-        columns: vec![Rc::new(passengers_column), Rc::new(pickup_timestamp_column), Rc::new(distance_column)]
+    let table = Table3 {
+        column1: Rc::new(num_passengers),
+        column2: Rc::new(pickup_timestamp),
+        column3:  Rc::new(trip_distance)
     };
 
     let q1 = table.query();
-    let q2 = q1.count_group_by_extract_year_and_distance(0, 1, 2);
+    let q2 = q1.count_group_by_extract_year_and_distance();
     let op_output = q2.execute();
 
     let end = SystemTime::now();
@@ -524,10 +451,10 @@ fn query4() {
         .expect("Time went backwards");
     println!("Query 4 (first 10) result:");
     for i in 0..10 {
-        let passengers = op_output[0].u8_data()[i];
-        let year = op_output[1].i64_data()[i];
-        let distance = op_output[2].i64_data()[i];
-        let count = op_output[3].i64_data()[i];
+        let passengers = op_output.0[i];
+        let year = op_output.1[i];
+        let distance = op_output.2[i];
+        let count = op_output.3[i];
         println!("{}, {}, {}: {}", passengers, year, distance, count);
     }
     println!("Query 4 duration: {:?}ms", duration.as_secs() * 1000 + (duration.subsec_nanos() / 1000 / 1000) as u64);
