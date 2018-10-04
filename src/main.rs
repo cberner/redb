@@ -106,6 +106,26 @@ impl<T: 'static> Table1<T> {
     }
 }
 
+struct Table2<T, U> {
+    column1: Rc<Vec<T>>,
+    column2: Rc<Vec<U>>
+}
+
+impl<T: 'static, U: 'static> Table2<T, U> {
+    fn table_scan(&self) -> ScanOperator2<T, U> {
+        ScanOperator2 {
+            column1: self.column1.clone(),
+            column2: self.column2.clone()
+        }
+    }
+
+    fn query(&self) -> Query2<T, U> {
+        Query2 {
+            operator: Box::new(self.table_scan())
+        }
+    }
+}
+
 trait Operator1<T> {
     fn execute(&self) -> (Rc<Vec<T>>,);
 }
@@ -121,6 +141,17 @@ struct ScanOperator1<T> {
 impl<T> Operator1<T> for ScanOperator1<T> {
     fn execute(&self) -> (Rc<Vec<T>>,) {
         (self.column1.clone(),)
+    }
+}
+
+struct ScanOperator2<T, U> {
+    column1: Rc<Vec<T>>,
+    column2: Rc<Vec<U>>
+}
+
+impl<T, U> Operator2<T, U> for ScanOperator2<T, U> {
+    fn execute(&self) -> (Rc<Vec<T>>, Rc<Vec<U>>) {
+        (self.column1.clone(), self.column2.clone())
     }
 }
 
@@ -153,24 +184,25 @@ impl Operator2<bool, i64> for BooleanNotNullGroupByCountOperator {
 }
 
 struct UInt8GroupByF32AverageOperator {
-    group_by: Vec<Rc<Column>>,
-    avg: Vec<Rc<Column>>
+    group_by: Rc<Vec<u8>>,
+    avg: Rc<Vec<f32>>
 }
 
-impl Operator for UInt8GroupByF32AverageOperator {
-    fn execute(&self) -> Vec<Rc<Column>> {
-        assert!(self.group_by.len() == 1);
-        assert!(self.avg.len() == 1);
-
+impl Operator2<u8, f32> for UInt8GroupByF32AverageOperator {
+    fn execute(&self) -> (Rc<Vec<u8>>, Rc<Vec<f32>>) {
         let mut sums: [f32; 256] = [0.0; 256];
         let mut counts: [u32; 256] = [0; 256];
 
-        let group_column = &self.group_by[0].u8_data();
-        let avg_column = &self.avg[0].f32_data();
+        assert!(self.group_by.len() == self.avg.len());
 
-        for i in 0..group_column.len() {
-            sums[group_column[i] as usize] += avg_column[i];
-            counts[group_column[i] as usize] += 1;
+        for i in 0..self.group_by.len() {
+            // TODO: compiler doesn't seem to be able to elide these bounds checks,
+            // so use get_unchecked() as the bounds checking incurs a ~30% performance penalty
+            unsafe {
+                let group = *self.group_by.get_unchecked(i) as usize;
+                sums[group] += self.avg.get_unchecked(i);
+                counts[group] += 1;
+            }
         }
 
         let mut groups: Vec<u8> = vec![];
@@ -181,13 +213,7 @@ impl Operator for UInt8GroupByF32AverageOperator {
                 avgs.push(sums[i] / counts[i] as f32);
             }
         }
-        let groups_output = UInt8Column {
-            data: groups
-        };
-        let avgs_output = Float32Column {
-            data: avgs
-        };
-        vec![Rc::new(groups_output), Rc::new(avgs_output)]
+        (Rc::new(groups), Rc::new(avgs))
     }
 }
 
@@ -319,6 +345,20 @@ impl<T, U> Query2<T, U> {
     }
 }
 
+impl Query2<u8, f32> {
+    fn group_by_avg(&self) -> Query2<u8, f32> {
+        let columns = self.operator.execute();
+        let group_by = Box::new(UInt8GroupByF32AverageOperator {
+            group_by: columns.0,
+            avg: columns.1
+        });
+        Query2 {
+            operator: group_by
+        }
+    }
+
+}
+
 struct Query {
     operator: Box<Operator>
 }
@@ -341,19 +381,6 @@ impl Query {
             uint8_column: columns[u8_column].clone(),
             timestamp_column: columns[year_column].clone(),
             distance_column: columns[distance_column].clone()
-        });
-        Query {
-            operator: group_by
-        }
-    }
-
-    fn group_by_avg(&self, group_by_columns: &[usize], avg_columns: &[usize]) -> Query {
-        assert!(group_by_columns.len() == 1);
-        assert!(avg_columns.len() == 1);
-        let mut columns = self.operator.execute().clone();
-        let group_by = Box::new(UInt8GroupByF32AverageOperator {
-            group_by: vec![columns.remove(group_by_columns[0])],
-            avg: vec![columns.remove(avg_columns[0] - 1)]
         });
         Query {
             operator: group_by
@@ -401,22 +428,15 @@ fn query2() {
 
     let start = SystemTime::now();
 
-    let passengers_column = UInt8Column {
-        data: num_passengers
-    };
-
-    let fare_column = Float32Column {
-        data: total_fare
-    };
-
-    let table = Table {
-        columns: vec![Rc::new(passengers_column), Rc::new(fare_column)]
+    let table = Table2 {
+        column1: Rc::new(num_passengers),
+        column2: Rc::new(total_fare)
     };
 
     let q1 = table.query();
-    let q2 = q1.group_by_avg(&[0 as usize], &[1 as usize]);
+    let q2 = q1.group_by_avg();
     let op_output = q2.execute();
-    let result = op_output[1].f32_data();
+    let result = op_output.1;
 
 
     let end = SystemTime::now();
