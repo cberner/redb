@@ -11,6 +11,8 @@ use chrono::{NaiveDate, NaiveDateTime};
 mod redb;
 
 use redb::{Table1, Table2, Table3};
+use redb::AggregationOperation::GroupBy as GroupBy;
+use redb::AggregationOperation::Count as Count;
 
 const ELEMENTS: usize = 1000*1000*1000;
 const MAX_PASSENGERS: usize = 10;
@@ -30,7 +32,7 @@ fn query1() {
     };
 
     let q1 = table.query();
-    let q2 = q1.count_group_by();
+    let q2 = q1.aggregate(GroupBy, Count);
     let op_output = q2.execute();
     let result = op_output.1;
 

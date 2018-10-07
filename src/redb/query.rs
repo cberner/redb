@@ -11,6 +11,11 @@ use super::group_by_operator::UInt8YearGroupByCountOperator;
 use super::group_by_operator::UInt8GroupByF32AverageOperator;
 use super::group_by_operator::UInt8YearAndDistanceGroupByCountOperator;
 
+#[derive(PartialEq)]
+pub enum AggregationOperation {
+    GroupBy,
+    Count
+}
 
 pub struct Query1<T> {
     pub operator: Box<Operator1<T>>
@@ -47,7 +52,9 @@ impl<T, U, V, W> Query4<T, U, V, W> {
 }
 
 impl Query1<i64> {
-    pub fn count_group_by(&self) -> Query2<bool, i64> {
+    pub fn aggregate(&self, op1: AggregationOperation, op2: AggregationOperation) -> Query2<bool, i64> {
+        assert!(op1 == AggregationOperation::GroupBy);
+        assert!(op2 == AggregationOperation::Count);
         let group_by = Box::new(BooleanNotNullGroupByCountOperator {
             group_by_bits: self.operator.execute().0.clone()
         });
