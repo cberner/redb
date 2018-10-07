@@ -13,6 +13,7 @@ mod redb;
 use redb::{Table1, Table2, Table3};
 use redb::AggregationOperation::GroupBy as GroupBy;
 use redb::AggregationOperation::Count as Count;
+use redb::AggregationOperation::Average as Average;
 
 const ELEMENTS: usize = 1000*1000*1000;
 const MAX_PASSENGERS: usize = 10;
@@ -60,7 +61,7 @@ fn query2() {
     };
 
     let q1 = table.query();
-    let q2 = q1.group_by_avg();
+    let q2 = q1.aggregate(GroupBy, Average);
     let op_output = q2.execute();
     let result = op_output.1;
 
