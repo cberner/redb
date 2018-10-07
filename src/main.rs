@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use rand::Rng;
 
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{Datelike, NaiveDate, NaiveDateTime};
 
 mod redb;
 
@@ -76,6 +76,11 @@ fn query2() {
     println!("Query 2 duration: {:?}ms", duration.as_secs() * 1000 + (duration.subsec_nanos() / 1000 / 1000) as u64);
 }
 
+#[inline(always)]
+fn inline_project(x: &u8, y: &NaiveDateTime) -> (u8, u8) {
+    (*x, (y.date().year() - 1970) as u8)
+}
+
 fn query3() {
     let mut num_passengers: Vec<u8> = vec![0; ELEMENTS];
     let mut pickup_timestamp: Vec<NaiveDateTime> = vec![NaiveDate::from_ymd(2001, 1, 1).and_hms(1, 1, 1); ELEMENTS];
@@ -92,8 +97,10 @@ fn query3() {
     };
 
     let q1 = table.query();
-    let q2 = q1.count_group_by_extract_year();
-    let op_output = q2.execute();
+    let q2 = q1.project(inline_project);
+    let q3 = q2.aggregate(GroupBy, GroupBy, Count);
+    let q4 = q3.project(|&p, &y, &c| (p, y as i64 + 1970, c));
+    let op_output = q4.execute();
 
     let end = SystemTime::now();
     let duration = end.duration_since(start)

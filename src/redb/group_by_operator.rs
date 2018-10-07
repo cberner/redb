@@ -56,38 +56,37 @@ impl Operator2<u8, f32> for UInt8GroupByF32AverageOperator {
     }
 }
 
-pub struct UInt8YearGroupByCountOperator {
+pub struct UInt8UInt8GroupByCountOperator<T> {
     pub uint8_column: Rc<Vec<u8>>,
-    pub timestamp_column: Rc<Vec<NaiveDateTime>>
+    pub generic_column: Rc<Vec<T>>,
+    pub projection: fn(&u8, &T) -> (u8, u8)
 }
 
-impl Operator3<u8, i64, i64> for UInt8YearGroupByCountOperator {
-    fn execute(&self) -> (Rc<Vec<u8>>, Rc<Vec<i64>>, Rc<Vec<i64>>) {
+impl<T> Operator3<u8, u8, i64> for UInt8UInt8GroupByCountOperator<T> {
+    #[inline]
+    fn execute(&self) -> (Rc<Vec<u8>>, Rc<Vec<u8>>, Rc<Vec<i64>>) {
         const GROUPS: usize = 256 * 256;
         let mut counts: [u32; GROUPS] = [0; GROUPS];
 
-        assert!(self.uint8_column.len() == self.timestamp_column.len());
+        assert!(self.uint8_column.len() == self.generic_column.len());
         for i in 0..self.uint8_column.len() {
             unsafe {
-                let c1 = *self.uint8_column.get_unchecked(i) as usize;
-                let year = (self.timestamp_column.get_unchecked(i).date().year() - 1970) as usize;
-                counts[(256 * year + c1) as usize] += 1;
+                let (c0, c1) = (self.projection)(self.uint8_column.get_unchecked(i), self.generic_column.get_unchecked(i));
+                counts[(256 * (c1 as usize) + c0 as usize)] += 1;
             }
         }
 
-        let mut u8_values: Vec<u8> = vec![];
-        let mut year_values: Vec<i64> = vec![];
+        let mut c0_values: Vec<u8> = vec![];
+        let mut c1_values: Vec<u8> = vec![];
         let mut count_values: Vec<i64> = vec![];
         for i in 0..GROUPS {
             if counts[i] > 0 {
-                let u8_value = i % 256;
-                let year = i / 256 + 1970;
-                u8_values.push(u8_value as u8);
-                year_values.push(year as i64);
+                c0_values.push((i % 256) as u8);
+                c1_values.push((i / 256) as u8);
                 count_values.push(counts[i] as i64);
             }
         }
-        (Rc::new(u8_values), Rc::new(year_values), Rc::new(count_values))
+        (Rc::new(c0_values), Rc::new(c1_values), Rc::new(count_values))
     }
 }
 

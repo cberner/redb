@@ -27,7 +27,9 @@ pub struct Table2<T, U> {
     pub column2: Rc<Vec<U>>
 }
 
-impl<T: 'static, U: 'static> Table2<T, U> {
+impl<T: 'static, U: 'static> Table2<T, U>
+    where T: Copy, U: Copy
+{
     fn table_scan(&self) -> ScanOperator2<T, U> {
         ScanOperator2 {
             column1: self.column1.clone(),
@@ -35,9 +37,10 @@ impl<T: 'static, U: 'static> Table2<T, U> {
         }
     }
 
-    pub fn query(&self) -> Query2<T, U> {
+    pub fn query(&self) -> Query2<T, U, T, U> {
         Query2 {
-            operator: Box::new(self.table_scan())
+            operator: Box::new(self.table_scan()),
+            projection: |x: &T, y: &U| (*x, *y)
         }
     }
 }
@@ -48,7 +51,9 @@ pub struct Table3<T, U, V> {
     pub column3: Rc<Vec<V>>
 }
 
-impl<T: 'static, U: 'static, V: 'static> Table3<T, U, V> {
+impl<T: 'static, U: 'static, V: 'static> Table3<T, U, V>
+    where T: Copy, U: Copy, V: Copy
+{
     fn table_scan(&self) -> ScanOperator3<T, U, V> {
         ScanOperator3 {
             column1: self.column1.clone(),
@@ -57,9 +62,10 @@ impl<T: 'static, U: 'static, V: 'static> Table3<T, U, V> {
         }
     }
 
-    pub fn query(&self) -> Query3<T, U, V> {
+    pub fn query(&self) -> Query3<T, U, V, T, U, V> {
         Query3 {
-            operator: Box::new(self.table_scan())
+            operator: Box::new(self.table_scan()),
+            projection: |x, y, z| (*x, *y, *z)
         }
     }
 }
