@@ -2,8 +2,6 @@ extern crate chrono;
 
 use std::rc::Rc;
 
-use chrono::{Datelike, NaiveDateTime};
-
 use super::operator::{Operator2, Operator3, Operator4};
 
 const MAX_PASSENGERS: usize = 10;
@@ -90,40 +88,40 @@ impl<T> Operator3<u8, u8, i64> for UInt8UInt8GroupByCountOperator<T> {
     }
 }
 
-pub struct UInt8YearAndDistanceGroupByCountOperator {
+pub struct UInt8UInt8UInt8GroupByCountOperator<T, U> {
     pub uint8_column: Rc<Vec<u8>>,
-    pub timestamp_column: Rc<Vec<NaiveDateTime>>,
-    pub distance_column: Rc<Vec<f32>>
+    pub column1: Rc<Vec<T>>,
+    pub column2: Rc<Vec<U>>,
+    pub projection: fn(&u8, &T, &U) -> (u8, u8, u8)
 }
 
-impl Operator4<u8, i64, i64, i64> for UInt8YearAndDistanceGroupByCountOperator {
-    fn execute(&self) -> (Rc<Vec<u8>>, Rc<Vec<i64>>, Rc<Vec<i64>>, Rc<Vec<i64>>) {
+impl<T, U> Operator4<u8, u8, u8, i64> for UInt8UInt8UInt8GroupByCountOperator<T, U> {
+    #[inline]
+    fn execute(&self) -> (Rc<Vec<u8>>, Rc<Vec<u8>>, Rc<Vec<u8>>, Rc<Vec<i64>>) {
         const GROUPS: usize = MAX_PASSENGERS * 100 * 100;
         let mut counts: [u32; GROUPS] = [0; GROUPS];
 
-        assert!(self.uint8_column.len() == self.timestamp_column.len());
-        assert!(self.uint8_column.len() == self.distance_column.len());
+        assert!(self.uint8_column.len() == self.column1.len());
+        assert!(self.uint8_column.len() == self.column2.len());
         for i in 0..self.uint8_column.len() {
             unsafe {
-                let c1 = *self.uint8_column.get_unchecked(i) as usize;
-                let year = (self.timestamp_column.get_unchecked(i).date().year() - 1970) as usize;
-                let distance = *self.distance_column.get_unchecked(i) as usize;
-                counts[(MAX_PASSENGERS * 100 * year + 100 * c1 + distance) as usize] += 1;
+                let (c0, c1, c2) = (self.projection)(self.uint8_column.get_unchecked(i), self.column1.get_unchecked(i), self.column2.get_unchecked(i));
+                counts[MAX_PASSENGERS * 100 * c1 as usize + 100 * c0 as usize + c2 as usize] += 1;
             }
         }
 
         let mut u8_values: Vec<u8> = vec![];
-        let mut year_values: Vec<i64> = vec![];
-        let mut distance_values: Vec<i64> = vec![];
+        let mut year_values: Vec<u8> = vec![];
+        let mut distance_values: Vec<u8> = vec![];
         let mut count_values: Vec<i64> = vec![];
         for i in 0..GROUPS {
             if counts[i] > 0 {
                 let distance = i % 100;
                 let u8_value = (i % MAX_PASSENGERS * 100) / 100;
-                let year = i / (MAX_PASSENGERS * 100) + 1970;
+                let year = i / (MAX_PASSENGERS * 100);
                 u8_values.push(u8_value as u8);
-                year_values.push(year as i64);
-                distance_values.push(distance as i64);
+                year_values.push(year as u8);
+                distance_values.push(distance as u8);
                 count_values.push(counts[i] as i64);
             }
         }

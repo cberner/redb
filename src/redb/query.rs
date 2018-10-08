@@ -9,8 +9,9 @@ use super::operator::{Operator1, Operator2, Operator3, Operator4};
 use super::group_by_operator::BooleanNotNullGroupByCountOperator;
 use super::group_by_operator::UInt8UInt8GroupByCountOperator;
 use super::group_by_operator::UInt8GroupByF32AverageOperator;
-use super::group_by_operator::UInt8YearAndDistanceGroupByCountOperator;
+use super::group_by_operator::UInt8UInt8UInt8GroupByCountOperator;
 use redb::scan_operator::ScanOperator3;
+use redb::scan_operator::ScanOperator4;
 
 #[derive(PartialEq)]
 pub enum AggregationOperation {
@@ -33,8 +34,9 @@ pub struct Query3<A, B, C, T, U, V> {
     pub projection: fn(&A, &B, &C) -> (T, U, V)
 }
 
-pub struct Query4<T, U, V, W> {
-    pub operator: Box<Operator4<T, U, V, W>>
+pub struct Query4<A, B, C, D, T, U, V, W> {
+    pub operator: Box<Operator4<A, B, C, D>>,
+    pub projection: fn(&A, &B, &C, &D) -> (T, U, V, W)
 }
 
 impl<A, B, T, U> Query2<A, B, T, U> {
@@ -70,6 +72,15 @@ impl<T, U, V> Query3<T, U, V, T, U, V> {
     }
 }
 
+impl<T, U, V, W> Query4<T, U, V, W, T, U, V, W> {
+    pub fn project<X, Y, Z, A>(self, projection: fn(&T, &U, &V, &W) -> (X, Y, Z, A)) -> Query4<T, U, V, W, X, Y, Z, A> {
+        Query4 {
+            operator: self.operator,
+            projection: projection
+        }
+    }
+}
+
 impl<A, B, C, T, U, V> Query3<A, B, C, T, U, V> {
     #[inline]
     pub fn execute(&self) -> (Rc<Vec<T>>, Rc<Vec<U>>, Rc<Vec<V>>) {
@@ -88,9 +99,22 @@ impl<A, B, C, T, U, V> Query3<A, B, C, T, U, V> {
     }
 }
 
-impl<T, U, V, W> Query4<T, U, V, W> {
+impl<A, B, C, D, T, U, V, W> Query4<A, B, C, D, T, U, V, W> {
     pub fn execute(&self) -> (Rc<Vec<T>>, Rc<Vec<U>>, Rc<Vec<V>>, Rc<Vec<W>>) {
-        self.operator.execute()
+        let columns = self.operator.execute();
+        let mut output0: Vec<T> = vec![];
+        let mut output1: Vec<U> = vec![];
+        let mut output2: Vec<V> = vec![];
+        let mut output3: Vec<W> = vec![];
+
+        for i in 0..columns.0.len() {
+            let (o0, o1, o2, o3) = (self.projection)(&columns.0[i], &columns.1[i], &columns.2[i], &columns.3[i]);
+            output0.push(o0);
+            output1.push(o1);
+            output2.push(o2);
+            output3.push(o3);
+        }
+        (Rc::new(output0), Rc::new(output1), Rc::new(output2), Rc::new(output3))
     }
 }
 
@@ -151,16 +175,31 @@ impl Query2<u8, NaiveDateTime, u8, u8> {
     }
 }
 
-impl Query3<u8, NaiveDateTime, f32, u8, NaiveDateTime, f32> {
-    pub fn count_group_by_extract_year_and_distance(&self) -> Query4<u8, i64, i64, i64> {
+impl Query3<u8, NaiveDateTime, f32, u8, u8, u8> {
+    #[inline]
+    pub fn aggregate(&self, op0: AggregationOperation, op1: AggregationOperation, op2: AggregationOperation, op3: AggregationOperation) -> Query4<u8, u8, u8, i64, u8, u8, u8, i64> {
+        assert!(op0 == AggregationOperation::GroupBy);
+        assert!(op1 == AggregationOperation::GroupBy);
+        assert!(op2 == AggregationOperation::GroupBy);
+        assert!(op3 == AggregationOperation::Count);
         let columns = self.operator.execute();
-        let group_by = Box::new(UInt8YearAndDistanceGroupByCountOperator {
+        let group_by = UInt8UInt8UInt8GroupByCountOperator {
             uint8_column: columns.0,
-            timestamp_column: columns.1,
-            distance_column: columns.2
+            column1: columns.1,
+            column2: columns.2,
+            projection: self.projection
+        };
+        // XXX: Materialize results to help compiler with inlining
+        let columns_prime = group_by.execute();
+        let scan = Box::new(ScanOperator4 {
+            column1: columns_prime.0,
+            column2: columns_prime.1,
+            column3: columns_prime.2,
+            column4: columns_prime.3
         });
         Query4 {
-            operator: group_by
+            operator: scan,
+            projection: |&a, &b, &c, &d| (a, b, c, d)
         }
     }
 }

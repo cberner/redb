@@ -77,7 +77,7 @@ fn query2() {
 }
 
 #[inline(always)]
-fn inline_project(x: &u8, y: &NaiveDateTime) -> (u8, u8) {
+fn inline_project3(x: &u8, y: &NaiveDateTime) -> (u8, u8) {
     (*x, (y.date().year() - 1970) as u8)
 }
 
@@ -97,7 +97,7 @@ fn query3() {
     };
 
     let q1 = table.query();
-    let q2 = q1.project(inline_project);
+    let q2 = q1.project(inline_project3);
     let q3 = q2.aggregate(GroupBy, GroupBy, Count);
     let q4 = q3.project(|&p, &y, &c| (p, y as i64 + 1970, c));
     let op_output = q4.execute();
@@ -113,6 +113,11 @@ fn query3() {
         println!("{}, {}: {}", passengers, year, count);
     }
     println!("Query 3 duration: {:?}ms", duration.as_secs() * 1000 + (duration.subsec_nanos() / 1000 / 1000) as u64);
+}
+
+#[inline(always)]
+fn inline_project4(x: &u8, y: &NaiveDateTime, d: &f32) -> (u8, u8, u8) {
+    (*x, (y.date().year() - 1970) as u8, *d as u8)
 }
 
 fn query4() {
@@ -134,8 +139,10 @@ fn query4() {
     };
 
     let q1 = table.query();
-    let q2 = q1.count_group_by_extract_year_and_distance();
-    let op_output = q2.execute();
+    let q2 = q1.project(inline_project4);
+    let q3 = q2.aggregate(GroupBy, GroupBy, GroupBy, Count);
+    let q4 = q3.project(|&p, &y, &d, &c| (p, y as i64 + 1970, d, c));
+    let op_output = q4.execute();
 
     let end = SystemTime::now();
     let duration = end.duration_since(start)
