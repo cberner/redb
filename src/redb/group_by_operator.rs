@@ -7,22 +7,27 @@ use super::operator::{Operator2, Operator3, Operator4};
 const MAX_PASSENGERS: usize = 10;
 
 pub struct BooleanNotNullGroupByCountOperator {
-    pub group_by_bits: Rc<Vec<i64>>
+    pub group_by_bits: Rc<Vec<i64>>,
 }
 
 impl Operator2<bool, i64> for BooleanNotNullGroupByCountOperator {
     fn execute(&self) -> (Rc<Vec<bool>>, Rc<Vec<i64>>) {
-        let ones = self.group_by_bits.iter()
+        let ones = self
+            .group_by_bits
+            .iter()
             .map(|x| x.count_ones())
             .fold(0, |sum, x| sum + x);
-        let output = vec![(ones as i64), (self.group_by_bits.len() * 64) as i64 - ones as i64];
+        let output = vec![
+            (ones as i64),
+            (self.group_by_bits.len() * 64) as i64 - ones as i64,
+        ];
         (Rc::new(vec![true, false]), Rc::new(output))
     }
 }
 
 pub struct UInt8GroupByF32AverageOperator {
     pub group_by: Rc<Vec<u8>>,
-    pub avg: Rc<Vec<f32>>
+    pub avg: Rc<Vec<f32>>,
 }
 
 impl Operator2<u8, f32> for UInt8GroupByF32AverageOperator {
@@ -57,7 +62,7 @@ impl Operator2<u8, f32> for UInt8GroupByF32AverageOperator {
 pub struct UInt8UInt8GroupByCountOperator<T> {
     pub uint8_column: Rc<Vec<u8>>,
     pub generic_column: Rc<Vec<T>>,
-    pub projection: fn(&u8, &T) -> (u8, u8)
+    pub projection: fn(&u8, &T) -> (u8, u8),
 }
 
 impl<T> Operator3<u8, u8, i64> for UInt8UInt8GroupByCountOperator<T> {
@@ -69,7 +74,10 @@ impl<T> Operator3<u8, u8, i64> for UInt8UInt8GroupByCountOperator<T> {
         assert!(self.uint8_column.len() == self.generic_column.len());
         for i in 0..self.uint8_column.len() {
             unsafe {
-                let (c0, c1) = (self.projection)(self.uint8_column.get_unchecked(i), self.generic_column.get_unchecked(i));
+                let (c0, c1) = (self.projection)(
+                    self.uint8_column.get_unchecked(i),
+                    self.generic_column.get_unchecked(i),
+                );
                 counts[(256 * (c1 as usize) + c0 as usize)] += 1;
             }
         }
@@ -84,7 +92,11 @@ impl<T> Operator3<u8, u8, i64> for UInt8UInt8GroupByCountOperator<T> {
                 count_values.push(counts[i] as i64);
             }
         }
-        (Rc::new(c0_values), Rc::new(c1_values), Rc::new(count_values))
+        (
+            Rc::new(c0_values),
+            Rc::new(c1_values),
+            Rc::new(count_values),
+        )
     }
 }
 
@@ -92,7 +104,7 @@ pub struct UInt8UInt8UInt8GroupByCountOperator<T, U> {
     pub uint8_column: Rc<Vec<u8>>,
     pub column1: Rc<Vec<T>>,
     pub column2: Rc<Vec<U>>,
-    pub projection: fn(&u8, &T, &U) -> (u8, u8, u8)
+    pub projection: fn(&u8, &T, &U) -> (u8, u8, u8),
 }
 
 impl<T, U> Operator4<u8, u8, u8, i64> for UInt8UInt8UInt8GroupByCountOperator<T, U> {
@@ -105,7 +117,11 @@ impl<T, U> Operator4<u8, u8, u8, i64> for UInt8UInt8UInt8GroupByCountOperator<T,
         assert!(self.uint8_column.len() == self.column2.len());
         for i in 0..self.uint8_column.len() {
             unsafe {
-                let (c0, c1, c2) = (self.projection)(self.uint8_column.get_unchecked(i), self.column1.get_unchecked(i), self.column2.get_unchecked(i));
+                let (c0, c1, c2) = (self.projection)(
+                    self.uint8_column.get_unchecked(i),
+                    self.column1.get_unchecked(i),
+                    self.column2.get_unchecked(i),
+                );
                 counts[MAX_PASSENGERS * 100 * c1 as usize + 100 * c0 as usize + c2 as usize] += 1;
             }
         }
@@ -125,6 +141,11 @@ impl<T, U> Operator4<u8, u8, u8, i64> for UInt8UInt8UInt8GroupByCountOperator<T,
                 count_values.push(counts[i] as i64);
             }
         }
-        (Rc::new(u8_values), Rc::new(year_values), Rc::new(distance_values), Rc::new(count_values))
+        (
+            Rc::new(u8_values),
+            Rc::new(year_values),
+            Rc::new(distance_values),
+            Rc::new(count_values),
+        )
     }
 }
