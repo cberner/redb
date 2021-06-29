@@ -1,3 +1,6 @@
+build: pre
+	cargo build
+
 pre:
 	cargo deny check licenses
 	cargo fmt --all -- --check
@@ -21,3 +24,6 @@ install_py: pre
 
 test: pre
 	cargo test
+
+bench: pre
+	cargo bench
