@@ -13,12 +13,21 @@ authors = ["Christopher Berner <christopherberner@gmail.com>"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rand = "0.3.14"
+rand = "0.8"
 chrono = "0.4.6"
 pyo3 = {version = "0.13", features=["extension-module", "abi3-py36"], optional = true }
 
+[dev-dependencies]
+lmdb-zero = "0.4.4"
+lmdb-rkv = "0.14.0"
+tempfile = "3.2.0"
+
 [features]
 python = ["pyo3"]
+
+[[bench]]
+name = "lmdb_benchmark"
+harness = false
 
 [package.metadata.maturin]
 requires-python = ">= 3.6"
