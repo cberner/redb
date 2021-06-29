@@ -10,8 +10,7 @@ use super::group_by_operator::BooleanNotNullGroupByCountOperator;
 use super::group_by_operator::UInt8UInt8GroupByCountOperator;
 use super::group_by_operator::UInt8GroupByF32AverageOperator;
 use super::group_by_operator::UInt8UInt8UInt8GroupByCountOperator;
-use redb::scan_operator::ScanOperator3;
-use redb::scan_operator::ScanOperator4;
+use super::scan_operator::{ScanOperator3, ScanOperator4};
 
 #[derive(PartialEq)]
 pub enum AggregationOperation {
