@@ -1,3 +1,4 @@
+mod btree;
 mod db;
 mod error;
 #[cfg(feature = "python")]
