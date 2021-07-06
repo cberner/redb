@@ -1,25 +1,22 @@
 use crate::error::Error;
+use crate::storage::Storage;
 use crate::transactions::WriteTransaction;
 use crate::ReadOnlyTransaction;
-use std::cell::RefCell;
-use std::collections::HashMap;
 
-pub struct Table {
-    data: RefCell<HashMap<Vec<u8>, Vec<u8>>>,
+pub struct Table<'mmap> {
+    storage: &'mmap Storage,
 }
 
-impl Table {
-    pub(in crate) fn new() -> Result<Table, Error> {
-        Ok(Table {
-            data: RefCell::new(HashMap::new()),
-        })
+impl<'mmap> Table<'mmap> {
+    pub(in crate) fn new(storage: &'mmap Storage) -> Result<Table<'mmap>, Error> {
+        Ok(Table { storage })
     }
 
     pub fn begin_write(&mut self) -> Result<WriteTransaction, Error> {
-        Ok(WriteTransaction::new(&self.data))
+        Ok(WriteTransaction::new(self.storage))
     }
 
     pub fn read_transaction(&self) -> Result<ReadOnlyTransaction, Error> {
-        Ok(ReadOnlyTransaction::new(self.data.borrow().clone()))
+        Ok(ReadOnlyTransaction::new(self.storage))
     }
 }

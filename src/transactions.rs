@@ -1,16 +1,18 @@
 use crate::error::Error;
-use std::cell::RefCell;
+use crate::storage::{AccessGuard, Storage};
 use std::collections::HashMap;
 
-pub struct WriteTransaction<'a> {
-    table: &'a RefCell<HashMap<Vec<u8>, Vec<u8>>>,
+pub struct WriteTransaction<'mmap> {
+    storage: &'mmap Storage,
     data: HashMap<Vec<u8>, Vec<u8>>,
 }
 
-impl<'a> WriteTransaction<'a> {
-    pub(in crate) fn new(table: &'a RefCell<HashMap<Vec<u8>, Vec<u8>>>) -> WriteTransaction<'a> {
-        let data = table.borrow().clone();
-        WriteTransaction { table, data }
+impl<'mmap> WriteTransaction<'mmap> {
+    pub(in crate) fn new(storage: &'mmap Storage) -> WriteTransaction<'mmap> {
+        WriteTransaction {
+            storage,
+            data: HashMap::new(),
+        }
     }
 
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
@@ -19,21 +21,24 @@ impl<'a> WriteTransaction<'a> {
     }
 
     pub fn commit(self) -> Result<(), Error> {
-        self.table.replace(self.data);
+        for (key, value) in self.data.iter() {
+            self.storage.append(key, value)?;
+        }
+        self.storage.fsync()?;
         Ok(())
     }
 }
 
-pub struct ReadOnlyTransaction {
-    data: HashMap<Vec<u8>, Vec<u8>>,
+pub struct ReadOnlyTransaction<'mmap> {
+    storage: &'mmap Storage,
 }
 
-impl ReadOnlyTransaction {
-    pub(in crate) fn new(data: HashMap<Vec<u8>, Vec<u8>>) -> ReadOnlyTransaction {
-        ReadOnlyTransaction { data }
+impl<'mmap> ReadOnlyTransaction<'mmap> {
+    pub(in crate) fn new(storage: &'mmap Storage) -> ReadOnlyTransaction<'mmap> {
+        ReadOnlyTransaction { storage }
     }
 
-    pub fn get(&self, key: &[u8]) -> Result<Option<&[u8]>, Error> {
-        Ok(self.data.get(key).map(|x| x.as_slice()))
+    pub fn get(&self, key: &[u8]) -> Result<Option<AccessGuard<'mmap>>, Error> {
+        self.storage.get(key)
     }
 }
