@@ -30,6 +30,10 @@ python = ["pyo3"]
 name = "lmdb_benchmark"
 harness = false
 
+[[bench]]
+name = "syscall_benchmark"
+harness = false
+
 [package.metadata.maturin]
 requires-python = ">= 3.6"
 classifier = ["Development Status :: 4 - Beta",
