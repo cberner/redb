@@ -222,4 +222,10 @@ fn main() {
         let table = RedbBenchTable::new(&db);
         benchmark(table);
     }
+    {
+        let tmpfile: TempDir = tempfile::tempdir().unwrap();
+        let db = sled::Config::new().path(tmpfile.path()).open().unwrap();
+        let table = SledBenchTable::new(&db);
+        benchmark(table);
+    }
 }
