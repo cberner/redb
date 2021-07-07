@@ -1,6 +1,8 @@
-pub trait BenchTable {
+use redb::AccessGuard;
+
+pub trait BenchTable<T: AsRef<[u8]>> {
     type W: BenchWriteTransaction;
-    type R: BenchReadTransaction;
+    type R: BenchReadTransaction<T>;
 
     fn db_type_name() -> &'static str;
 
@@ -15,10 +17,8 @@ pub trait BenchWriteTransaction {
     fn commit(self) -> Result<(), ()>;
 }
 
-pub trait BenchReadTransaction {
-    type T: AsRef<[u8]>;
-
-    fn get(&self, key: &[u8]) -> Option<Self::T>;
+pub trait BenchReadTransaction<T: AsRef<[u8]>> {
+    fn get(&self, key: &[u8]) -> Option<T>;
 }
 
 pub struct RedbBenchTable<'a> {
@@ -33,7 +33,7 @@ impl<'a> RedbBenchTable<'a> {
     }
 }
 
-impl<'a> BenchTable for RedbBenchTable<'a> {
+impl<'a> BenchTable<AccessGuard<'a>> for RedbBenchTable<'a> {
     type W = RedbBenchWriteTransaction<'a>;
     type R = RedbBenchReadTransaction<'a>;
 
@@ -58,10 +58,8 @@ pub struct RedbBenchReadTransaction<'a> {
     txn: redb::ReadOnlyTransaction<'a>,
 }
 
-impl<'a> BenchReadTransaction for RedbBenchReadTransaction<'a> {
-    type T = redb::AccessGuard<'a>;
-
-    fn get(&self, key: &[u8]) -> Option<Self::T> {
+impl<'a> BenchReadTransaction<redb::AccessGuard<'a>> for RedbBenchReadTransaction<'a> {
+    fn get(&self, key: &[u8]) -> Option<AccessGuard<'a>> {
         self.txn.get(key).unwrap()
     }
 }
