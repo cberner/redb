@@ -12,11 +12,11 @@ impl<'mmap> Table<'mmap> {
         Ok(Table { storage })
     }
 
-    pub fn begin_write(&mut self) -> Result<WriteTransaction, Error> {
+    pub fn begin_write(&'_ mut self) -> Result<WriteTransaction<'mmap>, Error> {
         Ok(WriteTransaction::new(self.storage))
     }
 
-    pub fn read_transaction(&self) -> Result<ReadOnlyTransaction, Error> {
+    pub fn read_transaction(&'_ self) -> Result<ReadOnlyTransaction<'mmap>, Error> {
         Ok(ReadOnlyTransaction::new(self.storage))
     }
 }
