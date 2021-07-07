@@ -1,5 +1,3 @@
-use std::ops::Deref;
-
 pub trait BenchTable {
     type W: BenchWriteTransaction;
     type R: BenchReadTransaction;
@@ -18,7 +16,7 @@ pub trait BenchWriteTransaction {
 }
 
 pub trait BenchReadTransaction {
-    type T: Deref<Target = [u8]>;
+    type T: AsRef<[u8]>;
 
     fn get(&self, key: &[u8]) -> Option<Self::T>;
 }
