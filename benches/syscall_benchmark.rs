@@ -2,6 +2,8 @@ use tempfile::{NamedTempFile, TempDir};
 
 use rand::prelude::SliceRandom;
 use rand::Rng;
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -91,31 +93,32 @@ fn lmdb_zero_bench(path: &str) {
     }
 }
 
-fn lmdb_rkv_bench(path: &Path) {
-    use lmdb::Transaction;
-    let env = lmdb::Environment::new().open(path).unwrap();
-    env.set_map_size(4096 * 1024 * 1024).unwrap();
+fn readwrite_bench(path: &Path) {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)
+        .unwrap();
 
     let pairs = gen_data(1000, 16, 2000);
 
-    let db = env.open_db(None).unwrap();
     let start = SystemTime::now();
-    let mut txn = env.begin_rw_txn().unwrap();
     {
         for i in 0..ELEMENTS {
             let (key, value) = &pairs[i % pairs.len()];
             let mut mut_key = key.clone();
             mut_key.extend_from_slice(&i.to_be_bytes());
-            txn.put(db, &mut_key, value, lmdb::WriteFlags::empty())
-                .unwrap();
+            file.write_all(&mut_key).unwrap();
+            file.write_all(value).unwrap();
         }
     }
-    txn.commit().unwrap();
+    file.sync_all().unwrap();
 
     let end = SystemTime::now();
     let duration = end.duration_since(start).unwrap();
     println!(
-        "lmdb-rkv: Loaded {} items in {}ms",
+        "read()/write(): Loaded {} items in {}ms",
         ELEMENTS,
         duration.as_millis()
     );
@@ -123,7 +126,6 @@ fn lmdb_rkv_bench(path: &Path) {
     let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
     key_order.shuffle(&mut rand::thread_rng());
 
-    let txn = env.begin_ro_txn().unwrap();
     {
         for _ in 0..ITERATIONS {
             let start = SystemTime::now();
@@ -133,72 +135,19 @@ fn lmdb_rkv_bench(path: &Path) {
                 let (key, value) = &pairs[*i % pairs.len()];
                 let mut mut_key = key.clone();
                 mut_key.extend_from_slice(&i.to_be_bytes());
-                let result: &[u8] = txn.get(db, &mut_key).unwrap();
-                checksum += result[0] as u64;
+                let offset = i * (mut_key.len() + value.len()) + mut_key.len();
+                let mut buffer = vec![0u8; value.len()];
+
+                file.seek(SeekFrom::Start(offset as u64)).unwrap();
+                file.read_exact(&mut buffer).unwrap();
+                checksum += buffer[0] as u64;
                 expected_checksum += value[0] as u64;
             }
             assert_eq!(checksum, expected_checksum);
             let end = SystemTime::now();
             let duration = end.duration_since(start).unwrap();
             println!(
-                "lmdb-rkv: Random read {} items in {}ms",
-                ELEMENTS,
-                duration.as_millis()
-            );
-        }
-    }
-}
-
-fn redb_bench(path: &Path) {
-    use redb::Database;
-
-    let db = unsafe { Database::open(path).unwrap() };
-    let mut table = db.open_table("bench").unwrap();
-
-    let pairs = gen_data(1000, 16, 2000);
-
-    let start = SystemTime::now();
-    let mut txn = table.begin_write().unwrap();
-    {
-        for i in 0..ELEMENTS {
-            let (key, value) = &pairs[i % pairs.len()];
-            let mut mut_key = key.clone();
-            mut_key.extend_from_slice(&i.to_be_bytes());
-            txn.insert(&mut_key, value).unwrap();
-        }
-    }
-    txn.commit().unwrap();
-
-    let end = SystemTime::now();
-    let duration = end.duration_since(start).unwrap();
-    println!(
-        "redb: Loaded {} items in {}ms",
-        ELEMENTS,
-        duration.as_millis()
-    );
-
-    let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-    key_order.shuffle(&mut rand::thread_rng());
-
-    let txn = table.read_transaction().unwrap();
-    {
-        for _ in 0..ITERATIONS {
-            let start = SystemTime::now();
-            let mut checksum = 0u64;
-            let mut expected_checksum = 0u64;
-            for i in &key_order {
-                let (key, value) = &pairs[*i % pairs.len()];
-                let mut mut_key = key.clone();
-                mut_key.extend_from_slice(&i.to_be_bytes());
-                let result: &[u8] = &txn.get(&mut_key).unwrap().unwrap();
-                checksum += result[0] as u64;
-                expected_checksum += value[0] as u64;
-            }
-            assert_eq!(checksum, expected_checksum);
-            let end = SystemTime::now();
-            let duration = end.duration_since(start).unwrap();
-            println!(
-                "redb: Random read {} items in {}ms",
+                "read()/write(): Random read {} items in {}ms",
                 ELEMENTS,
                 duration.as_millis()
             );
@@ -207,17 +156,14 @@ fn redb_bench(path: &Path) {
 }
 
 fn main() {
+    // Benchmark lmdb against raw read()/write() performance
     {
         let tmpfile: TempDir = tempfile::tempdir().unwrap();
         let path = tmpfile.path().to_str().unwrap();
         lmdb_zero_bench(path);
     }
     {
-        let tmpfile: TempDir = tempfile::tempdir().unwrap();
-        lmdb_rkv_bench(tmpfile.path());
-    }
-    {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        redb_bench(tmpfile.path());
+        readwrite_bench(tmpfile.path());
     }
 }
