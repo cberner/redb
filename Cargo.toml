@@ -22,6 +22,7 @@ chrono = "0.4.6"
 lmdb-zero = "0.4.4"
 lmdb-rkv = "0.14.0"
 tempfile = "3.2.0"
+sled = "0.34.6"
 
 [features]
 python = ["pyo3"]

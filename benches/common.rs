@@ -77,3 +77,54 @@ impl BenchWriteTransaction for RedbBenchWriteTransaction<'_> {
         self.txn.commit().map_err(|_| ())
     }
 }
+
+pub struct SledBenchTable<'a> {
+    db: &'a sled::Db,
+}
+
+impl<'a> SledBenchTable<'a> {
+    pub fn new(db: &'a sled::Db) -> Self {
+        SledBenchTable { db }
+    }
+}
+
+impl<'a> BenchTable<sled::IVec> for SledBenchTable<'a> {
+    type W = SledBenchWriteTransaction<'a>;
+    type R = SledBenchReadTransaction<'a>;
+
+    fn db_type_name() -> &'static str {
+        "sled"
+    }
+
+    fn write_transaction(&mut self) -> Self::W {
+        SledBenchWriteTransaction { db: self.db }
+    }
+
+    fn read_transaction(&self) -> Self::R {
+        SledBenchReadTransaction { db: self.db }
+    }
+}
+
+pub struct SledBenchReadTransaction<'a> {
+    db: &'a sled::Db,
+}
+
+impl<'a> BenchReadTransaction<sled::IVec> for SledBenchReadTransaction<'a> {
+    fn get(&self, key: &[u8]) -> Option<sled::IVec> {
+        self.db.get(key).unwrap()
+    }
+}
+
+pub struct SledBenchWriteTransaction<'a> {
+    db: &'a sled::Db,
+}
+
+impl BenchWriteTransaction for SledBenchWriteTransaction<'_> {
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
+        self.db.insert(key, value).map(|_| ()).map_err(|_| ())
+    }
+
+    fn commit(self) -> Result<(), ()> {
+        self.db.flush().map(|_| ()).map_err(|_| ())
+    }
+}
