@@ -49,8 +49,8 @@ fn persistence() {
     {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
-            let result: &[u8] = &txn.get(key).unwrap().unwrap();
-            assert_eq!(result, value);
+            let result = &txn.get(key).unwrap().unwrap();
+            assert_eq!(result.as_ref(), value);
         }
     }
 }

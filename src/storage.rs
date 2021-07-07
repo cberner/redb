@@ -3,7 +3,6 @@ use crate::Error;
 use memmap2::MmapMut;
 use std::cell::{Ref, RefCell};
 use std::convert::TryInto;
-use std::ops::Deref;
 
 const MAGICNUMBER: [u8; 4] = [b'r', b'e', b'd', b'b'];
 const DATA_LEN: usize = MAGICNUMBER.len();
@@ -113,10 +112,8 @@ pub struct AccessGuard<'mmap> {
     len: usize,
 }
 
-impl<'mmap> Deref for AccessGuard<'mmap> {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
+impl<'mmap> AsRef<[u8]> for AccessGuard<'mmap> {
+    fn as_ref(&self) -> &[u8] {
         &self.mmap_ref[self.offset..(self.offset + self.len)]
     }
 }

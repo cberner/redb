@@ -189,8 +189,8 @@ fn benchmark<'a, T: BenchTable + 'a>(mut db: T) {
                 let (key, value) = &pairs[*i % pairs.len()];
                 let mut mut_key = key.clone();
                 mut_key.extend_from_slice(&i.to_be_bytes());
-                let result: &[u8] = &txn.get(&mut_key).unwrap();
-                checksum += result[0] as u64;
+                let result = txn.get(&mut_key).unwrap();
+                checksum += result.as_ref()[0] as u64;
                 expected_checksum += value[0] as u64;
             }
             assert_eq!(checksum, expected_checksum);
