@@ -152,7 +152,7 @@ fn lmdb_rkv_bench(path: &Path) {
     }
 }
 
-fn benchmark<'a, T: BenchTable + 'a>(mut db: T) {
+fn benchmark<'a, R: AsRef<[u8]>, T: BenchTable<R> + 'a>(mut db: T) {
     let pairs = gen_data(1000, 16, 2000);
 
     let start = SystemTime::now();
