@@ -23,76 +23,6 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
     pairs
 }
 
-fn lmdb_zero_bench(path: &str) {
-    let env = unsafe {
-        lmdb_zero::EnvBuilder::new()
-            .unwrap()
-            .open(path, lmdb_zero::open::Flags::empty(), 0o600)
-            .unwrap()
-    };
-    unsafe {
-        env.set_mapsize(4096 * 1024 * 1024).unwrap();
-    }
-
-    let pairs = gen_data(1000, 16, 2000);
-
-    let db =
-        lmdb_zero::Database::open(&env, None, &lmdb_zero::DatabaseOptions::defaults()).unwrap();
-    {
-        let start = SystemTime::now();
-        let txn = lmdb_zero::WriteTransaction::new(&env).unwrap();
-        {
-            let mut access = txn.access();
-            for i in 0..ELEMENTS {
-                let (key, value) = &pairs[i % pairs.len()];
-                let mut mut_key = key.clone();
-                mut_key.extend_from_slice(&i.to_be_bytes());
-                access
-                    .put(&db, &mut_key, value, lmdb_zero::put::Flags::empty())
-                    .unwrap();
-            }
-        }
-        txn.commit().unwrap();
-
-        let end = SystemTime::now();
-        let duration = end.duration_since(start).unwrap();
-        println!(
-            "lmdb-zero: Loaded {} items in {}ms",
-            ELEMENTS,
-            duration.as_millis()
-        );
-
-        let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-        key_order.shuffle(&mut rand::thread_rng());
-
-        let txn = lmdb_zero::ReadTransaction::new(&env).unwrap();
-        {
-            for _ in 0..ITERATIONS {
-                let start = SystemTime::now();
-                let access = txn.access();
-                let mut checksum = 0u64;
-                let mut expected_checksum = 0u64;
-                for i in &key_order {
-                    let (key, value) = &pairs[*i % pairs.len()];
-                    let mut mut_key = key.clone();
-                    mut_key.extend_from_slice(&i.to_be_bytes());
-                    let result: &[u8] = access.get(&db, &mut_key).unwrap();
-                    checksum += result[0] as u64;
-                    expected_checksum += value[0] as u64;
-                }
-                assert_eq!(checksum, expected_checksum);
-                let end = SystemTime::now();
-                let duration = end.duration_since(start).unwrap();
-                println!(
-                    "lmdb-zero: Random read {} items in {}ms",
-                    ELEMENTS,
-                    duration.as_millis()
-                );
-            }
-        }
-    }
-}
-
 fn benchmark<T: BenchTable>(mut db: T) {
     let pairs = gen_data(1000, 16, 2000);
 
@@ -148,11 +78,6 @@ fn benchmark<T: BenchTable>(mut db: T) {
 }
 
 fn main() {
-    {
-        let tmpfile: TempDir = tempfile::tempdir().unwrap();
-        let path = tmpfile.path().to_str().unwrap();
-        lmdb_zero_bench(path);
-    }
     {
         let tmpfile: TempDir = tempfile::tempdir().unwrap();
         let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
