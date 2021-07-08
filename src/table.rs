@@ -58,4 +58,20 @@ mod test {
         write_txn.commit().unwrap();
         assert!(!table.is_empty().unwrap());
     }
+
+    #[test]
+    fn abort() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let mut table = db.open_table("").unwrap();
+        assert!(table.is_empty().unwrap());
+        let mut write_txn = table.begin_write().unwrap();
+        write_txn.insert(b"hello", b"world").unwrap();
+        write_txn.abort().unwrap();
+        assert!(table.is_empty().unwrap());
+        let mut write_txn = table.begin_write().unwrap();
+        write_txn.insert(b"hello", b"world").unwrap();
+        write_txn.commit().unwrap();
+        assert_eq!(table.len().unwrap(), 1);
+    }
 }

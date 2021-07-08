@@ -27,6 +27,10 @@ impl<'mmap> WriteTransaction<'mmap> {
         self.storage.fsync()?;
         Ok(())
     }
+
+    pub fn abort(self) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 pub struct ReadOnlyTransaction<'mmap> {
