@@ -66,12 +66,18 @@ mod test {
         let mut table = db.open_table("").unwrap();
         assert!(table.is_empty().unwrap());
         let mut write_txn = table.begin_write().unwrap();
-        write_txn.insert(b"hello", b"world").unwrap();
+        write_txn.insert(b"hello", b"aborted").unwrap();
+        assert_eq!(
+            b"aborted",
+            write_txn.get(b"hello").unwrap().unwrap().as_ref()
+        );
         write_txn.abort().unwrap();
         assert!(table.is_empty().unwrap());
         let mut write_txn = table.begin_write().unwrap();
         write_txn.insert(b"hello", b"world").unwrap();
         write_txn.commit().unwrap();
+        let read_txn = table.read_transaction().unwrap();
+        assert_eq!(b"world", read_txn.get(b"hello").unwrap().unwrap().as_ref());
         assert_eq!(table.len().unwrap(), 1);
     }
 }

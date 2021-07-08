@@ -20,6 +20,13 @@ impl<'mmap> WriteTransaction<'mmap> {
         Ok(())
     }
 
+    pub fn get(&self, key: &[u8]) -> Result<Option<AccessGuard>, Error> {
+        if let Some(value) = self.data.get(key) {
+            return Ok(Some(AccessGuard::Local(value)));
+        }
+        self.storage.get(key)
+    }
+
     pub fn commit(self) -> Result<(), Error> {
         for (key, value) in self.data.iter() {
             self.storage.append(key, value)?;
