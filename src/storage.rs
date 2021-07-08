@@ -57,6 +57,26 @@ impl Storage {
         Ok(())
     }
 
+    pub(in crate) fn len(&self) -> Result<usize, Error> {
+        let mmap = self.mmap.borrow();
+        let data_len =
+            u64::from_be_bytes(mmap[DATA_LEN..(DATA_LEN + 8)].try_into().unwrap()) as usize;
+
+        let mut index = DATA_OFFSET;
+
+        let mut entries = 0;
+        while index < (DATA_OFFSET + data_len) {
+            let key_len = u64::from_be_bytes(mmap[index..(index + 8)].try_into().unwrap()) as usize;
+            index += 8 + key_len;
+            let value_len =
+                u64::from_be_bytes(mmap[index..(index + 8)].try_into().unwrap()) as usize;
+            index += 8 + value_len;
+            entries += 1;
+        }
+
+        Ok(entries)
+    }
+
     pub(in crate) fn fsync(&self) -> Result<(), Error> {
         let mut builder = BtreeBuilder::new();
         let mut mmap = self.mmap.borrow_mut();
