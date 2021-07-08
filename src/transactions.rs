@@ -20,6 +20,13 @@ impl<'mmap> WriteTransaction<'mmap> {
         Ok(())
     }
 
+    /// Reserve space to insert a key-value pair
+    /// The returned reference will have length equal to value_length
+    pub fn insert_reserve(&mut self, key: &[u8], value_length: usize) -> Result<&mut [u8], Error> {
+        self.data.insert(key.to_vec(), vec![0; value_length]);
+        Ok(self.data.get_mut(key).unwrap())
+    }
+
     pub fn get(&self, key: &[u8]) -> Result<Option<AccessGuard>, Error> {
         if let Some(value) = self.data.get(key) {
             return Ok(Some(AccessGuard::Local(value)));

@@ -80,4 +80,18 @@ mod test {
         assert_eq!(b"world", read_txn.get(b"hello").unwrap().unwrap().as_ref());
         assert_eq!(table.len().unwrap(), 1);
     }
+
+    #[test]
+    fn insert_reserve() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let mut table = db.open_table("").unwrap();
+        let mut write_txn = table.begin_write().unwrap();
+        let value = b"world";
+        let reserved = write_txn.insert_reserve(b"hello", value.len()).unwrap();
+        reserved.copy_from_slice(value);
+        write_txn.commit().unwrap();
+        let read_txn = table.read_transaction().unwrap();
+        assert_eq!(value, read_txn.get(b"hello").unwrap().unwrap().as_ref());
+    }
 }
