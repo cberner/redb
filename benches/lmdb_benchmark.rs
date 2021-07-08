@@ -5,7 +5,6 @@ use common::*;
 
 use rand::prelude::SliceRandom;
 use rand::Rng;
-use std::path::Path;
 use std::time::SystemTime;
 
 const ITERATIONS: usize = 3;
@@ -94,65 +93,7 @@ fn lmdb_zero_bench(path: &str) {
     }
 }
 
-fn lmdb_rkv_bench(path: &Path) {
-    use lmdb::Transaction;
-    let env = lmdb::Environment::new().open(path).unwrap();
-    env.set_map_size(4096 * 1024 * 1024).unwrap();
-
-    let pairs = gen_data(1000, 16, 2000);
-
-    let db = env.open_db(None).unwrap();
-    let start = SystemTime::now();
-    let mut txn = env.begin_rw_txn().unwrap();
-    {
-        for i in 0..ELEMENTS {
-            let (key, value) = &pairs[i % pairs.len()];
-            let mut mut_key = key.clone();
-            mut_key.extend_from_slice(&i.to_be_bytes());
-            txn.put(db, &mut_key, value, lmdb::WriteFlags::empty())
-                .unwrap();
-        }
-    }
-    txn.commit().unwrap();
-
-    let end = SystemTime::now();
-    let duration = end.duration_since(start).unwrap();
-    println!(
-        "lmdb-rkv: Loaded {} items in {}ms",
-        ELEMENTS,
-        duration.as_millis()
-    );
-
-    let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-    key_order.shuffle(&mut rand::thread_rng());
-
-    let txn = env.begin_ro_txn().unwrap();
-    {
-        for _ in 0..ITERATIONS {
-            let start = SystemTime::now();
-            let mut checksum = 0u64;
-            let mut expected_checksum = 0u64;
-            for i in &key_order {
-                let (key, value) = &pairs[*i % pairs.len()];
-                let mut mut_key = key.clone();
-                mut_key.extend_from_slice(&i.to_be_bytes());
-                let result: &[u8] = txn.get(db, &mut_key).unwrap();
-                checksum += result[0] as u64;
-                expected_checksum += value[0] as u64;
-            }
-            assert_eq!(checksum, expected_checksum);
-            let end = SystemTime::now();
-            let duration = end.duration_since(start).unwrap();
-            println!(
-                "lmdb-rkv: Random read {} items in {}ms",
-                ELEMENTS,
-                duration.as_millis()
-            );
-        }
-    }
-}
-
-fn benchmark<'a, R: AsRef<[u8]>, T: BenchTable<R> + 'a>(mut db: T) {
+fn benchmark<T: BenchTable>(mut db: T) {
     let pairs = gen_data(1000, 16, 2000);
 
     let start = SystemTime::now();
@@ -214,7 +155,10 @@ fn main() {
     }
     {
         let tmpfile: TempDir = tempfile::tempdir().unwrap();
-        lmdb_rkv_bench(tmpfile.path());
+        let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
+        env.set_map_size(4096 * 1024 * 1024).unwrap();
+        let table = LmdbRkvBenchTable::new(&env);
+        benchmark(table);
     }
     {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
