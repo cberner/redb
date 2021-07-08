@@ -114,26 +114,23 @@ impl Storage {
 
         let index = DATA_OFFSET + data_len;
         if let Some((offset, len)) = lookup_in_raw(&mmap, key, index) {
-            let guard = AccessGuard {
-                mmap_ref: mmap,
-                offset,
-                len,
-            };
-            Ok(Some(guard))
+            Ok(Some(AccessGuard::Mmap(mmap, offset, len)))
         } else {
             Ok(None)
         }
     }
 }
 
-pub struct AccessGuard<'mmap> {
-    mmap_ref: Ref<'mmap, MmapMut>,
-    offset: usize,
-    len: usize,
+pub enum AccessGuard<'a> {
+    Mmap(Ref<'a, MmapMut>, usize, usize),
+    Local(&'a [u8]),
 }
 
-impl<'mmap> AsRef<[u8]> for AccessGuard<'mmap> {
+impl<'a> AsRef<[u8]> for AccessGuard<'a> {
     fn as_ref(&self) -> &[u8] {
-        &self.mmap_ref[self.offset..(self.offset + self.len)]
+        match self {
+            AccessGuard::Mmap(mmap_ref, offset, len) => &mmap_ref[*offset..(*offset + *len)],
+            AccessGuard::Local(data_ref) => data_ref,
+        }
     }
 }
