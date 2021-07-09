@@ -33,8 +33,7 @@ impl Database {
         file.set_len(db_size as u64)?;
 
         let mmap = MmapMut::map_mut(&file)?;
-        let storage = Storage::new(mmap);
-        storage.initialize()?;
+        let storage = Storage::new(mmap)?;
         Ok(Database { storage })
     }
 

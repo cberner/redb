@@ -1,6 +1,7 @@
 mod btree;
 mod db;
 mod error;
+mod page_allocator;
 #[cfg(feature = "python")]
 mod python;
 mod storage;
