@@ -8,6 +8,77 @@ const MAGICNUMBER: [u8; 4] = [b'r', b'e', b'd', b'b'];
 const DATA_LEN: usize = MAGICNUMBER.len();
 const DATA_OFFSET: usize = DATA_LEN + 8;
 
+// Provides a simple zero-copy way to access entries
+//
+// Entry format is:
+// * (8 bytes) key_size
+// * (key_size bytes) key_data
+// * (8 bytes) value_size
+// * (value_size bytes) value_data
+struct EntryAccessor<'a> {
+    raw: &'a [u8],
+}
+
+impl<'a> EntryAccessor<'a> {
+    fn new(raw: &'a [u8]) -> Self {
+        EntryAccessor { raw }
+    }
+
+    fn key_len(&self) -> usize {
+        u64::from_be_bytes(self.raw[..8].try_into().unwrap()) as usize
+    }
+
+    fn key(&self) -> &'a [u8] {
+        &self.raw[8..(8 + self.key_len())]
+    }
+
+    fn value_len(&self) -> usize {
+        let key_len = self.key_len();
+        u64::from_be_bytes(
+            self.raw[(8 + key_len)..(8 + key_len + 8)]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    fn value(&self) -> &'a [u8] {
+        let value_offset = 8 + self.key_len() + 8;
+        &self.raw[value_offset..(value_offset + self.value_len())]
+    }
+
+    fn raw_len(&self) -> usize {
+        8 + self.key_len() + 8 + self.value_len()
+    }
+}
+
+// Note the caller is responsible for ensuring that the buffer is large enough
+// and rewriting all fields if any dynamically sized fields are written
+struct EntryMutator<'a> {
+    raw: &'a mut [u8],
+}
+
+impl<'a> EntryMutator<'a> {
+    fn new(raw: &'a mut [u8]) -> Self {
+        EntryMutator { raw }
+    }
+
+    fn raw_len(&self) -> usize {
+        EntryAccessor::new(self.raw).raw_len()
+    }
+
+    fn write_key(&mut self, key: &[u8]) {
+        self.raw[..8].copy_from_slice(&(key.len() as u64).to_be_bytes());
+        self.raw[8..(8 + key.len())].copy_from_slice(key);
+    }
+
+    fn write_value(&mut self, value: &[u8]) {
+        let value_offset = 8 + EntryAccessor::new(self.raw).key_len();
+        self.raw[value_offset..(value_offset + 8)]
+            .copy_from_slice(&(value.len() as u64).to_be_bytes());
+        self.raw[(value_offset + 8)..(value_offset + 8 + value.len())].copy_from_slice(value);
+    }
+}
+
 pub(in crate) struct Storage {
     mmap: RefCell<MmapMut>,
 }
@@ -42,14 +113,10 @@ impl Storage {
         let mut index = DATA_OFFSET + data_len;
 
         // Append the new key & value
-        mmap[index..(index + 8)].copy_from_slice(&(key.len() as u64).to_be_bytes());
-        index += 8;
-        mmap[index..(index + key.len())].copy_from_slice(key);
-        index += key.len();
-        mmap[index..(index + 8)].copy_from_slice(&(value.len() as u64).to_be_bytes());
-        index += 8;
-        mmap[index..(index + value.len())].copy_from_slice(value);
-        index += value.len();
+        let mut mutator = EntryMutator::new(&mut mmap[index..]);
+        mutator.write_key(key);
+        mutator.write_value(value);
+        index += mutator.raw_len();
 
         data_len = index - DATA_OFFSET;
 
@@ -66,11 +133,7 @@ impl Storage {
 
         let mut entries = 0;
         while index < (DATA_OFFSET + data_len) {
-            let key_len = u64::from_be_bytes(mmap[index..(index + 8)].try_into().unwrap()) as usize;
-            index += 8 + key_len;
-            let value_len =
-                u64::from_be_bytes(mmap[index..(index + 8)].try_into().unwrap()) as usize;
-            index += 8 + value_len;
+            index += EntryAccessor::new(&mmap[index..]).raw_len();
             entries += 1;
         }
 
@@ -86,16 +149,9 @@ impl Storage {
 
         let mut index = DATA_OFFSET;
         while index < (DATA_OFFSET + data_len) {
-            let key_len = u64::from_be_bytes(mmap[index..(index + 8)].try_into().unwrap()) as usize;
-            index += 8;
-            let key = &mmap[index..(index + key_len)];
-            index += key_len;
-            let value_len =
-                u64::from_be_bytes(mmap[index..(index + 8)].try_into().unwrap()) as usize;
-            index += 8;
-            let value = &mmap[index..(index + value_len)];
-            index += value_len;
-            builder.add(key, value);
+            let entry = EntryAccessor::new(&mmap[index..]);
+            builder.add(entry.key(), entry.value());
+            index += entry.raw_len();
         }
 
         let node = builder.build();
