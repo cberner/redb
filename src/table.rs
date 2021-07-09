@@ -114,4 +114,42 @@ mod test {
         assert!(read_txn.get(b"hello").unwrap().is_none());
         assert_eq!(read_txn.len().unwrap(), 1);
     }
+
+    #[test]
+    #[ignore]
+    fn read_isolation() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let mut table = db.open_table("").unwrap();
+
+        let mut write_txn = table.begin_write().unwrap();
+        write_txn.insert(b"hello", b"world").unwrap();
+        write_txn.commit().unwrap();
+
+        let read_txn = table.read_transaction().unwrap();
+        assert_eq!(b"world", read_txn.get(b"hello").unwrap().unwrap().as_ref());
+
+        let mut write_txn = table.begin_write().unwrap();
+        write_txn.remove(b"hello").unwrap();
+        write_txn.insert(b"hello2", b"world2").unwrap();
+        write_txn.insert(b"hello3", b"world3").unwrap();
+        write_txn.commit().unwrap();
+
+        let read_txn2 = table.read_transaction().unwrap();
+        assert!(read_txn2.get(b"hello").unwrap().is_none());
+        assert_eq!(
+            b"world2",
+            read_txn.get(b"hello2").unwrap().unwrap().as_ref()
+        );
+        assert_eq!(
+            b"world3",
+            read_txn.get(b"hello3").unwrap().unwrap().as_ref()
+        );
+        assert_eq!(read_txn2.len().unwrap(), 2);
+
+        assert_eq!(b"world", read_txn.get(b"hello").unwrap().unwrap().as_ref());
+        assert!(read_txn.get(b"hello2").unwrap().is_none());
+        assert!(read_txn.get(b"hello3").unwrap().is_none());
+        assert_eq!(read_txn.len().unwrap(), 1);
+    }
 }
