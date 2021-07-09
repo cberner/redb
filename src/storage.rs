@@ -1,13 +1,12 @@
 use crate::btree::{lookup_in_raw, BtreeBuilder};
-use crate::page_allocator::PageAllocator;
+use crate::page_manager::{Page, PageManager, ALL_MEMORY_HACK};
 use crate::Error;
 use memmap2::MmapMut;
-use std::cell::{Ref, RefCell};
 use std::convert::TryInto;
 
 const MAGICNUMBER: [u8; 4] = [b'r', b'e', b'd', b'b'];
 const ALLOCATOR_STATE_OFFSET: usize = MAGICNUMBER.len();
-const DATA_LEN_OFFSET: usize = ALLOCATOR_STATE_OFFSET + PageAllocator::state_size();
+const DATA_LEN_OFFSET: usize = ALLOCATOR_STATE_OFFSET + PageManager::state_size();
 const DATA_OFFSET: usize = DATA_LEN_OFFSET + 8;
 const DB_METADATA_SIZE: usize = DATA_OFFSET;
 
@@ -94,8 +93,7 @@ impl<'a> EntryMutator<'a> {
 }
 
 pub(in crate) struct Storage {
-    mmap: RefCell<MmapMut>,
-    allocator: RefCell<PageAllocator>,
+    mem: PageManager,
 }
 
 impl Storage {
@@ -103,16 +101,10 @@ impl Storage {
         // Ensure that the database metadata fits into the first page
         assert!(page_size::get() >= DB_METADATA_SIZE);
 
-        let allocator;
-        if mmap[0..MAGICNUMBER.len()] == MAGICNUMBER {
-            allocator = PageAllocator::restore(
-                &mmap[ALLOCATOR_STATE_OFFSET
-                    ..(ALLOCATOR_STATE_OFFSET + PageAllocator::state_size())],
-            );
-        } else {
-            allocator = PageAllocator::initialize(
-                &mut mmap[ALLOCATOR_STATE_OFFSET
-                    ..(ALLOCATOR_STATE_OFFSET + PageAllocator::state_size())],
+        if mmap[0..MAGICNUMBER.len()] != MAGICNUMBER {
+            PageManager::initialize(
+                &mut mmap
+                    [ALLOCATOR_STATE_OFFSET..(ALLOCATOR_STATE_OFFSET + PageManager::state_size())],
             );
             mmap[DATA_LEN_OFFSET..(DATA_LEN_OFFSET + 8)].copy_from_slice(&0u64.to_be_bytes());
             mmap.flush()?;
@@ -123,13 +115,14 @@ impl Storage {
         }
 
         Ok(Storage {
-            mmap: RefCell::new(mmap),
-            allocator: RefCell::new(allocator),
+            mem: PageManager::restore(mmap, ALLOCATOR_STATE_OFFSET),
         })
     }
 
     pub(in crate) fn append(&self, key: &[u8], value: &[u8]) -> Result<(), Error> {
-        let mut mmap = self.mmap.borrow_mut();
+        let mut all_mem = self.mem.get_page_mut(ALL_MEMORY_HACK);
+        let mmap = all_mem.memory_mut();
+
         let mut data_len = u64::from_be_bytes(
             mmap[DATA_LEN_OFFSET..(DATA_LEN_OFFSET + 8)]
                 .try_into()
@@ -151,7 +144,8 @@ impl Storage {
     }
 
     pub(in crate) fn len(&self) -> Result<usize, Error> {
-        let mmap = self.mmap.borrow();
+        let all_mem = self.mem.get_page(ALL_MEMORY_HACK);
+        let mmap = all_mem.memory();
         let data_len = u64::from_be_bytes(
             mmap[DATA_LEN_OFFSET..(DATA_LEN_OFFSET + 8)]
                 .try_into()
@@ -174,7 +168,8 @@ impl Storage {
 
     pub(in crate) fn fsync(&self) -> Result<(), Error> {
         let mut builder = BtreeBuilder::new();
-        let mut mmap = self.mmap.borrow_mut();
+        let mut all_mem = self.mem.get_page_mut(ALL_MEMORY_HACK);
+        let mut mmap = all_mem.memory_mut();
 
         let data_len = u64::from_be_bytes(
             mmap[DATA_LEN_OFFSET..(DATA_LEN_OFFSET + 8)]
@@ -192,15 +187,21 @@ impl Storage {
         }
 
         let node = builder.build();
-        assert!(DATA_OFFSET + data_len + node.recursive_size() < mmap.len());
-        node.to_bytes(&mut mmap[(DATA_OFFSET + data_len)..], 0);
+        self.mem
+            .hack_set_free_page_to_next_after((DATA_OFFSET + data_len) as u64);
+        node.to_bytes(&mut mmap, 0);
 
-        mmap.flush()?;
+        self.mem.store_state(
+            &mut mmap[ALLOCATOR_STATE_OFFSET..(ALLOCATOR_STATE_OFFSET + PageManager::state_size())],
+        );
+
+        self.mem.fsync()?;
         Ok(())
     }
 
     pub(in crate) fn get(&self, key: &[u8]) -> Result<Option<AccessGuard>, Error> {
-        let mmap = self.mmap.borrow();
+        let all_mem = self.mem.get_page(ALL_MEMORY_HACK);
+        let mmap = all_mem.memory();
 
         let data_len = u64::from_be_bytes(
             mmap[DATA_LEN_OFFSET..(DATA_LEN_OFFSET + 8)]
@@ -210,7 +211,7 @@ impl Storage {
 
         let index = DATA_OFFSET + data_len;
         if let Some((offset, len)) = lookup_in_raw(&mmap, key, index) {
-            Ok(Some(AccessGuard::Mmap(mmap, offset, len)))
+            Ok(Some(AccessGuard::PageBacked(all_mem, offset, len)))
         } else {
             Ok(None)
         }
@@ -218,7 +219,8 @@ impl Storage {
 
     // Returns a boolean indicating if an entry was removed
     pub(in crate) fn remove(&self, key: &[u8]) -> Result<bool, Error> {
-        let mut mmap = self.mmap.borrow_mut();
+        let mut all_mem = self.mem.get_page_mut(ALL_MEMORY_HACK);
+        let mmap = all_mem.memory_mut();
 
         let data_len = u64::from_be_bytes(
             mmap[DATA_LEN_OFFSET..(DATA_LEN_OFFSET + 8)]
@@ -246,6 +248,8 @@ impl Storage {
                 }
                 index += entry.raw_len();
             }
+
+            self.mem.fsync()?;
             Ok(true)
         } else {
             Ok(false)
@@ -254,14 +258,14 @@ impl Storage {
 }
 
 pub enum AccessGuard<'a> {
-    Mmap(Ref<'a, MmapMut>, usize, usize),
+    PageBacked(Page<'a>, usize, usize),
     Local(&'a [u8]),
 }
 
 impl<'a> AsRef<[u8]> for AccessGuard<'a> {
     fn as_ref(&self) -> &[u8] {
         match self {
-            AccessGuard::Mmap(mmap_ref, offset, len) => &mmap_ref[*offset..(*offset + *len)],
+            AccessGuard::PageBacked(page, offset, len) => &page.memory()[*offset..(*offset + *len)],
             AccessGuard::Local(data_ref) => data_ref,
         }
     }
