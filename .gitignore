@@ -12,3 +12,7 @@ Cargo.lock
 # IntelliJ
 .idea/
 redb.iml
+
+
+**/__pycache__
+**/*.pyc
