@@ -94,4 +94,27 @@ mod test {
         let read_txn = table.read_transaction().unwrap();
         assert_eq!(value, read_txn.get(b"hello").unwrap().unwrap().as_ref());
     }
+
+    #[test]
+    fn delete() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let mut table = db.open_table("").unwrap();
+
+        let mut write_txn = table.begin_write().unwrap();
+        write_txn.insert(b"hello", b"world").unwrap();
+        write_txn.insert(b"hello2", b"world").unwrap();
+        write_txn.commit().unwrap();
+        let read_txn = table.read_transaction().unwrap();
+        assert_eq!(b"world", read_txn.get(b"hello").unwrap().unwrap().as_ref());
+        assert_eq!(table.len().unwrap(), 2);
+
+        let mut write_txn = table.begin_write().unwrap();
+        write_txn.remove(b"hello").unwrap();
+        write_txn.commit().unwrap();
+
+        let read_txn = table.read_transaction().unwrap();
+        assert!(read_txn.get(b"hello").unwrap().is_none());
+        assert_eq!(table.len().unwrap(), 1);
+    }
 }

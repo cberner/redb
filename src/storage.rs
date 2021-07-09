@@ -8,9 +8,12 @@ const MAGICNUMBER: [u8; 4] = [b'r', b'e', b'd', b'b'];
 const DATA_LEN: usize = MAGICNUMBER.len();
 const DATA_OFFSET: usize = DATA_LEN + 8;
 
+const ENTRY_DELETED: u8 = 1;
+
 // Provides a simple zero-copy way to access entries
 //
 // Entry format is:
+// * (1 byte) flags: 1 = DELETED
 // * (8 bytes) key_size
 // * (key_size bytes) key_data
 // * (8 bytes) value_size
@@ -24,30 +27,34 @@ impl<'a> EntryAccessor<'a> {
         EntryAccessor { raw }
     }
 
+    fn is_deleted(&self) -> bool {
+        self.raw[0] & ENTRY_DELETED != 0
+    }
+
     fn key_len(&self) -> usize {
-        u64::from_be_bytes(self.raw[..8].try_into().unwrap()) as usize
+        u64::from_be_bytes(self.raw[1..9].try_into().unwrap()) as usize
     }
 
     fn key(&self) -> &'a [u8] {
-        &self.raw[8..(8 + self.key_len())]
+        &self.raw[9..(9 + self.key_len())]
     }
 
     fn value_len(&self) -> usize {
         let key_len = self.key_len();
         u64::from_be_bytes(
-            self.raw[(8 + key_len)..(8 + key_len + 8)]
+            self.raw[(9 + key_len)..(9 + key_len + 8)]
                 .try_into()
                 .unwrap(),
         ) as usize
     }
 
     fn value(&self) -> &'a [u8] {
-        let value_offset = 8 + self.key_len() + 8;
+        let value_offset = 1 + 8 + self.key_len() + 8;
         &self.raw[value_offset..(value_offset + self.value_len())]
     }
 
     fn raw_len(&self) -> usize {
-        8 + self.key_len() + 8 + self.value_len()
+        1 + 8 + self.key_len() + 8 + self.value_len()
     }
 }
 
@@ -66,13 +73,17 @@ impl<'a> EntryMutator<'a> {
         EntryAccessor::new(self.raw).raw_len()
     }
 
+    fn write_flags(&mut self, flags: u8) {
+        self.raw[0] = flags;
+    }
+
     fn write_key(&mut self, key: &[u8]) {
-        self.raw[..8].copy_from_slice(&(key.len() as u64).to_be_bytes());
-        self.raw[8..(8 + key.len())].copy_from_slice(key);
+        self.raw[1..9].copy_from_slice(&(key.len() as u64).to_be_bytes());
+        self.raw[9..(9 + key.len())].copy_from_slice(key);
     }
 
     fn write_value(&mut self, value: &[u8]) {
-        let value_offset = 8 + EntryAccessor::new(self.raw).key_len();
+        let value_offset = 9 + EntryAccessor::new(self.raw).key_len();
         self.raw[value_offset..(value_offset + 8)]
             .copy_from_slice(&(value.len() as u64).to_be_bytes());
         self.raw[(value_offset + 8)..(value_offset + 8 + value.len())].copy_from_slice(value);
@@ -133,8 +144,11 @@ impl Storage {
 
         let mut entries = 0;
         while index < (DATA_OFFSET + data_len) {
-            index += EntryAccessor::new(&mmap[index..]).raw_len();
-            entries += 1;
+            let entry = EntryAccessor::new(&mmap[index..]);
+            index += entry.raw_len();
+            if !entry.is_deleted() {
+                entries += 1;
+            }
         }
 
         Ok(entries)
@@ -150,7 +164,9 @@ impl Storage {
         let mut index = DATA_OFFSET;
         while index < (DATA_OFFSET + data_len) {
             let entry = EntryAccessor::new(&mmap[index..]);
-            builder.add(entry.key(), entry.value());
+            if !entry.is_deleted() {
+                builder.add(entry.key(), entry.value());
+            }
             index += entry.raw_len();
         }
 
@@ -173,6 +189,36 @@ impl Storage {
             Ok(Some(AccessGuard::Mmap(mmap, offset, len)))
         } else {
             Ok(None)
+        }
+    }
+
+    // Returns a boolean indicating if an entry was removed
+    pub(in crate) fn remove(&self, key: &[u8]) -> Result<bool, Error> {
+        let mut mmap = self.mmap.borrow_mut();
+
+        let data_len =
+            u64::from_be_bytes(mmap[DATA_LEN..(DATA_LEN + 8)].try_into().unwrap()) as usize;
+
+        let index = DATA_OFFSET + data_len;
+        if let Some((_, _)) = lookup_in_raw(&mmap, key, index) {
+            // Delete the entry from the entry space
+            let data_len =
+                u64::from_be_bytes(mmap[DATA_LEN..(DATA_LEN + 8)].try_into().unwrap()) as usize;
+
+            let mut index = DATA_OFFSET;
+            while index < (DATA_OFFSET + data_len) {
+                let entry = EntryAccessor::new(&mmap[index..]);
+                if entry.key() == key {
+                    drop(entry);
+                    let mut entry = EntryMutator::new(&mut mmap[index..]);
+                    entry.write_flags(ENTRY_DELETED);
+                    break;
+                }
+                index += entry.raw_len();
+            }
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 }
