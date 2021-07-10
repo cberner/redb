@@ -1,5 +1,6 @@
 use tempfile::{NamedTempFile, TempDir};
 
+use memmap2::MmapMut;
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use std::fs::OpenOptions;
@@ -155,6 +156,73 @@ fn readwrite_bench(path: &Path) {
     }
 }
 
+fn mmap_bench(path: &Path) {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)
+        .unwrap();
+
+    file.set_len(4 * 1024 * 1024 * 1024).unwrap();
+
+    let mut mmap = unsafe { MmapMut::map_mut(&file).unwrap() };
+    drop(file);
+
+    let pairs = gen_data(1000, 16, 2000);
+
+    let mut write_index = 0;
+    let start = SystemTime::now();
+    {
+        for i in 0..ELEMENTS {
+            let (key, value) = &pairs[i % pairs.len()];
+            let mut mut_key = key.clone();
+            mut_key.extend_from_slice(&i.to_be_bytes());
+            mmap[write_index..(write_index + mut_key.len())].copy_from_slice(&mut_key);
+            write_index += mut_key.len();
+            mmap[write_index..(write_index + value.len())].copy_from_slice(&value);
+            write_index += value.len();
+        }
+    }
+    mmap.flush().unwrap();
+
+    let end = SystemTime::now();
+    let duration = end.duration_since(start).unwrap();
+    println!(
+        "mmap(): Loaded {} items in {}ms",
+        ELEMENTS,
+        duration.as_millis()
+    );
+
+    let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
+    key_order.shuffle(&mut rand::thread_rng());
+
+    {
+        for _ in 0..ITERATIONS {
+            let start = SystemTime::now();
+            let mut checksum = 0u64;
+            let mut expected_checksum = 0u64;
+            for i in &key_order {
+                let (key, value) = &pairs[*i % pairs.len()];
+                let mut mut_key = key.clone();
+                mut_key.extend_from_slice(&i.to_be_bytes());
+                let offset = i * (mut_key.len() + value.len()) + mut_key.len();
+                let buffer = &mmap[offset..(offset + value.len())];
+                checksum += buffer[0] as u64;
+                expected_checksum += value[0] as u64;
+            }
+            assert_eq!(checksum, expected_checksum);
+            let end = SystemTime::now();
+            let duration = end.duration_since(start).unwrap();
+            println!(
+                "mmap(): Random read {} items in {}ms",
+                ELEMENTS,
+                duration.as_millis()
+            );
+        }
+    }
+}
+
 fn main() {
     // Benchmark lmdb against raw read()/write() performance
     {
@@ -165,5 +233,9 @@ fn main() {
     {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         readwrite_bench(tmpfile.path());
+    }
+    {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        mmap_bench(tmpfile.path());
     }
 }
