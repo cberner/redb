@@ -1,7 +1,11 @@
 use crate::btree::Node::{Internal, Leaf};
+use crate::page_manager::{Page, PageManager};
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::convert::TryInto;
+
+const LEAF: u8 = 1;
+const INTERNAL: u8 = 2;
 
 fn write_vec(value: &[u8], output: &mut [u8], mut index: usize) -> usize {
     output[index..(index + 8)].copy_from_slice(&(value.len() as u64).to_be_bytes());
@@ -12,61 +16,67 @@ fn write_vec(value: &[u8], output: &mut [u8], mut index: usize) -> usize {
 }
 
 // Returns the (offset, len) of the value for the queried key, if present
-pub(in crate) fn lookup_in_raw(
-    tree: &[u8],
+pub(in crate) fn lookup_in_raw<'a>(
+    page: Page<'a>,
     query: &[u8],
-    mut index: usize,
-) -> Option<(usize, usize)> {
-    match tree[index] {
-        1 => {
+    manager: &'a PageManager,
+) -> Option<(Page<'a>, usize, usize)> {
+    let node_mem = page.memory();
+    let mut index = 0;
+    match node_mem[index] {
+        LEAF => {
             index += 1;
-            let key_len = u64::from_be_bytes(tree[index..(index + 8)].try_into().unwrap()) as usize;
+            let key_len =
+                u64::from_be_bytes(node_mem[index..(index + 8)].try_into().unwrap()) as usize;
             index += 8;
-            match query.cmp(&tree[index..(index + key_len)]) {
+            match query.cmp(&node_mem[index..(index + key_len)]) {
                 Ordering::Less => None,
                 Ordering::Equal => {
                     index += key_len;
                     let value_len =
-                        u64::from_be_bytes(tree[index..(index + 8)].try_into().unwrap()) as usize;
+                        u64::from_be_bytes(node_mem[index..(index + 8)].try_into().unwrap())
+                            as usize;
                     index += 8;
-                    Some((index, value_len))
+                    Some((page, index, value_len))
                 }
                 Ordering::Greater => {
                     index += key_len;
                     let value_len =
-                        u64::from_be_bytes(tree[index..(index + 8)].try_into().unwrap()) as usize;
+                        u64::from_be_bytes(node_mem[index..(index + 8)].try_into().unwrap())
+                            as usize;
                     index += 8 + value_len;
                     let second_key_len =
-                        u64::from_be_bytes(tree[index..(index + 8)].try_into().unwrap()) as usize;
+                        u64::from_be_bytes(node_mem[index..(index + 8)].try_into().unwrap())
+                            as usize;
                     index += 8;
-                    if query == &tree[index..(index + second_key_len)] {
+                    if query == &node_mem[index..(index + second_key_len)] {
                         index += second_key_len;
                         let value_len =
-                            u64::from_be_bytes(tree[index..(index + 8)].try_into().unwrap())
+                            u64::from_be_bytes(node_mem[index..(index + 8)].try_into().unwrap())
                                 as usize;
                         index += 8;
-                        Some((index, value_len))
+                        Some((page, index, value_len))
                     } else {
                         None
                     }
                 }
             }
         }
-        2 => {
+        INTERNAL => {
             index += 1;
-            let key_len = u64::from_be_bytes(tree[index..(index + 8)].try_into().unwrap()) as usize;
+            let key_len =
+                u64::from_be_bytes(node_mem[index..(index + 8)].try_into().unwrap()) as usize;
             index += 8;
+            let key = &node_mem[index..(index + key_len)];
             index += key_len;
-            if query <= &tree[(index - key_len)..index] {
-                // Skip left-node length
-                index += 8;
+            let left_page = u64::from_be_bytes(node_mem[index..(index + 8)].try_into().unwrap());
+            index += 8;
+            let right_page = u64::from_be_bytes(node_mem[index..(index + 8)].try_into().unwrap());
+            if query <= key {
+                lookup_in_raw(manager.get_page(left_page), query, manager)
             } else {
-                // Skip left-node
-                let left_node_len =
-                    u64::from_be_bytes(tree[index..(index + 8)].try_into().unwrap()) as usize;
-                index += 8 + left_node_len;
+                lookup_in_raw(manager.get_page(right_page), query, manager)
             }
-            lookup_in_raw(tree, query, index)
         }
         _ => unreachable!(),
     }
@@ -79,60 +89,43 @@ pub(in crate) enum Node {
 }
 
 impl Node {
-    pub(in crate) fn recursive_size(&self) -> usize {
+    // Returns the page number that the node was written to
+    pub(in crate) fn to_bytes(&self, page_manager: &PageManager) -> u64 {
         match self {
             Node::Leaf(left_val, right_val) => {
-                let mut size = 1; // 1 byte for node type
-                size += 8 + left_val.0.len() + 8 + left_val.1.len();
-                if let Some(right) = right_val {
-                    size += 8 + right.0.len() + 8 + right.1.len();
-                } else {
-                    // empty right val stored as a single 0 length key
-                    size += 8;
-                }
-                size
-            }
-            Node::Internal(left, key, right) => {
-                let mut size = 1; // 1 byte for node type
-                size += 8 + key.len();
-                // Reserve space to prefix the left node with its size, so that we can skip it
-                // efficiently
-                size += 8 + left.recursive_size();
-                size += right.recursive_size();
-                size
-            }
-        }
-    }
-
-    // Returns the index following the last written
-    pub(in crate) fn to_bytes(&self, output: &mut [u8], mut index: usize) -> usize {
-        match self {
-            Node::Leaf(left_val, right_val) => {
-                output[index] = 1;
+                let mut page = page_manager.allocate();
+                let mut index = 0;
+                let output = page.memory_mut();
+                output[index] = LEAF;
                 index += 1;
                 index = write_vec(&left_val.0, output, index);
                 index = write_vec(&left_val.1, output, index);
                 if let Some(right) = right_val {
                     index = write_vec(&right.0, output, index);
-                    index = write_vec(&right.1, output, index);
+                    write_vec(&right.1, output, index);
                 } else {
                     // empty right val stored as a single 0 length key
-                    index = write_vec(&[], output, index);
+                    write_vec(&[], output, index);
                 }
+
+                page.get_page_number()
             }
             Node::Internal(left, key, right) => {
-                output[index] = 2;
+                let left_page = left.to_bytes(page_manager);
+                let right_page = right.to_bytes(page_manager);
+                let mut page = page_manager.allocate();
+                let mut index = 0;
+                let output = page.memory_mut();
+                output[index] = INTERNAL;
                 index += 1;
                 index = write_vec(key, output, index);
-                let left_size = left.recursive_size();
-                output[index..(index + 8)].copy_from_slice(&(left_size as u64).to_be_bytes());
+                output[index..(index + 8)].copy_from_slice(&left_page.to_be_bytes());
                 index += 8;
-                index = left.to_bytes(output, index);
-                index = right.to_bytes(output, index);
+                output[index..(index + 8)].copy_from_slice(&right_page.to_be_bytes());
+
+                page.get_page_number()
             }
         }
-
-        index
     }
 
     fn get_max_key(&self) -> Vec<u8> {
@@ -218,14 +211,6 @@ mod test {
         );
         let right = Leaf((b"hello3".to_vec(), b"world3".to_vec()), None);
         Internal(Box::new(left), b"hello2".to_vec(), Box::new(right))
-    }
-
-    #[test]
-    fn serialize() {
-        let internal = gen_tree();
-        let size = internal.recursive_size();
-        let mut buffer = vec![0u8; size];
-        internal.to_bytes(&mut buffer, 0);
     }
 
     #[test]
