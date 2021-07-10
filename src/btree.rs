@@ -104,8 +104,13 @@ impl<'a: 'b, 'b> LeafAccessor<'a, 'b> {
         EntryAccessor::new(&self.page.memory()[self.offset_of_lesser()..])
     }
 
-    fn greater(&self) -> EntryAccessor {
-        EntryAccessor::new(&self.page.memory()[self.offset_of_greater()..])
+    fn greater(&self) -> Option<EntryAccessor> {
+        let entry = EntryAccessor::new(&self.page.memory()[self.offset_of_greater()..]);
+        if entry.key_len() == 0 {
+            None
+        } else {
+            Some(entry)
+        }
     }
 }
 
@@ -207,6 +212,29 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
     }
 }
 
+// Returns the number of key-value pairs in the tree
+pub(in crate) fn tree_size<'a>(page: Page<'a>, manager: &'a PageManager) -> usize {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            if accessor.greater().is_some() {
+                2
+            } else {
+                1
+            }
+        }
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page);
+            let left_page = accessor.lte_page();
+            let right_page = accessor.gt_page();
+            tree_size(manager.get_page(left_page), manager)
+                + tree_size(manager.get_page(right_page), manager)
+        }
+        _ => unreachable!(),
+    }
+}
+
 // Returns the (offset, len) of the value for the queried key, if present
 pub(in crate) fn lookup_in_raw<'a>(
     page: Page<'a>,
@@ -225,11 +253,14 @@ pub(in crate) fn lookup_in_raw<'a>(
                     Some((page, offset, value_len))
                 }
                 Ordering::Greater => {
-                    if query == accessor.greater().key() {
-                        let offset =
-                            accessor.offset_of_greater() + accessor.greater().value_offset();
-                        let value_len = accessor.greater().value().len();
-                        Some((page, offset, value_len))
+                    if let Some(entry) = accessor.greater() {
+                        if query == entry.key() {
+                            let offset = accessor.offset_of_greater() + entry.value_offset();
+                            let value_len = entry.value().len();
+                            Some((page, offset, value_len))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
