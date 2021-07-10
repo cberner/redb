@@ -1,4 +1,4 @@
-use crate::btree::{lookup_in_raw, BtreeBuilder};
+use crate::btree::{lookup_in_raw, tree_size, BtreeBuilder};
 use crate::page_manager::{Page, PageManager, ALL_MEMORY_HACK, DB_METADATA_PAGE};
 use crate::Error;
 use memmap2::MmapMut;
@@ -147,26 +147,11 @@ impl Storage {
     }
 
     pub(in crate) fn len(&self) -> Result<usize, Error> {
-        let all_mem = self.mem.get_page(ALL_MEMORY_HACK);
-        let mmap = all_mem.memory();
-        let data_len = u64::from_be_bytes(
-            mmap[DATA_LEN_OFFSET..(DATA_LEN_OFFSET + 8)]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-
-        let mut index = DATA_OFFSET;
-
-        let mut entries = 0;
-        while index < (DATA_OFFSET + data_len) {
-            let entry = EntryAccessor::new(&mmap[index..]);
-            index += entry.raw_len();
-            if !entry.is_deleted() {
-                entries += 1;
-            }
+        if let Some(root) = self.get_root_page() {
+            Ok(tree_size(root, &self.mem))
+        } else {
+            Ok(0)
         }
-
-        Ok(entries)
     }
 
     fn get_root_page(&self) -> Option<Page> {
