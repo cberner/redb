@@ -46,7 +46,7 @@ impl<'mmap> WriteTransaction<'mmap> {
 
     pub fn commit(self) -> Result<(), Error> {
         for (key, value) in self.added.iter() {
-            self.storage.append(key, value)?;
+            self.storage.insert(key, value)?;
         }
         for key in self.removed.iter() {
             self.storage.remove(key)?;

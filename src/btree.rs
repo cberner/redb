@@ -235,6 +235,141 @@ pub(in crate) fn tree_size<'a>(page: Page<'a>, manager: &'a PageManager) -> usiz
     }
 }
 
+// Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
+// If key is not found, guaranteed not to modify the tree
+pub(in crate) fn tree_delete<'a>(
+    page: Page<'a>,
+    key: &[u8],
+    manager: &'a PageManager,
+) -> Option<u64> {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            #[allow(clippy::collapsible_else_if)]
+            if let Some(greater) = accessor.greater() {
+                if key != accessor.lesser().key() && key != greater.key() {
+                    // Not found
+                    return Some(page.get_page_number());
+                }
+                let new_leaf = if key == accessor.lesser().key() {
+                    Leaf((greater.key().to_vec(), greater.value().to_vec()), None)
+                } else {
+                    Leaf(
+                        (
+                            accessor.lesser().key().to_vec(),
+                            accessor.lesser().value().to_vec(),
+                        ),
+                        None,
+                    )
+                };
+
+                // TODO: shouldn't need to drop this, but we can't allocate when there are pages in flight
+                drop(page);
+                Some(new_leaf.to_bytes(manager))
+            } else {
+                if key == accessor.lesser().key() {
+                    // Deleted the entire left
+                    None
+                } else {
+                    // Not found
+                    Some(page.get_page_number())
+                }
+            }
+        }
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page);
+            let original_left_page = accessor.lte_page();
+            let original_right_page = accessor.gt_page();
+            let original_page_number = page.get_page_number();
+            let mut left_page = accessor.lte_page();
+            let mut right_page = accessor.gt_page();
+            // TODO: we should recompute our key, since it may now be smaller (if the largest key in the left tree was deleted)
+            let our_key = accessor.key().to_vec();
+            // TODO: shouldn't need to drop this, but we can't allocate when there are pages in flight
+            drop(page);
+            #[allow(clippy::collapsible_else_if)]
+            if key <= our_key.as_slice() {
+                if let Some(page_number) = tree_delete(manager.get_page(left_page), key, manager) {
+                    left_page = page_number;
+                } else {
+                    // The entire left sub-tree was deleted, replace ourself with the right tree
+                    return Some(right_page);
+                }
+            } else {
+                if let Some(page_number) = tree_delete(manager.get_page(right_page), key, manager) {
+                    right_page = page_number;
+                } else {
+                    return Some(left_page);
+                }
+            }
+
+            // The key was not found, since neither sub-tree changed
+            if left_page == original_left_page && right_page == original_right_page {
+                return Some(original_page_number);
+            }
+
+            let mut page = manager.allocate();
+            let mut builder = InternalBuilder::new(&mut page);
+            builder.write_key(&our_key);
+            builder.write_lte_page(left_page);
+            builder.write_gt_page(right_page);
+
+            Some(page.get_page_number())
+        }
+        _ => unreachable!(),
+    }
+}
+
+// Returns the page number of the sub-tree into which the key was inserted
+pub(in crate) fn tree_insert<'a>(
+    page: Page<'a>,
+    key: &[u8],
+    value: &[u8],
+    manager: &'a PageManager,
+) -> u64 {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            // TODO: this is suboptimal, because it may rebuild the leaf page even if it's not necessary:
+            // e.g. when we insert a second leaf adjacent without modifying this one
+            let mut builder = BtreeBuilder::new();
+            builder.add(key, value);
+            builder.add(accessor.lesser().key(), accessor.lesser().value());
+            if let Some(entry) = accessor.greater() {
+                builder.add(entry.key(), entry.value());
+            }
+
+            // TODO: shouldn't need to drop this, but we can't allocate when there are pages in flight
+            drop(page);
+            builder.build().to_bytes(manager)
+        }
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page);
+            let mut left_page = accessor.lte_page();
+            let mut right_page = accessor.gt_page();
+            let our_key = accessor.key().to_vec();
+            // TODO: shouldn't need to drop this, but we can't allocate when there are pages in flight
+            drop(page);
+            if key <= our_key.as_slice() {
+                left_page = tree_insert(manager.get_page(left_page), key, value, manager);
+            } else {
+                right_page = tree_insert(manager.get_page(right_page), key, value, manager);
+            }
+
+            let mut page = manager.allocate();
+            let mut builder = InternalBuilder::new(&mut page);
+            builder.write_key(&our_key);
+            builder.write_lte_page(left_page);
+            builder.write_gt_page(right_page);
+
+            page.get_page_number()
+        }
+        _ => unreachable!(),
+    }
+}
+
 // Returns the (offset, len) of the value for the queried key, if present
 pub(in crate) fn lookup_in_raw<'a>(
     page: Page<'a>,
