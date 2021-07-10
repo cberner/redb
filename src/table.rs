@@ -116,6 +116,23 @@ mod test {
     }
 
     #[test]
+    fn no_dirty_reads() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let mut table = db.open_table("").unwrap();
+
+        let mut write_txn = table.begin_write().unwrap();
+        write_txn.insert(b"hello", b"world").unwrap();
+        let read_txn = table.read_transaction().unwrap();
+        assert!(read_txn.get(b"hello").unwrap().is_none());
+        assert!(read_txn.is_empty().unwrap());
+        write_txn.commit().unwrap();
+
+        let read_txn = table.read_transaction().unwrap();
+        assert_eq!(b"world", read_txn.get(b"hello").unwrap().unwrap().as_ref());
+    }
+
+    #[test]
     #[ignore]
     fn read_isolation() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
