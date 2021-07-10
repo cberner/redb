@@ -1,4 +1,7 @@
 use crate::btree::Node::{Internal, Leaf};
+use crate::btree::RangeIterState::{
+    InitialState, InternalLeft, InternalRight, LeafLeft, LeafRight,
+};
 use crate::page_manager::{Page, PageManager, PageMut};
 use std::cell::Cell;
 use std::cmp::Ordering;
@@ -7,6 +10,123 @@ use std::convert::TryInto;
 const LEAF: u8 = 1;
 const INTERNAL: u8 = 2;
 
+enum RangeIterState<'a> {
+    InitialState(Page<'a>),
+    LeafLeft {
+        page: Page<'a>,
+        parent: Option<Box<RangeIterState<'a>>>,
+    },
+    LeafRight {
+        page: Page<'a>,
+        parent: Option<Box<RangeIterState<'a>>>,
+    },
+    InternalLeft {
+        page: Page<'a>,
+        parent: Option<Box<RangeIterState<'a>>>,
+    },
+    InternalRight {
+        page: Page<'a>,
+        parent: Option<Box<RangeIterState<'a>>>,
+    },
+}
+
+impl<'a> RangeIterState<'a> {
+    fn next(self, manager: &'a PageManager) -> Option<RangeIterState> {
+        match self {
+            RangeIterState::InitialState(root_page) => match root_page.memory()[0] {
+                LEAF => Some(LeafLeft {
+                    page: root_page,
+                    parent: None,
+                }),
+                INTERNAL => Some(InternalLeft {
+                    page: root_page,
+                    parent: None,
+                }),
+                _ => unreachable!(),
+            },
+            RangeIterState::LeafLeft { page, parent } => Some(LeafRight { page, parent }),
+            RangeIterState::LeafRight { parent, .. } => parent.map(|x| *x),
+            RangeIterState::InternalLeft { page, parent } => {
+                let child = InternalAccessor::new(&page).lte_page();
+                let child_page = manager.get_page(child);
+                match child_page.memory()[0] {
+                    LEAF => Some(LeafLeft {
+                        page: child_page,
+                        parent: Some(Box::new(InternalRight { page, parent })),
+                    }),
+                    INTERNAL => Some(InternalLeft {
+                        page: child_page,
+                        parent: Some(Box::new(InternalRight { page, parent })),
+                    }),
+                    _ => unreachable!(),
+                }
+            }
+            RangeIterState::InternalRight { page, parent } => {
+                let child = InternalAccessor::new(&page).gt_page();
+                let child_page = manager.get_page(child);
+                match child_page.memory()[0] {
+                    LEAF => Some(LeafLeft {
+                        page: child_page,
+                        parent,
+                    }),
+                    INTERNAL => Some(InternalLeft {
+                        page: child_page,
+                        parent,
+                    }),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    fn get_entry(&self) -> Option<EntryAccessor> {
+        match self {
+            RangeIterState::LeafLeft { page, .. } => Some(LeafAccessor::new(&page).lesser()),
+            RangeIterState::LeafRight { page, .. } => LeafAccessor::new(&page).greater(),
+            _ => None,
+        }
+    }
+}
+
+pub(in crate) struct BtreeRangeIter<'a> {
+    last: Option<RangeIterState<'a>>,
+    manager: &'a PageManager,
+}
+
+impl<'a> BtreeRangeIter<'a> {
+    pub(in crate) fn new(root_page: Option<Page<'a>>, manager: &'a PageManager) -> Self {
+        Self {
+            last: root_page.map(InitialState),
+            manager,
+        }
+    }
+
+    // TODO: we need generic-associated-types to implement Iterator
+    pub(in crate) fn next(&mut self) -> Option<EntryAccessor> {
+        if let Some(mut state) = self.last.take() {
+            loop {
+                if let Some(new_state) = state.next(self.manager) {
+                    if new_state.get_entry().is_some() {
+                        self.last = Some(new_state);
+                        return self.last.as_ref().map(|s| s.get_entry().unwrap());
+                    } else {
+                        state = new_state;
+                    }
+                } else {
+                    self.last = None;
+                    return None;
+                }
+            }
+        }
+        None
+    }
+}
+
+pub(in crate) trait BtreeEntry<'a: 'b, 'b> {
+    fn key(&'b self) -> &'a [u8];
+    fn value(&'b self) -> &'a [u8];
+}
+
 // Provides a simple zero-copy way to access entries
 //
 // Entry format is:
@@ -14,7 +134,7 @@ const INTERNAL: u8 = 2;
 // * (key_size bytes) key_data
 // * (8 bytes) value_size
 // * (value_size bytes) value_data
-struct EntryAccessor<'a> {
+pub(in crate) struct EntryAccessor<'a> {
     raw: &'a [u8],
 }
 
@@ -25,10 +145,6 @@ impl<'a> EntryAccessor<'a> {
 
     fn key_len(&self) -> usize {
         u64::from_be_bytes(self.raw[0..8].try_into().unwrap()) as usize
-    }
-
-    fn key(&self) -> &'a [u8] {
-        &self.raw[8..(8 + self.key_len())]
     }
 
     fn value_offset(&self) -> usize {
@@ -44,12 +160,18 @@ impl<'a> EntryAccessor<'a> {
         ) as usize
     }
 
-    fn value(&self) -> &'a [u8] {
-        &self.raw[self.value_offset()..(self.value_offset() + self.value_len())]
-    }
-
     fn raw_len(&self) -> usize {
         8 + self.key_len() + 8 + self.value_len()
+    }
+}
+
+impl<'a: 'b, 'b> BtreeEntry<'a, 'b> for EntryAccessor<'a> {
+    fn key(&'b self) -> &'a [u8] {
+        &self.raw[8..(8 + self.key_len())]
+    }
+
+    fn value(&'b self) -> &'a [u8] {
+        &self.raw[self.value_offset()..(self.value_offset() + self.value_len())]
     }
 }
 
@@ -100,11 +222,11 @@ impl<'a: 'b, 'b> LeafAccessor<'a, 'b> {
         1 + self.lesser().raw_len()
     }
 
-    fn lesser(&self) -> EntryAccessor {
+    fn lesser(&self) -> EntryAccessor<'b> {
         EntryAccessor::new(&self.page.memory()[self.offset_of_lesser()..])
     }
 
-    fn greater(&self) -> Option<EntryAccessor> {
+    fn greater(&self) -> Option<EntryAccessor<'b>> {
         let entry = EntryAccessor::new(&self.page.memory()[self.offset_of_greater()..]);
         if entry.key_len() == 0 {
             None
@@ -209,29 +331,6 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
     fn write_gt_page(&mut self, page_number: u64) {
         let offset = 9 + self.key_len() + 8;
         self.page.memory_mut()[offset..(offset + 8)].copy_from_slice(&page_number.to_be_bytes());
-    }
-}
-
-// Returns the number of key-value pairs in the tree
-pub(in crate) fn tree_size<'a>(page: Page<'a>, manager: &'a PageManager) -> usize {
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => {
-            let accessor = LeafAccessor::new(&page);
-            if accessor.greater().is_some() {
-                2
-            } else {
-                1
-            }
-        }
-        INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
-            let left_page = accessor.lte_page();
-            let right_page = accessor.gt_page();
-            tree_size(manager.get_page(left_page), manager)
-                + tree_size(manager.get_page(right_page), manager)
-        }
-        _ => unreachable!(),
     }
 }
 
