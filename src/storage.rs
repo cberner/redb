@@ -48,15 +48,15 @@ impl Storage {
         Ok(())
     }
 
-    pub(in crate) fn len(&self) -> Result<usize, Error> {
-        if let Some(root) = self.get_root_page() {
+    pub(in crate) fn len(&self, root_page: Option<u64>) -> Result<usize, Error> {
+        if let Some(root) = root_page.map(|p| self.mem.get_page(p)) {
             Ok(tree_size(root, &self.mem))
         } else {
             Ok(0)
         }
     }
 
-    fn get_root_page(&self) -> Option<Page> {
+    pub(in crate) fn get_root_page_number(&self) -> Option<u64> {
         let metapage = self.mem.get_page(DB_METADATA_PAGE);
         let mmap = metapage.memory();
         let root_page_number = u64::from_be_bytes(
@@ -64,11 +64,16 @@ impl Storage {
                 .try_into()
                 .unwrap(),
         );
+
         if root_page_number == 0 {
             None
         } else {
-            Some(self.mem.get_page(root_page_number))
+            Some(root_page_number)
         }
+    }
+
+    fn get_root_page(&self) -> Option<Page> {
+        self.get_root_page_number().map(|p| self.mem.get_page(p))
     }
 
     fn set_root_page(&self, root_page: Option<u64>) {
@@ -91,8 +96,12 @@ impl Storage {
         Ok(())
     }
 
-    pub(in crate) fn get(&self, key: &[u8]) -> Result<Option<AccessGuard>, Error> {
-        if let Some(root_page) = self.get_root_page() {
+    pub(in crate) fn get(
+        &self,
+        key: &[u8],
+        root_page_number: Option<u64>,
+    ) -> Result<Option<AccessGuard>, Error> {
+        if let Some(root_page) = root_page_number.map(|p| self.mem.get_page(p)) {
             if let Some((page, offset, len)) = lookup_in_raw(root_page, key, &self.mem) {
                 return Ok(Some(AccessGuard::PageBacked(page, offset, len)));
             }
