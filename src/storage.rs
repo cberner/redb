@@ -4,6 +4,7 @@ use crate::btree::{
 use crate::page_manager::{Page, PageManager, DB_METADATA_PAGE};
 use crate::Error;
 use memmap2::MmapMut;
+use std::collections::HashMap;
 use std::convert::TryInto;
 
 const MAGICNUMBER: [u8; 4] = [b'r', b'e', b'd', b'b'];
@@ -47,6 +48,29 @@ impl Storage {
             builder.build().to_bytes(&self.mem)
         };
         self.set_root_page(Some(new_root));
+        Ok(())
+    }
+
+    pub(in crate) fn bulk_insert(&self, entries: HashMap<Vec<u8>, Vec<u8>>) -> Result<(), Error> {
+        // Assume that rewriting half the tree is about the same cost as building a completely new one
+        if entries.len() <= self.len(self.get_root_page_number())? / 2 {
+            for (key, value) in entries.iter() {
+                self.insert(key, value)?;
+            }
+        } else {
+            let mut builder = BtreeBuilder::new();
+            for (key, value) in entries {
+                builder.add(&key, &value);
+            }
+            // Copy all the existing entries
+            let mut iter = BtreeRangeIter::new(self.get_root_page(), &self.mem);
+            while let Some(x) = iter.next() {
+                builder.add(x.key(), x.value());
+            }
+
+            let new_root = builder.build().to_bytes(&self.mem);
+            self.set_root_page(Some(new_root));
+        }
         Ok(())
     }
 
