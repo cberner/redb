@@ -4,6 +4,7 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::convert::TryInto;
 
 pub(in crate) const ALL_MEMORY_HACK: u64 = u64::MAX;
+pub(in crate) const DB_METADATA_PAGE: u64 = 0;
 
 pub struct Page<'a> {
     mem: Ref<'a, [u8]>,
@@ -15,6 +16,7 @@ impl<'a> Page<'a> {
         &self.mem
     }
 
+    #[allow(dead_code)]
     pub(in crate) fn get_page_number(&self) -> u64 {
         self.page_number
     }
@@ -26,6 +28,7 @@ pub(in crate) struct PageMut<'a> {
 }
 
 impl<'a> PageMut<'a> {
+    #[allow(dead_code)]
     pub(in crate) fn memory(&self) -> &[u8] {
         &self.mem
     }
@@ -73,29 +76,39 @@ impl PageManager {
 
     pub(in crate) fn get_page(&self, page_number: u64) -> Page {
         // TODO: remove this
-        if page_number != ALL_MEMORY_HACK {
+        if page_number == ALL_MEMORY_HACK {
+            Page {
+                mem: Ref::map(self.mmap.borrow(), |m| &m[..]),
+                page_number,
+            }
+        } else {
             assert!(page_number < *self.next_free_page.borrow());
-        }
-        let start = page_number as usize * page_size::get();
-        let end = start + page_size::get();
+            let start = page_number as usize * page_size::get();
+            let end = start + page_size::get();
 
-        Page {
-            mem: Ref::map(self.mmap.borrow(), |m| &m[start..end]),
-            page_number,
+            Page {
+                mem: Ref::map(self.mmap.borrow(), |m| &m[start..end]),
+                page_number,
+            }
         }
     }
 
     pub(in crate) fn get_page_mut(&self, page_number: u64) -> PageMut {
         // TODO: remove this
-        if page_number != ALL_MEMORY_HACK {
+        if page_number == ALL_MEMORY_HACK {
+            PageMut {
+                mem: RefMut::map(self.mmap.borrow_mut(), |m| &mut m[..]),
+                page_number,
+            }
+        } else {
             assert!(page_number < *self.next_free_page.borrow());
-        }
-        let start = page_number as usize * page_size::get();
-        let end = start + page_size::get();
+            let start = page_number as usize * page_size::get();
+            let end = start + page_size::get();
 
-        PageMut {
-            mem: RefMut::map(self.mmap.borrow_mut(), |m| &mut m[start..end]),
-            page_number,
+            PageMut {
+                mem: RefMut::map(self.mmap.borrow_mut(), |m| &mut m[start..end]),
+                page_number,
+            }
         }
     }
 
@@ -104,9 +117,11 @@ impl PageManager {
             (offset + page_size::get() as u64 - 1) / page_size::get() as u64;
     }
 
-    pub(in crate) fn allocate(&self) -> u64 {
+    pub(in crate) fn allocate(&self) -> PageMut {
+        let page_number = *self.next_free_page.borrow();
         *self.next_free_page.borrow_mut() += 1;
-        *self.next_free_page.borrow() - 1
+
+        self.get_page_mut(page_number)
     }
 
     pub(in crate) fn store_state(&self, output: &mut [u8]) {
