@@ -41,9 +41,31 @@ fn benchmark<T: BenchTable>(mut db: T) {
     let end = SystemTime::now();
     let duration = end.duration_since(start).unwrap();
     println!(
-        "{}: Loaded {} items in {}ms",
+        "{}: Bulk loaded {} items in {}ms",
         T::db_type_name(),
         ELEMENTS,
+        duration.as_millis()
+    );
+
+    let start = SystemTime::now();
+    let writes = 100;
+    {
+        for i in ELEMENTS..(ELEMENTS + writes) {
+            let mut txn = db.write_transaction();
+            let (key, value) = &pairs[i % pairs.len()];
+            let mut mut_key = key.clone();
+            mut_key.extend_from_slice(&i.to_be_bytes());
+            txn.insert(&mut_key, value).unwrap();
+            txn.commit().unwrap();
+        }
+    }
+
+    let end = SystemTime::now();
+    let duration = end.duration_since(start).unwrap();
+    println!(
+        "{}: Wrote {} individual items in {}ms",
+        T::db_type_name(),
+        writes,
         duration.as_millis()
     );
 
