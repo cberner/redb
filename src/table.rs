@@ -133,7 +133,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn read_isolation() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path()).unwrap() };
@@ -156,11 +155,11 @@ mod test {
         assert!(read_txn2.get(b"hello").unwrap().is_none());
         assert_eq!(
             b"world2",
-            read_txn.get(b"hello2").unwrap().unwrap().as_ref()
+            read_txn2.get(b"hello2").unwrap().unwrap().as_ref()
         );
         assert_eq!(
             b"world3",
-            read_txn.get(b"hello3").unwrap().unwrap().as_ref()
+            read_txn2.get(b"hello3").unwrap().unwrap().as_ref()
         );
         assert_eq!(read_txn2.len().unwrap(), 2);
 
