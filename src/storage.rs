@@ -104,14 +104,14 @@ impl Storage {
     }
 
     fn set_root_page(&self, root_page: Option<u64>) {
-        let mut meta = self.mem.get_page_mut(DB_METADATA_PAGE);
+        let mut meta = self.mem.get_metapage_mut();
         let mmap = meta.memory_mut();
         mmap[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + 8)]
             .copy_from_slice(&root_page.unwrap_or(0).to_be_bytes());
     }
 
     pub(in crate) fn fsync(&self) -> Result<(), Error> {
-        let mut meta = self.mem.get_page_mut(DB_METADATA_PAGE);
+        let mut meta = self.mem.get_metapage_mut();
         let mmap = meta.memory_mut();
 
         self.mem.store_state(
