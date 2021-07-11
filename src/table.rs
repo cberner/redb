@@ -120,6 +120,32 @@ mod test {
     }
 
     #[test]
+    fn range_query_reversed() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let mut table = db.open_table("").unwrap();
+
+        let mut write_txn = table.begin_write().unwrap();
+        for i in 0..10u8 {
+            let key = vec![i];
+            write_txn.insert(&key, b"value").unwrap();
+        }
+        write_txn.commit().unwrap();
+        let read_txn = table.read_transaction().unwrap();
+        let start = vec![3u8];
+        let end = vec![7u8];
+        let mut iter = read_txn
+            .get_range_reversed(start.as_slice()..end.as_slice())
+            .unwrap();
+        for i in (3..7u8).rev() {
+            let entry = iter.next().unwrap();
+            assert_eq!(&[i], entry.key());
+            assert_eq!(b"value", entry.value());
+        }
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
     fn delete() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path()).unwrap() };
