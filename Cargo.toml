@@ -28,6 +28,9 @@ sled = "0.34.6"
 [features]
 python = ["pyo3"]
 
+[profile.bench]
+debug = true
+
 [[bench]]
 name = "lmdb_benchmark"
 harness = false
