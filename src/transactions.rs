@@ -1,6 +1,8 @@
+use crate::btree::BtreeRangeIter;
 use crate::error::Error;
 use crate::storage::{AccessGuard, Storage};
 use std::collections::{HashMap, HashSet};
+use std::ops::RangeBounds;
 
 pub struct WriteTransaction<'mmap> {
     storage: &'mmap Storage,
@@ -71,6 +73,13 @@ impl<'mmap> ReadOnlyTransaction<'mmap> {
 
     pub fn get(&self, key: &[u8]) -> Result<Option<AccessGuard<'mmap>>, Error> {
         self.storage.get(key, self.root_page)
+    }
+
+    pub fn get_range<'a, T: RangeBounds<&'a [u8]>>(
+        &'a self,
+        range: T,
+    ) -> Result<BtreeRangeIter<T>, Error> {
+        self.storage.get_range(range, self.root_page)
     }
 
     pub fn len(&self) -> Result<usize, Error> {

@@ -6,6 +6,7 @@ use crate::page_manager::{Page, PageManager, PageMut};
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::convert::TryInto;
+use std::ops::{Bound, RangeBounds};
 
 const LEAF: u8 = 1;
 const INTERNAL: u8 = 2;
@@ -88,27 +89,49 @@ impl<'a> RangeIterState<'a> {
     }
 }
 
-pub(in crate) struct BtreeRangeIter<'a> {
+pub struct BtreeRangeIter<'a, T: RangeBounds<&'a [u8]>> {
     last: Option<RangeIterState<'a>>,
+    query_range: T,
     manager: &'a PageManager,
 }
 
-impl<'a> BtreeRangeIter<'a> {
-    pub(in crate) fn new(root_page: Option<Page<'a>>, manager: &'a PageManager) -> Self {
+impl<'a, T: RangeBounds<&'a [u8]>> BtreeRangeIter<'a, T> {
+    pub(in crate) fn new(
+        root_page: Option<Page<'a>>,
+        query_range: T,
+        manager: &'a PageManager,
+    ) -> Self {
         Self {
             last: root_page.map(InitialState),
+            query_range,
             manager,
         }
     }
 
     // TODO: we need generic-associated-types to implement Iterator
-    pub(in crate) fn next(&mut self) -> Option<EntryAccessor> {
+    pub fn next(&mut self) -> Option<EntryAccessor> {
         if let Some(mut state) = self.last.take() {
             loop {
                 if let Some(new_state) = state.next(self.manager) {
-                    if new_state.get_entry().is_some() {
-                        self.last = Some(new_state);
-                        return self.last.as_ref().map(|s| s.get_entry().unwrap());
+                    if let Some(entry) = new_state.get_entry() {
+                        // TODO: optimize. This is very inefficient to retrieve and then ignore the values
+                        if self.query_range.contains(&entry.key()) {
+                            self.last = Some(new_state);
+                            return self.last.as_ref().map(|s| s.get_entry().unwrap());
+                        } else {
+                            if let Bound::Included(end) = self.query_range.end_bound() {
+                                if entry.key() > end {
+                                    self.last = None;
+                                    return None;
+                                }
+                            } else if let Bound::Excluded(end) = self.query_range.end_bound() {
+                                if entry.key() >= end {
+                                    self.last = None;
+                                    return None;
+                                }
+                            }
+                            state = new_state;
+                        }
                     } else {
                         state = new_state;
                     }
@@ -122,7 +145,7 @@ impl<'a> BtreeRangeIter<'a> {
     }
 }
 
-pub(in crate) trait BtreeEntry<'a: 'b, 'b> {
+pub trait BtreeEntry<'a: 'b, 'b> {
     fn key(&'b self) -> &'a [u8];
     fn value(&'b self) -> &'a [u8];
 }
@@ -134,7 +157,7 @@ pub(in crate) trait BtreeEntry<'a: 'b, 'b> {
 // * (key_size bytes) key_data
 // * (8 bytes) value_size
 // * (value_size bytes) value_data
-pub(in crate) struct EntryAccessor<'a> {
+pub struct EntryAccessor<'a> {
     raw: &'a [u8],
 }
 
