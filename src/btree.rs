@@ -619,9 +619,13 @@ pub(in crate) fn tree_insert<'a>(
             // e.g. when we insert a second leaf adjacent without modifying this one
             let mut builder = BtreeBuilder::new();
             builder.add(key, value);
-            builder.add(accessor.lesser().key(), accessor.lesser().value());
+            if key != accessor.lesser().key() {
+                builder.add(accessor.lesser().key(), accessor.lesser().value());
+            }
             if let Some(entry) = accessor.greater() {
-                builder.add(entry.key(), entry.value());
+                if key != entry.key() {
+                    builder.add(entry.key(), entry.value());
+                }
             }
 
             // TODO: shouldn't need to drop this, but we can't allocate when there are pages in flight

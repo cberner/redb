@@ -80,6 +80,27 @@ mod test {
     }
 
     #[test]
+    fn insert_overwrite() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let mut table = db.open_table("").unwrap();
+        let mut write_txn = table.begin_write().unwrap();
+        write_txn.insert(b"hello", b"world").unwrap();
+        write_txn.commit().unwrap();
+        let read_txn = table.read_transaction().unwrap();
+        assert_eq!(b"world", read_txn.get(b"hello").unwrap().unwrap().as_ref());
+
+        let mut write_txn = table.begin_write().unwrap();
+        write_txn.insert(b"hello", b"replaced").unwrap();
+        write_txn.commit().unwrap();
+        let read_txn = table.read_transaction().unwrap();
+        assert_eq!(
+            b"replaced",
+            read_txn.get(b"hello").unwrap().unwrap().as_ref()
+        );
+    }
+
+    #[test]
     fn insert_reserve() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path()).unwrap() };

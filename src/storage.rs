@@ -60,13 +60,15 @@ impl Storage {
             }
         } else {
             let mut builder = BtreeBuilder::new();
-            for (key, value) in entries {
-                builder.add(&key, &value);
-            }
             // Copy all the existing entries
             let mut iter = BtreeRangeIter::new(self.get_root_page(), .., &self.mem);
             while let Some(x) = iter.next() {
-                builder.add(x.key(), x.value());
+                if !entries.contains_key(x.key()) {
+                    builder.add(x.key(), x.value());
+                }
+            }
+            for (key, value) in entries {
+                builder.add(&key, &value);
             }
 
             let new_root = builder.build().to_bytes(&self.mem);
