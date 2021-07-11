@@ -149,6 +149,18 @@ impl Storage {
         ))
     }
 
+    pub(in crate) fn get_range_reversed<'a, T: RangeBounds<&'a [u8]>>(
+        &'a self,
+        range: T,
+        root_page: Option<u64>,
+    ) -> Result<BtreeRangeIter<T>, Error> {
+        Ok(BtreeRangeIter::new_reversed(
+            root_page.map(|p| self.mem.get_page(p)),
+            range,
+            &self.mem,
+        ))
+    }
+
     // Returns a boolean indicating if an entry was removed
     pub(in crate) fn remove(&self, key: &[u8]) -> Result<bool, Error> {
         if let Some(root_page) = self.get_root_page() {

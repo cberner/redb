@@ -82,6 +82,13 @@ impl<'mmap> ReadOnlyTransaction<'mmap> {
         self.storage.get_range(range, self.root_page)
     }
 
+    pub fn get_range_reversed<'a, T: RangeBounds<&'a [u8]>>(
+        &'a self,
+        range: T,
+    ) -> Result<BtreeRangeIter<T>, Error> {
+        self.storage.get_range_reversed(range, self.root_page)
+    }
+
     pub fn len(&self) -> Result<usize, Error> {
         self.storage.len(self.root_page)
     }

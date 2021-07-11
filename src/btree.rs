@@ -12,69 +12,197 @@ const LEAF: u8 = 1;
 const INTERNAL: u8 = 2;
 
 enum RangeIterState<'a> {
-    InitialState(Page<'a>),
+    InitialState(Page<'a>, bool),
     LeafLeft {
         page: Page<'a>,
         parent: Option<Box<RangeIterState<'a>>>,
+        reversed: bool,
     },
     LeafRight {
         page: Page<'a>,
         parent: Option<Box<RangeIterState<'a>>>,
+        reversed: bool,
     },
     InternalLeft {
         page: Page<'a>,
         parent: Option<Box<RangeIterState<'a>>>,
+        reversed: bool,
     },
     InternalRight {
         page: Page<'a>,
         parent: Option<Box<RangeIterState<'a>>>,
+        reversed: bool,
     },
 }
 
 impl<'a> RangeIterState<'a> {
-    fn next(self, manager: &'a PageManager) -> Option<RangeIterState> {
+    fn forward_next(self, manager: &'a PageManager) -> Option<RangeIterState> {
         match self {
-            RangeIterState::InitialState(root_page) => match root_page.memory()[0] {
+            RangeIterState::InitialState(root_page, ..) => match root_page.memory()[0] {
                 LEAF => Some(LeafLeft {
                     page: root_page,
                     parent: None,
+                    reversed: false,
                 }),
                 INTERNAL => Some(InternalLeft {
                     page: root_page,
                     parent: None,
+                    reversed: false,
                 }),
                 _ => unreachable!(),
             },
-            RangeIterState::LeafLeft { page, parent } => Some(LeafRight { page, parent }),
+            RangeIterState::LeafLeft { page, parent, .. } => Some(LeafRight {
+                page,
+                parent,
+                reversed: false,
+            }),
             RangeIterState::LeafRight { parent, .. } => parent.map(|x| *x),
-            RangeIterState::InternalLeft { page, parent } => {
+            RangeIterState::InternalLeft { page, parent, .. } => {
                 let child = InternalAccessor::new(&page).lte_page();
                 let child_page = manager.get_page(child);
                 match child_page.memory()[0] {
                     LEAF => Some(LeafLeft {
                         page: child_page,
-                        parent: Some(Box::new(InternalRight { page, parent })),
+                        parent: Some(Box::new(InternalRight {
+                            page,
+                            parent,
+                            reversed: false,
+                        })),
+                        reversed: false,
                     }),
                     INTERNAL => Some(InternalLeft {
                         page: child_page,
-                        parent: Some(Box::new(InternalRight { page, parent })),
+                        parent: Some(Box::new(InternalRight {
+                            page,
+                            parent,
+                            reversed: false,
+                        })),
+                        reversed: false,
                     }),
                     _ => unreachable!(),
                 }
             }
-            RangeIterState::InternalRight { page, parent } => {
+            RangeIterState::InternalRight { page, parent, .. } => {
                 let child = InternalAccessor::new(&page).gt_page();
                 let child_page = manager.get_page(child);
                 match child_page.memory()[0] {
                     LEAF => Some(LeafLeft {
                         page: child_page,
                         parent,
+                        reversed: false,
                     }),
                     INTERNAL => Some(InternalLeft {
                         page: child_page,
                         parent,
+                        reversed: false,
                     }),
                     _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    fn backward_next(self, manager: &'a PageManager) -> Option<RangeIterState> {
+        match self {
+            RangeIterState::InitialState(root_page, ..) => match root_page.memory()[0] {
+                LEAF => Some(LeafRight {
+                    page: root_page,
+                    parent: None,
+                    reversed: true,
+                }),
+                INTERNAL => Some(InternalRight {
+                    page: root_page,
+                    parent: None,
+                    reversed: true,
+                }),
+                _ => unreachable!(),
+            },
+            RangeIterState::LeafLeft { parent, .. } => parent.map(|x| *x),
+            RangeIterState::LeafRight { page, parent, .. } => Some(LeafLeft {
+                page,
+                parent,
+                reversed: true,
+            }),
+            RangeIterState::InternalLeft { page, parent, .. } => {
+                let child = InternalAccessor::new(&page).lte_page();
+                let child_page = manager.get_page(child);
+                match child_page.memory()[0] {
+                    LEAF => Some(LeafRight {
+                        page: child_page,
+                        parent,
+                        reversed: true,
+                    }),
+                    INTERNAL => Some(InternalRight {
+                        page: child_page,
+                        parent,
+                        reversed: true,
+                    }),
+                    _ => unreachable!(),
+                }
+            }
+            RangeIterState::InternalRight { page, parent, .. } => {
+                let child = InternalAccessor::new(&page).gt_page();
+                let child_page = manager.get_page(child);
+                match child_page.memory()[0] {
+                    LEAF => Some(LeafRight {
+                        page: child_page,
+                        parent: Some(Box::new(InternalLeft {
+                            page,
+                            parent,
+                            reversed: true,
+                        })),
+                        reversed: true,
+                    }),
+                    INTERNAL => Some(InternalRight {
+                        page: child_page,
+                        parent: Some(Box::new(InternalLeft {
+                            page,
+                            parent,
+                            reversed: true,
+                        })),
+                        reversed: true,
+                    }),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    fn next(self, manager: &'a PageManager) -> Option<RangeIterState> {
+        match &self {
+            InitialState(_, reversed) => {
+                if *reversed {
+                    self.backward_next(manager)
+                } else {
+                    self.forward_next(manager)
+                }
+            }
+            RangeIterState::LeafLeft { reversed, .. } => {
+                if *reversed {
+                    self.backward_next(manager)
+                } else {
+                    self.forward_next(manager)
+                }
+            }
+            RangeIterState::LeafRight { reversed, .. } => {
+                if *reversed {
+                    self.backward_next(manager)
+                } else {
+                    self.forward_next(manager)
+                }
+            }
+            RangeIterState::InternalLeft { reversed, .. } => {
+                if *reversed {
+                    self.backward_next(manager)
+                } else {
+                    self.forward_next(manager)
+                }
+            }
+            RangeIterState::InternalRight { reversed, .. } => {
+                if *reversed {
+                    self.backward_next(manager)
+                } else {
+                    self.forward_next(manager)
                 }
             }
         }
@@ -92,6 +220,7 @@ impl<'a> RangeIterState<'a> {
 pub struct BtreeRangeIter<'a, T: RangeBounds<&'a [u8]>> {
     last: Option<RangeIterState<'a>>,
     query_range: T,
+    reversed: bool,
     manager: &'a PageManager,
 }
 
@@ -102,8 +231,22 @@ impl<'a, T: RangeBounds<&'a [u8]>> BtreeRangeIter<'a, T> {
         manager: &'a PageManager,
     ) -> Self {
         Self {
-            last: root_page.map(InitialState),
+            last: root_page.map(|p| InitialState(p, false)),
             query_range,
+            reversed: false,
+            manager,
+        }
+    }
+
+    pub(in crate) fn new_reversed(
+        root_page: Option<Page<'a>>,
+        query_range: T,
+        manager: &'a PageManager,
+    ) -> Self {
+        Self {
+            last: root_page.map(|p| InitialState(p, true)),
+            query_range,
+            reversed: true,
             manager,
         }
     }
@@ -119,17 +262,35 @@ impl<'a, T: RangeBounds<&'a [u8]>> BtreeRangeIter<'a, T> {
                             self.last = Some(new_state);
                             return self.last.as_ref().map(|s| s.get_entry().unwrap());
                         } else {
-                            if let Bound::Included(end) = self.query_range.end_bound() {
-                                if entry.key() > end {
-                                    self.last = None;
-                                    return None;
+                            #[allow(clippy::collapsible_else_if)]
+                            if self.reversed {
+                                if let Bound::Included(start) = self.query_range.start_bound() {
+                                    if entry.key() < start {
+                                        self.last = None;
+                                        return None;
+                                    }
+                                } else if let Bound::Excluded(start) =
+                                    self.query_range.start_bound()
+                                {
+                                    if entry.key() <= start {
+                                        self.last = None;
+                                        return None;
+                                    }
                                 }
-                            } else if let Bound::Excluded(end) = self.query_range.end_bound() {
-                                if entry.key() >= end {
-                                    self.last = None;
-                                    return None;
+                            } else {
+                                if let Bound::Included(end) = self.query_range.end_bound() {
+                                    if entry.key() > end {
+                                        self.last = None;
+                                        return None;
+                                    }
+                                } else if let Bound::Excluded(end) = self.query_range.end_bound() {
+                                    if entry.key() >= end {
+                                        self.last = None;
+                                        return None;
+                                    }
                                 }
-                            }
+                            };
+
                             state = new_state;
                         }
                     } else {
