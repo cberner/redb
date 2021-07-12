@@ -28,7 +28,7 @@ pub struct RedbBenchTable<'a> {
 impl<'a> RedbBenchTable<'a> {
     pub fn new(db: &'a redb::Database) -> Self {
         RedbBenchTable {
-            table: db.open_table("").unwrap(),
+            table: db.open_table(b"x").unwrap(),
         }
     }
 }

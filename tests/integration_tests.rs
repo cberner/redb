@@ -24,7 +24,7 @@ fn persistence() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db = unsafe { Database::open(tmpfile.path()).unwrap() };
-    let mut table = db.open_table("").unwrap();
+    let mut table = db.open_table(b"x").unwrap();
 
     let pairs = gen_data(100, 16, 20);
 
@@ -40,7 +40,7 @@ fn persistence() {
     drop(table);
     drop(db);
     let db = unsafe { Database::open(tmpfile.path()).unwrap() };
-    let table = db.open_table("").unwrap();
+    let table = db.open_table(b"x").unwrap();
 
     let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
     key_order.shuffle(&mut rand::thread_rng());

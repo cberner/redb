@@ -37,7 +37,9 @@ impl Database {
         Ok(Database { storage })
     }
 
-    pub fn open_table(&self, _name: &str) -> Result<Table, Error> {
-        Table::new(&self.storage)
+    pub fn open_table(&self, name: &[u8]) -> Result<Table, Error> {
+        assert!(!name.is_empty());
+        let id = self.storage.get_or_create_table(name)?;
+        Table::new(id, &self.storage)
     }
 }
