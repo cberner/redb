@@ -22,7 +22,7 @@ pub trait BenchReadTransaction<'a> {
 }
 
 pub struct RedbBenchTable<'a> {
-    table: redb::Table<'a>,
+    table: redb::Table<'a, [u8]>,
 }
 
 impl<'a> RedbBenchTable<'a> {
@@ -55,7 +55,7 @@ impl<'a> BenchTable for RedbBenchTable<'a> {
 }
 
 pub struct RedbBenchReadTransaction<'a> {
-    txn: redb::ReadOnlyTransaction<'a>,
+    txn: redb::ReadOnlyTransaction<'a, [u8]>,
 }
 
 impl<'a, 'b> BenchReadTransaction<'b> for RedbBenchReadTransaction<'a> {
@@ -67,7 +67,7 @@ impl<'a, 'b> BenchReadTransaction<'b> for RedbBenchReadTransaction<'a> {
 }
 
 pub struct RedbBenchWriteTransaction<'a> {
-    txn: redb::WriteTransaction<'a>,
+    txn: redb::WriteTransaction<'a, [u8]>,
 }
 
 impl BenchWriteTransaction for RedbBenchWriteTransaction<'_> {

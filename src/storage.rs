@@ -2,11 +2,12 @@ use crate::btree::{
     lookup_in_raw, tree_delete, tree_insert, BtreeBuilder, BtreeEntry, BtreeRangeIter,
 };
 use crate::page_manager::{Page, PageManager, DB_METADATA_PAGE};
+use crate::types::RedbKey;
 use crate::Error;
 use memmap2::MmapMut;
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::ops::RangeBounds;
+use std::ops::{RangeBounds, RangeFull};
 
 const MAGICNUMBER: [u8; 4] = [b'r', b'e', b'd', b'b'];
 const ALLOCATOR_STATE_OFFSET: usize = MAGICNUMBER.len();
@@ -44,33 +45,42 @@ impl Storage {
     }
 
     pub(in crate) fn get_or_create_table(&self, name: &[u8]) -> Result<u64, Error> {
-        if let Some(found) = self.get(TABLE_TABLE_ID, name, self.get_root_page_number())? {
+        if let Some(found) = self.get::<[u8]>(TABLE_TABLE_ID, name, self.get_root_page_number())? {
             return Ok(u64::from_be_bytes(found.as_ref().try_into().unwrap()));
         }
-        let mut iter = self.get_range_reversed(TABLE_TABLE_ID, .., self.get_root_page_number())?;
+        let mut iter = self.get_range_reversed::<RangeFull, [u8]>(
+            TABLE_TABLE_ID,
+            ..,
+            self.get_root_page_number(),
+        )?;
         let largest_id = iter
             .next()
             .map(|x| u64::from_be_bytes(x.value().try_into().unwrap()))
             .unwrap_or(TABLE_TABLE_ID);
         drop(iter);
         let new_id = largest_id + 1;
-        self.insert(TABLE_TABLE_ID, name, &new_id.to_be_bytes())?;
+        self.insert::<[u8]>(TABLE_TABLE_ID, name, &new_id.to_be_bytes())?;
         Ok(new_id)
     }
 
-    pub(in crate) fn insert(&self, table_id: u64, key: &[u8], value: &[u8]) -> Result<(), Error> {
+    pub(in crate) fn insert<K: RedbKey + ?Sized>(
+        &self,
+        table_id: u64,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), Error> {
         let new_root = if let Some(root) = self.get_root_page() {
-            tree_insert(root, table_id, key, value, &self.mem)
+            tree_insert::<K>(root, table_id, key, value, &self.mem)
         } else {
             let mut builder = BtreeBuilder::new();
             builder.add(table_id, key, value);
-            builder.build().to_bytes(&self.mem)
+            builder.build::<K>().to_bytes(&self.mem)
         };
         self.set_root_page(Some(new_root));
         Ok(())
     }
 
-    pub(in crate) fn bulk_insert(
+    pub(in crate) fn bulk_insert<K: RedbKey + ?Sized>(
         &self,
         table_id: u64,
         entries: HashMap<Vec<u8>, Vec<u8>>,
@@ -78,13 +88,17 @@ impl Storage {
         // Assume that rewriting half the tree is about the same cost as building a completely new one
         if entries.len() <= self.len(table_id, self.get_root_page_number())? / 2 {
             for (key, value) in entries.iter() {
-                self.insert(table_id, key, value)?;
+                self.insert::<K>(table_id, key, value)?;
             }
         } else {
             let mut builder = BtreeBuilder::new();
             // Copy all the existing entries
-            let mut tables_iter =
-                BtreeRangeIter::new(self.get_root_page(), TABLE_TABLE_ID, .., &self.mem);
+            let mut tables_iter = BtreeRangeIter::<RangeFull, [u8]>::new(
+                self.get_root_page(),
+                TABLE_TABLE_ID,
+                ..,
+                &self.mem,
+            );
             while let Some(table_entry) = tables_iter.next() {
                 let id = u64::from_be_bytes(table_entry.value().try_into().unwrap());
                 // Copy the table entry
@@ -94,8 +108,10 @@ impl Storage {
                     table_entry.value(),
                 );
                 // Copy the contents of the table
-                let mut iter = BtreeRangeIter::new(self.get_root_page(), id, .., &self.mem);
+                let mut iter =
+                    BtreeRangeIter::<RangeFull, [u8]>::new(self.get_root_page(), id, .., &self.mem);
                 while let Some(x) = iter.next() {
+                    // TODO: THIS IS BROKEN. .contains_key() doesn't respect any custom ordering of the keys
                     if table_id != x.table_id() || !entries.contains_key(x.key()) {
                         builder.add(x.table_id(), x.key(), x.value());
                     }
@@ -105,14 +121,14 @@ impl Storage {
                 builder.add(table_id, &key, &value);
             }
 
-            let new_root = builder.build().to_bytes(&self.mem);
+            let new_root = builder.build::<K>().to_bytes(&self.mem);
             self.set_root_page(Some(new_root));
         }
         Ok(())
     }
 
     pub(in crate) fn len(&self, table: u64, root_page: Option<u64>) -> Result<usize, Error> {
-        let mut iter = BtreeRangeIter::new(
+        let mut iter = BtreeRangeIter::<RangeFull, [u8]>::new(
             root_page.map(|p| self.mem.get_page(p)),
             table,
             ..,
@@ -165,26 +181,28 @@ impl Storage {
         Ok(())
     }
 
-    pub(in crate) fn get(
+    pub(in crate) fn get<K: RedbKey + ?Sized>(
         &self,
         table_id: u64,
         key: &[u8],
         root_page_number: Option<u64>,
     ) -> Result<Option<AccessGuard>, Error> {
         if let Some(root_page) = root_page_number.map(|p| self.mem.get_page(p)) {
-            if let Some((page, offset, len)) = lookup_in_raw(root_page, table_id, key, &self.mem) {
+            if let Some((page, offset, len)) =
+                lookup_in_raw::<K>(root_page, table_id, key, &self.mem)
+            {
                 return Ok(Some(AccessGuard::PageBacked(page, offset, len)));
             }
         }
         Ok(None)
     }
 
-    pub(in crate) fn get_range<'a, T: RangeBounds<&'a [u8]>>(
+    pub(in crate) fn get_range<'a, T: RangeBounds<&'a [u8]>, K: RedbKey + ?Sized>(
         &'a self,
         table_id: u64,
         range: T,
         root_page: Option<u64>,
-    ) -> Result<BtreeRangeIter<T>, Error> {
+    ) -> Result<BtreeRangeIter<T, K>, Error> {
         Ok(BtreeRangeIter::new(
             root_page.map(|p| self.mem.get_page(p)),
             table_id,
@@ -193,12 +211,12 @@ impl Storage {
         ))
     }
 
-    pub(in crate) fn get_range_reversed<'a, T: RangeBounds<&'a [u8]>>(
+    pub(in crate) fn get_range_reversed<'a, T: RangeBounds<&'a [u8]>, K: RedbKey + ?Sized>(
         &'a self,
         table_id: u64,
         range: T,
         root_page: Option<u64>,
-    ) -> Result<BtreeRangeIter<T>, Error> {
+    ) -> Result<BtreeRangeIter<T, K>, Error> {
         Ok(BtreeRangeIter::new_reversed(
             root_page.map(|p| self.mem.get_page(p)),
             table_id,
@@ -208,10 +226,14 @@ impl Storage {
     }
 
     // Returns a boolean indicating if an entry was removed
-    pub(in crate) fn remove(&self, table_id: u64, key: &[u8]) -> Result<bool, Error> {
+    pub(in crate) fn remove<K: RedbKey + ?Sized>(
+        &self,
+        table_id: u64,
+        key: &[u8],
+    ) -> Result<bool, Error> {
         if let Some(root_page) = self.get_root_page() {
             let old_root = root_page.get_page_number();
-            let new_root = tree_delete(root_page, table_id, key, &self.mem);
+            let new_root = tree_delete::<K>(root_page, table_id, key, &self.mem);
             self.set_root_page(new_root);
             return Ok(old_root == new_root.unwrap_or(0));
         }

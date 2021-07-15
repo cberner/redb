@@ -3,9 +3,11 @@ use crate::btree::RangeIterState::{
     InitialState, InternalLeft, InternalRight, LeafLeft, LeafRight,
 };
 use crate::page_manager::{Page, PageManager, PageMut};
+use crate::types::RedbKey;
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::convert::TryInto;
+use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 
 const LEAF: u8 = 1;
@@ -217,15 +219,17 @@ impl<'a> RangeIterState<'a> {
     }
 }
 
-pub struct BtreeRangeIter<'a, T: RangeBounds<&'a [u8]>> {
+// TODO: T should be a RangeBound<&'a K>
+pub struct BtreeRangeIter<'a, T: RangeBounds<&'a [u8]>, K: RedbKey + ?Sized> {
     last: Option<RangeIterState<'a>>,
     table_id: u64,
     query_range: T,
     reversed: bool,
     manager: &'a PageManager,
+    _key_type: PhantomData<K>,
 }
 
-impl<'a, T: RangeBounds<&'a [u8]>> BtreeRangeIter<'a, T> {
+impl<'a, T: RangeBounds<&'a [u8]>, K: RedbKey + ?Sized> BtreeRangeIter<'a, T, K> {
     pub(in crate) fn new(
         root_page: Option<Page<'a>>,
         table_id: u64,
@@ -238,6 +242,7 @@ impl<'a, T: RangeBounds<&'a [u8]>> BtreeRangeIter<'a, T> {
             query_range,
             reversed: false,
             manager,
+            _key_type: Default::default(),
         }
     }
 
@@ -253,6 +258,7 @@ impl<'a, T: RangeBounds<&'a [u8]>> BtreeRangeIter<'a, T> {
             query_range,
             reversed: true,
             manager,
+            _key_type: Default::default(),
         }
     }
 
@@ -264,7 +270,7 @@ impl<'a, T: RangeBounds<&'a [u8]>> BtreeRangeIter<'a, T> {
                     if let Some(entry) = new_state.get_entry() {
                         // TODO: optimize. This is very inefficient to retrieve and then ignore the values
                         if self.table_id == entry.table_id()
-                            && self.query_range.contains(&entry.key())
+                            && bound_contains_key::<T, K>(&self.query_range, entry.key())
                         {
                             self.last = Some(new_state);
                             return self.last.as_ref().map(|s| s.get_entry().unwrap());
@@ -272,26 +278,26 @@ impl<'a, T: RangeBounds<&'a [u8]>> BtreeRangeIter<'a, T> {
                             #[allow(clippy::collapsible_else_if)]
                             if self.reversed {
                                 if let Bound::Included(start) = self.query_range.start_bound() {
-                                    if entry.table_and_key() < (self.table_id, *start) {
+                                    if entry.compare::<K>(self.table_id, *start).is_lt() {
                                         self.last = None;
                                         return None;
                                     }
                                 } else if let Bound::Excluded(start) =
                                     self.query_range.start_bound()
                                 {
-                                    if entry.table_and_key() <= (self.table_id, *start) {
+                                    if entry.compare::<K>(self.table_id, *start).is_le() {
                                         self.last = None;
                                         return None;
                                     }
                                 }
                             } else {
                                 if let Bound::Included(end) = self.query_range.end_bound() {
-                                    if entry.table_and_key() > (self.table_id, *end) {
+                                    if entry.compare::<K>(self.table_id, *end).is_gt() {
                                         self.last = None;
                                         return None;
                                     }
                                 } else if let Bound::Excluded(end) = self.query_range.end_bound() {
-                                    if entry.table_and_key() >= (self.table_id, *end) {
+                                    if entry.compare::<K>(self.table_id, *end).is_ge() {
                                         self.last = None;
                                         return None;
                                     }
@@ -316,6 +322,40 @@ impl<'a, T: RangeBounds<&'a [u8]>> BtreeRangeIter<'a, T> {
 pub trait BtreeEntry<'a: 'b, 'b> {
     fn key(&'b self) -> &'a [u8];
     fn value(&'b self) -> &'a [u8];
+}
+
+fn cmp_keys<K: RedbKey + ?Sized>(table1: u64, key1: &[u8], table2: u64, key2: &[u8]) -> Ordering {
+    match table1.cmp(&table2) {
+        Ordering::Less => Ordering::Less,
+        Ordering::Equal => K::compare(key1, key2),
+        Ordering::Greater => Ordering::Greater,
+    }
+}
+
+fn bound_contains_key<'a, T: RangeBounds<&'a [u8]>, K: RedbKey + ?Sized>(
+    range: &T,
+    key: &[u8],
+) -> bool {
+    if let Bound::Included(start) = range.start_bound() {
+        if K::compare(key, *start).is_lt() {
+            return false;
+        }
+    } else if let Bound::Excluded(start) = range.start_bound() {
+        if K::compare(key, *start).is_le() {
+            return false;
+        }
+    }
+    if let Bound::Included(end) = range.end_bound() {
+        if K::compare(key, *end).is_gt() {
+            return false;
+        }
+    } else if let Bound::Excluded(end) = range.end_bound() {
+        if K::compare(key, *end).is_ge() {
+            return false;
+        }
+    }
+
+    true
 }
 
 // Provides a simple zero-copy way to access entries
@@ -361,8 +401,8 @@ impl<'a> EntryAccessor<'a> {
         16 + self.key_len() + 8 + self.value_len()
     }
 
-    fn table_and_key(&self) -> (u64, &'a [u8]) {
-        (self.table_id(), self.key())
+    fn compare<K: RedbKey + ?Sized>(&self, table: u64, key: &[u8]) -> Ordering {
+        cmp_keys::<K>(self.table_id(), self.key(), table, key)
     }
 }
 
@@ -499,10 +539,6 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
         u64::from_be_bytes(self.page.memory()[9..17].try_into().unwrap())
     }
 
-    fn table_and_key(&self) -> (u64, &[u8]) {
-        (self.table_id(), self.key())
-    }
-
     fn key(&self) -> &[u8] {
         &self.page.memory()[17..(17 + self.key_len())]
     }
@@ -553,7 +589,7 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
 
 // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
 // If key is not found, guaranteed not to modify the tree
-pub(in crate) fn tree_delete<'a>(
+pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
     page: Page<'a>,
     table: u64,
     key: &[u8],
@@ -565,13 +601,13 @@ pub(in crate) fn tree_delete<'a>(
             let accessor = LeafAccessor::new(&page);
             #[allow(clippy::collapsible_else_if)]
             if let Some(greater) = accessor.greater() {
-                if (table, key) != accessor.lesser().table_and_key()
-                    && (table, key) != greater.table_and_key()
+                if accessor.lesser().compare::<K>(table, key).is_ne()
+                    && greater.compare::<K>(table, key).is_ne()
                 {
                     // Not found
                     return Some(page.get_page_number());
                 }
-                let new_leaf = if (table, key) == accessor.lesser().table_and_key() {
+                let new_leaf = if accessor.lesser().compare::<K>(table, key).is_eq() {
                     Leaf(
                         (
                             greater.table_id(),
@@ -595,7 +631,7 @@ pub(in crate) fn tree_delete<'a>(
                 drop(page);
                 Some(new_leaf.to_bytes(manager))
             } else {
-                if (table, key) == accessor.lesser().table_and_key() {
+                if accessor.lesser().compare::<K>(table, key).is_eq() {
                     // Deleted the entire left
                     None
                 } else {
@@ -617,9 +653,9 @@ pub(in crate) fn tree_delete<'a>(
             // TODO: shouldn't need to drop this, but we can't allocate when there are pages in flight
             drop(page);
             #[allow(clippy::collapsible_else_if)]
-            if (table, key) <= (our_table, our_key.as_slice()) {
+            if cmp_keys::<K>(table, key, our_table, our_key.as_slice()).is_le() {
                 if let Some(page_number) =
-                    tree_delete(manager.get_page(left_page), table, key, manager)
+                    tree_delete::<K>(manager.get_page(left_page), table, key, manager)
                 {
                     left_page = page_number;
                 } else {
@@ -628,7 +664,7 @@ pub(in crate) fn tree_delete<'a>(
                 }
             } else {
                 if let Some(page_number) =
-                    tree_delete(manager.get_page(right_page), table, key, manager)
+                    tree_delete::<K>(manager.get_page(right_page), table, key, manager)
                 {
                     right_page = page_number;
                 } else {
@@ -654,7 +690,7 @@ pub(in crate) fn tree_delete<'a>(
 }
 
 // Returns the page number of the sub-tree into which the key was inserted
-pub(in crate) fn tree_insert<'a>(
+pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
     page: Page<'a>,
     table: u64,
     key: &[u8],
@@ -669,7 +705,7 @@ pub(in crate) fn tree_insert<'a>(
             // e.g. when we insert a second leaf adjacent without modifying this one
             let mut builder = BtreeBuilder::new();
             builder.add(table, key, value);
-            if (table, key) != accessor.lesser().table_and_key() {
+            if accessor.lesser().compare::<K>(table, key).is_ne() {
                 builder.add(
                     accessor.lesser().table_id(),
                     accessor.lesser().key(),
@@ -677,14 +713,14 @@ pub(in crate) fn tree_insert<'a>(
                 );
             }
             if let Some(entry) = accessor.greater() {
-                if (table, key) != entry.table_and_key() {
+                if entry.compare::<K>(table, key).is_ne() {
                     builder.add(entry.table_id(), entry.key(), entry.value());
                 }
             }
 
             // TODO: shouldn't need to drop this, but we can't allocate when there are pages in flight
             drop(page);
-            builder.build().to_bytes(manager)
+            builder.build::<K>().to_bytes(manager)
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
@@ -695,9 +731,11 @@ pub(in crate) fn tree_insert<'a>(
             // TODO: shouldn't need to drop this, but we can't allocate when there are pages in flight
             drop(page);
             if (table, key) <= (our_table, our_key.as_slice()) {
-                left_page = tree_insert(manager.get_page(left_page), table, key, value, manager);
+                left_page =
+                    tree_insert::<K>(manager.get_page(left_page), table, key, value, manager);
             } else {
-                right_page = tree_insert(manager.get_page(right_page), table, key, value, manager);
+                right_page =
+                    tree_insert::<K>(manager.get_page(right_page), table, key, value, manager);
             }
 
             let mut page = manager.allocate();
@@ -713,7 +751,7 @@ pub(in crate) fn tree_insert<'a>(
 }
 
 // Returns the (offset, len) of the value for the queried key, if present
-pub(in crate) fn lookup_in_raw<'a>(
+pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
     page: Page<'a>,
     table: u64,
     query: &[u8],
@@ -723,7 +761,12 @@ pub(in crate) fn lookup_in_raw<'a>(
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
-            match (table, query).cmp(&accessor.lesser().table_and_key()) {
+            match cmp_keys::<K>(
+                table,
+                query,
+                accessor.lesser().table_id(),
+                accessor.lesser().key(),
+            ) {
                 Ordering::Less => None,
                 Ordering::Equal => {
                     let offset = accessor.offset_of_lesser() + accessor.lesser().value_offset();
@@ -732,7 +775,7 @@ pub(in crate) fn lookup_in_raw<'a>(
                 }
                 Ordering::Greater => {
                     if let Some(entry) = accessor.greater() {
-                        if (table, query) == entry.table_and_key() {
+                        if entry.compare::<K>(table, query).is_eq() {
                             let offset = accessor.offset_of_greater() + entry.value_offset();
                             let value_len = entry.value().len();
                             Some((page, offset, value_len))
@@ -749,10 +792,10 @@ pub(in crate) fn lookup_in_raw<'a>(
             let accessor = InternalAccessor::new(&page);
             let left_page = accessor.lte_page();
             let right_page = accessor.gt_page();
-            if (table, query) <= accessor.table_and_key() {
-                lookup_in_raw(manager.get_page(left_page), table, query, manager)
+            if cmp_keys::<K>(table, query, accessor.table_id(), accessor.key()).is_le() {
+                lookup_in_raw::<K>(manager.get_page(left_page), table, query, manager)
             } else {
-                lookup_in_raw(manager.get_page(right_page), table, query, manager)
+                lookup_in_raw::<K>(manager.get_page(right_page), table, query, manager)
             }
         }
         _ => unreachable!(),
@@ -822,9 +865,11 @@ impl BtreeBuilder {
         self.pairs.push((table, key.to_vec(), value.to_vec()));
     }
 
-    pub(in crate) fn build(mut self) -> Node {
+    pub(in crate) fn build<K: RedbKey + ?Sized>(mut self) -> Node {
         assert!(!self.pairs.is_empty());
-        self.pairs.sort();
+        self.pairs.sort_by(|(table1, key1, _), (table2, key2, _)| {
+            cmp_keys::<K>(*table1, key1, *table2, key2)
+        });
         let mut leaves = vec![];
         for group in self.pairs.chunks(2) {
             let leaf = if group.len() == 1 {
@@ -888,6 +933,6 @@ mod test {
         builder.add(1, b"hello3", b"world3");
         builder.add(1, b"hello", b"world");
 
-        assert_eq!(expected, builder.build());
+        assert_eq!(expected, builder.build::<[u8]>());
     }
 }

@@ -7,6 +7,7 @@ mod python;
 mod storage;
 mod table;
 mod transactions;
+mod types;
 
 pub use db::Database;
 pub use error::Error;
