@@ -1,5 +1,5 @@
 build: pre
-	cargo build
+	cargo build --all-targets
 
 pre:
 	cargo deny check licenses
