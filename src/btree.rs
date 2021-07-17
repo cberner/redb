@@ -711,8 +711,29 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
-            // TODO: this is suboptimal, because it may rebuild the leaf page even if it's not necessary:
-            // e.g. when we insert a second leaf adjacent without modifying this one
+            if let Some(entry) = accessor.greater() {
+                if entry.compare::<K>(table, key).is_lt() {
+                    // New entry goes in a new page to the right, so leave this page untouched
+                    let left_page = page.get_page_number();
+                    let index_table = entry.table_id();
+                    let index_key = entry.key().to_vec();
+                    drop(page);
+
+                    let mut page = manager.allocate();
+                    let mut builder = LeafBuilder::new(&mut page);
+                    builder.write_lesser(table, key, value);
+                    builder.write_greater(None);
+                    let right_page = page.get_page_number();
+
+                    let mut page = manager.allocate();
+                    let mut builder = InternalBuilder::new(&mut page);
+                    builder.write_table_and_key(index_table, &index_key);
+                    builder.write_lte_page(left_page);
+                    builder.write_gt_page(right_page);
+                    return page.get_page_number();
+                }
+            }
+
             let mut builder = BtreeBuilder::new();
             builder.add(table, key, value);
             if accessor.lesser().compare::<K>(table, key).is_ne() {
