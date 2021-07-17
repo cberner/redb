@@ -1,6 +1,6 @@
 use crate::Error;
 use memmap2::MmapMut;
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::convert::TryInto;
 
 pub(in crate) const DB_METADATA_PAGE: u64 = 0;
@@ -23,6 +23,7 @@ impl<'a> Page<'a> {
 pub(in crate) struct PageMut<'a> {
     mem: RefMut<'a, [u8]>,
     page_number: u64,
+    ref_counter: &'a Cell<u64>,
 }
 
 impl<'a> PageMut<'a> {
@@ -39,9 +40,18 @@ impl<'a> PageMut<'a> {
     }
 }
 
+impl<'a> Drop for PageMut<'a> {
+    fn drop(&mut self) {
+        let x = self.ref_counter.get() - 1;
+        self.ref_counter.set(x);
+    }
+}
+
 pub(in crate) struct PageManager {
     next_free_page: RefCell<u64>,
     mmap: RefCell<MmapMut>,
+    // The number of PageMut which are outstanding
+    open_dirty_pages: Cell<u64>,
 }
 
 impl PageManager {
@@ -62,10 +72,14 @@ impl PageManager {
         PageManager {
             next_free_page: RefCell::new(next_free_page),
             mmap: RefCell::new(mmap),
+            open_dirty_pages: Cell::new(0),
         }
     }
 
     pub(in crate) fn fsync(&self) -> Result<(), Error> {
+        // All mutable pages must be dropped, this ensures that when a transaction completes and
+        // calls fsync() no more writes can happen to the pages it allocated
+        assert_eq!(self.open_dirty_pages.get(), 0);
         self.mmap.borrow().flush()?;
 
         Ok(())
@@ -91,9 +105,13 @@ impl PageManager {
         let start = page_number as usize * page_size::get();
         let end = start + page_size::get();
 
+        let x = self.open_dirty_pages.get() + 1;
+        self.open_dirty_pages.set(x);
+
         PageMut {
             mem: RefMut::map(self.mmap.borrow_mut(), |m| &mut m[start..end]),
             page_number,
+            ref_counter: &self.open_dirty_pages,
         }
     }
 
