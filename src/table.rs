@@ -231,11 +231,9 @@ mod test {
         }
         write_txn.commit().unwrap();
         let read_txn = table.read_transaction().unwrap();
-        let start = vec![7u8]; // ReverseKey is used, so 7 < 3
-        let end = vec![3u8];
-        let mut iter = read_txn
-            .get_range(start.as_slice()..=end.as_slice())
-            .unwrap();
+        let start = ReverseKey(vec![7u8]); // ReverseKey is used, so 7 < 3
+        let end = ReverseKey(vec![3u8]);
+        let mut iter = read_txn.get_range(&start..=&end).unwrap();
         for i in (3..=7u8).rev() {
             let entry = iter.next().unwrap();
             dbg!(entry.table_id(), entry.key());

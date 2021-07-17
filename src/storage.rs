@@ -197,7 +197,7 @@ impl Storage {
         Ok(None)
     }
 
-    pub(in crate) fn get_range<'a, T: RangeBounds<&'a [u8]>, K: RedbKey + ?Sized>(
+    pub(in crate) fn get_range<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a>(
         &'a self,
         table_id: u64,
         range: T,
@@ -211,7 +211,7 @@ impl Storage {
         ))
     }
 
-    pub(in crate) fn get_range_reversed<'a, T: RangeBounds<&'a [u8]>, K: RedbKey + ?Sized>(
+    pub(in crate) fn get_range_reversed<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a>(
         &'a self,
         table_id: u64,
         range: T,

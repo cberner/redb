@@ -219,8 +219,7 @@ impl<'a> RangeIterState<'a> {
     }
 }
 
-// TODO: T should be a RangeBound<&'a K>
-pub struct BtreeRangeIter<'a, T: RangeBounds<&'a [u8]>, K: RedbKey + ?Sized> {
+pub struct BtreeRangeIter<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a> {
     last: Option<RangeIterState<'a>>,
     table_id: u64,
     query_range: T,
@@ -229,7 +228,7 @@ pub struct BtreeRangeIter<'a, T: RangeBounds<&'a [u8]>, K: RedbKey + ?Sized> {
     _key_type: PhantomData<K>,
 }
 
-impl<'a, T: RangeBounds<&'a [u8]>, K: RedbKey + ?Sized> BtreeRangeIter<'a, T, K> {
+impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a> BtreeRangeIter<'a, T, K> {
     pub(in crate) fn new(
         root_page: Option<Page<'a>>,
         table_id: u64,
@@ -278,26 +277,26 @@ impl<'a, T: RangeBounds<&'a [u8]>, K: RedbKey + ?Sized> BtreeRangeIter<'a, T, K>
                             #[allow(clippy::collapsible_else_if)]
                             if self.reversed {
                                 if let Bound::Included(start) = self.query_range.start_bound() {
-                                    if entry.compare::<K>(self.table_id, *start).is_lt() {
+                                    if entry.compare::<K>(self.table_id, start.as_bytes()).is_lt() {
                                         self.last = None;
                                         return None;
                                     }
                                 } else if let Bound::Excluded(start) =
                                     self.query_range.start_bound()
                                 {
-                                    if entry.compare::<K>(self.table_id, *start).is_le() {
+                                    if entry.compare::<K>(self.table_id, start.as_bytes()).is_le() {
                                         self.last = None;
                                         return None;
                                     }
                                 }
                             } else {
                                 if let Bound::Included(end) = self.query_range.end_bound() {
-                                    if entry.compare::<K>(self.table_id, *end).is_gt() {
+                                    if entry.compare::<K>(self.table_id, end.as_bytes()).is_gt() {
                                         self.last = None;
                                         return None;
                                     }
                                 } else if let Bound::Excluded(end) = self.query_range.end_bound() {
-                                    if entry.compare::<K>(self.table_id, *end).is_ge() {
+                                    if entry.compare::<K>(self.table_id, end.as_bytes()).is_ge() {
                                         self.last = None;
                                         return None;
                                     }
@@ -332,25 +331,25 @@ fn cmp_keys<K: RedbKey + ?Sized>(table1: u64, key1: &[u8], table2: u64, key2: &[
     }
 }
 
-fn bound_contains_key<'a, T: RangeBounds<&'a [u8]>, K: RedbKey + ?Sized>(
+fn bound_contains_key<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a>(
     range: &T,
     key: &[u8],
 ) -> bool {
     if let Bound::Included(start) = range.start_bound() {
-        if K::compare(key, *start).is_lt() {
+        if K::compare(key, start.as_bytes()).is_lt() {
             return false;
         }
     } else if let Bound::Excluded(start) = range.start_bound() {
-        if K::compare(key, *start).is_le() {
+        if K::compare(key, start.as_bytes()).is_le() {
             return false;
         }
     }
     if let Bound::Included(end) = range.end_bound() {
-        if K::compare(key, *end).is_gt() {
+        if K::compare(key, end.as_bytes()).is_gt() {
             return false;
         }
     } else if let Bound::Excluded(end) = range.end_bound() {
-        if K::compare(key, *end).is_ge() {
+        if K::compare(key, end.as_bytes()).is_ge() {
             return false;
         }
     }
