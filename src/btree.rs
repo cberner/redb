@@ -478,6 +478,14 @@ impl<'a: 'b, 'b> LeafAccessor<'a, 'b> {
             Some(entry)
         }
     }
+
+    fn max_key(&self) -> (u64, &'b [u8]) {
+        if let Some(greater) = self.greater() {
+            (greater.table_id(), greater.key())
+        } else {
+            (self.lesser().table_id(), self.lesser().key())
+        }
+    }
 }
 
 // Note the caller is responsible for ensuring that the buffer is large enough
@@ -646,9 +654,8 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
             let original_page_number = page.get_page_number();
             let mut left_page = accessor.lte_page();
             let mut right_page = accessor.gt_page();
-            // TODO: we should recompute our key, since it may now be smaller (if the largest key in the left tree was deleted)
-            let our_table = accessor.table_id();
-            let our_key = accessor.key().to_vec();
+            let mut our_table = accessor.table_id();
+            let mut our_key = accessor.key().to_vec();
             // TODO: shouldn't need to drop this, but we can't allocate when there are pages in flight
             drop(page);
             #[allow(clippy::collapsible_else_if)]
@@ -657,6 +664,10 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
                     tree_delete::<K>(manager.get_page(left_page), table, key, manager)
                 {
                     left_page = page_number;
+                    let left = manager.get_page(page_number);
+                    let new_key = LeafAccessor::new(&left).max_key();
+                    our_table = new_key.0;
+                    our_key = new_key.1.to_vec();
                 } else {
                     // The entire left sub-tree was deleted, replace ourself with the right tree
                     return Some(right_page);
