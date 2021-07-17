@@ -761,7 +761,7 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
             let our_key = accessor.key().to_vec();
             // TODO: shouldn't need to drop this, but we can't allocate when there are pages in flight
             drop(page);
-            if (table, key) <= (our_table, our_key.as_slice()) {
+            if cmp_keys::<K>(table, key, our_table, our_key.as_slice()).is_le() {
                 left_page =
                     tree_insert::<K>(manager.get_page(left_page), table, key, value, manager);
             } else {
