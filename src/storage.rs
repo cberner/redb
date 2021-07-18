@@ -2,7 +2,7 @@ use crate::btree::{
     lookup_in_raw, make_single_leaf, tree_delete, tree_insert, BtreeEntry, BtreeRangeIter,
 };
 use crate::page_manager::{Page, PageNumber, TransactionalMemory};
-use crate::types::RedbKey;
+use crate::types::{RedbKey, RedbValue};
 use crate::Error;
 use memmap2::MmapMut;
 use std::convert::TryInto;
@@ -32,7 +32,8 @@ impl Storage {
             let table_id = u64::from_be_bytes(found.as_ref().try_into().unwrap());
             return Ok((table_id, root_page.unwrap()));
         }
-        let mut iter = self.get_range_reversed::<RangeFull, [u8]>(TABLE_TABLE_ID, .., root_page)?;
+        let mut iter =
+            self.get_range_reversed::<RangeFull, [u8], [u8]>(TABLE_TABLE_ID, .., root_page)?;
         let largest_id = iter
             .next()
             .map(|x| u64::from_be_bytes(x.value().try_into().unwrap()))
@@ -61,7 +62,7 @@ impl Storage {
     }
 
     pub(in crate) fn len(&self, table: u64, root_page: Option<PageNumber>) -> Result<usize, Error> {
-        let mut iter = BtreeRangeIter::<RangeFull, [u8]>::new(
+        let mut iter = BtreeRangeIter::<RangeFull, [u8], [u8]>::new(
             root_page.map(|p| self.mem.get_page(p)),
             table,
             ..,
@@ -101,12 +102,17 @@ impl Storage {
         Ok(None)
     }
 
-    pub(in crate) fn get_range<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a>(
+    pub(in crate) fn get_range<
+        'a,
+        T: RangeBounds<&'a K>,
+        K: RedbKey + ?Sized + 'a,
+        V: RedbValue + ?Sized + 'a,
+    >(
         &'a self,
         table_id: u64,
         range: T,
         root_page: Option<PageNumber>,
-    ) -> Result<BtreeRangeIter<T, K>, Error> {
+    ) -> Result<BtreeRangeIter<T, K, V>, Error> {
         Ok(BtreeRangeIter::new(
             root_page.map(|p| self.mem.get_page(p)),
             table_id,
@@ -115,12 +121,17 @@ impl Storage {
         ))
     }
 
-    pub(in crate) fn get_range_reversed<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a>(
+    pub(in crate) fn get_range_reversed<
+        'a,
+        T: RangeBounds<&'a K>,
+        K: RedbKey + ?Sized + 'a,
+        V: RedbValue + ?Sized + 'a,
+    >(
         &'a self,
         table_id: u64,
         range: T,
         root_page: Option<PageNumber>,
-    ) -> Result<BtreeRangeIter<T, K>, Error> {
+    ) -> Result<BtreeRangeIter<T, K, V>, Error> {
         Ok(BtreeRangeIter::new_reversed(
             root_page.map(|p| self.mem.get_page(p)),
             table_id,

@@ -2,33 +2,36 @@ use crate::btree::BtreeRangeIter;
 use crate::error::Error;
 use crate::page_manager::PageNumber;
 use crate::storage::{AccessGuard, Storage};
-use crate::types::RedbKey;
+use crate::types::{RedbKey, RedbValue};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 
-pub struct WriteTransaction<'mmap, K: RedbKey + ?Sized> {
+pub struct WriteTransaction<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     storage: &'mmap Storage,
     table_id: u64,
     root_page: Option<PageNumber>,
     _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
 }
 
-impl<'mmap, K: RedbKey + ?Sized> WriteTransaction<'mmap, K> {
-    pub(in crate) fn new(table_id: u64, storage: &'mmap Storage) -> WriteTransaction<'mmap, K> {
+impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> WriteTransaction<'mmap, K, V> {
+    pub(in crate) fn new(table_id: u64, storage: &'mmap Storage) -> WriteTransaction<'mmap, K, V> {
         WriteTransaction {
             storage,
             table_id,
             root_page: storage.get_root_page_number(),
             _key_type: Default::default(),
+            _value_type: Default::default(),
         }
     }
 
-    pub fn insert(&mut self, key: &K, value: &[u8]) -> Result<(), Error> {
-        self.root_page =
-            Some(
-                self.storage
-                    .insert::<K>(self.table_id, key.as_bytes(), value, self.root_page)?,
-            );
+    pub fn insert(&mut self, key: &K, value: &V) -> Result<(), Error> {
+        self.root_page = Some(self.storage.insert::<K>(
+            self.table_id,
+            key.as_bytes(),
+            value.as_bytes(),
+            self.root_page,
+        )?);
         Ok(())
     }
 
@@ -61,21 +64,26 @@ impl<'mmap, K: RedbKey + ?Sized> WriteTransaction<'mmap, K> {
     }
 }
 
-pub struct ReadOnlyTransaction<'mmap, K: RedbKey + ?Sized> {
+pub struct ReadOnlyTransaction<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     storage: &'mmap Storage,
     root_page: Option<PageNumber>,
     table_id: u64,
     _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
 }
 
-impl<'mmap, K: RedbKey + ?Sized> ReadOnlyTransaction<'mmap, K> {
-    pub(in crate) fn new(table_id: u64, storage: &'mmap Storage) -> ReadOnlyTransaction<'mmap, K> {
+impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTransaction<'mmap, K, V> {
+    pub(in crate) fn new(
+        table_id: u64,
+        storage: &'mmap Storage,
+    ) -> ReadOnlyTransaction<'mmap, K, V> {
         let root_page = storage.get_root_page_number();
         ReadOnlyTransaction {
             storage,
             root_page,
             table_id,
             _key_type: Default::default(),
+            _value_type: Default::default(),
         }
     }
 
@@ -87,14 +95,14 @@ impl<'mmap, K: RedbKey + ?Sized> ReadOnlyTransaction<'mmap, K> {
     pub fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<BtreeRangeIter<T, K>, Error> {
+    ) -> Result<BtreeRangeIter<T, K, V>, Error> {
         self.storage.get_range(self.table_id, range, self.root_page)
     }
 
     pub fn get_range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<BtreeRangeIter<T, K>, Error> {
+    ) -> Result<BtreeRangeIter<T, K, V>, Error> {
         self.storage
             .get_range_reversed(self.table_id, range, self.root_page)
     }
