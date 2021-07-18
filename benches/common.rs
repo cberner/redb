@@ -59,9 +59,9 @@ pub struct RedbBenchReadTransaction<'a> {
 }
 
 impl<'a, 'b> BenchReadTransaction<'b> for RedbBenchReadTransaction<'a> {
-    type Output = redb::AccessGuard<'b>;
+    type Output = redb::AccessGuard<'b, [u8]>;
 
-    fn get(&'b self, key: &[u8]) -> Option<redb::AccessGuard<'b>> {
+    fn get(&'b self, key: &[u8]) -> Option<redb::AccessGuard<'b, [u8]>> {
         self.txn.get(key).unwrap()
     }
 }

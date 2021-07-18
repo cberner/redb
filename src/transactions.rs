@@ -28,8 +28,8 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> WriteTransaction<'mmap, 
     pub fn insert(&mut self, key: &K, value: &V) -> Result<(), Error> {
         self.root_page = Some(self.storage.insert::<K>(
             self.table_id,
-            key.as_bytes(),
-            value.as_bytes(),
+            key.as_bytes().as_ref(),
+            value.as_bytes().as_ref(),
             self.root_page,
         )?);
         Ok(())
@@ -41,15 +41,15 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> WriteTransaction<'mmap, 
         todo!()
     }
 
-    pub fn get(&self, key: &K) -> Result<Option<AccessGuard>, Error> {
+    pub fn get(&self, key: &K) -> Result<Option<AccessGuard<V>>, Error> {
         self.storage
-            .get::<K>(self.table_id, key.as_bytes(), self.root_page)
+            .get::<K, V>(self.table_id, key.as_bytes().as_ref(), self.root_page)
     }
 
     pub fn remove(&mut self, key: &K) -> Result<(), Error> {
-        self.root_page = self
-            .storage
-            .remove::<K>(self.table_id, key.as_bytes(), self.root_page)?;
+        self.root_page =
+            self.storage
+                .remove::<K>(self.table_id, key.as_bytes().as_ref(), self.root_page)?;
         Ok(())
     }
 
@@ -87,9 +87,9 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTransaction<'mma
         }
     }
 
-    pub fn get(&self, key: &K) -> Result<Option<AccessGuard<'mmap>>, Error> {
+    pub fn get(&self, key: &K) -> Result<Option<AccessGuard<'mmap, V>>, Error> {
         self.storage
-            .get::<K>(self.table_id, key.as_bytes(), self.root_page)
+            .get::<K, V>(self.table_id, key.as_bytes().as_ref(), self.root_page)
     }
 
     pub fn get_range<'a, T: RangeBounds<&'a K> + 'a>(

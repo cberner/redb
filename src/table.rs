@@ -37,7 +37,9 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'mmap, K, V> {
 #[cfg(test)]
 mod test {
     use crate::btree::BtreeEntry;
-    use crate::types::{RedbKey, RedbValue, RefLifetime, WithLifetime};
+    use crate::types::{
+        AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
+    };
     use crate::{Database, Table};
     use std::cmp::Ordering;
     use tempfile::NamedTempFile;
@@ -141,6 +143,18 @@ mod test {
     }
 
     #[test]
+    fn u64_type() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let mut table: Table<u64, u64> = db.open_table(b"x").unwrap();
+        let mut write_txn = table.begin_write().unwrap();
+        write_txn.insert(&0, &1).unwrap();
+        write_txn.commit().unwrap();
+        let read_txn = table.read_transaction().unwrap();
+        assert_eq!(1, read_txn.get(&0).unwrap().unwrap().to_value());
+    }
+
+    #[test]
     // TODO: fix this test
     #[ignore]
     fn insert_reserve() {
@@ -214,12 +228,13 @@ mod test {
 
         impl RedbValue for ReverseKey {
             type View = RefLifetime<[u8]>;
+            type ToBytes = RefAsBytesLifetime<[u8]>;
 
             fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
                 data
             }
 
-            fn as_bytes(&self) -> &[u8] {
+            fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
                 &self.0
             }
         }

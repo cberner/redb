@@ -2,10 +2,11 @@ use crate::btree::{
     lookup_in_raw, make_single_leaf, tree_delete, tree_insert, BtreeEntry, BtreeRangeIter,
 };
 use crate::page_manager::{Page, PageNumber, TransactionalMemory};
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use memmap2::MmapMut;
 use std::convert::TryInto;
+use std::marker::PhantomData;
 use std::ops::{RangeBounds, RangeFull};
 
 // The table of name -> table_id mappings
@@ -28,7 +29,7 @@ impl Storage {
         name: &[u8],
         root_page: Option<PageNumber>,
     ) -> Result<(u64, PageNumber), Error> {
-        if let Some(found) = self.get::<[u8]>(TABLE_TABLE_ID, name, root_page)? {
+        if let Some(found) = self.get::<[u8], [u8]>(TABLE_TABLE_ID, name, root_page)? {
             let table_id = u64::from_be_bytes(found.as_ref().try_into().unwrap());
             return Ok((table_id, root_page.unwrap()));
         }
@@ -86,12 +87,12 @@ impl Storage {
         Ok(())
     }
 
-    pub(in crate) fn get<K: RedbKey + ?Sized>(
+    pub(in crate) fn get<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         table_id: u64,
         key: &[u8],
         root_page_number: Option<PageNumber>,
-    ) -> Result<Option<AccessGuard>, Error> {
+    ) -> Result<Option<AccessGuard<V>>, Error> {
         if let Some(root_page) = root_page_number.map(|p| self.mem.get_page(p)) {
             if let Some((page, offset, len)) =
                 lookup_in_raw::<K>(root_page, table_id, key, &self.mem)
@@ -155,19 +156,29 @@ impl Storage {
     }
 }
 
-pub struct AccessGuard<'a> {
+pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
     page: Page<'a>,
     offset: usize,
     len: usize,
+    _value_type: PhantomData<V>,
 }
 
-impl<'a> AccessGuard<'a> {
+impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
     fn new(page: Page<'a>, offset: usize, len: usize) -> Self {
-        Self { page, offset, len }
+        Self {
+            page,
+            offset,
+            len,
+            _value_type: Default::default(),
+        }
+    }
+
+    pub fn to_value(&self) -> <<V as RedbValue>::View as WithLifetime>::Out {
+        V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
     }
 }
 
-impl<'a> AsRef<[u8]> for AccessGuard<'a> {
+impl<'a> AsRef<[u8]> for AccessGuard<'a, [u8]> {
     fn as_ref(&self) -> &[u8] {
         &self.page.memory()[self.offset..(self.offset + self.len)]
     }

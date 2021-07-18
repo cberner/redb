@@ -285,26 +285,38 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized 
                             #[allow(clippy::collapsible_else_if)]
                             if self.reversed {
                                 if let Bound::Included(start) = self.query_range.start_bound() {
-                                    if entry.compare::<K>(self.table_id, start.as_bytes()).is_lt() {
+                                    if entry
+                                        .compare::<K>(self.table_id, start.as_bytes().as_ref())
+                                        .is_lt()
+                                    {
                                         self.last = None;
                                         return None;
                                     }
                                 } else if let Bound::Excluded(start) =
                                     self.query_range.start_bound()
                                 {
-                                    if entry.compare::<K>(self.table_id, start.as_bytes()).is_le() {
+                                    if entry
+                                        .compare::<K>(self.table_id, start.as_bytes().as_ref())
+                                        .is_le()
+                                    {
                                         self.last = None;
                                         return None;
                                     }
                                 }
                             } else {
                                 if let Bound::Included(end) = self.query_range.end_bound() {
-                                    if entry.compare::<K>(self.table_id, end.as_bytes()).is_gt() {
+                                    if entry
+                                        .compare::<K>(self.table_id, end.as_bytes().as_ref())
+                                        .is_gt()
+                                    {
                                         self.last = None;
                                         return None;
                                     }
                                 } else if let Bound::Excluded(end) = self.query_range.end_bound() {
-                                    if entry.compare::<K>(self.table_id, end.as_bytes()).is_ge() {
+                                    if entry
+                                        .compare::<K>(self.table_id, end.as_bytes().as_ref())
+                                        .is_ge()
+                                    {
                                         self.last = None;
                                         return None;
                                     }
@@ -344,20 +356,20 @@ fn bound_contains_key<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a>(
     key: &[u8],
 ) -> bool {
     if let Bound::Included(start) = range.start_bound() {
-        if K::compare(key, start.as_bytes()).is_lt() {
+        if K::compare(key, start.as_bytes().as_ref()).is_lt() {
             return false;
         }
     } else if let Bound::Excluded(start) = range.start_bound() {
-        if K::compare(key, start.as_bytes()).is_le() {
+        if K::compare(key, start.as_bytes().as_ref()).is_le() {
             return false;
         }
     }
     if let Bound::Included(end) = range.end_bound() {
-        if K::compare(key, end.as_bytes()).is_gt() {
+        if K::compare(key, end.as_bytes().as_ref()).is_gt() {
             return false;
         }
     } else if let Bound::Excluded(end) = range.end_bound() {
-        if K::compare(key, end.as_bytes()).is_ge() {
+        if K::compare(key, end.as_bytes().as_ref()).is_ge() {
             return false;
         }
     }
