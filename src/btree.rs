@@ -2,7 +2,7 @@ use crate::btree::Node::{Internal, Leaf};
 use crate::btree::RangeIterState::{
     InitialState, InternalLeft, InternalRight, LeafLeft, LeafRight,
 };
-use crate::page_manager::{Page, PageManager, PageMut};
+use crate::page_manager::{Page, PageMut, PageNumber, TransactionalMemory};
 use crate::types::RedbKey;
 use std::cell::Cell;
 use std::cmp::Ordering;
@@ -38,7 +38,7 @@ enum RangeIterState<'a> {
 }
 
 impl<'a> RangeIterState<'a> {
-    fn forward_next(self, manager: &'a PageManager) -> Option<RangeIterState> {
+    fn forward_next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match self {
             RangeIterState::InitialState(root_page, ..) => match root_page.memory()[0] {
                 LEAF => Some(LeafLeft {
@@ -104,7 +104,7 @@ impl<'a> RangeIterState<'a> {
         }
     }
 
-    fn backward_next(self, manager: &'a PageManager) -> Option<RangeIterState> {
+    fn backward_next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match self {
             RangeIterState::InitialState(root_page, ..) => match root_page.memory()[0] {
                 LEAF => Some(LeafRight {
@@ -170,7 +170,7 @@ impl<'a> RangeIterState<'a> {
         }
     }
 
-    fn next(self, manager: &'a PageManager) -> Option<RangeIterState> {
+    fn next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match &self {
             InitialState(_, reversed) => {
                 if *reversed {
@@ -224,7 +224,7 @@ pub struct BtreeRangeIter<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a> {
     table_id: u64,
     query_range: T,
     reversed: bool,
-    manager: &'a PageManager,
+    manager: &'a TransactionalMemory,
     _key_type: PhantomData<K>,
 }
 
@@ -233,7 +233,7 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a> BtreeRangeIter<'a, T, 
         root_page: Option<Page<'a>>,
         table_id: u64,
         query_range: T,
-        manager: &'a PageManager,
+        manager: &'a TransactionalMemory,
     ) -> Self {
         Self {
             last: root_page.map(|p| InitialState(p, false)),
@@ -249,7 +249,7 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a> BtreeRangeIter<'a, T, 
         root_page: Option<Page<'a>>,
         table_id: u64,
         query_range: T,
-        manager: &'a PageManager,
+        manager: &'a TransactionalMemory,
     ) -> Self {
         Self {
             last: root_page.map(|p| InitialState(p, true)),
@@ -550,14 +550,18 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
         &self.page.memory()[17..(17 + self.key_len())]
     }
 
-    fn lte_page(&self) -> u64 {
+    fn lte_page(&self) -> PageNumber {
         let offset = 17 + self.key_len();
-        u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap())
+        PageNumber(u64::from_be_bytes(
+            self.page.memory()[offset..(offset + 8)].try_into().unwrap(),
+        ))
     }
 
-    fn gt_page(&self) -> u64 {
+    fn gt_page(&self) -> PageNumber {
         let offset = 17 + self.key_len() + 8;
-        u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap())
+        PageNumber(u64::from_be_bytes(
+            self.page.memory()[offset..(offset + 8)].try_into().unwrap(),
+        ))
     }
 }
 
@@ -583,12 +587,12 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
         self.page.memory_mut()[17..(17 + key.len())].copy_from_slice(key);
     }
 
-    fn write_lte_page(&mut self, page_number: u64) {
+    fn write_lte_page(&mut self, page_number: PageNumber) {
         let offset = 17 + self.key_len();
         self.page.memory_mut()[offset..(offset + 8)].copy_from_slice(&page_number.to_be_bytes());
     }
 
-    fn write_gt_page(&mut self, page_number: u64) {
+    fn write_gt_page(&mut self, page_number: PageNumber) {
         let offset = 17 + self.key_len() + 8;
         self.page.memory_mut()[offset..(offset + 8)].copy_from_slice(&page_number.to_be_bytes());
     }
@@ -600,8 +604,8 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
     page: Page<'a>,
     table: u64,
     key: &[u8],
-    manager: &'a PageManager,
-) -> Option<u64> {
+    manager: &'a TransactionalMemory,
+) -> Option<PageNumber> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -705,8 +709,8 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
     table: u64,
     key: &[u8],
     value: &[u8],
-    manager: &'a PageManager,
-) -> u64 {
+    manager: &'a TransactionalMemory,
+) -> PageNumber {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -724,6 +728,7 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
                     builder.write_lesser(table, key, value);
                     builder.write_greater(None);
                     let right_page = page.get_page_number();
+                    drop(page);
 
                     let mut page = manager.allocate();
                     let mut builder = InternalBuilder::new(&mut page);
@@ -786,7 +791,7 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
     page: Page<'a>,
     table: u64,
     query: &[u8],
-    manager: &'a PageManager,
+    manager: &'a TransactionalMemory,
 ) -> Option<(Page<'a>, usize, usize)> {
     let node_mem = page.memory();
     match node_mem[0] {
@@ -841,7 +846,7 @@ pub(in crate) enum Node {
 
 impl Node {
     // Returns the page number that the node was written to
-    pub(in crate) fn to_bytes(&self, page_manager: &PageManager) -> u64 {
+    pub(in crate) fn to_bytes(&self, page_manager: &TransactionalMemory) -> PageNumber {
         match self {
             Node::Leaf(left_val, right_val) => {
                 let mut page = page_manager.allocate();

@@ -1,16 +1,15 @@
 use crate::btree::BtreeRangeIter;
 use crate::error::Error;
+use crate::page_manager::PageNumber;
 use crate::storage::{AccessGuard, Storage};
 use crate::types::RedbKey;
-use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 
 pub struct WriteTransaction<'mmap, K: RedbKey + ?Sized> {
     storage: &'mmap Storage,
     table_id: u64,
-    added: HashMap<Vec<u8>, Vec<u8>>,
-    removed: HashSet<Vec<u8>>,
+    root_page: Option<PageNumber>,
     _key_type: PhantomData<K>,
 }
 
@@ -19,61 +18,52 @@ impl<'mmap, K: RedbKey + ?Sized> WriteTransaction<'mmap, K> {
         WriteTransaction {
             storage,
             table_id,
-            added: HashMap::new(),
-            removed: HashSet::new(),
+            root_page: storage.get_root_page_number(),
             _key_type: Default::default(),
         }
     }
 
     pub fn insert(&mut self, key: &K, value: &[u8]) -> Result<(), Error> {
-        self.removed.remove(key.as_bytes());
-        self.added.insert(key.as_bytes().to_vec(), value.to_vec());
+        self.root_page =
+            Some(
+                self.storage
+                    .insert::<K>(self.table_id, key.as_bytes(), value, self.root_page)?,
+            );
         Ok(())
     }
 
     /// Reserve space to insert a key-value pair
     /// The returned reference will have length equal to value_length
-    pub fn insert_reserve(&mut self, key: &K, value_length: usize) -> Result<&mut [u8], Error> {
-        self.removed.remove(key.as_bytes());
-        self.added
-            .insert(key.as_bytes().to_vec(), vec![0; value_length]);
-        Ok(self.added.get_mut(key.as_bytes()).unwrap())
+    pub fn insert_reserve(&mut self, _key: &K, _value_length: usize) -> Result<&mut [u8], Error> {
+        todo!()
     }
 
     pub fn get(&self, key: &K) -> Result<Option<AccessGuard>, Error> {
-        if let Some(value) = self.added.get(key.as_bytes()) {
-            return Ok(Some(AccessGuard::Local(value)));
-        }
-        self.storage.get::<K>(
-            self.table_id,
-            key.as_bytes(),
-            self.storage.get_root_page_number(),
-        )
+        self.storage
+            .get::<K>(self.table_id, key.as_bytes(), self.root_page)
     }
 
     pub fn remove(&mut self, key: &K) -> Result<(), Error> {
-        self.added.remove(key.as_bytes());
-        self.removed.insert(key.as_bytes().to_vec());
+        self.root_page = self
+            .storage
+            .remove::<K>(self.table_id, key.as_bytes(), self.root_page)?;
         Ok(())
     }
 
     pub fn commit(self) -> Result<(), Error> {
-        self.storage.bulk_insert::<K>(self.table_id, self.added)?;
-        for key in self.removed.iter() {
-            self.storage.remove::<K>(self.table_id, key)?;
-        }
-        self.storage.fsync()?;
+        self.storage.commit(self.root_page)?;
         Ok(())
     }
 
     pub fn abort(self) -> Result<(), Error> {
+        // TODO: reset the allocator state
         Ok(())
     }
 }
 
 pub struct ReadOnlyTransaction<'mmap, K: RedbKey + ?Sized> {
     storage: &'mmap Storage,
-    root_page: Option<u64>,
+    root_page: Option<PageNumber>,
     table_id: u64,
     _key_type: PhantomData<K>,
 }
