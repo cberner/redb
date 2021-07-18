@@ -1,10 +1,8 @@
-use crate::btree::Node::{Internal, Leaf};
 use crate::btree::RangeIterState::{
     InitialState, InternalLeft, InternalRight, LeafLeft, LeafRight,
 };
 use crate::page_manager::{Page, PageMut, PageNumber, TransactionalMemory};
 use crate::types::RedbKey;
-use std::cell::Cell;
 use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::marker::PhantomData;
@@ -619,28 +617,27 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
                     return Some(page.get_page_number());
                 }
                 let new_leaf = if accessor.lesser().compare::<K>(table, key).is_eq() {
-                    Leaf(
-                        (
-                            greater.table_id(),
-                            greater.key().to_vec(),
-                            greater.value().to_vec(),
-                        ),
-                        None,
+                    (
+                        greater.table_id(),
+                        greater.key().to_vec(),
+                        greater.value().to_vec(),
                     )
                 } else {
-                    Leaf(
-                        (
-                            accessor.lesser().table_id(),
-                            accessor.lesser().key().to_vec(),
-                            accessor.lesser().value().to_vec(),
-                        ),
-                        None,
+                    (
+                        accessor.lesser().table_id(),
+                        accessor.lesser().key().to_vec(),
+                        accessor.lesser().value().to_vec(),
                     )
                 };
 
                 // TODO: shouldn't need to drop this, but we can't allocate when there are pages in flight
                 drop(page);
-                Some(new_leaf.to_bytes(manager))
+                Some(make_single_leaf(
+                    new_leaf.0,
+                    &new_leaf.1,
+                    &new_leaf.2,
+                    manager,
+                ))
             } else {
                 if accessor.lesser().compare::<K>(table, key).is_eq() {
                     // Deleted the entire left
@@ -703,6 +700,51 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
     }
 }
 
+pub(in crate) fn make_single_leaf<'a>(
+    table: u64,
+    key: &[u8],
+    value: &[u8],
+    manager: &'a TransactionalMemory,
+) -> PageNumber {
+    let mut page = manager.allocate();
+    let mut builder = LeafBuilder::new(&mut page);
+    builder.write_lesser(table, key, value);
+    builder.write_greater(None);
+    page.get_page_number()
+}
+
+pub(in crate) fn make_double_leaf<'a, K: RedbKey + ?Sized>(
+    table1: u64,
+    key1: &[u8],
+    value1: &[u8],
+    table2: u64,
+    key2: &[u8],
+    value2: &[u8],
+    manager: &'a TransactionalMemory,
+) -> PageNumber {
+    debug_assert!(cmp_keys::<K>(table1, key1, table2, key2).is_lt());
+    let mut page = manager.allocate();
+    let mut builder = LeafBuilder::new(&mut page);
+    builder.write_lesser(table1, key1, value1);
+    builder.write_greater(Some((table2, key2, value2)));
+    page.get_page_number()
+}
+
+pub(in crate) fn make_index(
+    table: u64,
+    key: &[u8],
+    lte_page: PageNumber,
+    gt_page: PageNumber,
+    manager: &TransactionalMemory,
+) -> PageNumber {
+    let mut page = manager.allocate();
+    let mut builder = InternalBuilder::new(&mut page);
+    builder.write_table_and_key(table, &key);
+    builder.write_lte_page(lte_page);
+    builder.write_gt_page(gt_page);
+    page.get_page_number()
+}
+
 // Returns the page number of the sub-tree into which the key was inserted
 pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
     page: Page<'a>,
@@ -716,47 +758,122 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
         LEAF => {
             let accessor = LeafAccessor::new(&page);
             if let Some(entry) = accessor.greater() {
-                if entry.compare::<K>(table, key).is_lt() {
-                    // New entry goes in a new page to the right, so leave this page untouched
-                    let left_page = page.get_page_number();
-                    let index_table = entry.table_id();
-                    let index_key = entry.key().to_vec();
-                    drop(page);
+                match entry.compare::<K>(table, key) {
+                    Ordering::Less => {
+                        // New entry goes in a new page to the right, so leave this page untouched
+                        let left_page = page.get_page_number();
+                        let index_table = entry.table_id();
+                        let index_key = entry.key().to_vec();
+                        drop(page);
 
-                    let mut page = manager.allocate();
-                    let mut builder = LeafBuilder::new(&mut page);
-                    builder.write_lesser(table, key, value);
-                    builder.write_greater(None);
-                    let right_page = page.get_page_number();
-                    drop(page);
+                        let right_page = make_single_leaf(table, key, value, manager);
+                        make_index(index_table, &index_key, left_page, right_page, manager)
+                    }
+                    Ordering::Equal => {
+                        let existing_table = accessor.lesser().table_id();
+                        let existing_key = accessor.lesser().key().to_vec();
+                        let existing_value = accessor.lesser().value().to_vec();
+                        drop(page);
+                        make_double_leaf::<K>(
+                            existing_table,
+                            &existing_key,
+                            &existing_value,
+                            table,
+                            key,
+                            value,
+                            manager,
+                        )
+                    }
+                    Ordering::Greater => {
+                        let right_table = entry.table_id();
+                        let right_key = entry.key().to_vec();
+                        let right_value = entry.value().to_vec();
 
-                    let mut page = manager.allocate();
-                    let mut builder = InternalBuilder::new(&mut page);
-                    builder.write_table_and_key(index_table, &index_key);
-                    builder.write_lte_page(left_page);
-                    builder.write_gt_page(right_page);
-                    return page.get_page_number();
+                        let left_table = accessor.lesser().table_id();
+                        let left_key = accessor.lesser().key().to_vec();
+                        let left_value = accessor.lesser().value().to_vec();
+
+                        match accessor.lesser().compare::<K>(table, key) {
+                            Ordering::Less => {
+                                drop(page);
+                                let left = make_double_leaf::<K>(
+                                    left_table,
+                                    &left_key,
+                                    &left_value,
+                                    table,
+                                    key,
+                                    value,
+                                    manager,
+                                );
+                                let right = make_single_leaf(
+                                    right_table,
+                                    &right_key,
+                                    &right_value,
+                                    manager,
+                                );
+                                make_index(table, key, left, right, manager)
+                            }
+                            Ordering::Equal => {
+                                drop(page);
+                                make_double_leaf::<K>(
+                                    table,
+                                    key,
+                                    value,
+                                    right_table,
+                                    &right_key,
+                                    &right_value,
+                                    manager,
+                                )
+                            }
+                            Ordering::Greater => {
+                                drop(page);
+                                let left = make_double_leaf::<K>(
+                                    table,
+                                    key,
+                                    value,
+                                    left_table,
+                                    &left_key,
+                                    &left_value,
+                                    manager,
+                                );
+                                let right = make_single_leaf(
+                                    right_table,
+                                    &right_key,
+                                    &right_value,
+                                    manager,
+                                );
+                                make_index(left_table, &left_key, left, right, manager)
+                            }
+                        }
+                    }
+                }
+            } else {
+                let existing_table = accessor.lesser().table_id();
+                let existing_key = accessor.lesser().key().to_vec();
+                let existing_value = accessor.lesser().value().to_vec();
+                drop(page);
+                match cmp_keys::<K>(existing_table, &existing_key, table, key) {
+                    Ordering::Less => make_double_leaf::<K>(
+                        existing_table,
+                        &existing_key,
+                        &existing_value,
+                        table,
+                        key,
+                        value,
+                        manager,
+                    ),
+                    Ordering::Equal => make_single_leaf(table, key, value, manager),
+                    Ordering::Greater => make_double_leaf::<K>(
+                        table,
+                        key,
+                        value,
+                        existing_table,
+                        &existing_key,
+                        &existing_value,
+                        manager,
+                    ),
                 }
             }
-
-            let mut builder = BtreeBuilder::new();
-            builder.add(table, key, value);
-            if accessor.lesser().compare::<K>(table, key).is_ne() {
-                builder.add(
-                    accessor.lesser().table_id(),
-                    accessor.lesser().key(),
-                    accessor.lesser().value(),
-                );
-            }
-            if let Some(entry) = accessor.greater() {
-                if entry.compare::<K>(table, key).is_ne() {
-                    builder.add(entry.table_id(), entry.key(), entry.value());
-                }
-            }
-
-            // TODO: shouldn't need to drop this, but we can't allocate when there are pages in flight
-            drop(page);
-            builder.build::<K>().to_bytes(manager)
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
@@ -835,140 +952,5 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
             }
         }
         _ => unreachable!(),
-    }
-}
-
-#[derive(Eq, PartialEq, Debug)]
-pub(in crate) enum Node {
-    Leaf((u64, Vec<u8>, Vec<u8>), Option<(u64, Vec<u8>, Vec<u8>)>),
-    Internal(Box<Node>, u64, Vec<u8>, Box<Node>),
-}
-
-impl Node {
-    // Returns the page number that the node was written to
-    pub(in crate) fn to_bytes(&self, page_manager: &TransactionalMemory) -> PageNumber {
-        match self {
-            Node::Leaf(left_val, right_val) => {
-                let mut page = page_manager.allocate();
-                let mut builder = LeafBuilder::new(&mut page);
-                builder.write_lesser(left_val.0, &left_val.1, &left_val.2);
-                builder.write_greater(
-                    right_val
-                        .as_ref()
-                        .map(|(table, key, value)| (*table, key.as_slice(), value.as_slice())),
-                );
-
-                page.get_page_number()
-            }
-            Node::Internal(left, table, key, right) => {
-                let left_page = left.to_bytes(page_manager);
-                let right_page = right.to_bytes(page_manager);
-                let mut page = page_manager.allocate();
-                let mut builder = InternalBuilder::new(&mut page);
-                builder.write_table_and_key(*table, key);
-                builder.write_lte_page(left_page);
-                builder.write_gt_page(right_page);
-
-                page.get_page_number()
-            }
-        }
-    }
-
-    fn get_max_key(&self) -> (u64, Vec<u8>) {
-        match self {
-            Node::Leaf((left_table, left_key, _), right_val) => {
-                if let Some((right_table, right_key, _)) = right_val {
-                    (*right_table, right_key.to_vec())
-                } else {
-                    (*left_table, left_key.to_vec())
-                }
-            }
-            Node::Internal(_left, _table, _key, right) => right.get_max_key(),
-        }
-    }
-}
-
-pub(in crate) struct BtreeBuilder {
-    pairs: Vec<(u64, Vec<u8>, Vec<u8>)>,
-}
-
-impl BtreeBuilder {
-    pub(in crate) fn new() -> BtreeBuilder {
-        BtreeBuilder { pairs: vec![] }
-    }
-
-    pub(in crate) fn add(&mut self, table: u64, key: &[u8], value: &[u8]) {
-        self.pairs.push((table, key.to_vec(), value.to_vec()));
-    }
-
-    pub(in crate) fn build<K: RedbKey + ?Sized>(mut self) -> Node {
-        assert!(!self.pairs.is_empty());
-        self.pairs.sort_by(|(table1, key1, _), (table2, key2, _)| {
-            cmp_keys::<K>(*table1, key1, *table2, key2)
-        });
-        let mut leaves = vec![];
-        for group in self.pairs.chunks(2) {
-            let leaf = if group.len() == 1 {
-                Leaf((group[0].0, group[0].1.to_vec(), group[0].2.to_vec()), None)
-            } else {
-                assert_eq!(group.len(), 2);
-                if (group[0].0, &group[0].1) == (group[1].0, &group[1].1) {
-                    todo!("support overwriting existing keys");
-                }
-                Leaf(
-                    (group[0].0, group[0].1.to_vec(), group[0].2.to_vec()),
-                    Some((group[1].0, group[1].1.to_vec(), group[1].2.to_vec())),
-                )
-            };
-            leaves.push(leaf);
-        }
-
-        let mut bottom = leaves;
-        let maybe_previous_node: Cell<Option<Node>> = Cell::new(None);
-        while bottom.len() > 1 {
-            let mut internals = vec![];
-            for node in bottom.drain(..) {
-                if let Some(previous_node) = maybe_previous_node.take() {
-                    let (table, key) = previous_node.get_max_key();
-                    let internal = Internal(Box::new(previous_node), table, key, Box::new(node));
-                    internals.push(internal)
-                } else {
-                    maybe_previous_node.set(Some(node));
-                }
-            }
-            if let Some(previous_node) = maybe_previous_node.take() {
-                internals.push(previous_node);
-            }
-
-            bottom = internals
-        }
-
-        bottom.pop().unwrap()
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::btree::Node::{Internal, Leaf};
-    use crate::btree::{BtreeBuilder, Node};
-
-    fn gen_tree() -> Node {
-        let left = Leaf(
-            (1, b"hello".to_vec(), b"world".to_vec()),
-            Some((1, b"hello2".to_vec(), b"world2".to_vec())),
-        );
-        let right = Leaf((1, b"hello3".to_vec(), b"world3".to_vec()), None);
-        Internal(Box::new(left), 1, b"hello2".to_vec(), Box::new(right))
-    }
-
-    #[test]
-    fn builder() {
-        let expected = gen_tree();
-        let mut builder = BtreeBuilder::new();
-        builder.add(1, b"hello2", b"world2");
-        builder.add(1, b"hello3", b"world3");
-        builder.add(1, b"hello", b"world");
-
-        assert_eq!(expected, builder.build::<[u8]>());
     }
 }
