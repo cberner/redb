@@ -1,5 +1,5 @@
 use crate::btree::{
-    lookup_in_raw, tree_delete, tree_insert, BtreeBuilder, BtreeEntry, BtreeRangeIter,
+    lookup_in_raw, make_single_leaf, tree_delete, tree_insert, BtreeEntry, BtreeRangeIter,
 };
 use crate::page_manager::{Page, PageNumber, TransactionalMemory};
 use crate::types::RedbKey;
@@ -55,9 +55,7 @@ impl Storage {
         let new_root = if let Some(root) = root_page.map(|p| self.mem.get_page(p)) {
             tree_insert::<K>(root, table_id, key, value, &self.mem)
         } else {
-            let mut builder = BtreeBuilder::new();
-            builder.add(table_id, key, value);
-            builder.build::<K>().to_bytes(&self.mem)
+            make_single_leaf(table_id, key, value, &self.mem)
         };
         Ok(new_root)
     }
