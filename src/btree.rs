@@ -2,7 +2,7 @@ use crate::btree::RangeIterState::{
     InitialState, InternalLeft, InternalRight, LeafLeft, LeafRight,
 };
 use crate::page_manager::{Page, PageMut, PageNumber, TransactionalMemory};
-use crate::types::RedbKey;
+use crate::types::{RedbKey, RedbValue};
 use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::marker::PhantomData;
@@ -217,16 +217,24 @@ impl<'a> RangeIterState<'a> {
     }
 }
 
-pub struct BtreeRangeIter<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a> {
+pub struct BtreeRangeIter<
+    'a,
+    T: RangeBounds<&'a K>,
+    K: RedbKey + ?Sized + 'a,
+    V: RedbValue + ?Sized + 'a,
+> {
     last: Option<RangeIterState<'a>>,
     table_id: u64,
     query_range: T,
     reversed: bool,
     manager: &'a TransactionalMemory,
     _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
 }
 
-impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a> BtreeRangeIter<'a, T, K> {
+impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a>
+    BtreeRangeIter<'a, T, K, V>
+{
     pub(in crate) fn new(
         root_page: Option<Page<'a>>,
         table_id: u64,
@@ -240,6 +248,7 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a> BtreeRangeIter<'a, T, 
             reversed: false,
             manager,
             _key_type: Default::default(),
+            _value_type: Default::default(),
         }
     }
 
@@ -256,6 +265,7 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a> BtreeRangeIter<'a, T, 
             reversed: true,
             manager,
             _key_type: Default::default(),
+            _value_type: Default::default(),
         }
     }
 

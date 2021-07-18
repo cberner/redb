@@ -10,7 +10,7 @@ impl<'a, T: 'a + ?Sized> WithLifetime<'a> for RefLifetime<T> {
     type Out = &'a T;
 }
 
-pub trait RedbKey {
+pub trait RedbValue {
     // TODO: need GATs, so that we can replace all this HRTB stuff
     type View: for<'a> WithLifetime<'a>;
 
@@ -20,12 +20,14 @@ pub trait RedbKey {
 
     /// Serialize the key to a slice
     fn as_bytes(&self) -> &[u8];
+}
 
+pub trait RedbKey: RedbValue {
     /// Compare data1 with data2
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering;
 }
 
-impl RedbKey for [u8] {
+impl RedbValue for [u8] {
     type View = RefLifetime<[u8]>;
 
     fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
@@ -35,7 +37,9 @@ impl RedbKey for [u8] {
     fn as_bytes(&self) -> &[u8] {
         self
     }
+}
 
+impl RedbKey for [u8] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         data1.cmp(data2)
     }

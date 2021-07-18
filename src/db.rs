@@ -1,6 +1,6 @@
 use crate::storage::Storage;
 use crate::table::Table;
-use crate::types::RedbKey;
+use crate::types::{RedbKey, RedbValue};
 use crate::Error;
 use memmap2::MmapMut;
 use std::fs::OpenOptions;
@@ -38,7 +38,10 @@ impl Database {
         Ok(Database { storage })
     }
 
-    pub fn open_table<K: RedbKey + ?Sized>(&self, name: &[u8]) -> Result<Table<K>, Error> {
+    pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+        &self,
+        name: &[u8],
+    ) -> Result<Table<K, V>, Error> {
         assert!(!name.is_empty());
         let (id, root) = self
             .storage
