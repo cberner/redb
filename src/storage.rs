@@ -95,7 +95,7 @@ impl Storage {
             if let Some((page, offset, len)) =
                 lookup_in_raw::<K>(root_page, table_id, key, &self.mem)
             {
-                return Ok(Some(AccessGuard::PageBacked(page, offset, len)));
+                return Ok(Some(AccessGuard::new(page, offset, len)));
             }
         }
         Ok(None)
@@ -144,16 +144,20 @@ impl Storage {
     }
 }
 
-pub enum AccessGuard<'a> {
-    PageBacked(Page<'a>, usize, usize),
-    Local(&'a [u8]),
+pub struct AccessGuard<'a> {
+    page: Page<'a>,
+    offset: usize,
+    len: usize,
+}
+
+impl<'a> AccessGuard<'a> {
+    fn new(page: Page<'a>, offset: usize, len: usize) -> Self {
+        Self { page, offset, len }
+    }
 }
 
 impl<'a> AsRef<[u8]> for AccessGuard<'a> {
     fn as_ref(&self) -> &[u8] {
-        match self {
-            AccessGuard::PageBacked(page, offset, len) => &page.memory()[*offset..(*offset + *len)],
-            AccessGuard::Local(data_ref) => data_ref,
-        }
+        &self.page.memory()[self.offset..(self.offset + self.len)]
     }
 }
