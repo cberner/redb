@@ -40,7 +40,10 @@ impl Database {
 
     pub fn open_table<K: RedbKey + ?Sized>(&self, name: &[u8]) -> Result<Table<K>, Error> {
         assert!(!name.is_empty());
-        let id = self.storage.get_or_create_table(name)?;
+        let (id, root) = self
+            .storage
+            .get_or_create_table(name, self.storage.get_root_page_number())?;
+        self.storage.commit(Some(root))?;
         Table::new(id, &self.storage)
     }
 }
