@@ -1,6 +1,7 @@
 use crate::Error;
 use memmap2::MmapMut;
 use std::cell::{Cell, Ref, RefCell, RefMut};
+use std::collections::HashSet;
 use std::convert::TryInto;
 
 const DB_METADATA_PAGE: u64 = 0;
@@ -38,7 +39,7 @@ fn get_secondary(mmap: &RefCell<MmapMut>) -> RefMut<[u8]> {
     RefMut::map(mmap.borrow_mut(), |m| &mut m[start..end])
 }
 
-#[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub(in crate) struct PageNumber(pub u64);
 
 impl PageNumber {
@@ -116,7 +117,7 @@ impl<'a> Page<'a> {
 pub(in crate) struct PageMut<'a> {
     mem: RefMut<'a, [u8]>,
     page_number: PageNumber,
-    ref_counter: &'a Cell<u64>,
+    open_pages: &'a RefCell<HashSet<PageNumber>>,
 }
 
 impl<'a> PageMut<'a> {
@@ -135,8 +136,7 @@ impl<'a> PageMut<'a> {
 
 impl<'a> Drop for PageMut<'a> {
     fn drop(&mut self) {
-        let x = self.ref_counter.get() - 1;
-        self.ref_counter.set(x);
+        self.open_pages.borrow_mut().remove(&self.page_number);
     }
 }
 
@@ -144,7 +144,7 @@ pub(in crate) struct TransactionalMemory {
     next_free_page: Cell<PageNumber>,
     mmap: RefCell<MmapMut>,
     // The number of PageMut which are outstanding
-    open_dirty_pages: Cell<u64>,
+    open_dirty_pages: RefCell<HashSet<PageNumber>>,
 }
 
 impl TransactionalMemory {
@@ -179,15 +179,16 @@ impl TransactionalMemory {
         Ok(TransactionalMemory {
             next_free_page,
             mmap,
-            open_dirty_pages: Cell::new(0),
+            open_dirty_pages: RefCell::new(HashSet::new()),
         })
     }
 
     // Commit all outstanding changes and make them visible as the primary
     pub(in crate) fn commit(&self) -> Result<(), Error> {
-        // All mutable pages must be dropped, this ensures that when a transaction completes and
-        // no more writes can happen to the pages it allocated
-        assert_eq!(self.open_dirty_pages.get(), 0);
+        // All mutable pages must be dropped, this ensures that when a transaction completes
+        // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
+        // to future read transactions
+        assert!(self.open_dirty_pages.borrow().is_empty());
         let mut mutator = TransactionMutator::new(get_secondary(&self.mmap));
         mutator.set_allocator_state(self.next_free_page.get().0);
         drop(mutator);
@@ -231,13 +232,12 @@ impl TransactionalMemory {
         let start = page_number.0 as usize * page_size::get();
         let end = start + page_size::get();
 
-        let x = self.open_dirty_pages.get() + 1;
-        self.open_dirty_pages.set(x);
+        self.open_dirty_pages.borrow_mut().insert(page_number);
 
         PageMut {
             mem: RefMut::map(self.mmap.borrow_mut(), |m| &mut m[start..end]),
             page_number,
-            ref_counter: &self.open_dirty_pages,
+            open_pages: &self.open_dirty_pages,
         }
     }
 }
