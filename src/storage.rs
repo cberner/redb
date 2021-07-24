@@ -1,7 +1,8 @@
 use crate::btree::{
-    lookup_in_raw, make_single_leaf, tree_delete, tree_insert, BtreeEntry, BtreeRangeIter,
+    lookup_in_raw, make_single_leaf, reserve_single_leaf, tree_delete, tree_insert,
+    tree_insert_reserve, AccessGuardMut, BtreeEntry, BtreeRangeIter,
 };
-use crate::page_manager::{Page, PageNumber, TransactionalMemory};
+use crate::page_manager::{Page, PageImpl, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use memmap2::MmapMut;
@@ -60,6 +61,22 @@ impl Storage {
             make_single_leaf(table_id, key, value, &self.mem)
         };
         Ok(new_root)
+    }
+
+    // Returns the new root page number, and accessor for writing the value
+    pub(in crate) fn insert_reserve<K: RedbKey + ?Sized>(
+        &self,
+        table_id: u64,
+        key: &[u8],
+        value_len: usize,
+        root_page: Option<PageNumber>,
+    ) -> Result<(PageNumber, AccessGuardMut), Error> {
+        let (new_root, guard) = if let Some(root) = root_page.map(|p| self.mem.get_page(p)) {
+            tree_insert_reserve::<K>(root, table_id, key, value_len, &self.mem)
+        } else {
+            reserve_single_leaf(table_id, key, value_len, &self.mem)
+        };
+        Ok((new_root, guard))
     }
 
     pub(in crate) fn len(&self, table: u64, root_page: Option<PageNumber>) -> Result<usize, Error> {
@@ -157,14 +174,14 @@ impl Storage {
 }
 
 pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
-    page: Page<'a>,
+    page: PageImpl<'a>,
     offset: usize,
     len: usize,
     _value_type: PhantomData<V>,
 }
 
 impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
-    fn new(page: Page<'a>, offset: usize, len: usize) -> Self {
+    fn new(page: PageImpl<'a>, offset: usize, len: usize) -> Self {
         Self {
             page,
             offset,

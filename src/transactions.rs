@@ -1,4 +1,4 @@
-use crate::btree::BtreeRangeIter;
+use crate::btree::{AccessGuardMut, BtreeRangeIter};
 use crate::error::Error;
 use crate::page_manager::PageNumber;
 use crate::storage::{AccessGuard, Storage};
@@ -37,8 +37,19 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> WriteTransaction<'mmap, 
 
     /// Reserve space to insert a key-value pair
     /// The returned reference will have length equal to value_length
-    pub fn insert_reserve(&mut self, _key: &K, _value_length: usize) -> Result<&mut [u8], Error> {
-        todo!()
+    pub fn insert_reserve(
+        &mut self,
+        key: &K,
+        value_length: usize,
+    ) -> Result<AccessGuardMut, Error> {
+        let (root_page, guard) = self.storage.insert_reserve::<K>(
+            self.table_id,
+            key.as_bytes().as_ref(),
+            value_length,
+            self.root_page,
+        )?;
+        self.root_page = Some(root_page);
+        Ok(guard)
     }
 
     pub fn get(&self, key: &K) -> Result<Option<AccessGuard<V>>, Error> {

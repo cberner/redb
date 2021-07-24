@@ -1,35 +1,53 @@
 use crate::btree::RangeIterState::{
     InitialState, InternalLeft, InternalRight, LeafLeft, LeafRight,
 };
-use crate::page_manager::{Page, PageMut, PageNumber, TransactionalMemory};
+use crate::page_manager::{Page, PageImpl, PageMut, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
 use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 
+pub struct AccessGuardMut<'a> {
+    page: PageMut<'a>,
+    offset: usize,
+    len: usize,
+}
+
+impl<'a> AccessGuardMut<'a> {
+    fn new(page: PageMut<'a>, offset: usize, len: usize) -> Self {
+        AccessGuardMut { page, offset, len }
+    }
+}
+
+impl<'a> AsMut<[u8]> for AccessGuardMut<'a> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.page.memory_mut()[self.offset..(self.offset + self.len)]
+    }
+}
+
 const LEAF: u8 = 1;
 const INTERNAL: u8 = 2;
 
 enum RangeIterState<'a> {
-    InitialState(Page<'a>, bool),
+    InitialState(PageImpl<'a>, bool),
     LeafLeft {
-        page: Page<'a>,
+        page: PageImpl<'a>,
         parent: Option<Box<RangeIterState<'a>>>,
         reversed: bool,
     },
     LeafRight {
-        page: Page<'a>,
+        page: PageImpl<'a>,
         parent: Option<Box<RangeIterState<'a>>>,
         reversed: bool,
     },
     InternalLeft {
-        page: Page<'a>,
+        page: PageImpl<'a>,
         parent: Option<Box<RangeIterState<'a>>>,
         reversed: bool,
     },
     InternalRight {
-        page: Page<'a>,
+        page: PageImpl<'a>,
         parent: Option<Box<RangeIterState<'a>>>,
         reversed: bool,
     },
@@ -210,8 +228,8 @@ impl<'a> RangeIterState<'a> {
 
     fn get_entry(&self) -> Option<EntryAccessor> {
         match self {
-            RangeIterState::LeafLeft { page, .. } => Some(LeafAccessor::new(&page).lesser()),
-            RangeIterState::LeafRight { page, .. } => LeafAccessor::new(&page).greater(),
+            RangeIterState::LeafLeft { page, .. } => Some(LeafAccessor::new(page).lesser()),
+            RangeIterState::LeafRight { page, .. } => LeafAccessor::new(page).greater(),
             _ => None,
         }
     }
@@ -236,7 +254,7 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized 
     BtreeRangeIter<'a, T, K, V>
 {
     pub(in crate) fn new(
-        root_page: Option<Page<'a>>,
+        root_page: Option<PageImpl<'a>>,
         table_id: u64,
         query_range: T,
         manager: &'a TransactionalMemory,
@@ -253,7 +271,7 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized 
     }
 
     pub(in crate) fn new_reversed(
-        root_page: Option<Page<'a>>,
+        root_page: Option<PageImpl<'a>>,
         table_id: u64,
         query_range: T,
         manager: &'a TransactionalMemory,
@@ -469,13 +487,17 @@ impl<'a> EntryMutator<'a> {
 // * (1 byte) type: 1 = LEAF
 // * (n bytes) lesser_entry
 // * (n bytes) greater_entry: optional
-struct LeafAccessor<'a: 'b, 'b> {
-    page: &'b Page<'a>,
+struct LeafAccessor<'a: 'b, 'b, T: Page + 'a> {
+    page: &'b T,
+    _page_lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a: 'b, 'b> LeafAccessor<'a, 'b> {
-    fn new(page: &'b Page<'a>) -> Self {
-        LeafAccessor { page }
+impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
+    fn new(page: &'b T) -> Self {
+        LeafAccessor {
+            page,
+            _page_lifetime: Default::default(),
+        }
     }
 
     fn offset_of_lesser(&self) -> usize {
@@ -550,11 +572,11 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
 // * (8 bytes) lte_page: page number for keys <= key_data
 // * (8 bytes) gt_page: page number for keys > key_data
 struct InternalAccessor<'a: 'b, 'b> {
-    page: &'b Page<'a>,
+    page: &'b PageImpl<'a>,
 }
 
 impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
-    fn new(page: &'b Page<'a>) -> Self {
+    fn new(page: &'b PageImpl<'a>) -> Self {
         InternalAccessor { page }
     }
 
@@ -622,7 +644,7 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
 // If key is not found, guaranteed not to modify the tree
 #[allow(clippy::needless_return)]
 pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
-    page: Page<'a>,
+    page: PageImpl<'a>,
     table: u64,
     key: &[u8],
     manager: &'a TransactionalMemory,
@@ -713,6 +735,77 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
     }
 }
 
+pub(in crate) fn reserve_single_leaf<'a>(
+    table: u64,
+    key: &[u8],
+    value_len: usize,
+    manager: &'a TransactionalMemory,
+) -> (PageNumber, AccessGuardMut<'a>) {
+    let mut page = manager.allocate();
+    let mut builder = LeafBuilder::new(&mut page);
+    let value = vec![0; value_len];
+    builder.write_lesser(table, key, &value);
+    builder.write_greater(None);
+
+    let accessor = LeafAccessor::new(&page);
+    let offset = accessor.offset_of_lesser() + accessor.lesser().value_offset();
+
+    let page_num = page.get_page_number();
+    let guard = AccessGuardMut::new(page, offset, value_len);
+
+    (page_num, guard)
+}
+
+pub(in crate) fn reserve_double_leaf_right<'a, K: RedbKey + ?Sized>(
+    table1: u64,
+    key1: &[u8],
+    value1: &[u8],
+    table2: u64,
+    key2: &[u8],
+    value2_len: usize,
+    manager: &'a TransactionalMemory,
+) -> (PageNumber, AccessGuardMut<'a>) {
+    debug_assert!(cmp_keys::<K>(table1, key1, table2, key2).is_lt());
+    let mut page = manager.allocate();
+    let mut builder = LeafBuilder::new(&mut page);
+    builder.write_lesser(table1, key1, value1);
+    let value2 = vec![0; value2_len];
+    builder.write_greater(Some((table2, key2, &value2)));
+
+    let accessor = LeafAccessor::new(&page);
+    let offset = accessor.offset_of_greater() + accessor.greater().unwrap().value_offset();
+
+    let page_num = page.get_page_number();
+    let guard = AccessGuardMut::new(page, offset, value2_len);
+
+    (page_num, guard)
+}
+
+pub(in crate) fn reserve_double_leaf_left<'a, K: RedbKey + ?Sized>(
+    table1: u64,
+    key1: &[u8],
+    value1_len: usize,
+    table2: u64,
+    key2: &[u8],
+    value2: &[u8],
+    manager: &'a TransactionalMemory,
+) -> (PageNumber, AccessGuardMut<'a>) {
+    debug_assert!(cmp_keys::<K>(table1, key1, table2, key2).is_lt());
+    let mut page = manager.allocate();
+    let mut builder = LeafBuilder::new(&mut page);
+    let value1 = vec![0; value1_len];
+    builder.write_lesser(table1, key1, &value1);
+    builder.write_greater(Some((table2, key2, &value2)));
+
+    let accessor = LeafAccessor::new(&page);
+    let offset = accessor.offset_of_lesser() + accessor.lesser().value_offset();
+
+    let page_num = page.get_page_number();
+    let guard = AccessGuardMut::new(page, offset, value1_len);
+
+    (page_num, guard)
+}
+
 pub(in crate) fn make_single_leaf<'a>(
     table: u64,
     key: &[u8],
@@ -758,9 +851,161 @@ pub(in crate) fn make_index(
     page.get_page_number()
 }
 
+// Returns the page number of the sub-tree into which the key was inserted,
+// and the guard which can be used to access the value
+pub(in crate) fn tree_insert_reserve<'a, K: RedbKey + ?Sized>(
+    page: PageImpl<'a>,
+    table: u64,
+    key: &[u8],
+    value_len: usize,
+    manager: &'a TransactionalMemory,
+) -> (PageNumber, AccessGuardMut<'a>) {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            if let Some(entry) = accessor.greater() {
+                match entry.compare::<K>(table, key) {
+                    Ordering::Less => {
+                        // New entry goes in a new page to the right, so leave this page untouched
+                        let left_page = page.get_page_number();
+
+                        let (right_page, guard) =
+                            reserve_single_leaf(table, key, value_len, manager);
+                        let index_page = make_index(
+                            entry.table_id(),
+                            entry.key(),
+                            left_page,
+                            right_page,
+                            manager,
+                        );
+
+                        (index_page, guard)
+                    }
+                    Ordering::Equal => reserve_double_leaf_right::<K>(
+                        accessor.lesser().table_id(),
+                        accessor.lesser().key(),
+                        accessor.lesser().value(),
+                        table,
+                        key,
+                        value_len,
+                        manager,
+                    ),
+                    Ordering::Greater => {
+                        let right_table = entry.table_id();
+                        let right_key = entry.key();
+                        let right_value = entry.value();
+
+                        let left_table = accessor.lesser().table_id();
+                        let left_key = accessor.lesser().key();
+                        let left_value = accessor.lesser().value();
+
+                        match accessor.lesser().compare::<K>(table, key) {
+                            Ordering::Less => {
+                                let (left, guard) = reserve_double_leaf_right::<K>(
+                                    left_table, left_key, left_value, table, key, value_len,
+                                    manager,
+                                );
+                                let right =
+                                    make_single_leaf(right_table, right_key, right_value, manager);
+                                let index_page = make_index(table, key, left, right, manager);
+
+                                (index_page, guard)
+                            }
+                            Ordering::Equal => reserve_double_leaf_left::<K>(
+                                table,
+                                key,
+                                value_len,
+                                right_table,
+                                right_key,
+                                right_value,
+                                manager,
+                            ),
+                            Ordering::Greater => {
+                                let (left, guard) = reserve_double_leaf_left::<K>(
+                                    table, key, value_len, left_table, left_key, left_value,
+                                    manager,
+                                );
+                                let right =
+                                    make_single_leaf(right_table, right_key, right_value, manager);
+                                let index_page =
+                                    make_index(left_table, &left_key, left, right, manager);
+
+                                (index_page, guard)
+                            }
+                        }
+                    }
+                }
+            } else {
+                match cmp_keys::<K>(
+                    accessor.lesser().table_id(),
+                    accessor.lesser().key(),
+                    table,
+                    key,
+                ) {
+                    Ordering::Less => reserve_double_leaf_right::<K>(
+                        accessor.lesser().table_id(),
+                        accessor.lesser().key(),
+                        accessor.lesser().value(),
+                        table,
+                        key,
+                        value_len,
+                        manager,
+                    ),
+                    Ordering::Equal => reserve_single_leaf(table, key, value_len, manager),
+                    Ordering::Greater => reserve_double_leaf_left::<K>(
+                        table,
+                        key,
+                        value_len,
+                        accessor.lesser().table_id(),
+                        accessor.lesser().key(),
+                        accessor.lesser().value(),
+                        manager,
+                    ),
+                }
+            }
+        }
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page);
+            let mut left_page = accessor.lte_page();
+            let mut right_page = accessor.gt_page();
+            let guard = if cmp_keys::<K>(table, key, accessor.table_id(), accessor.key()).is_le() {
+                let (page, guard) = tree_insert_reserve::<K>(
+                    manager.get_page(left_page),
+                    table,
+                    key,
+                    value_len,
+                    manager,
+                );
+                left_page = page;
+                guard
+            } else {
+                let (page, guard) = tree_insert_reserve::<K>(
+                    manager.get_page(right_page),
+                    table,
+                    key,
+                    value_len,
+                    manager,
+                );
+                right_page = page;
+                guard
+            };
+
+            let mut page = manager.allocate();
+            let mut builder = InternalBuilder::new(&mut page);
+            builder.write_table_and_key(accessor.table_id(), accessor.key());
+            builder.write_lte_page(left_page);
+            builder.write_gt_page(right_page);
+
+            (page.get_page_number(), guard)
+        }
+        _ => unreachable!(),
+    }
+}
+
 // Returns the page number of the sub-tree into which the key was inserted
 pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
-    page: Page<'a>,
+    page: PageImpl<'a>,
     table: u64,
     key: &[u8],
     value: &[u8],
@@ -887,11 +1132,11 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
 
 // Returns the (offset, len) of the value for the queried key, if present
 pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
-    page: Page<'a>,
+    page: PageImpl<'a>,
     table: u64,
     query: &[u8],
     manager: &'a TransactionalMemory,
-) -> Option<(Page<'a>, usize, usize)> {
+) -> Option<(PageImpl<'a>, usize, usize)> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {

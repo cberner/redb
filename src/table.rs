@@ -156,15 +156,15 @@ mod test {
 
     #[test]
     // TODO: fix this test
-    #[ignore]
     fn insert_reserve() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path()).unwrap() };
         let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
         let mut write_txn = table.begin_write().unwrap();
         let value = b"world";
-        let reserved = write_txn.insert_reserve(b"hello", value.len()).unwrap();
-        reserved.copy_from_slice(value);
+        let mut reserved = write_txn.insert_reserve(b"hello", value.len()).unwrap();
+        reserved.as_mut().copy_from_slice(value);
+        drop(reserved);
         write_txn.commit().unwrap();
         let read_txn = table.read_transaction().unwrap();
         assert_eq!(value, read_txn.get(b"hello").unwrap().unwrap().as_ref());
