@@ -105,17 +105,23 @@ impl<'a> TransactionMutator<'a> {
     }
 }
 
-pub struct Page<'a> {
+pub(in crate) trait Page {
+    fn memory(&self) -> &[u8];
+
+    fn get_page_number(&self) -> PageNumber;
+}
+
+pub struct PageImpl<'a> {
     mem: &'a [u8],
     page_number: PageNumber,
 }
 
-impl<'a> Page<'a> {
-    pub(in crate) fn memory(&self) -> &[u8] {
+impl<'a> Page for PageImpl<'a> {
+    fn memory(&self) -> &[u8] {
         &self.mem
     }
 
-    pub(in crate) fn get_page_number(&self) -> PageNumber {
+    fn get_page_number(&self) -> PageNumber {
         self.page_number
     }
 }
@@ -127,15 +133,17 @@ pub(in crate) struct PageMut<'a> {
 }
 
 impl<'a> PageMut<'a> {
-    pub(in crate) fn memory(&self) -> &[u8] {
-        &self.mem
-    }
-
     pub(in crate) fn memory_mut(&mut self) -> &mut [u8] {
         &mut self.mem
     }
+}
 
-    pub(in crate) fn get_page_number(&self) -> PageNumber {
+impl<'a> Page for PageMut<'a> {
+    fn memory(&self) -> &[u8] {
+        &self.mem
+    }
+
+    fn get_page_number(&self) -> PageNumber {
         self.page_number
     }
 }
@@ -231,14 +239,14 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(in crate) fn get_page(&self, page_number: PageNumber) -> Page {
+    pub(in crate) fn get_page(&self, page_number: PageNumber) -> PageImpl {
         assert!(page_number < self.next_free_page.get());
         // We must not retrieve an immutable reference to a page which already has a mutable ref to it
         assert!(!self.open_dirty_pages.borrow().contains(&page_number));
         let start = page_number.0 as usize * page_size::get();
         let end = start + page_size::get();
 
-        Page {
+        PageImpl {
             mem: &self.mmap[start..end],
             page_number,
         }
