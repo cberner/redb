@@ -1,6 +1,6 @@
 use crate::btree::{
-    lookup_in_raw, make_single_leaf, reserve_single_leaf, tree_delete, tree_height, tree_insert,
-    tree_insert_reserve, AccessGuardMut, BtreeEntry, BtreeRangeIter,
+    lookup_in_raw, make_mut_single_leaf, tree_delete, tree_height, tree_insert, AccessGuardMut,
+    BtreeEntry, BtreeRangeIter,
 };
 use crate::page_manager::{Page, PageImpl, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
@@ -70,10 +70,10 @@ impl Storage {
         value: &[u8],
         root_page: Option<PageNumber>,
     ) -> Result<PageNumber, Error> {
-        let new_root = if let Some(root) = root_page.map(|p| self.mem.get_page(p)) {
+        let (new_root, _) = if let Some(root) = root_page.map(|p| self.mem.get_page(p)) {
             tree_insert::<K>(root, table_id, key, value, &self.mem)
         } else {
-            make_single_leaf(table_id, key, value, &self.mem)
+            make_mut_single_leaf(table_id, key, value, &self.mem)
         };
         Ok(new_root)
     }
@@ -86,10 +86,11 @@ impl Storage {
         value_len: usize,
         root_page: Option<PageNumber>,
     ) -> Result<(PageNumber, AccessGuardMut), Error> {
+        let value = vec![0u8; value_len];
         let (new_root, guard) = if let Some(root) = root_page.map(|p| self.mem.get_page(p)) {
-            tree_insert_reserve::<K>(root, table_id, key, value_len, &self.mem)
+            tree_insert::<K>(root, table_id, key, &value, &self.mem)
         } else {
-            reserve_single_leaf(table_id, key, value_len, &self.mem)
+            make_mut_single_leaf(table_id, key, &value, &self.mem)
         };
         Ok((new_root, guard))
     }
