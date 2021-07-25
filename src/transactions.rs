@@ -70,8 +70,7 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> WriteTransaction<'mmap, 
     }
 
     pub fn abort(self) -> Result<(), Error> {
-        // TODO: reset the allocator state
-        Ok(())
+        self.storage.rollback_uncommited_writes()
     }
 }
 
