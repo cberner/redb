@@ -156,6 +156,7 @@ impl<'a> Drop for PageMut<'a> {
 
 pub(in crate) struct TransactionalMemory {
     next_free_page: Cell<PageNumber>,
+    last_commited_page: Cell<PageNumber>,
     mmap: MmapMut,
     // We use unsafe to access the metapage (page 0), and so guard it with this mutex
     // It would be nice if this was a RefCell<&[u8]> on the metapage. However, that would be
@@ -193,10 +194,12 @@ impl TransactionalMemory {
         }
         let accessor = TransactionAccessor::new(get_primary(&mmap), mutex.lock().unwrap());
         let next_free_page = Cell::new(PageNumber(accessor.get_allocator_state()));
+        let last_commited_page = Cell::new(PageNumber(next_free_page.get().0 - 1));
         drop(accessor);
 
         Ok(TransactionalMemory {
             next_free_page,
+            last_commited_page,
             mmap,
             metapage_guard: mutex,
             open_dirty_pages: RefCell::new(HashSet::new()),
@@ -219,6 +222,9 @@ impl TransactionalMemory {
         // to future read transactions
         assert!(self.open_dirty_pages.borrow().is_empty());
 
+        self.last_commited_page
+            .set(PageNumber(self.next_free_page.get().0 - 1));
+
         let (mmap, guard) = self.acquire_mutable_metapage();
 
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
@@ -236,6 +242,13 @@ impl TransactionalMemory {
         drop(guard); // Ensure the guard lives past the write on the previous line
         self.mmap.flush()?;
 
+        Ok(())
+    }
+
+    pub(in crate) fn rollback_uncommited_writes(&self) -> Result<(), Error> {
+        assert!(self.open_dirty_pages.borrow().is_empty());
+        self.next_free_page
+            .set(PageNumber(self.last_commited_page.get().0 + 1));
         Ok(())
     }
 

@@ -104,6 +104,10 @@ impl Storage {
         Ok(())
     }
 
+    pub(in crate) fn rollback_uncommited_writes(&self) -> Result<(), Error> {
+        self.mem.rollback_uncommited_writes()
+    }
+
     pub(in crate) fn get<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         table_id: u64,
