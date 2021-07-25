@@ -753,56 +753,30 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
     }
 }
 
-pub(in crate) fn reserve_single_leaf<'a>(
+pub(in crate) fn make_mut_single_leaf<'a>(
     table: u64,
     key: &[u8],
-    value_len: usize,
+    value: &[u8],
     manager: &'a TransactionalMemory,
 ) -> (PageNumber, AccessGuardMut<'a>) {
     let mut page = manager.allocate();
     let mut builder = LeafBuilder::new(&mut page);
-    let value = vec![0; value_len];
-    builder.write_lesser(table, key, &value);
+    builder.write_lesser(table, key, value);
     builder.write_greater(None);
 
     let accessor = LeafAccessor::new(&page);
     let offset = accessor.offset_of_lesser() + accessor.lesser().value_offset();
 
     let page_num = page.get_page_number();
-    let guard = AccessGuardMut::new(page, offset, value_len);
+    let guard = AccessGuardMut::new(page, offset, value.len());
 
     (page_num, guard)
 }
 
-pub(in crate) fn reserve_double_leaf_right<'a, K: RedbKey + ?Sized>(
+pub(in crate) fn make_mut_double_leaf_right<'a, K: RedbKey + ?Sized>(
     table1: u64,
     key1: &[u8],
     value1: &[u8],
-    table2: u64,
-    key2: &[u8],
-    value2_len: usize,
-    manager: &'a TransactionalMemory,
-) -> (PageNumber, AccessGuardMut<'a>) {
-    debug_assert!(cmp_keys::<K>(table1, key1, table2, key2).is_lt());
-    let mut page = manager.allocate();
-    let mut builder = LeafBuilder::new(&mut page);
-    builder.write_lesser(table1, key1, value1);
-    let value2 = vec![0; value2_len];
-    builder.write_greater(Some((table2, key2, &value2)));
-
-    let accessor = LeafAccessor::new(&page);
-    let offset = accessor.offset_of_greater() + accessor.greater().unwrap().value_offset();
-
-    let page_num = page.get_page_number();
-    let guard = AccessGuardMut::new(page, offset, value2_len);
-
-    (page_num, guard)
-}
-
-pub(in crate) fn reserve_double_leaf_left<'a, K: RedbKey + ?Sized>(
-    table1: u64,
-    key1: &[u8],
-    value1_len: usize,
     table2: u64,
     key2: &[u8],
     value2: &[u8],
@@ -811,15 +785,38 @@ pub(in crate) fn reserve_double_leaf_left<'a, K: RedbKey + ?Sized>(
     debug_assert!(cmp_keys::<K>(table1, key1, table2, key2).is_lt());
     let mut page = manager.allocate();
     let mut builder = LeafBuilder::new(&mut page);
-    let value1 = vec![0; value1_len];
-    builder.write_lesser(table1, key1, &value1);
+    builder.write_lesser(table1, key1, value1);
+    builder.write_greater(Some((table2, key2, value2)));
+
+    let accessor = LeafAccessor::new(&page);
+    let offset = accessor.offset_of_greater() + accessor.greater().unwrap().value_offset();
+
+    let page_num = page.get_page_number();
+    let guard = AccessGuardMut::new(page, offset, value2.len());
+
+    (page_num, guard)
+}
+
+pub(in crate) fn make_mut_double_leaf_left<'a, K: RedbKey + ?Sized>(
+    table1: u64,
+    key1: &[u8],
+    value1: &[u8],
+    table2: u64,
+    key2: &[u8],
+    value2: &[u8],
+    manager: &'a TransactionalMemory,
+) -> (PageNumber, AccessGuardMut<'a>) {
+    debug_assert!(cmp_keys::<K>(table1, key1, table2, key2).is_lt());
+    let mut page = manager.allocate();
+    let mut builder = LeafBuilder::new(&mut page);
+    builder.write_lesser(table1, key1, value1);
     builder.write_greater(Some((table2, key2, &value2)));
 
     let accessor = LeafAccessor::new(&page);
     let offset = accessor.offset_of_lesser() + accessor.lesser().value_offset();
 
     let page_num = page.get_page_number();
-    let guard = AccessGuardMut::new(page, offset, value1_len);
+    let guard = AccessGuardMut::new(page, offset, value1.len());
 
     (page_num, guard)
 }
@@ -834,23 +831,6 @@ pub(in crate) fn make_single_leaf<'a>(
     let mut builder = LeafBuilder::new(&mut page);
     builder.write_lesser(table, key, value);
     builder.write_greater(None);
-    page.get_page_number()
-}
-
-pub(in crate) fn make_double_leaf<'a, K: RedbKey + ?Sized>(
-    table1: u64,
-    key1: &[u8],
-    value1: &[u8],
-    table2: u64,
-    key2: &[u8],
-    value2: &[u8],
-    manager: &'a TransactionalMemory,
-) -> PageNumber {
-    debug_assert!(cmp_keys::<K>(table1, key1, table2, key2).is_lt());
-    let mut page = manager.allocate();
-    let mut builder = LeafBuilder::new(&mut page);
-    builder.write_lesser(table1, key1, value1);
-    builder.write_greater(Some((table2, key2, value2)));
     page.get_page_number()
 }
 
@@ -871,11 +851,11 @@ pub(in crate) fn make_index(
 
 // Returns the page number of the sub-tree into which the key was inserted,
 // and the guard which can be used to access the value
-pub(in crate) fn tree_insert_reserve<'a, K: RedbKey + ?Sized>(
+pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     table: u64,
     key: &[u8],
-    value_len: usize,
+    value: &[u8],
     manager: &'a TransactionalMemory,
 ) -> (PageNumber, AccessGuardMut<'a>) {
     let node_mem = page.memory();
@@ -888,8 +868,7 @@ pub(in crate) fn tree_insert_reserve<'a, K: RedbKey + ?Sized>(
                         // New entry goes in a new page to the right, so leave this page untouched
                         let left_page = page.get_page_number();
 
-                        let (right_page, guard) =
-                            reserve_single_leaf(table, key, value_len, manager);
+                        let (right_page, guard) = make_mut_single_leaf(table, key, value, manager);
                         let index_page = make_index(
                             entry.table_id(),
                             entry.key(),
@@ -900,13 +879,13 @@ pub(in crate) fn tree_insert_reserve<'a, K: RedbKey + ?Sized>(
 
                         (index_page, guard)
                     }
-                    Ordering::Equal => reserve_double_leaf_right::<K>(
+                    Ordering::Equal => make_mut_double_leaf_right::<K>(
                         accessor.lesser().table_id(),
                         accessor.lesser().key(),
                         accessor.lesser().value(),
                         table,
                         key,
-                        value_len,
+                        value,
                         manager,
                     ),
                     Ordering::Greater => {
@@ -920,9 +899,8 @@ pub(in crate) fn tree_insert_reserve<'a, K: RedbKey + ?Sized>(
 
                         match accessor.lesser().compare::<K>(table, key) {
                             Ordering::Less => {
-                                let (left, guard) = reserve_double_leaf_right::<K>(
-                                    left_table, left_key, left_value, table, key, value_len,
-                                    manager,
+                                let (left, guard) = make_mut_double_leaf_right::<K>(
+                                    left_table, left_key, left_value, table, key, value, manager,
                                 );
                                 let right =
                                     make_single_leaf(right_table, right_key, right_value, manager);
@@ -930,19 +908,18 @@ pub(in crate) fn tree_insert_reserve<'a, K: RedbKey + ?Sized>(
 
                                 (index_page, guard)
                             }
-                            Ordering::Equal => reserve_double_leaf_left::<K>(
+                            Ordering::Equal => make_mut_double_leaf_left::<K>(
                                 table,
                                 key,
-                                value_len,
+                                value,
                                 right_table,
                                 right_key,
                                 right_value,
                                 manager,
                             ),
                             Ordering::Greater => {
-                                let (left, guard) = reserve_double_leaf_left::<K>(
-                                    table, key, value_len, left_table, left_key, left_value,
-                                    manager,
+                                let (left, guard) = make_mut_double_leaf_left::<K>(
+                                    table, key, value, left_table, left_key, left_value, manager,
                                 );
                                 let right =
                                     make_single_leaf(right_table, right_key, right_value, manager);
@@ -961,20 +938,20 @@ pub(in crate) fn tree_insert_reserve<'a, K: RedbKey + ?Sized>(
                     table,
                     key,
                 ) {
-                    Ordering::Less => reserve_double_leaf_right::<K>(
+                    Ordering::Less => make_mut_double_leaf_right::<K>(
                         accessor.lesser().table_id(),
                         accessor.lesser().key(),
                         accessor.lesser().value(),
                         table,
                         key,
-                        value_len,
+                        value,
                         manager,
                     ),
-                    Ordering::Equal => reserve_single_leaf(table, key, value_len, manager),
-                    Ordering::Greater => reserve_double_leaf_left::<K>(
+                    Ordering::Equal => make_mut_single_leaf(table, key, value, manager),
+                    Ordering::Greater => make_mut_double_leaf_left::<K>(
                         table,
                         key,
-                        value_len,
+                        value,
                         accessor.lesser().table_id(),
                         accessor.lesser().key(),
                         accessor.lesser().value(),
@@ -988,23 +965,13 @@ pub(in crate) fn tree_insert_reserve<'a, K: RedbKey + ?Sized>(
             let mut left_page = accessor.lte_page();
             let mut right_page = accessor.gt_page();
             let guard = if cmp_keys::<K>(table, key, accessor.table_id(), accessor.key()).is_le() {
-                let (page, guard) = tree_insert_reserve::<K>(
-                    manager.get_page(left_page),
-                    table,
-                    key,
-                    value_len,
-                    manager,
-                );
+                let (page, guard) =
+                    tree_insert::<K>(manager.get_page(left_page), table, key, value, manager);
                 left_page = page;
                 guard
             } else {
-                let (page, guard) = tree_insert_reserve::<K>(
-                    manager.get_page(right_page),
-                    table,
-                    key,
-                    value_len,
-                    manager,
-                );
+                let (page, guard) =
+                    tree_insert::<K>(manager.get_page(right_page), table, key, value, manager);
                 right_page = page;
                 guard
             };
@@ -1016,133 +983,6 @@ pub(in crate) fn tree_insert_reserve<'a, K: RedbKey + ?Sized>(
             builder.write_gt_page(right_page);
 
             (page.get_page_number(), guard)
-        }
-        _ => unreachable!(),
-    }
-}
-
-// Returns the page number of the sub-tree into which the key was inserted
-pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
-    page: PageImpl<'a>,
-    table: u64,
-    key: &[u8],
-    value: &[u8],
-    manager: &'a TransactionalMemory,
-) -> PageNumber {
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => {
-            let accessor = LeafAccessor::new(&page);
-            if let Some(entry) = accessor.greater() {
-                match entry.compare::<K>(table, key) {
-                    Ordering::Less => {
-                        // New entry goes in a new page to the right, so leave this page untouched
-                        let left_page = page.get_page_number();
-
-                        let right_page = make_single_leaf(table, key, value, manager);
-                        make_index(
-                            entry.table_id(),
-                            entry.key(),
-                            left_page,
-                            right_page,
-                            manager,
-                        )
-                    }
-                    Ordering::Equal => make_double_leaf::<K>(
-                        accessor.lesser().table_id(),
-                        accessor.lesser().key(),
-                        accessor.lesser().value(),
-                        table,
-                        key,
-                        value,
-                        manager,
-                    ),
-                    Ordering::Greater => {
-                        let right_table = entry.table_id();
-                        let right_key = entry.key();
-                        let right_value = entry.value();
-
-                        let left_table = accessor.lesser().table_id();
-                        let left_key = accessor.lesser().key();
-                        let left_value = accessor.lesser().value();
-
-                        match accessor.lesser().compare::<K>(table, key) {
-                            Ordering::Less => {
-                                let left = make_double_leaf::<K>(
-                                    left_table, left_key, left_value, table, key, value, manager,
-                                );
-                                let right =
-                                    make_single_leaf(right_table, right_key, right_value, manager);
-                                make_index(table, key, left, right, manager)
-                            }
-                            Ordering::Equal => make_double_leaf::<K>(
-                                table,
-                                key,
-                                value,
-                                right_table,
-                                right_key,
-                                right_value,
-                                manager,
-                            ),
-                            Ordering::Greater => {
-                                let left = make_double_leaf::<K>(
-                                    table, key, value, left_table, left_key, left_value, manager,
-                                );
-                                let right =
-                                    make_single_leaf(right_table, right_key, right_value, manager);
-                                make_index(left_table, &left_key, left, right, manager)
-                            }
-                        }
-                    }
-                }
-            } else {
-                match cmp_keys::<K>(
-                    accessor.lesser().table_id(),
-                    accessor.lesser().key(),
-                    table,
-                    key,
-                ) {
-                    Ordering::Less => make_double_leaf::<K>(
-                        accessor.lesser().table_id(),
-                        accessor.lesser().key(),
-                        accessor.lesser().value(),
-                        table,
-                        key,
-                        value,
-                        manager,
-                    ),
-                    Ordering::Equal => make_single_leaf(table, key, value, manager),
-                    Ordering::Greater => make_double_leaf::<K>(
-                        table,
-                        key,
-                        value,
-                        accessor.lesser().table_id(),
-                        accessor.lesser().key(),
-                        accessor.lesser().value(),
-                        manager,
-                    ),
-                }
-            }
-        }
-        INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
-            let mut left_page = accessor.lte_page();
-            let mut right_page = accessor.gt_page();
-            if cmp_keys::<K>(table, key, accessor.table_id(), accessor.key()).is_le() {
-                left_page =
-                    tree_insert::<K>(manager.get_page(left_page), table, key, value, manager);
-            } else {
-                right_page =
-                    tree_insert::<K>(manager.get_page(right_page), table, key, value, manager);
-            }
-
-            let mut page = manager.allocate();
-            let mut builder = InternalBuilder::new(&mut page);
-            builder.write_table_and_key(accessor.table_id(), accessor.key());
-            builder.write_lte_page(left_page);
-            builder.write_gt_page(right_page);
-
-            page.get_page_number()
         }
         _ => unreachable!(),
     }
