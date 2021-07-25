@@ -155,7 +155,6 @@ mod test {
     }
 
     #[test]
-    // TODO: fix this test
     fn insert_reserve() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path()).unwrap() };
