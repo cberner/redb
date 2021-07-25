@@ -1,5 +1,5 @@
 use crate::btree::{
-    lookup_in_raw, make_single_leaf, reserve_single_leaf, tree_delete, tree_insert,
+    lookup_in_raw, make_single_leaf, reserve_single_leaf, tree_delete, tree_height, tree_insert,
     tree_insert_reserve, AccessGuardMut, BtreeEntry, BtreeRangeIter,
 };
 use crate::page_manager::{Page, PageImpl, PageNumber, TransactionalMemory};
@@ -12,6 +12,21 @@ use std::ops::{RangeBounds, RangeFull};
 
 // The table of name -> table_id mappings
 const TABLE_TABLE_ID: u64 = 0;
+
+#[derive(Debug)]
+pub struct DbStats {
+    tree_height: usize,
+}
+
+impl DbStats {
+    fn new(tree_height: usize) -> Self {
+        DbStats { tree_height }
+    }
+
+    pub fn tree_height(&self) -> usize {
+        self.tree_height
+    }
+}
 
 pub(in crate) struct Storage {
     mem: TransactionalMemory,
@@ -106,6 +121,14 @@ impl Storage {
 
     pub(in crate) fn rollback_uncommited_writes(&self) -> Result<(), Error> {
         self.mem.rollback_uncommited_writes()
+    }
+
+    pub(in crate) fn storage_stats(&self) -> Result<DbStats, Error> {
+        let tree_height = self
+            .get_root_page_number()
+            .map(|p| tree_height(self.mem.get_page(p), &self.mem))
+            .unwrap_or(0);
+        Ok(DbStats::new(tree_height))
     }
 
     pub(in crate) fn get<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(

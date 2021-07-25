@@ -3,7 +3,7 @@ use crate::btree::RangeIterState::{
 };
 use crate::page_manager::{Page, PageImpl, PageMut, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
-use std::cmp::Ordering;
+use std::cmp::{max, Ordering};
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
@@ -637,6 +637,24 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
     fn write_gt_page(&mut self, page_number: PageNumber) {
         let offset = 17 + self.key_len() + 8;
         self.page.memory_mut()[offset..(offset + 8)].copy_from_slice(&page_number.to_be_bytes());
+    }
+}
+
+pub(in crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => 1,
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page);
+            let left_page = accessor.lte_page();
+            let right_page = accessor.gt_page();
+            let left_height = tree_height(manager.get_page(left_page), manager);
+            let right_height = tree_height(manager.get_page(right_page), manager);
+            let child_height = max(left_height, right_height);
+
+            child_height + 1
+        }
+        _ => unreachable!(),
     }
 }
 
