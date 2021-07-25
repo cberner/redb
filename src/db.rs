@@ -1,4 +1,4 @@
-use crate::storage::Storage;
+use crate::storage::{DbStats, Storage};
 use crate::table::Table;
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
@@ -48,5 +48,9 @@ impl Database {
             .get_or_create_table(name, self.storage.get_root_page_number())?;
         self.storage.commit(Some(root))?;
         Table::new(id, &self.storage)
+    }
+
+    pub fn stats(&self) -> Result<DbStats, Error> {
+        self.storage.storage_stats()
     }
 }
