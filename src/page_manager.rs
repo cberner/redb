@@ -291,6 +291,8 @@ impl TransactionalMemory {
         // All PageMut are registered in open_dirty_pages, and no immutable references are allowed
         // to those pages
         let mem = unsafe { &mut (*address)[start..end] };
+        // Zero the memory
+        mem.copy_from_slice(&vec![0u8; end - start]);
 
         PageMut {
             mem,
