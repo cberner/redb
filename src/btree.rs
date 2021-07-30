@@ -732,13 +732,15 @@ pub(in crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalM
         LEAF => 1,
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
-            let left_page = accessor.child_page(0).unwrap();
-            let right_page = accessor.child_page(1).unwrap();
-            let left_height = tree_height(manager.get_page(left_page), manager);
-            let right_height = tree_height(manager.get_page(right_page), manager);
-            let child_height = max(left_height, right_height);
+            let mut max_child_height = 0;
+            for i in 0..BTREE_ORDER {
+                if let Some(child) = accessor.child_page(i) {
+                    let height = tree_height(manager.get_page(child), manager);
+                    max_child_height = max(max_child_height, height);
+                }
+            }
 
-            child_height + 1
+            max_child_height + 1
         }
         _ => unreachable!(),
     }
