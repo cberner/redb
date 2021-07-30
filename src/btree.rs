@@ -76,7 +76,7 @@ impl<'a> RangeIterState<'a> {
             }),
             RangeIterState::LeafRight { parent, .. } => parent.map(|x| *x),
             RangeIterState::InternalLeft { page, parent, .. } => {
-                let child = InternalAccessor::new(&page).lte_page();
+                let child = InternalAccessor::new(&page).child_page(0);
                 let child_page = manager.get_page(child);
                 match child_page.memory()[0] {
                     LEAF => Some(LeafLeft {
@@ -101,7 +101,7 @@ impl<'a> RangeIterState<'a> {
                 }
             }
             RangeIterState::InternalRight { page, parent, .. } => {
-                let child = InternalAccessor::new(&page).gt_page();
+                let child = InternalAccessor::new(&page).child_page(1);
                 let child_page = manager.get_page(child);
                 match child_page.memory()[0] {
                     LEAF => Some(LeafLeft {
@@ -142,7 +142,7 @@ impl<'a> RangeIterState<'a> {
                 reversed: true,
             }),
             RangeIterState::InternalLeft { page, parent, .. } => {
-                let child = InternalAccessor::new(&page).lte_page();
+                let child = InternalAccessor::new(&page).child_page(0);
                 let child_page = manager.get_page(child);
                 match child_page.memory()[0] {
                     LEAF => Some(LeafRight {
@@ -159,7 +159,7 @@ impl<'a> RangeIterState<'a> {
                 }
             }
             RangeIterState::InternalRight { page, parent, .. } => {
-                let child = InternalAccessor::new(&page).gt_page();
+                let child = InternalAccessor::new(&page).child_page(1);
                 let child_page = manager.get_page(child);
                 match child_page.memory()[0] {
                     LEAF => Some(LeafRight {
@@ -562,15 +562,7 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
     }
 }
 
-// Provides a simple zero-copy way to access a leaf page
-//
-// Entry format is:
-// * (1 byte) type: 2 = INTERNAL
-// * (8 bytes) key_len
-// * (8 bytes) table_id 64-bit big-endian unsigned
-// * (key_len bytes) key_data
-// * (8 bytes) lte_page: page number for keys <= key_data
-// * (8 bytes) gt_page: page number for keys > key_data
+// Provides a simple zero-copy way to access an index page
 struct InternalAccessor<'a: 'b, 'b> {
     page: &'b PageImpl<'a>,
 }
@@ -580,27 +572,68 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
         InternalAccessor { page }
     }
 
-    fn key_len(&self) -> usize {
-        u64::from_be_bytes(self.page.memory()[1..9].try_into().unwrap()) as usize
+    fn key_len(&self, n: usize) -> usize {
+        let mut offset = 9;
+        for _ in 0..n {
+            // Skip the table id
+            offset += 8;
+            // Skip the key
+            offset +=
+                u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap())
+                    as usize;
+            // and the length field
+            offset += 8;
+            // and the page number
+            offset += 8;
+        }
+        // Skip the table id
+        offset += 8;
+        u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
-    fn table_id(&self) -> u64 {
-        u64::from_be_bytes(self.page.memory()[9..17].try_into().unwrap())
+    fn key_offset(&self, n: usize) -> usize {
+        let mut offset = 9;
+        for i in 0..n {
+            // Skip the table id
+            offset += 8;
+            // and the length field
+            offset += 8;
+            // Skip the key data
+            offset += self.key_len(i);
+            // and the page number
+            offset += 8;
+        }
+        // Skip the table id & key length
+        offset + 16
     }
 
-    fn key(&self) -> &[u8] {
-        &self.page.memory()[17..(17 + self.key_len())]
+    fn table_id(&self, n: usize) -> u64 {
+        let offset = self.key_offset(n);
+        u64::from_be_bytes(
+            self.page.memory()[(offset - 16)..(offset - 8)]
+                .try_into()
+                .unwrap(),
+        )
     }
 
-    fn lte_page(&self) -> PageNumber {
-        let offset = 17 + self.key_len();
-        PageNumber(u64::from_be_bytes(
-            self.page.memory()[offset..(offset + 8)].try_into().unwrap(),
-        ))
+    fn key(&self, n: usize) -> &[u8] {
+        let offset = self.key_offset(n);
+        let len = self.key_len(n);
+        &self.page.memory()[offset..(offset + len)]
     }
 
-    fn gt_page(&self) -> PageNumber {
-        let offset = 17 + self.key_len() + 8;
+    fn child_page(&self, n: usize) -> PageNumber {
+        let mut offset = 1;
+        for i in 0..n {
+            // Skip the page number
+            offset += 8;
+            // Skip the table id
+            offset += 8;
+            // and the length field
+            offset += 8;
+            // Skip the key data
+            offset += self.key_len(i);
+        }
         PageNumber(u64::from_be_bytes(
             self.page.memory()[offset..(offset + 8)].try_into().unwrap(),
         ))
@@ -609,6 +642,14 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
 
 // Note the caller is responsible for ensuring that the buffer is large enough
 // and rewriting all fields if any dynamically sized fields are written
+// Layout is:
+// 1 byte: type
+// 8 bytes first page number
+// repeating:
+// * 8 bytes: table id
+// * 8 bytes: key len
+// * n bytes: key data
+// * 8 bytes: page number
 struct InternalBuilder<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
 }
@@ -619,24 +660,57 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
         InternalBuilder { page }
     }
 
-    fn key_len(&self) -> usize {
-        u64::from_be_bytes(self.page.memory()[1..9].try_into().unwrap()) as usize
-    }
-
-    fn write_table_and_key(&mut self, table_id: u64, key: &[u8]) {
-        self.page.memory_mut()[1..9].copy_from_slice(&(key.len() as u64).to_be_bytes());
-        self.page.memory_mut()[9..17].copy_from_slice(&table_id.to_be_bytes());
-        self.page.memory_mut()[17..(17 + key.len())].copy_from_slice(key);
-    }
-
-    fn write_lte_page(&mut self, page_number: PageNumber) {
-        let offset = 17 + self.key_len();
+    fn write_first_page(&mut self, page_number: PageNumber) {
+        let offset = 1;
         self.page.memory_mut()[offset..(offset + 8)].copy_from_slice(&page_number.to_be_bytes());
     }
 
-    fn write_gt_page(&mut self, page_number: PageNumber) {
-        let offset = 17 + self.key_len() + 8;
-        self.page.memory_mut()[offset..(offset + 8)].copy_from_slice(&page_number.to_be_bytes());
+    fn key_offset(&self, n: usize) -> usize {
+        let mut offset = 9;
+        for i in 0..n {
+            // Skip the table id
+            offset += 8;
+            // and the length field
+            offset += 8;
+            // Skip the key data
+            offset += self.key_len(i);
+            // and the page number
+            offset += 8;
+        }
+        // Skip the table id & key length
+        offset + 16
+    }
+
+    fn key_len(&self, n: usize) -> usize {
+        let mut offset = 9;
+        for _ in 0..n {
+            // Skip the table id
+            offset += 8;
+            // Skip the key
+            offset +=
+                u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap())
+                    as usize;
+            // and the length field
+            offset += 8;
+            // and the page number
+            offset += 8;
+        }
+        // Skip the table id
+        offset += 8;
+        u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
+    }
+
+    // Write the nth key and page of values greater than this key, but less than or equal to the next
+    // Caller must write keys & pages in increasing order
+    fn write_nth_key(&mut self, table_id: u64, key: &[u8], page_number: PageNumber, n: usize) {
+        let offset = self.key_offset(n);
+        self.page.memory_mut()[(offset - 16)..(offset - 8)]
+            .copy_from_slice(&table_id.to_be_bytes());
+        self.page.memory_mut()[(offset - 8)..offset]
+            .copy_from_slice(&(key.len() as u64).to_be_bytes());
+        self.page.memory_mut()[offset..(offset + key.len())].copy_from_slice(key);
+        self.page.memory_mut()[(offset + key.len())..(offset + key.len() + 8)]
+            .copy_from_slice(&page_number.to_be_bytes());
     }
 }
 
@@ -646,8 +720,8 @@ pub(in crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalM
         LEAF => 1,
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
-            let left_page = accessor.lte_page();
-            let right_page = accessor.gt_page();
+            let left_page = accessor.child_page(0);
+            let right_page = accessor.child_page(1);
             let left_height = tree_height(manager.get_page(left_page), manager);
             let right_height = tree_height(manager.get_page(right_page), manager);
             let child_height = max(left_height, right_height);
@@ -705,10 +779,10 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             let original_page_number = page.get_page_number();
-            let left_page = accessor.lte_page();
-            let right_page = accessor.gt_page();
+            let left_page = accessor.child_page(0);
+            let right_page = accessor.child_page(1);
             #[allow(clippy::collapsible_else_if)]
-            if cmp_keys::<K>(table, key, accessor.table_id(), accessor.key()).is_le() {
+            if cmp_keys::<K>(table, key, accessor.table_id(0), accessor.key(0)).is_le() {
                 if let Some(page_number) =
                     tree_delete::<K>(manager.get_page(left_page), table, key, manager)
                 {
@@ -738,8 +812,8 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
                         return Some(original_page_number);
                     }
                     return Some(make_index(
-                        accessor.table_id(),
-                        accessor.key(),
+                        accessor.table_id(0),
+                        accessor.key(0),
                         left_page,
                         page_number,
                         manager,
@@ -843,9 +917,8 @@ pub(in crate) fn make_index(
 ) -> PageNumber {
     let mut page = manager.allocate();
     let mut builder = InternalBuilder::new(&mut page);
-    builder.write_table_and_key(table, &key);
-    builder.write_lte_page(lte_page);
-    builder.write_gt_page(gt_page);
+    builder.write_first_page(lte_page);
+    builder.write_nth_key(table, &key, gt_page, 0);
     page.get_page_number()
 }
 
@@ -962,9 +1035,10 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
-            let mut left_page = accessor.lte_page();
-            let mut right_page = accessor.gt_page();
-            let guard = if cmp_keys::<K>(table, key, accessor.table_id(), accessor.key()).is_le() {
+            let mut left_page = accessor.child_page(0);
+            let mut right_page = accessor.child_page(1);
+            let guard = if cmp_keys::<K>(table, key, accessor.table_id(0), accessor.key(0)).is_le()
+            {
                 let (page, guard) =
                     tree_insert::<K>(manager.get_page(left_page), table, key, value, manager);
                 left_page = page;
@@ -978,9 +1052,8 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
 
             let mut page = manager.allocate();
             let mut builder = InternalBuilder::new(&mut page);
-            builder.write_table_and_key(accessor.table_id(), accessor.key());
-            builder.write_lte_page(left_page);
-            builder.write_gt_page(right_page);
+            builder.write_first_page(left_page);
+            builder.write_nth_key(accessor.table_id(0), accessor.key(0), right_page, 0);
 
             (page.get_page_number(), guard)
         }
@@ -1028,9 +1101,9 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
-            let left_page = accessor.lte_page();
-            let right_page = accessor.gt_page();
-            if cmp_keys::<K>(table, query, accessor.table_id(), accessor.key()).is_le() {
+            let left_page = accessor.child_page(0);
+            let right_page = accessor.child_page(1);
+            if cmp_keys::<K>(table, query, accessor.table_id(0), accessor.key(0)).is_le() {
                 lookup_in_raw::<K>(manager.get_page(left_page), table, query, manager)
             } else {
                 lookup_in_raw::<K>(manager.get_page(right_page), table, query, manager)
