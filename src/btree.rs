@@ -8,6 +8,8 @@ use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 
+const BTREE_ORDER: usize = 3;
+
 pub struct AccessGuardMut<'a> {
     page: PageMut<'a>,
     offset: usize,
@@ -76,7 +78,7 @@ impl<'a> RangeIterState<'a> {
             }),
             RangeIterState::LeafRight { parent, .. } => parent.map(|x| *x),
             RangeIterState::InternalLeft { page, parent, .. } => {
-                let child = InternalAccessor::new(&page).child_page(0);
+                let child = InternalAccessor::new(&page).child_page(0).unwrap();
                 let child_page = manager.get_page(child);
                 match child_page.memory()[0] {
                     LEAF => Some(LeafLeft {
@@ -101,7 +103,7 @@ impl<'a> RangeIterState<'a> {
                 }
             }
             RangeIterState::InternalRight { page, parent, .. } => {
-                let child = InternalAccessor::new(&page).child_page(1);
+                let child = InternalAccessor::new(&page).child_page(1).unwrap();
                 let child_page = manager.get_page(child);
                 match child_page.memory()[0] {
                     LEAF => Some(LeafLeft {
@@ -142,7 +144,7 @@ impl<'a> RangeIterState<'a> {
                 reversed: true,
             }),
             RangeIterState::InternalLeft { page, parent, .. } => {
-                let child = InternalAccessor::new(&page).child_page(0);
+                let child = InternalAccessor::new(&page).child_page(0).unwrap();
                 let child_page = manager.get_page(child);
                 match child_page.memory()[0] {
                     LEAF => Some(LeafRight {
@@ -159,7 +161,7 @@ impl<'a> RangeIterState<'a> {
                 }
             }
             RangeIterState::InternalRight { page, parent, .. } => {
-                let child = InternalAccessor::new(&page).child_page(1);
+                let child = InternalAccessor::new(&page).child_page(1).unwrap();
                 let child_page = manager.get_page(child);
                 match child_page.memory()[0] {
                     LEAF => Some(LeafRight {
@@ -607,22 +609,29 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
         offset + 16
     }
 
-    fn table_id(&self, n: usize) -> u64 {
+    fn table_id(&self, n: usize) -> Option<u64> {
         let offset = self.key_offset(n);
-        u64::from_be_bytes(
+        let len = self.key_len(n);
+        if len == 0 {
+            return None;
+        }
+        Some(u64::from_be_bytes(
             self.page.memory()[(offset - 16)..(offset - 8)]
                 .try_into()
                 .unwrap(),
-        )
+        ))
     }
 
-    fn key(&self, n: usize) -> &[u8] {
+    fn key(&self, n: usize) -> Option<&[u8]> {
         let offset = self.key_offset(n);
         let len = self.key_len(n);
-        &self.page.memory()[offset..(offset + len)]
+        if len == 0 {
+            return None;
+        }
+        Some(&self.page.memory()[offset..(offset + len)])
     }
 
-    fn child_page(&self, n: usize) -> PageNumber {
+    fn child_page(&self, n: usize) -> Option<PageNumber> {
         let mut offset = 1;
         for i in 0..n {
             // Skip the page number
@@ -633,10 +642,13 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
             offset += 8;
             // Skip the key data
             offset += self.key_len(i);
+            if self.key_len(i) == 0 {
+                return None;
+            }
         }
-        PageNumber(u64::from_be_bytes(
+        Some(PageNumber(u64::from_be_bytes(
             self.page.memory()[offset..(offset + 8)].try_into().unwrap(),
-        ))
+        )))
     }
 }
 
@@ -647,7 +659,7 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
 // 8 bytes first page number
 // repeating:
 // * 8 bytes: table id
-// * 8 bytes: key len
+// * 8 bytes: key len. Zero length indicates no key
 // * n bytes: key data
 // * 8 bytes: page number
 struct InternalBuilder<'a: 'b, 'b> {
@@ -720,8 +732,8 @@ pub(in crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalM
         LEAF => 1,
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
-            let left_page = accessor.child_page(0);
-            let right_page = accessor.child_page(1);
+            let left_page = accessor.child_page(0).unwrap();
+            let right_page = accessor.child_page(1).unwrap();
             let left_height = tree_height(manager.get_page(left_page), manager);
             let right_height = tree_height(manager.get_page(right_page), manager);
             let child_height = max(left_height, right_height);
@@ -779,10 +791,17 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             let original_page_number = page.get_page_number();
-            let left_page = accessor.child_page(0);
-            let right_page = accessor.child_page(1);
+            let left_page = accessor.child_page(0).unwrap();
+            let right_page = accessor.child_page(1).unwrap();
             #[allow(clippy::collapsible_else_if)]
-            if cmp_keys::<K>(table, key, accessor.table_id(0), accessor.key(0)).is_le() {
+            if cmp_keys::<K>(
+                table,
+                key,
+                accessor.table_id(0).unwrap(),
+                accessor.key(0).unwrap(),
+            )
+            .is_le()
+            {
                 if let Some(page_number) =
                     tree_delete::<K>(manager.get_page(left_page), table, key, manager)
                 {
@@ -812,8 +831,8 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
                         return Some(original_page_number);
                     }
                     return Some(make_index(
-                        accessor.table_id(0),
-                        accessor.key(0),
+                        accessor.table_id(0).unwrap(),
+                        accessor.key(0).unwrap(),
                         left_page,
                         page_number,
                         manager,
@@ -1035,9 +1054,15 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
-            let mut left_page = accessor.child_page(0);
-            let mut right_page = accessor.child_page(1);
-            let guard = if cmp_keys::<K>(table, key, accessor.table_id(0), accessor.key(0)).is_le()
+            let mut left_page = accessor.child_page(0).unwrap();
+            let mut right_page = accessor.child_page(1).unwrap();
+            let guard = if cmp_keys::<K>(
+                table,
+                key,
+                accessor.table_id(0).unwrap(),
+                accessor.key(0).unwrap(),
+            )
+            .is_le()
             {
                 let (page, guard) =
                     tree_insert::<K>(manager.get_page(left_page), table, key, value, manager);
@@ -1053,7 +1078,12 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
             let mut page = manager.allocate();
             let mut builder = InternalBuilder::new(&mut page);
             builder.write_first_page(left_page);
-            builder.write_nth_key(accessor.table_id(0), accessor.key(0), right_page, 0);
+            builder.write_nth_key(
+                accessor.table_id(0).unwrap(),
+                accessor.key(0).unwrap(),
+                right_page,
+                0,
+            );
 
             (page.get_page_number(), guard)
         }
@@ -1101,13 +1131,25 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
-            let left_page = accessor.child_page(0);
-            let right_page = accessor.child_page(1);
-            if cmp_keys::<K>(table, query, accessor.table_id(0), accessor.key(0)).is_le() {
-                lookup_in_raw::<K>(manager.get_page(left_page), table, query, manager)
-            } else {
-                lookup_in_raw::<K>(manager.get_page(right_page), table, query, manager)
+            for i in 0..(BTREE_ORDER - 1) {
+                if let Some(table_id) = accessor.table_id(i) {
+                    let key = accessor.key(i).unwrap();
+                    if cmp_keys::<K>(table, query, table_id, key).is_le() {
+                        let lte_page = accessor.child_page(i).unwrap();
+                        return lookup_in_raw::<K>(
+                            manager.get_page(lte_page),
+                            table,
+                            query,
+                            manager,
+                        );
+                    }
+                } else {
+                    let gt_page = accessor.child_page(i).unwrap();
+                    return lookup_in_raw::<K>(manager.get_page(gt_page), table, query, manager);
+                }
             }
+            let last_page = accessor.child_page(BTREE_ORDER - 1).unwrap();
+            return lookup_in_raw::<K>(manager.get_page(last_page), table, query, manager);
         }
         _ => unreachable!(),
     }
