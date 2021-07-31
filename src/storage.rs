@@ -1,6 +1,6 @@
 use crate::btree::{
-    lookup_in_raw, make_mut_single_leaf, tree_delete, tree_height, tree_insert, AccessGuardMut,
-    BtreeEntry, BtreeRangeIter,
+    lookup_in_raw, make_mut_single_leaf, print_tree, tree_delete, tree_height, tree_insert,
+    AccessGuardMut, BtreeEntry, BtreeRangeIter,
 };
 use crate::page_manager::{Page, PageImpl, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
@@ -130,6 +130,18 @@ impl Storage {
             .map(|p| tree_height(self.mem.get_page(p), &self.mem))
             .unwrap_or(0);
         Ok(DbStats::new(tree_height))
+    }
+
+    #[allow(dead_code)]
+    pub(in crate) fn print_debug(&self) {
+        if let Some(page) = self.get_root_page_number() {
+            print_tree(self.mem.get_page(page), &self.mem);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(in crate) fn print_dirty_debug(&self, root_page: PageNumber) {
+        print_tree(self.mem.get_page(root_page), &self.mem);
     }
 
     pub(in crate) fn get<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(

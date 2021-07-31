@@ -3,6 +3,7 @@ use memmap2::MmapMut;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::convert::TryInto;
+use std::fmt::{Debug, Formatter};
 use std::sync::{Mutex, MutexGuard};
 
 const DB_METADATA_PAGE: u64 = 0;
@@ -114,6 +115,12 @@ pub(in crate) trait Page {
 pub struct PageImpl<'a> {
     mem: &'a [u8],
     page_number: PageNumber,
+}
+
+impl<'a> Debug for PageImpl<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("PageImpl: page_number={}", self.page_number.0))
+    }
 }
 
 impl<'a> Page for PageImpl<'a> {

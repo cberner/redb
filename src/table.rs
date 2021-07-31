@@ -260,7 +260,6 @@ mod test {
         let mut iter = read_txn.get_range(&start..=&end).unwrap();
         for i in (3..=7u8).rev() {
             let entry = iter.next().unwrap();
-            dbg!(entry.table_id(), entry.key());
             assert_eq!(&[i], entry.key());
             assert_eq!(b"value", entry.value());
         }

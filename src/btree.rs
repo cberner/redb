@@ -1,6 +1,4 @@
-use crate::btree::RangeIterState::{
-    InitialState, InternalLeft, InternalRight, LeafLeft, LeafRight,
-};
+use crate::btree::RangeIterState::{InitialState, Internal, LeafLeft, LeafRight};
 use crate::page_manager::{Page, PageImpl, PageMut, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
 use std::cmp::{max, Ordering};
@@ -31,6 +29,7 @@ impl<'a> AsMut<[u8]> for AccessGuardMut<'a> {
 const LEAF: u8 = 1;
 const INTERNAL: u8 = 2;
 
+#[derive(Debug)]
 enum RangeIterState<'a> {
     InitialState(PageImpl<'a>, bool),
     LeafLeft {
@@ -43,13 +42,9 @@ enum RangeIterState<'a> {
         parent: Option<Box<RangeIterState<'a>>>,
         reversed: bool,
     },
-    InternalLeft {
+    Internal {
         page: PageImpl<'a>,
-        parent: Option<Box<RangeIterState<'a>>>,
-        reversed: bool,
-    },
-    InternalRight {
-        page: PageImpl<'a>,
+        child: usize,
         parent: Option<Box<RangeIterState<'a>>>,
         reversed: bool,
     },
@@ -64,8 +59,9 @@ impl<'a> RangeIterState<'a> {
                     parent: None,
                     reversed: false,
                 }),
-                INTERNAL => Some(InternalLeft {
+                INTERNAL => Some(Internal {
                     page: root_page,
+                    child: 0,
                     parent: None,
                     reversed: false,
                 }),
@@ -77,42 +73,32 @@ impl<'a> RangeIterState<'a> {
                 reversed: false,
             }),
             RangeIterState::LeafRight { parent, .. } => parent.map(|x| *x),
-            RangeIterState::InternalLeft { page, parent, .. } => {
-                let child = InternalAccessor::new(&page).child_page(0).unwrap();
-                let child_page = manager.get_page(child);
-                match child_page.memory()[0] {
-                    LEAF => Some(LeafLeft {
-                        page: child_page,
-                        parent: Some(Box::new(InternalRight {
-                            page,
-                            parent,
-                            reversed: false,
-                        })),
+            RangeIterState::Internal {
+                page,
+                child,
+                mut parent,
+                ..
+            } => {
+                let accessor = InternalAccessor::new(&page);
+                let child_page = accessor.child_page(child).unwrap();
+                let child_page = manager.get_page(child_page);
+                if accessor.child_page(child + 1).is_some() {
+                    parent = Some(Box::new(Internal {
+                        page,
+                        child: child + 1,
+                        parent,
                         reversed: false,
-                    }),
-                    INTERNAL => Some(InternalLeft {
-                        page: child_page,
-                        parent: Some(Box::new(InternalRight {
-                            page,
-                            parent,
-                            reversed: false,
-                        })),
-                        reversed: false,
-                    }),
-                    _ => unreachable!(),
+                    }));
                 }
-            }
-            RangeIterState::InternalRight { page, parent, .. } => {
-                let child = InternalAccessor::new(&page).child_page(1).unwrap();
-                let child_page = manager.get_page(child);
                 match child_page.memory()[0] {
                     LEAF => Some(LeafLeft {
                         page: child_page,
                         parent,
                         reversed: false,
                     }),
-                    INTERNAL => Some(InternalLeft {
+                    INTERNAL => Some(Internal {
                         page: child_page,
+                        child: 0,
                         parent,
                         reversed: false,
                     }),
@@ -130,11 +116,23 @@ impl<'a> RangeIterState<'a> {
                     parent: None,
                     reversed: true,
                 }),
-                INTERNAL => Some(InternalRight {
-                    page: root_page,
-                    parent: None,
-                    reversed: true,
-                }),
+                INTERNAL => {
+                    let accessor = InternalAccessor::new(&root_page);
+                    let mut index = 0;
+                    for i in (0..BTREE_ORDER).rev() {
+                        if accessor.child_page(i).is_some() {
+                            index = i;
+                            break;
+                        }
+                    }
+                    assert!(index > 0);
+                    Some(Internal {
+                        page: root_page,
+                        child: index,
+                        parent: None,
+                        reversed: true,
+                    })
+                }
                 _ => unreachable!(),
             },
             RangeIterState::LeafLeft { parent, .. } => parent.map(|x| *x),
@@ -143,45 +141,45 @@ impl<'a> RangeIterState<'a> {
                 parent,
                 reversed: true,
             }),
-            RangeIterState::InternalLeft { page, parent, .. } => {
-                let child = InternalAccessor::new(&page).child_page(0).unwrap();
-                let child_page = manager.get_page(child);
-                match child_page.memory()[0] {
-                    LEAF => Some(LeafRight {
-                        page: child_page,
+            RangeIterState::Internal {
+                page,
+                child,
+                mut parent,
+                ..
+            } => {
+                let child_page = InternalAccessor::new(&page).child_page(child).unwrap();
+                let child_page = manager.get_page(child_page);
+                if child > 0 {
+                    parent = Some(Box::new(Internal {
+                        page,
+                        child: child - 1,
                         parent,
                         reversed: true,
-                    }),
-                    INTERNAL => Some(InternalRight {
-                        page: child_page,
-                        parent,
-                        reversed: true,
-                    }),
-                    _ => unreachable!(),
+                    }));
                 }
-            }
-            RangeIterState::InternalRight { page, parent, .. } => {
-                let child = InternalAccessor::new(&page).child_page(1).unwrap();
-                let child_page = manager.get_page(child);
                 match child_page.memory()[0] {
                     LEAF => Some(LeafRight {
                         page: child_page,
-                        parent: Some(Box::new(InternalLeft {
-                            page,
-                            parent,
-                            reversed: true,
-                        })),
+                        parent,
                         reversed: true,
                     }),
-                    INTERNAL => Some(InternalRight {
-                        page: child_page,
-                        parent: Some(Box::new(InternalLeft {
-                            page,
+                    INTERNAL => {
+                        let accessor = InternalAccessor::new(&child_page);
+                        let mut index = 0;
+                        for i in (0..BTREE_ORDER).rev() {
+                            if accessor.child_page(i).is_some() {
+                                index = i;
+                                break;
+                            }
+                        }
+                        assert!(index > 0);
+                        Some(Internal {
+                            page: child_page,
+                            child: index,
                             parent,
                             reversed: true,
-                        })),
-                        reversed: true,
-                    }),
+                        })
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -211,14 +209,7 @@ impl<'a> RangeIterState<'a> {
                     self.forward_next(manager)
                 }
             }
-            RangeIterState::InternalLeft { reversed, .. } => {
-                if *reversed {
-                    self.backward_next(manager)
-                } else {
-                    self.forward_next(manager)
-                }
-            }
-            RangeIterState::InternalRight { reversed, .. } => {
+            RangeIterState::Internal { reversed, .. } => {
                 if *reversed {
                     self.backward_next(manager)
                 } else {
@@ -746,6 +737,86 @@ pub(in crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalM
     }
 }
 
+pub(in crate) fn print_node(page: &PageImpl) {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(page);
+            eprint!(
+                "Leaf[ (page={}), lt_table={} lt_key={:?}",
+                page.get_page_number().0,
+                accessor.lesser().table_id(),
+                accessor.lesser().key()
+            );
+            if let Some(greater) = accessor.greater() {
+                eprint!(
+                    " gt_table={} gt_key={:?}",
+                    greater.table_id(),
+                    greater.key()
+                );
+            }
+            eprint!("]");
+        }
+        INTERNAL => {
+            let accessor = InternalAccessor::new(page);
+            eprint!(
+                "Internal[ (page={}), child_0={}",
+                page.get_page_number().0,
+                accessor.child_page(0).unwrap().0
+            );
+            for i in 0..(BTREE_ORDER - 1) {
+                if let Some(child) = accessor.child_page(i + 1) {
+                    let table = accessor.table_id(i).unwrap();
+                    let key = accessor.key(i).unwrap();
+                    eprint!(" table_{}={}", i, table);
+                    eprint!(" key_{}={:?}", i, key);
+                    eprint!(" child_{}={}", i + 1, child.0);
+                }
+            }
+            eprint!("]");
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub(in crate) fn node_children<'a>(
+    page: &PageImpl<'a>,
+    manager: &'a TransactionalMemory,
+) -> Vec<PageImpl<'a>> {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            vec![]
+        }
+        INTERNAL => {
+            let mut children = vec![];
+            let accessor = InternalAccessor::new(&page);
+            for i in 0..BTREE_ORDER {
+                if let Some(child) = accessor.child_page(i) {
+                    children.push(manager.get_page(child));
+                }
+            }
+            children
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub(in crate) fn print_tree<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) {
+    let mut pages = vec![page];
+    while !pages.is_empty() {
+        let mut next_children = vec![];
+        for page in pages.drain(..) {
+            next_children.extend(node_children(&page, manager));
+            print_node(&page);
+            eprint!("  ");
+        }
+        eprintln!();
+
+        pages = next_children;
+    }
+}
+
 // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
 // If key is not found, guaranteed not to modify the tree
 #[allow(clippy::needless_return)]
@@ -952,6 +1023,28 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
     value: &[u8],
     manager: &'a TransactionalMemory,
 ) -> (PageNumber, AccessGuardMut<'a>) {
+    let (page1, more, guard) = tree_insert_helper::<K>(page, table, key, value, manager);
+
+    if let Some((table, key, page2)) = more {
+        let index_page = make_index(table, &key, page1, page2, manager);
+        (index_page, guard)
+    } else {
+        (page1, guard)
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
+    page: PageImpl<'a>,
+    table: u64,
+    key: &[u8],
+    value: &[u8],
+    manager: &'a TransactionalMemory,
+) -> (
+    PageNumber,
+    Option<(u64, Vec<u8>, PageNumber)>,
+    AccessGuardMut<'a>,
+) {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -963,25 +1056,26 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
                         let left_page = page.get_page_number();
 
                         let (right_page, guard) = make_mut_single_leaf(table, key, value, manager);
-                        let index_page = make_index(
-                            entry.table_id(),
-                            entry.key(),
+
+                        (
                             left_page,
-                            right_page,
+                            Some((entry.table_id(), entry.key().to_vec(), right_page)),
+                            guard,
+                        )
+                    }
+                    Ordering::Equal => {
+                        let (new_page, guard) = make_mut_double_leaf_right::<K>(
+                            accessor.lesser().table_id(),
+                            accessor.lesser().key(),
+                            accessor.lesser().value(),
+                            table,
+                            key,
+                            value,
                             manager,
                         );
 
-                        (index_page, guard)
+                        (new_page, None, guard)
                     }
-                    Ordering::Equal => make_mut_double_leaf_right::<K>(
-                        accessor.lesser().table_id(),
-                        accessor.lesser().key(),
-                        accessor.lesser().value(),
-                        table,
-                        key,
-                        value,
-                        manager,
-                    ),
                     Ordering::Greater => {
                         let right_table = entry.table_id();
                         let right_key = entry.key();
@@ -998,35 +1092,36 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
                                 );
                                 let right =
                                     make_single_leaf(right_table, right_key, right_value, manager);
-                                let index_page = make_index(table, key, left, right, manager);
 
-                                (index_page, guard)
+                                (left, Some((table, key.to_vec(), right)), guard)
                             }
-                            Ordering::Equal => make_mut_double_leaf_left::<K>(
-                                table,
-                                key,
-                                value,
-                                right_table,
-                                right_key,
-                                right_value,
-                                manager,
-                            ),
+                            Ordering::Equal => {
+                                let (new_page, guard) = make_mut_double_leaf_left::<K>(
+                                    table,
+                                    key,
+                                    value,
+                                    right_table,
+                                    right_key,
+                                    right_value,
+                                    manager,
+                                );
+
+                                (new_page, None, guard)
+                            }
                             Ordering::Greater => {
                                 let (left, guard) = make_mut_double_leaf_left::<K>(
                                     table, key, value, left_table, left_key, left_value, manager,
                                 );
                                 let right =
                                     make_single_leaf(right_table, right_key, right_value, manager);
-                                let index_page =
-                                    make_index(left_table, &left_key, left, right, manager);
 
-                                (index_page, guard)
+                                (left, Some((left_table, left_key.to_vec(), right)), guard)
                             }
                         }
                     }
                 }
             } else {
-                match cmp_keys::<K>(
+                let (new_page, guard) = match cmp_keys::<K>(
                     accessor.lesser().table_id(),
                     accessor.lesser().key(),
                     table,
@@ -1051,43 +1146,100 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
                         accessor.lesser().value(),
                         manager,
                     ),
-                }
+                };
+
+                (new_page, None, guard)
             }
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
-            let mut left_page = accessor.child_page(0).unwrap();
-            let mut right_page = accessor.child_page(1).unwrap();
-            let guard = if cmp_keys::<K>(
-                table,
-                key,
-                accessor.table_id(0).unwrap(),
-                accessor.key(0).unwrap(),
-            )
-            .is_le()
-            {
-                let (page, guard) =
-                    tree_insert::<K>(manager.get_page(left_page), table, key, value, manager);
-                left_page = page;
-                guard
-            } else {
-                let (page, guard) =
-                    tree_insert::<K>(manager.get_page(right_page), table, key, value, manager);
-                right_page = page;
-                guard
-            };
+            let mut children = vec![];
+            let mut index_table_keys = vec![];
+            let mut guard = None;
+            for i in 0..BTREE_ORDER {
+                if let Some(index_table) = accessor.table_id(i) {
+                    let index_key = accessor.key(i).unwrap();
+                    if cmp_keys::<K>(table, key, index_table, index_key).is_le() && guard.is_none()
+                    {
+                        let lte_page = accessor.child_page(i).unwrap();
+                        let (page1, more, guard2) = tree_insert_helper::<K>(
+                            manager.get_page(lte_page),
+                            table,
+                            key,
+                            value,
+                            manager,
+                        );
+                        children.push(page1);
+                        if let Some((index_table, index_key, page2)) = more {
+                            index_table_keys.push((index_table, index_key));
+                            children.push(page2);
+                        }
+                        index_table_keys.push((index_table, index_key.to_vec()));
+                        assert!(guard.is_none());
+                        guard = Some(guard2);
+                    } else {
+                        children.push(accessor.child_page(i).unwrap());
+                        index_table_keys.push((index_table, index_key.to_vec()));
+                    }
+                } else {
+                    let last_page = accessor.child_page(i).unwrap();
+                    if guard.is_some() {
+                        // Already found the insertion place, so just copy
+                        children.push(last_page);
+                        break;
+                    }
+                    let (page1, more, guard2) = tree_insert_helper::<K>(
+                        manager.get_page(last_page),
+                        table,
+                        key,
+                        value,
+                        manager,
+                    );
+                    children.push(page1);
+                    if let Some((index_table, index_key, page2)) = more {
+                        index_table_keys.push((index_table, index_key));
+                        children.push(page2);
+                    }
+                    assert!(guard.is_none());
+                    guard = Some(guard2);
+                    break;
+                }
+            }
+            let guard = guard.unwrap();
+            assert_eq!(children.len() - 1, index_table_keys.len());
 
             let mut page = manager.allocate();
             let mut builder = InternalBuilder::new(&mut page);
-            builder.write_first_page(left_page);
-            builder.write_nth_key(
-                accessor.table_id(0).unwrap(),
-                accessor.key(0).unwrap(),
-                right_page,
-                0,
-            );
+            if children.len() <= BTREE_ORDER {
+                builder.write_first_page(children[0]);
+                for (i, ((table, key), page_number)) in index_table_keys
+                    .iter()
+                    .zip(children.iter().skip(1))
+                    .enumerate()
+                {
+                    builder.write_nth_key(*table, key, *page_number, i);
+                }
+                (page.get_page_number(), None, guard)
+            } else {
+                assert_eq!(BTREE_ORDER, 3);
+                builder.write_first_page(children[0]);
+                let (table, key) = &index_table_keys[0];
+                builder.write_nth_key(*table, &key, children[1], 0);
 
-            (page.get_page_number(), guard)
+                let (index_table, index_key) = &index_table_keys[1];
+
+                let mut page2 = manager.allocate();
+                let mut builder2 = InternalBuilder::new(&mut page2);
+                builder2.write_first_page(children[2]);
+                let (table, key) = &index_table_keys[2];
+                builder2.write_nth_key(*table, &key, children[3], 0);
+
+                (
+                    page.get_page_number(),
+                    Some((*index_table, index_key.to_vec(), page2.get_page_number())),
+                    guard,
+                )
+            }
         }
         _ => unreachable!(),
     }

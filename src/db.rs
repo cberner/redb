@@ -53,4 +53,8 @@ impl Database {
     pub fn stats(&self) -> Result<DbStats, Error> {
         self.storage.storage_stats()
     }
+
+    pub fn print_debug(&self) {
+        self.storage.print_debug()
+    }
 }
