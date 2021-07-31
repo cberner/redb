@@ -25,6 +25,13 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> WriteTransaction<'mmap, 
         }
     }
 
+    #[allow(dead_code)]
+    pub(in crate) fn print_debug(&self) {
+        if let Some(page) = self.root_page {
+            self.storage.print_dirty_debug(page);
+        }
+    }
+
     pub fn insert(&mut self, key: &K, value: &V) -> Result<(), Error> {
         self.root_page = Some(self.storage.insert::<K>(
             self.table_id,

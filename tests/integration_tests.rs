@@ -56,7 +56,6 @@ fn persistence() {
 }
 
 #[test]
-#[ignore]
 fn tree_balance() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
