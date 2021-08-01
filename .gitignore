@@ -16,3 +16,7 @@ redb.iml
 
 **/__pycache__
 **/*.pyc
+
+# Profiling
+perf.data*
+flamegraph.svg
