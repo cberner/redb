@@ -9,6 +9,10 @@ pre:
 release: pre
 	cargo build --release
 
+flamegraph:
+	cargo flamegraph --bench lmdb_benchmark
+	google-chrome ./flamegraph.svg
+
 release_native: pre
 	RUSTFLAGS='-C target-cpu=native' cargo build --release
 
