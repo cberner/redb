@@ -78,4 +78,21 @@ fn tree_balance() {
         height,
         expected_height
     );
+
+    let reduce_to = 9;
+
+    let mut txn = table.begin_write().unwrap();
+    for i in 0..(elements - reduce_to) {
+        txn.remove(&i.to_be_bytes()).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let expected_height = (reduce_to as f32).log2() as usize + 1;
+    let height = db.stats().unwrap().tree_height();
+    assert!(
+        height <= expected_height,
+        "height={} expected={}",
+        height,
+        expected_height
+    );
 }

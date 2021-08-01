@@ -1,3 +1,4 @@
+use crate::btree::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
 use crate::btree::RangeIterState::{InitialState, Internal, LeafLeft, LeafRight};
 use crate::page_manager::{Page, PageImpl, PageMut, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
@@ -513,14 +514,6 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
             Some(entry)
         }
     }
-
-    fn max_key(&self) -> (u64, &'b [u8]) {
-        if let Some(greater) = self.greater() {
-            (greater.table_id(), greater.key())
-        } else {
-            (self.lesser().table_id(), self.lesser().key())
-        }
-    }
 }
 
 // Note the caller is responsible for ensuring that the buffer is large enough
@@ -817,15 +810,252 @@ pub(in crate) fn print_tree<'a>(page: PageImpl<'a>, manager: &'a TransactionalMe
     }
 }
 
-// Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
-// If key is not found, guaranteed not to modify the tree
-#[allow(clippy::needless_return)]
 pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     table: u64,
     key: &[u8],
     manager: &'a TransactionalMemory,
 ) -> Option<PageNumber> {
+    match tree_delete_helper::<K>(page, table, key, manager) {
+        DeletionResult::Subtree(page) => Some(page),
+        DeletionResult::PartialLeaf(entries) => {
+            assert!(entries.is_empty());
+            None
+        }
+        DeletionResult::PartialInternal(pages) => {
+            assert_eq!(pages.len(), 1);
+            Some(pages[0])
+        }
+    }
+}
+
+enum DeletionResult {
+    // A proper subtree
+    Subtree(PageNumber),
+    // A leaf subtree with too few entries
+    PartialLeaf(Vec<(u64, Vec<u8>, Vec<u8>)>),
+    // A index page subtree with too few children
+    PartialInternal(Vec<PageNumber>),
+}
+
+// Must return the pages in order
+fn split_leaf(
+    leaf: PageNumber,
+    partial: &[(u64, Vec<u8>, Vec<u8>)],
+    manager: &TransactionalMemory,
+) -> Option<(PageNumber, PageNumber)> {
+    assert!(partial.is_empty());
+    let page = manager.get_page(leaf);
+    let accessor = LeafAccessor::new(&page);
+    if let Some(greater) = accessor.greater() {
+        let lesser = accessor.lesser();
+        let page1 = make_single_leaf(lesser.table_id(), lesser.key(), lesser.value(), manager);
+        let page2 = make_single_leaf(greater.table_id(), greater.key(), greater.value(), manager);
+        Some((page1, page2))
+    } else {
+        None
+    }
+}
+
+fn merge_leaf(
+    leaf: PageNumber,
+    partial: &[(u64, Vec<u8>, Vec<u8>)],
+    manager: &TransactionalMemory,
+) -> PageNumber {
+    let page = manager.get_page(leaf);
+    let accessor = LeafAccessor::new(&page);
+    assert!(accessor.greater().is_none());
+    assert!(partial.is_empty());
+    leaf
+}
+
+// Must return the pages in order
+fn split_index(
+    index: PageNumber,
+    partial: &[PageNumber],
+    manager: &TransactionalMemory,
+) -> Option<(PageNumber, PageNumber)> {
+    assert_eq!(partial.len(), 1);
+    assert_eq!(BTREE_ORDER, 3);
+    let page = manager.get_page(index);
+    let accessor = InternalAccessor::new(&page);
+
+    accessor.child_page(BTREE_ORDER - 1)?;
+
+    let mut pages = vec![];
+    pages.extend_from_slice(partial);
+    for i in 0..BTREE_ORDER {
+        if let Some(page_number) = accessor.child_page(i) {
+            pages.push(page_number);
+        }
+    }
+
+    pages.sort_by_key(|p| max_table_key(manager.get_page(*p), manager));
+    assert_eq!(pages.len(), 4);
+
+    let (table, key) = max_table_key(manager.get_page(pages[0]), manager);
+    let page1 = make_index(table, &key, pages[0], pages[1], manager);
+    let (table, key) = max_table_key(manager.get_page(pages[2]), manager);
+    let page2 = make_index(table, &key, pages[2], pages[3], manager);
+
+    Some((page1, page2))
+}
+
+fn merge_index(
+    index: PageNumber,
+    partial: &[PageNumber],
+    manager: &TransactionalMemory,
+) -> PageNumber {
+    assert_eq!(partial.len(), 1);
+    assert_eq!(BTREE_ORDER, 3);
+    let page = manager.get_page(index);
+    let accessor = InternalAccessor::new(&page);
+    assert!(accessor.child_page(BTREE_ORDER - 1).is_none());
+
+    let mut pages = vec![];
+    pages.extend_from_slice(partial);
+    for i in 0..BTREE_ORDER {
+        if let Some(page_number) = accessor.child_page(i) {
+            pages.push(page_number);
+        }
+    }
+
+    pages.sort_by_key(|p| max_table_key(manager.get_page(*p), manager));
+    assert!(pages.len() <= BTREE_ORDER);
+
+    let mut page = manager.allocate();
+    let mut builder = InternalBuilder::new(&mut page);
+    builder.write_first_page(pages[0]);
+    for i in 0..(pages.len() - 1) {
+        let (table, key) = max_table_key(manager.get_page(pages[i]), manager);
+        let next_child = pages[i + 1];
+        builder.write_nth_key(table, &key, next_child, i);
+    }
+
+    page.get_page_number()
+}
+
+fn repair_children(
+    children: Vec<DeletionResult>,
+    manager: &TransactionalMemory,
+) -> Vec<PageNumber> {
+    if children.iter().all(|x| matches!(x, Subtree(_))) {
+        children
+            .iter()
+            .map(|x| match x {
+                Subtree(page_number) => *page_number,
+                _ => unreachable!(),
+            })
+            .collect()
+    } else if children.iter().any(|x| matches!(x, PartialLeaf(_))) {
+        let mut result = vec![];
+        let mut repaired = false;
+        for i in 0..children.len() {
+            if let Subtree(page_number) = &children[i] {
+                if repaired {
+                    result.push(*page_number);
+                    continue;
+                }
+                if i > 0 {
+                    if let Some(PartialLeaf(partials)) = children.get(i - 1) {
+                        if let Some((page1, page2)) = split_leaf(*page_number, partials, manager) {
+                            result.push(page1);
+                            result.push(page2);
+                            repaired = true;
+                        } else {
+                            result.push(merge_leaf(*page_number, partials, manager));
+                            repaired = true;
+                        }
+                    }
+                }
+                if let Some(PartialLeaf(partials)) = children.get(i + 1) {
+                    if let Some((page1, page2)) = split_leaf(*page_number, partials, manager) {
+                        result.push(page1);
+                        result.push(page2);
+                        repaired = true;
+                    } else {
+                        result.push(merge_leaf(*page_number, partials, manager));
+                        repaired = true;
+                    }
+                }
+            }
+        }
+        result
+    } else if children.iter().any(|x| matches!(x, PartialInternal(_))) {
+        let mut result = vec![];
+        let mut repaired = false;
+        for i in 0..children.len() {
+            if let Subtree(page_number) = &children[i] {
+                if repaired {
+                    result.push(*page_number);
+                    continue;
+                }
+                if i > 0 {
+                    if let Some(PartialInternal(partials)) = children.get(i - 1) {
+                        if let Some((page1, page2)) = split_index(*page_number, partials, manager) {
+                            result.push(page1);
+                            result.push(page2);
+                            repaired = true;
+                        } else {
+                            result.push(merge_index(*page_number, partials, manager));
+                            repaired = true;
+                        }
+                    }
+                }
+                if let Some(PartialInternal(partials)) = children.get(i + 1) {
+                    if let Some((page1, page2)) = split_index(*page_number, partials, manager) {
+                        result.push(page1);
+                        result.push(page2);
+                        repaired = true;
+                    } else {
+                        result.push(merge_index(*page_number, partials, manager));
+                        repaired = true;
+                    }
+                }
+            }
+        }
+        result
+    } else {
+        unreachable!()
+    }
+}
+
+fn max_table_key(page: PageImpl, manager: &TransactionalMemory) -> (u64, Vec<u8>) {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            if let Some(greater) = accessor.greater() {
+                (greater.table_id(), greater.key().to_vec())
+            } else {
+                (
+                    accessor.lesser().table_id(),
+                    accessor.lesser().key().to_vec(),
+                )
+            }
+        }
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page);
+            for i in (0..BTREE_ORDER).rev() {
+                if let Some(child) = accessor.child_page(i) {
+                    return max_table_key(manager.get_page(child), manager);
+                }
+            }
+            unreachable!();
+        }
+        _ => unreachable!(),
+    }
+}
+
+// Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
+// If key is not found, guaranteed not to modify the tree
+#[allow(clippy::needless_return)]
+fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
+    page: PageImpl<'a>,
+    table: u64,
+    key: &[u8],
+    manager: &'a TransactionalMemory,
+) -> DeletionResult {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -836,7 +1066,7 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
                     && greater.compare::<K>(table, key).is_ne()
                 {
                     // Not found
-                    return Some(page.get_page_number());
+                    return Subtree(page.get_page_number());
                 }
                 let new_leaf = if accessor.lesser().compare::<K>(table, key).is_eq() {
                     (greater.table_id(), greater.key(), greater.value())
@@ -848,72 +1078,82 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
                     )
                 };
 
-                Some(make_single_leaf(
+                Subtree(make_single_leaf(
                     new_leaf.0, new_leaf.1, new_leaf.2, manager,
                 ))
             } else {
                 if accessor.lesser().compare::<K>(table, key).is_eq() {
                     // Deleted the entire left
-                    None
+                    PartialLeaf(vec![])
                 } else {
                     // Not found
-                    Some(page.get_page_number())
+                    Subtree(page.get_page_number())
                 }
             }
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             let original_page_number = page.get_page_number();
-            let left_page = accessor.child_page(0).unwrap();
-            let right_page = accessor.child_page(1).unwrap();
-            #[allow(clippy::collapsible_else_if)]
-            if cmp_keys::<K>(
-                table,
-                key,
-                accessor.table_id(0).unwrap(),
-                accessor.key(0).unwrap(),
-            )
-            .is_le()
-            {
-                if let Some(page_number) =
-                    tree_delete::<K>(manager.get_page(left_page), table, key, manager)
-                {
-                    // The key was not found, since the sub-tree did not change
-                    if page_number == left_page {
-                        return Some(original_page_number);
+            let mut children = vec![];
+            let mut found = false;
+            for i in 0..BTREE_ORDER {
+                if let Some(index_table) = accessor.table_id(i) {
+                    let index_key = accessor.key(i).unwrap();
+                    let child_page = accessor.child_page(i).unwrap();
+                    if cmp_keys::<K>(table, key, index_table, index_key).is_le() && !found {
+                        found = true;
+                        let result = tree_delete_helper::<K>(
+                            manager.get_page(child_page),
+                            table,
+                            key,
+                            manager,
+                        );
+                        // The key must not have been found, since the subtree didn't change
+                        if let Subtree(page_number) = result {
+                            if page_number == child_page {
+                                return Subtree(original_page_number);
+                            }
+                        }
+                        children.push(result);
+                    } else {
+                        children.push(Subtree(child_page));
                     }
-                    let left = manager.get_page(page_number);
-                    let new_key = LeafAccessor::new(&left).max_key();
-                    return Some(make_index(
-                        new_key.0,
-                        new_key.1,
-                        page_number,
-                        right_page,
-                        manager,
-                    ));
                 } else {
-                    // The entire left sub-tree was deleted, replace ourself with the right tree
-                    return Some(right_page);
-                }
-            } else {
-                if let Some(page_number) =
-                    tree_delete::<K>(manager.get_page(right_page), table, key, manager)
-                {
-                    // The key was not found, since the sub-tree did not change
-                    if page_number == right_page {
-                        return Some(original_page_number);
+                    let last_page = accessor.child_page(i).unwrap();
+                    if found {
+                        // Already found the insertion place, so just copy
+                        children.push(Subtree(last_page));
+                        break;
                     }
-                    return Some(make_index(
-                        accessor.table_id(0).unwrap(),
-                        accessor.key(0).unwrap(),
-                        left_page,
-                        page_number,
-                        manager,
-                    ));
-                } else {
-                    return Some(left_page);
+                    let result =
+                        tree_delete_helper::<K>(manager.get_page(last_page), table, key, manager);
+                    found = true;
+                    // The key must not have been found, since the subtree didn't change
+                    if let Subtree(page_number) = result {
+                        if page_number == last_page {
+                            return Subtree(original_page_number);
+                        }
+                    }
+                    children.push(result);
+                    break;
                 }
             }
+            assert!(found);
+            assert!(children.len() > 1);
+            let children = repair_children(children, manager);
+            if children.len() == 1 {
+                return PartialInternal(children);
+            }
+
+            let mut page = manager.allocate();
+            let mut builder = InternalBuilder::new(&mut page);
+            builder.write_first_page(children[0]);
+            for i in 0..(children.len() - 1) {
+                let (table, key) = max_table_key(manager.get_page(children[i]), manager);
+                let next_child = children[i + 1];
+                builder.write_nth_key(table, &key, next_child, i);
+            }
+            Subtree(page.get_page_number())
         }
         _ => unreachable!(),
     }
