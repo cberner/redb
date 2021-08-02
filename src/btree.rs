@@ -83,7 +83,7 @@ impl<'a> RangeIterState<'a> {
                 let accessor = InternalAccessor::new(&page);
                 let child_page = accessor.child_page(child).unwrap();
                 let child_page = manager.get_page(child_page);
-                if accessor.child_page(child + 1).is_some() {
+                if child < BTREE_ORDER - 1 && accessor.child_page(child + 1).is_some() {
                     parent = Some(Box::new(Internal {
                         page,
                         child: child + 1,
@@ -555,58 +555,34 @@ struct InternalAccessor<'a: 'b, 'b> {
 
 impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
     fn new(page: &'b PageImpl<'a>) -> Self {
+        assert_eq!(page.memory()[0], INTERNAL);
         InternalAccessor { page }
     }
 
-    fn key_len(&self, n: usize) -> usize {
-        let mut offset = 9;
-        for _ in 0..n {
-            // Skip the table id
-            offset += 8;
-            // Skip the key
-            offset +=
-                u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap())
-                    as usize;
-            // and the length field
-            offset += 8;
-            // and the page number
-            offset += 8;
-        }
-        // Skip the table id
-        offset += 8;
+    fn key_offset(&self, n: usize) -> usize {
+        let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
         u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
-    fn key_offset(&self, n: usize) -> usize {
-        let mut offset = 9;
-        for i in 0..n {
-            // Skip the table id
-            offset += 8;
-            // and the length field
-            offset += 8;
-            // Skip the key data
-            offset += self.key_len(i);
-            // and the page number
-            offset += 8;
-        }
-        // Skip the table id & key length
-        offset + 16
+    fn key_len(&self, n: usize) -> usize {
+        let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
+        u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
     fn table_id(&self, n: usize) -> Option<u64> {
-        let offset = self.key_offset(n);
+        assert!(n < BTREE_ORDER - 1);
         let len = self.key_len(n);
         if len == 0 {
             return None;
         }
+        let offset = 1 + 8 * BTREE_ORDER + 8 * n;
         Some(u64::from_be_bytes(
-            self.page.memory()[(offset - 16)..(offset - 8)]
-                .try_into()
-                .unwrap(),
+            self.page.memory()[offset..(offset + 8)].try_into().unwrap(),
         ))
     }
 
     fn key(&self, n: usize) -> Option<&[u8]> {
+        assert!(n < BTREE_ORDER - 1);
         let offset = self.key_offset(n);
         let len = self.key_len(n);
         if len == 0 {
@@ -616,20 +592,11 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
     }
 
     fn child_page(&self, n: usize) -> Option<PageNumber> {
-        let mut offset = 1;
-        for i in 0..n {
-            // Skip the page number
-            offset += 8;
-            // Skip the table id
-            offset += 8;
-            // and the length field
-            offset += 8;
-            // Skip the key data
-            offset += self.key_len(i);
-            if self.key_len(i) == 0 {
-                return None;
-            }
+        assert!(n < BTREE_ORDER);
+        if n > 0 && self.key_len(n - 1) == 0 {
+            return None;
         }
+        let offset = 1 + 8 * n;
         Some(PageNumber(u64::from_be_bytes(
             self.page.memory()[offset..(offset + 8)].try_into().unwrap(),
         )))
@@ -640,12 +607,16 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
 // and rewriting all fields if any dynamically sized fields are written
 // Layout is:
 // 1 byte: type
-// 8 bytes first page number
-// repeating:
+// repeating (BTREE_ORDER times):
+// 8 bytes page number
+// repeating (BTREE_ORDER - 1 times):
 // * 8 bytes: table id
-// * 8 bytes: key len. Zero length indicates no key
+// repeating (BTREE_ORDER - 1 times):
+// * 8 bytes: key len. Zero length indicates no key, or following page
+// repeating (BTREE_ORDER - 1 times):
+// * 8 bytes: key offset. Offset to the key data
+// repeating (BTREE_ORDER - 1 times):
 // * n bytes: key data
-// * 8 bytes: page number
 struct InternalBuilder<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
 }
@@ -653,6 +624,12 @@ struct InternalBuilder<'a: 'b, 'b> {
 impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
     fn new(page: &'b mut PageMut<'a>) -> Self {
         page.memory_mut()[0] = INTERNAL;
+        //  ensure all the key lengths are zeroed, since we use those to indicate missing keys
+        let start = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1);
+        for i in 0..(BTREE_ORDER - 1) {
+            let offset = start + 8 * i;
+            page.memory_mut()[offset..(offset + 8)].copy_from_slice(&(0u64).to_be_bytes());
+        }
         InternalBuilder { page }
     }
 
@@ -662,51 +639,39 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
     }
 
     fn key_offset(&self, n: usize) -> usize {
-        let mut offset = 9;
-        for i in 0..n {
-            // Skip the table id
-            offset += 8;
-            // and the length field
-            offset += 8;
-            // Skip the key data
-            offset += self.key_len(i);
-            // and the page number
-            offset += 8;
-        }
-        // Skip the table id & key length
-        offset + 16
+        let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
+        u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
     fn key_len(&self, n: usize) -> usize {
-        let mut offset = 9;
-        for _ in 0..n {
-            // Skip the table id
-            offset += 8;
-            // Skip the key
-            offset +=
-                u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap())
-                    as usize;
-            // and the length field
-            offset += 8;
-            // and the page number
-            offset += 8;
-        }
-        // Skip the table id
-        offset += 8;
+        let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
         u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
     // Write the nth key and page of values greater than this key, but less than or equal to the next
     // Caller must write keys & pages in increasing order
     fn write_nth_key(&mut self, table_id: u64, key: &[u8], page_number: PageNumber, n: usize) {
-        let offset = self.key_offset(n);
-        self.page.memory_mut()[(offset - 16)..(offset - 8)]
-            .copy_from_slice(&table_id.to_be_bytes());
-        self.page.memory_mut()[(offset - 8)..offset]
+        assert!(n < BTREE_ORDER - 1);
+        let offset = 1 + 8 * (n + 1);
+        self.page.memory_mut()[offset..(offset + 8)].copy_from_slice(&page_number.to_be_bytes());
+
+        let offset = 1 + 8 * BTREE_ORDER + 8 * n;
+        self.page.memory_mut()[offset..(offset + 8)].copy_from_slice(&table_id.to_be_bytes());
+
+        let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
+        self.page.memory_mut()[offset..(offset + 8)]
             .copy_from_slice(&(key.len() as u64).to_be_bytes());
-        self.page.memory_mut()[offset..(offset + key.len())].copy_from_slice(key);
-        self.page.memory_mut()[(offset + key.len())..(offset + key.len() + 8)]
-            .copy_from_slice(&page_number.to_be_bytes());
+
+        let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
+        let data_offset = if n > 0 {
+            self.key_offset(n - 1) + self.key_len(n - 1)
+        } else {
+            1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3
+        };
+        self.page.memory_mut()[offset..(offset + 8)]
+            .copy_from_slice(&(data_offset as u64).to_be_bytes());
+
+        self.page.memory_mut()[data_offset..(data_offset + key.len())].copy_from_slice(key);
     }
 }
 
@@ -1096,7 +1061,8 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
             let original_page_number = page.get_page_number();
             let mut children = vec![];
             let mut found = false;
-            for i in 0..BTREE_ORDER {
+            let mut last_valid_child = BTREE_ORDER - 1;
+            for i in 0..(BTREE_ORDER - 1) {
                 if let Some(index_table) = accessor.table_id(i) {
                     let index_key = accessor.key(i).unwrap();
                     let child_page = accessor.child_page(i).unwrap();
@@ -1119,24 +1085,25 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                         children.push(Subtree(child_page));
                     }
                 } else {
-                    let last_page = accessor.child_page(i).unwrap();
-                    if found {
-                        // Already found the insertion place, so just copy
-                        children.push(Subtree(last_page));
-                        break;
-                    }
-                    let result =
-                        tree_delete_helper::<K>(manager.get_page(last_page), table, key, manager);
-                    found = true;
-                    // The key must not have been found, since the subtree didn't change
-                    if let Subtree(page_number) = result {
-                        if page_number == last_page {
-                            return Subtree(original_page_number);
-                        }
-                    }
-                    children.push(result);
+                    last_valid_child = i;
                     break;
                 }
+            }
+            let last_page = accessor.child_page(last_valid_child).unwrap();
+            if found {
+                // Already found the insertion place, so just copy
+                children.push(Subtree(last_page));
+            } else {
+                let result =
+                    tree_delete_helper::<K>(manager.get_page(last_page), table, key, manager);
+                found = true;
+                // The key must not have been found, since the subtree didn't change
+                if let Subtree(page_number) = result {
+                    if page_number == last_page {
+                        return Subtree(original_page_number);
+                    }
+                }
+                children.push(result);
             }
             assert!(found);
             assert!(children.len() > 1);
@@ -1396,7 +1363,8 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
             let mut children = vec![];
             let mut index_table_keys = vec![];
             let mut guard = None;
-            for i in 0..BTREE_ORDER {
+            let mut last_valid_child = BTREE_ORDER - 1;
+            for i in 0..(BTREE_ORDER - 1) {
                 if let Some(index_table) = accessor.table_id(i) {
                     let index_key = accessor.key(i).unwrap();
                     if cmp_keys::<K>(table, key, index_table, index_key).is_le() && guard.is_none()
@@ -1422,28 +1390,29 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         index_table_keys.push((index_table, index_key.to_vec()));
                     }
                 } else {
-                    let last_page = accessor.child_page(i).unwrap();
-                    if guard.is_some() {
-                        // Already found the insertion place, so just copy
-                        children.push(last_page);
-                        break;
-                    }
-                    let (page1, more, guard2) = tree_insert_helper::<K>(
-                        manager.get_page(last_page),
-                        table,
-                        key,
-                        value,
-                        manager,
-                    );
-                    children.push(page1);
-                    if let Some((index_table, index_key, page2)) = more {
-                        index_table_keys.push((index_table, index_key));
-                        children.push(page2);
-                    }
-                    assert!(guard.is_none());
-                    guard = Some(guard2);
+                    last_valid_child = i;
                     break;
                 }
+            }
+            let last_page = accessor.child_page(last_valid_child).unwrap();
+            if guard.is_some() {
+                // Already found the insertion place, so just copy
+                children.push(last_page);
+            } else {
+                let (page1, more, guard2) = tree_insert_helper::<K>(
+                    manager.get_page(last_page),
+                    table,
+                    key,
+                    value,
+                    manager,
+                );
+                children.push(page1);
+                if let Some((index_table, index_key, page2)) = more {
+                    index_table_keys.push((index_table, index_key));
+                    children.push(page2);
+                }
+                assert!(guard.is_none());
+                guard = Some(guard2);
             }
             let guard = guard.unwrap();
             assert_eq!(children.len() - 1, index_table_keys.len());
