@@ -581,6 +581,19 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
         ))
     }
 
+    fn table_and_key(&self, n: usize) -> Option<(u64, &[u8])> {
+        assert!(n < BTREE_ORDER - 1);
+        let len = self.key_len(n);
+        if len == 0 {
+            return None;
+        }
+        let offset = 1 + 8 * BTREE_ORDER + 8 * n;
+        let table =
+            u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap());
+        let offset = self.key_offset(n);
+        Some((table, &self.page.memory()[offset..(offset + len)]))
+    }
+
     fn key(&self, n: usize) -> Option<&[u8]> {
         assert!(n < BTREE_ORDER - 1);
         let offset = self.key_offset(n);
@@ -1495,8 +1508,7 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             for i in 0..(BTREE_ORDER - 1) {
-                if let Some(table_id) = accessor.table_id(i) {
-                    let key = accessor.key(i).unwrap();
+                if let Some((table_id, key)) = accessor.table_and_key(i) {
                     if cmp_keys::<K>(table, query, table_id, key).is_le() {
                         let lte_page = accessor.child_page(i).unwrap();
                         return lookup_in_raw::<K>(
