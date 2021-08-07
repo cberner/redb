@@ -125,7 +125,7 @@ impl<'a> Debug for PageImpl<'a> {
 
 impl<'a> Page for PageImpl<'a> {
     fn memory(&self) -> &[u8] {
-        &self.mem
+        self.mem
     }
 
     fn get_page_number(&self) -> PageNumber {
@@ -147,7 +147,7 @@ impl<'a> PageMut<'a> {
 
 impl<'a> Page for PageMut<'a> {
     fn memory(&self) -> &[u8] {
-        &self.mem
+        self.mem
     }
 
     fn get_page_number(&self) -> PageNumber {

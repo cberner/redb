@@ -761,7 +761,7 @@ pub(in crate) fn node_children<'a>(
         }
         INTERNAL => {
             let mut children = vec![];
-            let accessor = InternalAccessor::new(&page);
+            let accessor = InternalAccessor::new(page);
             for i in 0..BTREE_ORDER {
                 if let Some(child) = accessor.child_page(i) {
                     children.push(manager.get_page(child));
@@ -1196,7 +1196,7 @@ pub(in crate) fn make_mut_double_leaf_left<'a, K: RedbKey + ?Sized>(
     let mut page = manager.allocate();
     let mut builder = LeafBuilder::new(&mut page);
     builder.write_lesser(table1, key1, value1);
-    builder.write_greater(Some((table2, key2, &value2)));
+    builder.write_greater(Some((table2, key2, value2)));
 
     let accessor = LeafAccessor::new(&page);
     let offset = accessor.offset_of_lesser() + accessor.lesser().value_offset();
@@ -1230,7 +1230,7 @@ pub(in crate) fn make_index(
     let mut page = manager.allocate();
     let mut builder = InternalBuilder::new(&mut page);
     builder.write_first_page(lte_page);
-    builder.write_nth_key(table, &key, gt_page, 0);
+    builder.write_nth_key(table, key, gt_page, 0);
     page.get_page_number()
 }
 
@@ -1446,7 +1446,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 assert_eq!(BTREE_ORDER, 3);
                 builder.write_first_page(children[0]);
                 let (table, key) = &index_table_keys[0];
-                builder.write_nth_key(*table, &key, children[1], 0);
+                builder.write_nth_key(*table, key, children[1], 0);
 
                 let (index_table, index_key) = &index_table_keys[1];
 
@@ -1454,7 +1454,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 let mut builder2 = InternalBuilder::new(&mut page2);
                 builder2.write_first_page(children[2]);
                 let (table, key) = &index_table_keys[2];
-                builder2.write_nth_key(*table, &key, children[3], 0);
+                builder2.write_nth_key(*table, key, children[3], 0);
 
                 (
                     page.get_page_number(),
