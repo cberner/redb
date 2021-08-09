@@ -1123,15 +1123,7 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                 return PartialInternal(children);
             }
 
-            let mut page = manager.allocate();
-            let mut builder = InternalBuilder::new(&mut page);
-            builder.write_first_page(children[0]);
-            for i in 0..(children.len() - 1) {
-                let (table, key) = max_table_key(manager.get_page(children[i]), manager);
-                let next_child = children[i + 1];
-                builder.write_nth_key(table, &key, next_child, i);
-            }
-            Subtree(page.get_page_number())
+            Subtree(make_index_many_pages(&children, manager))
         }
         _ => unreachable!(),
     }
