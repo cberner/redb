@@ -7,7 +7,7 @@ use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 
-const BTREE_ORDER: usize = 3;
+const BTREE_ORDER: usize = 50;
 
 pub struct AccessGuardMut<'a> {
     page: PageMut<'a>,
@@ -853,8 +853,6 @@ fn split_index(
     partial: &[PageNumber],
     manager: &TransactionalMemory,
 ) -> Option<(PageNumber, PageNumber)> {
-    assert_eq!(partial.len(), 1);
-    assert_eq!(BTREE_ORDER, 3);
     let page = manager.get_page(index);
     let accessor = InternalAccessor::new(&page);
 
@@ -869,14 +867,25 @@ fn split_index(
     }
 
     pages.sort_by_key(|p| max_table_key(manager.get_page(*p), manager));
-    assert_eq!(pages.len(), 4);
 
-    let (table, key) = max_table_key(manager.get_page(pages[0]), manager);
-    let page1 = make_index(table, &key, pages[0], pages[1], manager);
-    let (table, key) = max_table_key(manager.get_page(pages[2]), manager);
-    let page2 = make_index(table, &key, pages[2], pages[3], manager);
+    let division = pages.len() / 2;
+
+    let page1 = make_index_many_pages(&pages[0..division], manager);
+    let page2 = make_index_many_pages(&pages[division..], manager);
 
     Some((page1, page2))
+}
+
+// Pages must be in sorted order
+fn make_index_many_pages(children: &[PageNumber], manager: &TransactionalMemory) -> PageNumber {
+    let mut page = manager.allocate();
+    let mut builder = InternalBuilder::new(&mut page);
+    builder.write_first_page(children[0]);
+    for i in 1..children.len() {
+        let (table, key) = max_table_key(manager.get_page(children[i - 1]), manager);
+        builder.write_nth_key(table, &key, children[i], i - 1);
+    }
+    page.get_page_number()
 }
 
 fn merge_index(
@@ -884,11 +893,9 @@ fn merge_index(
     partial: &[PageNumber],
     manager: &TransactionalMemory,
 ) -> PageNumber {
-    assert_eq!(partial.len(), 1);
-    assert_eq!(BTREE_ORDER, 3);
     let page = manager.get_page(index);
     let accessor = InternalAccessor::new(&page);
-    assert!(accessor.child_page(BTREE_ORDER - 1).is_none());
+    assert!(accessor.child_page(BTREE_ORDER - partial.len()).is_none());
 
     let mut pages = vec![];
     pages.extend_from_slice(partial);
@@ -901,16 +908,7 @@ fn merge_index(
     pages.sort_by_key(|p| max_table_key(manager.get_page(*p), manager));
     assert!(pages.len() <= BTREE_ORDER);
 
-    let mut page = manager.allocate();
-    let mut builder = InternalBuilder::new(&mut page);
-    builder.write_first_page(pages[0]);
-    for i in 0..(pages.len() - 1) {
-        let (table, key) = max_table_key(manager.get_page(pages[i]), manager);
-        let next_child = pages[i + 1];
-        builder.write_nth_key(table, &key, next_child, i);
-    }
-
-    page.get_page_number()
+    make_index_many_pages(&pages, manager)
 }
 
 fn repair_children(
@@ -1443,18 +1441,22 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 }
                 (page.get_page_number(), None, guard)
             } else {
-                assert_eq!(BTREE_ORDER, 3);
+                let division = BTREE_ORDER / 2;
                 builder.write_first_page(children[0]);
-                let (table, key) = &index_table_keys[0];
-                builder.write_nth_key(*table, key, children[1], 0);
+                for i in 0..division {
+                    let (table, key) = &index_table_keys[i];
+                    builder.write_nth_key(*table, key, children[i + 1], i);
+                }
 
-                let (index_table, index_key) = &index_table_keys[1];
+                let (index_table, index_key) = &index_table_keys[division];
 
                 let mut page2 = manager.allocate();
                 let mut builder2 = InternalBuilder::new(&mut page2);
-                builder2.write_first_page(children[2]);
-                let (table, key) = &index_table_keys[2];
-                builder2.write_nth_key(*table, key, children[3], 0);
+                builder2.write_first_page(children[division + 1]);
+                for i in (division + 1)..BTREE_ORDER {
+                    let (table, key) = &index_table_keys[i];
+                    builder2.write_nth_key(*table, key, children[i + 1], i - (division + 1));
+                }
 
                 (
                     page.get_page_number(),
