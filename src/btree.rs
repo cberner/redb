@@ -559,6 +559,32 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
         InternalAccessor { page }
     }
 
+    fn child_for_key<K: RedbKey + ?Sized>(&self, table: u64, query: &[u8]) -> PageNumber {
+        let mut min_child = 0; // inclusive
+        let mut max_child = BTREE_ORDER - 1; // inclusive
+        while min_child < max_child {
+            let mid = (min_child + max_child) / 2;
+            if let Some((table_id, key)) = self.table_and_key(mid) {
+                match cmp_keys::<K>(table, query, table_id, key) {
+                    Ordering::Less => {
+                        max_child = mid;
+                    }
+                    Ordering::Equal => {
+                        return self.child_page(mid).unwrap();
+                    }
+                    Ordering::Greater => {
+                        min_child = mid + 1;
+                    }
+                }
+            } else {
+                max_child = mid;
+            }
+        }
+        assert_eq!(min_child, max_child);
+
+        self.child_page(min_child).unwrap()
+    }
+
     fn key_offset(&self, n: usize) -> usize {
         let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
         u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
@@ -1501,24 +1527,8 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
-            for i in 0..(BTREE_ORDER - 1) {
-                if let Some((table_id, key)) = accessor.table_and_key(i) {
-                    if cmp_keys::<K>(table, query, table_id, key).is_le() {
-                        let lte_page = accessor.child_page(i).unwrap();
-                        return lookup_in_raw::<K>(
-                            manager.get_page(lte_page),
-                            table,
-                            query,
-                            manager,
-                        );
-                    }
-                } else {
-                    let gt_page = accessor.child_page(i).unwrap();
-                    return lookup_in_raw::<K>(manager.get_page(gt_page), table, query, manager);
-                }
-            }
-            let last_page = accessor.child_page(BTREE_ORDER - 1).unwrap();
-            return lookup_in_raw::<K>(manager.get_page(last_page), table, query, manager);
+            let child_page = accessor.child_for_key::<K>(table, query);
+            return lookup_in_raw::<K>(manager.get_page(child_page), table, query, manager);
         }
         _ => unreachable!(),
     }
