@@ -555,7 +555,7 @@ struct InternalAccessor<'a: 'b, 'b> {
 
 impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
     fn new(page: &'b PageImpl<'a>) -> Self {
-        assert_eq!(page.memory()[0], INTERNAL);
+        debug_assert_eq!(page.memory()[0], INTERNAL);
         InternalAccessor { page }
     }
 
@@ -580,7 +580,7 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
                 max_child = mid;
             }
         }
-        assert_eq!(min_child, max_child);
+        debug_assert_eq!(min_child, max_child);
 
         self.child_page(min_child).unwrap()
     }
@@ -596,7 +596,7 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
     }
 
     fn table_id(&self, n: usize) -> Option<u64> {
-        assert!(n < BTREE_ORDER - 1);
+        debug_assert!(n < BTREE_ORDER - 1);
         let len = self.key_len(n);
         if len == 0 {
             return None;
@@ -608,7 +608,7 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
     }
 
     fn table_and_key(&self, n: usize) -> Option<(u64, &[u8])> {
-        assert!(n < BTREE_ORDER - 1);
+        debug_assert!(n < BTREE_ORDER - 1);
         let len = self.key_len(n);
         if len == 0 {
             return None;
@@ -621,7 +621,7 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
     }
 
     fn key(&self, n: usize) -> Option<&[u8]> {
-        assert!(n < BTREE_ORDER - 1);
+        debug_assert!(n < BTREE_ORDER - 1);
         let offset = self.key_offset(n);
         let len = self.key_len(n);
         if len == 0 {
@@ -631,7 +631,7 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
     }
 
     fn child_page(&self, n: usize) -> Option<PageNumber> {
-        assert!(n < BTREE_ORDER);
+        debug_assert!(n < BTREE_ORDER);
         if n > 0 && self.key_len(n - 1) == 0 {
             return None;
         }
