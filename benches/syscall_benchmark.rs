@@ -5,6 +5,7 @@ use rand::prelude::SliceRandom;
 use rand::Rng;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -90,6 +91,95 @@ fn lmdb_zero_bench(path: &str) {
                     duration.as_millis()
                 );
             }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn uring_bench(path: &Path) {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)
+        .unwrap();
+
+    let pairs = gen_data(1000, 16, 2000);
+
+    let start = SystemTime::now();
+    {
+        for i in 0..ELEMENTS {
+            let (key, value) = &pairs[i % pairs.len()];
+            let mut mut_key = key.clone();
+            mut_key.extend_from_slice(&i.to_be_bytes());
+            file.write_all(&mut_key).unwrap();
+            file.write_all(value).unwrap();
+        }
+    }
+    file.sync_all().unwrap();
+
+    let end = SystemTime::now();
+    let duration = end.duration_since(start).unwrap();
+    println!(
+        "uring_read()/write(): Loaded {} items in {}ms",
+        ELEMENTS,
+        duration.as_millis()
+    );
+
+    let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
+    key_order.shuffle(&mut rand::thread_rng());
+
+    {
+        for _ in 0..ITERATIONS {
+            let start = SystemTime::now();
+
+            let uring_entries = 10usize;
+            let mut ring = io_uring::IoUring::new(uring_entries as u32).unwrap();
+            let mut buffers = vec![vec![0u8; 2000]; uring_entries];
+
+            let mut checksum = 0u64;
+            let mut expected_checksum = 0u64;
+            for (uring_counter, i) in key_order.iter().enumerate() {
+                let (key, value) = &pairs[*i % pairs.len()];
+                let mut mut_key = key.clone();
+                mut_key.extend_from_slice(&i.to_be_bytes());
+                let offset = i * (mut_key.len() + value.len()) + mut_key.len();
+
+                expected_checksum += value[0] as u64;
+
+                let buffer_index = uring_counter % uring_entries;
+                let buf = &mut buffers[buffer_index];
+                let iovec = libc::iovec {
+                    iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+                    iov_len: buf.len(),
+                };
+                let read_e =
+                    io_uring::opcode::Readv::new(io_uring::types::Fd(file.as_raw_fd()), &iovec, 1)
+                        .offset(offset as i64)
+                        .build()
+                        .user_data(buffer_index as u64);
+
+                unsafe {
+                    ring.submission().push(&read_e).unwrap();
+                }
+                ring.submit().unwrap();
+
+                if uring_counter % uring_entries == (uring_entries - 1) {
+                    ring.submit_and_wait(uring_entries).unwrap();
+                    for _ in 0..uring_entries {
+                        let cqe = ring.completion().next().unwrap();
+                        checksum += buffers[cqe.user_data() as usize][0] as u64;
+                    }
+                }
+            }
+            assert_eq!(checksum, expected_checksum);
+            let end = SystemTime::now();
+            let duration = end.duration_since(start).unwrap();
+            println!(
+                "uring_read()/write(): Random read {} items in {}ms",
+                ELEMENTS,
+                duration.as_millis()
+            );
         }
     }
 }
@@ -233,6 +323,11 @@ fn main() {
     {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         readwrite_bench(tmpfile.path());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        uring_bench(tmpfile.path());
     }
     {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
