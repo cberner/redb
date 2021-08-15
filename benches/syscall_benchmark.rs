@@ -132,12 +132,12 @@ fn readwrite_bench(path: &Path) {
             let start = SystemTime::now();
             let mut checksum = 0u64;
             let mut expected_checksum = 0u64;
+            let mut buffer = vec![0u8; 2000];
             for i in &key_order {
                 let (key, value) = &pairs[*i % pairs.len()];
                 let mut mut_key = key.clone();
                 mut_key.extend_from_slice(&i.to_be_bytes());
                 let offset = i * (mut_key.len() + value.len()) + mut_key.len();
-                let mut buffer = vec![0u8; value.len()];
 
                 file.seek(SeekFrom::Start(offset as u64)).unwrap();
                 file.read_exact(&mut buffer).unwrap();
