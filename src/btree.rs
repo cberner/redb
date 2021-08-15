@@ -1533,3 +1533,52 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
         _ => unreachable!(),
     }
 }
+
+#[cfg(test)]
+mod test {
+    use crate::btree::BTREE_ORDER;
+    use crate::{Database, Table};
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn tree_balance() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+
+        let elements = (BTREE_ORDER / 2).pow(2) as usize;
+
+        let mut txn = table.begin_write().unwrap();
+        for i in (0..elements).rev() {
+            txn.insert(&i.to_be_bytes(), b"").unwrap();
+        }
+        txn.commit().unwrap();
+
+        let expected_height = (elements as f32).log((BTREE_ORDER / 2) as f32) as usize + 1;
+        let height = db.stats().unwrap().tree_height();
+        assert!(
+            height <= expected_height,
+            "height={} expected={}",
+            height,
+            expected_height
+        );
+
+        let reduce_to = BTREE_ORDER / 2;
+
+        let mut txn = table.begin_write().unwrap();
+        for i in 0..(elements - reduce_to) {
+            txn.remove(&i.to_be_bytes()).unwrap();
+        }
+        txn.commit().unwrap();
+
+        let expected_height = (reduce_to as f32).log((BTREE_ORDER / 2) as f32) as usize + 1;
+        let height = db.stats().unwrap().tree_height();
+        assert!(
+            height <= expected_height,
+            "height={} expected={}",
+            height,
+            expected_height
+        );
+    }
+}
