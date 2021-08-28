@@ -28,6 +28,65 @@ impl DbStats {
     }
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) enum TableType {
+    Normal,
+    MultiMap,
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<u8> for TableType {
+    fn into(self) -> u8 {
+        match self {
+            TableType::Normal => 1,
+            TableType::MultiMap => 2,
+        }
+    }
+}
+
+impl From<u8> for TableType {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => TableType::Normal,
+            2 => TableType::MultiMap,
+            _ => unreachable!(),
+        }
+    }
+}
+
+pub(crate) struct TableDefinition {
+    table_id: u64,
+    table_type: TableType,
+}
+
+impl TableDefinition {
+    pub(crate) fn get_id(&self) -> u64 {
+        self.table_id
+    }
+
+    pub(crate) fn get_type(&self) -> TableType {
+        self.table_type
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut result = vec![self.table_type.into()];
+        result.extend_from_slice(&self.table_id.to_be_bytes());
+
+        result
+    }
+
+    fn from_bytes(value: &[u8]) -> Self {
+        assert_eq!(9, value.len());
+        let table_id = u64::from_be_bytes(value[1..9].try_into().unwrap());
+        let table_type = TableType::from(value[0]);
+
+        TableDefinition {
+            table_id,
+            table_type,
+        }
+    }
+}
+
 pub(in crate) struct Storage {
     mem: TransactionalMemory,
 }
@@ -43,23 +102,35 @@ impl Storage {
     pub(in crate) fn get_or_create_table(
         &self,
         name: &[u8],
+        table_type: TableType,
         root_page: Option<PageNumber>,
-    ) -> Result<(u64, PageNumber), Error> {
+    ) -> Result<(TableDefinition, PageNumber), Error> {
         if let Some(found) = self.get::<[u8], [u8]>(TABLE_TABLE_ID, name, root_page)? {
-            let table_id = u64::from_be_bytes(found.as_ref().try_into().unwrap());
-            return Ok((table_id, root_page.unwrap()));
+            let definition = TableDefinition::from_bytes(found.as_ref());
+            if definition.get_type() != table_type {
+                return Err(Error::TableTypeMismatch(format!(
+                    "{:?} is not of type {:?}",
+                    name, table_type
+                )));
+            }
+            return Ok((definition, root_page.unwrap()));
         }
+
         let mut iter =
             self.get_range_reversed::<RangeFull, [u8], [u8]>(TABLE_TABLE_ID, .., root_page)?;
         let largest_id = iter
             .next()
-            .map(|x| u64::from_be_bytes(x.value().try_into().unwrap()))
+            .map(|x| TableDefinition::from_bytes(x.value()).get_id())
             .unwrap_or(TABLE_TABLE_ID);
         drop(iter);
         let new_id = largest_id + 1;
+        let definition = TableDefinition {
+            table_id: new_id,
+            table_type,
+        };
         let new_root =
-            self.insert::<[u8]>(TABLE_TABLE_ID, name, &new_id.to_be_bytes(), root_page)?;
-        Ok((new_id, new_root))
+            self.insert::<[u8]>(TABLE_TABLE_ID, name, &definition.to_bytes(), root_page)?;
+        Ok((definition, new_root))
     }
 
     // Returns the new root page number
