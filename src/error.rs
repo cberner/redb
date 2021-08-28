@@ -3,6 +3,7 @@ use std::io;
 #[derive(Debug)]
 pub enum Error {
     Corrupted(String),
+    TableTypeMismatch(String),
     Io(io::Error),
 }
 

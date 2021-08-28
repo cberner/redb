@@ -1,4 +1,4 @@
-use crate::storage::{DbStats, Storage};
+use crate::storage::{DbStats, Storage, TableType};
 use crate::table::Table;
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
@@ -43,11 +43,13 @@ impl Database {
         name: &[u8],
     ) -> Result<Table<K, V>, Error> {
         assert!(!name.is_empty());
-        let (id, root) = self
-            .storage
-            .get_or_create_table(name, self.storage.get_root_page_number())?;
+        let (definition, root) = self.storage.get_or_create_table(
+            name,
+            TableType::Normal,
+            self.storage.get_root_page_number(),
+        )?;
         self.storage.commit(Some(root))?;
-        Table::new(id, &self.storage)
+        Table::new(definition.get_id(), &self.storage)
     }
 
     pub fn stats(&self) -> Result<DbStats, Error> {
