@@ -225,6 +225,12 @@ mod test {
     fn custom_ordering() {
         struct ReverseKey(Vec<u8>);
 
+        impl AsRef<ReverseKey> for ReverseKey {
+            fn as_ref(&self) -> &ReverseKey {
+                self
+            }
+        }
+
         impl RedbValue for ReverseKey {
             type View = RefLifetime<[u8]>;
             type ToBytes = RefAsBytesLifetime<[u8]>;
@@ -257,7 +263,7 @@ mod test {
         let read_txn = table.read_transaction().unwrap();
         let start = ReverseKey(vec![7u8]); // ReverseKey is used, so 7 < 3
         let end = ReverseKey(vec![3u8]);
-        let mut iter = read_txn.get_range(&start..=&end).unwrap();
+        let mut iter = read_txn.get_range(start..=end).unwrap();
         for i in (3..=7u8).rev() {
             let entry = iter.next().unwrap();
             assert_eq!(&[i], entry.key());

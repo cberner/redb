@@ -117,7 +117,7 @@ impl Storage {
         }
 
         let mut iter =
-            self.get_range_reversed::<RangeFull, [u8], [u8]>(TABLE_TABLE_ID, .., root_page)?;
+            self.get_range_reversed::<RangeFull, [u8], [u8], [u8]>(TABLE_TABLE_ID, .., root_page)?;
         let largest_id = iter
             .next()
             .map(|x| TableDefinition::from_bytes(x.value()).get_id())
@@ -167,7 +167,7 @@ impl Storage {
     }
 
     pub(in crate) fn len(&self, table: u64, root_page: Option<PageNumber>) -> Result<usize, Error> {
-        let mut iter = BtreeRangeIter::<RangeFull, [u8], [u8]>::new(
+        let mut iter = BtreeRangeIter::<RangeFull, [u8], [u8], [u8]>::new(
             root_page.map(|p| self.mem.get_page(p)),
             table,
             ..,
@@ -233,7 +233,8 @@ impl Storage {
 
     pub(in crate) fn get_range<
         'a,
-        T: RangeBounds<&'a K>,
+        T: RangeBounds<KR>,
+        KR: AsRef<K> + ?Sized + 'a,
         K: RedbKey + ?Sized + 'a,
         V: RedbValue + ?Sized + 'a,
     >(
@@ -241,7 +242,7 @@ impl Storage {
         table_id: u64,
         range: T,
         root_page: Option<PageNumber>,
-    ) -> Result<BtreeRangeIter<T, K, V>, Error> {
+    ) -> Result<BtreeRangeIter<T, KR, K, V>, Error> {
         Ok(BtreeRangeIter::new(
             root_page.map(|p| self.mem.get_page(p)),
             table_id,
@@ -252,7 +253,8 @@ impl Storage {
 
     pub(in crate) fn get_range_reversed<
         'a,
-        T: RangeBounds<&'a K>,
+        T: RangeBounds<KR>,
+        KR: AsRef<K> + ?Sized + 'a,
         K: RedbKey + ?Sized + 'a,
         V: RedbValue + ?Sized + 'a,
     >(
@@ -260,7 +262,7 @@ impl Storage {
         table_id: u64,
         range: T,
         root_page: Option<PageNumber>,
-    ) -> Result<BtreeRangeIter<T, K, V>, Error> {
+    ) -> Result<BtreeRangeIter<T, KR, K, V>, Error> {
         Ok(BtreeRangeIter::new_reversed(
             root_page.map(|p| self.mem.get_page(p)),
             table_id,
