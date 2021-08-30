@@ -231,7 +231,8 @@ impl<'a> RangeIterState<'a> {
 
 pub struct BtreeRangeIter<
     'a,
-    T: RangeBounds<&'a K>,
+    T: RangeBounds<KR>,
+    KR: AsRef<K> + ?Sized + 'a,
     K: RedbKey + ?Sized + 'a,
     V: RedbValue + ?Sized + 'a,
 > {
@@ -241,11 +242,17 @@ pub struct BtreeRangeIter<
     reversed: bool,
     manager: &'a TransactionalMemory,
     _key_type: PhantomData<K>,
+    _key_ref_type: PhantomData<KR>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a>
-    BtreeRangeIter<'a, T, K, V>
+impl<
+        'a,
+        T: RangeBounds<KR>,
+        KR: AsRef<K> + ?Sized + 'a,
+        K: RedbKey + ?Sized + 'a,
+        V: RedbValue + ?Sized + 'a,
+    > BtreeRangeIter<'a, T, KR, K, V>
 {
     pub(in crate) fn new(
         root_page: Option<PageImpl<'a>>,
@@ -260,6 +267,7 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized 
             reversed: false,
             manager,
             _key_type: Default::default(),
+            _key_ref_type: Default::default(),
             _value_type: Default::default(),
         }
     }
@@ -277,6 +285,7 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized 
             reversed: true,
             manager,
             _key_type: Default::default(),
+            _key_ref_type: Default::default(),
             _value_type: Default::default(),
         }
     }
@@ -289,7 +298,7 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized 
                     if let Some(entry) = new_state.get_entry() {
                         // TODO: optimize. This is very inefficient to retrieve and then ignore the values
                         if self.table_id == entry.table_id()
-                            && bound_contains_key::<T, K>(&self.query_range, entry.key())
+                            && bound_contains_key::<T, KR, K>(&self.query_range, entry.key())
                         {
                             self.last = Some(new_state);
                             return self.last.as_ref().map(|s| s.get_entry().unwrap());
@@ -298,7 +307,10 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized 
                             if self.reversed {
                                 if let Bound::Included(start) = self.query_range.start_bound() {
                                     if entry
-                                        .compare::<K>(self.table_id, start.as_bytes().as_ref())
+                                        .compare::<K>(
+                                            self.table_id,
+                                            start.as_ref().as_bytes().as_ref(),
+                                        )
                                         .is_lt()
                                     {
                                         self.last = None;
@@ -308,7 +320,10 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized 
                                     self.query_range.start_bound()
                                 {
                                     if entry
-                                        .compare::<K>(self.table_id, start.as_bytes().as_ref())
+                                        .compare::<K>(
+                                            self.table_id,
+                                            start.as_ref().as_bytes().as_ref(),
+                                        )
                                         .is_le()
                                     {
                                         self.last = None;
@@ -318,7 +333,10 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized 
                             } else {
                                 if let Bound::Included(end) = self.query_range.end_bound() {
                                     if entry
-                                        .compare::<K>(self.table_id, end.as_bytes().as_ref())
+                                        .compare::<K>(
+                                            self.table_id,
+                                            end.as_ref().as_bytes().as_ref(),
+                                        )
                                         .is_gt()
                                     {
                                         self.last = None;
@@ -326,7 +344,10 @@ impl<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized 
                                     }
                                 } else if let Bound::Excluded(end) = self.query_range.end_bound() {
                                     if entry
-                                        .compare::<K>(self.table_id, end.as_bytes().as_ref())
+                                        .compare::<K>(
+                                            self.table_id,
+                                            end.as_ref().as_bytes().as_ref(),
+                                        )
                                         .is_ge()
                                     {
                                         self.last = None;
@@ -363,25 +384,30 @@ fn cmp_keys<K: RedbKey + ?Sized>(table1: u64, key1: &[u8], table2: u64, key2: &[
     }
 }
 
-fn bound_contains_key<'a, T: RangeBounds<&'a K>, K: RedbKey + ?Sized + 'a>(
+fn bound_contains_key<
+    'a,
+    T: RangeBounds<KR>,
+    KR: AsRef<K> + ?Sized + 'a,
+    K: RedbKey + ?Sized + 'a,
+>(
     range: &T,
     key: &[u8],
 ) -> bool {
     if let Bound::Included(start) = range.start_bound() {
-        if K::compare(key, start.as_bytes().as_ref()).is_lt() {
+        if K::compare(key, start.as_ref().as_bytes().as_ref()).is_lt() {
             return false;
         }
     } else if let Bound::Excluded(start) = range.start_bound() {
-        if K::compare(key, start.as_bytes().as_ref()).is_le() {
+        if K::compare(key, start.as_ref().as_bytes().as_ref()).is_le() {
             return false;
         }
     }
     if let Bound::Included(end) = range.end_bound() {
-        if K::compare(key, end.as_bytes().as_ref()).is_gt() {
+        if K::compare(key, end.as_ref().as_bytes().as_ref()).is_gt() {
             return false;
         }
     } else if let Bound::Excluded(end) = range.end_bound() {
-        if K::compare(key, end.as_bytes().as_ref()).is_ge() {
+        if K::compare(key, end.as_ref().as_bytes().as_ref()).is_ge() {
             return false;
         }
     }

@@ -109,17 +109,17 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTransaction<'mma
             .get::<K, V>(self.table_id, key.as_bytes().as_ref(), self.root_page)
     }
 
-    pub fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
+    pub fn get_range<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
         &'a self,
         range: T,
-    ) -> Result<BtreeRangeIter<T, K, V>, Error> {
+    ) -> Result<BtreeRangeIter<T, KR, K, V>, Error> {
         self.storage.get_range(self.table_id, range, self.root_page)
     }
 
-    pub fn get_range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
+    pub fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
         &'a self,
         range: T,
-    ) -> Result<BtreeRangeIter<T, K, V>, Error> {
+    ) -> Result<BtreeRangeIter<T, KR, K, V>, Error> {
         self.storage
             .get_range_reversed(self.table_id, range, self.root_page)
     }

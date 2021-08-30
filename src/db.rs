@@ -1,3 +1,4 @@
+use crate::multimap_table::MultiMapTable;
 use crate::storage::{DbStats, Storage, TableType};
 use crate::table::Table;
 use crate::types::{RedbKey, RedbValue};
@@ -50,6 +51,20 @@ impl Database {
         )?;
         self.storage.commit(Some(root))?;
         Table::new(definition.get_id(), &self.storage)
+    }
+
+    pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
+        &self,
+        name: &[u8],
+    ) -> Result<MultiMapTable<K, V>, Error> {
+        assert!(!name.is_empty());
+        let (definition, root) = self.storage.get_or_create_table(
+            name,
+            TableType::MultiMap,
+            self.storage.get_root_page_number(),
+        )?;
+        self.storage.commit(Some(root))?;
+        MultiMapTable::new(definition.get_id(), &self.storage)
     }
 
     pub fn stats(&self) -> Result<DbStats, Error> {
