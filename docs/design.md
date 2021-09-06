@@ -58,3 +58,26 @@ inactive copy, which is then atomically promoted to the primary via the `field_m
 * root page (CoW mutable, 8 bytes): 64-bit unsigned big-endian integer, indicating the offset of the
   root page.
 
+### Page allocator state
+The page allocator state is double buffered, and the state is technically just a cache: it can be reconstructed
+by walking the btree from all active roots.
+Both copies of the page allocator state are kept up to date after a transaction commit. This is done safely by
+using the following protocol:
+1) the shadow copy is updated
+2) the dirty bit is set for the primary copy. If the system crashes at this point, and the dirty bit gets written out,
+   then when the database is next opened the page allocation state will need to be reconstructed by walking the entire
+   btree. Setting this dirty bit on the primary before fsync'ing to swap the buffers is necessary because we do not
+   fsync after step (4) to avoid introducing an extra fsync in the commit protocol, but those writes must be marked
+   dirty.
+3) fsync the shadow metadata & shadow page allocator state.
+4) fsync to swap the shadow copy with the primary copy is completed, and unset the dirty bit on the shadow page
+   allocator state as clean
+5) the old primary copy is updated
+
+When the database is closed, the shadow copy should be fsync'ed, it's dirty bit should be cleared, and a second
+fsync performed.
+
+If the dirty bit is found set on the primary page allocator state, when the database is opened, it can be ignored. It
+must have come from a crash during or after step 2, but before step 5, therefore the state is correct.
+If the dirty bit is found set on the shadow page allocator state, when the database is opened, then it must be repaired
+by copying it from the primary or re-walking all the btree roots
