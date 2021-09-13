@@ -2,6 +2,7 @@ mod btree;
 mod db;
 mod error;
 mod multimap_table;
+mod page_allocator;
 mod page_manager;
 #[cfg(feature = "python")]
 mod python;
