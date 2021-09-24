@@ -24,7 +24,7 @@ test_py: install_py
 	python3 -m unittest discover
 
 install_py: pre
-	maturin develop --cargo-extra-args="--features python"
+	maturin develop
 
 test: pre
 	cargo test
