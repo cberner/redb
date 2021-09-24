@@ -1,3 +1,6 @@
 [build-system]
-requires = ["maturin"]
+requires = ["maturin>=0.11.3,<0.12"]
 build-backend = "maturin"
+
+[tool.maturin]
+cargo-extra-args = "--features python"
