@@ -63,7 +63,7 @@ pub(crate) struct PageAllocator {
 // subtree layer: 2-64 u64s
 // ...consecutive layers. Except for the last level, all sub-trees of the root must be complete
 impl PageAllocator {
-    pub(crate) fn open(num_pages: usize) -> Self {
+    pub(crate) fn new(num_pages: usize) -> Self {
         let mut tree_level_offsets = vec![];
 
         let mut offset = 0;
@@ -95,19 +95,17 @@ impl PageAllocator {
         );
         assert_eq!(offset, Self::required_space(num_pages));
 
-        let result = Self {
+        Self {
             num_pages,
             tree_level_offsets,
-        };
-
-        result
+        }
     }
 
     pub(crate) fn init_new(data: &mut [u8], num_pages: usize) -> Self {
         assert!(data.len() >= Self::required_space(num_pages));
         data[..8].copy_from_slice(&(num_pages as u64).to_be_bytes());
 
-        let mut result = Self::open(num_pages);
+        let result = Self::new(num_pages);
 
         // Mark all the subtrees that don't exist
         for i in Self::required_subtrees(num_pages)..64 {
@@ -272,7 +270,7 @@ mod test {
     fn alloc() {
         let num_pages = 2;
         let mut data = vec![0; PageAllocator::required_space(num_pages)];
-        let mut allocator = PageAllocator::init_new(&mut data, num_pages);
+        let allocator = PageAllocator::init_new(&mut data, num_pages);
         for i in 0..num_pages {
             assert_eq!(i as u64, allocator.alloc(&mut data).unwrap());
         }
@@ -282,7 +280,7 @@ mod test {
     #[test]
     fn record_alloc() {
         let mut data = vec![0; PageAllocator::required_space(2)];
-        let mut allocator = PageAllocator::init_new(&mut data, 2);
+        let allocator = PageAllocator::init_new(&mut data, 2);
         allocator.record_alloc(&mut data, 0);
         assert_eq!(1, allocator.alloc(&mut data).unwrap());
         assert!(allocator.alloc(&mut data).is_none());
@@ -291,7 +289,7 @@ mod test {
     #[test]
     fn free() {
         let mut data = vec![0; PageAllocator::required_space(1)];
-        let mut allocator = PageAllocator::init_new(&mut data, 1);
+        let allocator = PageAllocator::init_new(&mut data, 1);
         assert_eq!(0, allocator.alloc(&mut data).unwrap());
         assert!(allocator.alloc(&mut data).is_none());
         allocator.free(&mut data, 0);
@@ -302,7 +300,7 @@ mod test {
     fn reuse_lowest() {
         let num_pages = 65;
         let mut data = vec![0; PageAllocator::required_space(num_pages)];
-        let mut allocator = PageAllocator::init_new(&mut data, num_pages);
+        let allocator = PageAllocator::init_new(&mut data, num_pages);
         for i in 0..num_pages {
             assert_eq!(i as u64, allocator.alloc(&mut data).unwrap());
         }
@@ -317,7 +315,7 @@ mod test {
     fn all_space_used() {
         let num_pages = 65;
         let mut data = vec![0; PageAllocator::required_space(num_pages)];
-        let mut allocator = PageAllocator::init_new(&mut data, num_pages);
+        let allocator = PageAllocator::init_new(&mut data, num_pages);
         // Allocate everything
         while allocator.alloc(&mut data).is_some() {}
         // The last u64 must be used, since the leaf layer is compact
@@ -334,7 +332,7 @@ mod test {
 
         let num_pages = rng.gen_range(2..10000);
         let mut data = vec![0; PageAllocator::required_space(num_pages)];
-        let mut allocator = PageAllocator::init_new(&mut data, num_pages);
+        let allocator = PageAllocator::init_new(&mut data, num_pages);
         let mut allocated = HashSet::new();
 
         for _ in 0..(num_pages * 2) {
