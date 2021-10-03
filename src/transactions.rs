@@ -9,6 +9,7 @@ use std::ops::RangeBounds;
 pub struct WriteTransaction<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     storage: &'mmap Storage,
     table_id: u64,
+    transaction_id: u128,
     root_page: Option<PageNumber>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -16,9 +17,11 @@ pub struct WriteTransaction<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 
 impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> WriteTransaction<'mmap, K, V> {
     pub(in crate) fn new(table_id: u64, storage: &'mmap Storage) -> WriteTransaction<'mmap, K, V> {
+        let transaction_id = storage.allocate_write_transaction();
         WriteTransaction {
             storage,
             table_id,
+            transaction_id,
             root_page: storage.get_root_page_number(),
             _key_type: Default::default(),
             _value_type: Default::default(),
@@ -37,6 +40,7 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> WriteTransaction<'mmap, 
             self.table_id,
             key.as_bytes().as_ref(),
             value.as_bytes().as_ref(),
+            self.transaction_id,
             self.root_page,
         )?);
         Ok(())
@@ -53,6 +57,7 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> WriteTransaction<'mmap, 
             self.table_id,
             key.as_bytes().as_ref(),
             value_length,
+            self.transaction_id,
             self.root_page,
         )?;
         self.root_page = Some(root_page);
@@ -65,9 +70,12 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> WriteTransaction<'mmap, 
     }
 
     pub fn remove(&mut self, key: &K) -> Result<(), Error> {
-        self.root_page =
-            self.storage
-                .remove::<K>(self.table_id, key.as_bytes().as_ref(), self.root_page)?;
+        self.root_page = self.storage.remove::<K>(
+            self.table_id,
+            key.as_bytes().as_ref(),
+            self.transaction_id,
+            self.root_page,
+        )?;
         Ok(())
     }
 
@@ -77,7 +85,7 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> WriteTransaction<'mmap, 
     }
 
     pub fn abort(self) -> Result<(), Error> {
-        self.storage.rollback_uncommited_writes()
+        self.storage.rollback_uncommited_writes(self.transaction_id)
     }
 }
 
@@ -85,6 +93,7 @@ pub struct ReadOnlyTransaction<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized
     storage: &'mmap Storage,
     root_page: Option<PageNumber>,
     table_id: u64,
+    transaction_id: u128,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
@@ -95,10 +104,12 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTransaction<'mma
         storage: &'mmap Storage,
     ) -> ReadOnlyTransaction<'mmap, K, V> {
         let root_page = storage.get_root_page_number();
+        let transaction_id = storage.allocate_read_transaction();
         ReadOnlyTransaction {
             storage,
             root_page,
             table_id,
+            transaction_id,
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -132,5 +143,12 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTransaction<'mma
         self.storage
             .len(self.table_id, self.root_page)
             .map(|x| x == 0)
+    }
+}
+
+impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for ReadOnlyTransaction<'mmap, K, V> {
+    fn drop(&mut self) {
+        self.storage
+            .deallocate_read_transaction(self.transaction_id);
     }
 }

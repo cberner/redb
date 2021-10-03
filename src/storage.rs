@@ -6,6 +6,8 @@ use crate::page_manager::{Page, PageImpl, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use memmap2::MmapMut;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ops::{RangeBounds, RangeFull};
@@ -89,13 +91,38 @@ impl TableDefinition {
 
 pub(in crate) struct Storage {
     mem: TransactionalMemory,
+    next_transaction_id: Cell<u128>,
+    live_read_transactions: RefCell<BTreeSet<u128>>,
+    pending_freed_pages: RefCell<BTreeMap<u128, Vec<PageNumber>>>,
 }
 
 impl Storage {
     pub(in crate) fn new(mmap: MmapMut) -> Result<Storage, Error> {
         let mem = TransactionalMemory::new(mmap)?;
 
-        Ok(Storage { mem })
+        Ok(Storage {
+            mem,
+            next_transaction_id: Cell::new(1),
+            live_read_transactions: RefCell::new(Default::default()),
+            pending_freed_pages: RefCell::new(Default::default()),
+        })
+    }
+
+    pub(crate) fn allocate_write_transaction(&self) -> u128 {
+        let id = self.next_transaction_id.get();
+        self.next_transaction_id.set(id + 1);
+        id
+    }
+
+    pub(crate) fn allocate_read_transaction(&self) -> u128 {
+        let id = self.next_transaction_id.get();
+        self.live_read_transactions.borrow_mut().insert(id);
+        self.next_transaction_id.set(id + 1);
+        id
+    }
+
+    pub(crate) fn deallocate_read_transaction(&self, id: u128) {
+        self.live_read_transactions.borrow_mut().remove(&id);
     }
 
     // Returns a tuple of the table id and the new root page
@@ -103,6 +130,7 @@ impl Storage {
         &self,
         name: &[u8],
         table_type: TableType,
+        transaction_id: u128,
         root_page: Option<PageNumber>,
     ) -> Result<(TableDefinition, PageNumber), Error> {
         if let Some(found) = self.get::<[u8], [u8]>(TABLE_TABLE_ID, name, root_page)? {
@@ -128,8 +156,13 @@ impl Storage {
             table_id: new_id,
             table_type,
         };
-        let new_root =
-            self.insert::<[u8]>(TABLE_TABLE_ID, name, &definition.to_bytes(), root_page)?;
+        let new_root = self.insert::<[u8]>(
+            TABLE_TABLE_ID,
+            name,
+            &definition.to_bytes(),
+            transaction_id,
+            root_page,
+        )?;
         Ok((definition, new_root))
     }
 
@@ -139,14 +172,21 @@ impl Storage {
         table_id: u64,
         key: &[u8],
         value: &[u8],
+        transaction_id: u128,
         root_page: Option<PageNumber>,
     ) -> Result<PageNumber, Error> {
-        let (new_root, _) = if let Some(root) = root_page.map(|p| self.mem.get_page(p)) {
-            tree_insert::<K>(root, table_id, key, value, &self.mem)
+        if let Some(root) = root_page.map(|p| self.mem.get_page(p)) {
+            let (new_root, _, freed) = tree_insert::<K>(root, table_id, key, value, &self.mem);
+            self.pending_freed_pages
+                .borrow_mut()
+                .entry(transaction_id)
+                .or_default()
+                .extend_from_slice(&freed);
+            Ok(new_root)
         } else {
-            make_mut_single_leaf(table_id, key, value, &self.mem)
-        };
-        Ok(new_root)
+            let (new_root, _) = make_mut_single_leaf(table_id, key, value, &self.mem);
+            Ok(new_root)
+        }
     }
 
     // Returns the new root page number, and accessor for writing the value
@@ -155,11 +195,18 @@ impl Storage {
         table_id: u64,
         key: &[u8],
         value_len: usize,
+        transaction_id: u128,
         root_page: Option<PageNumber>,
     ) -> Result<(PageNumber, AccessGuardMut), Error> {
         let value = vec![0u8; value_len];
         let (new_root, guard) = if let Some(root) = root_page.map(|p| self.mem.get_page(p)) {
-            tree_insert::<K>(root, table_id, key, &value, &self.mem)
+            let (new_root, guard, freed) = tree_insert::<K>(root, table_id, key, &value, &self.mem);
+            self.pending_freed_pages
+                .borrow_mut()
+                .entry(transaction_id)
+                .or_default()
+                .extend_from_slice(&freed);
+            (new_root, guard)
         } else {
             make_mut_single_leaf(table_id, key, &value, &self.mem)
         };
@@ -187,11 +234,39 @@ impl Storage {
     pub(in crate) fn commit(&self, new_root: Option<PageNumber>) -> Result<(), Error> {
         self.mem
             .set_secondary_root_page(new_root.unwrap_or(PageNumber(0)));
+        let oldest_live_read = self
+            .live_read_transactions
+            .borrow()
+            .iter()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| self.next_transaction_id.get());
+        // TODO: replace this loop with BtreeMap.drain_filter when it's stable
+        #[allow(clippy::while_let_loop)]
+        loop {
+            let to_remove =
+                if let Some((key, freed)) = self.pending_freed_pages.borrow_mut().iter().next() {
+                    if *key < oldest_live_read {
+                        for page in freed {
+                            self.mem.free(*page);
+                        }
+                        *key
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                };
+            self.pending_freed_pages.borrow_mut().remove(&to_remove);
+        }
         self.mem.commit()?;
         Ok(())
     }
 
-    pub(in crate) fn rollback_uncommited_writes(&self) -> Result<(), Error> {
+    pub(in crate) fn rollback_uncommited_writes(&self, transaction_id: u128) -> Result<(), Error> {
+        self.pending_freed_pages
+            .borrow_mut()
+            .remove(&transaction_id);
         self.mem.rollback_uncommited_writes()
     }
 
@@ -276,10 +351,16 @@ impl Storage {
         &self,
         table_id: u64,
         key: &[u8],
+        transaction_id: u128,
         page_number: Option<PageNumber>,
     ) -> Result<Option<PageNumber>, Error> {
         if let Some(root_page) = page_number.map(|p| self.mem.get_page(p)) {
-            let new_root = tree_delete::<K>(root_page, table_id, key, &self.mem);
+            let (new_root, freed) = tree_delete::<K>(root_page, table_id, key, &self.mem);
+            self.pending_freed_pages
+                .borrow_mut()
+                .entry(transaction_id)
+                .or_default()
+                .extend_from_slice(&freed);
             return Ok(new_root);
         }
         Ok(page_number)

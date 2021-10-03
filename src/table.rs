@@ -47,7 +47,7 @@ mod test {
     #[test]
     fn len() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
         let mut write_txn = table.begin_write().unwrap();
         write_txn.insert(b"hello", b"world").unwrap();
@@ -61,7 +61,7 @@ mod test {
     #[test]
     fn multiple_tables() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<[u8], [u8]> = db.open_table(b"1").unwrap();
         let mut table2: Table<[u8], [u8]> = db.open_table(b"2").unwrap();
 
@@ -86,7 +86,7 @@ mod test {
     #[test]
     fn is_empty() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
         let read_txn = table.read_transaction().unwrap();
         assert!(read_txn.is_empty().unwrap());
@@ -100,7 +100,7 @@ mod test {
     #[test]
     fn abort() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
         let read_txn = table.read_transaction().unwrap();
         assert!(read_txn.is_empty().unwrap());
@@ -124,7 +124,7 @@ mod test {
     #[test]
     fn insert_overwrite() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
         let mut write_txn = table.begin_write().unwrap();
         write_txn.insert(b"hello", b"world").unwrap();
@@ -145,7 +145,7 @@ mod test {
     #[test]
     fn u64_type() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<u64, u64> = db.open_table(b"x").unwrap();
         let mut write_txn = table.begin_write().unwrap();
         write_txn.insert(&0, &1).unwrap();
@@ -157,7 +157,7 @@ mod test {
     #[test]
     fn insert_reserve() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
         let mut write_txn = table.begin_write().unwrap();
         let value = b"world";
@@ -172,7 +172,7 @@ mod test {
     #[test]
     fn range_query() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
 
         let mut write_txn = table.begin_write().unwrap();
@@ -198,7 +198,7 @@ mod test {
     #[test]
     fn range_query_reversed() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
 
         let mut write_txn = table.begin_write().unwrap();
@@ -251,7 +251,7 @@ mod test {
         }
 
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<ReverseKey, [u8]> = db.open_table(b"x").unwrap();
 
         let mut write_txn = table.begin_write().unwrap();
@@ -275,7 +275,7 @@ mod test {
     #[test]
     fn delete() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
 
         let mut write_txn = table.begin_write().unwrap();
@@ -298,7 +298,7 @@ mod test {
     #[test]
     fn no_dirty_reads() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
 
         let mut write_txn = table.begin_write().unwrap();
@@ -315,7 +315,7 @@ mod test {
     #[test]
     fn read_isolation() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
 
         let mut write_txn = table.begin_write().unwrap();

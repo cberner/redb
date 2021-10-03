@@ -295,6 +295,7 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapTable<'mmap, K, V>
 pub struct MultiMapWriteTransaction<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     storage: &'mmap Storage,
     table_id: u64,
+    transaction_id: u128,
     root_page: Option<PageNumber>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -305,9 +306,11 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapWriteTransaction<'
         table_id: u64,
         storage: &'mmap Storage,
     ) -> MultiMapWriteTransaction<'mmap, K, V> {
+        let transaction_id = storage.allocate_write_transaction();
         MultiMapWriteTransaction {
             storage,
             table_id,
+            transaction_id,
             root_page: storage.get_root_page_number(),
             _key_type: Default::default(),
             _value_type: Default::default(),
@@ -327,6 +330,7 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapWriteTransaction<'
             self.table_id,
             &kv,
             b"",
+            self.transaction_id,
             self.root_page,
         )?);
         Ok(())
@@ -347,9 +351,12 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapWriteTransaction<'
 
     pub fn remove(&mut self, key: &K, value: &V) -> Result<(), Error> {
         let kv = make_serialized_kv(key, value);
-        self.root_page =
-            self.storage
-                .remove::<MultiMapKVPair<K, V>>(self.table_id, &kv, self.root_page)?;
+        self.root_page = self.storage.remove::<MultiMapKVPair<K, V>>(
+            self.table_id,
+            &kv,
+            self.transaction_id,
+            self.root_page,
+        )?;
         Ok(())
     }
 
@@ -361,6 +368,7 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapWriteTransaction<'
             self.root_page = self.storage.remove::<MultiMapKVPair<K, V>>(
                 self.table_id,
                 &key_only,
+                self.transaction_id,
                 self.root_page,
             )?;
             if old_root == self.root_page {
@@ -376,7 +384,7 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapWriteTransaction<'
     }
 
     pub fn abort(self) -> Result<(), Error> {
-        self.storage.rollback_uncommited_writes()
+        self.storage.rollback_uncommited_writes(self.transaction_id)
     }
 }
 
@@ -384,6 +392,7 @@ pub struct MultiMapReadOnlyTransaction<'mmap, K: RedbKey + ?Sized, V: RedbKey + 
     storage: &'mmap Storage,
     root_page: Option<PageNumber>,
     table_id: u64,
+    transaction_id: u128,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
@@ -394,10 +403,12 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapReadOnlyTransactio
         storage: &'mmap Storage,
     ) -> MultiMapReadOnlyTransaction<'mmap, K, V> {
         let root_page = storage.get_root_page_number();
+        let transaction_id = storage.allocate_read_transaction();
         MultiMapReadOnlyTransaction {
             storage,
             root_page,
             table_id,
+            transaction_id,
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -457,6 +468,15 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapReadOnlyTransactio
     }
 }
 
+impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Drop
+    for MultiMapReadOnlyTransaction<'mmap, K, V>
+{
+    fn drop(&mut self) {
+        self.storage
+            .deallocate_read_transaction(self.transaction_id);
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::{Database, MultiMapReadOnlyTransaction, MultiMapTable};
@@ -479,7 +499,7 @@ mod test {
     #[test]
     fn len() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: MultiMapTable<[u8], [u8]> = db.open_multimap_table(b"x").unwrap();
         let mut write_txn = table.begin_write().unwrap();
         write_txn.insert(b"hello", b"world").unwrap();
@@ -493,7 +513,7 @@ mod test {
     #[test]
     fn is_empty() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: MultiMapTable<[u8], [u8]> = db.open_multimap_table(b"x").unwrap();
         let read_txn = table.read_transaction().unwrap();
         assert!(read_txn.is_empty().unwrap());
@@ -507,7 +527,7 @@ mod test {
     #[test]
     fn insert() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: MultiMapTable<[u8], [u8]> = db.open_multimap_table(b"x").unwrap();
         let mut write_txn = table.begin_write().unwrap();
         write_txn.insert(b"hello", b"world").unwrap();
@@ -524,7 +544,7 @@ mod test {
     #[test]
     fn range_query() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: MultiMapTable<[u8], [u8]> = db.open_multimap_table(b"x").unwrap();
 
         let mut write_txn = table.begin_write().unwrap();
@@ -560,7 +580,7 @@ mod test {
     #[test]
     fn delete() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let mut table: MultiMapTable<[u8], [u8]> = db.open_multimap_table(b"x").unwrap();
 
         let mut write_txn = table.begin_write().unwrap();
