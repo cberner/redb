@@ -8,6 +8,8 @@ use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 
 const BTREE_ORDER: usize = 50;
+// TODO: dynamically calculate this based on the actual page size
+const MAX_KEY_SPACE_PER_PAGE: usize = 4096 - 32 * BTREE_ORDER;
 
 pub struct AccessGuardMut<'a> {
     page: PageMut<'a>,
@@ -666,6 +668,15 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
             self.page.memory()[offset..(offset + 8)].try_into().unwrap(),
         )))
     }
+
+    fn total_key_length(&self) -> usize {
+        let mut len = 0;
+        for i in 0..(BTREE_ORDER - 1) {
+            len += self.key_len(i);
+        }
+
+        len
+    }
 }
 
 // Note the caller is responsible for ensuring that the buffer is large enough
@@ -902,7 +913,8 @@ fn merge_leaf(
     leaf
 }
 
-// Must return the pages in order
+// Splits the page, if necessary, to fit the additional pages in `partial`
+// Returns the pages in order
 fn split_index(
     index: PageNumber,
     partial: &[PageNumber],
@@ -911,7 +923,17 @@ fn split_index(
     let page = manager.get_page(index);
     let accessor = InternalAccessor::new(&page);
 
-    accessor.child_page(BTREE_ORDER - 1)?;
+    let has_enough_slots = accessor.child_page(BTREE_ORDER - partial.len()).is_none();
+    let required_key_space: usize = partial
+        .iter()
+        .map(|p| max_table_key(manager.get_page(*p), manager).1.len())
+        .sum();
+    // TODO: Note we could get a false negative here, since we don't need to store the last key
+    // The total_key_length calculation below does it correctly
+    let has_space = accessor.total_key_length() + required_key_space < MAX_KEY_SPACE_PER_PAGE;
+    if has_space && has_enough_slots {
+        return None;
+    }
 
     let mut pages = vec![];
     pages.extend_from_slice(partial);
@@ -923,7 +945,26 @@ fn split_index(
 
     pages.sort_by_key(|p| max_table_key(manager.get_page(*p), manager));
 
-    let division = pages.len() / 2;
+    let total_key_length: usize = pages
+        .iter()
+        .map(|p| max_table_key(manager.get_page(*p), manager).1.len())
+        .sum();
+    let division = if total_key_length < MAX_KEY_SPACE_PER_PAGE {
+        // Use tree order if we did not run out of space
+        pages.len() / 2
+    } else {
+        // Otherwise balance the nodes based on the key size
+        let mut index = pages.len() - 2;
+        let mut cumulative = 0;
+        for (i, p) in pages.iter().enumerate() {
+            cumulative += max_table_key(manager.get_page(*p), manager).1.len();
+            if cumulative > total_key_length / 2 {
+                index = i;
+                break;
+            }
+        }
+        index
+    };
 
     let page1 = make_index_many_pages(&pages[0..division], manager);
     let page2 = make_index_many_pages(&pages[division..], manager);
@@ -1503,9 +1544,11 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
             let guard = guard.unwrap();
             assert_eq!(children.len() - 1, index_table_keys.len());
 
+            let total_key_len: usize = index_table_keys.iter().map(|(_, key)| key.len()).sum();
+
             let mut page = manager.allocate();
             let mut builder = InternalBuilder::new(&mut page);
-            if children.len() <= BTREE_ORDER {
+            if children.len() <= BTREE_ORDER && total_key_len < MAX_KEY_SPACE_PER_PAGE {
                 builder.write_first_page(children[0]);
                 for (i, ((table, key), page_number)) in index_table_keys
                     .iter()
@@ -1516,7 +1559,22 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 }
                 (page.get_page_number(), None, guard, freed)
             } else {
-                let division = BTREE_ORDER / 2;
+                let division = if total_key_len < MAX_KEY_SPACE_PER_PAGE {
+                    // Use tree order if we did not run out of space
+                    BTREE_ORDER / 2
+                } else {
+                    // Otherwise balance the nodes based on the key size
+                    let mut index = index_table_keys.len() - 1;
+                    let mut cumulative = 0;
+                    for (i, (_, key)) in index_table_keys.iter().enumerate() {
+                        cumulative += key.len();
+                        if cumulative > total_key_len / 2 {
+                            index = i;
+                            break;
+                        }
+                    }
+                    index
+                };
                 builder.write_first_page(children[0]);
                 for i in 0..division {
                     let (table, key) = &index_table_keys[i];
@@ -1528,7 +1586,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 let mut page2 = manager.allocate();
                 let mut builder2 = InternalBuilder::new(&mut page2);
                 builder2.write_first_page(children[division + 1]);
-                for i in (division + 1)..BTREE_ORDER {
+                for i in (division + 1)..index_table_keys.len() {
                     let (table, key) = &index_table_keys[i];
                     builder2.write_nth_key(*table, key, children[i + 1], i - (division + 1));
                 }
