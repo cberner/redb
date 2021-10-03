@@ -84,3 +84,32 @@ fn free() {
 
     // TODO: assert that no pages were leaked
 }
+
+#[test]
+fn large_keys() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024_1024;
+    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+
+    let mut key = vec![0; 1024];
+    let value = vec![0; 1];
+    let mut txn = table.begin_write().unwrap();
+    {
+        for i in 0..100 {
+            key[0] = i;
+            txn.insert(&key, &value).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let mut txn = table.begin_write().unwrap();
+    {
+        for i in 0..100 {
+            key[0] = i;
+            txn.remove(&key).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+}
