@@ -11,7 +11,8 @@ use std::sync::{Mutex, MutexGuard};
 const DB_METADATA_PAGE: u64 = 0;
 
 const MAGICNUMBER: [u8; 4] = [b'r', b'e', b'd', b'b'];
-const PRIMARY_BIT_OFFSET: usize = MAGICNUMBER.len();
+const VERSION_OFFSET: usize = MAGICNUMBER.len();
+const PRIMARY_BIT_OFFSET: usize = VERSION_OFFSET + 1;
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 128;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
@@ -283,6 +284,8 @@ impl TransactionalMemory {
                 &mut mmap[start..(start + allocator_state_size)],
                 DB_METADATA_PAGE,
             );
+
+            mmap[VERSION_OFFSET] = 1;
 
             mmap.flush()?;
             // Write the magic number only after the data structure is initialized and written to disk
