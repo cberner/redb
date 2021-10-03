@@ -21,15 +21,14 @@ impl Database {
     ///
     /// The file referenced by `path` must only be concurrently modified by compatible versions
     /// of redb
-    pub unsafe fn open(path: &Path) -> Result<Database, Error> {
+    // TODO: ensure that db_size doesn't change
+    pub unsafe fn open(path: &Path, mut db_size: usize) -> Result<Database, Error> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(path)?;
 
-        // TODO: what value should we use here?
-        let mut db_size = 16 * 1024 * 1024 * 1024;
         // Ensure that db_size is a multiple of page size, which is required by mmap
         db_size -= db_size % page_size::get();
         file.set_len(db_size as u64)?;
@@ -44,9 +43,12 @@ impl Database {
         name: &[u8],
     ) -> Result<Table<K, V>, Error> {
         assert!(!name.is_empty());
+        // TODO: this could conflict with an on-going write
+        let id = self.storage.allocate_write_transaction();
         let (definition, root) = self.storage.get_or_create_table(
             name,
             TableType::Normal,
+            id,
             self.storage.get_root_page_number(),
         )?;
         self.storage.commit(Some(root))?;
@@ -58,9 +60,12 @@ impl Database {
         name: &[u8],
     ) -> Result<MultiMapTable<K, V>, Error> {
         assert!(!name.is_empty());
+        // TODO: this could conflict with an on-going write
+        let id = self.storage.allocate_write_transaction();
         let (definition, root) = self.storage.get_or_create_table(
             name,
             TableType::MultiMap,
+            id,
             self.storage.get_root_page_number(),
         )?;
         self.storage.commit(Some(root))?;

@@ -204,6 +204,7 @@ impl<'a> Drop for PageMut<'a> {
 pub(in crate) struct TransactionalMemory {
     // Pages allocated since the last commit
     allocated_since_commit: RefCell<Vec<PageNumber>>,
+    freed_since_commit: RefCell<Vec<PageNumber>>,
     // Metapage guard lock should be held when using this to modify the page allocator state
     page_allocator: PageAllocator,
     mmap: MmapMut,
@@ -300,6 +301,7 @@ impl TransactionalMemory {
 
         Ok(TransactionalMemory {
             allocated_since_commit: RefCell::new(vec![]),
+            freed_since_commit: RefCell::new(vec![]),
             page_allocator,
             mmap,
             metapage_guard: mutex,
@@ -363,6 +365,9 @@ impl TransactionalMemory {
         for page_number in self.allocated_since_commit.borrow_mut().drain(..) {
             self.page_allocator.record_alloc(mem, page_number.0);
         }
+        for page_number in self.freed_since_commit.borrow_mut().drain(..) {
+            self.page_allocator.free(mem, page_number.0);
+        }
         drop(guard); // Ensure the guard lives past all the writes to the page allocator state
 
         Ok(())
@@ -375,6 +380,9 @@ impl TransactionalMemory {
         let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
         for page_number in self.allocated_since_commit.borrow_mut().drain(..) {
             self.page_allocator.free(mem, page_number.0);
+        }
+        for page_number in self.freed_since_commit.borrow_mut().drain(..) {
+            self.page_allocator.record_alloc(mem, page_number.0);
         }
         // Drop guard only after page_allocator calls are completed
         drop(guard);
@@ -403,6 +411,15 @@ impl TransactionalMemory {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
         mutator.set_root_page(root_page);
+    }
+
+    pub(in crate) fn free(&self, page: PageNumber) {
+        let (mmap, guard) = self.acquire_mutable_metapage();
+        let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
+        let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
+        self.page_allocator.free(mem, page.0);
+        drop(guard);
+        self.freed_since_commit.borrow_mut().push(page);
     }
 
     pub(in crate) fn allocate(&self) -> PageMut {

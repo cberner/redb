@@ -23,7 +23,8 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
 fn persistence() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+    let db_size = 16 * 1024 * 1024;
+    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
     let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
 
     let pairs = gen_data(100, 16, 20);
@@ -39,7 +40,7 @@ fn persistence() {
 
     drop(table);
     drop(db);
-    let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
     let table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
 
     let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
@@ -53,4 +54,33 @@ fn persistence() {
             assert_eq!(result.as_ref(), value);
         }
     }
+}
+
+#[test]
+fn free() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024_1024;
+    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+
+    let key = vec![0; 100];
+    let value = vec![0; 1024];
+    // Write 10% of db space each iteration
+    let num_writes = db_size / 10 / (key.len() + value.len());
+    assert!(num_writes > 0);
+
+    // Fill the database 10 times, to be sure that memory is getting freed
+    for _ in 0..100 {
+        let mut txn = table.begin_write().unwrap();
+        {
+            for _ in 0..num_writes {
+                txn.insert(&key, &value).unwrap();
+                txn.remove(&key).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    // TODO: assert that no pages were leaked
 }
