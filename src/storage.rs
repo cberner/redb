@@ -93,6 +93,8 @@ pub(in crate) struct Storage {
     mem: TransactionalMemory,
     next_transaction_id: Cell<u128>,
     live_read_transactions: RefCell<BTreeSet<u128>>,
+    // TODO: these need to be persisted in the mmap'ed file, so that they don't leak
+    // if we crash before freeing pages
     pending_freed_pages: RefCell<BTreeMap<u128, Vec<PageNumber>>>,
 }
 
