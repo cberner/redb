@@ -458,6 +458,17 @@ impl TransactionalMemory {
             open_pages: &self.open_dirty_pages,
         }
     }
+
+    pub(crate) fn count_free_pages(&self) -> usize {
+        let (mmap, guard) = self.acquire_mutable_metapage();
+        let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
+        let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
+        let count = self.page_allocator.count_free_pages(mem);
+        // Drop guard only after page_allocator.count_free() is completed
+        drop(guard);
+
+        count
+    }
 }
 
 impl Drop for TransactionalMemory {

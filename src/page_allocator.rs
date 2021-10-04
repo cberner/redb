@@ -46,6 +46,10 @@ impl<'a> U64GroupedBitMap<'a> {
             x => Some(start_bit + x as usize),
         }
     }
+
+    fn count_unset(&self) -> usize {
+        self.data.iter().map(|x| x.count_zeros() as usize).sum()
+    }
 }
 
 pub(crate) struct PageAllocator {
@@ -175,6 +179,10 @@ impl PageAllocator {
         }
 
         height
+    }
+
+    pub(crate) fn count_free_pages(&self, data: &mut [u8]) -> usize {
+        self.get_level(data, self.get_height() - 1).count_unset()
     }
 
     fn get_level<'a>(&self, data: &'a mut [u8], i: usize) -> U64GroupedBitMap<'a> {
