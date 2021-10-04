@@ -1339,7 +1339,9 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
     value: &[u8],
     manager: &'a TransactionalMemory,
 ) -> (PageNumber, AccessGuardMut<'a>, Vec<PageNumber>) {
-    let (page1, more, guard, freed) = tree_insert_helper::<K>(page, table, key, value, manager);
+    let mut freed = vec![];
+    let (page1, more, guard) =
+        tree_insert_helper::<K>(page, table, key, value, &mut freed, manager);
 
     if let Some((table, key, page2)) = more {
         let index_page = make_index(table, &key, page1, page2, manager);
@@ -1355,12 +1357,12 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
     table: u64,
     key: &[u8],
     value: &[u8],
+    freed: &mut Vec<PageNumber>,
     manager: &'a TransactionalMemory,
 ) -> (
     PageNumber,
     Option<(u64, Vec<u8>, PageNumber)>,
     AccessGuardMut<'a>,
-    Vec<PageNumber>,
 ) {
     let node_mem = page.memory();
     match node_mem[0] {
@@ -1378,7 +1380,6 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                             left_page,
                             Some((entry.table_id(), entry.key().to_vec(), right_page)),
                             guard,
-                            vec![],
                         )
                     }
                     Ordering::Equal => {
@@ -1392,7 +1393,9 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                             manager,
                         );
 
-                        (new_page, None, guard, vec![page.get_page_number()])
+                        freed.push(page.get_page_number());
+
+                        (new_page, None, guard)
                     }
                     Ordering::Greater => {
                         let right_table = entry.table_id();
@@ -1411,12 +1414,9 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                                 let right =
                                     make_single_leaf(right_table, right_key, right_value, manager);
 
-                                (
-                                    left,
-                                    Some((table, key.to_vec(), right)),
-                                    guard,
-                                    vec![page.get_page_number()],
-                                )
+                                freed.push(page.get_page_number());
+
+                                (left, Some((table, key.to_vec(), right)), guard)
                             }
                             Ordering::Equal => {
                                 let (new_page, guard) = make_mut_double_leaf_left::<K>(
@@ -1429,7 +1429,9 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                                     manager,
                                 );
 
-                                (new_page, None, guard, vec![page.get_page_number()])
+                                freed.push(page.get_page_number());
+
+                                (new_page, None, guard)
                             }
                             Ordering::Greater => {
                                 let (left, guard) = make_mut_double_leaf_left::<K>(
@@ -1438,12 +1440,9 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                                 let right =
                                     make_single_leaf(right_table, right_key, right_value, manager);
 
-                                (
-                                    left,
-                                    Some((left_table, left_key.to_vec(), right)),
-                                    guard,
-                                    vec![page.get_page_number()],
-                                )
+                                freed.push(page.get_page_number());
+
+                                (left, Some((left_table, left_key.to_vec(), right)), guard)
                             }
                         }
                     }
@@ -1476,15 +1475,16 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     ),
                 };
 
-                // TODO: should refactor to remove all these vec! allocations
-                (new_page, None, guard, vec![page.get_page_number()])
+                freed.push(page.get_page_number());
+
+                (new_page, None, guard)
             }
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             // Inserting into an internal page will always free it
             // TODO: unless the (key, value) pair is the same? That could result in no change
-            let mut freed = vec![page.get_page_number()];
+            freed.push(page.get_page_number());
             let mut children = vec![];
             let mut index_table_keys = vec![];
             let mut guard = None;
@@ -1495,14 +1495,14 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     if cmp_keys::<K>(table, key, index_table, index_key).is_le() && guard.is_none()
                     {
                         let lte_page = accessor.child_page(i).unwrap();
-                        let (page1, more, guard2, child_freed) = tree_insert_helper::<K>(
+                        let (page1, more, guard2) = tree_insert_helper::<K>(
                             manager.get_page(lte_page),
                             table,
                             key,
                             value,
+                            freed,
                             manager,
                         );
-                        freed.extend_from_slice(&child_freed);
                         children.push(page1);
                         if let Some((index_table, index_key, page2)) = more {
                             index_table_keys.push((index_table, index_key));
@@ -1525,14 +1525,14 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 // Already found the insertion place, so just copy
                 children.push(last_page);
             } else {
-                let (page1, more, guard2, child_freed) = tree_insert_helper::<K>(
+                let (page1, more, guard2) = tree_insert_helper::<K>(
                     manager.get_page(last_page),
                     table,
                     key,
                     value,
+                    freed,
                     manager,
                 );
-                freed.extend_from_slice(&child_freed);
                 children.push(page1);
                 if let Some((index_table, index_key, page2)) = more {
                     index_table_keys.push((index_table, index_key));
@@ -1557,7 +1557,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 {
                     builder.write_nth_key(*table, key, *page_number, i);
                 }
-                (page.get_page_number(), None, guard, freed)
+                (page.get_page_number(), None, guard)
             } else {
                 let division = if total_key_len < MAX_KEY_SPACE_PER_PAGE {
                     // Use tree order if we did not run out of space
@@ -1595,7 +1595,6 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     page.get_page_number(),
                     Some((*index_table, index_key.to_vec(), page2.get_page_number())),
                     guard,
-                    freed,
                 )
             }
         }
