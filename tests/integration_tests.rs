@@ -60,29 +60,36 @@ fn persistence() {
 fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024_1024;
+    let db_size = 512 * 1024;
     let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
     let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
 
+    let free_pages = db.stats().unwrap().free_pages();
+
     let key = vec![0; 100];
     let value = vec![0; 1024];
-    // Write 10% of db space each iteration
-    let num_writes = db_size / 10 / (key.len() + value.len());
-    assert!(num_writes > 0);
+    // Write 25% of db space each iteration
+    let num_writes = db_size / 4 / (key.len() + value.len());
+    // Make sure an internal index page is required
+    assert!(num_writes > 64);
 
-    // Fill the database 10 times, to be sure that memory is getting freed
-    for _ in 0..100 {
-        let mut txn = table.begin_write().unwrap();
-        {
-            for _ in 0..num_writes {
-                txn.insert(&key, &value).unwrap();
-                txn.remove(&key).unwrap();
-            }
+    let mut txn = table.begin_write().unwrap();
+    {
+        for _ in 0..num_writes {
+            txn.insert(&key, &value).unwrap();
         }
-        txn.commit().unwrap();
     }
+    txn.commit().unwrap();
 
-    // TODO: assert that no pages were leaked
+    let mut txn = table.begin_write().unwrap();
+    {
+        for _ in 0..num_writes {
+            txn.remove(&key).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    assert_eq!(free_pages, db.stats().unwrap().free_pages());
 }
 
 #[test]

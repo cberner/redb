@@ -18,15 +18,23 @@ const TABLE_TABLE_ID: u64 = 0;
 #[derive(Debug)]
 pub struct DbStats {
     tree_height: usize,
+    free_pages: usize,
 }
 
 impl DbStats {
-    fn new(tree_height: usize) -> Self {
-        DbStats { tree_height }
+    fn new(tree_height: usize, free_pages: usize) -> Self {
+        DbStats {
+            tree_height,
+            free_pages,
+        }
     }
 
     pub fn tree_height(&self) -> usize {
         self.tree_height
+    }
+
+    pub fn free_pages(&self) -> usize {
+        self.free_pages
     }
 }
 
@@ -277,7 +285,7 @@ impl Storage {
             .get_root_page_number()
             .map(|p| tree_height(self.mem.get_page(p), &self.mem))
             .unwrap_or(0);
-        Ok(DbStats::new(tree_height))
+        Ok(DbStats::new(tree_height, self.mem.count_free_pages()))
     }
 
     #[allow(dead_code)]
