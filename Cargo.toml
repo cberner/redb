@@ -13,7 +13,7 @@ authors = ["Christopher Berner <christopherberner@gmail.com>"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-memmap2 = "0.3.0"
+memmap2 = "0.5.0"
 page_size = "0.4.2"
 pyo3 = {version = "0.14", features=["extension-module", "abi3-py36"], optional = true }
 
