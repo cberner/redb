@@ -873,6 +873,7 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
     (result, freed)
 }
 
+#[derive(Debug)]
 enum DeletionResult {
     // A proper subtree
     Subtree(PageNumber),
@@ -1022,25 +1023,15 @@ fn repair_children(
     } else if children.iter().any(|x| matches!(x, PartialLeaf(_))) {
         let mut result = vec![];
         let mut repaired = false;
+        // For each whole subtree, try to merge it with a partial left to repair it, if one is neighboring
         for i in 0..children.len() {
             if let Subtree(page_number) = &children[i] {
                 if repaired {
                     result.push(*page_number);
                     continue;
                 }
-                if i > 0 {
-                    if let Some(PartialLeaf(partials)) = children.get(i - 1) {
-                        if let Some((page1, page2)) = split_leaf(*page_number, partials, manager) {
-                            result.push(page1);
-                            result.push(page2);
-                            repaired = true;
-                        } else {
-                            result.push(merge_leaf(*page_number, partials, manager));
-                            repaired = true;
-                        }
-                    }
-                }
-                if let Some(PartialLeaf(partials)) = children.get(i + 1) {
+                let offset = if i > 0 { i - 1 } else { i + 1 };
+                if let Some(PartialLeaf(partials)) = children.get(offset) {
                     if let Some((page1, page2)) = split_leaf(*page_number, partials, manager) {
                         result.push(page1);
                         result.push(page2);
@@ -1049,6 +1040,9 @@ fn repair_children(
                         result.push(merge_leaf(*page_number, partials, manager));
                         repaired = true;
                     }
+                } else {
+                    // No adjacent partial
+                    result.push(*page_number);
                 }
             }
         }
@@ -1056,25 +1050,15 @@ fn repair_children(
     } else if children.iter().any(|x| matches!(x, PartialInternal(_))) {
         let mut result = vec![];
         let mut repaired = false;
+        // For each whole subtree, try to merge it with a partial left to repair it, if one is neighboring
         for i in 0..children.len() {
             if let Subtree(page_number) = &children[i] {
                 if repaired {
                     result.push(*page_number);
                     continue;
                 }
-                if i > 0 {
-                    if let Some(PartialInternal(partials)) = children.get(i - 1) {
-                        if let Some((page1, page2)) = split_index(*page_number, partials, manager) {
-                            result.push(page1);
-                            result.push(page2);
-                            repaired = true;
-                        } else {
-                            result.push(merge_index(*page_number, partials, manager));
-                            repaired = true;
-                        }
-                    }
-                }
-                if let Some(PartialInternal(partials)) = children.get(i + 1) {
+                let offset = if i > 0 { i - 1 } else { i + 1 };
+                if let Some(PartialInternal(partials)) = children.get(offset) {
                     if let Some((page1, page2)) = split_index(*page_number, partials, manager) {
                         result.push(page1);
                         result.push(page2);
@@ -1083,6 +1067,9 @@ fn repair_children(
                         result.push(merge_index(*page_number, partials, manager));
                         repaired = true;
                     }
+                } else {
+                    // No adjacent partial
+                    result.push(*page_number);
                 }
             }
         }

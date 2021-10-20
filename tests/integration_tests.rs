@@ -120,3 +120,45 @@ fn large_keys() {
     }
     txn.commit().unwrap();
 }
+
+#[test]
+// Test for a bug in the deletion code, where deleting a key accidentally deleted other keys
+fn regression() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024 * 1024;
+    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let mut table: Table<u64, u64> = db.open_table(b"x").unwrap();
+
+    let mut txn = table.begin_write().unwrap();
+    txn.insert(&1, &1).unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = table.begin_write().unwrap();
+    txn.insert(&6, &9).unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = table.begin_write().unwrap();
+    txn.insert(&12, &10).unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = table.begin_write().unwrap();
+    txn.insert(&18, &27).unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = table.begin_write().unwrap();
+    txn.insert(&24, &33).unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = table.begin_write().unwrap();
+    txn.insert(&30, &14).unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = table.begin_write().unwrap();
+    txn.remove(&30).unwrap();
+    txn.commit().unwrap();
+
+    let txn = table.read_transaction().unwrap();
+    let v = txn.get(&6).unwrap().unwrap().to_value();
+    assert_eq!(v, 9);
+}
