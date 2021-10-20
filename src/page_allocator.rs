@@ -127,7 +127,7 @@ impl PageAllocator {
         if result.get_height() > 2 {
             // Mark excess index space in the last subtree
             let total_indexable_pages = result.get_level(data, result.get_height() - 2).len() * 64;
-            for i in (num_pages + 64)..total_indexable_pages {
+            for i in (num_pages + 63)..total_indexable_pages {
                 result.update_to_root(data, i, true);
             }
         }
