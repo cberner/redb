@@ -171,10 +171,11 @@ impl PageAllocator {
         (num_pages + pages_per_subtree - 1) / pages_per_subtree
     }
 
-    fn required_tree_height(mut num_pages: usize) -> usize {
+    fn required_tree_height(num_pages: usize) -> usize {
         let mut height = 1;
-        while num_pages > 64 {
-            num_pages /= 64;
+        let mut storable = 64;
+        while num_pages > storable {
+            storable *= 64;
             height += 1;
         }
 
