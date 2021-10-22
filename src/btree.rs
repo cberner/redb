@@ -1035,11 +1035,10 @@ fn repair_children(
                     if let Some((page1, page2)) = split_leaf(*page_number, partials, manager) {
                         result.push(page1);
                         result.push(page2);
-                        repaired = true;
                     } else {
                         result.push(merge_leaf(*page_number, partials, manager));
-                        repaired = true;
                     }
+                    repaired = true;
                 } else {
                     // No adjacent partial
                     result.push(*page_number);
@@ -1062,11 +1061,10 @@ fn repair_children(
                     if let Some((page1, page2)) = split_index(*page_number, partials, manager) {
                         result.push(page1);
                         result.push(page2);
-                        repaired = true;
                     } else {
                         result.push(merge_index(*page_number, partials, manager));
-                        repaired = true;
                     }
+                    repaired = true;
                 } else {
                     // No adjacent partial
                     result.push(*page_number);
