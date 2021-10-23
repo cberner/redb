@@ -4,6 +4,7 @@ mod error;
 mod multimap_table;
 mod page_allocator;
 mod page_manager;
+mod page_store;
 #[cfg(feature = "python")]
 mod python;
 mod storage;

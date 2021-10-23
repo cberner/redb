@@ -1,4 +1,5 @@
 use crate::multimap_table::MultiMapTable;
+use crate::page_store::utils::get_page_size;
 use crate::storage::{DbStats, Storage, TableType};
 use crate::table::Table;
 use crate::types::{RedbKey, RedbValue};
@@ -30,7 +31,7 @@ impl Database {
             .open(path)?;
 
         // Ensure that db_size is a multiple of page size, which is required by mmap
-        db_size -= db_size % page_size::get();
+        db_size -= db_size % get_page_size();
         file.set_len(db_size as u64)?;
 
         let mmap = MmapMut::map_mut(&file)?;
