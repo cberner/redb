@@ -1,4 +1,5 @@
 use crate::page_allocator::PageAllocator;
+use crate::page_store::utils::get_page_size;
 use crate::Error;
 use memmap2::MmapMut;
 use std::cell::RefCell;
@@ -215,18 +216,19 @@ pub(in crate) struct TransactionalMemory {
     metapage_guard: Mutex<MetapageGuard>,
     // The number of PageMut which are outstanding
     open_dirty_pages: RefCell<HashSet<PageNumber>>,
+    page_size: usize,
 }
 
 impl TransactionalMemory {
     fn calculate_usable_pages(mmap_size: usize) -> usize {
-        let mut guess = mmap_size / page_size::get();
+        let mut guess = mmap_size / get_page_size();
         let mut new_guess =
-            (mmap_size - 2 * PageAllocator::required_space(guess)) / page_size::get();
+            (mmap_size - 2 * PageAllocator::required_space(guess)) / get_page_size();
         // Make sure we don't loop forever. This might not converge if it oscillates
         let mut i = 0;
         while guess != new_guess && i < 1000 {
             guess = new_guess;
-            new_guess = (mmap_size - 2 * PageAllocator::required_space(guess)) / page_size::get();
+            new_guess = (mmap_size - 2 * PageAllocator::required_space(guess)) / get_page_size();
             i += 1;
         }
 
@@ -235,7 +237,8 @@ impl TransactionalMemory {
 
     pub(in crate) fn new(mut mmap: MmapMut) -> Result<Self, Error> {
         // Ensure that the database metadata fits into the first page
-        assert!(page_size::get() >= DB_METAPAGE_SIZE);
+        let page_size = get_page_size();
+        assert!(page_size >= DB_METAPAGE_SIZE);
 
         let mutex = Mutex::new(MetapageGuard {});
         let usable_pages = Self::calculate_usable_pages(mmap.len());
@@ -243,7 +246,7 @@ impl TransactionalMemory {
         if mmap[0..MAGICNUMBER.len()] != MAGICNUMBER {
             // Explicitly zero the memory
             mmap[0..DB_METAPAGE_SIZE].copy_from_slice(&[0; DB_METAPAGE_SIZE]);
-            for i in &mut mmap[(usable_pages * page_size::get())..] {
+            for i in &mut mmap[(usable_pages * page_size)..] {
                 *i = 0
             }
 
@@ -309,6 +312,7 @@ impl TransactionalMemory {
             mmap,
             metapage_guard: mutex,
             open_dirty_pages: RefCell::new(HashSet::new()),
+            page_size,
         })
     }
 
@@ -396,8 +400,8 @@ impl TransactionalMemory {
     pub(in crate) fn get_page(&self, page_number: PageNumber) -> PageImpl {
         // We must not retrieve an immutable reference to a page which already has a mutable ref to it
         assert!(!self.open_dirty_pages.borrow().contains(&page_number));
-        let start = page_number.0 as usize * page_size::get();
-        let end = start + page_size::get();
+        let start = page_number.0 as usize * self.page_size;
+        let end = start + self.page_size;
 
         PageImpl {
             mem: &self.mmap[start..end],
@@ -441,8 +445,8 @@ impl TransactionalMemory {
         self.allocated_since_commit.borrow_mut().push(page_number);
         self.open_dirty_pages.borrow_mut().insert(page_number);
 
-        let start = page_number.0 as usize * page_size::get();
-        let end = start + page_size::get();
+        let start = page_number.0 as usize * self.page_size;
+        let end = start + self.page_size;
 
         let address = &self.mmap as *const MmapMut as *mut MmapMut;
         // Safety:
