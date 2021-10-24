@@ -503,6 +503,7 @@ impl<'a> EntryMutator<'a> {
     }
 }
 
+// TODO: support more than 2 entries in a leaf
 // Provides a simple zero-copy way to access a leaf page
 //
 // Entry format is:
