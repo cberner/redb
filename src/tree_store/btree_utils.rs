@@ -1,6 +1,6 @@
-use crate::btree::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
-use crate::btree::RangeIterState::{InitialState, Internal, LeafLeft, LeafRight};
-use crate::page_manager::{Page, PageImpl, PageMut, PageNumber, TransactionalMemory};
+use crate::page_store::page_manager::{Page, PageImpl, PageMut, PageNumber, TransactionalMemory};
+use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
+use crate::tree_store::btree_utils::RangeIterState::{InitialState, Internal, LeafLeft, LeafRight};
 use crate::types::{RedbKey, RedbValue};
 use std::cmp::{max, Ordering};
 use std::convert::TryInto;
@@ -1637,7 +1637,7 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
 
 #[cfg(test)]
 mod test {
-    use crate::btree::BTREE_ORDER;
+    use crate::tree_store::btree_utils::BTREE_ORDER;
     use crate::{Database, Table};
     use tempfile::NamedTempFile;
 

@@ -1,7 +1,7 @@
 use crate::multimap_table::MultiMapTable;
-use crate::page_store::utils::get_page_size;
-use crate::storage::{DbStats, Storage, TableType};
+use crate::page_store::get_page_size;
 use crate::table::Table;
+use crate::tree_store::storage::{DbStats, Storage, TableType};
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
 use memmap2::MmapMut;
