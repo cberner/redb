@@ -1,8 +1,8 @@
-use crate::btree::{
+use crate::page_store::page_manager::{Page, PageImpl, PageNumber, TransactionalMemory};
+use crate::tree_store::btree_utils::{
     lookup_in_raw, make_mut_single_leaf, print_tree, tree_delete, tree_height, tree_insert,
     AccessGuardMut, BtreeEntry, BtreeRangeIter,
 };
-use crate::page_manager::{Page, PageImpl, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use memmap2::MmapMut;

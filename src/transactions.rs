@@ -1,7 +1,7 @@
-use crate::btree::{AccessGuardMut, BtreeRangeIter};
 use crate::error::Error;
-use crate::page_manager::PageNumber;
-use crate::storage::{AccessGuard, Storage};
+use crate::page_store::page_manager::PageNumber;
+use crate::tree_store::btree_utils::{AccessGuardMut, BtreeRangeIter};
+use crate::tree_store::storage::{AccessGuard, Storage};
 use crate::types::{RedbKey, RedbValue};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;

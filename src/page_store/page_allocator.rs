@@ -268,7 +268,7 @@ impl PageAllocator {
 
 #[cfg(test)]
 mod test {
-    use crate::page_allocator::PageAllocator;
+    use crate::page_store::page_allocator::PageAllocator;
     use rand::prelude::IteratorRandom;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};

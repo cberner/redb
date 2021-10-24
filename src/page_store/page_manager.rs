@@ -1,4 +1,4 @@
-use crate::page_allocator::PageAllocator;
+use crate::page_store::page_allocator::PageAllocator;
 use crate::page_store::utils::get_page_size;
 use crate::Error;
 use memmap2::MmapMut;
