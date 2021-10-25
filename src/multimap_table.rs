@@ -1,7 +1,7 @@
 use crate::error::Error;
-use crate::page_store::page_manager::PageNumber;
 use crate::tree_store::btree_utils::{BtreeEntry, BtreeRangeIter};
 use crate::tree_store::storage::Storage;
+use crate::tree_store::PageNumber;
 use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
 };

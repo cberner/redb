@@ -1,6 +1,8 @@
-use crate::page_store::page_manager::{Page, PageImpl, PageMut, PageNumber, TransactionalMemory};
 use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
 use crate::tree_store::btree_utils::RangeIterState::{InitialState, Internal, LeafLeft, LeafRight};
+use crate::tree_store::page_store::page_manager::{
+    Page, PageImpl, PageMut, PageNumber, TransactionalMemory,
+};
 use crate::types::{RedbKey, RedbValue};
 use std::cmp::{max, Ordering};
 use std::convert::TryInto;
