@@ -1,5 +1,4 @@
 use crate::multimap_table::MultiMapTable;
-use crate::page_store::get_page_size;
 use crate::table::Table;
 use crate::tree_store::storage::{DbStats, Storage, TableType};
 use crate::types::{RedbKey, RedbValue};
@@ -23,15 +22,13 @@ impl Database {
     /// The file referenced by `path` must only be concurrently modified by compatible versions
     /// of redb
     // TODO: ensure that db_size doesn't change
-    pub unsafe fn open(path: &Path, mut db_size: usize) -> Result<Database, Error> {
+    pub unsafe fn open(path: &Path, db_size: usize) -> Result<Database, Error> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(path)?;
 
-        // Ensure that db_size is a multiple of page size, which is required by mmap
-        db_size -= db_size % get_page_size();
         file.set_len(db_size as u64)?;
 
         let mmap = MmapMut::map_mut(&file)?;
@@ -79,5 +76,29 @@ impl Database {
 
     pub fn print_debug(&self) {
         self.storage.print_debug()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{Database, Table};
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn non_page_size_multiple() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+        let db_size = 1024 * 1024 + 1;
+        let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+        let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+
+        let key = vec![0; 1024];
+        let value = vec![0; 1];
+        let mut txn = table.begin_write().unwrap();
+        txn.insert(&key, &value).unwrap();
+        txn.commit().unwrap();
+
+        let read_txn = table.read_transaction().unwrap();
+        assert_eq!(read_txn.len().unwrap(), 1);
     }
 }
