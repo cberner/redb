@@ -5,7 +5,7 @@ pub use multimap_table::{
 };
 pub use table::Table;
 pub use transactions::{ReadOnlyTransaction, WriteTransaction};
-pub use tree_store::storage::AccessGuard;
+pub use tree_store::AccessGuard;
 
 #[cfg(feature = "python")]
 pub use crate::python::redb;

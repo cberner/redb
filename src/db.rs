@@ -1,6 +1,6 @@
 use crate::multimap_table::MultiMapTable;
 use crate::table::Table;
-use crate::tree_store::storage::{DbStats, Storage, TableType};
+use crate::tree_store::{DbStats, Storage, TableType};
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
 use memmap2::MmapMut;

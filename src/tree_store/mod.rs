@@ -1,5 +1,8 @@
-pub(crate) mod btree_utils;
+mod btree_utils;
 mod page_store;
-pub(crate) mod storage;
+mod storage;
 
-pub(crate) use page_store::page_manager::PageNumber;
+pub(crate) use btree_utils::{AccessGuardMut, BtreeEntry, BtreeRangeIter};
+pub(crate) use page_store::PageNumber;
+pub use storage::AccessGuard;
+pub(crate) use storage::{DbStats, Storage, TableType};
