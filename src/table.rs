@@ -1,6 +1,6 @@
 use crate::error::Error;
 use crate::transactions::WriteTransaction;
-use crate::tree_store::storage::Storage;
+use crate::tree_store::Storage;
 use crate::types::{RedbKey, RedbValue};
 use crate::ReadOnlyTransaction;
 use std::marker::PhantomData;
@@ -36,7 +36,7 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'mmap, K, V> {
 
 #[cfg(test)]
 mod test {
-    use crate::tree_store::btree_utils::BtreeEntry;
+    use crate::tree_store::BtreeEntry;
     use crate::types::{
         AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
     };
