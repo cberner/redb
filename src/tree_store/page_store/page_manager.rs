@@ -1,5 +1,5 @@
-use crate::page_store::page_allocator::PageAllocator;
-use crate::page_store::utils::get_page_size;
+use crate::tree_store::page_store::page_allocator::PageAllocator;
+use crate::tree_store::page_store::utils::get_page_size;
 use crate::Error;
 use memmap2::MmapMut;
 use std::cell::RefCell;
@@ -53,10 +53,10 @@ fn get_secondary(metapage: &mut [u8]) -> &mut [u8] {
 }
 
 #[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub(in crate) struct PageNumber(pub u64);
+pub(crate) struct PageNumber(pub u64);
 
 impl PageNumber {
-    pub(in crate) fn to_be_bytes(self) -> [u8; 8] {
+    pub(crate) fn to_be_bytes(self) -> [u8; 8] {
         self.0.to_be_bytes()
     }
 }
@@ -148,7 +148,7 @@ impl<'a> TransactionMutator<'a> {
     }
 }
 
-pub(in crate) trait Page {
+pub(crate) trait Page {
     fn memory(&self) -> &[u8];
 
     fn get_page_number(&self) -> PageNumber;
@@ -175,14 +175,14 @@ impl<'a> Page for PageImpl<'a> {
     }
 }
 
-pub(in crate) struct PageMut<'a> {
+pub(crate) struct PageMut<'a> {
     mem: &'a mut [u8],
     page_number: PageNumber,
     open_pages: &'a RefCell<HashSet<PageNumber>>,
 }
 
 impl<'a> PageMut<'a> {
-    pub(in crate) fn memory_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn memory_mut(&mut self) -> &mut [u8] {
         &mut self.mem
     }
 }
@@ -203,7 +203,7 @@ impl<'a> Drop for PageMut<'a> {
     }
 }
 
-pub(in crate) struct TransactionalMemory {
+pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
     allocated_since_commit: RefCell<Vec<PageNumber>>,
     freed_since_commit: RefCell<Vec<PageNumber>>,
@@ -235,7 +235,7 @@ impl TransactionalMemory {
         guess
     }
 
-    pub(in crate) fn new(mut mmap: MmapMut) -> Result<Self, Error> {
+    pub(crate) fn new(mut mmap: MmapMut) -> Result<Self, Error> {
         // Ensure that the database metadata fits into the first page
         let page_size = get_page_size();
         assert!(page_size >= DB_METAPAGE_SIZE);
@@ -340,7 +340,7 @@ impl TransactionalMemory {
     }
 
     // Commit all outstanding changes and make them visible as the primary
-    pub(in crate) fn commit(&self) -> Result<(), Error> {
+    pub(crate) fn commit(&self) -> Result<(), Error> {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
@@ -380,7 +380,7 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(in crate) fn rollback_uncommited_writes(&self) -> Result<(), Error> {
+    pub(crate) fn rollback_uncommited_writes(&self) -> Result<(), Error> {
         assert!(self.open_dirty_pages.borrow().is_empty());
         let (metamem, guard) = self.acquire_mutable_metapage();
         let accessor = TransactionAccessor::new(get_secondary(metamem), guard);
@@ -397,7 +397,7 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(in crate) fn get_page(&self, page_number: PageNumber) -> PageImpl {
+    pub(crate) fn get_page(&self, page_number: PageNumber) -> PageImpl {
         // We must not retrieve an immutable reference to a page which already has a mutable ref to it
         assert!(!self.open_dirty_pages.borrow().contains(&page_number));
         let start = page_number.0 as usize * self.page_size;
@@ -409,18 +409,18 @@ impl TransactionalMemory {
         }
     }
 
-    pub(in crate) fn get_primary_root_page(&self) -> Option<PageNumber> {
+    pub(crate) fn get_primary_root_page(&self) -> Option<PageNumber> {
         TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock().unwrap())
             .get_root_page()
     }
 
-    pub(in crate) fn set_secondary_root_page(&self, root_page: PageNumber) {
+    pub(crate) fn set_secondary_root_page(&self, root_page: PageNumber) {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
         mutator.set_root_page(root_page);
     }
 
-    pub(in crate) fn free(&self, page: PageNumber) {
+    pub(crate) fn free(&self, page: PageNumber) {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
@@ -429,7 +429,7 @@ impl TransactionalMemory {
         self.freed_since_commit.borrow_mut().push(page);
     }
 
-    pub(in crate) fn allocate(&self) -> PageMut {
+    pub(crate) fn allocate(&self) -> PageMut {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
         mutator.set_allocator_dirty(true);
