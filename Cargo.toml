@@ -16,11 +16,11 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 memmap2 = "0.5.0"
 libc = "0.2.104"
-pyo3 = {version = "0.14", features=["extension-module", "abi3-py36"], optional = true }
+pyo3 = {version = "0.15", features=["extension-module", "abi3-py36"], optional = true }
 
 [dev-dependencies]
 rand = "0.8"
-chrono = "0.4.6"
+chrono = "0.4.19"
 lmdb-zero = "0.4.4"
 lmdb-rkv = "0.14.0"
 tempfile = "3.2.0"
