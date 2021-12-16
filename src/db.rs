@@ -38,13 +38,13 @@ impl Database {
 
     pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
-        name: &[u8],
+        name: impl AsRef<[u8]>,
     ) -> Result<Table<K, V>, Error> {
-        assert!(!name.is_empty());
+        assert!(!name.as_ref().is_empty());
         // TODO: this could conflict with an on-going write
         let id = self.storage.allocate_write_transaction();
         let (definition, root) = self.storage.get_or_create_table(
-            name,
+            name.as_ref(),
             TableType::Normal,
             id,
             self.storage.get_root_page_number(),
@@ -55,13 +55,13 @@ impl Database {
 
     pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
-        name: &[u8],
+        name: impl AsRef<[u8]>,
     ) -> Result<MultiMapTable<K, V>, Error> {
-        assert!(!name.is_empty());
+        assert!(!name.as_ref().is_empty());
         // TODO: this could conflict with an on-going write
         let id = self.storage.allocate_write_transaction();
         let (definition, root) = self.storage.get_or_create_table(
-            name,
+            name.as_ref(),
             TableType::MultiMap,
             id,
             self.storage.get_root_page_number(),
@@ -90,7 +90,7 @@ mod test {
 
         let db_size = 1024 * 1024 + 1;
         let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
-        let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+        let mut table: Table<[u8], [u8]> = db.open_table("x").unwrap();
 
         let key = vec![0; 1024];
         let value = vec![0; 1];
