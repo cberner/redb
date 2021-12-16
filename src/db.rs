@@ -22,7 +22,7 @@ impl Database {
     /// The file referenced by `path` must only be concurrently modified by compatible versions
     /// of redb
     // TODO: ensure that db_size doesn't change
-    pub unsafe fn open(path: &Path, db_size: usize) -> Result<Database, Error> {
+    pub unsafe fn open(path: impl AsRef<Path>, db_size: usize) -> Result<Database, Error> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
