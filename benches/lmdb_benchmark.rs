@@ -25,15 +25,17 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
 
 fn benchmark<T: BenchTable>(mut db: T) {
     let pairs = gen_data(1000, 16, 1500);
+    let mut written = 0;
 
     let start = SystemTime::now();
     let mut txn = db.write_transaction();
     {
-        for i in 0..ELEMENTS {
-            let (key, value) = &pairs[i % pairs.len()];
+        for _ in 0..ELEMENTS {
+            let (key, value) = &pairs[written % pairs.len()];
             let mut mut_key = key.clone();
-            mut_key.extend_from_slice(&i.to_be_bytes());
+            mut_key.extend_from_slice(&written.to_be_bytes());
             txn.insert(&mut_key, value).unwrap();
+            written += 1;
         }
     }
     txn.commit().unwrap();
@@ -50,13 +52,14 @@ fn benchmark<T: BenchTable>(mut db: T) {
     let start = SystemTime::now();
     let writes = 100;
     {
-        for i in ELEMENTS..(ELEMENTS + writes) {
+        for _ in 0..writes {
             let mut txn = db.write_transaction();
-            let (key, value) = &pairs[i % pairs.len()];
+            let (key, value) = &pairs[written % pairs.len()];
             let mut mut_key = key.clone();
-            mut_key.extend_from_slice(&i.to_be_bytes());
+            mut_key.extend_from_slice(&written.to_be_bytes());
             txn.insert(&mut_key, value).unwrap();
             txn.commit().unwrap();
+            written += 1;
         }
     }
 
@@ -66,6 +69,32 @@ fn benchmark<T: BenchTable>(mut db: T) {
         "{}: Wrote {} individual items in {}ms",
         T::db_type_name(),
         writes,
+        duration.as_millis()
+    );
+
+    let start = SystemTime::now();
+    let batch_size = 1000;
+    {
+        for _ in 0..writes {
+            let mut txn = db.write_transaction();
+            for _ in 0..batch_size {
+                let (key, value) = &pairs[written % pairs.len()];
+                let mut mut_key = key.clone();
+                mut_key.extend_from_slice(&written.to_be_bytes());
+                txn.insert(&mut_key, value).unwrap();
+                written += 1;
+            }
+            txn.commit().unwrap();
+        }
+    }
+
+    let end = SystemTime::now();
+    let duration = end.duration_since(start).unwrap();
+    println!(
+        "{}: Wrote {} x {} items in {}ms",
+        T::db_type_name(),
+        writes,
+        batch_size,
         duration.as_millis()
     );
 
