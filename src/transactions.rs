@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::tree_store::{AccessGuard, AccessGuardMut, BtreeRangeIter, PageNumber, Storage};
+use crate::tree_store::{AccessGuard, AccessGuardMut, BtreeRangeIter, NodeHandle, Storage};
 use crate::types::{RedbKey, RedbValue};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
@@ -8,7 +8,7 @@ pub struct WriteTransaction<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     storage: &'mmap Storage,
     table_id: u64,
     transaction_id: u128,
-    root_page: Option<PageNumber>,
+    root_page: Option<NodeHandle>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
@@ -89,7 +89,7 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> WriteTransaction<'mmap, 
 
 pub struct ReadOnlyTransaction<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     storage: &'mmap Storage,
-    root_page: Option<PageNumber>,
+    root_page: Option<NodeHandle>,
     table_id: u64,
     transaction_id: u128,
     _key_type: PhantomData<K>,
