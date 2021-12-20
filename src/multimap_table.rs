@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::tree_store::{BtreeEntry, BtreeRangeIter, PageNumber, Storage};
+use crate::tree_store::{BtreeEntry, BtreeRangeIter, NodeHandle, Storage};
 use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
 };
@@ -294,7 +294,7 @@ pub struct MultiMapWriteTransaction<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Si
     storage: &'mmap Storage,
     table_id: u64,
     transaction_id: u128,
-    root_page: Option<PageNumber>,
+    root_page: Option<NodeHandle>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
@@ -388,7 +388,7 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapWriteTransaction<'
 
 pub struct MultiMapReadOnlyTransaction<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     storage: &'mmap Storage,
-    root_page: Option<PageNumber>,
+    root_page: Option<NodeHandle>,
     table_id: u64,
     transaction_id: u128,
     _key_type: PhantomData<K>,

@@ -21,8 +21,9 @@ const DB_METAPAGE_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
 
 // Structure of each metapage
 const ROOT_PAGE_OFFSET: usize = 0;
+const ROOT_PAGE_MESSAGE_BYTES_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
 // Memory pointed to by this ptr is logically part of the metapage
-const ALLOCATOR_STATE_PTR_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
+const ALLOCATOR_STATE_PTR_OFFSET: usize = ROOT_PAGE_MESSAGE_BYTES_OFFSET + size_of::<u32>();
 const ALLOCATOR_STATE_LEN_OFFSET: usize = ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>();
 // TODO: these dirty flags should be part of the PRIMARY_BIT byte, so that they can be written atomically
 const ALLOCATOR_STATE_DIRTY_OFFSET: usize = ALLOCATOR_STATE_LEN_OFFSET + size_of::<u64>();
@@ -71,16 +72,22 @@ impl<'a> TransactionAccessor<'a> {
         TransactionAccessor { mem, _guard: guard }
     }
 
-    fn get_root_page(&self) -> Option<PageNumber> {
+    fn get_root_page(&self) -> Option<(PageNumber, u32)> {
         let num = u64::from_be_bytes(
             self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + 8)]
+                .try_into()
+                .unwrap(),
+        );
+        let message_bytes = u32::from_be_bytes(
+            self.mem[ROOT_PAGE_MESSAGE_BYTES_OFFSET
+                ..(ROOT_PAGE_MESSAGE_BYTES_OFFSET + size_of::<u32>())]
                 .try_into()
                 .unwrap(),
         );
         if num == 0 {
             None
         } else {
-            Some(PageNumber(num))
+            Some((PageNumber(num), message_bytes))
         }
     }
 
@@ -127,9 +134,11 @@ impl<'a> TransactionMutator<'a> {
         TransactionMutator { mem, _guard: guard }
     }
 
-    fn set_root_page(&mut self, page_number: PageNumber) {
+    fn set_root_page(&mut self, page_number: PageNumber, valid_message_bytes: u32) {
         self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + 8)]
             .copy_from_slice(&page_number.to_be_bytes());
+        self.mem[ROOT_PAGE_MESSAGE_BYTES_OFFSET..(ROOT_PAGE_MESSAGE_BYTES_OFFSET + 4)]
+            .copy_from_slice(&valid_message_bytes.to_be_bytes());
     }
 
     fn set_allocator_data(&mut self, start: usize, len: usize) {
@@ -257,7 +266,7 @@ impl TransactionalMemory {
             let start = mmap.len() - 2 * allocator_state_size;
             let mut mutator =
                 TransactionMutator::new(get_secondary(&mut mmap), mutex.lock().unwrap());
-            mutator.set_root_page(PageNumber(0));
+            mutator.set_root_page(PageNumber(0), 0);
             mutator.set_allocator_dirty(false);
             mutator.set_allocator_data(start, allocator_state_size);
             drop(mutator);
@@ -409,15 +418,17 @@ impl TransactionalMemory {
         }
     }
 
-    pub(crate) fn get_primary_root_page(&self) -> Option<PageNumber> {
+    pub(crate) fn get_primary_root_page(&self) -> Option<(PageNumber, u32)> {
         TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock().unwrap())
             .get_root_page()
     }
 
-    pub(crate) fn set_secondary_root_page(&self, root_page: PageNumber) {
+    // TODO: valid_message_bytes kind of breaks the separation of concerns for the PageManager.
+    // It's only used by the delta message protocol of the b-tree
+    pub(crate) fn set_secondary_root_page(&self, root_page: PageNumber, valid_message_bytes: u32) {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        mutator.set_root_page(root_page);
+        mutator.set_root_page(root_page, valid_message_bytes);
     }
 
     pub(crate) fn free(&self, page: PageNumber) {

@@ -1,6 +1,7 @@
 use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
 use crate::tree_store::btree_utils::RangeIterState::{InitialState, Internal, LeafLeft, LeafRight};
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, PageNumber, TransactionalMemory};
+use crate::tree_store::NodeHandle;
 use crate::types::{RedbKey, RedbValue};
 use std::cmp::{max, Ordering};
 use std::convert::TryInto;
@@ -9,7 +10,7 @@ use std::ops::{Bound, RangeBounds};
 
 const BTREE_ORDER: usize = 50;
 // TODO: dynamically calculate this based on the actual page size
-const MAX_KEY_SPACE_PER_PAGE: usize = 4096 - 32 * BTREE_ORDER;
+const MAX_KEY_SPACE_PER_PAGE: usize = 4096 - 36 * BTREE_ORDER;
 
 pub struct AccessGuardMut<'a> {
     page: PageMut<'a>,
@@ -34,7 +35,7 @@ const INTERNAL: u8 = 2;
 
 #[derive(Debug)]
 enum RangeIterState<'a> {
-    InitialState(PageImpl<'a>, bool),
+    InitialState(PageImpl<'a>, u32, bool),
     LeafLeft {
         page: PageImpl<'a>,
         parent: Option<Box<RangeIterState<'a>>>,
@@ -47,6 +48,7 @@ enum RangeIterState<'a> {
     },
     Internal {
         page: PageImpl<'a>,
+        valid_message_bytes: u32,
         child: usize,
         parent: Option<Box<RangeIterState<'a>>>,
         reversed: bool,
@@ -56,20 +58,23 @@ enum RangeIterState<'a> {
 impl<'a> RangeIterState<'a> {
     fn forward_next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match self {
-            RangeIterState::InitialState(root_page, ..) => match root_page.memory()[0] {
-                LEAF => Some(LeafLeft {
-                    page: root_page,
-                    parent: None,
-                    reversed: false,
-                }),
-                INTERNAL => Some(Internal {
-                    page: root_page,
-                    child: 0,
-                    parent: None,
-                    reversed: false,
-                }),
-                _ => unreachable!(),
-            },
+            RangeIterState::InitialState(root_page, valid_message_bytes, ..) => {
+                match root_page.memory()[0] {
+                    LEAF => Some(LeafLeft {
+                        page: root_page,
+                        parent: None,
+                        reversed: false,
+                    }),
+                    INTERNAL => Some(Internal {
+                        page: root_page,
+                        valid_message_bytes,
+                        child: 0,
+                        parent: None,
+                        reversed: false,
+                    }),
+                    _ => unreachable!(),
+                }
+            }
             RangeIterState::LeafLeft { page, parent, .. } => Some(LeafRight {
                 page,
                 parent,
@@ -78,16 +83,19 @@ impl<'a> RangeIterState<'a> {
             RangeIterState::LeafRight { parent, .. } => parent.map(|x| *x),
             RangeIterState::Internal {
                 page,
+                valid_message_bytes,
                 child,
                 mut parent,
                 ..
             } => {
-                let accessor = InternalAccessor::new(&page);
+                let accessor = InternalAccessor::new(&page, valid_message_bytes);
                 let child_page = accessor.child_page(child).unwrap();
-                let child_page = manager.get_page(child_page);
+                let child_message_bytes = child_page.get_valid_message_bytes();
+                let child_page = manager.get_page(child_page.get_page_number());
                 if child < BTREE_ORDER - 1 && accessor.child_page(child + 1).is_some() {
                     parent = Some(Box::new(Internal {
                         page,
+                        valid_message_bytes,
                         child: child + 1,
                         parent,
                         reversed: false,
@@ -101,6 +109,7 @@ impl<'a> RangeIterState<'a> {
                     }),
                     INTERNAL => Some(Internal {
                         page: child_page,
+                        valid_message_bytes: child_message_bytes,
                         child: 0,
                         parent,
                         reversed: false,
@@ -113,31 +122,34 @@ impl<'a> RangeIterState<'a> {
 
     fn backward_next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match self {
-            RangeIterState::InitialState(root_page, ..) => match root_page.memory()[0] {
-                LEAF => Some(LeafRight {
-                    page: root_page,
-                    parent: None,
-                    reversed: true,
-                }),
-                INTERNAL => {
-                    let accessor = InternalAccessor::new(&root_page);
-                    let mut index = 0;
-                    for i in (0..BTREE_ORDER).rev() {
-                        if accessor.child_page(i).is_some() {
-                            index = i;
-                            break;
-                        }
-                    }
-                    assert!(index > 0);
-                    Some(Internal {
+            RangeIterState::InitialState(root_page, valid_message_bytes, ..) => {
+                match root_page.memory()[0] {
+                    LEAF => Some(LeafRight {
                         page: root_page,
-                        child: index,
                         parent: None,
                         reversed: true,
-                    })
+                    }),
+                    INTERNAL => {
+                        let accessor = InternalAccessor::new(&root_page, valid_message_bytes);
+                        let mut index = 0;
+                        for i in (0..BTREE_ORDER).rev() {
+                            if accessor.child_page(i).is_some() {
+                                index = i;
+                                break;
+                            }
+                        }
+                        assert!(index > 0);
+                        Some(Internal {
+                            page: root_page,
+                            valid_message_bytes,
+                            child: index,
+                            parent: None,
+                            reversed: true,
+                        })
+                    }
+                    _ => unreachable!(),
                 }
-                _ => unreachable!(),
-            },
+            }
             RangeIterState::LeafLeft { parent, .. } => parent.map(|x| *x),
             RangeIterState::LeafRight { page, parent, .. } => Some(LeafLeft {
                 page,
@@ -146,15 +158,20 @@ impl<'a> RangeIterState<'a> {
             }),
             RangeIterState::Internal {
                 page,
+                valid_message_bytes,
                 child,
                 mut parent,
                 ..
             } => {
-                let child_page = InternalAccessor::new(&page).child_page(child).unwrap();
-                let child_page = manager.get_page(child_page);
+                let child_page = InternalAccessor::new(&page, valid_message_bytes)
+                    .child_page(child)
+                    .unwrap();
+                let child_message_bytes = child_page.get_valid_message_bytes();
+                let child_page = manager.get_page(child_page.get_page_number());
                 if child > 0 {
                     parent = Some(Box::new(Internal {
                         page,
+                        valid_message_bytes,
                         child: child - 1,
                         parent,
                         reversed: true,
@@ -167,7 +184,7 @@ impl<'a> RangeIterState<'a> {
                         reversed: true,
                     }),
                     INTERNAL => {
-                        let accessor = InternalAccessor::new(&child_page);
+                        let accessor = InternalAccessor::new(&child_page, child_message_bytes);
                         let mut index = 0;
                         for i in (0..BTREE_ORDER).rev() {
                             if accessor.child_page(i).is_some() {
@@ -178,6 +195,7 @@ impl<'a> RangeIterState<'a> {
                         assert!(index > 0);
                         Some(Internal {
                             page: child_page,
+                            valid_message_bytes: child_message_bytes,
                             child: index,
                             parent,
                             reversed: true,
@@ -191,7 +209,7 @@ impl<'a> RangeIterState<'a> {
 
     fn next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match &self {
-            InitialState(_, reversed) => {
+            InitialState(_, _, reversed) => {
                 if *reversed {
                     self.backward_next(manager)
                 } else {
@@ -257,13 +275,13 @@ impl<
     > BtreeRangeIter<'a, T, KR, K, V>
 {
     pub(in crate) fn new(
-        root_page: Option<PageImpl<'a>>,
+        root_page: Option<(PageImpl<'a>, u32)>,
         table_id: u64,
         query_range: T,
         manager: &'a TransactionalMemory,
     ) -> Self {
         Self {
-            last: root_page.map(|p| InitialState(p, false)),
+            last: root_page.map(|(p, message_bytes)| InitialState(p, message_bytes, false)),
             table_id,
             query_range,
             reversed: false,
@@ -275,13 +293,13 @@ impl<
     }
 
     pub(in crate) fn new_reversed(
-        root_page: Option<PageImpl<'a>>,
+        root_page: Option<(PageImpl<'a>, u32)>,
         table_id: u64,
         query_range: T,
         manager: &'a TransactionalMemory,
     ) -> Self {
         Self {
-            last: root_page.map(|p| InitialState(p, true)),
+            last: root_page.map(|(p, message_bytes)| InitialState(p, message_bytes, true)),
             table_id,
             query_range,
             reversed: true,
@@ -580,15 +598,19 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
 // Provides a simple zero-copy way to access an index page
 struct InternalAccessor<'a: 'b, 'b> {
     page: &'b PageImpl<'a>,
+    _valid_message_bytes: u32,
 }
 
 impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
-    fn new(page: &'b PageImpl<'a>) -> Self {
+    fn new(page: &'b PageImpl<'a>, message_bytes: u32) -> Self {
         debug_assert_eq!(page.memory()[0], INTERNAL);
-        InternalAccessor { page }
+        InternalAccessor {
+            page,
+            _valid_message_bytes: message_bytes,
+        }
     }
 
-    fn child_for_key<K: RedbKey + ?Sized>(&self, table: u64, query: &[u8]) -> PageNumber {
+    fn child_for_key<K: RedbKey + ?Sized>(&self, table: u64, query: &[u8]) -> NodeHandle {
         let mut min_child = 0; // inclusive
         let mut max_child = BTREE_ORDER - 1; // inclusive
         while min_child < max_child {
@@ -615,12 +637,12 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
     }
 
     fn key_offset(&self, n: usize) -> usize {
-        let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
+        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
         u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
     fn key_len(&self, n: usize) -> usize {
-        let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
+        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
         u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
@@ -630,7 +652,7 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
         if len == 0 {
             return None;
         }
-        let offset = 1 + 8 * BTREE_ORDER + 8 * n;
+        let offset = 1 + 12 * BTREE_ORDER + 8 * n;
         Some(u64::from_be_bytes(
             self.page.memory()[offset..(offset + 8)].try_into().unwrap(),
         ))
@@ -642,7 +664,7 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
         if len == 0 {
             return None;
         }
-        let offset = 1 + 8 * BTREE_ORDER + 8 * n;
+        let offset = 1 + 12 * BTREE_ORDER + 8 * n;
         let table =
             u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap());
         let offset = self.key_offset(n);
@@ -659,15 +681,17 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
         Some(&self.page.memory()[offset..(offset + len)])
     }
 
-    fn child_page(&self, n: usize) -> Option<PageNumber> {
+    fn child_page(&self, n: usize) -> Option<NodeHandle> {
         debug_assert!(n < BTREE_ORDER);
         if n > 0 && self.key_len(n - 1) == 0 {
             return None;
         }
-        let offset = 1 + 8 * n;
-        Some(PageNumber(u64::from_be_bytes(
-            self.page.memory()[offset..(offset + 8)].try_into().unwrap(),
-        )))
+        let offset = 1 + 12 * n;
+        Some(NodeHandle::from_be_bytes(
+            self.page.memory()[offset..(offset + 12)]
+                .try_into()
+                .unwrap(),
+        ))
     }
 
     fn total_key_length(&self) -> usize {
@@ -685,7 +709,7 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
 // Layout is:
 // 1 byte: type
 // repeating (BTREE_ORDER times):
-// 8 bytes page number
+// 12 bytes node handle
 // repeating (BTREE_ORDER - 1 times):
 // * 8 bytes: table id
 // repeating (BTREE_ORDER - 1 times):
@@ -710,40 +734,40 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
         InternalBuilder { page }
     }
 
-    fn write_first_page(&mut self, page_number: PageNumber) {
+    fn write_first_page(&mut self, node_handle: NodeHandle) {
         let offset = 1;
-        self.page.memory_mut()[offset..(offset + 8)].copy_from_slice(&page_number.to_be_bytes());
+        self.page.memory_mut()[offset..(offset + 12)].copy_from_slice(&node_handle.to_be_bytes());
     }
 
     fn key_offset(&self, n: usize) -> usize {
-        let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
+        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
         u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
     fn key_len(&self, n: usize) -> usize {
-        let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
+        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
         u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
     // Write the nth key and page of values greater than this key, but less than or equal to the next
     // Caller must write keys & pages in increasing order
-    fn write_nth_key(&mut self, table_id: u64, key: &[u8], page_number: PageNumber, n: usize) {
+    fn write_nth_key(&mut self, table_id: u64, key: &[u8], handle: NodeHandle, n: usize) {
         assert!(n < BTREE_ORDER - 1);
-        let offset = 1 + 8 * (n + 1);
-        self.page.memory_mut()[offset..(offset + 8)].copy_from_slice(&page_number.to_be_bytes());
+        let offset = 1 + 12 * (n + 1);
+        self.page.memory_mut()[offset..(offset + 12)].copy_from_slice(&handle.to_be_bytes());
 
-        let offset = 1 + 8 * BTREE_ORDER + 8 * n;
+        let offset = 1 + 12 * BTREE_ORDER + 8 * n;
         self.page.memory_mut()[offset..(offset + 8)].copy_from_slice(&table_id.to_be_bytes());
 
-        let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
+        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
         self.page.memory_mut()[offset..(offset + 8)]
             .copy_from_slice(&(key.len() as u64).to_be_bytes());
 
-        let offset = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
+        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
         let data_offset = if n > 0 {
             self.key_offset(n - 1) + self.key_len(n - 1)
         } else {
-            1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3
+            1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3
         };
         self.page.memory_mut()[offset..(offset + 8)]
             .copy_from_slice(&(data_offset as u64).to_be_bytes());
@@ -752,16 +776,24 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
     }
 }
 
-pub(in crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
+pub(in crate) fn tree_height<'a>(
+    page: PageImpl<'a>,
+    valid_message_bytes: u32,
+    manager: &'a TransactionalMemory,
+) -> usize {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => 1,
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
+            let accessor = InternalAccessor::new(&page, valid_message_bytes);
             let mut max_child_height = 0;
             for i in 0..BTREE_ORDER {
                 if let Some(child) = accessor.child_page(i) {
-                    let height = tree_height(manager.get_page(child), manager);
+                    let height = tree_height(
+                        manager.get_page(child.get_page_number()),
+                        child.get_valid_message_bytes(),
+                        manager,
+                    );
                     max_child_height = max(max_child_height, height);
                 }
             }
@@ -772,7 +804,7 @@ pub(in crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalM
     }
 }
 
-pub(in crate) fn print_node(page: &PageImpl) {
+pub(in crate) fn print_node(page: &PageImpl, valid_message_bytes: u32) {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -793,11 +825,11 @@ pub(in crate) fn print_node(page: &PageImpl) {
             eprint!("]");
         }
         INTERNAL => {
-            let accessor = InternalAccessor::new(page);
+            let accessor = InternalAccessor::new(page, valid_message_bytes);
             eprint!(
                 "Internal[ (page={}), child_0={}",
                 page.get_page_number().0,
-                accessor.child_page(0).unwrap().0
+                accessor.child_page(0).unwrap().get_page_number().0
             );
             for i in 0..(BTREE_ORDER - 1) {
                 if let Some(child) = accessor.child_page(i + 1) {
@@ -805,7 +837,7 @@ pub(in crate) fn print_node(page: &PageImpl) {
                     let key = accessor.key(i).unwrap();
                     eprint!(" table_{}={}", i, table);
                     eprint!(" key_{}={:?}", i, key);
-                    eprint!(" child_{}={}", i + 1, child.0);
+                    eprint!(" child_{}={}", i + 1, child.get_page_number().0);
                 }
             }
             eprint!("]");
@@ -816,8 +848,9 @@ pub(in crate) fn print_node(page: &PageImpl) {
 
 pub(in crate) fn node_children<'a>(
     page: &PageImpl<'a>,
+    valid_message_bytes: u32,
     manager: &'a TransactionalMemory,
-) -> Vec<PageImpl<'a>> {
+) -> Vec<(PageImpl<'a>, u32)> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -825,10 +858,13 @@ pub(in crate) fn node_children<'a>(
         }
         INTERNAL => {
             let mut children = vec![];
-            let accessor = InternalAccessor::new(page);
+            let accessor = InternalAccessor::new(page, valid_message_bytes);
             for i in 0..BTREE_ORDER {
                 if let Some(child) = accessor.child_page(i) {
-                    children.push(manager.get_page(child));
+                    children.push((
+                        manager.get_page(child.get_page_number()),
+                        child.get_valid_message_bytes(),
+                    ));
                 }
             }
             children
@@ -837,13 +873,17 @@ pub(in crate) fn node_children<'a>(
     }
 }
 
-pub(in crate) fn print_tree<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) {
-    let mut pages = vec![page];
+pub(in crate) fn print_tree<'a>(
+    page: PageImpl<'a>,
+    valid_message_bytes: u32,
+    manager: &'a TransactionalMemory,
+) {
+    let mut pages = vec![(page, valid_message_bytes)];
     while !pages.is_empty() {
         let mut next_children = vec![];
-        for page in pages.drain(..) {
-            next_children.extend(node_children(&page, manager));
-            print_node(&page);
+        for (page, message_bytes) in pages.drain(..) {
+            next_children.extend(node_children(&page, message_bytes, manager));
+            print_node(&page, message_bytes);
             eprint!("  ");
         }
         eprintln!();
@@ -855,43 +895,45 @@ pub(in crate) fn print_tree<'a>(page: PageImpl<'a>, manager: &'a TransactionalMe
 // Returns the new root, and a list of freed pages
 pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
+    valid_message_bytes: u32,
     table: u64,
     key: &[u8],
     manager: &'a TransactionalMemory,
-) -> (Option<PageNumber>, Vec<PageNumber>) {
+) -> (Option<NodeHandle>, Vec<PageNumber>) {
     let mut freed = vec![];
-    let result = match tree_delete_helper::<K>(page, table, key, &mut freed, manager) {
-        DeletionResult::Subtree(page) => Some(page),
-        DeletionResult::PartialLeaf(entries) => {
-            assert!(entries.is_empty());
-            None
-        }
-        DeletionResult::PartialInternal(pages) => {
-            assert_eq!(pages.len(), 1);
-            Some(pages[0])
-        }
-    };
+    let result =
+        match tree_delete_helper::<K>(page, valid_message_bytes, table, key, &mut freed, manager) {
+            DeletionResult::Subtree(page) => Some(page),
+            DeletionResult::PartialLeaf(entries) => {
+                assert!(entries.is_empty());
+                None
+            }
+            DeletionResult::PartialInternal(pages) => {
+                assert_eq!(pages.len(), 1);
+                Some(pages[0])
+            }
+        };
     (result, freed)
 }
 
 #[derive(Debug)]
 enum DeletionResult {
     // A proper subtree
-    Subtree(PageNumber),
+    Subtree(NodeHandle),
     // A leaf subtree with too few entries
     PartialLeaf(Vec<(u64, Vec<u8>, Vec<u8>)>),
     // A index page subtree with too few children
-    PartialInternal(Vec<PageNumber>),
+    PartialInternal(Vec<NodeHandle>),
 }
 
 // Must return the pages in order
 fn split_leaf(
-    leaf: PageNumber,
+    leaf: NodeHandle,
     partial: &[(u64, Vec<u8>, Vec<u8>)],
     manager: &TransactionalMemory,
-) -> Option<(PageNumber, PageNumber)> {
+) -> Option<(NodeHandle, NodeHandle)> {
     assert!(partial.is_empty());
-    let page = manager.get_page(leaf);
+    let page = manager.get_page(leaf.get_page_number());
     let accessor = LeafAccessor::new(&page);
     if let Some(greater) = accessor.greater() {
         let lesser = accessor.lesser();
@@ -904,11 +946,11 @@ fn split_leaf(
 }
 
 fn merge_leaf(
-    leaf: PageNumber,
+    leaf: NodeHandle,
     partial: &[(u64, Vec<u8>, Vec<u8>)],
     manager: &TransactionalMemory,
-) -> PageNumber {
-    let page = manager.get_page(leaf);
+) -> NodeHandle {
+    let page = manager.get_page(leaf.get_page_number());
     let accessor = LeafAccessor::new(&page);
     assert!(accessor.greater().is_none());
     assert!(partial.is_empty());
@@ -918,17 +960,25 @@ fn merge_leaf(
 // Splits the page, if necessary, to fit the additional pages in `partial`
 // Returns the pages in order
 fn split_index(
-    index: PageNumber,
-    partial: &[PageNumber],
+    index: NodeHandle,
+    partial: &[NodeHandle],
     manager: &TransactionalMemory,
-) -> Option<(PageNumber, PageNumber)> {
-    let page = manager.get_page(index);
-    let accessor = InternalAccessor::new(&page);
+) -> Option<(NodeHandle, NodeHandle)> {
+    let page = manager.get_page(index.get_page_number());
+    let accessor = InternalAccessor::new(&page, index.get_valid_message_bytes());
 
     let has_enough_slots = accessor.child_page(BTREE_ORDER - partial.len()).is_none();
     let required_key_space: usize = partial
         .iter()
-        .map(|p| max_table_key(manager.get_page(*p), manager).1.len())
+        .map(|p| {
+            max_table_key(
+                manager.get_page(p.get_page_number()),
+                p.get_valid_message_bytes(),
+                manager,
+            )
+            .1
+            .len()
+        })
         .sum();
     // TODO: Note we could get a false negative here, since we don't need to store the last key
     // The total_key_length calculation below does it correctly
@@ -940,16 +990,30 @@ fn split_index(
     let mut pages = vec![];
     pages.extend_from_slice(partial);
     for i in 0..BTREE_ORDER {
-        if let Some(page_number) = accessor.child_page(i) {
-            pages.push(page_number);
+        if let Some(child) = accessor.child_page(i) {
+            pages.push(child);
         }
     }
 
-    pages.sort_by_key(|p| max_table_key(manager.get_page(*p), manager));
+    pages.sort_by_key(|p| {
+        max_table_key(
+            manager.get_page(p.get_page_number()),
+            p.get_valid_message_bytes(),
+            manager,
+        )
+    });
 
     let total_key_length: usize = pages
         .iter()
-        .map(|p| max_table_key(manager.get_page(*p), manager).1.len())
+        .map(|p| {
+            max_table_key(
+                manager.get_page(p.get_page_number()),
+                p.get_valid_message_bytes(),
+                manager,
+            )
+            .1
+            .len()
+        })
         .sum();
     let division = if total_key_length < MAX_KEY_SPACE_PER_PAGE {
         // Use tree order if we did not run out of space
@@ -959,7 +1023,13 @@ fn split_index(
         let mut index = pages.len() - 2;
         let mut cumulative = 0;
         for (i, p) in pages.iter().enumerate() {
-            cumulative += max_table_key(manager.get_page(*p), manager).1.len();
+            cumulative += max_table_key(
+                manager.get_page(p.get_page_number()),
+                p.get_valid_message_bytes(),
+                manager,
+            )
+            .1
+            .len();
             if cumulative > total_key_length / 2 {
                 index = i;
                 break;
@@ -975,24 +1045,28 @@ fn split_index(
 }
 
 // Pages must be in sorted order
-fn make_index_many_pages(children: &[PageNumber], manager: &TransactionalMemory) -> PageNumber {
+fn make_index_many_pages(children: &[NodeHandle], manager: &TransactionalMemory) -> NodeHandle {
     let mut page = manager.allocate();
     let mut builder = InternalBuilder::new(&mut page);
     builder.write_first_page(children[0]);
     for i in 1..children.len() {
-        let (table, key) = max_table_key(manager.get_page(children[i - 1]), manager);
+        let (table, key) = max_table_key(
+            manager.get_page(children[i - 1].get_page_number()),
+            children[i - 1].get_valid_message_bytes(),
+            manager,
+        );
         builder.write_nth_key(table, &key, children[i], i - 1);
     }
-    page.get_page_number()
+    NodeHandle::new(page.get_page_number(), 0)
 }
 
 fn merge_index(
-    index: PageNumber,
-    partial: &[PageNumber],
+    index: NodeHandle,
+    partial: &[NodeHandle],
     manager: &TransactionalMemory,
-) -> PageNumber {
-    let page = manager.get_page(index);
-    let accessor = InternalAccessor::new(&page);
+) -> NodeHandle {
+    let page = manager.get_page(index.get_page_number());
+    let accessor = InternalAccessor::new(&page, index.get_valid_message_bytes());
     assert!(accessor.child_page(BTREE_ORDER - partial.len()).is_none());
 
     let mut pages = vec![];
@@ -1003,7 +1077,13 @@ fn merge_index(
         }
     }
 
-    pages.sort_by_key(|p| max_table_key(manager.get_page(*p), manager));
+    pages.sort_by_key(|p| {
+        max_table_key(
+            manager.get_page(p.get_page_number()),
+            p.get_valid_message_bytes(),
+            manager,
+        )
+    });
     assert!(pages.len() <= BTREE_ORDER);
 
     make_index_many_pages(&pages, manager)
@@ -1012,7 +1092,7 @@ fn merge_index(
 fn repair_children(
     children: Vec<DeletionResult>,
     manager: &TransactionalMemory,
-) -> Vec<PageNumber> {
+) -> Vec<NodeHandle> {
     if children.iter().all(|x| matches!(x, Subtree(_))) {
         children
             .iter()
@@ -1026,23 +1106,23 @@ fn repair_children(
         let mut repaired = false;
         // For each whole subtree, try to merge it with a partial left to repair it, if one is neighboring
         for i in 0..children.len() {
-            if let Subtree(page_number) = &children[i] {
+            if let Subtree(handle) = &children[i] {
                 if repaired {
-                    result.push(*page_number);
+                    result.push(*handle);
                     continue;
                 }
                 let offset = if i > 0 { i - 1 } else { i + 1 };
                 if let Some(PartialLeaf(partials)) = children.get(offset) {
-                    if let Some((page1, page2)) = split_leaf(*page_number, partials, manager) {
+                    if let Some((page1, page2)) = split_leaf(*handle, partials, manager) {
                         result.push(page1);
                         result.push(page2);
                     } else {
-                        result.push(merge_leaf(*page_number, partials, manager));
+                        result.push(merge_leaf(*handle, partials, manager));
                     }
                     repaired = true;
                 } else {
                     // No adjacent partial
-                    result.push(*page_number);
+                    result.push(*handle);
                 }
             }
         }
@@ -1078,7 +1158,11 @@ fn repair_children(
     }
 }
 
-fn max_table_key(page: PageImpl, manager: &TransactionalMemory) -> (u64, Vec<u8>) {
+fn max_table_key(
+    page: PageImpl,
+    valid_message_bytes: u32,
+    manager: &TransactionalMemory,
+) -> (u64, Vec<u8>) {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -1093,10 +1177,14 @@ fn max_table_key(page: PageImpl, manager: &TransactionalMemory) -> (u64, Vec<u8>
             }
         }
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
+            let accessor = InternalAccessor::new(&page, valid_message_bytes);
             for i in (0..BTREE_ORDER).rev() {
                 if let Some(child) = accessor.child_page(i) {
-                    return max_table_key(manager.get_page(child), manager);
+                    return max_table_key(
+                        manager.get_page(child.get_page_number()),
+                        child.get_valid_message_bytes(),
+                        manager,
+                    );
                 }
             }
             unreachable!();
@@ -1110,6 +1198,7 @@ fn max_table_key(page: PageImpl, manager: &TransactionalMemory) -> (u64, Vec<u8>
 #[allow(clippy::needless_return)]
 fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
+    valid_message_bytes: u32,
     table: u64,
     key: &[u8],
     freed: &mut Vec<PageNumber>,
@@ -1125,7 +1214,7 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     && greater.compare::<K>(table, key).is_ne()
                 {
                     // Not found
-                    return Subtree(page.get_page_number());
+                    return Subtree(NodeHandle::new(page.get_page_number(), valid_message_bytes));
                 }
                 let new_leaf = if accessor.lesser().compare::<K>(table, key).is_eq() {
                     (greater.table_id(), greater.key(), greater.value())
@@ -1148,12 +1237,12 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     PartialLeaf(vec![])
                 } else {
                     // Not found
-                    Subtree(page.get_page_number())
+                    Subtree(NodeHandle::new(page.get_page_number(), valid_message_bytes))
                 }
             }
         }
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
+            let accessor = InternalAccessor::new(&page, valid_message_bytes);
             let original_page_number = page.get_page_number();
             let mut children = vec![];
             let mut found = false;
@@ -1165,7 +1254,8 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     if cmp_keys::<K>(table, key, index_table, index_key).is_le() && !found {
                         found = true;
                         let result = tree_delete_helper::<K>(
-                            manager.get_page(child_page),
+                            manager.get_page(child_page.get_page_number()),
+                            child_page.get_valid_message_bytes(),
                             table,
                             key,
                             freed,
@@ -1174,7 +1264,10 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                         // The key must not have been found, since the subtree didn't change
                         if let Subtree(page_number) = result {
                             if page_number == child_page {
-                                return Subtree(original_page_number);
+                                return Subtree(NodeHandle::new(
+                                    original_page_number,
+                                    valid_message_bytes,
+                                ));
                             }
                         }
                         children.push(result);
@@ -1192,7 +1285,8 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                 children.push(Subtree(last_page));
             } else {
                 let result = tree_delete_helper::<K>(
-                    manager.get_page(last_page),
+                    manager.get_page(last_page.get_page_number()),
+                    last_page.get_valid_message_bytes(),
                     table,
                     key,
                     freed,
@@ -1202,7 +1296,7 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                 // The key must not have been found, since the subtree didn't change
                 if let Subtree(page_number) = result {
                     if page_number == last_page {
-                        return Subtree(original_page_number);
+                        return Subtree(NodeHandle::new(original_page_number, valid_message_bytes));
                     }
                 }
                 children.push(result);
@@ -1226,7 +1320,7 @@ pub(in crate) fn make_mut_single_leaf<'a>(
     key: &[u8],
     value: &[u8],
     manager: &'a TransactionalMemory,
-) -> (PageNumber, AccessGuardMut<'a>) {
+) -> (NodeHandle, AccessGuardMut<'a>) {
     let mut page = manager.allocate();
     let mut builder = LeafBuilder::new(&mut page);
     builder.write_lesser(table, key, value);
@@ -1238,7 +1332,7 @@ pub(in crate) fn make_mut_single_leaf<'a>(
     let page_num = page.get_page_number();
     let guard = AccessGuardMut::new(page, offset, value.len());
 
-    (page_num, guard)
+    (NodeHandle::new(page_num, 0), guard)
 }
 
 pub(in crate) fn make_mut_double_leaf_right<'a, K: RedbKey + ?Sized>(
@@ -1249,7 +1343,7 @@ pub(in crate) fn make_mut_double_leaf_right<'a, K: RedbKey + ?Sized>(
     key2: &[u8],
     value2: &[u8],
     manager: &'a TransactionalMemory,
-) -> (PageNumber, AccessGuardMut<'a>) {
+) -> (NodeHandle, AccessGuardMut<'a>) {
     debug_assert!(cmp_keys::<K>(table1, key1, table2, key2).is_lt());
     let mut page = manager.allocate();
     let mut builder = LeafBuilder::new(&mut page);
@@ -1262,7 +1356,7 @@ pub(in crate) fn make_mut_double_leaf_right<'a, K: RedbKey + ?Sized>(
     let page_num = page.get_page_number();
     let guard = AccessGuardMut::new(page, offset, value2.len());
 
-    (page_num, guard)
+    (NodeHandle::new(page_num, 0), guard)
 }
 
 pub(in crate) fn make_mut_double_leaf_left<'a, K: RedbKey + ?Sized>(
@@ -1273,7 +1367,7 @@ pub(in crate) fn make_mut_double_leaf_left<'a, K: RedbKey + ?Sized>(
     key2: &[u8],
     value2: &[u8],
     manager: &'a TransactionalMemory,
-) -> (PageNumber, AccessGuardMut<'a>) {
+) -> (NodeHandle, AccessGuardMut<'a>) {
     debug_assert!(cmp_keys::<K>(table1, key1, table2, key2).is_lt());
     let mut page = manager.allocate();
     let mut builder = LeafBuilder::new(&mut page);
@@ -1286,7 +1380,7 @@ pub(in crate) fn make_mut_double_leaf_left<'a, K: RedbKey + ?Sized>(
     let page_num = page.get_page_number();
     let guard = AccessGuardMut::new(page, offset, value1.len());
 
-    (page_num, guard)
+    (NodeHandle::new(page_num, 0), guard)
 }
 
 pub(in crate) fn make_single_leaf<'a>(
@@ -1294,40 +1388,48 @@ pub(in crate) fn make_single_leaf<'a>(
     key: &[u8],
     value: &[u8],
     manager: &'a TransactionalMemory,
-) -> PageNumber {
+) -> NodeHandle {
     let mut page = manager.allocate();
     let mut builder = LeafBuilder::new(&mut page);
     builder.write_lesser(table, key, value);
     builder.write_greater(None);
-    page.get_page_number()
+    NodeHandle::new(page.get_page_number(), 0)
 }
 
 pub(in crate) fn make_index(
     table: u64,
     key: &[u8],
-    lte_page: PageNumber,
-    gt_page: PageNumber,
+    lte_page: NodeHandle,
+    gt_page: NodeHandle,
     manager: &TransactionalMemory,
-) -> PageNumber {
+) -> NodeHandle {
     let mut page = manager.allocate();
     let mut builder = InternalBuilder::new(&mut page);
     builder.write_first_page(lte_page);
     builder.write_nth_key(table, key, gt_page, 0);
-    page.get_page_number()
+    NodeHandle::new(page.get_page_number(), 0)
 }
 
 // Returns the page number of the sub-tree into which the key was inserted,
 // and the guard which can be used to access the value, and a list of freed pages
 pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
+    valid_message_bytes: u32,
     table: u64,
     key: &[u8],
     value: &[u8],
     manager: &'a TransactionalMemory,
-) -> (PageNumber, AccessGuardMut<'a>, Vec<PageNumber>) {
+) -> (NodeHandle, AccessGuardMut<'a>, Vec<PageNumber>) {
     let mut freed = vec![];
-    let (page1, more, guard) =
-        tree_insert_helper::<K>(page, table, key, value, &mut freed, manager);
+    let (page1, more, guard) = tree_insert_helper::<K>(
+        page,
+        valid_message_bytes,
+        table,
+        key,
+        value,
+        &mut freed,
+        manager,
+    );
 
     if let Some((table, key, page2)) = more {
         let index_page = make_index(table, &key, page1, page2, manager);
@@ -1340,14 +1442,15 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
 #[allow(clippy::type_complexity)]
 fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
+    valid_message_bytes: u32,
     table: u64,
     key: &[u8],
     value: &[u8],
     freed: &mut Vec<PageNumber>,
     manager: &'a TransactionalMemory,
 ) -> (
-    PageNumber,
-    Option<(u64, Vec<u8>, PageNumber)>,
+    NodeHandle,
+    Option<(u64, Vec<u8>, NodeHandle)>,
     AccessGuardMut<'a>,
 ) {
     let node_mem = page.memory();
@@ -1363,7 +1466,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         let (right_page, guard) = make_mut_single_leaf(table, key, value, manager);
 
                         (
-                            left_page,
+                            NodeHandle::new(left_page, valid_message_bytes),
                             Some((entry.table_id(), entry.key().to_vec(), right_page)),
                             guard,
                         )
@@ -1467,7 +1570,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
             }
         }
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
+            let accessor = InternalAccessor::new(&page, valid_message_bytes);
             // Inserting into an internal page will always free it
             // TODO: unless the (key, value) pair is the same? That could result in no change
             freed.push(page.get_page_number());
@@ -1482,7 +1585,8 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     {
                         let lte_page = accessor.child_page(i).unwrap();
                         let (page1, more, guard2) = tree_insert_helper::<K>(
-                            manager.get_page(lte_page),
+                            manager.get_page(lte_page.get_page_number()),
+                            lte_page.get_valid_message_bytes(),
                             table,
                             key,
                             value,
@@ -1512,7 +1616,8 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 children.push(last_page);
             } else {
                 let (page1, more, guard2) = tree_insert_helper::<K>(
-                    manager.get_page(last_page),
+                    manager.get_page(last_page.get_page_number()),
+                    last_page.get_valid_message_bytes(),
                     table,
                     key,
                     value,
@@ -1543,7 +1648,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 {
                     builder.write_nth_key(*table, key, *page_number, i);
                 }
-                (page.get_page_number(), None, guard)
+                (NodeHandle::new(page.get_page_number(), 0), None, guard)
             } else {
                 let division = if total_key_len < MAX_KEY_SPACE_PER_PAGE {
                     // Use tree order if we did not run out of space
@@ -1578,8 +1683,12 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 }
 
                 (
-                    page.get_page_number(),
-                    Some((*index_table, index_key.to_vec(), page2.get_page_number())),
+                    NodeHandle::new(page.get_page_number(), 0),
+                    Some((
+                        *index_table,
+                        index_key.to_vec(),
+                        NodeHandle::new(page2.get_page_number(), 0),
+                    )),
                     guard,
                 )
             }
@@ -1591,6 +1700,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 // Returns the (offset, len) of the value for the queried key, if present
 pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
+    valid_message_bytes: u32,
     table: u64,
     query: &[u8],
     manager: &'a TransactionalMemory,
@@ -1627,9 +1737,15 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
             }
         }
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
+            let accessor = InternalAccessor::new(&page, valid_message_bytes);
             let child_page = accessor.child_for_key::<K>(table, query);
-            return lookup_in_raw::<K>(manager.get_page(child_page), table, query, manager);
+            return lookup_in_raw::<K>(
+                manager.get_page(child_page.get_page_number()),
+                child_page.get_valid_message_bytes(),
+                table,
+                query,
+                manager,
+            );
         }
         _ => unreachable!(),
     }
