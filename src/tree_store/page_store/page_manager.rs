@@ -418,6 +418,29 @@ impl TransactionalMemory {
         }
     }
 
+    pub(crate) fn get_page_mut(&self, page_number: PageNumber) -> PageMut {
+        self.open_dirty_pages.borrow_mut().insert(page_number);
+
+        let start = page_number.0 as usize * self.page_size;
+        let end = start + self.page_size;
+
+        let address = &self.mmap as *const MmapMut as *mut MmapMut;
+        // Safety:
+        // All PageMut are registered in open_dirty_pages, and no immutable references are allowed
+        // to those pages
+        // TODO: change this to take a NodeHandle, and check that future get_page() calls don't
+        // request valid_message bytes after this request. Otherwise, we could get a race.
+        // Immutable references are allowed, they just need to be to a strict subset of the
+        // valid delta message bytes
+        let mem = unsafe { &mut (*address)[start..end] };
+
+        PageMut {
+            mem,
+            page_number,
+            open_pages: &self.open_dirty_pages,
+        }
+    }
+
     pub(crate) fn get_primary_root_page(&self) -> Option<(PageNumber, u32)> {
         TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock().unwrap())
             .get_root_page()
