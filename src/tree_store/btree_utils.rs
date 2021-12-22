@@ -8,9 +8,9 @@ use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 
-const BTREE_ORDER: usize = 50;
+const BTREE_ORDER: usize = 40;
 // TODO: dynamically calculate this based on the actual page size
-const MAX_KEY_SPACE_PER_PAGE: usize = 4096 - 36 * BTREE_ORDER;
+const MAX_KEY_SPACE_PER_PAGE: usize = 4096 - 49 * BTREE_ORDER;
 
 pub struct AccessGuardMut<'a> {
     page: PageMut<'a>,
@@ -598,7 +598,7 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
 // Provides a simple zero-copy way to access an index page
 struct InternalAccessor<'a: 'b, 'b> {
     page: &'b PageImpl<'a>,
-    _valid_message_bytes: u32,
+    valid_message_bytes: u32,
 }
 
 impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
@@ -606,7 +606,7 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
         debug_assert_eq!(page.memory()[0], INTERNAL);
         InternalAccessor {
             page,
-            _valid_message_bytes: message_bytes,
+            valid_message_bytes: message_bytes,
         }
     }
 
@@ -686,6 +686,20 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
         if n > 0 && self.key_len(n - 1) == 0 {
             return None;
         }
+
+        // Search the delta messages
+        let messages = self.valid_message_bytes / 13;
+        for i in (0..messages as usize).rev() {
+            let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + 13 * i;
+            if self.page.memory()[offset] as usize == n {
+                return Some(NodeHandle::from_be_bytes(
+                    self.page.memory()[(offset + 1)..(offset + 13)]
+                        .try_into()
+                        .unwrap(),
+                ));
+            }
+        }
+
         let offset = 1 + 12 * n;
         Some(NodeHandle::from_be_bytes(
             self.page.memory()[offset..(offset + 12)]
@@ -711,13 +725,15 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
 // Layout is:
 // 1 byte: type
 // repeating (BTREE_ORDER times):
-// 12 bytes node handle
+// 12 bytes: node handle
 // repeating (BTREE_ORDER - 1 times):
 // * 8 bytes: table id
 // repeating (BTREE_ORDER - 1 times):
 // * 8 bytes: key len. Zero length indicates no key, or following page
 // repeating (BTREE_ORDER - 1 times):
 // * 8 bytes: key offset. Offset to the key data
+// repeating (BTREE_ORDER times):
+// 13 bytes: (child index, node handle). Replacement messages, should be read last to first
 // repeating (BTREE_ORDER - 1 times):
 // * n bytes: key data
 struct InternalBuilder<'a: 'b, 'b> {
@@ -769,12 +785,30 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
         let data_offset = if n > 0 {
             self.key_offset(n - 1) + self.key_len(n - 1)
         } else {
-            1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3
+            1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + 13 * BTREE_ORDER
         };
         self.page.memory_mut()[offset..(offset + 8)]
             .copy_from_slice(&(data_offset as u64).to_be_bytes());
 
         self.page.memory_mut()[data_offset..(data_offset + key.len())].copy_from_slice(key);
+    }
+
+    // Returns the new valid message offset
+    fn write_delta_message(
+        &mut self,
+        message_byte_offset: u32,
+        child_index: u8,
+        handle: NodeHandle,
+    ) -> usize {
+        assert_eq!(message_byte_offset % 13, 0);
+        assert!(child_index < BTREE_ORDER as u8);
+        let n = (message_byte_offset / 13) as usize;
+        assert!(n < BTREE_ORDER);
+        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + 13 * n;
+        self.page.memory_mut()[offset] = child_index;
+        self.page.memory_mut()[(offset + 1)..(offset + 13)].copy_from_slice(&handle.to_be_bytes());
+
+        message_byte_offset as usize + 13
     }
 }
 
