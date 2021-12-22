@@ -691,15 +691,19 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
 
         // Search the delta messages
         let messages = self.valid_message_bytes / 13;
-        for i in (0..messages as usize).rev() {
-            let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + 13 * i;
-            if self.page.memory()[offset] as usize == n {
-                return Some(NodeHandle::from_be_bytes(
-                    self.page.memory()[(offset + 1)..(offset + 13)]
-                        .try_into()
-                        .unwrap(),
-                ));
-            }
+        let base = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3;
+        // TODO: this rposition call could maybe be optimized with SIMD
+        if let Some(index) = self.page.memory()[base..(base + messages as usize)]
+            .iter()
+            .rposition(|x| *x == n as u8)
+        {
+            let offset =
+                1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + BTREE_ORDER + 12 * index;
+            return Some(NodeHandle::from_be_bytes(
+                self.page.memory()[offset..(offset + 12)]
+                    .try_into()
+                    .unwrap(),
+            ));
         }
 
         let offset = 1 + 12 * n;
@@ -734,9 +738,10 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
 // * 8 bytes: key len. Zero length indicates no key, or following page
 // repeating (BTREE_ORDER - 1 times):
 // * 8 bytes: key offset. Offset to the key data
-// TODO: vectorize these, so that we can use SIMD to check the child index more quickly
 // repeating (BTREE_ORDER times):
-// 13 bytes: (child index, node handle). Replacement messages, should be read last to first
+// 1 byte: child index. Replacement messages, should be read last to first
+// repeating (BTREE_ORDER times):
+// 12 bytes: node handle. Replacement messages, should be read last to first
 // repeating (BTREE_ORDER - 1 times):
 // * n bytes: key data
 struct InternalBuilder<'a: 'b, 'b> {
@@ -822,9 +827,10 @@ impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
         assert!(child_index < BTREE_ORDER as u8);
         let n = (message_byte_offset / 13) as usize;
         assert!(n < BTREE_ORDER);
-        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + 13 * n;
+        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + n;
         self.page.memory_mut()[offset] = child_index;
-        self.page.memory_mut()[(offset + 1)..(offset + 13)].copy_from_slice(&handle.to_be_bytes());
+        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + BTREE_ORDER + 12 * n;
+        self.page.memory_mut()[offset..(offset + 12)].copy_from_slice(&handle.to_be_bytes());
 
         message_byte_offset + 13
     }
