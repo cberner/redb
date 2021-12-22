@@ -706,6 +706,8 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
 
 // Note the caller is responsible for ensuring that the buffer is large enough
 // and rewriting all fields if any dynamically sized fields are written
+// TODO: change layout to include a length field, instead of always allocating enough fixed size
+// slots for BTREE_ORDER entries. This will free up extra space for long keys
 // Layout is:
 // 1 byte: type
 // repeating (BTREE_ORDER times):
