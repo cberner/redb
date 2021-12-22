@@ -596,17 +596,19 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
 }
 
 // Provides a simple zero-copy way to access an index page
-struct InternalAccessor<'a: 'b, 'b> {
-    page: &'b PageImpl<'a>,
+struct InternalAccessor<'a: 'b, 'b, T: Page + 'a> {
+    page: &'b T,
     valid_message_bytes: u32,
+    _page_lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
-    fn new(page: &'b PageImpl<'a>, message_bytes: u32) -> Self {
+impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
+    fn new(page: &'b T, message_bytes: u32) -> Self {
         debug_assert_eq!(page.memory()[0], INTERNAL);
         InternalAccessor {
             page,
             valid_message_bytes: message_bytes,
+            _page_lifetime: Default::default(),
         }
     }
 
@@ -732,6 +734,7 @@ impl<'a: 'b, 'b> InternalAccessor<'a, 'b> {
 // * 8 bytes: key len. Zero length indicates no key, or following page
 // repeating (BTREE_ORDER - 1 times):
 // * 8 bytes: key offset. Offset to the key data
+// TODO: vectorize these, so that we can use SIMD to check the child index more quickly
 // repeating (BTREE_ORDER times):
 // 13 bytes: (child index, node handle). Replacement messages, should be read last to first
 // repeating (BTREE_ORDER - 1 times):
@@ -792,6 +795,21 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
 
         self.page.memory_mut()[data_offset..(data_offset + key.len())].copy_from_slice(key);
     }
+}
+
+struct InternalMutator<'a: 'b, 'b> {
+    page: &'b mut PageMut<'a>,
+}
+
+impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
+    fn new(page: &'b mut PageMut<'a>) -> Self {
+        assert_eq!(page.memory()[0], INTERNAL);
+        Self { page }
+    }
+
+    fn can_write_delta_message(&self, message_byte_offset: u32) -> bool {
+        message_byte_offset / 13 < BTREE_ORDER as u32
+    }
 
     // Returns the new valid message offset
     fn write_delta_message(
@@ -799,7 +817,7 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
         message_byte_offset: u32,
         child_index: u8,
         handle: NodeHandle,
-    ) -> usize {
+    ) -> u32 {
         assert_eq!(message_byte_offset % 13, 0);
         assert!(child_index < BTREE_ORDER as u8);
         let n = (message_byte_offset / 13) as usize;
@@ -808,7 +826,7 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
         self.page.memory_mut()[offset] = child_index;
         self.page.memory_mut()[(offset + 1)..(offset + 13)].copy_from_slice(&handle.to_be_bytes());
 
-        message_byte_offset as usize + 13
+        message_byte_offset + 13
     }
 }
 
@@ -840,7 +858,7 @@ pub(in crate) fn tree_height<'a>(
     }
 }
 
-pub(in crate) fn print_node(page: &PageImpl, valid_message_bytes: u32) {
+pub(in crate) fn print_node(page: &impl Page, valid_message_bytes: u32) {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -1607,13 +1625,13 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page, valid_message_bytes);
-            // Inserting into an internal page will always free it
-            // TODO: unless the (key, value) pair is the same? That could result in no change
-            freed.push(page.get_page_number());
             let mut children = vec![];
             let mut index_table_keys = vec![];
             let mut guard = None;
             let mut last_valid_child = BTREE_ORDER - 1;
+            // Delta message can only be used if the keys did not change
+            let mut use_delta_message = true;
+            let mut delta_message = None;
             for i in 0..(BTREE_ORDER - 1) {
                 if let Some(index_table) = accessor.table_id(i) {
                     let index_key = accessor.key(i).unwrap();
@@ -1630,9 +1648,14 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                             manager,
                         );
                         children.push(page1);
+                        if page1 != lte_page {
+                            assert!(delta_message.is_none());
+                            delta_message = Some((i as u8, page1));
+                        }
                         if let Some((index_table, index_key, page2)) = more {
                             index_table_keys.push((index_table, index_key));
                             children.push(page2);
+                            use_delta_message = false;
                         }
                         index_table_keys.push((index_table, index_key.to_vec()));
                         assert!(guard.is_none());
@@ -1661,9 +1684,14 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     manager,
                 );
                 children.push(page1);
+                if page1 != last_page {
+                    assert!(delta_message.is_none());
+                    delta_message = Some((last_valid_child as u8, page1));
+                }
                 if let Some((index_table, index_key, page2)) = more {
                     index_table_keys.push((index_table, index_key));
                     children.push(page2);
+                    use_delta_message = false;
                 }
                 assert!(guard.is_none());
                 guard = Some(guard2);
@@ -1672,6 +1700,25 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
             assert_eq!(children.len() - 1, index_table_keys.len());
 
             let total_key_len: usize = index_table_keys.iter().map(|(_, key)| key.len()).sum();
+
+            drop(accessor);
+            let mut page = manager.get_page_mut(page.get_page_number());
+            let mut mutator = InternalMutator::new(&mut page);
+            use_delta_message =
+                use_delta_message && mutator.can_write_delta_message(valid_message_bytes);
+            if use_delta_message {
+                let (child_index, handle) = delta_message.unwrap();
+                let new_messages =
+                    mutator.write_delta_message(valid_message_bytes, child_index, handle);
+                return (
+                    NodeHandle::new(page.get_page_number(), new_messages),
+                    None,
+                    guard,
+                );
+            }
+
+            // Free the page, since we're going to replace it
+            freed.push(page.get_page_number());
 
             let mut page = manager.allocate();
             let mut builder = InternalBuilder::new(&mut page);
