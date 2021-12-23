@@ -612,7 +612,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
         }
     }
 
-    fn child_for_key<K: RedbKey + ?Sized>(&self, table: u64, query: &[u8]) -> NodeHandle {
+    fn child_for_key<K: RedbKey + ?Sized>(&self, table: u64, query: &[u8]) -> (usize, NodeHandle) {
         let mut min_child = 0; // inclusive
         let mut max_child = BTREE_ORDER - 1; // inclusive
         while min_child < max_child {
@@ -623,7 +623,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
                         max_child = mid;
                     }
                     Ordering::Equal => {
-                        return self.child_page(mid).unwrap();
+                        return (mid, self.child_page(mid).unwrap());
                     }
                     Ordering::Greater => {
                         min_child = mid + 1;
@@ -635,7 +635,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
         }
         debug_assert_eq!(min_child, max_child);
 
-        self.child_page(min_child).unwrap()
+        (min_child, self.child_page(min_child).unwrap())
     }
 
     fn key_offset(&self, n: usize) -> usize {
@@ -681,6 +681,18 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
             return None;
         }
         Some(&self.page.memory()[offset..(offset + len)])
+    }
+
+    fn count_children(&self) -> usize {
+        let mut count = 1;
+        for i in 0..(BTREE_ORDER - 1) {
+            let length = self.key_len(i);
+            if length == 0 {
+                break;
+            }
+            count += 1;
+        }
+        count
     }
 
     fn child_page(&self, n: usize) -> Option<NodeHandle> {
@@ -887,8 +899,9 @@ pub(in crate) fn print_node(page: &impl Page, valid_message_bytes: u32) {
         INTERNAL => {
             let accessor = InternalAccessor::new(page, valid_message_bytes);
             eprint!(
-                "Internal[ (page={}), child_0={}",
+                "Internal[ (page={}/{}), child_0={}",
                 page.get_page_number().0,
+                valid_message_bytes,
                 accessor.child_page(0).unwrap().get_page_number().0
             );
             for i in 0..(BTREE_ORDER - 1) {
@@ -1499,6 +1512,50 @@ pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
     }
 }
 
+// Patch is applied at patch_index of the accessor children, using patch_handle to replace the child,
+// and inserting patch_extension after it
+// copies [start_child, end_child)
+fn copy_to_builder_and_patch<'a>(
+    accessor: &InternalAccessor<PageImpl<'a>>,
+    start_child: usize,
+    end_child: usize,
+    builder: &mut InternalBuilder,
+    patch_index: u8,
+    patch_handle: NodeHandle,
+    patch_extension: Option<(u64, &[u8], NodeHandle)>,
+) {
+    let mut dest = 0;
+    if patch_index as usize == start_child {
+        builder.write_first_page(patch_handle);
+        if let Some((extra_table, extra_key, extra_handle)) = patch_extension {
+            builder.write_nth_key(extra_table, extra_key, extra_handle, dest);
+            dest += 1;
+        }
+    } else {
+        builder.write_first_page(accessor.child_page(start_child).unwrap());
+    }
+
+    for i in (start_child + 1)..end_child {
+        if let Some((table, key)) = accessor.table_and_key(i - 1) {
+            let handle = if i == patch_index as usize {
+                patch_handle
+            } else {
+                accessor.child_page(i).unwrap()
+            };
+            builder.write_nth_key(table, key, handle, dest);
+            dest += 1;
+            if i == patch_index as usize {
+                if let Some((extra_table, extra_key, extra_handle)) = patch_extension {
+                    builder.write_nth_key(extra_table, extra_key, extra_handle, dest);
+                    dest += 1;
+                };
+            }
+        } else {
+            break;
+        }
+    }
+}
+
 #[allow(clippy::type_complexity)]
 fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
@@ -1631,155 +1688,142 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page, valid_message_bytes);
-            let mut children = vec![];
-            let mut index_table_keys = vec![];
-            let mut guard = None;
-            let mut last_valid_child = BTREE_ORDER - 1;
             // Delta message can only be used if the keys did not change
-            let mut use_delta_message = true;
-            let mut delta_message = None;
-            for i in 0..(BTREE_ORDER - 1) {
-                if let Some(index_table) = accessor.table_id(i) {
-                    let index_key = accessor.key(i).unwrap();
-                    if cmp_keys::<K>(table, key, index_table, index_key).is_le() && guard.is_none()
-                    {
-                        let lte_page = accessor.child_page(i).unwrap();
-                        let (page1, more, guard2) = tree_insert_helper::<K>(
-                            manager.get_page(lte_page.get_page_number()),
-                            lte_page.get_valid_message_bytes(),
-                            table,
-                            key,
-                            value,
-                            freed,
-                            manager,
-                        );
-                        children.push(page1);
-                        if page1 != lte_page {
-                            assert!(delta_message.is_none());
-                            delta_message = Some((i as u8, page1));
-                        }
-                        if let Some((index_table, index_key, page2)) = more {
-                            index_table_keys.push((index_table, index_key));
-                            children.push(page2);
-                            use_delta_message = false;
-                        }
-                        index_table_keys.push((index_table, index_key.to_vec()));
-                        assert!(guard.is_none());
-                        guard = Some(guard2);
-                    } else {
-                        children.push(accessor.child_page(i).unwrap());
-                        index_table_keys.push((index_table, index_key.to_vec()));
-                    }
-                } else {
-                    last_valid_child = i;
-                    break;
-                }
-            }
-            let last_page = accessor.child_page(last_valid_child).unwrap();
-            if guard.is_some() {
-                // Already found the insertion place, so just copy
-                children.push(last_page);
-            } else {
-                let (page1, more, guard2) = tree_insert_helper::<K>(
-                    manager.get_page(last_page.get_page_number()),
-                    last_page.get_valid_message_bytes(),
-                    table,
-                    key,
-                    value,
-                    freed,
-                    manager,
-                );
-                children.push(page1);
-                if page1 != last_page {
-                    assert!(delta_message.is_none());
-                    delta_message = Some((last_valid_child as u8, page1));
-                }
-                if let Some((index_table, index_key, page2)) = more {
-                    index_table_keys.push((index_table, index_key));
-                    children.push(page2);
-                    use_delta_message = false;
-                }
-                assert!(guard.is_none());
-                guard = Some(guard2);
-            }
-            let guard = guard.unwrap();
-            assert_eq!(children.len() - 1, index_table_keys.len());
+            let (child_index, child_page) = accessor.child_for_key::<K>(table, key);
+            let (page1, more, guard) = tree_insert_helper::<K>(
+                manager.get_page(child_page.get_page_number()),
+                child_page.get_valid_message_bytes(),
+                table,
+                key,
+                value,
+                freed,
+                manager,
+            );
 
-            let total_key_len: usize = index_table_keys.iter().map(|(_, key)| key.len()).sum();
+            if let Some((index_table2, index_key2, page2)) = more {
+                let new_children_count = 1 + accessor.count_children();
+                let new_total_key_size = index_key2.len() + accessor.total_key_length();
 
-            drop(accessor);
-            let mut page = manager.get_page_mut(page.get_page_number());
-            let mut mutator = InternalMutator::new(&mut page);
-            use_delta_message =
-                use_delta_message && mutator.can_write_delta_message(valid_message_bytes);
-            if use_delta_message {
-                let (child_index, handle) = delta_message.unwrap();
-                let new_messages =
-                    mutator.write_delta_message(valid_message_bytes, child_index, handle);
-                return (
-                    NodeHandle::new(page.get_page_number(), new_messages),
-                    None,
-                    guard,
-                );
-            }
+                // Rewrite page since we're splitting a child
+                let mut new_page = manager.allocate();
+                let mut builder = InternalBuilder::new(&mut new_page);
 
-            // Free the page, since we're going to replace it
-            freed.push(page.get_page_number());
-
-            let mut page = manager.allocate();
-            let mut builder = InternalBuilder::new(&mut page);
-            if children.len() <= BTREE_ORDER && total_key_len < MAX_KEY_SPACE_PER_PAGE {
-                builder.write_first_page(children[0]);
-                for (i, ((table, key), page_number)) in index_table_keys
-                    .iter()
-                    .zip(children.iter().skip(1))
-                    .enumerate()
+                if new_children_count <= BTREE_ORDER && new_total_key_size < MAX_KEY_SPACE_PER_PAGE
                 {
-                    builder.write_nth_key(*table, key, *page_number, i);
-                }
-                (NodeHandle::new(page.get_page_number(), 0), None, guard)
-            } else {
-                let division = if total_key_len < MAX_KEY_SPACE_PER_PAGE {
-                    // Use tree order if we did not run out of space
-                    BTREE_ORDER / 2
+                    copy_to_builder_and_patch(
+                        &accessor,
+                        0,
+                        BTREE_ORDER,
+                        &mut builder,
+                        child_index as u8,
+                        page1,
+                        Some((index_table2, &index_key2, page2)),
+                    );
+                    // Free the original page, since we've replaced it
+                    freed.push(page.get_page_number());
+                    (NodeHandle::new(new_page.get_page_number(), 0), None, guard)
                 } else {
-                    // Otherwise balance the nodes based on the key size
-                    let mut index = index_table_keys.len() - 1;
-                    let mut cumulative = 0;
-                    for (i, (_, key)) in index_table_keys.iter().enumerate() {
-                        cumulative += key.len();
-                        if cumulative > total_key_len / 2 {
-                            index = i;
+                    // TODO: optimize to remove these Vecs
+                    let mut children = vec![];
+                    let mut index_table_keys: Vec<(u64, &[u8])> = vec![];
+
+                    if child_index == 0 {
+                        children.push(page1);
+                        index_table_keys.push((index_table2, &index_key2));
+                        children.push(page2);
+                    } else {
+                        children.push(accessor.child_page(0).unwrap());
+                    };
+                    for i in 1..BTREE_ORDER {
+                        if let Some((temp_table, temp_key)) = accessor.table_and_key(i - 1) {
+                            index_table_keys.push((temp_table, temp_key));
+                            if i == child_index as usize {
+                                children.push(page1);
+                                index_table_keys.push((index_table2, &index_key2));
+                                children.push(page2);
+                            } else {
+                                children.push(accessor.child_page(i).unwrap());
+                            };
+                        } else {
                             break;
                         }
                     }
-                    index
-                };
-                builder.write_first_page(children[0]);
-                for i in 0..division {
-                    let (table, key) = &index_table_keys[i];
-                    builder.write_nth_key(*table, key, children[i + 1], i);
+
+                    let division = if new_total_key_size < MAX_KEY_SPACE_PER_PAGE {
+                        // Use tree order if we did not run out of space
+                        BTREE_ORDER / 2
+                    } else {
+                        // Otherwise balance the nodes based on the key size
+                        let mut index = index_table_keys.len() - 1;
+                        let mut cumulative = 0;
+                        for (i, (_, key)) in index_table_keys.iter().enumerate() {
+                            cumulative += key.len();
+                            if cumulative > new_total_key_size / 2 {
+                                index = i;
+                                break;
+                            }
+                        }
+                        index
+                    };
+
+                    builder.write_first_page(children[0]);
+                    for i in 0..division {
+                        let (table, key) = &index_table_keys[i];
+                        builder.write_nth_key(*table, key, children[i + 1], i);
+                    }
+
+                    let (index_table, index_key) = &index_table_keys[division];
+
+                    let mut new_page2 = manager.allocate();
+                    let mut builder2 = InternalBuilder::new(&mut new_page2);
+                    builder2.write_first_page(children[division + 1]);
+                    for i in (division + 1)..index_table_keys.len() {
+                        let (table, key) = &index_table_keys[i];
+                        builder2.write_nth_key(*table, key, children[i + 1], i - (division + 1));
+                    }
+
+                    // Free the original page, since we've replaced it
+                    freed.push(page.get_page_number());
+                    (
+                        NodeHandle::new(new_page.get_page_number(), 0),
+                        Some((
+                            *index_table,
+                            index_key.to_vec(),
+                            NodeHandle::new(new_page2.get_page_number(), 0),
+                        )),
+                        guard,
+                    )
                 }
+            } else {
+                assert_ne!(page1, child_page);
+                let mut mutpage = manager.get_page_mut(page.get_page_number());
+                let mut mutator = InternalMutator::new(&mut mutpage);
+                if mutator.can_write_delta_message(valid_message_bytes) {
+                    let new_messages =
+                        mutator.write_delta_message(valid_message_bytes, child_index as u8, page1);
+                    (
+                        NodeHandle::new(mutpage.get_page_number(), new_messages),
+                        None,
+                        guard,
+                    )
+                } else {
+                    // Page is full of delta messages, so rewrite it
+                    let mut new_page = manager.allocate();
+                    let mut builder = InternalBuilder::new(&mut new_page);
+                    copy_to_builder_and_patch(
+                        &accessor,
+                        0,
+                        BTREE_ORDER,
+                        &mut builder,
+                        child_index as u8,
+                        page1,
+                        None,
+                    );
 
-                let (index_table, index_key) = &index_table_keys[division];
-
-                let mut page2 = manager.allocate();
-                let mut builder2 = InternalBuilder::new(&mut page2);
-                builder2.write_first_page(children[division + 1]);
-                for i in (division + 1)..index_table_keys.len() {
-                    let (table, key) = &index_table_keys[i];
-                    builder2.write_nth_key(*table, key, children[i + 1], i - (division + 1));
+                    // Free the original page, since we've replaced it
+                    freed.push(page.get_page_number());
+                    (NodeHandle::new(new_page.get_page_number(), 0), None, guard)
                 }
-
-                (
-                    NodeHandle::new(page.get_page_number(), 0),
-                    Some((
-                        *index_table,
-                        index_key.to_vec(),
-                        NodeHandle::new(page2.get_page_number(), 0),
-                    )),
-                    guard,
-                )
             }
         }
         _ => unreachable!(),
@@ -1827,7 +1871,7 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page, valid_message_bytes);
-            let child_page = accessor.child_for_key::<K>(table, query);
+            let (_, child_page) = accessor.child_for_key::<K>(table, query);
             return lookup_in_raw::<K>(
                 manager.get_page(child_page.get_page_number()),
                 child_page.get_valid_message_bytes(),
