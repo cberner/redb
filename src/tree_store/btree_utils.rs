@@ -764,7 +764,7 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
     fn new(page: &'b mut PageMut<'a>) -> Self {
         page.memory_mut()[0] = INTERNAL;
         //  ensure all the key lengths are zeroed, since we use those to indicate missing keys
-        let start = 1 + 8 * BTREE_ORDER + 8 * (BTREE_ORDER - 1);
+        let start = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1);
         for i in 0..(BTREE_ORDER - 1) {
             let offset = start + 8 * i;
             page.memory_mut()[offset..(offset + 8)].copy_from_slice(&(0u64).to_be_bytes());
