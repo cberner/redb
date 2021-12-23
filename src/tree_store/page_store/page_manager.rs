@@ -408,7 +408,11 @@ impl TransactionalMemory {
 
     pub(crate) fn get_page(&self, page_number: PageNumber) -> PageImpl {
         // We must not retrieve an immutable reference to a page which already has a mutable ref to it
-        assert!(!self.open_dirty_pages.borrow().contains(&page_number));
+        assert!(
+            !self.open_dirty_pages.borrow().contains(&page_number),
+            "{}",
+            page_number.0
+        );
         let start = page_number.0 as usize * self.page_size;
         let end = start + self.page_size;
 
