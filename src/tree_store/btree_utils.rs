@@ -750,6 +750,8 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
 // * 8 bytes: key len. Zero length indicates no key, or following page
 // repeating (BTREE_ORDER - 1 times):
 // * 8 bytes: key offset. Offset to the key data
+// TODO: re-assess whether these delta messages are worthwhile. They hurt read performance,
+// in the current implementation
 // repeating (BTREE_ORDER times):
 // 1 byte: child index. Replacement messages, should be read last to first
 // repeating (BTREE_ORDER times):
