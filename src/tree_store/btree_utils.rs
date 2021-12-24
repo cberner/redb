@@ -846,6 +846,11 @@ impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
 
         message_byte_offset + 13
     }
+
+    fn write_child_page(&mut self, i: usize, node_handle: NodeHandle) {
+        let offset = 1 + 12 * i;
+        self.page.memory_mut()[offset..(offset + 12)].copy_from_slice(&node_handle.to_be_bytes());
+    }
 }
 
 pub(in crate) fn tree_height<'a>(
@@ -1599,7 +1604,9 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                             manager,
                         );
 
-                        freed.push(page.get_page_number());
+                        if !manager.free_if_uncommitted(page.get_page_number()) {
+                            freed.push(page.get_page_number());
+                        }
 
                         (new_page, None, guard)
                     }
@@ -1620,7 +1627,9 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                                 let right =
                                     make_single_leaf(right_table, right_key, right_value, manager);
 
-                                freed.push(page.get_page_number());
+                                if !manager.free_if_uncommitted(page.get_page_number()) {
+                                    freed.push(page.get_page_number());
+                                }
 
                                 (left, Some((table, key.to_vec(), right)), guard)
                             }
@@ -1635,7 +1644,9 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                                     manager,
                                 );
 
-                                freed.push(page.get_page_number());
+                                if !manager.free_if_uncommitted(page.get_page_number()) {
+                                    freed.push(page.get_page_number());
+                                }
 
                                 (new_page, None, guard)
                             }
@@ -1646,7 +1657,9 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                                 let right =
                                     make_single_leaf(right_table, right_key, right_value, manager);
 
-                                freed.push(page.get_page_number());
+                                if !manager.free_if_uncommitted(page.get_page_number()) {
+                                    freed.push(page.get_page_number());
+                                }
 
                                 (left, Some((left_table, left_key.to_vec(), right)), guard)
                             }
@@ -1681,7 +1694,9 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     ),
                 };
 
-                freed.push(page.get_page_number());
+                if !manager.free_if_uncommitted(page.get_page_number()) {
+                    freed.push(page.get_page_number());
+                }
 
                 (new_page, None, guard)
             }
@@ -1720,7 +1735,9 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         Some((index_table2, &index_key2, page2)),
                     );
                     // Free the original page, since we've replaced it
-                    freed.push(page.get_page_number());
+                    if !manager.free_if_uncommitted(page.get_page_number()) {
+                        freed.push(page.get_page_number());
+                    }
                     (NodeHandle::new(new_page.get_page_number(), 0), None, guard)
                 } else {
                     // TODO: optimize to remove these Vecs
@@ -1783,7 +1800,9 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     }
 
                     // Free the original page, since we've replaced it
-                    freed.push(page.get_page_number());
+                    if !manager.free_if_uncommitted(page.get_page_number()) {
+                        freed.push(page.get_page_number());
+                    }
                     (
                         NodeHandle::new(new_page.get_page_number(), 0),
                         Some((
@@ -1795,10 +1814,24 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     )
                 }
             } else {
-                assert_ne!(page1, child_page);
                 let mut mutpage = manager.get_page_mut(page.get_page_number());
                 let mut mutator = InternalMutator::new(&mut mutpage);
-                if mutator.can_write_delta_message(valid_message_bytes) {
+                if page1 == child_page {
+                    // NO-OP. One of our descendants is uncommitted, so there was no change
+                    (
+                        NodeHandle::new(mutpage.get_page_number(), valid_message_bytes),
+                        None,
+                        guard,
+                    )
+                } else if manager.uncommitted(page.get_page_number()) {
+                    assert_eq!(valid_message_bytes, 0);
+                    mutator.write_child_page(child_index, page1);
+                    (
+                        NodeHandle::new(mutpage.get_page_number(), valid_message_bytes),
+                        None,
+                        guard,
+                    )
+                } else if mutator.can_write_delta_message(valid_message_bytes) {
                     let new_messages =
                         mutator.write_delta_message(valid_message_bytes, child_index as u8, page1);
                     (
@@ -1821,7 +1854,9 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     );
 
                     // Free the original page, since we've replaced it
-                    freed.push(page.get_page_number());
+                    if !manager.free_if_uncommitted(page.get_page_number()) {
+                        freed.push(page.get_page_number());
+                    }
                     (NodeHandle::new(new_page.get_page_number(), 0), None, guard)
                 }
             }
