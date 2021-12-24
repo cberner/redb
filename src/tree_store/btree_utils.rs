@@ -9,9 +9,12 @@ use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 
 const BTREE_ORDER: usize = 40;
+const MESSAGE_BUFFER: usize = 32;
 // TODO: dynamically calculate this based on the actual page size
-const MAX_KEY_SPACE_PER_PAGE: usize =
-    4096 - 36 * BTREE_ORDER - (1 + NodeHandle::serialized_size()) * BTREE_ORDER;
+const MAX_KEY_SPACE_PER_PAGE: usize = 4096
+    - NodeHandle::serialized_size() * BTREE_ORDER
+    - 24 * BTREE_ORDER
+    - (1 + NodeHandle::serialized_size()) * MESSAGE_BUFFER;
 
 pub struct AccessGuardMut<'a> {
     page: PageMut<'a>,
@@ -715,7 +718,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
             let offset = 1
                 + NodeHandle::serialized_size() * BTREE_ORDER
                 + 8 * (BTREE_ORDER - 1) * 3
-                + BTREE_ORDER
+                + MESSAGE_BUFFER
                 + NodeHandle::serialized_size() * index;
             return Some(NodeHandle::from_be_bytes(
                 self.page.memory()[offset..(offset + NodeHandle::serialized_size())]
@@ -758,9 +761,9 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
 // * 8 bytes: key offset. Offset to the key data
 // TODO: re-assess whether these delta messages are worthwhile. They hurt read performance,
 // in the current implementation
-// repeating (BTREE_ORDER times):
+// repeating (MESSAGE_BUFFER times):
 // 1 byte: child index. Replacement messages, should be read last to first
-// repeating (BTREE_ORDER times):
+// repeating (MESSAGE_BUFFER times):
 // 8 bytes: node handle. Replacement messages, should be read last to first
 // repeating (BTREE_ORDER - 1 times):
 // * n bytes: key data
@@ -821,7 +824,7 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
         } else {
             1 + NodeHandle::serialized_size() * BTREE_ORDER
                 + 8 * (BTREE_ORDER - 1) * 3
-                + (1 + NodeHandle::serialized_size()) * BTREE_ORDER
+                + (1 + NodeHandle::serialized_size()) * MESSAGE_BUFFER
         };
         self.page.memory_mut()[offset..(offset + 8)]
             .copy_from_slice(&(data_offset as u64).to_be_bytes());
@@ -841,7 +844,7 @@ impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
     }
 
     fn can_write_delta_message(&self, message_byte_offset: u32) -> bool {
-        message_byte_offset / (1 + NodeHandle::serialized_size() as u32) < BTREE_ORDER as u32
+        message_byte_offset / (1 + NodeHandle::serialized_size() as u32) < MESSAGE_BUFFER as u32
     }
 
     // Returns the new valid message offset
@@ -864,7 +867,7 @@ impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
         let offset = 1
             + NodeHandle::serialized_size() * BTREE_ORDER
             + 8 * (BTREE_ORDER - 1) * 3
-            + BTREE_ORDER
+            + MESSAGE_BUFFER
             + NodeHandle::serialized_size() * n;
         self.page.memory_mut()[offset..(offset + NodeHandle::serialized_size())]
             .copy_from_slice(&handle.to_be_bytes());
