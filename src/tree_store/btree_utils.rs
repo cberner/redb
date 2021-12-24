@@ -10,7 +10,8 @@ use std::ops::{Bound, RangeBounds};
 
 const BTREE_ORDER: usize = 40;
 // TODO: dynamically calculate this based on the actual page size
-const MAX_KEY_SPACE_PER_PAGE: usize = 4096 - 49 * BTREE_ORDER;
+const MAX_KEY_SPACE_PER_PAGE: usize =
+    4096 - 36 * BTREE_ORDER - (1 + NodeHandle::serialized_size()) * BTREE_ORDER;
 
 pub struct AccessGuardMut<'a> {
     page: PageMut<'a>,
@@ -639,12 +640,14 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
     }
 
     fn key_offset(&self, n: usize) -> usize {
-        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
+        let offset =
+            1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
         u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
     fn key_len(&self, n: usize) -> usize {
-        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
+        let offset =
+            1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
         u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
@@ -654,7 +657,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
         if len == 0 {
             return None;
         }
-        let offset = 1 + 12 * BTREE_ORDER + 8 * n;
+        let offset = 1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * n;
         Some(u64::from_be_bytes(
             self.page.memory()[offset..(offset + 8)].try_into().unwrap(),
         ))
@@ -666,7 +669,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
         if len == 0 {
             return None;
         }
-        let offset = 1 + 12 * BTREE_ORDER + 8 * n;
+        let offset = 1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * n;
         let table =
             u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap());
         let offset = self.key_offset(n);
@@ -702,25 +705,28 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
         }
 
         // Search the delta messages
-        let messages = self.valid_message_bytes / 13;
-        let base = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3;
+        let messages = self.valid_message_bytes / (1 + NodeHandle::serialized_size() as u32);
+        let base = 1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3;
         // TODO: this rposition call could maybe be optimized with SIMD
         if let Some(index) = self.page.memory()[base..(base + messages as usize)]
             .iter()
             .rposition(|x| *x == n as u8)
         {
-            let offset =
-                1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + BTREE_ORDER + 12 * index;
+            let offset = 1
+                + NodeHandle::serialized_size() * BTREE_ORDER
+                + 8 * (BTREE_ORDER - 1) * 3
+                + BTREE_ORDER
+                + NodeHandle::serialized_size() * index;
             return Some(NodeHandle::from_be_bytes(
-                self.page.memory()[offset..(offset + 12)]
+                self.page.memory()[offset..(offset + NodeHandle::serialized_size())]
                     .try_into()
                     .unwrap(),
             ));
         }
 
-        let offset = 1 + 12 * n;
+        let offset = 1 + NodeHandle::serialized_size() * n;
         Some(NodeHandle::from_be_bytes(
-            self.page.memory()[offset..(offset + 12)]
+            self.page.memory()[offset..(offset + NodeHandle::serialized_size())]
                 .try_into()
                 .unwrap(),
         ))
@@ -743,7 +749,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
 // Layout is:
 // 1 byte: type
 // repeating (BTREE_ORDER times):
-// 12 bytes: node handle
+// 8 bytes: node handle
 // repeating (BTREE_ORDER - 1 times):
 // * 8 bytes: table id
 // repeating (BTREE_ORDER - 1 times):
@@ -755,7 +761,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
 // repeating (BTREE_ORDER times):
 // 1 byte: child index. Replacement messages, should be read last to first
 // repeating (BTREE_ORDER times):
-// 12 bytes: node handle. Replacement messages, should be read last to first
+// 8 bytes: node handle. Replacement messages, should be read last to first
 // repeating (BTREE_ORDER - 1 times):
 // * n bytes: key data
 struct InternalBuilder<'a: 'b, 'b> {
@@ -766,7 +772,7 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
     fn new(page: &'b mut PageMut<'a>) -> Self {
         page.memory_mut()[0] = INTERNAL;
         //  ensure all the key lengths are zeroed, since we use those to indicate missing keys
-        let start = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1);
+        let start = 1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1);
         for i in 0..(BTREE_ORDER - 1) {
             let offset = start + 8 * i;
             page.memory_mut()[offset..(offset + 8)].copy_from_slice(&(0u64).to_be_bytes());
@@ -776,16 +782,19 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
 
     fn write_first_page(&mut self, node_handle: NodeHandle) {
         let offset = 1;
-        self.page.memory_mut()[offset..(offset + 12)].copy_from_slice(&node_handle.to_be_bytes());
+        self.page.memory_mut()[offset..(offset + NodeHandle::serialized_size())]
+            .copy_from_slice(&node_handle.to_be_bytes());
     }
 
     fn key_offset(&self, n: usize) -> usize {
-        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
+        let offset =
+            1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
         u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
     fn key_len(&self, n: usize) -> usize {
-        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
+        let offset =
+            1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
         u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
     }
 
@@ -793,21 +802,26 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
     // Caller must write keys & pages in increasing order
     fn write_nth_key(&mut self, table_id: u64, key: &[u8], handle: NodeHandle, n: usize) {
         assert!(n < BTREE_ORDER - 1);
-        let offset = 1 + 12 * (n + 1);
-        self.page.memory_mut()[offset..(offset + 12)].copy_from_slice(&handle.to_be_bytes());
+        let offset = 1 + NodeHandle::serialized_size() * (n + 1);
+        self.page.memory_mut()[offset..(offset + NodeHandle::serialized_size())]
+            .copy_from_slice(&handle.to_be_bytes());
 
-        let offset = 1 + 12 * BTREE_ORDER + 8 * n;
+        let offset = 1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * n;
         self.page.memory_mut()[offset..(offset + 8)].copy_from_slice(&table_id.to_be_bytes());
 
-        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
+        let offset =
+            1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
         self.page.memory_mut()[offset..(offset + 8)]
             .copy_from_slice(&(key.len() as u64).to_be_bytes());
 
-        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
+        let offset =
+            1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2 + 8 * n;
         let data_offset = if n > 0 {
             self.key_offset(n - 1) + self.key_len(n - 1)
         } else {
-            1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + 13 * BTREE_ORDER
+            1 + NodeHandle::serialized_size() * BTREE_ORDER
+                + 8 * (BTREE_ORDER - 1) * 3
+                + (1 + NodeHandle::serialized_size()) * BTREE_ORDER
         };
         self.page.memory_mut()[offset..(offset + 8)]
             .copy_from_slice(&(data_offset as u64).to_be_bytes());
@@ -827,7 +841,7 @@ impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
     }
 
     fn can_write_delta_message(&self, message_byte_offset: u32) -> bool {
-        message_byte_offset / 13 < BTREE_ORDER as u32
+        message_byte_offset / (1 + NodeHandle::serialized_size() as u32) < BTREE_ORDER as u32
     }
 
     // Returns the new valid message offset
@@ -837,21 +851,31 @@ impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
         child_index: u8,
         handle: NodeHandle,
     ) -> u32 {
-        assert_eq!(message_byte_offset % 13, 0);
+        assert_eq!(
+            message_byte_offset % (1 + NodeHandle::serialized_size() as u32),
+            0
+        );
         assert!(child_index < BTREE_ORDER as u8);
-        let n = (message_byte_offset / 13) as usize;
+        let n = (message_byte_offset / (1 + NodeHandle::serialized_size() as u32)) as usize;
         assert!(n < BTREE_ORDER);
-        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + n;
+        let offset =
+            1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + n;
         self.page.memory_mut()[offset] = child_index;
-        let offset = 1 + 12 * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + BTREE_ORDER + 12 * n;
-        self.page.memory_mut()[offset..(offset + 12)].copy_from_slice(&handle.to_be_bytes());
+        let offset = 1
+            + NodeHandle::serialized_size() * BTREE_ORDER
+            + 8 * (BTREE_ORDER - 1) * 3
+            + BTREE_ORDER
+            + NodeHandle::serialized_size() * n;
+        self.page.memory_mut()[offset..(offset + NodeHandle::serialized_size())]
+            .copy_from_slice(&handle.to_be_bytes());
 
-        message_byte_offset + 13
+        message_byte_offset + 1 + NodeHandle::serialized_size() as u32
     }
 
     fn write_child_page(&mut self, i: usize, node_handle: NodeHandle) {
-        let offset = 1 + 12 * i;
-        self.page.memory_mut()[offset..(offset + 12)].copy_from_slice(&node_handle.to_be_bytes());
+        let offset = 1 + NodeHandle::serialized_size() * i;
+        self.page.memory_mut()[offset..(offset + NodeHandle::serialized_size())]
+            .copy_from_slice(&node_handle.to_be_bytes());
     }
 }
 

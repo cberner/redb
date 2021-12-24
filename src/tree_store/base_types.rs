@@ -22,18 +22,25 @@ impl NodeHandle {
         self.valid_message_bytes
     }
 
-    pub(crate) fn to_be_bytes(self) -> [u8; 12] {
-        let mut result = [0u8; 12];
-        result[0..8].copy_from_slice(&self.page_number.to_be_bytes());
-        result[8..12].copy_from_slice(&self.valid_message_bytes.to_be_bytes());
+    #[inline(always)]
+    pub(crate) fn to_be_bytes(self) -> [u8; Self::serialized_size()] {
+        let mut temp = self.page_number.0;
+        temp |= (self.valid_message_bytes as u64) << 48;
 
-        result
+        temp.to_be_bytes()
     }
 
-    pub(crate) fn from_be_bytes(bytes: [u8; 12]) -> Self {
-        let page_number = PageNumber(u64::from_be_bytes(bytes[..8].try_into().unwrap()));
-        let valid_message_bytes = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
+    #[inline(always)]
+    pub(crate) fn from_be_bytes(bytes: [u8; Self::serialized_size()]) -> Self {
+        let temp = u64::from_be_bytes(bytes[..8].try_into().unwrap());
+        let page_number = PageNumber(temp & 0x0000_FFFF_FFFF_FFFF);
+        let valid_message_bytes = (temp >> 48) as u32;
 
         Self::new(page_number, valid_message_bytes)
+    }
+
+    #[inline(always)]
+    pub(crate) const fn serialized_size() -> usize {
+        8
     }
 }
