@@ -214,7 +214,7 @@ impl<'a> Drop for PageMut<'a> {
 
 pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
-    allocated_since_commit: RefCell<Vec<PageNumber>>,
+    allocated_since_commit: RefCell<HashSet<PageNumber>>,
     freed_since_commit: RefCell<Vec<PageNumber>>,
     // Metapage guard lock should be held when using this to modify the page allocator state
     page_allocator: PageAllocator,
@@ -315,7 +315,7 @@ impl TransactionalMemory {
         drop(accessor);
 
         Ok(TransactionalMemory {
-            allocated_since_commit: RefCell::new(vec![]),
+            allocated_since_commit: RefCell::new(HashSet::new()),
             freed_since_commit: RefCell::new(vec![]),
             page_allocator,
             mmap,
@@ -378,7 +378,7 @@ impl TransactionalMemory {
         let accessor =
             TransactionAccessor::new(get_secondary(mmap), self.metapage_guard.lock().unwrap());
         let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
-        for page_number in self.allocated_since_commit.borrow_mut().drain(..) {
+        for page_number in self.allocated_since_commit.borrow_mut().drain() {
             self.page_allocator.record_alloc(mem, page_number.0);
         }
         for page_number in self.freed_since_commit.borrow_mut().drain(..) {
@@ -394,7 +394,7 @@ impl TransactionalMemory {
         let (metamem, guard) = self.acquire_mutable_metapage();
         let accessor = TransactionAccessor::new(get_secondary(metamem), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
-        for page_number in self.allocated_since_commit.borrow_mut().drain(..) {
+        for page_number in self.allocated_since_commit.borrow_mut().drain() {
             self.page_allocator.free(mem, page_number.0);
         }
         for page_number in self.freed_since_commit.borrow_mut().drain(..) {
@@ -467,6 +467,25 @@ impl TransactionalMemory {
         self.freed_since_commit.borrow_mut().push(page);
     }
 
+    // Frees the page if it was allocated since the last commit. Returns true, if the page was freed
+    pub(crate) fn free_if_uncommitted(&self, page: PageNumber) -> bool {
+        if self.allocated_since_commit.borrow_mut().remove(&page) {
+            let (mmap, guard) = self.acquire_mutable_metapage();
+            let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
+            let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
+            self.page_allocator.free(mem, page.0);
+            drop(guard);
+            true
+        } else {
+            false
+        }
+    }
+
+    // Page has not been committed
+    pub(crate) fn uncommitted(&self, page: PageNumber) -> bool {
+        self.allocated_since_commit.borrow().contains(&page)
+    }
+
     pub(crate) fn allocate(&self) -> PageMut {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
@@ -480,7 +499,7 @@ impl TransactionalMemory {
         // Drop guard only after page_allocator.alloc() is completed
         drop(guard);
 
-        self.allocated_since_commit.borrow_mut().push(page_number);
+        self.allocated_since_commit.borrow_mut().insert(page_number);
         self.open_dirty_pages.borrow_mut().insert(page_number);
 
         let start = page_number.0 as usize * self.page_size;
