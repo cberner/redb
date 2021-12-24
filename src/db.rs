@@ -17,6 +17,10 @@ impl Database {
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
     ///
+    /// `db_size`: the maximum size in bytes of the database. Note: this cannot be changed after the
+    /// database is created.
+    /// TODO: remove the restriction that db_size cannot be changed
+    ///
     /// # Safety
     ///
     /// The file referenced by `path` must only be concurrently modified by compatible versions
