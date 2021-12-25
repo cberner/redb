@@ -486,7 +486,8 @@ impl TransactionalMemory {
         self.allocated_since_commit.borrow().contains(&page)
     }
 
-    pub(crate) fn allocate(&self) -> PageMut {
+    pub(crate) fn allocate(&self, allocation_size: usize) -> PageMut {
+        assert!(allocation_size <= self.page_size);
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
         mutator.set_allocator_dirty(true);

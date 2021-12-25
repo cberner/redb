@@ -6,6 +6,7 @@ use crate::types::{RedbKey, RedbValue};
 use std::cmp::{max, Ordering};
 use std::convert::TryInto;
 use std::marker::PhantomData;
+use std::mem::size_of;
 use std::ops::{Bound, RangeBounds};
 
 const BTREE_ORDER: usize = 40;
@@ -574,6 +575,19 @@ struct LeafBuilder<'a: 'b, 'b> {
 }
 
 impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
+    fn required_bytes(keys_values: &[&[u8]]) -> usize {
+        assert_eq!(keys_values.len() % 2, 0);
+        // Page id;
+        let mut result = 1;
+        // Table ids
+        result += keys_values.len() / 2 * size_of::<u64>();
+        // key & value lengths
+        result += keys_values.len() * size_of::<u64>();
+        result += keys_values.iter().map(|x| x.len()).sum::<usize>();
+
+        result
+    }
+
     fn new(page: &'b mut PageMut<'a>) -> Self {
         page.memory_mut()[0] = LEAF;
         LeafBuilder { page }
@@ -772,6 +786,14 @@ struct InternalBuilder<'a: 'b, 'b> {
 }
 
 impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
+    fn required_bytes(size_of_keys: usize) -> usize {
+        let fixed_size = 1
+            + NodeHandle::serialized_size() * BTREE_ORDER
+            + 8 * (BTREE_ORDER - 1) * 3
+            + (1 + NodeHandle::serialized_size()) * MESSAGE_BUFFER;
+        size_of_keys + fixed_size
+    }
+
     fn new(page: &'b mut PageMut<'a>) -> Self {
         page.memory_mut()[0] = INTERNAL;
         //  ensure all the key lengths are zeroed, since we use those to indicate missing keys
@@ -1153,16 +1175,23 @@ fn split_index(
 
 // Pages must be in sorted order
 fn make_index_many_pages(children: &[NodeHandle], manager: &TransactionalMemory) -> NodeHandle {
-    let mut page = manager.allocate();
-    let mut builder = InternalBuilder::new(&mut page);
-    builder.write_first_page(children[0]);
+    let mut tables_and_keys = vec![];
+    let mut key_size = 0;
     for i in 1..children.len() {
-        let (table, key) = max_table_key(
+        let entry = max_table_key(
             manager.get_page(children[i - 1].get_page_number()),
             children[i - 1].get_valid_message_bytes(),
             manager,
         );
-        builder.write_nth_key(table, &key, children[i], i - 1);
+        key_size += entry.1.len();
+        tables_and_keys.push(entry);
+    }
+    let mut page = manager.allocate(InternalBuilder::required_bytes(key_size));
+    let mut builder = InternalBuilder::new(&mut page);
+    builder.write_first_page(children[0]);
+    for i in 1..children.len() {
+        let (table, key) = &tables_and_keys[i - 1];
+        builder.write_nth_key(*table, key, children[i], i - 1);
     }
     NodeHandle::new(page.get_page_number(), 0)
 }
@@ -1428,7 +1457,7 @@ pub(in crate) fn make_mut_single_leaf<'a>(
     value: &[u8],
     manager: &'a TransactionalMemory,
 ) -> (NodeHandle, AccessGuardMut<'a>) {
-    let mut page = manager.allocate();
+    let mut page = manager.allocate(LeafBuilder::required_bytes(&[key, value]));
     let mut builder = LeafBuilder::new(&mut page);
     builder.write_lesser(table, key, value);
     builder.write_greater(None);
@@ -1452,7 +1481,7 @@ pub(in crate) fn make_mut_double_leaf_right<'a, K: RedbKey + ?Sized>(
     manager: &'a TransactionalMemory,
 ) -> (NodeHandle, AccessGuardMut<'a>) {
     debug_assert!(cmp_keys::<K>(table1, key1, table2, key2).is_lt());
-    let mut page = manager.allocate();
+    let mut page = manager.allocate(LeafBuilder::required_bytes(&[key1, value1, key2, value2]));
     let mut builder = LeafBuilder::new(&mut page);
     builder.write_lesser(table1, key1, value1);
     builder.write_greater(Some((table2, key2, value2)));
@@ -1476,7 +1505,7 @@ pub(in crate) fn make_mut_double_leaf_left<'a, K: RedbKey + ?Sized>(
     manager: &'a TransactionalMemory,
 ) -> (NodeHandle, AccessGuardMut<'a>) {
     debug_assert!(cmp_keys::<K>(table1, key1, table2, key2).is_lt());
-    let mut page = manager.allocate();
+    let mut page = manager.allocate(LeafBuilder::required_bytes(&[key1, value1, key2, value2]));
     let mut builder = LeafBuilder::new(&mut page);
     builder.write_lesser(table1, key1, value1);
     builder.write_greater(Some((table2, key2, value2)));
@@ -1496,7 +1525,7 @@ pub(in crate) fn make_single_leaf<'a>(
     value: &[u8],
     manager: &'a TransactionalMemory,
 ) -> NodeHandle {
-    let mut page = manager.allocate();
+    let mut page = manager.allocate(LeafBuilder::required_bytes(&[key, value]));
     let mut builder = LeafBuilder::new(&mut page);
     builder.write_lesser(table, key, value);
     builder.write_greater(None);
@@ -1510,7 +1539,7 @@ pub(in crate) fn make_index(
     gt_page: NodeHandle,
     manager: &TransactionalMemory,
 ) -> NodeHandle {
-    let mut page = manager.allocate();
+    let mut page = manager.allocate(InternalBuilder::required_bytes(key.len()));
     let mut builder = InternalBuilder::new(&mut page);
     builder.write_first_page(lte_page);
     builder.write_nth_key(table, key, gt_page, 0);
@@ -1748,12 +1777,13 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 let new_children_count = 1 + accessor.count_children();
                 let new_total_key_size = index_key2.len() + accessor.total_key_length();
 
-                // Rewrite page since we're splitting a child
-                let mut new_page = manager.allocate();
-                let mut builder = InternalBuilder::new(&mut new_page);
-
                 if new_children_count <= BTREE_ORDER && new_total_key_size < MAX_KEY_SPACE_PER_PAGE
                 {
+                    // Rewrite page since we're splitting a child
+                    let mut new_page =
+                        manager.allocate(accessor.total_key_length() + index_key2.len());
+                    let mut builder = InternalBuilder::new(&mut new_page);
+
                     copy_to_builder_and_patch(
                         &accessor,
                         0,
@@ -1812,6 +1842,14 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         index
                     };
 
+                    // Rewrite page since we're splitting a child
+                    let key_size = index_table_keys[0..division]
+                        .iter()
+                        .map(|(_, k)| k.len())
+                        .sum();
+                    let mut new_page = manager.allocate(InternalBuilder::required_bytes(key_size));
+                    let mut builder = InternalBuilder::new(&mut new_page);
+
                     builder.write_first_page(children[0]);
                     for i in 0..division {
                         let (table, key) = &index_table_keys[i];
@@ -1820,7 +1858,11 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                     let (index_table, index_key) = &index_table_keys[division];
 
-                    let mut new_page2 = manager.allocate();
+                    let key_size = index_table_keys[(division + 1)..]
+                        .iter()
+                        .map(|(_, k)| k.len())
+                        .sum();
+                    let mut new_page2 = manager.allocate(InternalBuilder::required_bytes(key_size));
                     let mut builder2 = InternalBuilder::new(&mut new_page2);
                     builder2.write_first_page(children[division + 1]);
                     for i in (division + 1)..index_table_keys.len() {
@@ -1870,7 +1912,8 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     )
                 } else {
                     // Page is full of delta messages, so rewrite it
-                    let mut new_page = manager.allocate();
+                    let mut new_page = manager
+                        .allocate(InternalBuilder::required_bytes(accessor.total_key_length()));
                     let mut builder = InternalBuilder::new(&mut new_page);
                     copy_to_builder_and_patch(
                         &accessor,
