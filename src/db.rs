@@ -25,7 +25,6 @@ impl Database {
     ///
     /// The file referenced by `path` must only be concurrently modified by compatible versions
     /// of redb
-    // TODO: ensure that db_size doesn't change
     pub unsafe fn open(path: impl AsRef<Path>, db_size: usize) -> Result<Database, Error> {
         let file = OpenOptions::new()
             .read(true)
@@ -36,7 +35,7 @@ impl Database {
         file.set_len(db_size as u64)?;
 
         let mmap = MmapMut::map_mut(&file)?;
-        let storage = Storage::new(mmap)?;
+        let storage = Storage::new(mmap, None)?;
         Ok(Database { storage })
     }
 
@@ -80,6 +79,50 @@ impl Database {
 
     pub fn print_debug(&self) {
         self.storage.print_debug()
+    }
+}
+
+pub struct DatabaseBuilder {
+    page_size: Option<usize>,
+}
+
+impl DatabaseBuilder {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self { page_size: None }
+    }
+
+    pub fn set_page_size(&mut self, size: usize) -> &mut Self {
+        assert!(size.is_power_of_two());
+        self.page_size = Some(size);
+        self
+    }
+
+    /// Opens the specified file as a redb database.
+    /// * if the file does not exist, or is an empty file, a new database will be initialized in it
+    /// * if the file is a valid redb database, it will be opened
+    /// * otherwise this function will return an error
+    ///
+    /// `db_size`: the maximum size in bytes of the database. Note: this cannot be changed after the
+    /// database is created.
+    /// TODO: remove the restriction that db_size cannot be changed
+    ///
+    /// # Safety
+    ///
+    /// The file referenced by `path` must only be concurrently modified by compatible versions
+    /// of redb
+    pub unsafe fn open(self, path: impl AsRef<Path>, db_size: usize) -> Result<Database, Error> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)?;
+
+        file.set_len(db_size as u64)?;
+
+        let mmap = MmapMut::map_mut(&file)?;
+        let storage = Storage::new(mmap, self.page_size)?;
+        Ok(Database { storage })
     }
 }
 

@@ -1,4 +1,4 @@
-pub use db::Database;
+pub use db::{Database, DatabaseBuilder};
 pub use error::Error;
 pub use multimap_table::{
     MultiMapRangeIter, MultiMapReadOnlyTransaction, MultiMapTable, MultiMapWriteTransaction,

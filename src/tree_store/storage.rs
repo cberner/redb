@@ -113,8 +113,8 @@ pub(in crate) struct Storage {
 }
 
 impl Storage {
-    pub(in crate) fn new(mmap: MmapMut) -> Result<Storage, Error> {
-        let mem = TransactionalMemory::new(mmap)?;
+    pub(in crate) fn new(mmap: MmapMut, page_size: Option<usize>) -> Result<Storage, Error> {
+        let mem = TransactionalMemory::new(mmap, page_size)?;
 
         Ok(Storage {
             mem,
