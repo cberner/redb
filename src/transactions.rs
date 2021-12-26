@@ -150,3 +150,26 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for ReadOnlyTransac
             .deallocate_read_transaction(self.transaction_id);
     }
 }
+
+#[cfg(test)]
+mod test {
+    use crate::{Database, Table};
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn transaction_id_persistence() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+        let mut write_txn = table.begin_write().unwrap();
+        write_txn.insert(b"hello", b"world").unwrap();
+        let first_txn_id = write_txn.transaction_id;
+        write_txn.commit().unwrap();
+        drop(db);
+
+        let db2 = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let mut table: Table<[u8], [u8]> = db2.open_table(b"x").unwrap();
+        let write_txn = table.begin_write().unwrap();
+        assert!(write_txn.transaction_id > first_txn_id);
+    }
+}

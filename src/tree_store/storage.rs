@@ -115,10 +115,11 @@ pub(in crate) struct Storage {
 impl Storage {
     pub(in crate) fn new(mmap: MmapMut, page_size: Option<usize>) -> Result<Storage, Error> {
         let mem = TransactionalMemory::new(mmap, page_size)?;
+        let next_transaction_id = mem.get_last_committed_transaction_id() + 1;
 
         Ok(Storage {
             mem,
-            next_transaction_id: Cell::new(1),
+            next_transaction_id: Cell::new(next_transaction_id),
             live_write_transaction: Cell::new(None),
             live_read_transactions: RefCell::new(Default::default()),
             pending_freed_pages: RefCell::new(Default::default()),
@@ -301,7 +302,7 @@ impl Storage {
             self.mem.set_secondary_root_page(PageNumber::null(), 0);
         }
 
-        self.mem.commit()?;
+        self.mem.commit(transaction_id)?;
         assert_eq!(Some(transaction_id), self.live_write_transaction.take());
         Ok(())
     }
