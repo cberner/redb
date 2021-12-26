@@ -8,13 +8,19 @@ use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use memmap2::MmapMut;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::min;
+use std::collections::BTreeSet;
 use std::convert::TryInto;
 use std::marker::PhantomData;
-use std::ops::{RangeBounds, RangeFull};
+use std::mem::size_of;
+use std::ops::{RangeBounds, RangeFull, RangeTo};
 
 // The table of name -> table_id mappings
 const TABLE_TABLE_ID: u64 = 0;
+// The table of freed pages by transaction. (transaction id, pagination counter) -> binary.
+// The binary blob is a length-prefixed array of big endian PageNumber
+const FREED_TABLE_ID: u64 = TABLE_TABLE_ID + 1;
+const LAST_SYSTEM_TABLE: u64 = FREED_TABLE_ID;
 
 #[derive(Debug)]
 pub struct DbStats {
@@ -103,9 +109,7 @@ pub(in crate) struct Storage {
     next_transaction_id: Cell<u128>,
     live_read_transactions: RefCell<BTreeSet<u128>>,
     live_write_transaction: Cell<Option<u128>>,
-    // TODO: these need to be persisted in the mmap'ed file, so that they don't leak
-    // if we crash before freeing pages
-    pending_freed_pages: RefCell<BTreeMap<u128, Vec<PageNumber>>>,
+    pending_freed_pages: RefCell<Vec<PageNumber>>,
 }
 
 impl Storage {
@@ -123,6 +127,7 @@ impl Storage {
 
     pub(crate) fn allocate_write_transaction(&self) -> u128 {
         assert!(self.live_write_transaction.get().is_none());
+        assert!(self.pending_freed_pages.borrow().is_empty());
         let id = self.next_transaction_id.get();
         self.live_write_transaction.set(Some(id));
         self.next_transaction_id.set(id + 1);
@@ -164,7 +169,7 @@ impl Storage {
         let largest_id = iter
             .next()
             .map(|x| TableDefinition::from_bytes(x.value()).get_id())
-            .unwrap_or(TABLE_TABLE_ID);
+            .unwrap_or(LAST_SYSTEM_TABLE);
         drop(iter);
         let new_id = largest_id + 1;
         let definition = TableDefinition {
@@ -190,6 +195,7 @@ impl Storage {
         transaction_id: u128,
         root_page: Option<NodeHandle>,
     ) -> Result<NodeHandle, Error> {
+        assert_eq!(transaction_id, self.live_write_transaction.get().unwrap());
         if let Some(handle) = root_page {
             let root = self.mem.get_page(handle.get_page_number());
             let (new_root, _, freed) = tree_insert::<K>(
@@ -202,8 +208,6 @@ impl Storage {
             );
             self.pending_freed_pages
                 .borrow_mut()
-                .entry(transaction_id)
-                .or_default()
                 .extend_from_slice(&freed);
             Ok(new_root)
         } else {
@@ -221,6 +225,7 @@ impl Storage {
         transaction_id: u128,
         root_page: Option<NodeHandle>,
     ) -> Result<(NodeHandle, AccessGuardMut), Error> {
+        assert_eq!(transaction_id, self.live_write_transaction.get().unwrap());
         let value = vec![0u8; value_len];
         let (new_root, guard) = if let Some(handle) = root_page {
             let root = self.mem.get_page(handle.get_page_number());
@@ -234,8 +239,6 @@ impl Storage {
             );
             self.pending_freed_pages
                 .borrow_mut()
-                .entry(transaction_id)
-                .or_default()
                 .extend_from_slice(&freed);
             (new_root, guard)
         } else {
@@ -271,15 +274,9 @@ impl Storage {
 
     pub(in crate) fn commit(
         &self,
-        new_root: Option<NodeHandle>,
+        mut new_root: Option<NodeHandle>,
         transaction_id: u128,
     ) -> Result<(), Error> {
-        if let Some(ptr) = new_root {
-            self.mem
-                .set_secondary_root_page(ptr.get_page_number(), ptr.get_valid_messages());
-        } else {
-            self.mem.set_secondary_root_page(PageNumber::null(), 0);
-        }
         let oldest_live_read = self
             .live_read_transactions
             .borrow()
@@ -287,33 +284,112 @@ impl Storage {
             .next()
             .cloned()
             .unwrap_or_else(|| self.next_transaction_id.get());
-        // TODO: replace this loop with BtreeMap.drain_filter when it's stable
-        #[allow(clippy::while_let_loop)]
-        loop {
-            let to_remove =
-                if let Some((key, freed)) = self.pending_freed_pages.borrow_mut().iter().next() {
-                    if *key < oldest_live_read {
-                        for page in freed {
-                            self.mem.free(*page);
-                        }
-                        *key
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                };
-            self.pending_freed_pages.borrow_mut().remove(&to_remove);
+
+        new_root = self.process_freed_pages(oldest_live_read, transaction_id, new_root)?;
+        if oldest_live_read < transaction_id {
+            new_root = self.store_freed_pages(transaction_id, new_root)?;
+        } else {
+            for page in self.pending_freed_pages.borrow_mut().drain(..) {
+                self.mem.free(page);
+            }
         }
+
+        if let Some(ptr) = new_root {
+            self.mem
+                .set_secondary_root_page(ptr.get_page_number(), ptr.get_valid_messages());
+        } else {
+            self.mem.set_secondary_root_page(PageNumber::null(), 0);
+        }
+
         self.mem.commit()?;
         assert_eq!(Some(transaction_id), self.live_write_transaction.take());
         Ok(())
     }
 
+    // NOTE: must be called before store_freed_pages() during commit, since this can create
+    // more pages freed by the current transaction
+    fn process_freed_pages(
+        &self,
+        oldest_live_read: u128,
+        transaction_id: u128,
+        mut root: Option<NodeHandle>,
+    ) -> Result<Option<NodeHandle>, Error> {
+        assert_eq!(transaction_id, self.live_write_transaction.get().unwrap());
+        assert_eq!(PageNumber::null().to_be_bytes().len(), 8); // We assume below that PageNumber is length 8
+        let mut lookup_key = [0u8; 24]; // (oldest_live_read, 0)
+        lookup_key[0..size_of::<u128>()].copy_from_slice(&oldest_live_read.to_be_bytes());
+        // second element of pair is already zero
+
+        let mut to_remove = vec![];
+        #[allow(clippy::type_complexity)]
+        let mut iter: BtreeRangeIter<'_, RangeTo<&[u8]>, &[u8], [u8], [u8]> =
+            self.get_range(FREED_TABLE_ID, ..lookup_key.as_ref(), root)?;
+        while let Some(entry) = iter.next() {
+            to_remove.push(entry.key().to_vec());
+            let value = entry.value();
+            let length = u64::from_be_bytes(value[..size_of::<u64>()].try_into().unwrap()) as usize;
+            // 1..=length because the array is length prefixed
+            for i in 1..=length {
+                let page = PageNumber::from_be_bytes(value[i * 8..(i + 1) * 8].try_into().unwrap());
+                self.mem.free(page);
+            }
+        }
+        drop(iter);
+
+        // Remove all the old transactions. Note: this may create new pages that need to be freed
+        for key in to_remove {
+            root = self.remove::<[u8]>(FREED_TABLE_ID, &key, transaction_id, root)?;
+        }
+
+        Ok(root)
+    }
+
+    fn store_freed_pages(
+        &self,
+        transaction_id: u128,
+        mut root: Option<NodeHandle>,
+    ) -> Result<Option<NodeHandle>, Error> {
+        assert_eq!(transaction_id, self.live_write_transaction.get().unwrap());
+        assert_eq!(PageNumber::null().to_be_bytes().len(), 8); // We assume below that PageNumber is length 8
+
+        let mut pagination_counter = 0u64;
+        while !self.pending_freed_pages.borrow().is_empty() {
+            // TODO: dynamically size this
+            let chunk_size = 100;
+            let buffer_size = size_of::<u64>() + 8 * chunk_size;
+            let mut key = [0u8; 24];
+            key[0..size_of::<u128>()].copy_from_slice(&transaction_id.to_be_bytes());
+            key[size_of::<u128>()..].copy_from_slice(&pagination_counter.to_be_bytes());
+            let (r, mut access_guard) = self.insert_reserve::<[u8]>(
+                FREED_TABLE_ID,
+                key.as_ref(),
+                buffer_size,
+                transaction_id,
+                root,
+            )?;
+            root = Some(r);
+
+            let len = self.pending_freed_pages.borrow().len();
+            access_guard.as_mut()[..8]
+                .copy_from_slice(&min(len as u64, chunk_size as u64).to_be_bytes());
+            for (i, page) in self
+                .pending_freed_pages
+                .borrow_mut()
+                .drain(len - min(len, chunk_size)..)
+                .enumerate()
+            {
+                access_guard.as_mut()[(i + 1) * 8..(i + 2) * 8]
+                    .copy_from_slice(&page.to_be_bytes());
+            }
+
+            pagination_counter += 1;
+        }
+
+        Ok(root)
+    }
+
     pub(in crate) fn rollback_uncommited_writes(&self, transaction_id: u128) -> Result<(), Error> {
-        self.pending_freed_pages
-            .borrow_mut()
-            .remove(&transaction_id);
+        self.pending_freed_pages.borrow_mut().clear();
         let result = self.mem.rollback_uncommited_writes();
         assert_eq!(Some(transaction_id), self.live_write_transaction.take());
 
@@ -433,6 +509,7 @@ impl Storage {
         transaction_id: u128,
         root_handle: Option<NodeHandle>,
     ) -> Result<Option<NodeHandle>, Error> {
+        assert_eq!(transaction_id, self.live_write_transaction.get().unwrap());
         if let Some(handle) = root_handle {
             let root_page = self.mem.get_page(handle.get_page_number());
             let (new_root, freed) = tree_delete::<K>(
@@ -444,8 +521,6 @@ impl Storage {
             );
             self.pending_freed_pages
                 .borrow_mut()
-                .entry(transaction_id)
-                .or_default()
                 .extend_from_slice(&freed);
             return Ok(new_root);
         }
