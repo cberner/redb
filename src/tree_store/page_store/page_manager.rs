@@ -25,8 +25,9 @@ const DB_METAPAGE_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
 // Structure of each metapage
 const ROOT_PAGE_OFFSET: usize = 0;
 const ROOT_PAGE_MESSAGE_BYTES_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
+const TRANSACTION_ID_OFFSET: usize = ROOT_PAGE_MESSAGE_BYTES_OFFSET + size_of::<u32>();
 // Memory pointed to by this ptr is logically part of the metapage
-const ALLOCATOR_STATE_PTR_OFFSET: usize = ROOT_PAGE_MESSAGE_BYTES_OFFSET + size_of::<u32>();
+const ALLOCATOR_STATE_PTR_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u128>();
 const ALLOCATOR_STATE_LEN_OFFSET: usize = ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>();
 // TODO: these dirty flags should be part of the PRIMARY_BIT byte, so that they can be written atomically
 const ALLOCATOR_STATE_DIRTY_OFFSET: usize = ALLOCATOR_STATE_LEN_OFFSET + size_of::<u64>();
@@ -130,6 +131,14 @@ impl<'a> TransactionAccessor<'a> {
         }
     }
 
+    fn get_last_committed_transaction_id(&self) -> u128 {
+        u128::from_be_bytes(
+            self.mem[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u128>())]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
     fn get_allocator_data(&self) -> (usize, usize) {
         let start = u64::from_be_bytes(
             self.mem[ALLOCATOR_STATE_PTR_OFFSET..(ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>())]
@@ -178,6 +187,11 @@ impl<'a> TransactionMutator<'a> {
             .copy_from_slice(&page_number.to_be_bytes());
         self.mem[ROOT_PAGE_MESSAGE_BYTES_OFFSET..(ROOT_PAGE_MESSAGE_BYTES_OFFSET + 4)]
             .copy_from_slice(&valid_message_bytes.to_be_bytes());
+    }
+
+    fn set_last_committed_transaction_id(&mut self, transaction_id: u128) {
+        self.mem[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u128>())]
+            .copy_from_slice(&transaction_id.to_be_bytes());
     }
 
     fn set_allocator_data(&mut self, start: usize, len: usize) {
@@ -316,6 +330,7 @@ impl TransactionalMemory {
             let mut mutator =
                 TransactionMutator::new(get_secondary(&mut mmap), mutex.lock().unwrap());
             mutator.set_root_page(PageNumber::new(0, 0), 0);
+            mutator.set_last_committed_transaction_id(0);
             mutator.set_allocator_dirty(false);
             mutator.set_allocator_data(start, allocator_state_size);
             drop(mutator);
@@ -411,7 +426,7 @@ impl TransactionalMemory {
     }
 
     // Commit all outstanding changes and make them visible as the primary
-    pub(crate) fn commit(&self) -> Result<(), Error> {
+    pub(crate) fn commit(&self, transaction_id: u128) -> Result<(), Error> {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
@@ -427,6 +442,7 @@ impl TransactionalMemory {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
         mutator.set_allocator_dirty(false);
+        mutator.set_last_committed_transaction_id(transaction_id);
         drop(mutator);
         let (mmap, guard) = self.acquire_mutable_metapage();
 
@@ -511,6 +527,11 @@ impl TransactionalMemory {
     pub(crate) fn get_primary_root_page(&self) -> Option<(PageNumber, u32)> {
         TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock().unwrap())
             .get_root_page()
+    }
+
+    pub(crate) fn get_last_committed_transaction_id(&self) -> u128 {
+        TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock().unwrap())
+            .get_last_committed_transaction_id()
     }
 
     // TODO: valid_message_bytes kind of breaks the separation of concerns for the PageManager.
