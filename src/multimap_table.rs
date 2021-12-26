@@ -377,7 +377,7 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapWriteTransaction<'
     }
 
     pub fn commit(self) -> Result<(), Error> {
-        self.storage.commit(self.root_page)?;
+        self.storage.commit(self.root_page, self.transaction_id)?;
         Ok(())
     }
 
