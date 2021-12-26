@@ -102,6 +102,7 @@ pub(in crate) struct Storage {
     mem: TransactionalMemory,
     next_transaction_id: Cell<u128>,
     live_read_transactions: RefCell<BTreeSet<u128>>,
+    live_write_transaction: Cell<Option<u128>>,
     // TODO: these need to be persisted in the mmap'ed file, so that they don't leak
     // if we crash before freeing pages
     pending_freed_pages: RefCell<BTreeMap<u128, Vec<PageNumber>>>,
@@ -114,13 +115,16 @@ impl Storage {
         Ok(Storage {
             mem,
             next_transaction_id: Cell::new(1),
+            live_write_transaction: Cell::new(None),
             live_read_transactions: RefCell::new(Default::default()),
             pending_freed_pages: RefCell::new(Default::default()),
         })
     }
 
     pub(crate) fn allocate_write_transaction(&self) -> u128 {
+        assert!(self.live_write_transaction.get().is_none());
         let id = self.next_transaction_id.get();
+        self.live_write_transaction.set(Some(id));
         self.next_transaction_id.set(id + 1);
         id
     }
@@ -265,7 +269,11 @@ impl Storage {
             .map(|(page, message_bytes)| NodeHandle::new(page, message_bytes))
     }
 
-    pub(in crate) fn commit(&self, new_root: Option<NodeHandle>) -> Result<(), Error> {
+    pub(in crate) fn commit(
+        &self,
+        new_root: Option<NodeHandle>,
+        transaction_id: u128,
+    ) -> Result<(), Error> {
         if let Some(ptr) = new_root {
             self.mem
                 .set_secondary_root_page(ptr.get_page_number(), ptr.get_valid_messages());
@@ -298,6 +306,7 @@ impl Storage {
             self.pending_freed_pages.borrow_mut().remove(&to_remove);
         }
         self.mem.commit()?;
+        assert_eq!(Some(transaction_id), self.live_write_transaction.take());
         Ok(())
     }
 
@@ -305,7 +314,10 @@ impl Storage {
         self.pending_freed_pages
             .borrow_mut()
             .remove(&transaction_id);
-        self.mem.rollback_uncommited_writes()
+        let result = self.mem.rollback_uncommited_writes();
+        assert_eq!(Some(transaction_id), self.live_write_transaction.take());
+
+        result
     }
 
     pub(in crate) fn storage_stats(&self) -> Result<DbStats, Error> {

@@ -53,7 +53,7 @@ impl Database {
             id,
             self.storage.get_root_page_number(),
         )?;
-        self.storage.commit(Some(root))?;
+        self.storage.commit(Some(root), id)?;
         Table::new(definition.get_id(), &self.storage)
     }
 
@@ -70,7 +70,7 @@ impl Database {
             id,
             self.storage.get_root_page_number(),
         )?;
-        self.storage.commit(Some(root))?;
+        self.storage.commit(Some(root), id)?;
         MultiMapTable::new(definition.get_id(), &self.storage)
     }
 
