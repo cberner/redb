@@ -14,7 +14,9 @@ const DB_METADATA_PAGE: u64 = 0;
 
 const MAGICNUMBER: [u8; 4] = [b'r', b'e', b'd', b'b'];
 const VERSION_OFFSET: usize = MAGICNUMBER.len();
-const PRIMARY_BIT_OFFSET: usize = VERSION_OFFSET + 1;
+const PAGE_SIZE_OFFSET: usize = VERSION_OFFSET + 1;
+const DB_SIZE_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u64>();
+const PRIMARY_BIT_OFFSET: usize = DB_SIZE_OFFSET + 1;
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 128;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
@@ -281,15 +283,19 @@ impl TransactionalMemory {
         guess
     }
 
-    pub(crate) fn new(mut mmap: MmapMut) -> Result<Self, Error> {
-        // Ensure that the database metadata fits into the first page
-        let page_size = get_page_size();
-        assert!(page_size >= DB_METAPAGE_SIZE);
-
+    pub(crate) fn new(
+        mut mmap: MmapMut,
+        requested_page_size: Option<usize>,
+    ) -> Result<Self, Error> {
         let mutex = Mutex::new(MetapageGuard {});
         let usable_pages = Self::calculate_usable_pages(mmap.len());
         let page_allocator = PageAllocator::new(usable_pages);
         if mmap[0..MAGICNUMBER.len()] != MAGICNUMBER {
+            let page_size = requested_page_size.unwrap_or_else(get_page_size);
+            // Ensure that the database metadata fits into the first page
+            assert!(page_size >= DB_METAPAGE_SIZE);
+            assert!(page_size.is_power_of_two());
+
             // Explicitly zero the memory
             mmap[0..DB_METAPAGE_SIZE].copy_from_slice(&[0; DB_METAPAGE_SIZE]);
             for i in &mut mmap[(usable_pages * page_size)..] {
@@ -297,6 +303,12 @@ impl TransactionalMemory {
             }
 
             let allocator_state_size = PageAllocator::required_space(usable_pages);
+
+            // Store the page & db size. These are immutable
+            mmap[PAGE_SIZE_OFFSET] = page_size.trailing_zeros() as u8;
+            let length = mmap.len() as u64;
+            mmap[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
+                .copy_from_slice(&length.to_be_bytes());
 
             // Set to 1, so that we can mutate the first transaction state
             mmap[PRIMARY_BIT_OFFSET] = 1;
@@ -342,6 +354,19 @@ impl TransactionalMemory {
             mmap[0..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
             mmap.flush()?;
         }
+
+        let page_size = (1 << mmap[PAGE_SIZE_OFFSET]) as usize;
+        if let Some(size) = requested_page_size {
+            assert_eq!(page_size, size);
+        }
+        assert_eq!(
+            u64::from_be_bytes(
+                mmap[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
+                    .try_into()
+                    .unwrap()
+            ) as usize,
+            mmap.len()
+        );
 
         let accessor = TransactionAccessor::new(get_primary(&mmap), mutex.lock().unwrap());
         // TODO: repair instead of crashing
