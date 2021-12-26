@@ -26,37 +26,27 @@ A redb database file consists of a header, and several modified B-trees (describ
 * free space tree: mapping from transaction ids to the list of pages they freed
 * table tree: name -> table definition mapping of table names to their definitions
 * data tree(s) (per one table): key -> value mapping for table
+While logically separate, all the B-trees are stored in a single structure
 
-Except for the database header, all other data structures are copy-on-write and
+Except for the database header, all other data structures are copy-on-write or append-only and
 may not be mutated in-place
 
 ### Database header
 Mutable fields in the database header are all double buffered, so that writes occur on the
 inactive copy, which is then atomically promoted to the primary via the `field_mutex` field
-* magic number (immutable, 8 bytes): 64-bit big-endian magic number
+* magic number (immutable, 4 bytes): 32-bit magic number
 * version (immutable, 1 byte): single byte which must be `1`
-* length1 (mutable, 8 bytes): 64-bit unsigned big-endian integer, indicating the number of valid
+* page_size (immutable, 1 byte): single byte, x, where `2^x` represents the size of pages
+* db_size: (immutable, 8 bytes): 64-bit unsigned big-endian integer, indicating the number of valid
   bytes in the database file
-* length2 (mutable, 8 bytes): double buffer for `length1`
-* free_space_root1 (mutable, 8 bytes): 64-bit unsigned big-endian integer, indicating the offset
-  to the root page of the free space tree
-* free_space_root2 (mutable, 8 bytes): double buffer for `free_space_root1`
-* table_root1 (mutable, 8 bytes): 64-bit unsigned big-endian integer, indicating the offset
-  to the root page of the table tree
-* table_root2 (mutable, 8 bytes): double buffer for `table_root1`
-* transaction_id1 (mutable, 8 bytes): 64-bit unsigned big-endian integer, monotonically
+* root1 (mutable, 8 bytes): 64-bit unsigned big-endian integer, indicating the offset
+  to the root page of the B-tree
+* root2 (mutable, 8 bytes): double buffer for `root1`
+* transaction_id1 (mutable, 16 bytes): 128-bit unsigned big-endian integer, monotonically
   increasing id indicating the currently committed transaction
-* transaction_id2 (mutable, 8 bytes): double buffer for `transaction_id1`
+* transaction_id2 (mutable, 16 bytes): double buffer for `transaction_id1`
 * field_mutex (mutable, 1 byte): either `1` indicating that the first version of each
   versioned field is valid, or `2` indicating that the second version of each versioned field is valid.
-
-### Table definition
-* key size (immutable, 8 bytes): 64-bit unsigned big-endian integer, indicating the length of
-  keys. `0` indicates dynamically sized keys.
-* value size (immutable, 8 bytes): 64-bit unsigned big-endian integer, indicating the length of
-  values. `0` indicates dynamically sized values.
-* root page (CoW mutable, 8 bytes): 64-bit unsigned big-endian integer, indicating the offset of the
-  root page.
 
 ### Page allocator state
 The page allocator state is double buffered, and the state is technically just a cache: it can be reconstructed
