@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
 use std::mem::size_of;
+use std::ops::Range;
 use std::sync::{Mutex, MutexGuard};
 
 const DB_METADATA_PAGE: u64 = 0;
@@ -54,11 +55,47 @@ fn get_secondary(metapage: &mut [u8]) -> &mut [u8] {
 }
 
 #[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub(crate) struct PageNumber(pub u64);
+pub(crate) struct PageNumber {
+    page_index: u64,
+    page_order: u8,
+}
 
 impl PageNumber {
+    // TODO: remove this
+    pub(crate) fn null() -> Self {
+        Self::new(0, 0)
+    }
+
+    fn new(page_index: u64, page_order: u8) -> Self {
+        Self {
+            page_index,
+            page_order,
+        }
+    }
+
     pub(crate) fn to_be_bytes(self) -> [u8; 8] {
-        self.0.to_be_bytes()
+        let mut temp = self.page_index;
+        temp |= (self.page_order as u64) << 48;
+        temp.to_be_bytes()
+    }
+
+    pub(crate) fn from_be_bytes(bytes: [u8; 8]) -> Self {
+        let temp = u64::from_be_bytes(bytes);
+        let index = temp & 0x0000_FFFF_FFFF_FFFF;
+        let order = (temp >> 48) as u8;
+
+        Self::new(index, order)
+    }
+
+    fn address_range(&self, page_size: usize) -> Range<usize> {
+        let pages = 1usize << self.page_order;
+        (self.page_index as usize * pages * page_size)
+            ..((self.page_index as usize + 1) * pages * page_size)
+    }
+
+    fn page_size_bytes(&self, page_size: usize) -> usize {
+        let pages = 1usize << self.page_order;
+        pages * page_size
     }
 }
 
@@ -73,7 +110,7 @@ impl<'a> TransactionAccessor<'a> {
     }
 
     fn get_root_page(&self) -> Option<(PageNumber, u32)> {
-        let num = u64::from_be_bytes(
+        let num = PageNumber::from_be_bytes(
             self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + 8)]
                 .try_into()
                 .unwrap(),
@@ -84,10 +121,10 @@ impl<'a> TransactionAccessor<'a> {
                 .try_into()
                 .unwrap(),
         );
-        if num == 0 {
+        if num.page_index == 0 {
             None
         } else {
-            Some((PageNumber(num), message_bytes))
+            Some((num, message_bytes))
         }
     }
 
@@ -170,7 +207,7 @@ pub struct PageImpl<'a> {
 
 impl<'a> Debug for PageImpl<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("PageImpl: page_number={}", self.page_number.0))
+        f.write_fmt(format_args!("PageImpl: page_number={:?}", self.page_number))
     }
 }
 
@@ -266,7 +303,7 @@ impl TransactionalMemory {
             let start = mmap.len() - 2 * allocator_state_size;
             let mut mutator =
                 TransactionMutator::new(get_secondary(&mut mmap), mutex.lock().unwrap());
-            mutator.set_root_page(PageNumber(0), 0);
+            mutator.set_root_page(PageNumber::new(0, 0), 0);
             mutator.set_allocator_dirty(false);
             mutator.set_allocator_data(start, allocator_state_size);
             drop(mutator);
@@ -379,10 +416,13 @@ impl TransactionalMemory {
             TransactionAccessor::new(get_secondary(mmap), self.metapage_guard.lock().unwrap());
         let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
-            self.page_allocator.record_alloc(mem, page_number.0);
+            assert_eq!(page_number.page_order, 0);
+            self.page_allocator
+                .record_alloc(mem, page_number.page_index);
         }
         for page_number in self.freed_since_commit.borrow_mut().drain(..) {
-            self.page_allocator.free(mem, page_number.0);
+            assert_eq!(page_number.page_order, 0);
+            self.page_allocator.free(mem, page_number.page_index);
         }
         drop(guard); // Ensure the guard lives past all the writes to the page allocator state
 
@@ -395,10 +435,13 @@ impl TransactionalMemory {
         let accessor = TransactionAccessor::new(get_secondary(metamem), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
-            self.page_allocator.free(mem, page_number.0);
+            assert_eq!(page_number.page_order, 0);
+            self.page_allocator.free(mem, page_number.page_index);
         }
         for page_number in self.freed_since_commit.borrow_mut().drain(..) {
-            self.page_allocator.record_alloc(mem, page_number.0);
+            assert_eq!(page_number.page_order, 0);
+            self.page_allocator
+                .record_alloc(mem, page_number.page_index);
         }
         // Drop guard only after page_allocator calls are completed
         drop(guard);
@@ -410,23 +453,18 @@ impl TransactionalMemory {
         // We must not retrieve an immutable reference to a page which already has a mutable ref to it
         assert!(
             !self.open_dirty_pages.borrow().contains(&page_number),
-            "{}",
-            page_number.0
+            "{:?}",
+            page_number
         );
-        let start = page_number.0 as usize * self.page_size;
-        let end = start + self.page_size;
 
         PageImpl {
-            mem: &self.mmap[start..end],
+            mem: &self.mmap[page_number.address_range(self.page_size)],
             page_number,
         }
     }
 
     pub(crate) fn get_page_mut(&self, page_number: PageNumber) -> PageMut {
         self.open_dirty_pages.borrow_mut().insert(page_number);
-
-        let start = page_number.0 as usize * self.page_size;
-        let end = start + self.page_size;
 
         let address = &self.mmap as *const MmapMut as *mut MmapMut;
         // Safety:
@@ -436,7 +474,7 @@ impl TransactionalMemory {
         // request valid_message bytes after this request. Otherwise, we could get a race.
         // Immutable references are allowed, they just need to be to a strict subset of the
         // valid delta message bytes
-        let mem = unsafe { &mut (*address)[start..end] };
+        let mem = unsafe { &mut (*address)[page_number.address_range(self.page_size)] };
 
         PageMut {
             mem,
@@ -462,7 +500,8 @@ impl TransactionalMemory {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
-        self.page_allocator.free(mem, page.0);
+        assert_eq!(page.page_order, 0);
+        self.page_allocator.free(mem, page.page_index);
         drop(guard);
         self.freed_since_commit.borrow_mut().push(page);
     }
@@ -473,7 +512,8 @@ impl TransactionalMemory {
             let (mmap, guard) = self.acquire_mutable_metapage();
             let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
             let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
-            self.page_allocator.free(mem, page.0);
+            assert_eq!(page.page_order, 0);
+            self.page_allocator.free(mem, page.page_index);
             drop(guard);
             true
         } else {
@@ -496,23 +536,20 @@ impl TransactionalMemory {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
-        let page_number = PageNumber(self.page_allocator.alloc(mem).unwrap());
+        let page_number = PageNumber::new(self.page_allocator.alloc(mem).unwrap(), 0);
         // Drop guard only after page_allocator.alloc() is completed
         drop(guard);
 
         self.allocated_since_commit.borrow_mut().insert(page_number);
         self.open_dirty_pages.borrow_mut().insert(page_number);
 
-        let start = page_number.0 as usize * self.page_size;
-        let end = start + self.page_size;
-
         let address = &self.mmap as *const MmapMut as *mut MmapMut;
         // Safety:
         // All PageMut are registered in open_dirty_pages, and no immutable references are allowed
         // to those pages
-        let mem = unsafe { &mut (*address)[start..end] };
+        let mem = unsafe { &mut (*address)[page_number.address_range(self.page_size)] };
         // Zero the memory
-        mem.copy_from_slice(&vec![0u8; end - start]);
+        mem.copy_from_slice(&vec![0u8; page_number.page_size_bytes(self.page_size)]);
 
         PageMut {
             mem,

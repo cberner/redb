@@ -95,7 +95,7 @@ impl<'a> RangeIterState<'a> {
             } => {
                 let accessor = InternalAccessor::new(&page, valid_message_bytes);
                 let child_page = accessor.child_page(child).unwrap();
-                let child_message_bytes = child_page.get_valid_message_bytes();
+                let child_message_bytes = child_page.get_valid_messages();
                 let child_page = manager.get_page(child_page.get_page_number());
                 if child < BTREE_ORDER - 1 && accessor.child_page(child + 1).is_some() {
                     parent = Some(Box::new(Internal {
@@ -171,7 +171,7 @@ impl<'a> RangeIterState<'a> {
                 let child_page = InternalAccessor::new(&page, valid_message_bytes)
                     .child_page(child)
                     .unwrap();
-                let child_message_bytes = child_page.get_valid_message_bytes();
+                let child_message_bytes = child_page.get_valid_messages();
                 let child_page = manager.get_page(child_page.get_page_number());
                 if child > 0 {
                     parent = Some(Box::new(Internal {
@@ -616,7 +616,7 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
 // Provides a simple zero-copy way to access an index page
 struct InternalAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
-    valid_message_bytes: u32,
+    valid_messages: u32,
     _page_lifetime: PhantomData<&'a ()>,
 }
 
@@ -625,7 +625,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
         debug_assert_eq!(page.memory()[0], INTERNAL);
         InternalAccessor {
             page,
-            valid_message_bytes: message_bytes,
+            valid_messages: message_bytes,
             _page_lifetime: Default::default(),
         }
     }
@@ -722,10 +722,9 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
         }
 
         // Search the delta messages
-        let messages = self.valid_message_bytes / (1 + NodeHandle::serialized_size() as u32);
         let base = 1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3;
         // TODO: this rposition call could maybe be optimized with SIMD
-        if let Some(index) = self.page.memory()[base..(base + messages as usize)]
+        if let Some(index) = self.page.memory()[base..(base + self.valid_messages as usize)]
             .iter()
             .rposition(|x| *x == n as u8)
         {
@@ -866,35 +865,32 @@ impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
     }
 
     fn can_write_delta_message(&self, message_byte_offset: u32) -> bool {
-        message_byte_offset / (1 + NodeHandle::serialized_size() as u32) < MESSAGE_BUFFER as u32
+        message_byte_offset < MESSAGE_BUFFER as u32
     }
 
     // Returns the new valid message offset
     fn write_delta_message(
         &mut self,
-        message_byte_offset: u32,
+        existing_messages: u32,
         child_index: u8,
         handle: NodeHandle,
     ) -> u32 {
-        assert_eq!(
-            message_byte_offset % (1 + NodeHandle::serialized_size() as u32),
-            0
-        );
         assert!(child_index < BTREE_ORDER as u8);
-        let n = (message_byte_offset / (1 + NodeHandle::serialized_size() as u32)) as usize;
-        assert!(n < BTREE_ORDER);
-        let offset =
-            1 + NodeHandle::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 3 + n;
+        assert!(existing_messages < MESSAGE_BUFFER as u32);
+        let offset = 1
+            + NodeHandle::serialized_size() * BTREE_ORDER
+            + 8 * (BTREE_ORDER - 1) * 3
+            + existing_messages as usize;
         self.page.memory_mut()[offset] = child_index;
         let offset = 1
             + NodeHandle::serialized_size() * BTREE_ORDER
             + 8 * (BTREE_ORDER - 1) * 3
             + MESSAGE_BUFFER
-            + NodeHandle::serialized_size() * n;
+            + NodeHandle::serialized_size() * existing_messages as usize;
         self.page.memory_mut()[offset..(offset + NodeHandle::serialized_size())]
             .copy_from_slice(&handle.to_be_bytes());
 
-        message_byte_offset + 1 + NodeHandle::serialized_size() as u32
+        existing_messages + 1
     }
 
     fn write_child_page(&mut self, i: usize, node_handle: NodeHandle) {
@@ -919,7 +915,7 @@ pub(in crate) fn tree_height<'a>(
                 if let Some(child) = accessor.child_page(i) {
                     let height = tree_height(
                         manager.get_page(child.get_page_number()),
-                        child.get_valid_message_bytes(),
+                        child.get_valid_messages(),
                         manager,
                     );
                     max_child_height = max(max_child_height, height);
@@ -938,8 +934,8 @@ pub(in crate) fn print_node(page: &impl Page, valid_message_bytes: u32) {
         LEAF => {
             let accessor = LeafAccessor::new(page);
             eprint!(
-                "Leaf[ (page={}), lt_table={} lt_key={:?}",
-                page.get_page_number().0,
+                "Leaf[ (page={:?}), lt_table={} lt_key={:?}",
+                page.get_page_number(),
                 accessor.lesser().table_id(),
                 accessor.lesser().key()
             );
@@ -955,10 +951,10 @@ pub(in crate) fn print_node(page: &impl Page, valid_message_bytes: u32) {
         INTERNAL => {
             let accessor = InternalAccessor::new(page, valid_message_bytes);
             eprint!(
-                "Internal[ (page={}/{}), child_0={}",
-                page.get_page_number().0,
+                "Internal[ (page={:?}/{}), child_0={:?}",
+                page.get_page_number(),
                 valid_message_bytes,
-                accessor.child_page(0).unwrap().get_page_number().0
+                accessor.child_page(0).unwrap().get_page_number()
             );
             for i in 0..(BTREE_ORDER - 1) {
                 if let Some(child) = accessor.child_page(i + 1) {
@@ -966,7 +962,7 @@ pub(in crate) fn print_node(page: &impl Page, valid_message_bytes: u32) {
                     let key = accessor.key(i).unwrap();
                     eprint!(" table_{}={}", i, table);
                     eprint!(" key_{}={:?}", i, key);
-                    eprint!(" child_{}={}", i + 1, child.get_page_number().0);
+                    eprint!(" child_{}={:?}", i + 1, child.get_page_number());
                 }
             }
             eprint!("]");
@@ -992,7 +988,7 @@ pub(in crate) fn node_children<'a>(
                 if let Some(child) = accessor.child_page(i) {
                     children.push((
                         manager.get_page(child.get_page_number()),
-                        child.get_valid_message_bytes(),
+                        child.get_valid_messages(),
                     ));
                 }
             }
@@ -1094,7 +1090,7 @@ fn split_index(
     manager: &TransactionalMemory,
 ) -> Option<(NodeHandle, NodeHandle)> {
     let page = manager.get_page(index.get_page_number());
-    let accessor = InternalAccessor::new(&page, index.get_valid_message_bytes());
+    let accessor = InternalAccessor::new(&page, index.get_valid_messages());
 
     let has_enough_slots = accessor.child_page(BTREE_ORDER - partial.len()).is_none();
     let required_key_space: usize = partial
@@ -1102,7 +1098,7 @@ fn split_index(
         .map(|p| {
             max_table_key(
                 manager.get_page(p.get_page_number()),
-                p.get_valid_message_bytes(),
+                p.get_valid_messages(),
                 manager,
             )
             .1
@@ -1127,7 +1123,7 @@ fn split_index(
     pages.sort_by_key(|p| {
         max_table_key(
             manager.get_page(p.get_page_number()),
-            p.get_valid_message_bytes(),
+            p.get_valid_messages(),
             manager,
         )
     });
@@ -1137,7 +1133,7 @@ fn split_index(
         .map(|p| {
             max_table_key(
                 manager.get_page(p.get_page_number()),
-                p.get_valid_message_bytes(),
+                p.get_valid_messages(),
                 manager,
             )
             .1
@@ -1154,7 +1150,7 @@ fn split_index(
         for (i, p) in pages.iter().enumerate() {
             cumulative += max_table_key(
                 manager.get_page(p.get_page_number()),
-                p.get_valid_message_bytes(),
+                p.get_valid_messages(),
                 manager,
             )
             .1
@@ -1180,7 +1176,7 @@ fn make_index_many_pages(children: &[NodeHandle], manager: &TransactionalMemory)
     for i in 1..children.len() {
         let entry = max_table_key(
             manager.get_page(children[i - 1].get_page_number()),
-            children[i - 1].get_valid_message_bytes(),
+            children[i - 1].get_valid_messages(),
             manager,
         );
         key_size += entry.1.len();
@@ -1202,7 +1198,7 @@ fn merge_index(
     manager: &TransactionalMemory,
 ) -> NodeHandle {
     let page = manager.get_page(index.get_page_number());
-    let accessor = InternalAccessor::new(&page, index.get_valid_message_bytes());
+    let accessor = InternalAccessor::new(&page, index.get_valid_messages());
     assert!(accessor.child_page(BTREE_ORDER - partial.len()).is_none());
 
     let mut pages = vec![];
@@ -1216,7 +1212,7 @@ fn merge_index(
     pages.sort_by_key(|p| {
         max_table_key(
             manager.get_page(p.get_page_number()),
-            p.get_valid_message_bytes(),
+            p.get_valid_messages(),
             manager,
         )
     });
@@ -1318,7 +1314,7 @@ fn max_table_key(
                 if let Some(child) = accessor.child_page(i) {
                     return max_table_key(
                         manager.get_page(child.get_page_number()),
-                        child.get_valid_message_bytes(),
+                        child.get_valid_messages(),
                         manager,
                     );
                 }
@@ -1391,7 +1387,7 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                         found = true;
                         let result = tree_delete_helper::<K>(
                             manager.get_page(child_page.get_page_number()),
-                            child_page.get_valid_message_bytes(),
+                            child_page.get_valid_messages(),
                             table,
                             key,
                             freed,
@@ -1422,7 +1418,7 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
             } else {
                 let result = tree_delete_helper::<K>(
                     manager.get_page(last_page.get_page_number()),
-                    last_page.get_valid_message_bytes(),
+                    last_page.get_valid_messages(),
                     table,
                     key,
                     freed,
@@ -1765,7 +1761,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
             let (child_index, child_page) = accessor.child_for_key::<K>(table, key);
             let (page1, more, guard) = tree_insert_helper::<K>(
                 manager.get_page(child_page.get_page_number()),
-                child_page.get_valid_message_bytes(),
+                child_page.get_valid_messages(),
                 table,
                 key,
                 value,
@@ -1981,7 +1977,7 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
             let (_, child_page) = accessor.child_for_key::<K>(table, query);
             return lookup_in_raw::<K>(
                 manager.get_page(child_page.get_page_number()),
-                child_page.get_valid_message_bytes(),
+                child_page.get_valid_messages(),
                 table,
                 query,
                 manager,

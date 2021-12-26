@@ -190,7 +190,7 @@ impl Storage {
             let root = self.mem.get_page(handle.get_page_number());
             let (new_root, _, freed) = tree_insert::<K>(
                 root,
-                handle.get_valid_message_bytes(),
+                handle.get_valid_messages(),
                 table_id,
                 key,
                 value,
@@ -222,7 +222,7 @@ impl Storage {
             let root = self.mem.get_page(handle.get_page_number());
             let (new_root, guard, freed) = tree_insert::<K>(
                 root,
-                handle.get_valid_message_bytes(),
+                handle.get_valid_messages(),
                 table_id,
                 key,
                 &value,
@@ -245,7 +245,7 @@ impl Storage {
             root_page.map(|p| {
                 (
                     self.mem.get_page(p.get_page_number()),
-                    p.get_valid_message_bytes(),
+                    p.get_valid_messages(),
                 )
             }),
             table,
@@ -268,9 +268,9 @@ impl Storage {
     pub(in crate) fn commit(&self, new_root: Option<NodeHandle>) -> Result<(), Error> {
         if let Some(ptr) = new_root {
             self.mem
-                .set_secondary_root_page(ptr.get_page_number(), ptr.get_valid_message_bytes());
+                .set_secondary_root_page(ptr.get_page_number(), ptr.get_valid_messages());
         } else {
-            self.mem.set_secondary_root_page(PageNumber(0), 0);
+            self.mem.set_secondary_root_page(PageNumber::null(), 0);
         }
         let oldest_live_read = self
             .live_read_transactions
@@ -314,7 +314,7 @@ impl Storage {
             .map(|p| {
                 tree_height(
                     self.mem.get_page(p.get_page_number()),
-                    p.get_valid_message_bytes(),
+                    p.get_valid_messages(),
                     &self.mem,
                 )
             })
@@ -327,7 +327,7 @@ impl Storage {
         if let Some(page) = self.get_root_page_number() {
             print_tree(
                 self.mem.get_page(page.get_page_number()),
-                page.get_valid_message_bytes(),
+                page.get_valid_messages(),
                 &self.mem,
             );
         }
@@ -337,7 +337,7 @@ impl Storage {
     pub(in crate) fn print_dirty_debug(&self, root_page: NodeHandle) {
         print_tree(
             self.mem.get_page(root_page.get_page_number()),
-            root_page.get_valid_message_bytes(),
+            root_page.get_valid_messages(),
             &self.mem,
         );
     }
@@ -352,7 +352,7 @@ impl Storage {
             let root_page = self.mem.get_page(handle.get_page_number());
             if let Some((page, offset, len)) = lookup_in_raw::<K>(
                 root_page,
-                handle.get_valid_message_bytes(),
+                handle.get_valid_messages(),
                 table_id,
                 key,
                 &self.mem,
@@ -379,7 +379,7 @@ impl Storage {
             root_page.map(|p| {
                 (
                     self.mem.get_page(p.get_page_number()),
-                    p.get_valid_message_bytes(),
+                    p.get_valid_messages(),
                 )
             }),
             table_id,
@@ -404,7 +404,7 @@ impl Storage {
             root_page.map(|p| {
                 (
                     self.mem.get_page(p.get_page_number()),
-                    p.get_valid_message_bytes(),
+                    p.get_valid_messages(),
                 )
             }),
             table_id,
@@ -425,7 +425,7 @@ impl Storage {
             let root_page = self.mem.get_page(handle.get_page_number());
             let (new_root, freed) = tree_delete::<K>(
                 root_page,
-                handle.get_valid_message_bytes(),
+                handle.get_valid_messages(),
                 table_id,
                 key,
                 &self.mem,
