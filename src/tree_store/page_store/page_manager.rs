@@ -474,6 +474,11 @@ impl TransactionalMemory {
         // to future read transactions
         assert!(self.open_dirty_pages.borrow().is_empty());
 
+        let (mmap, guard) = self.acquire_mutable_metapage();
+        let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
+        mutator.set_last_committed_transaction_id(transaction_id);
+        drop(mutator);
+
         self.mmap.flush()?;
 
         let next = match self.mmap[PRIMARY_BIT_OFFSET] {
@@ -484,7 +489,6 @@ impl TransactionalMemory {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
         mutator.set_allocator_dirty(false);
-        mutator.set_last_committed_transaction_id(transaction_id);
         drop(mutator);
         let (mmap, guard) = self.acquire_mutable_metapage();
 
