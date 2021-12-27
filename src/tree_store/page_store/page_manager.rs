@@ -8,6 +8,7 @@ use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
 use std::mem::size_of;
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 const DB_METADATA_PAGE: u64 = 0;
@@ -46,6 +47,19 @@ fn get_primary(metapage: &[u8]) -> &[u8] {
     &metapage[start..end]
 }
 
+// Warning! This method is only safe to use when modifying the allocator state and when the dirty bit
+// is already set and fsync'ed to the backing file
+fn get_primary_mut(metapage: &mut [u8]) -> &mut [u8] {
+    let start = if metapage[PRIMARY_BIT_OFFSET] == 0 {
+        TRANSACTION_0_OFFSET
+    } else {
+        TRANSACTION_1_OFFSET
+    };
+    let end = start + TRANSACTION_SIZE;
+
+    &mut metapage[start..end]
+}
+
 fn get_secondary(metapage: &mut [u8]) -> &mut [u8] {
     let start = if metapage[PRIMARY_BIT_OFFSET] == 0 {
         TRANSACTION_1_OFFSET
@@ -55,6 +69,17 @@ fn get_secondary(metapage: &mut [u8]) -> &mut [u8] {
     let end = start + TRANSACTION_SIZE;
 
     &mut metapage[start..end]
+}
+
+fn get_secondary_const(metapage: &[u8]) -> &[u8] {
+    let start = if metapage[PRIMARY_BIT_OFFSET] == 0 {
+        TRANSACTION_1_OFFSET
+    } else {
+        TRANSACTION_0_OFFSET
+    };
+    let end = start + TRANSACTION_SIZE;
+
+    &metapage[start..end]
 }
 
 #[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
@@ -208,6 +233,20 @@ impl<'a> TransactionMutator<'a> {
             self.mem[ALLOCATOR_STATE_DIRTY_OFFSET] = 0;
         }
     }
+
+    fn get_allocator_dirty(&self) -> bool {
+        let value = u8::from_be_bytes(
+            self.mem
+                [ALLOCATOR_STATE_DIRTY_OFFSET..(ALLOCATOR_STATE_DIRTY_OFFSET + size_of::<u8>())]
+                .try_into()
+                .unwrap(),
+        );
+        match value {
+            0 => false,
+            1 => true,
+            _ => unreachable!(),
+        }
+    }
 }
 
 pub(crate) trait Page {
@@ -278,6 +317,8 @@ pub(crate) struct TransactionalMemory {
     metapage_guard: Mutex<MetapageGuard>,
     // The number of PageMut which are outstanding
     open_dirty_pages: RefCell<HashSet<PageNumber>>,
+    // Indicates that a non-durable commit has been made, so reads should be served from the secondary meta page
+    read_from_secondary: AtomicBool,
     page_size: usize,
 }
 
@@ -398,6 +439,7 @@ impl TransactionalMemory {
             mmap,
             metapage_guard: mutex,
             open_dirty_pages: RefCell::new(HashSet::new()),
+            read_from_secondary: AtomicBool::new(false),
             page_size,
         })
     }
@@ -466,6 +508,46 @@ impl TransactionalMemory {
             self.page_allocator.free(mem, page_number.page_index);
         }
         drop(guard); // Ensure the guard lives past all the writes to the page allocator state
+        self.read_from_secondary.store(false, Ordering::SeqCst);
+
+        Ok(())
+    }
+
+    // Make changes visible, without a durability guarantee
+    pub(crate) fn non_durable_commit(&self, transaction_id: u128) -> Result<(), Error> {
+        // All mutable pages must be dropped, this ensures that when a transaction completes
+        // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
+        // to future read transactions
+        assert!(self.open_dirty_pages.borrow().is_empty());
+
+        let (mmap, guard) = self.acquire_mutable_metapage();
+        let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
+        mutator.set_last_committed_transaction_id(transaction_id);
+        drop(mutator);
+
+        // Ensure the dirty bit is set on the primary page, so that the following updates to it are safe
+        let mut primary_mutator =
+            TransactionMutator::new(get_primary_mut(mmap), self.metapage_guard.lock().unwrap());
+        if !primary_mutator.get_allocator_dirty() {
+            primary_mutator.set_allocator_dirty(true);
+            // Must fsync this, even though we're in a non-durable commit. Because we're dirtying
+            // the primary allocator state
+            self.mmap.flush()?;
+        }
+        drop(primary_mutator);
+
+        // Modify the primary allocator state directly. This is only safe because we first set the dirty bit
+        let accessor =
+            TransactionAccessor::new(get_primary_mut(mmap), self.metapage_guard.lock().unwrap());
+        let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
+        for page_number in self.allocated_since_commit.borrow_mut().drain() {
+            assert_eq!(page_number.page_order, 0);
+            self.page_allocator
+                .record_alloc(mem, page_number.page_index);
+        }
+        assert!(self.freed_since_commit.borrow().is_empty());
+        drop(guard); // Ensure the guard lives past all the writes to the page allocator state
+        self.read_from_secondary.store(true, Ordering::SeqCst);
 
         Ok(())
     }
@@ -525,13 +607,29 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn get_primary_root_page(&self) -> Option<(PageNumber, u32)> {
-        TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock().unwrap())
+        if self.read_from_secondary.load(Ordering::SeqCst) {
+            TransactionAccessor::new(
+                get_secondary_const(&self.mmap),
+                self.metapage_guard.lock().unwrap(),
+            )
             .get_root_page()
+        } else {
+            TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock().unwrap())
+                .get_root_page()
+        }
     }
 
     pub(crate) fn get_last_committed_transaction_id(&self) -> u128 {
-        TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock().unwrap())
+        if self.read_from_secondary.load(Ordering::SeqCst) {
+            TransactionAccessor::new(
+                get_secondary_const(&self.mmap),
+                self.metapage_guard.lock().unwrap(),
+            )
             .get_last_committed_transaction_id()
+        } else {
+            TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock().unwrap())
+                .get_last_committed_transaction_id()
+        }
     }
 
     // TODO: valid_message_bytes kind of breaks the separation of concerns for the PageManager.
@@ -619,6 +717,12 @@ impl TransactionalMemory {
 
 impl Drop for TransactionalMemory {
     fn drop(&mut self) {
+        // Commit any non-durable transactions that are outstanding
+        if self.read_from_secondary.load(Ordering::SeqCst) {
+            let non_durable_transaction_id = self.get_last_committed_transaction_id();
+            self.commit(non_durable_transaction_id)
+                .expect("Failure while finalizing non-durable commit. Database may be corrupted");
+        }
         if self.mmap.flush().is_ok() {
             let (metamem, guard) = self.acquire_mutable_metapage();
             let mut mutator = TransactionMutator::new(get_secondary(metamem), guard);

@@ -72,6 +72,16 @@ must have come from a crash during or after step 2, but before step 5, therefore
 If the dirty bit is found set on the shadow page allocator state, when the database is opened, then it must be repaired
 by copying it from the primary or re-walking all the btree roots.
 
+### Non-durable commits
+redb supports "non-durable" commits, meaning that there is no guarantee of durability. However, in the event of a crash
+the database is still guaranteed to be consistent, and will return to either the last non-durable commit or the last
+full commit that was made.
+Non-durable commits are implemented by marking both the primary & secondary page allocator states as dirty, and keeping
+both in sync, an in-memory flag is set to direct readers to read from the secondary page, but it is not promoted to the
+primary. In the event of a crash, the primary page allocator state will be corrupt, but since it is marked dirty it will
+be safely rebuilt on the next database open.
+Note that freeing pages during a non-durable commit is not permitted, because it could be rolled back at anytime.
+
 ### Modified B-tree
 We use a modified B-tree that uses a delta update approach similar to Bw-trees (described in [The Bw-Tree A B-tree for New Hardware
 Platforms](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/bw-tree-icde2013-final.pdf)),
