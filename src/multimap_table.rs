@@ -381,6 +381,14 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapWriteTransaction<'
         Ok(())
     }
 
+    /// Note: pages are only freed during commit(). So exclusively using this function may result
+    /// in an out-of-memory error
+    pub fn non_durable_commit(self) -> Result<(), Error> {
+        self.storage
+            .non_durable_commit(self.root_page, self.transaction_id)?;
+        Ok(())
+    }
+
     pub fn abort(self) -> Result<(), Error> {
         self.storage.rollback_uncommited_writes(self.transaction_id)
     }

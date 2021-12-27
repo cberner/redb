@@ -307,6 +307,28 @@ impl Storage {
         Ok(())
     }
 
+    // Commit without a durability guarantee
+    pub(in crate) fn non_durable_commit(
+        &self,
+        mut new_root: Option<NodeHandle>,
+        transaction_id: u128,
+    ) -> Result<(), Error> {
+        // Store all freed pages for a future commit(), since we can't free pages during a
+        // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
+        new_root = self.store_freed_pages(transaction_id, new_root)?;
+
+        if let Some(ptr) = new_root {
+            self.mem
+                .set_secondary_root_page(ptr.get_page_number(), ptr.get_valid_messages());
+        } else {
+            self.mem.set_secondary_root_page(PageNumber::null(), 0);
+        }
+
+        self.mem.non_durable_commit(transaction_id)?;
+        assert_eq!(Some(transaction_id), self.live_write_transaction.take());
+        Ok(())
+    }
+
     // NOTE: must be called before store_freed_pages() during commit, since this can create
     // more pages freed by the current transaction
     fn process_freed_pages(
