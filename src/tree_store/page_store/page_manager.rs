@@ -164,6 +164,7 @@ impl<'a> TransactionAccessor<'a> {
         )
     }
 
+    #[allow(dead_code)]
     fn get_allocator_data(&self) -> (usize, usize) {
         let start = u64::from_be_bytes(
             self.mem[ALLOCATOR_STATE_PTR_OFFSET..(ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>())]
@@ -190,10 +191,6 @@ impl<'a> TransactionAccessor<'a> {
             1 => true,
             _ => unreachable!(),
         }
-    }
-
-    fn into_guard(self) -> MutexGuard<'a, MetapageGuard> {
-        self._guard
     }
 }
 
@@ -226,6 +223,20 @@ impl<'a> TransactionMutator<'a> {
             .copy_from_slice(&(len as u64).to_be_bytes());
     }
 
+    fn get_allocator_data(&self) -> (usize, usize) {
+        let start = u64::from_be_bytes(
+            self.mem[ALLOCATOR_STATE_PTR_OFFSET..(ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>())]
+                .try_into()
+                .unwrap(),
+        );
+        let len = u64::from_be_bytes(
+            self.mem[ALLOCATOR_STATE_LEN_OFFSET..(ALLOCATOR_STATE_LEN_OFFSET + size_of::<u64>())]
+                .try_into()
+                .unwrap(),
+        );
+        (start as usize, (start + len) as usize)
+    }
+
     fn set_allocator_dirty(&mut self, dirty: bool) {
         if dirty {
             self.mem[ALLOCATOR_STATE_DIRTY_OFFSET] = 1;
@@ -246,6 +257,10 @@ impl<'a> TransactionMutator<'a> {
             1 => true,
             _ => unreachable!(),
         }
+    }
+
+    fn into_guard(self) -> MutexGuard<'a, MetapageGuard> {
+        self._guard
     }
 }
 
@@ -455,16 +470,22 @@ impl TransactionalMemory {
 
     fn acquire_mutable_page_allocator<'a>(
         &self,
-        transaction: TransactionAccessor<'a>,
-    ) -> (&mut [u8], MutexGuard<'a, MetapageGuard>) {
+        mut mutator: TransactionMutator<'a>,
+    ) -> Result<(&mut [u8], MutexGuard<'a, MetapageGuard>), Error> {
+        // The allocator is a cache, and therefore can only be modified when it's marked dirty
+        if !mutator.get_allocator_dirty() {
+            mutator.set_allocator_dirty(false);
+            self.mmap.flush()?
+        }
+
         let ptr = &self.mmap as *const MmapMut as *mut MmapMut;
         // Safety: we have the metapage lock and only access the metapage
         // (page allocator state is logically part of the metapage)
-        let (start, end) = transaction.get_allocator_data();
+        let (start, end) = mutator.get_allocator_data();
         assert!(end <= self.mmap.len());
         let mem = unsafe { &mut (*ptr)[start..end] };
 
-        (mem, transaction.into_guard())
+        Ok((mem, mutator.into_guard()))
     }
 
     // Commit all outstanding changes and make them visible as the primary
@@ -496,12 +517,9 @@ impl TransactionalMemory {
         // Dirty the current primary (we just switched them on the previous line)
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
         mutator.set_allocator_dirty(true);
-        drop(mutator); // Ensure the guard lives past the PRIMARY_BIT write
         self.mmap.flush()?;
 
-        let accessor =
-            TransactionAccessor::new(get_secondary(mmap), self.metapage_guard.lock().unwrap());
-        let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
+        let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
             assert_eq!(page_number.page_order, 0);
             self.page_allocator
@@ -538,12 +556,9 @@ impl TransactionalMemory {
             // the primary allocator state
             self.mmap.flush()?;
         }
-        drop(primary_mutator);
 
         // Modify the primary allocator state directly. This is only safe because we first set the dirty bit
-        let accessor =
-            TransactionAccessor::new(get_primary_mut(mmap), self.metapage_guard.lock().unwrap());
-        let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
+        let (mem, guard) = self.acquire_mutable_page_allocator(primary_mutator)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
             assert_eq!(page_number.page_order, 0);
             self.page_allocator
@@ -559,8 +574,8 @@ impl TransactionalMemory {
     pub(crate) fn rollback_uncommited_writes(&self) -> Result<(), Error> {
         assert!(self.open_dirty_pages.borrow().is_empty());
         let (metamem, guard) = self.acquire_mutable_metapage();
-        let accessor = TransactionAccessor::new(get_secondary(metamem), guard);
-        let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
+        let mutator = TransactionMutator::new(get_secondary(metamem), guard);
+        let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
             assert_eq!(page_number.page_order, 0);
             self.page_allocator.free(mem, page_number.page_index);
@@ -646,8 +661,9 @@ impl TransactionalMemory {
 
     pub(crate) fn free(&self, page: PageNumber) {
         let (mmap, guard) = self.acquire_mutable_metapage();
-        let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
-        let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
+        let mutator = TransactionMutator::new(get_secondary(mmap), guard);
+        // TODO: should propagate this error
+        let (mem, guard) = self.acquire_mutable_page_allocator(mutator).unwrap();
         assert_eq!(page.page_order, 0);
         self.page_allocator.free(mem, page.page_index);
         drop(guard);
@@ -658,8 +674,9 @@ impl TransactionalMemory {
     pub(crate) fn free_if_uncommitted(&self, page: PageNumber) -> bool {
         if self.allocated_since_commit.borrow_mut().remove(&page) {
             let (mmap, guard) = self.acquire_mutable_metapage();
-            let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
-            let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
+            let mutator = TransactionMutator::new(get_secondary(mmap), guard);
+            // TODO: should propagate this error
+            let (mem, guard) = self.acquire_mutable_page_allocator(mutator).unwrap();
             assert_eq!(page.page_order, 0);
             self.page_allocator.free(mem, page.page_index);
             drop(guard);
@@ -676,15 +693,11 @@ impl TransactionalMemory {
 
     pub(crate) fn allocate(&self, allocation_size: usize) -> PageMut {
         assert!(allocation_size <= self.page_size);
-        let (mmap, guard) = self.acquire_mutable_metapage();
-        let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        // TODO: this should be fsync'ed, so it should probably be moved to transaction creation
-        mutator.set_allocator_dirty(true);
-        drop(mutator);
 
         let (mmap, guard) = self.acquire_mutable_metapage();
-        let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
-        let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
+        let mutator = TransactionMutator::new(get_secondary(mmap), guard);
+        // TODO: should propagate this error
+        let (mem, guard) = self.acquire_mutable_page_allocator(mutator).unwrap();
         let page_number = PageNumber::new(self.page_allocator.alloc(mem).unwrap(), 0);
         // Drop guard only after page_allocator.alloc() is completed
         drop(guard);
@@ -709,8 +722,10 @@ impl TransactionalMemory {
 
     pub(crate) fn count_free_pages(&self) -> usize {
         let (mmap, guard) = self.acquire_mutable_metapage();
-        let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
-        let (mem, guard) = self.acquire_mutable_page_allocator(accessor);
+        // TODO: this is a read-only operation, so should be able to use an accessor
+        // and avoid dirtying the allocator state
+        let mutator = TransactionMutator::new(get_secondary(mmap), guard);
+        let (mem, guard) = self.acquire_mutable_page_allocator(mutator).unwrap();
         let count = self.page_allocator.count_free_pages(mem);
         // Drop guard only after page_allocator.count_free() is completed
         drop(guard);
