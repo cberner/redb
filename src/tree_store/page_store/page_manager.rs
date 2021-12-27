@@ -576,6 +576,7 @@ impl TransactionalMemory {
         assert!(allocation_size <= self.page_size);
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
+        // TODO: this should be fsync'ed, so it should probably be moved to transaction creation
         mutator.set_allocator_dirty(true);
         drop(mutator);
 
