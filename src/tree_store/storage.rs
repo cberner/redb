@@ -146,6 +146,27 @@ impl Storage {
         self.live_read_transactions.borrow_mut().remove(&id);
     }
 
+    pub(in crate) fn get_table(
+        &self,
+        name: &[u8],
+        table_type: TableType,
+        root_page: Option<NodeHandle>,
+    ) -> Result<Option<TableDefinition>, Error> {
+        if let Some(found) = self.get::<[u8], [u8]>(TABLE_TABLE_ID, name, root_page)? {
+            let definition = TableDefinition::from_bytes(found.as_ref());
+            if definition.get_type() != table_type {
+                return Err(Error::TableTypeMismatch(format!(
+                    "{:?} is not of type {:?}",
+                    name, table_type
+                )));
+            }
+
+            Ok(Some(definition))
+        } else {
+            Ok(None)
+        }
+    }
+
     // Returns a tuple of the table id and the new root page
     pub(in crate) fn get_or_create_table(
         &self,

@@ -23,21 +23,23 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
     pairs
 }
 
-fn benchmark<T: BenchTable>(mut db: T) {
+fn benchmark<T: BenchDatabase>(mut db: T) {
     let pairs = gen_data(1000, 16, 1500);
     let mut written = 0;
 
     let start = SystemTime::now();
-    let mut txn = db.write_transaction();
+    let txn = db.write_transaction();
+    let mut inserter = txn.get_inserter();
     {
         for _ in 0..ELEMENTS {
             let (key, value) = &pairs[written % pairs.len()];
             let mut mut_key = key.clone();
             mut_key.extend_from_slice(&written.to_be_bytes());
-            txn.insert(&mut_key, value).unwrap();
+            inserter.insert(&mut_key, value).unwrap();
             written += 1;
         }
     }
+    drop(inserter);
     txn.commit().unwrap();
 
     let end = SystemTime::now();
@@ -53,11 +55,13 @@ fn benchmark<T: BenchTable>(mut db: T) {
     let writes = 100;
     {
         for _ in 0..writes {
-            let mut txn = db.write_transaction();
+            let txn = db.write_transaction();
+            let mut inserter = txn.get_inserter();
             let (key, value) = &pairs[written % pairs.len()];
             let mut mut_key = key.clone();
             mut_key.extend_from_slice(&written.to_be_bytes());
-            txn.insert(&mut_key, value).unwrap();
+            inserter.insert(&mut_key, value).unwrap();
+            drop(inserter);
             txn.commit().unwrap();
             written += 1;
         }
@@ -76,14 +80,16 @@ fn benchmark<T: BenchTable>(mut db: T) {
     let batch_size = 1000;
     {
         for _ in 0..writes {
-            let mut txn = db.write_transaction();
+            let txn = db.write_transaction();
+            let mut inserter = txn.get_inserter();
             for _ in 0..batch_size {
                 let (key, value) = &pairs[written % pairs.len()];
                 let mut mut_key = key.clone();
                 mut_key.extend_from_slice(&written.to_be_bytes());
-                txn.insert(&mut_key, value).unwrap();
+                inserter.insert(&mut_key, value).unwrap();
                 written += 1;
             }
+            drop(inserter);
             txn.commit().unwrap();
         }
     }
@@ -129,23 +135,23 @@ fn benchmark<T: BenchTable>(mut db: T) {
 }
 
 fn main() {
-    {
-        let tmpfile: TempDir = tempfile::tempdir().unwrap();
-        let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
-        env.set_map_size(4096 * 1024 * 1024).unwrap();
-        let table = LmdbRkvBenchTable::new(&env);
-        benchmark(table);
-    }
+    // {
+    //     let tmpfile: TempDir = tempfile::tempdir().unwrap();
+    //     let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
+    //     env.set_map_size(4096 * 1024 * 1024).unwrap();
+    //     let table = LmdbRkvBenchDatabase::new(&env);
+    //     benchmark(table);
+    // }
     {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { redb::Database::open(tmpfile.path(), 4096 * 1024 * 1024).unwrap() };
-        let table = RedbBenchTable::new(&db);
+        let table = RedbBenchDatabase::new(&db);
         benchmark(table);
     }
     {
         let tmpfile: TempDir = tempfile::tempdir().unwrap();
         let db = sled::Config::new().path(tmpfile.path()).open().unwrap();
-        let table = SledBenchTable::new(&db);
+        let table = SledBenchDatabase::new(&db);
         benchmark(table);
     }
 }

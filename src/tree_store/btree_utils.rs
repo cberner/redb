@@ -1998,13 +1998,13 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
         let db = unsafe { Database::open(tmpfile.path(), 16 * 1024 * 1024).unwrap() };
-        let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+        let txn = db.begin_write().unwrap();
+        let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
         let elements = (BTREE_ORDER / 2).pow(2) as usize;
 
-        let mut txn = table.begin_write().unwrap();
         for i in (0..elements).rev() {
-            txn.insert(&i.to_be_bytes(), b"").unwrap();
+            table.insert(&i.to_be_bytes(), b"").unwrap();
         }
         txn.commit().unwrap();
 
@@ -2019,9 +2019,10 @@ mod test {
 
         let reduce_to = BTREE_ORDER / 2;
 
-        let mut txn = table.begin_write().unwrap();
+        let txn = db.begin_write().unwrap();
+        let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
         for i in 0..(elements - reduce_to) {
-            txn.remove(&i.to_be_bytes()).unwrap();
+            table.remove(&i.to_be_bytes()).unwrap();
         }
         txn.commit().unwrap();
 

@@ -2,7 +2,7 @@ use tempfile::NamedTempFile;
 
 use rand::prelude::SliceRandom;
 use rand::Rng;
-use redb::{Database, Table};
+use redb::{Database, ReadOnlyTable, Table};
 
 const ELEMENTS: usize = 100;
 
@@ -25,33 +25,32 @@ fn non_durable_commit_persistence() {
 
     let db_size = 16 * 1024 * 1024;
     let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
-    let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
     let pairs = gen_data(100, 16, 20);
 
-    let mut txn = table.begin_write().unwrap();
     {
         for i in 0..ELEMENTS {
             let (key, value) = &pairs[i % pairs.len()];
-            txn.insert(key, value).unwrap();
+            table.insert(key, value).unwrap();
         }
     }
     txn.non_durable_commit().unwrap();
 
-    drop(table);
     // Check that cleanly closing the database persists the non-durable commit
     drop(db);
     let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
-    let table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+    let txn = db.begin_read().unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
     let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
     key_order.shuffle(&mut rand::thread_rng());
 
-    let txn = table.read_transaction().unwrap();
     {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
-            let result = &txn.get(key).unwrap().unwrap();
+            let result = &table.get(key).unwrap().unwrap();
             assert_eq!(result.as_ref(), value);
         }
     }
@@ -63,32 +62,31 @@ fn persistence() {
 
     let db_size = 16 * 1024 * 1024;
     let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
-    let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
     let pairs = gen_data(100, 16, 20);
 
-    let mut txn = table.begin_write().unwrap();
     {
         for i in 0..ELEMENTS {
             let (key, value) = &pairs[i % pairs.len()];
-            txn.insert(key, value).unwrap();
+            table.insert(key, value).unwrap();
         }
     }
     txn.commit().unwrap();
 
-    drop(table);
     drop(db);
     let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
-    let table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+    let txn = db.begin_read().unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
     let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
     key_order.shuffle(&mut rand::thread_rng());
 
-    let txn = table.read_transaction().unwrap();
     {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
-            let result = &txn.get(key).unwrap().unwrap();
+            let result = &table.get(key).unwrap().unwrap();
             assert_eq!(result.as_ref(), value);
         }
     }
@@ -100,7 +98,8 @@ fn free() {
 
     let db_size = 512 * 1024;
     let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
-    let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
     let free_pages = db.stats().unwrap().free_pages();
 
@@ -111,18 +110,18 @@ fn free() {
     // Make sure an internal index page is required
     assert!(num_writes > 64);
 
-    let mut txn = table.begin_write().unwrap();
     {
         for _ in 0..num_writes {
-            txn.insert(&key, &value).unwrap();
+            table.insert(&key, &value).unwrap();
         }
     }
     txn.commit().unwrap();
 
-    let mut txn = table.begin_write().unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
     {
         for _ in 0..num_writes {
-            txn.remove(&key).unwrap();
+            table.remove(&key).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -136,24 +135,25 @@ fn large_keys() {
 
     let db_size = 1024_1024;
     let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
-    let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
     let mut key = vec![0; 1024];
     let value = vec![0; 1];
-    let mut txn = table.begin_write().unwrap();
     {
         for i in 0..100 {
             key[0] = i;
-            txn.insert(&key, &value).unwrap();
+            table.insert(&key, &value).unwrap();
         }
     }
     txn.commit().unwrap();
 
-    let mut txn = table.begin_write().unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
     {
         for i in 0..100 {
             key[0] = i;
-            txn.remove(&key).unwrap();
+            table.remove(&key).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -166,38 +166,45 @@ fn regression() {
 
     let db_size = 1024 * 1024;
     let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
-    let mut table: Table<u64, u64> = db.open_table(b"x").unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
 
-    let mut txn = table.begin_write().unwrap();
-    txn.insert(&1, &1).unwrap();
+    table.insert(&1, &1).unwrap();
     txn.commit().unwrap();
 
-    let mut txn = table.begin_write().unwrap();
-    txn.insert(&6, &9).unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
+    table.insert(&6, &9).unwrap();
     txn.commit().unwrap();
 
-    let mut txn = table.begin_write().unwrap();
-    txn.insert(&12, &10).unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
+    table.insert(&12, &10).unwrap();
     txn.commit().unwrap();
 
-    let mut txn = table.begin_write().unwrap();
-    txn.insert(&18, &27).unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
+    table.insert(&18, &27).unwrap();
     txn.commit().unwrap();
 
-    let mut txn = table.begin_write().unwrap();
-    txn.insert(&24, &33).unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
+    table.insert(&24, &33).unwrap();
     txn.commit().unwrap();
 
-    let mut txn = table.begin_write().unwrap();
-    txn.insert(&30, &14).unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
+    table.insert(&30, &14).unwrap();
     txn.commit().unwrap();
 
-    let mut txn = table.begin_write().unwrap();
-    txn.remove(&30).unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
+    table.remove(&30).unwrap();
     txn.commit().unwrap();
 
-    let txn = table.read_transaction().unwrap();
-    let v = txn.get(&6).unwrap().unwrap().to_value();
+    let txn = db.begin_read().unwrap();
+    let table: ReadOnlyTable<u64, u64> = txn.open_table(b"x").unwrap();
+    let v = table.get(&6).unwrap().unwrap().to_value();
     assert_eq!(v, 9);
 }
 
@@ -205,35 +212,44 @@ fn regression() {
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
-    let mut table: Table<[u8], [u8]> = db.open_table(b"x").unwrap();
+    let write_txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
 
-    let mut write_txn = table.begin_write().unwrap();
-    write_txn.insert(b"hello", b"world").unwrap();
+    table.insert(b"hello", b"world").unwrap();
     write_txn.non_durable_commit().unwrap();
 
-    let read_txn = table.read_transaction().unwrap();
-    assert_eq!(b"world", read_txn.get(b"hello").unwrap().unwrap().as_ref());
+    let read_txn = db.begin_read().unwrap();
+    let read_table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    assert_eq!(
+        b"world",
+        read_table.get(b"hello").unwrap().unwrap().as_ref()
+    );
 
-    let mut write_txn = table.begin_write().unwrap();
-    write_txn.remove(b"hello").unwrap();
-    write_txn.insert(b"hello2", b"world2").unwrap();
-    write_txn.insert(b"hello3", b"world3").unwrap();
+    let write_txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    table.remove(b"hello").unwrap();
+    table.insert(b"hello2", b"world2").unwrap();
+    table.insert(b"hello3", b"world3").unwrap();
     write_txn.non_durable_commit().unwrap();
 
-    let read_txn2 = table.read_transaction().unwrap();
-    assert!(read_txn2.get(b"hello").unwrap().is_none());
+    let read_txn2 = db.begin_read().unwrap();
+    let read_table2: ReadOnlyTable<[u8], [u8]> = read_txn2.open_table(b"x").unwrap();
+    assert!(read_table2.get(b"hello").unwrap().is_none());
     assert_eq!(
         b"world2",
-        read_txn2.get(b"hello2").unwrap().unwrap().as_ref()
+        read_table2.get(b"hello2").unwrap().unwrap().as_ref()
     );
     assert_eq!(
         b"world3",
-        read_txn2.get(b"hello3").unwrap().unwrap().as_ref()
+        read_table2.get(b"hello3").unwrap().unwrap().as_ref()
     );
-    assert_eq!(read_txn2.len().unwrap(), 2);
+    assert_eq!(read_table2.len().unwrap(), 2);
 
-    assert_eq!(b"world", read_txn.get(b"hello").unwrap().unwrap().as_ref());
-    assert!(read_txn.get(b"hello2").unwrap().is_none());
-    assert!(read_txn.get(b"hello3").unwrap().is_none());
-    assert_eq!(read_txn.len().unwrap(), 1);
+    assert_eq!(
+        b"world",
+        read_table.get(b"hello").unwrap().unwrap().as_ref()
+    );
+    assert!(read_table.get(b"hello2").unwrap().is_none());
+    assert!(read_table.get(b"hello3").unwrap().is_none());
+    assert_eq!(read_table.len().unwrap(), 1);
 }

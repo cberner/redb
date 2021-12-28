@@ -1,5 +1,5 @@
-pub trait BenchTable {
-    type W: BenchWriteTransaction;
+pub trait BenchDatabase {
+    type W: for<'a> BenchWriteTransaction<'a>;
     type R: for<'a> BenchReadTransaction<'a>;
 
     fn db_type_name() -> &'static str;
@@ -9,10 +9,16 @@ pub trait BenchTable {
     fn read_transaction(&self) -> Self::R;
 }
 
-pub trait BenchWriteTransaction {
-    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()>;
+pub trait BenchWriteTransaction<'a> {
+    type T: BenchInserter + 'a;
+
+    fn get_inserter(&'a self) -> Self::T;
 
     fn commit(self) -> Result<(), ()>;
+}
+
+pub trait BenchInserter {
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()>;
 }
 
 pub trait BenchReadTransaction<'a> {
@@ -21,19 +27,17 @@ pub trait BenchReadTransaction<'a> {
     fn get(&'a self, key: &[u8]) -> Option<Self::Output>;
 }
 
-pub struct RedbBenchTable<'a> {
-    table: redb::Table<'a, [u8], [u8]>,
+pub struct RedbBenchDatabase<'a> {
+    db: &'a redb::Database,
 }
 
-impl<'a> RedbBenchTable<'a> {
+impl<'a> RedbBenchDatabase<'a> {
     pub fn new(db: &'a redb::Database) -> Self {
-        RedbBenchTable {
-            table: db.open_table(b"x").unwrap(),
-        }
+        RedbBenchDatabase { db }
     }
 }
 
-impl<'a> BenchTable for RedbBenchTable<'a> {
+impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
     type W = RedbBenchWriteTransaction<'a>;
     type R = RedbBenchReadTransaction<'a>;
 
@@ -42,37 +46,41 @@ impl<'a> BenchTable for RedbBenchTable<'a> {
     }
 
     fn write_transaction(&mut self) -> Self::W {
-        RedbBenchWriteTransaction {
-            txn: self.table.begin_write().unwrap(),
-        }
+        let txn = self.db.begin_write().unwrap();
+        RedbBenchWriteTransaction { txn }
     }
 
     fn read_transaction(&self) -> Self::R {
-        RedbBenchReadTransaction {
-            txn: self.table.read_transaction().unwrap(),
-        }
+        let txn = self.db.begin_read().unwrap();
+        let table = txn.open_table("x").unwrap();
+        RedbBenchReadTransaction { _txn: txn, table }
     }
 }
 
 pub struct RedbBenchReadTransaction<'a> {
-    txn: redb::ReadOnlyTransaction<'a, [u8], [u8]>,
+    _txn: redb::ReadOnlyDatabaseTransaction<'a>,
+    table: redb::ReadOnlyTable<'a, [u8], [u8]>,
 }
 
 impl<'a, 'b> BenchReadTransaction<'b> for RedbBenchReadTransaction<'a> {
     type Output = redb::AccessGuard<'b, [u8]>;
 
     fn get(&'b self, key: &[u8]) -> Option<redb::AccessGuard<'b, [u8]>> {
-        self.txn.get(key).unwrap()
+        self.table.get(key).unwrap()
     }
 }
 
 pub struct RedbBenchWriteTransaction<'a> {
-    txn: redb::WriteTransaction<'a, [u8], [u8]>,
+    txn: redb::DatabaseTransaction<'a>,
 }
 
-impl BenchWriteTransaction for RedbBenchWriteTransaction<'_> {
-    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
-        self.txn.insert(key, value).map_err(|_| ())
+impl<'a, 'b> BenchWriteTransaction<'b> for RedbBenchWriteTransaction<'a> {
+    type T = RedbBenchInserter<'b>;
+
+    fn get_inserter(&'b self) -> Self::T {
+        RedbBenchInserter {
+            table: self.txn.open_table("x").unwrap(),
+        }
     }
 
     fn commit(self) -> Result<(), ()> {
@@ -80,17 +88,27 @@ impl BenchWriteTransaction for RedbBenchWriteTransaction<'_> {
     }
 }
 
-pub struct SledBenchTable<'a> {
-    db: &'a sled::Db,
+pub struct RedbBenchInserter<'a> {
+    table: redb::Table<'a, 'a, [u8], [u8]>,
 }
 
-impl<'a> SledBenchTable<'a> {
-    pub fn new(db: &'a sled::Db) -> Self {
-        SledBenchTable { db }
+impl BenchInserter for RedbBenchInserter<'_> {
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
+        self.table.insert(key, value).map_err(|_| ())
     }
 }
 
-impl<'a> BenchTable for SledBenchTable<'a> {
+pub struct SledBenchDatabase<'a> {
+    db: &'a sled::Db,
+}
+
+impl<'a> SledBenchDatabase<'a> {
+    pub fn new(db: &'a sled::Db) -> Self {
+        SledBenchDatabase { db }
+    }
+}
+
+impl<'a> BenchDatabase for SledBenchDatabase<'a> {
     type W = SledBenchWriteTransaction<'a>;
     type R = SledBenchReadTransaction<'a>;
 
@@ -123,9 +141,11 @@ pub struct SledBenchWriteTransaction<'a> {
     db: &'a sled::Db,
 }
 
-impl BenchWriteTransaction for SledBenchWriteTransaction<'_> {
-    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
-        self.db.insert(key, value).map(|_| ()).map_err(|_| ())
+impl<'a, 'b> BenchWriteTransaction<'b> for SledBenchWriteTransaction<'a> {
+    type T = SledBenchInserter<'b>;
+
+    fn get_inserter(&'b self) -> Self::T {
+        SledBenchInserter { db: self.db }
     }
 
     fn commit(self) -> Result<(), ()> {
@@ -133,19 +153,29 @@ impl BenchWriteTransaction for SledBenchWriteTransaction<'_> {
     }
 }
 
-pub struct LmdbRkvBenchTable<'a> {
+pub struct SledBenchInserter<'a> {
+    db: &'a sled::Db,
+}
+
+impl<'a> BenchInserter for SledBenchInserter<'a> {
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
+        self.db.insert(key, value).map(|_| ()).map_err(|_| ())
+    }
+}
+
+pub struct LmdbRkvBenchDatabase<'a> {
     env: &'a lmdb::Environment,
     db: lmdb::Database,
 }
 
-impl<'a> LmdbRkvBenchTable<'a> {
-    pub fn new(env: &'a lmdb::Environment) -> Self {
+impl<'a> LmdbRkvBenchDatabase<'a> {
+    pub fn _new(env: &'a lmdb::Environment) -> Self {
         let db = env.open_db(None).unwrap();
-        LmdbRkvBenchTable { env, db }
+        LmdbRkvBenchDatabase { env, db }
     }
 }
 
-impl<'a> BenchTable for LmdbRkvBenchTable<'a> {
+impl<'a> BenchDatabase for LmdbRkvBenchDatabase<'a> {
     type W = LmdbRkvBenchWriteTransaction<'a>;
     type R = LmdbRkvBenchReadTransaction<'a>;
 
@@ -169,16 +199,33 @@ pub struct LmdbRkvBenchWriteTransaction<'a> {
     txn: lmdb::RwTransaction<'a>,
 }
 
-impl BenchWriteTransaction for LmdbRkvBenchWriteTransaction<'_> {
-    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
-        self.txn
-            .put(self.db, &key, &value, lmdb::WriteFlags::empty())
-            .map_err(|_| ())
+impl<'a, 'b> BenchWriteTransaction<'b> for LmdbRkvBenchWriteTransaction<'a> {
+    type T = LmdbRkvBenchInserter<'b>;
+
+    fn get_inserter(&'b self) -> Self::T {
+        LmdbRkvBenchInserter {
+            _db: self.db,
+            _txn: &self.txn,
+        }
     }
 
     fn commit(self) -> Result<(), ()> {
         use lmdb::Transaction;
         self.txn.commit().map_err(|_| ())
+    }
+}
+
+pub struct LmdbRkvBenchInserter<'a> {
+    _db: lmdb::Database,
+    _txn: &'a lmdb::RwTransaction<'a>,
+}
+
+impl BenchInserter for LmdbRkvBenchInserter<'_> {
+    fn insert(&mut self, _key: &[u8], _value: &[u8]) -> Result<(), ()> {
+        todo!("Fix this")
+        // self.txn
+        //     .put(self.db, &key, &value, lmdb::WriteFlags::empty())
+        //     .map_err(|_| ())
     }
 }
 

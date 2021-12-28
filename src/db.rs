@@ -1,9 +1,10 @@
 use crate::multimap_table::MultiMapTable;
-use crate::table::Table;
-use crate::tree_store::{DbStats, Storage, TableType};
+use crate::table::{ReadOnlyTable, Table};
+use crate::tree_store::{DbStats, NodeHandle, Storage, TableType};
 use crate::types::{RedbKey, RedbValue};
-use crate::Error;
+use crate::{Error, ReadOnlyMultiMapTable};
 use memmap2::MmapMut;
+use std::cell::Cell;
 use std::fs::OpenOptions;
 use std::path::Path;
 
@@ -39,38 +40,12 @@ impl Database {
         Ok(Database { storage })
     }
 
-    pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
-        &self,
-        name: impl AsRef<[u8]>,
-    ) -> Result<Table<K, V>, Error> {
-        assert!(!name.as_ref().is_empty());
-        // TODO: this could conflict with an on-going write
-        let id = self.storage.allocate_write_transaction();
-        let (definition, root) = self.storage.get_or_create_table(
-            name.as_ref(),
-            TableType::Normal,
-            id,
-            self.storage.get_root_page_number(),
-        )?;
-        self.storage.commit(Some(root), id)?;
-        Table::new(definition.get_id(), &self.storage)
+    pub fn begin_write(&self) -> Result<DatabaseTransaction, Error> {
+        Ok(DatabaseTransaction::new(&self.storage))
     }
 
-    pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
-        &self,
-        name: impl AsRef<[u8]>,
-    ) -> Result<MultiMapTable<K, V>, Error> {
-        assert!(!name.as_ref().is_empty());
-        // TODO: this could conflict with an on-going write
-        let id = self.storage.allocate_write_transaction();
-        let (definition, root) = self.storage.get_or_create_table(
-            name.as_ref(),
-            TableType::MultiMap,
-            id,
-            self.storage.get_root_page_number(),
-        )?;
-        self.storage.commit(Some(root), id)?;
-        MultiMapTable::new(definition.get_id(), &self.storage)
+    pub fn begin_read(&self) -> Result<ReadOnlyDatabaseTransaction, Error> {
+        Ok(ReadOnlyDatabaseTransaction::new(&self.storage))
     }
 
     pub fn stats(&self) -> Result<DbStats, Error> {
@@ -126,9 +101,164 @@ impl DatabaseBuilder {
     }
 }
 
+pub struct DatabaseTransaction<'a> {
+    storage: &'a Storage,
+    transaction_id: u128,
+    root_page: Cell<Option<NodeHandle>>,
+}
+
+impl<'a> DatabaseTransaction<'a> {
+    fn new(storage: &'a Storage) -> Self {
+        let transaction_id = storage.allocate_write_transaction();
+        let root_page = storage.get_root_page_number();
+        Self {
+            storage,
+            transaction_id,
+            root_page: Cell::new(root_page),
+        }
+    }
+
+    /// Open the given table
+    ///
+    /// The table will be created if it does not exist
+    pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+        &self,
+        name: impl AsRef<[u8]>,
+    ) -> Result<Table<'a, '_, K, V>, Error> {
+        assert!(!name.as_ref().is_empty());
+        let (definition, root) = self.storage.get_or_create_table(
+            name.as_ref(),
+            TableType::Normal,
+            self.transaction_id,
+            self.root_page.get(),
+        )?;
+        self.root_page.set(Some(root));
+
+        Ok(Table::new(
+            definition.get_id(),
+            self.transaction_id,
+            &self.root_page,
+            self.storage,
+        ))
+    }
+
+    /// Open the given table
+    ///
+    /// The table will be created if it does not exist
+    pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
+        &self,
+        name: impl AsRef<[u8]>,
+    ) -> Result<MultiMapTable<'a, '_, K, V>, Error> {
+        assert!(!name.as_ref().is_empty());
+        let (definition, root) = self.storage.get_or_create_table(
+            name.as_ref(),
+            TableType::MultiMap,
+            self.transaction_id,
+            self.root_page.get(),
+        )?;
+        self.root_page.set(Some(root));
+
+        Ok(MultiMapTable::new(
+            definition.get_id(),
+            self.transaction_id,
+            &self.root_page,
+            self.storage,
+        ))
+    }
+
+    pub fn commit(self) -> Result<(), Error> {
+        self.storage
+            .commit(self.root_page.get(), self.transaction_id)?;
+        Ok(())
+    }
+
+    /// Note: pages are only freed during commit(). So exclusively using this function may result
+    /// in an out-of-memory error
+    pub fn non_durable_commit(self) -> Result<(), Error> {
+        self.storage
+            .non_durable_commit(self.root_page.get(), self.transaction_id)?;
+        Ok(())
+    }
+
+    pub fn abort(self) -> Result<(), Error> {
+        self.storage.rollback_uncommited_writes(self.transaction_id)
+    }
+}
+
+pub struct ReadOnlyDatabaseTransaction<'a> {
+    storage: &'a Storage,
+    transaction_id: u128,
+    root_page: Option<NodeHandle>,
+}
+
+impl<'a> ReadOnlyDatabaseTransaction<'a> {
+    fn new(storage: &'a Storage) -> Self {
+        let transaction_id = storage.allocate_read_transaction();
+        let root_page = storage.get_root_page_number();
+        Self {
+            storage,
+            transaction_id,
+            root_page,
+        }
+    }
+
+    /// Open the given table
+    pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+        &self,
+        name: impl AsRef<[u8]>,
+    ) -> Result<ReadOnlyTable<'a, K, V>, Error> {
+        assert!(!name.as_ref().is_empty());
+        let definition = self
+            .storage
+            .get_table(name.as_ref(), TableType::Normal, self.root_page)?
+            .ok_or_else(|| {
+                Error::DoesNotExist(format!(
+                    "Table '{}' does not exist",
+                    String::from_utf8_lossy(name.as_ref())
+                ))
+            })?;
+
+        Ok(ReadOnlyTable::new(
+            definition.get_id(),
+            self.root_page,
+            self.storage,
+        ))
+    }
+
+    /// Open the given table
+    pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
+        &self,
+        name: impl AsRef<[u8]>,
+    ) -> Result<ReadOnlyMultiMapTable<'a, K, V>, Error> {
+        assert!(!name.as_ref().is_empty());
+        let definition = self
+            .storage
+            .get_table(name.as_ref(), TableType::MultiMap, self.root_page)?
+            .ok_or_else(|| {
+                Error::DoesNotExist(format!(
+                    "Table '{}' does not exist",
+                    String::from_utf8_lossy(name.as_ref())
+                ))
+            })?;
+
+        Ok(ReadOnlyMultiMapTable::new(
+            definition.get_id(),
+            self.root_page,
+            self.storage,
+        ))
+    }
+}
+
+impl<'a> Drop for ReadOnlyDatabaseTransaction<'a> {
+    fn drop(&mut self) {
+        self.storage
+            .deallocate_read_transaction(self.transaction_id);
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use crate::{Database, Table};
+    use crate::{Database, ReadOnlyTable, Table};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -137,15 +267,32 @@ mod test {
 
         let db_size = 1024 * 1024 + 1;
         let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
-        let mut table: Table<[u8], [u8]> = db.open_table("x").unwrap();
+        let txn = db.begin_write().unwrap();
+        let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
         let key = vec![0; 1024];
         let value = vec![0; 1];
-        let mut txn = table.begin_write().unwrap();
-        txn.insert(&key, &value).unwrap();
+        table.insert(&key, &value).unwrap();
         txn.commit().unwrap();
 
-        let read_txn = table.read_transaction().unwrap();
-        assert_eq!(read_txn.len().unwrap(), 1);
+        let read_txn = db.begin_read().unwrap();
+        let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+        assert_eq!(table.len().unwrap(), 1);
+    }
+
+    #[test]
+    fn transaction_id_persistence() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let write_txn = db.begin_write().unwrap();
+        let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+        table.insert(b"hello", b"world").unwrap();
+        let first_txn_id = write_txn.transaction_id;
+        write_txn.commit().unwrap();
+        drop(db);
+
+        let db2 = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let write_txn = db2.begin_write().unwrap();
+        assert!(write_txn.transaction_id > first_txn_id);
     }
 }
