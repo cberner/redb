@@ -474,7 +474,7 @@ impl TransactionalMemory {
     ) -> Result<(&mut [u8], MutexGuard<'a, MetapageGuard>), Error> {
         // The allocator is a cache, and therefore can only be modified when it's marked dirty
         if !mutator.get_allocator_dirty() {
-            mutator.set_allocator_dirty(false);
+            mutator.set_allocator_dirty(true);
             self.mmap.flush()?
         }
 
