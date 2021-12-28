@@ -3,6 +3,7 @@ use crate::tree_store::{BtreeEntry, BtreeRangeIter, NodeHandle, Storage};
 use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
 };
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::Bound;
 use std::convert::TryInto;
@@ -258,58 +259,27 @@ impl<
     }
 }
 
-pub struct MultiMapTable<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
-    storage: &'mmap Storage,
-    table_id: u64,
-    _key_type: PhantomData<K>,
-    _value_type: PhantomData<V>,
-}
-
-impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapTable<'mmap, K, V> {
-    pub(in crate) fn new(
-        table_id: u64,
-        storage: &'mmap Storage,
-    ) -> Result<MultiMapTable<'mmap, K, V>, Error> {
-        Ok(MultiMapTable {
-            storage,
-            table_id,
-            _key_type: Default::default(),
-            _value_type: Default::default(),
-        })
-    }
-
-    pub fn begin_write(&'_ mut self) -> Result<MultiMapWriteTransaction<'mmap, K, V>, Error> {
-        Ok(MultiMapWriteTransaction::new(self.table_id, self.storage))
-    }
-
-    pub fn read_transaction(&'_ self) -> Result<MultiMapReadOnlyTransaction<'mmap, K, V>, Error> {
-        Ok(MultiMapReadOnlyTransaction::new(
-            self.table_id,
-            self.storage,
-        ))
-    }
-}
-
-pub struct MultiMapWriteTransaction<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
-    storage: &'mmap Storage,
+pub struct MultiMapTable<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+    storage: &'s Storage,
     table_id: u64,
     transaction_id: u128,
-    root_page: Option<NodeHandle>,
+    root_page: &'t Cell<Option<NodeHandle>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapWriteTransaction<'mmap, K, V> {
+impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapTable<'s, 't, K, V> {
     pub(in crate) fn new(
         table_id: u64,
-        storage: &'mmap Storage,
-    ) -> MultiMapWriteTransaction<'mmap, K, V> {
-        let transaction_id = storage.allocate_write_transaction();
-        MultiMapWriteTransaction {
+        transaction_id: u128,
+        root_page: &'t Cell<Option<NodeHandle>>,
+        storage: &'s Storage,
+    ) -> MultiMapTable<'s, 't, K, V> {
+        MultiMapTable {
             storage,
             table_id,
             transaction_id,
-            root_page: storage.get_root_page_number(),
+            root_page,
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -317,20 +287,21 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapWriteTransaction<'
 
     #[allow(dead_code)]
     pub(in crate) fn print_debug(&self) {
-        if let Some(page) = self.root_page {
+        if let Some(page) = self.root_page.get() {
             self.storage.print_dirty_debug(page);
         }
     }
 
     pub fn insert(&mut self, key: &K, value: &V) -> Result<(), Error> {
         let kv = make_serialized_kv(key, value);
-        self.root_page = Some(self.storage.insert::<MultiMapKVPair<K, V>>(
+        let page = Some(self.storage.insert::<MultiMapKVPair<K, V>>(
             self.table_id,
             &kv,
             b"",
             self.transaction_id,
-            self.root_page,
+            self.root_page.get(),
         )?);
+        self.root_page.set(page);
         Ok(())
     }
 
@@ -343,18 +314,19 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapWriteTransaction<'
         let lower = MultiMapKVPair::<K, V>::new(lower_bytes);
         let upper = MultiMapKVPair::<K, V>::new(upper_bytes);
         self.storage
-            .get_range(self.table_id, lower..=upper, self.root_page)
+            .get_range(self.table_id, lower..=upper, self.root_page.get())
             .map(MultiMapRangeIter::new)
     }
 
     pub fn remove(&mut self, key: &K, value: &V) -> Result<(), Error> {
         let kv = make_serialized_kv(key, value);
-        self.root_page = self.storage.remove::<MultiMapKVPair<K, V>>(
+        let page = self.storage.remove::<MultiMapKVPair<K, V>>(
             self.table_id,
             &kv,
             self.transaction_id,
-            self.root_page,
+            self.root_page.get(),
         )?;
+        self.root_page.set(page);
         Ok(())
     }
 
@@ -362,59 +334,40 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapWriteTransaction<'
         // Match only on the key, so that we can remove all the associated values
         let key_only = make_serialized_key_with_op(key, MultiMapKeyCompareOp::KeyOnly);
         loop {
-            let old_root = self.root_page;
-            self.root_page = self.storage.remove::<MultiMapKVPair<K, V>>(
+            let old_root = self.root_page.get();
+            let new_root = self.storage.remove::<MultiMapKVPair<K, V>>(
                 self.table_id,
                 &key_only,
                 self.transaction_id,
-                self.root_page,
+                self.root_page.get(),
             )?;
-            if old_root == self.root_page {
+            if old_root == new_root {
                 break;
             }
+            self.root_page.set(new_root);
         }
         Ok(())
     }
-
-    pub fn commit(self) -> Result<(), Error> {
-        self.storage.commit(self.root_page, self.transaction_id)?;
-        Ok(())
-    }
-
-    /// Note: pages are only freed during commit(). So exclusively using this function may result
-    /// in an out-of-memory error
-    pub fn non_durable_commit(self) -> Result<(), Error> {
-        self.storage
-            .non_durable_commit(self.root_page, self.transaction_id)?;
-        Ok(())
-    }
-
-    pub fn abort(self) -> Result<(), Error> {
-        self.storage.rollback_uncommited_writes(self.transaction_id)
-    }
 }
 
-pub struct MultiMapReadOnlyTransaction<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
-    storage: &'mmap Storage,
+pub struct ReadOnlyMultiMapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+    storage: &'s Storage,
     root_page: Option<NodeHandle>,
     table_id: u64,
-    transaction_id: u128,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapReadOnlyTransaction<'mmap, K, V> {
+impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultiMapTable<'s, K, V> {
     pub(in crate) fn new(
         table_id: u64,
-        storage: &'mmap Storage,
-    ) -> MultiMapReadOnlyTransaction<'mmap, K, V> {
-        let root_page = storage.get_root_page_number();
-        let transaction_id = storage.allocate_read_transaction();
-        MultiMapReadOnlyTransaction {
+        root_page: Option<NodeHandle>,
+        storage: &'s Storage,
+    ) -> ReadOnlyMultiMapTable<'s, K, V> {
+        ReadOnlyMultiMapTable {
             storage,
             root_page,
             table_id,
-            transaction_id,
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -474,23 +427,14 @@ impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapReadOnlyTransactio
     }
 }
 
-impl<'mmap, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Drop
-    for MultiMapReadOnlyTransaction<'mmap, K, V>
-{
-    fn drop(&mut self) {
-        self.storage
-            .deallocate_read_transaction(self.transaction_id);
-    }
-}
-
 #[cfg(test)]
 mod test {
-    use crate::{Database, MultiMapReadOnlyTransaction, MultiMapTable};
+    use crate::{Database, MultiMapTable, ReadOnlyMultiMapTable};
     use tempfile::NamedTempFile;
 
-    fn get_vec(txn: &MultiMapReadOnlyTransaction<[u8], [u8]>, key: &[u8]) -> Vec<Vec<u8>> {
+    fn get_vec(table: &ReadOnlyMultiMapTable<[u8], [u8]>, key: &[u8]) -> Vec<Vec<u8>> {
         let mut result = vec![];
-        let mut iter = txn.get(key).unwrap();
+        let mut iter = table.get(key).unwrap();
         loop {
             let item = iter.next();
             if let Some((item_key, item_value)) = item {
@@ -506,71 +450,78 @@ mod test {
     fn len() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
-        let mut table: MultiMapTable<[u8], [u8]> = db.open_multimap_table(b"x").unwrap();
-        let mut write_txn = table.begin_write().unwrap();
-        write_txn.insert(b"hello", b"world").unwrap();
-        write_txn.insert(b"hello", b"world2").unwrap();
-        write_txn.insert(b"hi", b"world").unwrap();
+        let write_txn = db.begin_write().unwrap();
+        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+
+        table.insert(b"hello", b"world").unwrap();
+        table.insert(b"hello", b"world2").unwrap();
+        table.insert(b"hi", b"world").unwrap();
         write_txn.commit().unwrap();
-        let read_txn = table.read_transaction().unwrap();
-        assert_eq!(read_txn.len().unwrap(), 3);
+
+        let read_txn = db.begin_read().unwrap();
+        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+        assert_eq!(table.len().unwrap(), 3);
     }
 
     #[test]
     fn is_empty() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
-        let mut table: MultiMapTable<[u8], [u8]> = db.open_multimap_table(b"x").unwrap();
-        let read_txn = table.read_transaction().unwrap();
-        assert!(read_txn.is_empty().unwrap());
-        let mut write_txn = table.begin_write().unwrap();
-        write_txn.insert(b"hello", b"world").unwrap();
+
+        let write_txn = db.begin_write().unwrap();
+        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+        table.insert(b"hello", b"world").unwrap();
         write_txn.commit().unwrap();
-        let read_txn = table.read_transaction().unwrap();
-        assert!(!read_txn.is_empty().unwrap());
+
+        let read_txn = db.begin_read().unwrap();
+        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+        assert!(!table.is_empty().unwrap());
     }
 
     #[test]
     fn insert() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
-        let mut table: MultiMapTable<[u8], [u8]> = db.open_multimap_table(b"x").unwrap();
-        let mut write_txn = table.begin_write().unwrap();
-        write_txn.insert(b"hello", b"world").unwrap();
-        write_txn.insert(b"hello", b"world2").unwrap();
+        let write_txn = db.begin_write().unwrap();
+        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+        table.insert(b"hello", b"world").unwrap();
+        table.insert(b"hello", b"world2").unwrap();
         write_txn.commit().unwrap();
-        let read_txn = table.read_transaction().unwrap();
+
+        let read_txn = db.begin_read().unwrap();
+        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
         assert_eq!(
             vec![b"world".to_vec(), b"world2".to_vec()],
-            get_vec(&read_txn, b"hello")
+            get_vec(&table, b"hello")
         );
-        assert_eq!(read_txn.len().unwrap(), 2);
+        assert_eq!(table.len().unwrap(), 2);
     }
 
     #[test]
     fn range_query() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
-        let mut table: MultiMapTable<[u8], [u8]> = db.open_multimap_table(b"x").unwrap();
-
-        let mut write_txn = table.begin_write().unwrap();
+        let write_txn = db.begin_write().unwrap();
+        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
         for i in 0..5u8 {
             let value = vec![i];
-            write_txn.insert(b"0", &value).unwrap();
+            table.insert(b"0", &value).unwrap();
         }
         for i in 5..10u8 {
             let value = vec![i];
-            write_txn.insert(b"1", &value).unwrap();
+            table.insert(b"1", &value).unwrap();
         }
         for i in 10..15u8 {
             let value = vec![i];
-            write_txn.insert(b"2", &value).unwrap();
+            table.insert(b"2", &value).unwrap();
         }
         write_txn.commit().unwrap();
-        let read_txn = table.read_transaction().unwrap();
+
+        let read_txn = db.begin_read().unwrap();
+        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
         let start = b"0".as_ref();
         let end = b"1".as_ref();
-        let mut iter = read_txn.get_range(start..=end).unwrap();
+        let mut iter = table.get_range(start..=end).unwrap();
         for i in 0..10u8 {
             let (key, value) = iter.next().unwrap();
             if i < 5 {
@@ -587,34 +538,39 @@ mod test {
     fn delete() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
-        let mut table: MultiMapTable<[u8], [u8]> = db.open_multimap_table(b"x").unwrap();
-
-        let mut write_txn = table.begin_write().unwrap();
-        write_txn.insert(b"hello", b"world").unwrap();
-        write_txn.insert(b"hello", b"world2").unwrap();
+        let write_txn = db.begin_write().unwrap();
+        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+        table.insert(b"hello", b"world").unwrap();
+        table.insert(b"hello", b"world2").unwrap();
         write_txn.commit().unwrap();
-        let read_txn = table.read_transaction().unwrap();
+
+        let read_txn = db.begin_read().unwrap();
+        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
         assert_eq!(
             vec![b"world".to_vec(), b"world2".to_vec()],
-            get_vec(&read_txn, b"hello")
+            get_vec(&table, b"hello")
         );
-        assert_eq!(read_txn.len().unwrap(), 2);
+        assert_eq!(table.len().unwrap(), 2);
 
-        let mut write_txn = table.begin_write().unwrap();
-        write_txn.remove(b"hello", b"world2").unwrap();
+        let write_txn = db.begin_write().unwrap();
+        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+        table.remove(b"hello", b"world2").unwrap();
         write_txn.commit().unwrap();
 
-        let read_txn = table.read_transaction().unwrap();
-        assert_eq!(vec![b"world".to_vec()], get_vec(&read_txn, b"hello"));
-        assert_eq!(read_txn.len().unwrap(), 1);
+        let read_txn = db.begin_read().unwrap();
+        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+        assert_eq!(vec![b"world".to_vec()], get_vec(&table, b"hello"));
+        assert_eq!(table.len().unwrap(), 1);
 
-        let mut write_txn = table.begin_write().unwrap();
-        write_txn.remove_all(b"hello").unwrap();
+        let write_txn = db.begin_write().unwrap();
+        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+        table.remove_all(b"hello").unwrap();
         write_txn.commit().unwrap();
 
-        let read_txn = table.read_transaction().unwrap();
-        assert!(read_txn.is_empty().unwrap());
+        let read_txn = db.begin_read().unwrap();
+        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+        assert!(table.is_empty().unwrap());
         let empty: Vec<Vec<u8>> = vec![];
-        assert_eq!(empty, get_vec(&read_txn, b"hello"));
+        assert_eq!(empty, get_vec(&table, b"hello"));
     }
 }
