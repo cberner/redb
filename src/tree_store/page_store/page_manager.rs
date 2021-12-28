@@ -299,7 +299,7 @@ pub(crate) struct PageMut<'a> {
 
 impl<'a> PageMut<'a> {
     pub(crate) fn memory_mut(&mut self) -> &mut [u8] {
-        &mut self.mem
+        self.mem
     }
 }
 
