@@ -1,3 +1,5 @@
+use redb::ReadableTable;
+
 pub trait BenchDatabase {
     type W: for<'a> BenchWriteTransaction<'a>;
     type R: for<'a> BenchReadTransaction<'a>;
