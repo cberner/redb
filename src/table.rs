@@ -1,6 +1,6 @@
 use crate::error::Error;
-use crate::tree_store::{AccessGuardMut, BtreeRangeIter, NodeHandle, Storage};
-use crate::types::{RedbKey, RedbValue};
+use crate::tree_store::{AccessGuardMut, BtreeEntry, BtreeRangeIter, NodeHandle, Storage};
+use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::AccessGuard;
 use std::cell::Cell;
 use std::marker::PhantomData;
@@ -117,8 +117,10 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
     pub fn get_range<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
         &'a self,
         range: T,
-    ) -> Result<BtreeRangeIter<T, KR, K, V>, Error> {
-        self.storage.get_range(self.table_id, range, self.root_page)
+    ) -> Result<RangeIter<T, KR, K, V>, Error> {
+        self.storage
+            .get_range(self.table_id, range, self.root_page)
+            .map(RangeIter::new)
     }
 
     pub fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
@@ -137,6 +139,48 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
         self.storage
             .len(self.table_id, self.root_page)
             .map(|x| x == 0)
+    }
+}
+
+pub struct RangeIter<
+    'a,
+    T: RangeBounds<KR>,
+    KR: AsRef<K>,
+    K: RedbKey + ?Sized + 'a,
+    V: RedbValue + ?Sized + 'a,
+> {
+    inner: BtreeRangeIter<'a, T, KR, K, V>,
+}
+
+impl<
+        'a,
+        T: RangeBounds<KR>,
+        KR: AsRef<K>,
+        K: RedbKey + ?Sized + 'a,
+        V: RedbValue + ?Sized + 'a,
+    > RangeIter<'a, T, KR, K, V>
+{
+    fn new(inner: BtreeRangeIter<'a, T, KR, K, V>) -> Self {
+        Self { inner }
+    }
+
+    // TODO: Simplify this when GATs are stable
+    #[allow(clippy::type_complexity)]
+    // TODO: implement Iter when GATs are stable
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(
+        &mut self,
+    ) -> Option<(
+        <<K as RedbValue>::View as WithLifetime>::Out,
+        <<V as RedbValue>::View as WithLifetime>::Out,
+    )> {
+        if let Some(entry) = self.inner.next() {
+            let key = K::from_bytes(entry.key());
+            let value = V::from_bytes(entry.value());
+            Some((key, value))
+        } else {
+            None
+        }
     }
 }
 
@@ -283,31 +327,6 @@ mod test {
     }
 
     #[test]
-    fn range_query() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
-        let write_txn = db.begin_write().unwrap();
-        let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
-        for i in 0..10u8 {
-            let key = vec![i];
-            table.insert(&key, b"value").unwrap();
-        }
-        write_txn.commit().unwrap();
-
-        let read_txn = db.begin_read().unwrap();
-        let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
-        let start = vec![3u8];
-        let end = vec![7u8];
-        let mut iter = table.get_range(start.as_slice()..end.as_slice()).unwrap();
-        for i in 3..7u8 {
-            let entry = iter.next().unwrap();
-            assert_eq!(&[i], entry.key());
-            assert_eq!(b"value", entry.value());
-        }
-        assert!(iter.next().is_none());
-    }
-
-    #[test]
     fn range_query_reversed() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
@@ -379,9 +398,9 @@ mod test {
         let end = ReverseKey(vec![3u8]);
         let mut iter = table.get_range(start..=end).unwrap();
         for i in (3..=7u8).rev() {
-            let entry = iter.next().unwrap();
-            assert_eq!(&[i], entry.key());
-            assert_eq!(b"value", entry.value());
+            let (key, value) = iter.next().unwrap();
+            assert_eq!(&[i], key);
+            assert_eq!(b"value", value);
         }
         assert!(iter.next().is_none());
     }
