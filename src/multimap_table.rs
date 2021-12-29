@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 use std::collections::Bound;
 use std::convert::TryInto;
 use std::marker::PhantomData;
-use std::ops::RangeBounds;
+use std::ops::{RangeBounds, RangeInclusive};
 
 #[derive(Eq, PartialEq)]
 #[allow(clippy::enum_variant_names)]
@@ -305,19 +305,6 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
         Ok(())
     }
 
-    pub fn get<'a>(
-        &'a self,
-        key: &'a K,
-    ) -> Result<MultimapRangeIter<impl RangeBounds<MultimapKVPair<K, V>>, K, V>, Error> {
-        let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
-        let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
-        let lower = MultimapKVPair::<K, V>::new(lower_bytes);
-        let upper = MultimapKVPair::<K, V>::new(upper_bytes);
-        self.storage
-            .get_range(self.table_id, lower..=upper, self.root_page.get())
-            .map(MultimapRangeIter::new)
-    }
-
     pub fn remove(&mut self, key: &K, value: &V) -> Result<(), Error> {
         let kv = make_serialized_kv(key, value);
         let page = self.storage.remove::<MultimapKVPair<K, V>>(
@@ -350,6 +337,83 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
     }
 }
 
+impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s, K, V>
+    for MultimapTable<'s, 't, K, V>
+{
+    fn get<'a>(&'a self, key: &'a K) -> Result<MultimapGetIterType<'a, K, V>, Error> {
+        let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
+        let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
+        let lower = MultimapKVPair::<K, V>::new(lower_bytes);
+        let upper = MultimapKVPair::<K, V>::new(upper_bytes);
+        self.storage
+            .get_range(self.table_id, lower..=upper, self.root_page.get())
+            .map(MultimapRangeIter::new)
+    }
+
+    fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
+        &'a self,
+        range: T,
+    ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error> {
+        let (start_bytes, end_bytes) = make_inclusive_query_range(range);
+        let start_kv = start_bytes.map(MultimapKVPair::<K, V>::new);
+        let end_kv = end_bytes.map(MultimapKVPair::<K, V>::new);
+        let start = make_bound(start_kv);
+        let end = make_bound(end_kv);
+
+        self.storage
+            .get_range(self.table_id, (start, end), self.root_page.get())
+            .map(MultimapRangeIter::new)
+    }
+
+    fn get_range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
+        &'a self,
+        range: T,
+    ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error> {
+        let (start_bytes, end_bytes) = make_inclusive_query_range(range);
+        let start_kv = start_bytes.map(MultimapKVPair::<K, V>::new);
+        let end_kv = end_bytes.map(MultimapKVPair::<K, V>::new);
+        let start = make_bound(start_kv);
+        let end = make_bound(end_kv);
+
+        self.storage
+            .get_range_reversed(self.table_id, (start, end), self.root_page.get())
+            .map(MultimapRangeIter::new)
+    }
+
+    fn len(&self) -> Result<usize, Error> {
+        self.storage.len(self.table_id, self.root_page.get())
+    }
+
+    fn is_empty(&self) -> Result<bool, Error> {
+        self.storage
+            .len(self.table_id, self.root_page.get())
+            .map(|x| x == 0)
+    }
+}
+
+type MultimapGetIterType<'a, K, V> =
+    MultimapRangeIter<'a, RangeInclusive<MultimapKVPair<K, V>>, K, V>;
+type MultimapGetRangeIterType<'a, K, V> =
+    MultimapRangeIter<'a, (Bound<MultimapKVPair<K, V>>, Bound<MultimapKVPair<K, V>>), K, V>;
+
+pub trait ReadableMultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+    fn get<'a>(&'a self, key: &'a K) -> Result<MultimapGetIterType<'a, K, V>, Error>;
+
+    fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
+        &'a self,
+        range: T,
+    ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error>;
+
+    fn get_range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
+        &'a self,
+        range: T,
+    ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error>;
+
+    fn len(&self) -> Result<usize, Error>;
+
+    fn is_empty(&self) -> Result<bool, Error>;
+}
+
 pub struct ReadOnlyMultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     storage: &'s Storage,
     root_page: Option<NodeHandle>,
@@ -372,11 +436,12 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, 
             _value_type: Default::default(),
         }
     }
+}
 
-    pub fn get<'a>(
-        &'a self,
-        key: &'a K,
-    ) -> Result<MultimapRangeIter<impl RangeBounds<MultimapKVPair<K, V>>, K, V>, Error> {
+impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s, K, V>
+    for ReadOnlyMultimapTable<'s, K, V>
+{
+    fn get<'a>(&'a self, key: &'a K) -> Result<MultimapGetIterType<'a, K, V>, Error> {
         let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
         let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
         let lower = MultimapKVPair::<K, V>::new(lower_bytes);
@@ -386,10 +451,10 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, 
             .map(MultimapRangeIter::new)
     }
 
-    pub fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
+    fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<MultimapRangeIter<impl RangeBounds<MultimapKVPair<K, V>>, K, V>, Error> {
+    ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error> {
         let (start_bytes, end_bytes) = make_inclusive_query_range(range);
         let start_kv = start_bytes.map(MultimapKVPair::<K, V>::new);
         let end_kv = end_bytes.map(MultimapKVPair::<K, V>::new);
@@ -401,10 +466,10 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, 
             .map(MultimapRangeIter::new)
     }
 
-    pub fn get_range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
+    fn get_range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<MultimapRangeIter<impl RangeBounds<MultimapKVPair<K, V>>, K, V>, Error> {
+    ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error> {
         let (start_bytes, end_bytes) = make_inclusive_query_range(range);
         let start_kv = start_bytes.map(MultimapKVPair::<K, V>::new);
         let end_kv = end_bytes.map(MultimapKVPair::<K, V>::new);
@@ -416,11 +481,11 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, 
             .map(MultimapRangeIter::new)
     }
 
-    pub fn len(&self) -> Result<usize, Error> {
+    fn len(&self) -> Result<usize, Error> {
         self.storage.len(self.table_id, self.root_page)
     }
 
-    pub fn is_empty(&self) -> Result<bool, Error> {
+    fn is_empty(&self) -> Result<bool, Error> {
         self.storage
             .len(self.table_id, self.root_page)
             .map(|x| x == 0)
@@ -429,6 +494,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, 
 
 #[cfg(test)]
 mod test {
+    use crate::multimap_table::ReadableMultimapTable;
     use crate::{Database, MultimapTable, ReadOnlyMultimapTable};
     use tempfile::NamedTempFile;
 
