@@ -698,6 +698,7 @@ impl TransactionalMemory {
         let mutator = TransactionMutator::new(get_secondary(mmap), guard);
         // TODO: should propagate this error
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator).unwrap();
+        // TODO: handle out-of-memory and return an error
         let page_number = PageNumber::new(self.page_allocator.alloc(mem).unwrap(), 0);
         // Drop guard only after page_allocator.alloc() is completed
         drop(guard);
@@ -706,10 +707,13 @@ impl TransactionalMemory {
         self.open_dirty_pages.borrow_mut().insert(page_number);
 
         let address = &self.mmap as *const MmapMut as *mut MmapMut;
+
+        let address_range = page_number.address_range(self.page_size);
+        assert!(address_range.end <= self.mmap.len());
         // Safety:
         // All PageMut are registered in open_dirty_pages, and no immutable references are allowed
         // to those pages
-        let mem = unsafe { &mut (*address)[page_number.address_range(self.page_size)] };
+        let mem = unsafe { &mut (*address)[address_range] };
         // Zero the memory
         mem.copy_from_slice(&vec![0u8; page_number.page_size_bytes(self.page_size)]);
 
