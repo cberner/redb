@@ -14,6 +14,7 @@ use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull, RangeTo};
+use std::panic;
 
 // The table of name -> table_id mappings
 const TABLE_TABLE_ID: u64 = 0;
@@ -114,6 +115,7 @@ pub(in crate) struct Storage {
     live_read_transactions: RefCell<BTreeSet<u128>>,
     live_write_transaction: Cell<Option<u128>>,
     pending_freed_pages: RefCell<Vec<PageNumber>>,
+    leaked_write_transaction: Cell<Option<&'static panic::Location<'static>>>,
 }
 
 impl Storage {
@@ -127,16 +129,27 @@ impl Storage {
             live_write_transaction: Cell::new(None),
             live_read_transactions: RefCell::new(Default::default()),
             pending_freed_pages: RefCell::new(Default::default()),
+            leaked_write_transaction: Cell::new(Default::default()),
         })
     }
 
-    pub(crate) fn allocate_write_transaction(&self) -> u128 {
+    pub(crate) fn record_leaked_write_transaction(&self, transaction_id: u128) {
+        assert_eq!(transaction_id, self.live_write_transaction.get().unwrap());
+        self.leaked_write_transaction
+            .set(Some(panic::Location::caller()));
+    }
+
+    pub(crate) fn allocate_write_transaction(&self) -> Result<u128, Error> {
+        if let Some(leaked) = self.leaked_write_transaction.get() {
+            return Err(Error::LeakedWriteTransaction(leaked.to_string()));
+        }
+
         assert!(self.live_write_transaction.get().is_none());
         assert!(self.pending_freed_pages.borrow().is_empty());
         let id = self.next_transaction_id.get();
         self.live_write_transaction.set(Some(id));
         self.next_transaction_id.set(id + 1);
-        id
+        Ok(id)
     }
 
     pub(crate) fn allocate_read_transaction(&self) -> u128 {

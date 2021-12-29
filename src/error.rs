@@ -6,6 +6,7 @@ pub enum Error {
     Corrupted(String),
     TableTypeMismatch(String),
     DoesNotExist(String),
+    LeakedWriteTransaction(String),
     Io(io::Error),
 }
 
