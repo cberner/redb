@@ -214,6 +214,44 @@ fn make_bound<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a>(
     }
 }
 
+pub struct MultimapValueIter<
+    'a,
+    T: RangeBounds<MultimapKVPair<K, V>>,
+    K: RedbKey + ?Sized + 'a,
+    V: RedbKey + ?Sized + 'a,
+> {
+    inner: BtreeRangeIter<'a, T, MultimapKVPair<K, V>, MultimapKVPair<K, V>, [u8]>,
+}
+
+impl<
+        'a,
+        T: RangeBounds<MultimapKVPair<K, V>>,
+        K: RedbKey + ?Sized + 'a,
+        V: RedbKey + ?Sized + 'a,
+    > MultimapValueIter<'a, T, K, V>
+{
+    fn new(inner: BtreeRangeIter<'a, T, MultimapKVPair<K, V>, MultimapKVPair<K, V>, [u8]>) -> Self {
+        Self { inner }
+    }
+
+    // TODO: Simplify this when GATs are stable
+    #[allow(clippy::type_complexity)]
+    // TODO: implement Iter when GATs are stable
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<<<V as RedbValue>::View as WithLifetime>::Out> {
+        if let Some(entry) = self.inner.next() {
+            let pair = MultimapKVPairAccessor::<K, V> {
+                data: entry.key(),
+                _key_type: Default::default(),
+                _value_type: Default::default(),
+            };
+            Some(V::from_bytes(pair.value_bytes()))
+        } else {
+            None
+        }
+    }
+}
+
 pub struct MultimapRangeIter<
     'a,
     T: RangeBounds<MultimapKVPair<K, V>>,
@@ -347,7 +385,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s,
         let upper = MultimapKVPair::<K, V>::new(upper_bytes);
         self.storage
             .get_range(self.table_id, lower..=upper, self.root_page.get())
-            .map(MultimapRangeIter::new)
+            .map(MultimapValueIter::new)
     }
 
     fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
@@ -392,7 +430,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s,
 }
 
 type MultimapGetIterType<'a, K, V> =
-    MultimapRangeIter<'a, RangeInclusive<MultimapKVPair<K, V>>, K, V>;
+    MultimapValueIter<'a, RangeInclusive<MultimapKVPair<K, V>>, K, V>;
 type MultimapGetRangeIterType<'a, K, V> =
     MultimapRangeIter<'a, (Bound<MultimapKVPair<K, V>>, Bound<MultimapKVPair<K, V>>), K, V>;
 
@@ -448,7 +486,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s, K, 
         let upper = MultimapKVPair::<K, V>::new(upper_bytes);
         self.storage
             .get_range(self.table_id, lower..=upper, self.root_page)
-            .map(MultimapRangeIter::new)
+            .map(MultimapValueIter::new)
     }
 
     fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
@@ -503,8 +541,7 @@ mod test {
         let mut iter = table.get(key).unwrap();
         loop {
             let item = iter.next();
-            if let Some((item_key, item_value)) = item {
-                assert_eq!(key, item_key);
+            if let Some(item_value) = item {
                 result.push(item_value.to_vec());
             } else {
                 return result;
