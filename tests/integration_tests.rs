@@ -253,3 +253,28 @@ fn non_durable_read_isolation() {
     assert!(read_table.get(b"hello3").unwrap().is_none());
     assert_eq!(read_table.len().unwrap(), 1);
 }
+
+#[test]
+fn range_query() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let write_txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    for i in 0..10u8 {
+        let key = vec![i];
+        table.insert(&key, b"value").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    let start = vec![3u8];
+    let end = vec![7u8];
+    let mut iter = table.get_range(start.as_slice()..end.as_slice()).unwrap();
+    for i in 3..7u8 {
+        let (key, value) = iter.next().unwrap();
+        assert_eq!(&[i], key);
+        assert_eq!(b"value", value);
+    }
+    assert!(iter.next().is_none());
+}
