@@ -20,7 +20,11 @@ const TABLE_TABLE_ID: u64 = 0;
 // The table of freed pages by transaction. (transaction id, pagination counter) -> binary.
 // The binary blob is a length-prefixed array of big endian PageNumber
 const FREED_TABLE_ID: u64 = TABLE_TABLE_ID + 1;
-const LAST_SYSTEM_TABLE: u64 = FREED_TABLE_ID;
+// Table with a single entry indicating the largest valid table id. u64 -> u64, with a key of LAST_TABLE_ID_KEY
+const LAST_TABLE_ID_TABLE: u64 = FREED_TABLE_ID + 1;
+const LAST_SYSTEM_TABLE: u64 = LAST_TABLE_ID_TABLE;
+
+const LAST_TABLE_ID_KEY: u64 = 0;
 
 #[derive(Debug)]
 pub struct DbStats {
@@ -186,24 +190,32 @@ impl Storage {
             return Ok((definition, root_page.unwrap()));
         }
 
-        let mut iter =
-            self.get_range_reversed::<RangeFull, [u8], [u8], [u8]>(TABLE_TABLE_ID, .., root_page)?;
-        let largest_id = iter
-            .next()
-            .map(|x| TableDefinition::from_bytes(x.value()).get_id())
+        let largest_id = self
+            .get::<u64, u64>(
+                LAST_TABLE_ID_TABLE,
+                &LAST_TABLE_ID_KEY.to_be_bytes(),
+                root_page,
+            )?
+            .map(|x| x.to_value())
             .unwrap_or(LAST_SYSTEM_TABLE);
-        drop(iter);
         let new_id = largest_id + 1;
         let definition = TableDefinition {
             table_id: new_id,
             table_type,
         };
+        let new_root = self.insert::<u64>(
+            LAST_TABLE_ID_TABLE,
+            &LAST_TABLE_ID_KEY.to_be_bytes(),
+            &new_id.to_be_bytes(),
+            transaction_id,
+            root_page,
+        )?;
         let new_root = self.insert::<[u8]>(
             TABLE_TABLE_ID,
             name,
             &definition.to_bytes(),
             transaction_id,
-            root_page,
+            Some(new_root),
         )?;
         Ok((definition, new_root))
     }

@@ -93,15 +93,20 @@ fn persistence() {
 }
 
 #[test]
+#[ignore]
 fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 512 * 1024;
     let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
+    let _table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
+    txn.commit().unwrap();
     let free_pages = db.stats().unwrap().free_pages();
+
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
     let key = vec![0; 100];
     let value = vec![0; 1024];
@@ -206,6 +211,21 @@ fn regression() {
     let table: ReadOnlyTable<u64, u64> = txn.open_table(b"x").unwrap();
     let v = table.get(&6).unwrap().unwrap().to_value();
     assert_eq!(v, 9);
+}
+
+#[test]
+// Test for a bug in table creation code, where multiple tables could end up with the same id
+fn regression2() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024 * 1024;
+    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let tx = db.begin_write().unwrap();
+    let _c: Table<[u8], [u8]> = tx.open_table("c").unwrap();
+    let b: Table<[u8], [u8]> = tx.open_table("b").unwrap();
+    let mut a: Table<[u8], [u8]> = tx.open_table("a").unwrap();
+    a.insert(b"hi", b"1").unwrap();
+    assert!(b.get(b"hi").unwrap().is_none());
 }
 
 #[test]
