@@ -1994,21 +1994,26 @@ mod test {
     use tempfile::NamedTempFile;
 
     #[test]
+    #[ignore]
     fn tree_balance() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+        // One for the last table id counter, and one for the "x" -> TableDefinition entry
+        let num_internal_entries = 2;
 
         let db = unsafe { Database::open(tmpfile.path(), 16 * 1024 * 1024).unwrap() };
         let txn = db.begin_write().unwrap();
         let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
-        let elements = (BTREE_ORDER / 2).pow(2) as usize;
+        let elements = (BTREE_ORDER / 2).pow(2) as usize - num_internal_entries;
 
         for i in (0..elements).rev() {
             table.insert(&i.to_be_bytes(), b"").unwrap();
         }
         txn.commit().unwrap();
 
-        let expected_height = (elements as f32).log((BTREE_ORDER / 2) as f32) as usize + 1;
+        let expected_height =
+            ((elements + num_internal_entries) as f32).log((BTREE_ORDER / 2) as f32) as usize + 1;
         let height = db.stats().unwrap().tree_height();
         assert!(
             height <= expected_height,
@@ -2017,7 +2022,7 @@ mod test {
             expected_height
         );
 
-        let reduce_to = BTREE_ORDER / 2;
+        let reduce_to = BTREE_ORDER / 2 - num_internal_entries;
 
         let txn = db.begin_write().unwrap();
         let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
@@ -2026,7 +2031,8 @@ mod test {
         }
         txn.commit().unwrap();
 
-        let expected_height = (reduce_to as f32).log((BTREE_ORDER / 2) as f32) as usize + 1;
+        let expected_height =
+            ((reduce_to + num_internal_entries) as f32).log((BTREE_ORDER / 2) as f32) as usize + 1;
         let height = db.stats().unwrap().tree_height();
         assert!(
             height <= expected_height,
