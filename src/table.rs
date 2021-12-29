@@ -69,11 +69,6 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
         Ok(guard)
     }
 
-    pub fn get(&self, key: &K) -> Result<Option<AccessGuard<V>>, Error> {
-        self.storage
-            .get::<K, V>(self.table_id, key.as_bytes().as_ref(), self.root_page.get())
-    }
-
     pub fn remove(&mut self, key: &K) -> Result<(), Error> {
         let page = self.storage.remove::<K>(
             self.table_id,
@@ -84,6 +79,61 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
         self.root_page.set(page);
         Ok(())
     }
+}
+
+impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<'s, K, V>
+    for Table<'s, 't, K, V>
+{
+    fn get(&self, key: &K) -> Result<Option<AccessGuard<'s, V>>, Error> {
+        self.storage
+            .get::<K, V>(self.table_id, key.as_bytes().as_ref(), self.root_page.get())
+    }
+
+    fn get_range<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
+        &'a self,
+        range: T,
+    ) -> Result<RangeIter<T, KR, K, V>, Error> {
+        self.storage
+            .get_range(self.table_id, range, self.root_page.get())
+            .map(RangeIter::new)
+    }
+
+    fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
+        &'a self,
+        range: T,
+    ) -> Result<RangeIter<T, KR, K, V>, Error> {
+        self.storage
+            .get_range_reversed(self.table_id, range, self.root_page.get())
+            .map(RangeIter::new)
+    }
+
+    fn len(&self) -> Result<usize, Error> {
+        self.storage.len(self.table_id, self.root_page.get())
+    }
+
+    fn is_empty(&self) -> Result<bool, Error> {
+        self.storage
+            .len(self.table_id, self.root_page.get())
+            .map(|x| x == 0)
+    }
+}
+
+pub trait ReadableTable<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+    fn get(&self, key: &K) -> Result<Option<AccessGuard<'s, V>>, Error>;
+
+    fn get_range<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
+        &'a self,
+        range: T,
+    ) -> Result<RangeIter<T, KR, K, V>, Error>;
+
+    fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
+        &'a self,
+        range: T,
+    ) -> Result<RangeIter<T, KR, K, V>, Error>;
+
+    fn len(&self) -> Result<usize, Error>;
+
+    fn is_empty(&self) -> Result<bool, Error>;
 }
 
 pub struct ReadOnlyTable<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
@@ -108,13 +158,17 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
             _value_type: Default::default(),
         }
     }
+}
 
-    pub fn get(&self, key: &K) -> Result<Option<AccessGuard<'s, V>>, Error> {
+impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<'s, K, V>
+    for ReadOnlyTable<'s, K, V>
+{
+    fn get(&self, key: &K) -> Result<Option<AccessGuard<'s, V>>, Error> {
         self.storage
             .get::<K, V>(self.table_id, key.as_bytes().as_ref(), self.root_page)
     }
 
-    pub fn get_range<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
+    fn get_range<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
@@ -123,7 +177,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
             .map(RangeIter::new)
     }
 
-    pub fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
+    fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
@@ -132,11 +186,11 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
             .map(RangeIter::new)
     }
 
-    pub fn len(&self) -> Result<usize, Error> {
+    fn len(&self) -> Result<usize, Error> {
         self.storage.len(self.table_id, self.root_page)
     }
 
-    pub fn is_empty(&self) -> Result<bool, Error> {
+    fn is_empty(&self) -> Result<bool, Error> {
         self.storage
             .len(self.table_id, self.root_page)
             .map(|x| x == 0)
@@ -190,7 +244,7 @@ mod test {
     use crate::types::{
         AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
     };
-    use crate::{Database, Error, ReadOnlyTable, Table};
+    use crate::{Database, Error, ReadOnlyTable, ReadableTable, Table};
     use std::cmp::Ordering;
     use tempfile::NamedTempFile;
 

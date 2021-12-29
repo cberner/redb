@@ -2,7 +2,9 @@ use tempfile::NamedTempFile;
 
 use rand::prelude::SliceRandom;
 use rand::Rng;
-use redb::{Database, Error, MultimapTable, ReadOnlyMultimapTable, ReadOnlyTable, Table};
+use redb::{
+    Database, Error, MultimapTable, ReadOnlyMultimapTable, ReadOnlyTable, ReadableTable, Table,
+};
 
 const ELEMENTS: usize = 100;
 

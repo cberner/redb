@@ -294,7 +294,7 @@ impl<'a> Drop for ReadOnlyDatabaseTransaction<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::{Database, ReadOnlyTable, Table};
+    use crate::{Database, ReadOnlyTable, ReadableTable, Table};
     use tempfile::NamedTempFile;
 
     #[test]
