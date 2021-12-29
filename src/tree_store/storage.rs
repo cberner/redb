@@ -171,6 +171,41 @@ impl Storage {
         }
     }
 
+    pub(in crate) fn delete_table(
+        &self,
+        name: &[u8],
+        table_type: TableType,
+        transaction_id: u128,
+        mut root_page: Option<NodeHandle>,
+    ) -> Result<Option<NodeHandle>, Error> {
+        if let Some(definition) = self.get_table(name, table_type, root_page)? {
+            // TODO optimize this
+            loop {
+                // We want to delete everything in the table, so just re-interpret it as a table of slices
+                let mut iter = self.get_range::<RangeFull, &[u8], [u8], [u8]>(
+                    definition.get_id(),
+                    ..,
+                    root_page,
+                )?;
+                if let Some(first_entry) = iter.next() {
+                    let first_key = first_entry.key().to_vec();
+                    root_page = self.remove::<[u8]>(
+                        definition.get_id(),
+                        &first_key,
+                        transaction_id,
+                        root_page,
+                    )?;
+                } else {
+                    break;
+                }
+            }
+
+            root_page = self.remove::<[u8]>(TABLE_TABLE_ID, name, transaction_id, root_page)?;
+        }
+
+        Ok(root_page)
+    }
+
     // Returns a tuple of the table id and the new root page
     pub(in crate) fn get_or_create_table(
         &self,
