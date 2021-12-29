@@ -2,7 +2,7 @@ use tempfile::NamedTempFile;
 
 use rand::prelude::SliceRandom;
 use rand::Rng;
-use redb::{Database, ReadOnlyTable, Table};
+use redb::{Database, Error, MultimapTable, ReadOnlyMultimapTable, ReadOnlyTable, Table};
 
 const ELEMENTS: usize = 100;
 
@@ -332,4 +332,31 @@ fn range_query_reversed() {
         assert_eq!(b"value", value);
     }
     assert!(iter.next().is_none());
+}
+
+#[test]
+fn delete_table() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let write_txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    table.insert(b"hello", b"world").unwrap();
+    let mut multitable: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"y").unwrap();
+    multitable.insert(b"hello2", b"world2").unwrap();
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    assert!(write_txn.delete_table(b"x").unwrap());
+    assert!(!write_txn.delete_table(b"x").unwrap());
+    assert!(write_txn.delete_multimap_table(b"y").unwrap());
+    assert!(!write_txn.delete_multimap_table(b"y").unwrap());
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let result: Result<ReadOnlyTable<[u8], [u8]>, Error> = read_txn.open_table(b"x");
+    assert!(result.is_err());
+    let result: Result<ReadOnlyMultimapTable<[u8], [u8]>, Error> =
+        read_txn.open_multimap_table(b"y");
+    assert!(result.is_err());
 }

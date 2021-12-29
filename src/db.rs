@@ -142,6 +142,42 @@ impl<'a> DatabaseTransaction<'a> {
         ))
     }
 
+    /// Delete the given table
+    ///
+    /// Returns a bool indicating whether the table existed
+    pub fn delete_table(&self, name: impl AsRef<[u8]>) -> Result<bool, Error> {
+        assert!(!name.as_ref().is_empty());
+        let original_root = self.root_page.get();
+        let root = self.storage.delete_table(
+            name.as_ref(),
+            TableType::Normal,
+            self.transaction_id,
+            original_root,
+        )?;
+
+        self.root_page.set(root);
+
+        Ok(root != original_root)
+    }
+
+    /// Delete the given table
+    ///
+    /// Returns a bool indicating whether the table existed
+    pub fn delete_multimap_table(&self, name: impl AsRef<[u8]>) -> Result<bool, Error> {
+        assert!(!name.as_ref().is_empty());
+        let original_root = self.root_page.get();
+        let root = self.storage.delete_table(
+            name.as_ref(),
+            TableType::Multimap,
+            self.transaction_id,
+            original_root,
+        )?;
+
+        self.root_page.set(root);
+
+        Ok(root != original_root)
+    }
+
     /// Open the given table
     ///
     /// The table will be created if it does not exist
