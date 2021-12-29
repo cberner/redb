@@ -12,20 +12,20 @@ use std::ops::RangeBounds;
 
 #[derive(Eq, PartialEq)]
 #[allow(clippy::enum_variant_names)]
-enum MultiMapKeyCompareOp {
+enum MultimapKeyCompareOp {
     KeyAndValue,
     KeyMinusEpsilon,
     KeyPlusEpsilon,
     KeyOnly,
 }
 
-impl MultiMapKeyCompareOp {
+impl MultimapKeyCompareOp {
     fn serialize(&self) -> u8 {
         match self {
-            MultiMapKeyCompareOp::KeyAndValue => 1,
-            MultiMapKeyCompareOp::KeyMinusEpsilon => 2,
-            MultiMapKeyCompareOp::KeyPlusEpsilon => 3,
-            MultiMapKeyCompareOp::KeyOnly => 4,
+            MultimapKeyCompareOp::KeyAndValue => 1,
+            MultimapKeyCompareOp::KeyMinusEpsilon => 2,
+            MultimapKeyCompareOp::KeyPlusEpsilon => 3,
+            MultimapKeyCompareOp::KeyOnly => 4,
         }
     }
 }
@@ -39,21 +39,21 @@ impl MultiMapKeyCompareOp {
 /// key_len: u32
 /// key_data: length of key_len
 /// value_data:
-pub struct MultiMapKVPair<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+pub struct MultimapKVPair<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     data: Vec<u8>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> AsRef<MultiMapKVPair<K, V>>
-    for MultiMapKVPair<K, V>
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> AsRef<MultimapKVPair<K, V>>
+    for MultimapKVPair<K, V>
 {
-    fn as_ref(&self) -> &MultiMapKVPair<K, V> {
+    fn as_ref(&self) -> &MultimapKVPair<K, V> {
         self
     }
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> RedbValue for MultiMapKVPair<K, V> {
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> RedbValue for MultimapKVPair<K, V> {
     type View = RefLifetime<[u8]>;
     type ToBytes = RefAsBytesLifetime<[u8]>;
 
@@ -66,48 +66,48 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> RedbValue for Multi
     }
 }
 
-impl<K: RedbKey + ?Sized, V: RedbKey + ?Sized> RedbKey for MultiMapKVPair<K, V> {
+impl<K: RedbKey + ?Sized, V: RedbKey + ?Sized> RedbKey for MultimapKVPair<K, V> {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let kv1 = MultiMapKVPairAccessor::<K, V>::new(data1);
-        let kv2 = MultiMapKVPairAccessor::<K, V>::new(data2);
+        let kv1 = MultimapKVPairAccessor::<K, V>::new(data1);
+        let kv2 = MultimapKVPairAccessor::<K, V>::new(data2);
         // Only one of the inputs may be a query
         assert!(
-            kv1.compare_op() == MultiMapKeyCompareOp::KeyAndValue
-                || kv2.compare_op() == MultiMapKeyCompareOp::KeyAndValue
+            kv1.compare_op() == MultimapKeyCompareOp::KeyAndValue
+                || kv2.compare_op() == MultimapKeyCompareOp::KeyAndValue
         );
-        if kv1.compare_op() != MultiMapKeyCompareOp::KeyAndValue {
+        if kv1.compare_op() != MultimapKeyCompareOp::KeyAndValue {
             Self::compare(data2, data1).reverse()
         } else {
             // Can assume data2 is the query at this point
             match kv2.compare_op() {
-                MultiMapKeyCompareOp::KeyAndValue => {
+                MultimapKeyCompareOp::KeyAndValue => {
                     match K::compare(kv1.key_bytes(), kv2.key_bytes()) {
                         Ordering::Less => Ordering::Less,
                         Ordering::Equal => V::compare(kv1.value_bytes(), kv2.value_bytes()),
                         Ordering::Greater => Ordering::Greater,
                     }
                 }
-                MultiMapKeyCompareOp::KeyMinusEpsilon => {
+                MultimapKeyCompareOp::KeyMinusEpsilon => {
                     match K::compare(kv1.key_bytes(), kv2.key_bytes()) {
                         Ordering::Less => Ordering::Less,
                         Ordering::Equal => Ordering::Greater,
                         Ordering::Greater => Ordering::Greater,
                     }
                 }
-                MultiMapKeyCompareOp::KeyPlusEpsilon => {
+                MultimapKeyCompareOp::KeyPlusEpsilon => {
                     match K::compare(kv1.key_bytes(), kv2.key_bytes()) {
                         Ordering::Less => Ordering::Less,
                         Ordering::Equal => Ordering::Less,
                         Ordering::Greater => Ordering::Greater,
                     }
                 }
-                MultiMapKeyCompareOp::KeyOnly => K::compare(kv1.key_bytes(), kv2.key_bytes()),
+                MultimapKeyCompareOp::KeyOnly => K::compare(kv1.key_bytes(), kv2.key_bytes()),
             }
         }
     }
 }
 
-impl<K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapKVPair<K, V> {
+impl<K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapKVPair<K, V> {
     fn new(data: Vec<u8>) -> Self {
         Self {
             data,
@@ -117,13 +117,13 @@ impl<K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapKVPair<K, V> {
     }
 }
 
-pub struct MultiMapKVPairAccessor<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+pub struct MultimapKVPairAccessor<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     data: &'a [u8],
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultiMapKVPairAccessor<'a, K, V> {
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapKVPairAccessor<'a, K, V> {
     fn new(data: &'a [u8]) -> Self {
         Self {
             data,
@@ -132,12 +132,12 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultiMapKVPairAcces
         }
     }
 
-    fn compare_op(&self) -> MultiMapKeyCompareOp {
+    fn compare_op(&self) -> MultimapKeyCompareOp {
         match self.data[0] {
-            1 => MultiMapKeyCompareOp::KeyAndValue,
-            2 => MultiMapKeyCompareOp::KeyMinusEpsilon,
-            3 => MultiMapKeyCompareOp::KeyPlusEpsilon,
-            4 => MultiMapKeyCompareOp::KeyOnly,
+            1 => MultimapKeyCompareOp::KeyAndValue,
+            2 => MultimapKeyCompareOp::KeyMinusEpsilon,
+            3 => MultimapKeyCompareOp::KeyPlusEpsilon,
+            4 => MultimapKeyCompareOp::KeyOnly,
             _ => unreachable!(),
         }
     }
@@ -156,7 +156,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultiMapKVPairAcces
 }
 
 fn make_serialized_kv<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(key: &K, value: &V) -> Vec<u8> {
-    let mut result = vec![MultiMapKeyCompareOp::KeyAndValue.serialize()];
+    let mut result = vec![MultimapKeyCompareOp::KeyAndValue.serialize()];
     result.extend_from_slice(&(key.as_bytes().as_ref().len() as u32).to_be_bytes());
     result.extend_from_slice(key.as_bytes().as_ref());
     result.extend_from_slice(value.as_bytes().as_ref());
@@ -164,7 +164,7 @@ fn make_serialized_kv<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(key: &K, value: 
     result
 }
 
-fn make_serialized_key_with_op<K: RedbKey + ?Sized>(key: &K, op: MultiMapKeyCompareOp) -> Vec<u8> {
+fn make_serialized_key_with_op<K: RedbKey + ?Sized>(key: &K, op: MultimapKeyCompareOp) -> Vec<u8> {
     let mut result = vec![op.serialize()];
     result.extend_from_slice(&(key.as_bytes().as_ref().len() as u32).to_be_bytes());
     result.extend_from_slice(key.as_bytes().as_ref());
@@ -180,11 +180,11 @@ fn make_inclusive_query_range<'a, K: RedbKey + ?Sized + 'a, T: RangeBounds<&'a K
     let start = match range.start_bound() {
         Bound::Included(&key) => Some(make_serialized_key_with_op(
             key,
-            MultiMapKeyCompareOp::KeyMinusEpsilon,
+            MultimapKeyCompareOp::KeyMinusEpsilon,
         )),
         Bound::Excluded(&key) => Some(make_serialized_key_with_op(
             key,
-            MultiMapKeyCompareOp::KeyPlusEpsilon,
+            MultimapKeyCompareOp::KeyPlusEpsilon,
         )),
         Bound::Unbounded => None,
     };
@@ -192,11 +192,11 @@ fn make_inclusive_query_range<'a, K: RedbKey + ?Sized + 'a, T: RangeBounds<&'a K
     let end = match range.end_bound() {
         Bound::Included(&key) => Some(make_serialized_key_with_op(
             key,
-            MultiMapKeyCompareOp::KeyPlusEpsilon,
+            MultimapKeyCompareOp::KeyPlusEpsilon,
         )),
         Bound::Excluded(&key) => Some(make_serialized_key_with_op(
             key,
-            MultiMapKeyCompareOp::KeyMinusEpsilon,
+            MultimapKeyCompareOp::KeyMinusEpsilon,
         )),
         Bound::Unbounded => None,
     };
@@ -205,8 +205,8 @@ fn make_inclusive_query_range<'a, K: RedbKey + ?Sized + 'a, T: RangeBounds<&'a K
 }
 
 fn make_bound<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a>(
-    included_or_unbounded: Option<MultiMapKVPair<K, V>>,
-) -> Bound<MultiMapKVPair<K, V>> {
+    included_or_unbounded: Option<MultimapKVPair<K, V>>,
+) -> Bound<MultimapKVPair<K, V>> {
     if let Some(kv) = included_or_unbounded {
         Bound::Included(kv)
     } else {
@@ -214,23 +214,23 @@ fn make_bound<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a>(
     }
 }
 
-pub struct MultiMapRangeIter<
+pub struct MultimapRangeIter<
     'a,
-    T: RangeBounds<MultiMapKVPair<K, V>>,
+    T: RangeBounds<MultimapKVPair<K, V>>,
     K: RedbKey + ?Sized + 'a,
     V: RedbKey + ?Sized + 'a,
 > {
-    inner: BtreeRangeIter<'a, T, MultiMapKVPair<K, V>, MultiMapKVPair<K, V>, [u8]>,
+    inner: BtreeRangeIter<'a, T, MultimapKVPair<K, V>, MultimapKVPair<K, V>, [u8]>,
 }
 
 impl<
         'a,
-        T: RangeBounds<MultiMapKVPair<K, V>>,
+        T: RangeBounds<MultimapKVPair<K, V>>,
         K: RedbKey + ?Sized + 'a,
         V: RedbKey + ?Sized + 'a,
-    > MultiMapRangeIter<'a, T, K, V>
+    > MultimapRangeIter<'a, T, K, V>
 {
-    fn new(inner: BtreeRangeIter<'a, T, MultiMapKVPair<K, V>, MultiMapKVPair<K, V>, [u8]>) -> Self {
+    fn new(inner: BtreeRangeIter<'a, T, MultimapKVPair<K, V>, MultimapKVPair<K, V>, [u8]>) -> Self {
         Self { inner }
     }
 
@@ -245,7 +245,7 @@ impl<
         <<V as RedbValue>::View as WithLifetime>::Out,
     )> {
         if let Some(entry) = self.inner.next() {
-            let pair = MultiMapKVPairAccessor::<K, V> {
+            let pair = MultimapKVPairAccessor::<K, V> {
                 data: entry.key(),
                 _key_type: Default::default(),
                 _value_type: Default::default(),
@@ -259,7 +259,7 @@ impl<
     }
 }
 
-pub struct MultiMapTable<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+pub struct MultimapTable<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     storage: &'s Storage,
     table_id: u64,
     transaction_id: u128,
@@ -268,14 +268,14 @@ pub struct MultiMapTable<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     _value_type: PhantomData<V>,
 }
 
-impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapTable<'s, 't, K, V> {
+impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, V> {
     pub(in crate) fn new(
         table_id: u64,
         transaction_id: u128,
         root_page: &'t Cell<Option<NodeHandle>>,
         storage: &'s Storage,
-    ) -> MultiMapTable<'s, 't, K, V> {
-        MultiMapTable {
+    ) -> MultimapTable<'s, 't, K, V> {
+        MultimapTable {
             storage,
             table_id,
             transaction_id,
@@ -294,7 +294,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapTable<'s, 't, K, 
 
     pub fn insert(&mut self, key: &K, value: &V) -> Result<(), Error> {
         let kv = make_serialized_kv(key, value);
-        let page = Some(self.storage.insert::<MultiMapKVPair<K, V>>(
+        let page = Some(self.storage.insert::<MultimapKVPair<K, V>>(
             self.table_id,
             &kv,
             b"",
@@ -308,19 +308,19 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapTable<'s, 't, K, 
     pub fn get<'a>(
         &'a self,
         key: &'a K,
-    ) -> Result<MultiMapRangeIter<impl RangeBounds<MultiMapKVPair<K, V>>, K, V>, Error> {
-        let lower_bytes = make_serialized_key_with_op(key, MultiMapKeyCompareOp::KeyMinusEpsilon);
-        let upper_bytes = make_serialized_key_with_op(key, MultiMapKeyCompareOp::KeyPlusEpsilon);
-        let lower = MultiMapKVPair::<K, V>::new(lower_bytes);
-        let upper = MultiMapKVPair::<K, V>::new(upper_bytes);
+    ) -> Result<MultimapRangeIter<impl RangeBounds<MultimapKVPair<K, V>>, K, V>, Error> {
+        let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
+        let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
+        let lower = MultimapKVPair::<K, V>::new(lower_bytes);
+        let upper = MultimapKVPair::<K, V>::new(upper_bytes);
         self.storage
             .get_range(self.table_id, lower..=upper, self.root_page.get())
-            .map(MultiMapRangeIter::new)
+            .map(MultimapRangeIter::new)
     }
 
     pub fn remove(&mut self, key: &K, value: &V) -> Result<(), Error> {
         let kv = make_serialized_kv(key, value);
-        let page = self.storage.remove::<MultiMapKVPair<K, V>>(
+        let page = self.storage.remove::<MultimapKVPair<K, V>>(
             self.table_id,
             &kv,
             self.transaction_id,
@@ -332,10 +332,10 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapTable<'s, 't, K, 
 
     pub fn remove_all(&mut self, key: &K) -> Result<(), Error> {
         // Match only on the key, so that we can remove all the associated values
-        let key_only = make_serialized_key_with_op(key, MultiMapKeyCompareOp::KeyOnly);
+        let key_only = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyOnly);
         loop {
             let old_root = self.root_page.get();
-            let new_root = self.storage.remove::<MultiMapKVPair<K, V>>(
+            let new_root = self.storage.remove::<MultimapKVPair<K, V>>(
                 self.table_id,
                 &key_only,
                 self.transaction_id,
@@ -350,7 +350,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultiMapTable<'s, 't, K, 
     }
 }
 
-pub struct ReadOnlyMultiMapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+pub struct ReadOnlyMultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     storage: &'s Storage,
     root_page: Option<NodeHandle>,
     table_id: u64,
@@ -358,13 +358,13 @@ pub struct ReadOnlyMultiMapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     _value_type: PhantomData<V>,
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultiMapTable<'s, K, V> {
+impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, V> {
     pub(in crate) fn new(
         table_id: u64,
         root_page: Option<NodeHandle>,
         storage: &'s Storage,
-    ) -> ReadOnlyMultiMapTable<'s, K, V> {
-        ReadOnlyMultiMapTable {
+    ) -> ReadOnlyMultimapTable<'s, K, V> {
+        ReadOnlyMultimapTable {
             storage,
             root_page,
             table_id,
@@ -376,44 +376,44 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultiMapTable<'s, K, 
     pub fn get<'a>(
         &'a self,
         key: &'a K,
-    ) -> Result<MultiMapRangeIter<impl RangeBounds<MultiMapKVPair<K, V>>, K, V>, Error> {
-        let lower_bytes = make_serialized_key_with_op(key, MultiMapKeyCompareOp::KeyMinusEpsilon);
-        let upper_bytes = make_serialized_key_with_op(key, MultiMapKeyCompareOp::KeyPlusEpsilon);
-        let lower = MultiMapKVPair::<K, V>::new(lower_bytes);
-        let upper = MultiMapKVPair::<K, V>::new(upper_bytes);
+    ) -> Result<MultimapRangeIter<impl RangeBounds<MultimapKVPair<K, V>>, K, V>, Error> {
+        let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
+        let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
+        let lower = MultimapKVPair::<K, V>::new(lower_bytes);
+        let upper = MultimapKVPair::<K, V>::new(upper_bytes);
         self.storage
             .get_range(self.table_id, lower..=upper, self.root_page)
-            .map(MultiMapRangeIter::new)
+            .map(MultimapRangeIter::new)
     }
 
     pub fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<MultiMapRangeIter<impl RangeBounds<MultiMapKVPair<K, V>>, K, V>, Error> {
+    ) -> Result<MultimapRangeIter<impl RangeBounds<MultimapKVPair<K, V>>, K, V>, Error> {
         let (start_bytes, end_bytes) = make_inclusive_query_range(range);
-        let start_kv = start_bytes.map(MultiMapKVPair::<K, V>::new);
-        let end_kv = end_bytes.map(MultiMapKVPair::<K, V>::new);
+        let start_kv = start_bytes.map(MultimapKVPair::<K, V>::new);
+        let end_kv = end_bytes.map(MultimapKVPair::<K, V>::new);
         let start = make_bound(start_kv);
         let end = make_bound(end_kv);
 
         self.storage
             .get_range(self.table_id, (start, end), self.root_page)
-            .map(MultiMapRangeIter::new)
+            .map(MultimapRangeIter::new)
     }
 
     pub fn get_range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<MultiMapRangeIter<impl RangeBounds<MultiMapKVPair<K, V>>, K, V>, Error> {
+    ) -> Result<MultimapRangeIter<impl RangeBounds<MultimapKVPair<K, V>>, K, V>, Error> {
         let (start_bytes, end_bytes) = make_inclusive_query_range(range);
-        let start_kv = start_bytes.map(MultiMapKVPair::<K, V>::new);
-        let end_kv = end_bytes.map(MultiMapKVPair::<K, V>::new);
+        let start_kv = start_bytes.map(MultimapKVPair::<K, V>::new);
+        let end_kv = end_bytes.map(MultimapKVPair::<K, V>::new);
         let start = make_bound(start_kv);
         let end = make_bound(end_kv);
 
         self.storage
             .get_range_reversed(self.table_id, (start, end), self.root_page)
-            .map(MultiMapRangeIter::new)
+            .map(MultimapRangeIter::new)
     }
 
     pub fn len(&self) -> Result<usize, Error> {
@@ -429,10 +429,10 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultiMapTable<'s, K, 
 
 #[cfg(test)]
 mod test {
-    use crate::{Database, MultiMapTable, ReadOnlyMultiMapTable};
+    use crate::{Database, MultimapTable, ReadOnlyMultimapTable};
     use tempfile::NamedTempFile;
 
-    fn get_vec(table: &ReadOnlyMultiMapTable<[u8], [u8]>, key: &[u8]) -> Vec<Vec<u8>> {
+    fn get_vec(table: &ReadOnlyMultimapTable<[u8], [u8]>, key: &[u8]) -> Vec<Vec<u8>> {
         let mut result = vec![];
         let mut iter = table.get(key).unwrap();
         loop {
@@ -451,7 +451,7 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+        let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
 
         table.insert(b"hello", b"world").unwrap();
         table.insert(b"hello", b"world2").unwrap();
@@ -459,7 +459,7 @@ mod test {
         write_txn.commit().unwrap();
 
         let read_txn = db.begin_read().unwrap();
-        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+        let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
         assert_eq!(table.len().unwrap(), 3);
     }
 
@@ -469,12 +469,12 @@ mod test {
         let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
 
         let write_txn = db.begin_write().unwrap();
-        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+        let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
         table.insert(b"hello", b"world").unwrap();
         write_txn.commit().unwrap();
 
         let read_txn = db.begin_read().unwrap();
-        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+        let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
         assert!(!table.is_empty().unwrap());
     }
 
@@ -483,13 +483,13 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+        let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
         table.insert(b"hello", b"world").unwrap();
         table.insert(b"hello", b"world2").unwrap();
         write_txn.commit().unwrap();
 
         let read_txn = db.begin_read().unwrap();
-        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+        let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
         assert_eq!(
             vec![b"world".to_vec(), b"world2".to_vec()],
             get_vec(&table, b"hello")
@@ -502,7 +502,7 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+        let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
         for i in 0..5u8 {
             let value = vec![i];
             table.insert(b"0", &value).unwrap();
@@ -518,7 +518,7 @@ mod test {
         write_txn.commit().unwrap();
 
         let read_txn = db.begin_read().unwrap();
-        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+        let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
         let start = b"0".as_ref();
         let end = b"1".as_ref();
         let mut iter = table.get_range(start..=end).unwrap();
@@ -539,13 +539,13 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+        let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
         table.insert(b"hello", b"world").unwrap();
         table.insert(b"hello", b"world2").unwrap();
         write_txn.commit().unwrap();
 
         let read_txn = db.begin_read().unwrap();
-        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+        let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
         assert_eq!(
             vec![b"world".to_vec(), b"world2".to_vec()],
             get_vec(&table, b"hello")
@@ -553,22 +553,22 @@ mod test {
         assert_eq!(table.len().unwrap(), 2);
 
         let write_txn = db.begin_write().unwrap();
-        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+        let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
         table.remove(b"hello", b"world2").unwrap();
         write_txn.commit().unwrap();
 
         let read_txn = db.begin_read().unwrap();
-        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+        let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
         assert_eq!(vec![b"world".to_vec()], get_vec(&table, b"hello"));
         assert_eq!(table.len().unwrap(), 1);
 
         let write_txn = db.begin_write().unwrap();
-        let mut table: MultiMapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+        let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
         table.remove_all(b"hello").unwrap();
         write_txn.commit().unwrap();
 
         let read_txn = db.begin_read().unwrap();
-        let table: ReadOnlyMultiMapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+        let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
         assert!(table.is_empty().unwrap());
         let empty: Vec<Vec<u8>> = vec![];
         assert_eq!(empty, get_vec(&table, b"hello"));

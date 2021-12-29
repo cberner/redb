@@ -1,8 +1,8 @@
-use crate::multimap_table::MultiMapTable;
+use crate::multimap_table::MultimapTable;
 use crate::table::{ReadOnlyTable, Table};
 use crate::tree_store::{DbStats, NodeHandle, Storage, TableType};
 use crate::types::{RedbKey, RedbValue};
-use crate::{Error, ReadOnlyMultiMapTable};
+use crate::{Error, ReadOnlyMultimapTable};
 use memmap2::MmapMut;
 use std::cell::Cell;
 use std::fs::OpenOptions;
@@ -148,17 +148,17 @@ impl<'a> DatabaseTransaction<'a> {
     pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
         name: impl AsRef<[u8]>,
-    ) -> Result<MultiMapTable<'a, '_, K, V>, Error> {
+    ) -> Result<MultimapTable<'a, '_, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
         let (definition, root) = self.storage.get_or_create_table(
             name.as_ref(),
-            TableType::MultiMap,
+            TableType::Multimap,
             self.transaction_id,
             self.root_page.get(),
         )?;
         self.root_page.set(Some(root));
 
-        Ok(MultiMapTable::new(
+        Ok(MultimapTable::new(
             definition.get_id(),
             self.transaction_id,
             &self.root_page,
@@ -229,11 +229,11 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
     pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
         name: impl AsRef<[u8]>,
-    ) -> Result<ReadOnlyMultiMapTable<'a, K, V>, Error> {
+    ) -> Result<ReadOnlyMultimapTable<'a, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
         let definition = self
             .storage
-            .get_table(name.as_ref(), TableType::MultiMap, self.root_page)?
+            .get_table(name.as_ref(), TableType::Multimap, self.root_page)?
             .ok_or_else(|| {
                 Error::DoesNotExist(format!(
                     "Table '{}' does not exist",
@@ -241,7 +241,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
                 ))
             })?;
 
-        Ok(ReadOnlyMultiMapTable::new(
+        Ok(ReadOnlyMultimapTable::new(
             definition.get_id(),
             self.root_page,
             self.storage,

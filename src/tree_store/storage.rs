@@ -52,7 +52,7 @@ impl DbStats {
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub(crate) enum TableType {
     Normal,
-    MultiMap,
+    Multimap,
 }
 
 #[allow(clippy::from_over_into)]
@@ -60,7 +60,7 @@ impl Into<u8> for TableType {
     fn into(self) -> u8 {
         match self {
             TableType::Normal => 1,
-            TableType::MultiMap => 2,
+            TableType::Multimap => 2,
         }
     }
 }
@@ -69,7 +69,7 @@ impl From<u8> for TableType {
     fn from(value: u8) -> Self {
         match value {
             1 => TableType::Normal,
-            2 => TableType::MultiMap,
+            2 => TableType::Multimap,
             _ => unreachable!(),
         }
     }
