@@ -1994,8 +1994,21 @@ mod test {
     use tempfile::NamedTempFile;
 
     #[test]
-    #[ignore]
     fn tree_balance() {
+        fn expected_height(mut elements: usize) -> usize {
+            // Root may have only 2 entries
+            let mut height = 1;
+            elements /= 2;
+
+            // Leaves may have only a single entry
+            height += 1;
+
+            // Each internal node half-full, plus 1 to round up
+            height += (elements as f32).log((BTREE_ORDER / 2) as f32) as usize + 1;
+
+            height
+        }
+
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
         // One for the last table id counter, and one for the "x" -> TableDefinition entry
@@ -2012,14 +2025,13 @@ mod test {
         }
         txn.commit().unwrap();
 
-        let expected_height =
-            ((elements + num_internal_entries) as f32).log((BTREE_ORDER / 2) as f32) as usize + 1;
+        let expected = expected_height(elements + num_internal_entries);
         let height = db.stats().unwrap().tree_height();
         assert!(
-            height <= expected_height,
+            height <= expected,
             "height={} expected={}",
             height,
-            expected_height
+            expected
         );
 
         let reduce_to = BTREE_ORDER / 2 - num_internal_entries;
@@ -2031,14 +2043,13 @@ mod test {
         }
         txn.commit().unwrap();
 
-        let expected_height =
-            ((reduce_to + num_internal_entries) as f32).log((BTREE_ORDER / 2) as f32) as usize + 1;
+        let expected = expected_height(reduce_to + num_internal_entries);
         let height = db.stats().unwrap().tree_height();
         assert!(
-            height <= expected_height,
+            height <= expected,
             "height={} expected={}",
             height,
-            expected_height
+            expected
         );
     }
 }
