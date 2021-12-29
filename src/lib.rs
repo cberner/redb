@@ -1,7 +1,8 @@
 pub use db::{Database, DatabaseBuilder, DatabaseTransaction, ReadOnlyDatabaseTransaction};
 pub use error::Error;
 pub use multimap_table::{
-    MultimapRangeIter, MultimapTable, ReadOnlyMultimapTable, ReadableMultimapTable,
+    MultimapRangeIter, MultimapTable, MultimapValueIter, ReadOnlyMultimapTable,
+    ReadableMultimapTable,
 };
 pub use table::{RangeIter, ReadOnlyTable, ReadableTable, Table};
 pub use tree_store::AccessGuard;
