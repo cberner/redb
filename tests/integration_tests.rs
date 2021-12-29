@@ -93,7 +93,6 @@ fn persistence() {
 }
 
 #[test]
-#[ignore]
 fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
@@ -101,6 +100,7 @@ fn free() {
     let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
     let _table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
+    let _table: Table<[u8], [u8]> = txn.open_table(b"y").unwrap();
 
     txn.commit().unwrap();
     let free_pages = db.stats().unwrap().free_pages();
@@ -116,20 +116,28 @@ fn free() {
     assert!(num_writes > 64);
 
     {
-        for _ in 0..num_writes {
-            table.insert(&key, &value).unwrap();
+        for i in 0..num_writes {
+            let mut mut_key = key.clone();
+            mut_key.extend_from_slice(&i.to_be_bytes());
+            table.insert(&mut_key, &value).unwrap();
         }
     }
     txn.commit().unwrap();
 
-    let txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
     {
-        for _ in 0..num_writes {
-            table.remove(&key).unwrap();
+        let key_range: Vec<usize> = (0..num_writes).collect();
+        // Delete in chunks to be sure that we don't run out of pages due to temp allocations
+        for chunk in key_range.chunks(10) {
+            let txn = db.begin_write().unwrap();
+            let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
+            for i in chunk {
+                let mut mut_key = key.clone();
+                mut_key.extend_from_slice(&(*i as u64).to_be_bytes());
+                table.remove(&mut_key).unwrap();
+            }
+            txn.commit().unwrap();
         }
     }
-    txn.commit().unwrap();
 
     assert_eq!(free_pages, db.stats().unwrap().free_pages());
 }

@@ -1056,6 +1056,7 @@ fn split_leaf(
     leaf: NodeHandle,
     partial: &[(u64, Vec<u8>, Vec<u8>)],
     manager: &TransactionalMemory,
+    freed: &mut Vec<PageNumber>,
 ) -> Option<(NodeHandle, NodeHandle)> {
     assert!(partial.is_empty());
     let page = manager.get_page(leaf.get_page_number());
@@ -1064,6 +1065,7 @@ fn split_leaf(
         let lesser = accessor.lesser();
         let page1 = make_single_leaf(lesser.table_id(), lesser.key(), lesser.value(), manager);
         let page2 = make_single_leaf(greater.table_id(), greater.key(), greater.value(), manager);
+        freed.push(page.get_page_number());
         Some((page1, page2))
     } else {
         None
@@ -1088,6 +1090,7 @@ fn split_index(
     index: NodeHandle,
     partial: &[NodeHandle],
     manager: &TransactionalMemory,
+    freed: &mut Vec<PageNumber>,
 ) -> Option<(NodeHandle, NodeHandle)> {
     let page = manager.get_page(index.get_page_number());
     let accessor = InternalAccessor::new(&page, index.get_valid_messages());
@@ -1165,6 +1168,7 @@ fn split_index(
 
     let page1 = make_index_many_pages(&pages[0..division], manager);
     let page2 = make_index_many_pages(&pages[division..], manager);
+    freed.push(page.get_page_number());
 
     Some((page1, page2))
 }
@@ -1196,6 +1200,7 @@ fn merge_index(
     index: NodeHandle,
     partial: &[NodeHandle],
     manager: &TransactionalMemory,
+    freed: &mut Vec<PageNumber>,
 ) -> NodeHandle {
     let page = manager.get_page(index.get_page_number());
     let accessor = InternalAccessor::new(&page, index.get_valid_messages());
@@ -1218,12 +1223,15 @@ fn merge_index(
     });
     assert!(pages.len() <= BTREE_ORDER);
 
+    freed.push(page.get_page_number());
+
     make_index_many_pages(&pages, manager)
 }
 
 fn repair_children(
     children: Vec<DeletionResult>,
     manager: &TransactionalMemory,
+    freed: &mut Vec<PageNumber>,
 ) -> Vec<NodeHandle> {
     if children.iter().all(|x| matches!(x, Subtree(_))) {
         children
@@ -1245,7 +1253,7 @@ fn repair_children(
                 }
                 let offset = if i > 0 { i - 1 } else { i + 1 };
                 if let Some(PartialLeaf(partials)) = children.get(offset) {
-                    if let Some((page1, page2)) = split_leaf(*handle, partials, manager) {
+                    if let Some((page1, page2)) = split_leaf(*handle, partials, manager, freed) {
                         result.push(page1);
                         result.push(page2);
                     } else {
@@ -1271,11 +1279,13 @@ fn repair_children(
                 }
                 let offset = if i > 0 { i - 1 } else { i + 1 };
                 if let Some(PartialInternal(partials)) = children.get(offset) {
-                    if let Some((page1, page2)) = split_index(*page_number, partials, manager) {
+                    if let Some((page1, page2)) =
+                        split_index(*page_number, partials, manager, freed)
+                    {
                         result.push(page1);
                         result.push(page2);
                     } else {
-                        result.push(merge_index(*page_number, partials, manager));
+                        result.push(merge_index(*page_number, partials, manager, freed));
                     }
                     repaired = true;
                 } else {
@@ -1436,7 +1446,7 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
             assert!(found);
             assert!(children.len() > 1);
             freed.push(original_page_number);
-            let children = repair_children(children, manager);
+            let children = repair_children(children, manager, freed);
             if children.len() == 1 {
                 return PartialInternal(children);
             }
