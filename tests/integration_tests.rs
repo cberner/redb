@@ -362,3 +362,18 @@ fn delete_table() {
         read_txn.open_multimap_table(b"y");
     assert!(result.is_err());
 }
+
+#[test]
+fn leaked_write() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let write_txn = db.begin_write().unwrap();
+    drop(write_txn);
+    let result = db.begin_write();
+    if let Err(Error::LeakedWriteTransaction(_message)) = result {
+        // Good
+    } else {
+        panic!();
+    }
+}

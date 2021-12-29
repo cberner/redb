@@ -7,6 +7,7 @@ use memmap2::MmapMut;
 use std::cell::Cell;
 use std::fs::OpenOptions;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct Database {
     storage: Storage,
@@ -41,7 +42,7 @@ impl Database {
     }
 
     pub fn begin_write(&self) -> Result<DatabaseTransaction, Error> {
-        Ok(DatabaseTransaction::new(&self.storage))
+        DatabaseTransaction::new(&self.storage)
     }
 
     pub fn begin_read(&self) -> Result<ReadOnlyDatabaseTransaction, Error> {
@@ -105,17 +106,19 @@ pub struct DatabaseTransaction<'a> {
     storage: &'a Storage,
     transaction_id: u128,
     root_page: Cell<Option<NodeHandle>>,
+    completed: AtomicBool,
 }
 
 impl<'a> DatabaseTransaction<'a> {
-    fn new(storage: &'a Storage) -> Self {
-        let transaction_id = storage.allocate_write_transaction();
+    fn new(storage: &'a Storage) -> Result<Self, Error> {
+        let transaction_id = storage.allocate_write_transaction()?;
         let root_page = storage.get_root_page_number();
-        Self {
+        Ok(Self {
             storage,
             transaction_id,
             root_page: Cell::new(root_page),
-        }
+            completed: Default::default(),
+        })
     }
 
     /// Open the given table
@@ -205,6 +208,7 @@ impl<'a> DatabaseTransaction<'a> {
     pub fn commit(self) -> Result<(), Error> {
         self.storage
             .commit(self.root_page.get(), self.transaction_id)?;
+        self.completed.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -213,11 +217,24 @@ impl<'a> DatabaseTransaction<'a> {
     pub fn non_durable_commit(self) -> Result<(), Error> {
         self.storage
             .non_durable_commit(self.root_page.get(), self.transaction_id)?;
+        self.completed.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     pub fn abort(self) -> Result<(), Error> {
-        self.storage.rollback_uncommited_writes(self.transaction_id)
+        self.storage
+            .rollback_uncommited_writes(self.transaction_id)?;
+        self.completed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+impl<'a> Drop for DatabaseTransaction<'a> {
+    fn drop(&mut self) {
+        if !self.completed.load(Ordering::SeqCst) {
+            self.storage
+                .record_leaked_write_transaction(self.transaction_id);
+        }
     }
 }
 
