@@ -21,6 +21,8 @@ pub trait BenchWriteTransaction<'a> {
 
 pub trait BenchInserter {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()>;
+
+    fn remove(&mut self, key: &[u8]) -> Result<(), ()>;
 }
 
 pub trait BenchReadTransaction<'a> {
@@ -98,6 +100,10 @@ impl BenchInserter for RedbBenchInserter<'_> {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.table.insert(key, value).map_err(|_| ())
     }
+
+    fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
+        self.table.remove(key).map_err(|_| ())
+    }
 }
 
 pub struct SledBenchDatabase<'a> {
@@ -162,6 +168,10 @@ pub struct SledBenchInserter<'a> {
 impl<'a> BenchInserter for SledBenchInserter<'a> {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.db.insert(key, value).map(|_| ()).map_err(|_| ())
+    }
+
+    fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
+        self.db.remove(key).map(|_| ()).map_err(|_| ())
     }
 }
 
@@ -230,6 +240,13 @@ impl BenchInserter for LmdbRkvBenchInserter<'_> {
         mut_txn
             .put(self.db, &key, &value, lmdb::WriteFlags::empty())
             .map_err(|_| ())
+    }
+
+    fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
+        // TODO: this might be UB, but I couldn't figure out how to fix the lifetimes without GATs
+        let mut_txn =
+            unsafe { &mut *(self.txn as *const lmdb::RwTransaction as *mut lmdb::RwTransaction) };
+        mut_txn.del(self.db, &key, None).map_err(|_| ())
     }
 }
 

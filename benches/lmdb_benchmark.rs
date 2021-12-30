@@ -132,6 +132,30 @@ fn benchmark<T: BenchDatabase>(mut db: T) {
             );
         }
     }
+
+    let start = SystemTime::now();
+    let deletes = key_order.len() / 2;
+    {
+        let txn = db.write_transaction();
+        let mut inserter = txn.get_inserter();
+        for i in 0..deletes {
+            let (key, value) = &pairs[i % pairs.len()];
+            let mut mut_key = key.clone();
+            mut_key.extend_from_slice(&i.to_be_bytes());
+            inserter.insert(&mut_key, value).unwrap();
+        }
+        drop(inserter);
+        txn.commit().unwrap();
+    }
+
+    let end = SystemTime::now();
+    let duration = end.duration_since(start).unwrap();
+    println!(
+        "{}: Removed {} individual items in {}ms",
+        T::db_type_name(),
+        deletes,
+        duration.as_millis()
+    );
 }
 
 fn main() {
