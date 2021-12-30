@@ -171,7 +171,7 @@ pub struct LmdbRkvBenchDatabase<'a> {
 }
 
 impl<'a> LmdbRkvBenchDatabase<'a> {
-    pub fn _new(env: &'a lmdb::Environment) -> Self {
+    pub fn new(env: &'a lmdb::Environment) -> Self {
         let db = env.open_db(None).unwrap();
         LmdbRkvBenchDatabase { env, db }
     }
@@ -206,8 +206,8 @@ impl<'a, 'b> BenchWriteTransaction<'b> for LmdbRkvBenchWriteTransaction<'a> {
 
     fn get_inserter(&'b self) -> Self::T {
         LmdbRkvBenchInserter {
-            _db: self.db,
-            _txn: &self.txn,
+            db: self.db,
+            txn: &self.txn,
         }
     }
 
@@ -218,16 +218,18 @@ impl<'a, 'b> BenchWriteTransaction<'b> for LmdbRkvBenchWriteTransaction<'a> {
 }
 
 pub struct LmdbRkvBenchInserter<'a> {
-    _db: lmdb::Database,
-    _txn: &'a lmdb::RwTransaction<'a>,
+    db: lmdb::Database,
+    txn: &'a lmdb::RwTransaction<'a>,
 }
 
 impl BenchInserter for LmdbRkvBenchInserter<'_> {
-    fn insert(&mut self, _key: &[u8], _value: &[u8]) -> Result<(), ()> {
-        todo!("Fix this")
-        // self.txn
-        //     .put(self.db, &key, &value, lmdb::WriteFlags::empty())
-        //     .map_err(|_| ())
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
+        // TODO: this might be UB, but I couldn't figure out how to fix the lifetimes without GATs
+        let mut_txn =
+            unsafe { &mut *(self.txn as *const lmdb::RwTransaction as *mut lmdb::RwTransaction) };
+        mut_txn
+            .put(self.db, &key, &value, lmdb::WriteFlags::empty())
+            .map_err(|_| ())
     }
 }
 
