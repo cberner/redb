@@ -135,13 +135,13 @@ fn benchmark<T: BenchDatabase>(mut db: T) {
 }
 
 fn main() {
-    // {
-    //     let tmpfile: TempDir = tempfile::tempdir().unwrap();
-    //     let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
-    //     env.set_map_size(4096 * 1024 * 1024).unwrap();
-    //     let table = LmdbRkvBenchDatabase::new(&env);
-    //     benchmark(table);
-    // }
+    {
+        let tmpfile: TempDir = tempfile::tempdir().unwrap();
+        let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
+        env.set_map_size(4096 * 1024 * 1024).unwrap();
+        let table = LmdbRkvBenchDatabase::new(&env);
+        benchmark(table);
+    }
     {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { redb::Database::open(tmpfile.path(), 4096 * 1024 * 1024).unwrap() };
