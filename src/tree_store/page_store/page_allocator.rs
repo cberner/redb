@@ -1,3 +1,4 @@
+use crate::Error;
 use std::convert::TryInto;
 use std::mem::size_of;
 
@@ -227,7 +228,7 @@ impl PageAllocator {
     }
 
     /// data must have been initialized by Self::init_new()
-    pub(crate) fn alloc(&self, data: &mut [u8]) -> Option<u64> {
+    pub(crate) fn alloc(&self, data: &mut [u8]) -> Result<u64, Error> {
         if let Some(mut entry) = self.get_level(data, 0).first_unset(0, 64) {
             let mut height = 0;
 
@@ -242,9 +243,9 @@ impl PageAllocator {
 
             assert!(entry < self.get_num_pages() as usize);
             self.record_alloc(data, entry as u64);
-            Some(entry as u64)
+            Ok(entry as u64)
         } else {
-            None
+            Err(Error::OutOfSpace)
         }
     }
 
@@ -269,6 +270,7 @@ impl PageAllocator {
 #[cfg(test)]
 mod test {
     use crate::tree_store::page_store::page_allocator::PageAllocator;
+    use crate::Error;
     use rand::prelude::IteratorRandom;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -283,7 +285,10 @@ mod test {
         for i in 0..num_pages {
             assert_eq!(i as u64, allocator.alloc(&mut data).unwrap());
         }
-        assert!(allocator.alloc(&mut data).is_none());
+        assert!(matches!(
+            allocator.alloc(&mut data).unwrap_err(),
+            Error::OutOfSpace
+        ));
     }
 
     #[test]
@@ -292,7 +297,10 @@ mod test {
         let allocator = PageAllocator::init_new(&mut data, 2);
         allocator.record_alloc(&mut data, 0);
         assert_eq!(1, allocator.alloc(&mut data).unwrap());
-        assert!(allocator.alloc(&mut data).is_none());
+        assert!(matches!(
+            allocator.alloc(&mut data).unwrap_err(),
+            Error::OutOfSpace
+        ));
     }
 
     #[test]
@@ -300,7 +308,10 @@ mod test {
         let mut data = vec![0; PageAllocator::required_space(1)];
         let allocator = PageAllocator::init_new(&mut data, 1);
         assert_eq!(0, allocator.alloc(&mut data).unwrap());
-        assert!(allocator.alloc(&mut data).is_none());
+        assert!(matches!(
+            allocator.alloc(&mut data).unwrap_err(),
+            Error::OutOfSpace
+        ));
         allocator.free(&mut data, 0);
         assert_eq!(0, allocator.alloc(&mut data).unwrap());
     }
@@ -317,7 +328,10 @@ mod test {
         allocator.free(&mut data, 15);
         assert_eq!(5, allocator.alloc(&mut data).unwrap());
         assert_eq!(15, allocator.alloc(&mut data).unwrap());
-        assert!(allocator.alloc(&mut data).is_none());
+        assert!(matches!(
+            allocator.alloc(&mut data).unwrap_err(),
+            Error::OutOfSpace
+        ));
     }
 
     #[test]
@@ -326,7 +340,7 @@ mod test {
         let mut data = vec![0; PageAllocator::required_space(num_pages)];
         let allocator = PageAllocator::init_new(&mut data, num_pages);
         // Allocate everything
-        while allocator.alloc(&mut data).is_some() {}
+        while allocator.alloc(&mut data).is_ok() {}
         // The last u64 must be used, since the leaf layer is compact
         let l = data.len();
         assert_ne!(0, u64::from_be_bytes(data[(l - 8)..].try_into().unwrap()));
@@ -346,7 +360,7 @@ mod test {
 
         for _ in 0..(num_pages * 2) {
             if rng.gen_bool(0.75) {
-                if let Some(page) = allocator.alloc(&mut data) {
+                if let Ok(page) = allocator.alloc(&mut data) {
                     allocated.insert(page);
                 } else {
                     assert_eq!(allocated.len(), num_pages);
@@ -362,7 +376,10 @@ mod test {
         for _ in allocated.len()..num_pages {
             allocator.alloc(&mut data).unwrap();
         }
-        assert!(allocator.alloc(&mut data).is_none());
+        assert!(matches!(
+            allocator.alloc(&mut data).unwrap_err(),
+            Error::OutOfSpace
+        ));
 
         for i in 0..num_pages {
             allocator.free(&mut data, i as u64);
@@ -371,6 +388,9 @@ mod test {
         for _ in 0..num_pages {
             allocator.alloc(&mut data).unwrap();
         }
-        assert!(allocator.alloc(&mut data).is_none());
+        assert!(matches!(
+            allocator.alloc(&mut data).unwrap_err(),
+            Error::OutOfSpace
+        ));
     }
 }

@@ -288,13 +288,13 @@ impl Storage {
                 key,
                 value,
                 &self.mem,
-            );
+            )?;
             self.pending_freed_pages
                 .borrow_mut()
                 .extend_from_slice(&freed);
             Ok(new_root)
         } else {
-            let (new_root, _) = make_mut_single_leaf(table_id, key, value, &self.mem);
+            let (new_root, _) = make_mut_single_leaf(table_id, key, value, &self.mem)?;
             Ok(new_root)
         }
     }
@@ -319,13 +319,13 @@ impl Storage {
                 key,
                 &value,
                 &self.mem,
-            );
+            )?;
             self.pending_freed_pages
                 .borrow_mut()
                 .extend_from_slice(&freed);
             (new_root, guard)
         } else {
-            make_mut_single_leaf(table_id, key, &value, &self.mem)
+            make_mut_single_leaf(table_id, key, &value, &self.mem)?
         };
         Ok((new_root, guard))
     }
@@ -364,7 +364,7 @@ impl Storage {
             new_root = self.store_freed_pages(transaction_id, new_root)?;
         } else {
             for page in self.pending_freed_pages.borrow_mut().drain(..) {
-                self.mem.free(page);
+                self.mem.free(page)?;
             }
         }
 
@@ -427,7 +427,7 @@ impl Storage {
             // 1..=length because the array is length prefixed
             for i in 1..=length {
                 let page = PageNumber::from_be_bytes(value[i * 8..(i + 1) * 8].try_into().unwrap());
-                self.mem.free(page);
+                self.mem.free(page)?;
             }
         }
         drop(iter);
@@ -658,7 +658,7 @@ impl Storage {
                 table_id,
                 key,
                 &self.mem,
-            );
+            )?;
             self.pending_freed_pages
                 .borrow_mut()
                 .extend_from_slice(&freed);

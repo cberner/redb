@@ -653,30 +653,31 @@ impl TransactionalMemory {
         mutator.set_root_page(root_page, valid_messages);
     }
 
-    pub(crate) fn free(&self, page: PageNumber) {
+    pub(crate) fn free(&self, page: PageNumber) -> Result<(), Error> {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        // TODO: should propagate this error
-        let (mem, guard) = self.acquire_mutable_page_allocator(mutator).unwrap();
+        let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
         assert_eq!(page.page_order, 0);
         self.page_allocator.free(mem, page.page_index);
         drop(guard);
         self.freed_since_commit.borrow_mut().push(page);
+
+        Ok(())
     }
 
     // Frees the page if it was allocated since the last commit. Returns true, if the page was freed
-    pub(crate) fn free_if_uncommitted(&self, page: PageNumber) -> bool {
+    pub(crate) fn free_if_uncommitted(&self, page: PageNumber) -> Result<bool, Error> {
         if self.allocated_since_commit.borrow_mut().remove(&page) {
             let (mmap, guard) = self.acquire_mutable_metapage();
             let mutator = TransactionMutator::new(get_secondary(mmap), guard);
-            // TODO: should propagate this error
-            let (mem, guard) = self.acquire_mutable_page_allocator(mutator).unwrap();
+            let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
             assert_eq!(page.page_order, 0);
             self.page_allocator.free(mem, page.page_index);
             drop(guard);
-            true
+
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -685,15 +686,13 @@ impl TransactionalMemory {
         self.allocated_since_commit.borrow().contains(&page)
     }
 
-    pub(crate) fn allocate(&self, allocation_size: usize) -> PageMut {
+    pub(crate) fn allocate(&self, allocation_size: usize) -> Result<PageMut, Error> {
         assert!(allocation_size <= self.page_size);
 
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        // TODO: should propagate this error
-        let (mem, guard) = self.acquire_mutable_page_allocator(mutator).unwrap();
-        // TODO: handle out-of-memory and return an error
-        let page_number = PageNumber::new(self.page_allocator.alloc(mem).unwrap(), 0);
+        let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
+        let page_number = PageNumber::new(self.page_allocator.alloc(mem)?, 0);
         // Drop guard only after page_allocator.alloc() is completed
         drop(guard);
 
@@ -711,11 +710,11 @@ impl TransactionalMemory {
         // Zero the memory
         mem.copy_from_slice(&vec![0u8; page_number.page_size_bytes(self.page_size)]);
 
-        PageMut {
+        Ok(PageMut {
             mem,
             page_number,
             open_pages: &self.open_dirty_pages,
-        }
+        })
     }
 
     pub(crate) fn count_free_pages(&self) -> usize {
