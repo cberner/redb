@@ -7,6 +7,7 @@ pub enum Error {
     TableTypeMismatch(String),
     DoesNotExist(String),
     LeakedWriteTransaction(String),
+    OutOfSpace,
     Io(io::Error),
 }
 
