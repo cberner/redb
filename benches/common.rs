@@ -29,6 +29,9 @@ pub trait BenchReadTransaction<'a> {
     type Output: AsRef<[u8]> + 'a;
 
     fn get(&'a self, key: &[u8]) -> Option<Self::Output>;
+
+    // TODO: change this to a method that iterates over a range, for a more complete benchmark
+    fn exists_after(&'a self, key: &[u8]) -> bool;
 }
 
 pub struct RedbBenchDatabase<'a> {
@@ -71,6 +74,10 @@ impl<'a, 'b> BenchReadTransaction<'b> for RedbBenchReadTransaction<'a> {
 
     fn get(&'b self, key: &[u8]) -> Option<redb::AccessGuard<'b, [u8]>> {
         self.table.get(key).unwrap()
+    }
+
+    fn exists_after(&'b self, key: &[u8]) -> bool {
+        self.table.get_range(key..).unwrap().next().is_some()
     }
 }
 
@@ -142,6 +149,10 @@ impl<'a, 'b> BenchReadTransaction<'b> for SledBenchReadTransaction<'a> {
 
     fn get(&'b self, key: &[u8]) -> Option<sled::IVec> {
         self.db.get(key).unwrap()
+    }
+
+    fn exists_after(&'b self, key: &[u8]) -> bool {
+        self.db.range(key..).next().is_some()
     }
 }
 
@@ -261,5 +272,15 @@ impl<'a, 'b> BenchReadTransaction<'b> for LmdbRkvBenchReadTransaction<'a> {
     fn get(&'b self, key: &[u8]) -> Option<&'b [u8]> {
         use lmdb::Transaction;
         self.txn.get(self.db, &key).ok()
+    }
+
+    fn exists_after(&'b self, key: &[u8]) -> bool {
+        use lmdb::{Cursor, Transaction};
+        self.txn
+            .open_ro_cursor(self.db)
+            .unwrap()
+            .iter_from(key)
+            .next()
+            .is_some()
     }
 }
