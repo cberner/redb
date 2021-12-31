@@ -7,12 +7,10 @@ pub(in crate) struct NodeHandle {
 }
 
 impl NodeHandle {
-    pub(crate) fn new(page_number: PageNumber, messages: u32) -> Self {
-        // TODO: change messages to a u8
-        assert!(messages <= u8::MAX as u32);
+    pub(crate) fn new(page_number: PageNumber, messages: u8) -> Self {
         Self {
             page_number,
-            messages: messages as u8,
+            messages,
         }
     }
 
@@ -23,8 +21,8 @@ impl NodeHandle {
     // Messages are btree node defined, but must form a strict ordering of subsets of page memory.
     // That is, if m1 & m2 are counts of messages and m1 < m2, then the bytes in a page p,
     // used in the representation of m1 is a strict subset of the bytes used for m2
-    pub(crate) fn get_valid_messages(&self) -> u32 {
-        self.messages as u32
+    pub(crate) fn get_valid_messages(&self) -> u8 {
+        self.messages
     }
 
     #[inline(always)]
@@ -41,7 +39,7 @@ impl NodeHandle {
     pub(crate) fn from_be_bytes(bytes: [u8; Self::serialized_size()]) -> Self {
         let page_number = PageNumber::from_be_bytes(bytes);
         let temp = u64::from_be_bytes(bytes[..8].try_into().unwrap());
-        let messages = (temp >> 56) as u32;
+        let messages = (temp >> 56) as u8;
 
         Self::new(page_number, messages)
     }
