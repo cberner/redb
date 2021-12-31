@@ -131,6 +131,24 @@ fn benchmark<T: BenchDatabase>(mut db: T) {
                 duration.as_millis()
             );
         }
+
+        for _ in 0..ITERATIONS {
+            let start = SystemTime::now();
+            for i in &key_order {
+                let (key, _) = &pairs[*i % pairs.len()];
+                let mut mut_key = key.clone();
+                mut_key.extend_from_slice(&i.to_be_bytes());
+                txn.exists_after(&mut_key);
+            }
+            let end = SystemTime::now();
+            let duration = end.duration_since(start).unwrap();
+            println!(
+                "{}: Random range read {} starts in {}ms",
+                T::db_type_name(),
+                ELEMENTS,
+                duration.as_millis()
+            );
+        }
     }
 
     let start = SystemTime::now();

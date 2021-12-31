@@ -1,5 +1,5 @@
 use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
-use crate::tree_store::btree_utils::RangeIterState::{InitialState, Internal, LeafLeft, LeafRight};
+use crate::tree_store::btree_utils::RangeIterState::{Internal, LeafLeft, LeafRight};
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, PageNumber, TransactionalMemory};
 use crate::tree_store::NodeHandle;
 use crate::types::{RedbKey, RedbValue};
@@ -39,8 +39,7 @@ const LEAF: u8 = 1;
 const INTERNAL: u8 = 2;
 
 #[derive(Debug)]
-enum RangeIterState<'a> {
-    InitialState(PageImpl<'a>, u32, bool),
+pub(crate) enum RangeIterState<'a> {
     LeafLeft {
         page: PageImpl<'a>,
         parent: Option<Box<RangeIterState<'a>>>,
@@ -63,23 +62,6 @@ enum RangeIterState<'a> {
 impl<'a> RangeIterState<'a> {
     fn forward_next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match self {
-            RangeIterState::InitialState(root_page, valid_message_bytes, ..) => {
-                match root_page.memory()[0] {
-                    LEAF => Some(LeafLeft {
-                        page: root_page,
-                        parent: None,
-                        reversed: false,
-                    }),
-                    INTERNAL => Some(Internal {
-                        page: root_page,
-                        valid_message_bytes,
-                        child: 0,
-                        parent: None,
-                        reversed: false,
-                    }),
-                    _ => unreachable!(),
-                }
-            }
             RangeIterState::LeafLeft { page, parent, .. } => Some(LeafRight {
                 page,
                 parent,
@@ -127,34 +109,6 @@ impl<'a> RangeIterState<'a> {
 
     fn backward_next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match self {
-            RangeIterState::InitialState(root_page, valid_message_bytes, ..) => {
-                match root_page.memory()[0] {
-                    LEAF => Some(LeafRight {
-                        page: root_page,
-                        parent: None,
-                        reversed: true,
-                    }),
-                    INTERNAL => {
-                        let accessor = InternalAccessor::new(&root_page, valid_message_bytes);
-                        let mut index = 0;
-                        for i in (0..BTREE_ORDER).rev() {
-                            if accessor.child_page(i).is_some() {
-                                index = i;
-                                break;
-                            }
-                        }
-                        assert!(index > 0);
-                        Some(Internal {
-                            page: root_page,
-                            valid_message_bytes,
-                            child: index,
-                            parent: None,
-                            reversed: true,
-                        })
-                    }
-                    _ => unreachable!(),
-                }
-            }
             RangeIterState::LeafLeft { parent, .. } => parent.map(|x| *x),
             RangeIterState::LeafRight { page, parent, .. } => Some(LeafLeft {
                 page,
@@ -214,13 +168,6 @@ impl<'a> RangeIterState<'a> {
 
     fn next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match &self {
-            InitialState(_, _, reversed) => {
-                if *reversed {
-                    self.backward_next(manager)
-                } else {
-                    self.forward_next(manager)
-                }
-            }
             RangeIterState::LeafLeft { reversed, .. } => {
                 if *reversed {
                     self.backward_next(manager)
@@ -261,7 +208,10 @@ pub struct BtreeRangeIter<
     K: RedbKey + ?Sized + 'a,
     V: RedbValue + ?Sized + 'a,
 > {
-    last: Option<RangeIterState<'a>>,
+    // whether we've returned the value for the self.next state. We don't want to advance the initial
+    // state, until it has been returned
+    consumed: bool,
+    next: Option<RangeIterState<'a>>,
     table_id: u64,
     query_range: T,
     reversed: bool,
@@ -280,13 +230,14 @@ impl<
     > BtreeRangeIter<'a, T, KR, K, V>
 {
     pub(in crate) fn new(
-        root_page: Option<(PageImpl<'a>, u32)>,
+        state: Option<RangeIterState<'a>>,
         table_id: u64,
         query_range: T,
         manager: &'a TransactionalMemory,
     ) -> Self {
         Self {
-            last: root_page.map(|(p, message_bytes)| InitialState(p, message_bytes, false)),
+            consumed: false,
+            next: state,
             table_id,
             query_range,
             reversed: false,
@@ -298,13 +249,14 @@ impl<
     }
 
     pub(in crate) fn new_reversed(
-        root_page: Option<(PageImpl<'a>, u32)>,
+        state: Option<RangeIterState<'a>>,
         table_id: u64,
         query_range: T,
         manager: &'a TransactionalMemory,
     ) -> Self {
         Self {
-            last: root_page.map(|(p, message_bytes)| InitialState(p, message_bytes, true)),
+            consumed: false,
+            next: state,
             table_id,
             query_range,
             reversed: true,
@@ -317,82 +269,58 @@ impl<
 
     // TODO: we need generic-associated-types to implement Iterator
     pub fn next(&mut self) -> Option<EntryAccessor> {
-        if let Some(mut state) = self.last.take() {
-            loop {
-                if let Some(new_state) = state.next(self.manager) {
-                    if let Some(entry) = new_state.get_entry() {
-                        // TODO: optimize. This is very inefficient to retrieve and then ignore the values
-                        if self.table_id == entry.table_id()
-                            && bound_contains_key::<T, KR, K>(&self.query_range, entry.key())
-                        {
-                            self.last = Some(new_state);
-                            return self.last.as_ref().map(|s| s.get_entry().unwrap());
-                        } else {
-                            #[allow(clippy::collapsible_else_if)]
-                            if self.reversed {
-                                if let Bound::Included(start) = self.query_range.start_bound() {
-                                    if entry
-                                        .compare::<K>(
-                                            self.table_id,
-                                            start.as_ref().as_bytes().as_ref(),
-                                        )
-                                        .is_lt()
-                                    {
-                                        self.last = None;
-                                        return None;
-                                    }
-                                } else if let Bound::Excluded(start) =
-                                    self.query_range.start_bound()
-                                {
-                                    if entry
-                                        .compare::<K>(
-                                            self.table_id,
-                                            start.as_ref().as_bytes().as_ref(),
-                                        )
-                                        .is_le()
-                                    {
-                                        self.last = None;
-                                        return None;
-                                    }
-                                }
-                            } else {
-                                if let Bound::Included(end) = self.query_range.end_bound() {
-                                    if entry
-                                        .compare::<K>(
-                                            self.table_id,
-                                            end.as_ref().as_bytes().as_ref(),
-                                        )
-                                        .is_gt()
-                                    {
-                                        self.last = None;
-                                        return None;
-                                    }
-                                } else if let Bound::Excluded(end) = self.query_range.end_bound() {
-                                    if entry
-                                        .compare::<K>(
-                                            self.table_id,
-                                            end.as_ref().as_bytes().as_ref(),
-                                        )
-                                        .is_ge()
-                                    {
-                                        self.last = None;
-                                        return None;
-                                    }
-                                }
-                            };
+        loop {
+            if self.consumed {
+                let state = self.next.take()?;
+                self.next = state.next(self.manager);
+                // Return None if the next state is None
+                self.next.as_ref()?;
+            }
 
-                            state = new_state;
+            self.consumed = true;
+            if let Some(entry) = self.next.as_ref().unwrap().get_entry() {
+                if self.table_id == entry.table_id()
+                    && bound_contains_key::<T, KR, K>(&self.query_range, entry.key())
+                {
+                    return self.next.as_ref().map(|s| s.get_entry().unwrap());
+                } else {
+                    #[allow(clippy::collapsible_else_if)]
+                    if self.reversed {
+                        if let Bound::Included(start) = self.query_range.start_bound() {
+                            if entry
+                                .compare::<K>(self.table_id, start.as_ref().as_bytes().as_ref())
+                                .is_lt()
+                            {
+                                self.next = None;
+                            }
+                        } else if let Bound::Excluded(start) = self.query_range.start_bound() {
+                            if entry
+                                .compare::<K>(self.table_id, start.as_ref().as_bytes().as_ref())
+                                .is_le()
+                            {
+                                self.next = None;
+                            }
                         }
                     } else {
-                        state = new_state;
-                    }
-                } else {
-                    self.last = None;
-                    return None;
+                        if let Bound::Included(end) = self.query_range.end_bound() {
+                            if entry
+                                .compare::<K>(self.table_id, end.as_ref().as_bytes().as_ref())
+                                .is_gt()
+                            {
+                                self.next = None;
+                            }
+                        } else if let Bound::Excluded(end) = self.query_range.end_bound() {
+                            if entry
+                                .compare::<K>(self.table_id, end.as_ref().as_bytes().as_ref())
+                                .is_ge()
+                            {
+                                self.next = None;
+                            }
+                        }
+                    };
                 }
             }
         }
-        None
     }
 }
 
@@ -654,6 +582,39 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
         debug_assert_eq!(min_child, max_child);
 
         (min_child, self.child_page(min_child).unwrap())
+    }
+
+    fn first_child_for_table(&self, table: u64) -> (usize, NodeHandle) {
+        for i in 0..BTREE_ORDER {
+            if i == BTREE_ORDER - 1 {
+                return (i, self.child_page(i).unwrap());
+            }
+            if let Some(index) = self.table_id(i) {
+                if table <= index {
+                    return (i, self.child_page(i).unwrap());
+                }
+            } else {
+                return (i, self.child_page(i).unwrap());
+            }
+        }
+        unreachable!()
+    }
+
+    fn last_child_for_table(&self, table: u64) -> (usize, NodeHandle) {
+        for i in (0..BTREE_ORDER).rev() {
+            if i == 0 {
+                return (i, self.child_page(i).unwrap());
+            }
+            if let Some(index) = self.table_id(i - 1) {
+                if table == index {
+                    return (i - 1, self.child_page(i - 1).unwrap());
+                }
+                if table > index {
+                    return (i, self.child_page(i).unwrap());
+                }
+            }
+        }
+        unreachable!()
     }
 
     fn key_offset(&self, n: usize) -> usize {
@@ -1992,6 +1953,166 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
                 query,
                 manager,
             );
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub(in crate) fn find_iter_unbounded_start<'a>(
+    page: PageImpl<'a>,
+    valid_message_bytes: u32,
+    mut parent: Option<Box<RangeIterState<'a>>>,
+    table: u64,
+    manager: &'a TransactionalMemory,
+) -> Option<RangeIterState<'a>> {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => Some(RangeIterState::LeafLeft {
+            page,
+            parent,
+            reversed: false,
+        }),
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let (child_index, child_page_number) = accessor.first_child_for_table(table);
+            let child_page = manager.get_page(child_page_number.get_page_number());
+            if child_index < BTREE_ORDER - 1 && accessor.child_page(child_index + 1).is_some() {
+                parent = Some(Box::new(Internal {
+                    page,
+                    valid_message_bytes,
+                    child: child_index + 1,
+                    parent,
+                    reversed: false,
+                }));
+            }
+            find_iter_unbounded_start(
+                child_page,
+                child_page_number.get_valid_messages(),
+                parent,
+                table,
+                manager,
+            )
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub(in crate) fn find_iter_unbounded_reversed<'a>(
+    page: PageImpl<'a>,
+    valid_message_bytes: u32,
+    mut parent: Option<Box<RangeIterState<'a>>>,
+    table: u64,
+    manager: &'a TransactionalMemory,
+) -> Option<RangeIterState<'a>> {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => Some(RangeIterState::LeafLeft {
+            page,
+            parent,
+            reversed: false,
+        }),
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let (child_index, child_page_number) = accessor.last_child_for_table(table);
+            let child_page = manager.get_page(child_page_number.get_page_number());
+            if child_index < BTREE_ORDER - 1 && accessor.child_page(child_index + 1).is_some() {
+                parent = Some(Box::new(Internal {
+                    page,
+                    valid_message_bytes,
+                    child: child_index + 1,
+                    parent,
+                    reversed: false,
+                }));
+            }
+            find_iter_unbounded_start(
+                child_page,
+                child_page_number.get_valid_messages(),
+                parent,
+                table,
+                manager,
+            )
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub(in crate) fn find_iter_start<'a, K: RedbKey + ?Sized>(
+    page: PageImpl<'a>,
+    valid_message_bytes: u32,
+    mut parent: Option<Box<RangeIterState<'a>>>,
+    table: u64,
+    query: &[u8],
+    manager: &'a TransactionalMemory,
+) -> Option<RangeIterState<'a>> {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => Some(RangeIterState::LeafLeft {
+            page,
+            parent,
+            reversed: false,
+        }),
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let (child_index, child_page_number) = accessor.child_for_key::<K>(table, query);
+            let child_page = manager.get_page(child_page_number.get_page_number());
+            if child_index < BTREE_ORDER - 1 && accessor.child_page(child_index + 1).is_some() {
+                parent = Some(Box::new(Internal {
+                    page,
+                    valid_message_bytes,
+                    child: child_index + 1,
+                    parent,
+                    reversed: false,
+                }));
+            }
+            find_iter_start::<K>(
+                child_page,
+                child_page_number.get_valid_messages(),
+                parent,
+                table,
+                query,
+                manager,
+            )
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub(in crate) fn find_iter_start_reversed<'a, K: RedbKey + ?Sized>(
+    page: PageImpl<'a>,
+    valid_message_bytes: u32,
+    mut parent: Option<Box<RangeIterState<'a>>>,
+    table: u64,
+    query: &[u8],
+    manager: &'a TransactionalMemory,
+) -> Option<RangeIterState<'a>> {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => Some(RangeIterState::LeafRight {
+            page,
+            parent,
+            reversed: true,
+        }),
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let (child_index, child_page_number) = accessor.child_for_key::<K>(table, query);
+            let child_page = manager.get_page(child_page_number.get_page_number());
+            if child_index > 0 && accessor.child_page(child_index - 1).is_some() {
+                parent = Some(Box::new(Internal {
+                    page,
+                    valid_message_bytes,
+                    child: child_index - 1,
+                    parent,
+                    reversed: true,
+                }));
+            }
+            find_iter_start_reversed::<K>(
+                child_page,
+                child_page_number.get_valid_messages(),
+                parent,
+                table,
+                query,
+                manager,
+            )
         }
         _ => unreachable!(),
     }

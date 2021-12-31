@@ -1,7 +1,8 @@
 use crate::tree_store::base_types::NodeHandle;
 use crate::tree_store::btree_utils::{
-    lookup_in_raw, make_mut_single_leaf, print_tree, tree_delete, tree_height, tree_insert,
-    AccessGuardMut, BtreeEntry, BtreeRangeIter,
+    find_iter_start, find_iter_start_reversed, find_iter_unbounded_reversed,
+    find_iter_unbounded_start, lookup_in_raw, make_mut_single_leaf, print_tree, tree_delete,
+    tree_height, tree_insert, AccessGuardMut, BtreeEntry, BtreeRangeIter,
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
@@ -9,7 +10,7 @@ use crate::Error;
 use memmap2::MmapMut;
 use std::cell::{Cell, RefCell};
 use std::cmp::min;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, Bound};
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::mem::size_of;
@@ -330,17 +331,8 @@ impl Storage {
     }
 
     pub(in crate) fn len(&self, table: u64, root_page: Option<NodeHandle>) -> Result<usize, Error> {
-        let mut iter = BtreeRangeIter::<RangeFull, [u8], [u8], [u8]>::new(
-            root_page.map(|p| {
-                (
-                    self.mem.get_page(p.get_page_number()),
-                    p.get_valid_messages(),
-                )
-            }),
-            table,
-            ..,
-            &self.mem,
-        );
+        let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
+            self.get_range(table, .., root_page)?;
         let mut count = 0;
         while iter.next().is_some() {
             count += 1;
@@ -567,17 +559,33 @@ impl Storage {
         range: T,
         root_page: Option<NodeHandle>,
     ) -> Result<BtreeRangeIter<T, KR, K, V>, Error> {
-        Ok(BtreeRangeIter::new(
-            root_page.map(|p| {
-                (
-                    self.mem.get_page(p.get_page_number()),
-                    p.get_valid_messages(),
-                )
-            }),
-            table_id,
-            range,
-            &self.mem,
-        ))
+        if let Some(root) = root_page {
+            match range.start_bound() {
+                Bound::Included(k) | Bound::Excluded(k) => {
+                    let start_state = find_iter_start::<K>(
+                        self.mem.get_page(root.get_page_number()),
+                        root.get_valid_messages(),
+                        None,
+                        table_id,
+                        k.as_ref().as_bytes().as_ref(),
+                        &self.mem,
+                    );
+                    Ok(BtreeRangeIter::new(start_state, table_id, range, &self.mem))
+                }
+                Bound::Unbounded => {
+                    let start_state = find_iter_unbounded_start(
+                        self.mem.get_page(root.get_page_number()),
+                        root.get_valid_messages(),
+                        None,
+                        table_id,
+                        &self.mem,
+                    );
+                    Ok(BtreeRangeIter::new(start_state, table_id, range, &self.mem))
+                }
+            }
+        } else {
+            Ok(BtreeRangeIter::new(None, table_id, range, &self.mem))
+        }
     }
 
     pub(in crate) fn get_range_reversed<
@@ -592,17 +600,45 @@ impl Storage {
         range: T,
         root_page: Option<NodeHandle>,
     ) -> Result<BtreeRangeIter<T, KR, K, V>, Error> {
-        Ok(BtreeRangeIter::new_reversed(
-            root_page.map(|p| {
-                (
-                    self.mem.get_page(p.get_page_number()),
-                    p.get_valid_messages(),
-                )
-            }),
-            table_id,
-            range,
-            &self.mem,
-        ))
+        if let Some(root) = root_page {
+            match range.end_bound() {
+                Bound::Included(k) | Bound::Excluded(k) => {
+                    let start_state = find_iter_start_reversed::<K>(
+                        self.mem.get_page(root.get_page_number()),
+                        root.get_valid_messages(),
+                        None,
+                        table_id,
+                        k.as_ref().as_bytes().as_ref(),
+                        &self.mem,
+                    );
+                    Ok(BtreeRangeIter::new_reversed(
+                        start_state,
+                        table_id,
+                        range,
+                        &self.mem,
+                    ))
+                }
+                Bound::Unbounded => {
+                    let start_state = find_iter_unbounded_reversed(
+                        self.mem.get_page(root.get_page_number()),
+                        root.get_valid_messages(),
+                        None,
+                        table_id,
+                        &self.mem,
+                    );
+                    Ok(BtreeRangeIter::new_reversed(
+                        start_state,
+                        table_id,
+                        range,
+                        &self.mem,
+                    ))
+                }
+            }
+        } else {
+            Ok(BtreeRangeIter::new_reversed(
+                None, table_id, range, &self.mem,
+            ))
+        }
     }
 
     // Returns the new root page. To determine if an entry was remove test whether equal to root_page
