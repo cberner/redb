@@ -52,7 +52,7 @@ pub(crate) enum RangeIterState<'a> {
     },
     Internal {
         page: PageImpl<'a>,
-        valid_message_bytes: u32,
+        valid_messages: u8,
         child: usize,
         parent: Option<Box<RangeIterState<'a>>>,
         reversed: bool,
@@ -70,19 +70,19 @@ impl<'a> RangeIterState<'a> {
             RangeIterState::LeafRight { parent, .. } => parent.map(|x| *x),
             RangeIterState::Internal {
                 page,
-                valid_message_bytes,
+                valid_messages,
                 child,
                 mut parent,
                 ..
             } => {
-                let accessor = InternalAccessor::new(&page, valid_message_bytes);
+                let accessor = InternalAccessor::new(&page, valid_messages);
                 let child_page = accessor.child_page(child).unwrap();
-                let child_message_bytes = child_page.get_valid_messages();
+                let child_messages = child_page.get_valid_messages();
                 let child_page = manager.get_page(child_page.get_page_number());
                 if child < BTREE_ORDER - 1 && accessor.child_page(child + 1).is_some() {
                     parent = Some(Box::new(Internal {
                         page,
-                        valid_message_bytes,
+                        valid_messages,
                         child: child + 1,
                         parent,
                         reversed: false,
@@ -96,7 +96,7 @@ impl<'a> RangeIterState<'a> {
                     }),
                     INTERNAL => Some(Internal {
                         page: child_page,
-                        valid_message_bytes: child_message_bytes,
+                        valid_messages: child_messages,
                         child: 0,
                         parent,
                         reversed: false,
@@ -117,20 +117,20 @@ impl<'a> RangeIterState<'a> {
             }),
             RangeIterState::Internal {
                 page,
-                valid_message_bytes,
+                valid_messages,
                 child,
                 mut parent,
                 ..
             } => {
-                let child_page = InternalAccessor::new(&page, valid_message_bytes)
+                let child_page = InternalAccessor::new(&page, valid_messages)
                     .child_page(child)
                     .unwrap();
-                let child_message_bytes = child_page.get_valid_messages();
+                let child_messages = child_page.get_valid_messages();
                 let child_page = manager.get_page(child_page.get_page_number());
                 if child > 0 {
                     parent = Some(Box::new(Internal {
                         page,
-                        valid_message_bytes,
+                        valid_messages,
                         child: child - 1,
                         parent,
                         reversed: true,
@@ -143,7 +143,7 @@ impl<'a> RangeIterState<'a> {
                         reversed: true,
                     }),
                     INTERNAL => {
-                        let accessor = InternalAccessor::new(&child_page, child_message_bytes);
+                        let accessor = InternalAccessor::new(&child_page, child_messages);
                         let mut index = 0;
                         for i in (0..BTREE_ORDER).rev() {
                             if accessor.child_page(i).is_some() {
@@ -154,7 +154,7 @@ impl<'a> RangeIterState<'a> {
                         assert!(index > 0);
                         Some(Internal {
                             page: child_page,
-                            valid_message_bytes: child_message_bytes,
+                            valid_messages: child_messages,
                             child: index,
                             parent,
                             reversed: true,
@@ -544,16 +544,16 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
 // Provides a simple zero-copy way to access an index page
 struct InternalAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
-    valid_messages: u32,
+    valid_messages: u8,
     _page_lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
-    fn new(page: &'b T, message_bytes: u32) -> Self {
+    fn new(page: &'b T, messages: u8) -> Self {
         debug_assert_eq!(page.memory()[0], INTERNAL);
         InternalAccessor {
             page,
-            valid_messages: message_bytes,
+            valid_messages: messages,
             _page_lifetime: Default::default(),
         }
     }
@@ -825,19 +825,19 @@ impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
         Self { page }
     }
 
-    fn can_write_delta_message(&self, message_byte_offset: u32) -> bool {
-        message_byte_offset < MESSAGE_BUFFER as u32
+    fn can_write_delta_message(&self, message_offset: u8) -> bool {
+        message_offset < MESSAGE_BUFFER as u8
     }
 
     // Returns the new valid message offset
     fn write_delta_message(
         &mut self,
-        existing_messages: u32,
+        existing_messages: u8,
         child_index: u8,
         handle: NodeHandle,
-    ) -> u32 {
+    ) -> u8 {
         assert!(child_index < BTREE_ORDER as u8);
-        assert!(existing_messages < MESSAGE_BUFFER as u32);
+        assert!(existing_messages < MESSAGE_BUFFER as u8);
         let offset = 1
             + NodeHandle::serialized_size() * BTREE_ORDER
             + 8 * (BTREE_ORDER - 1) * 3
@@ -863,14 +863,14 @@ impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
 
 pub(in crate) fn tree_height<'a>(
     page: PageImpl<'a>,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     manager: &'a TransactionalMemory,
 ) -> usize {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => 1,
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let accessor = InternalAccessor::new(&page, valid_messages);
             let mut max_child_height = 0;
             for i in 0..BTREE_ORDER {
                 if let Some(child) = accessor.child_page(i) {
@@ -889,7 +889,7 @@ pub(in crate) fn tree_height<'a>(
     }
 }
 
-pub(in crate) fn print_node(page: &impl Page, valid_message_bytes: u32) {
+pub(in crate) fn print_node(page: &impl Page, valid_messages: u8) {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -910,11 +910,11 @@ pub(in crate) fn print_node(page: &impl Page, valid_message_bytes: u32) {
             eprint!("]");
         }
         INTERNAL => {
-            let accessor = InternalAccessor::new(page, valid_message_bytes);
+            let accessor = InternalAccessor::new(page, valid_messages);
             eprint!(
                 "Internal[ (page={:?}/{}), child_0={:?}",
                 page.get_page_number(),
-                valid_message_bytes,
+                valid_messages,
                 accessor.child_page(0).unwrap().get_page_number()
             );
             for i in 0..(BTREE_ORDER - 1) {
@@ -934,9 +934,9 @@ pub(in crate) fn print_node(page: &impl Page, valid_message_bytes: u32) {
 
 pub(in crate) fn node_children<'a>(
     page: &PageImpl<'a>,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     manager: &'a TransactionalMemory,
-) -> Vec<(PageImpl<'a>, u32)> {
+) -> Vec<(PageImpl<'a>, u8)> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -944,7 +944,7 @@ pub(in crate) fn node_children<'a>(
         }
         INTERNAL => {
             let mut children = vec![];
-            let accessor = InternalAccessor::new(page, valid_message_bytes);
+            let accessor = InternalAccessor::new(page, valid_messages);
             for i in 0..BTREE_ORDER {
                 if let Some(child) = accessor.child_page(i) {
                     children.push((
@@ -961,15 +961,15 @@ pub(in crate) fn node_children<'a>(
 
 pub(in crate) fn print_tree<'a>(
     page: PageImpl<'a>,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     manager: &'a TransactionalMemory,
 ) {
-    let mut pages = vec![(page, valid_message_bytes)];
+    let mut pages = vec![(page, valid_messages)];
     while !pages.is_empty() {
         let mut next_children = vec![];
-        for (page, message_bytes) in pages.drain(..) {
-            next_children.extend(node_children(&page, message_bytes, manager));
-            print_node(&page, message_bytes);
+        for (page, messages) in pages.drain(..) {
+            next_children.extend(node_children(&page, messages, manager));
+            print_node(&page, messages);
             eprint!("  ");
         }
         eprintln!();
@@ -981,14 +981,14 @@ pub(in crate) fn print_tree<'a>(
 // Returns the new root, and a list of freed pages
 pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     table: u64,
     key: &[u8],
     manager: &'a TransactionalMemory,
 ) -> (Option<NodeHandle>, Vec<PageNumber>) {
     let mut freed = vec![];
     let result =
-        match tree_delete_helper::<K>(page, valid_message_bytes, table, key, &mut freed, manager) {
+        match tree_delete_helper::<K>(page, valid_messages, table, key, &mut freed, manager) {
             DeletionResult::Subtree(page) => Some(page),
             DeletionResult::PartialLeaf(entries) => {
                 assert!(entries.is_empty());
@@ -1263,7 +1263,7 @@ fn repair_children(
 
 fn max_table_key(
     page: PageImpl,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     manager: &TransactionalMemory,
 ) -> (u64, Vec<u8>) {
     let node_mem = page.memory();
@@ -1280,7 +1280,7 @@ fn max_table_key(
             }
         }
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let accessor = InternalAccessor::new(&page, valid_messages);
             for i in (0..BTREE_ORDER).rev() {
                 if let Some(child) = accessor.child_page(i) {
                     return max_table_key(
@@ -1301,7 +1301,7 @@ fn max_table_key(
 #[allow(clippy::needless_return)]
 fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     table: u64,
     key: &[u8],
     freed: &mut Vec<PageNumber>,
@@ -1317,7 +1317,7 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     && greater.compare::<K>(table, key).is_ne()
                 {
                     // Not found
-                    return Subtree(NodeHandle::new(page.get_page_number(), valid_message_bytes));
+                    return Subtree(NodeHandle::new(page.get_page_number(), valid_messages));
                 }
                 let new_leaf = if accessor.lesser().compare::<K>(table, key).is_eq() {
                     (greater.table_id(), greater.key(), greater.value())
@@ -1340,12 +1340,12 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     PartialLeaf(vec![])
                 } else {
                     // Not found
-                    Subtree(NodeHandle::new(page.get_page_number(), valid_message_bytes))
+                    Subtree(NodeHandle::new(page.get_page_number(), valid_messages))
                 }
             }
         }
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let accessor = InternalAccessor::new(&page, valid_messages);
             let original_page_number = page.get_page_number();
             let mut children = vec![];
             let mut found = false;
@@ -1369,7 +1369,7 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                             if page_number == child_page {
                                 return Subtree(NodeHandle::new(
                                     original_page_number,
-                                    valid_message_bytes,
+                                    valid_messages,
                                 ));
                             }
                         }
@@ -1399,7 +1399,7 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                 // The key must not have been found, since the subtree didn't change
                 if let Subtree(page_number) = result {
                     if page_number == last_page {
-                        return Subtree(NodeHandle::new(original_page_number, valid_message_bytes));
+                        return Subtree(NodeHandle::new(original_page_number, valid_messages));
                     }
                 }
                 children.push(result);
@@ -1517,22 +1517,15 @@ pub(in crate) fn make_index(
 // and the guard which can be used to access the value, and a list of freed pages
 pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     table: u64,
     key: &[u8],
     value: &[u8],
     manager: &'a TransactionalMemory,
 ) -> (NodeHandle, AccessGuardMut<'a>, Vec<PageNumber>) {
     let mut freed = vec![];
-    let (page1, more, guard) = tree_insert_helper::<K>(
-        page,
-        valid_message_bytes,
-        table,
-        key,
-        value,
-        &mut freed,
-        manager,
-    );
+    let (page1, more, guard) =
+        tree_insert_helper::<K>(page, valid_messages, table, key, value, &mut freed, manager);
 
     if let Some((table, key, page2)) = more {
         let index_page = make_index(table, &key, page1, page2, manager);
@@ -1589,7 +1582,7 @@ fn copy_to_builder_and_patch<'a>(
 #[allow(clippy::type_complexity)]
 fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     table: u64,
     key: &[u8],
     value: &[u8],
@@ -1613,7 +1606,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         let (right_page, guard) = make_mut_single_leaf(table, key, value, manager);
 
                         (
-                            NodeHandle::new(left_page, valid_message_bytes),
+                            NodeHandle::new(left_page, valid_messages),
                             Some((entry.table_id(), entry.key().to_vec(), right_page)),
                             guard,
                         )
@@ -1727,7 +1720,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
             }
         }
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let accessor = InternalAccessor::new(&page, valid_messages);
             // Delta message can only be used if the keys did not change
             let (child_index, child_page) = accessor.child_for_key::<K>(table, key);
             let (page1, more, guard) = tree_insert_helper::<K>(
@@ -1857,21 +1850,21 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 if page1 == child_page {
                     // NO-OP. One of our descendants is uncommitted, so there was no change
                     (
-                        NodeHandle::new(mutpage.get_page_number(), valid_message_bytes),
+                        NodeHandle::new(mutpage.get_page_number(), valid_messages),
                         None,
                         guard,
                     )
                 } else if manager.uncommitted(page.get_page_number()) {
-                    assert_eq!(valid_message_bytes, 0);
+                    assert_eq!(valid_messages, 0);
                     mutator.write_child_page(child_index, page1);
                     (
-                        NodeHandle::new(mutpage.get_page_number(), valid_message_bytes),
+                        NodeHandle::new(mutpage.get_page_number(), valid_messages),
                         None,
                         guard,
                     )
-                } else if mutator.can_write_delta_message(valid_message_bytes) {
+                } else if mutator.can_write_delta_message(valid_messages) {
                     let new_messages =
-                        mutator.write_delta_message(valid_message_bytes, child_index as u8, page1);
+                        mutator.write_delta_message(valid_messages, child_index as u8, page1);
                     (
                         NodeHandle::new(mutpage.get_page_number(), new_messages),
                         None,
@@ -1907,7 +1900,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 // Returns the (offset, len) of the value for the queried key, if present
 pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     table: u64,
     query: &[u8],
     manager: &'a TransactionalMemory,
@@ -1944,7 +1937,7 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
             }
         }
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let accessor = InternalAccessor::new(&page, valid_messages);
             let (_, child_page) = accessor.child_for_key::<K>(table, query);
             return lookup_in_raw::<K>(
                 manager.get_page(child_page.get_page_number()),
@@ -1960,7 +1953,7 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
 
 pub(in crate) fn find_iter_unbounded_start<'a>(
     page: PageImpl<'a>,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     mut parent: Option<Box<RangeIterState<'a>>>,
     table: u64,
     manager: &'a TransactionalMemory,
@@ -1973,13 +1966,13 @@ pub(in crate) fn find_iter_unbounded_start<'a>(
             reversed: false,
         }),
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let accessor = InternalAccessor::new(&page, valid_messages);
             let (child_index, child_page_number) = accessor.first_child_for_table(table);
             let child_page = manager.get_page(child_page_number.get_page_number());
             if child_index < BTREE_ORDER - 1 && accessor.child_page(child_index + 1).is_some() {
                 parent = Some(Box::new(Internal {
                     page,
-                    valid_message_bytes,
+                    valid_messages,
                     child: child_index + 1,
                     parent,
                     reversed: false,
@@ -1999,7 +1992,7 @@ pub(in crate) fn find_iter_unbounded_start<'a>(
 
 pub(in crate) fn find_iter_unbounded_reversed<'a>(
     page: PageImpl<'a>,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     mut parent: Option<Box<RangeIterState<'a>>>,
     table: u64,
     manager: &'a TransactionalMemory,
@@ -2012,13 +2005,13 @@ pub(in crate) fn find_iter_unbounded_reversed<'a>(
             reversed: false,
         }),
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let accessor = InternalAccessor::new(&page, valid_messages);
             let (child_index, child_page_number) = accessor.last_child_for_table(table);
             let child_page = manager.get_page(child_page_number.get_page_number());
             if child_index < BTREE_ORDER - 1 && accessor.child_page(child_index + 1).is_some() {
                 parent = Some(Box::new(Internal {
                     page,
-                    valid_message_bytes,
+                    valid_messages,
                     child: child_index + 1,
                     parent,
                     reversed: false,
@@ -2038,7 +2031,7 @@ pub(in crate) fn find_iter_unbounded_reversed<'a>(
 
 pub(in crate) fn find_iter_start<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     mut parent: Option<Box<RangeIterState<'a>>>,
     table: u64,
     query: &[u8],
@@ -2052,13 +2045,13 @@ pub(in crate) fn find_iter_start<'a, K: RedbKey + ?Sized>(
             reversed: false,
         }),
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let accessor = InternalAccessor::new(&page, valid_messages);
             let (child_index, child_page_number) = accessor.child_for_key::<K>(table, query);
             let child_page = manager.get_page(child_page_number.get_page_number());
             if child_index < BTREE_ORDER - 1 && accessor.child_page(child_index + 1).is_some() {
                 parent = Some(Box::new(Internal {
                     page,
-                    valid_message_bytes,
+                    valid_messages,
                     child: child_index + 1,
                     parent,
                     reversed: false,
@@ -2079,7 +2072,7 @@ pub(in crate) fn find_iter_start<'a, K: RedbKey + ?Sized>(
 
 pub(in crate) fn find_iter_start_reversed<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
-    valid_message_bytes: u32,
+    valid_messages: u8,
     mut parent: Option<Box<RangeIterState<'a>>>,
     table: u64,
     query: &[u8],
@@ -2093,13 +2086,13 @@ pub(in crate) fn find_iter_start_reversed<'a, K: RedbKey + ?Sized>(
             reversed: true,
         }),
         INTERNAL => {
-            let accessor = InternalAccessor::new(&page, valid_message_bytes);
+            let accessor = InternalAccessor::new(&page, valid_messages);
             let (child_index, child_page_number) = accessor.child_for_key::<K>(table, query);
             let child_page = manager.get_page(child_page_number.get_page_number());
             if child_index > 0 && accessor.child_page(child_index - 1).is_some() {
                 parent = Some(Box::new(Internal {
                     page,
-                    valid_message_bytes,
+                    valid_messages,
                     child: child_index - 1,
                     parent,
                     reversed: true,

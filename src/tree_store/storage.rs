@@ -343,7 +343,7 @@ impl Storage {
     pub(in crate) fn get_root_page_number(&self) -> Option<NodeHandle> {
         self.mem
             .get_primary_root_page()
-            .map(|(page, message_bytes)| NodeHandle::new(page, message_bytes))
+            .map(|(page, messages)| NodeHandle::new(page, messages))
     }
 
     pub(in crate) fn commit(
