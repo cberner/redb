@@ -377,3 +377,22 @@ fn leaked_write() {
         panic!();
     }
 }
+
+#[test]
+fn non_page_size_multiple() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024 * 1024 + 1;
+    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
+
+    let key = vec![0; 1024];
+    let value = vec![0; 1];
+    table.insert(&key, &value).unwrap();
+    txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    assert_eq!(table.len().unwrap(), 1);
+}
