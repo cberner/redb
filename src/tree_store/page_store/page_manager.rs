@@ -318,7 +318,8 @@ pub(crate) struct TransactionalMemory {
     allocated_since_commit: RefCell<HashSet<PageNumber>>,
     freed_since_commit: RefCell<Vec<PageNumber>>,
     // Metapage guard lock should be held when using this to modify the page allocator state
-    page_allocator: PageAllocator,
+    // May be None, if the allocator state was corrupted when the file was opened
+    page_allocator: Option<PageAllocator>,
     mmap: MmapMut,
     // We use unsafe to access the metapage (page 0), and so guard it with this mutex
     // It would be nice if this was a RefCell<&[u8]> on the metapage. However, that would be
@@ -352,13 +353,13 @@ impl TransactionalMemory {
         requested_page_size: Option<usize>,
     ) -> Result<Self, Error> {
         let mutex = Mutex::new(MetapageGuard {});
-        let usable_pages = Self::calculate_usable_pages(mmap.len());
-        let page_allocator = PageAllocator::new(usable_pages);
         if mmap[0..MAGICNUMBER.len()] != MAGICNUMBER {
             let page_size = requested_page_size.unwrap_or_else(get_page_size);
             // Ensure that the database metadata fits into the first page
             assert!(page_size >= DB_METAPAGE_SIZE);
             assert!(page_size.is_power_of_two());
+
+            let usable_pages = Self::calculate_usable_pages(mmap.len());
 
             // Explicitly zero the memory
             mmap[0..DB_METAPAGE_SIZE].copy_from_slice(&[0; DB_METAPAGE_SIZE]);
@@ -434,12 +435,18 @@ impl TransactionalMemory {
         );
 
         let accessor = TransactionAccessor::new(get_primary(&mmap), mutex.lock().unwrap());
-        // TODO: repair instead of crashing
-        assert!(!accessor.get_allocator_dirty());
+        let mut allocator_dirty = accessor.get_allocator_dirty();
         drop(accessor);
         let accessor = TransactionAccessor::new(get_secondary(&mut mmap), mutex.lock().unwrap());
-        assert!(!accessor.get_allocator_dirty());
+        allocator_dirty |= accessor.get_allocator_dirty();
         drop(accessor);
+
+        let page_allocator = if allocator_dirty {
+            None
+        } else {
+            let usable_pages = Self::calculate_usable_pages(mmap.len());
+            Some(PageAllocator::new(usable_pages))
+        };
 
         Ok(TransactionalMemory {
             allocated_since_commit: RefCell::new(HashSet::new()),
@@ -451,6 +458,76 @@ impl TransactionalMemory {
             read_from_secondary: AtomicBool::new(false),
             page_size,
         })
+    }
+
+    pub(crate) fn needs_repair(&self) -> bool {
+        let (mmap, guard) = self.acquire_mutable_metapage();
+        let accessor = TransactionAccessor::new(get_primary(mmap), guard);
+        let mut allocator_dirty = accessor.get_allocator_dirty();
+        drop(accessor);
+
+        let (mmap, guard) = self.acquire_mutable_metapage();
+        let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
+        allocator_dirty |= accessor.get_allocator_dirty();
+
+        allocator_dirty
+    }
+
+    // Returns true if the repair is complete. If false, this method must be called again
+    pub(crate) fn repair_allocator(
+        &self,
+        allocated_pages: impl Iterator<Item = PageNumber>,
+    ) -> Result<bool, Error> {
+        // TODO: clean up all the duplicated code in this function
+        let (mmap, guard) = self.acquire_mutable_metapage();
+        let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
+        if mutator.get_allocator_dirty() {
+            let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
+
+            let usable_pages = Self::calculate_usable_pages(self.mmap.len());
+            let allocator = PageAllocator::init_new(mem, usable_pages);
+            for page in allocated_pages {
+                allocator.record_alloc(mem, page.page_index);
+            }
+            self.mmap.flush()?;
+
+            drop(guard);
+            let (mmap, guard) = self.acquire_mutable_metapage();
+            let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
+            mutator.set_allocator_dirty(false);
+            self.mmap.flush()?;
+
+            Ok(false)
+        } else {
+            // Repair the primary instead
+            drop(mutator);
+            let (mmap, guard) = self.acquire_mutable_metapage();
+            mutator = TransactionMutator::new(get_primary_mut(mmap), guard);
+
+            let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
+
+            let usable_pages = Self::calculate_usable_pages(self.mmap.len());
+            let allocator = PageAllocator::init_new(mem, usable_pages);
+            for page in allocated_pages {
+                allocator.record_alloc(mem, page.page_index);
+            }
+            self.mmap.flush()?;
+
+            drop(guard);
+            let (mmap, guard) = self.acquire_mutable_metapage();
+            mutator = TransactionMutator::new(get_primary_mut(mmap), guard);
+            mutator.set_allocator_dirty(false);
+            self.mmap.flush()?;
+
+            Ok(true)
+        }
+    }
+
+    pub(crate) fn finalize_repair_allocator(&mut self) {
+        assert!(!self.needs_repair());
+        let usable_pages = Self::calculate_usable_pages(self.mmap.len());
+        let allocator = PageAllocator::new(usable_pages);
+        self.page_allocator = Some(allocator);
     }
 
     fn acquire_mutable_metapage(&self) -> (&mut [u8], MutexGuard<MetapageGuard>) {
@@ -488,6 +565,7 @@ impl TransactionalMemory {
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
         assert!(self.open_dirty_pages.borrow().is_empty());
+        assert!(self.page_allocator.is_some());
 
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
@@ -517,11 +595,16 @@ impl TransactionalMemory {
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
             assert_eq!(page_number.page_order, 0);
             self.page_allocator
+                .as_ref()
+                .unwrap()
                 .record_alloc(mem, page_number.page_index);
         }
         for page_number in self.freed_since_commit.borrow_mut().drain(..) {
             assert_eq!(page_number.page_order, 0);
-            self.page_allocator.free(mem, page_number.page_index);
+            self.page_allocator
+                .as_ref()
+                .unwrap()
+                .free(mem, page_number.page_index);
         }
         drop(guard); // Ensure the guard lives past all the writes to the page allocator state
         self.read_from_secondary.store(false, Ordering::SeqCst);
@@ -535,6 +618,7 @@ impl TransactionalMemory {
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
         assert!(self.open_dirty_pages.borrow().is_empty());
+        assert!(self.page_allocator.is_some());
 
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
@@ -556,6 +640,8 @@ impl TransactionalMemory {
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
             assert_eq!(page_number.page_order, 0);
             self.page_allocator
+                .as_ref()
+                .unwrap()
                 .record_alloc(mem, page_number.page_index);
         }
         assert!(self.freed_since_commit.borrow().is_empty());
@@ -572,11 +658,16 @@ impl TransactionalMemory {
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
             assert_eq!(page_number.page_order, 0);
-            self.page_allocator.free(mem, page_number.page_index);
+            self.page_allocator
+                .as_ref()
+                .unwrap()
+                .free(mem, page_number.page_index);
         }
         for page_number in self.freed_since_commit.borrow_mut().drain(..) {
             assert_eq!(page_number.page_order, 0);
             self.page_allocator
+                .as_ref()
+                .unwrap()
                 .record_alloc(mem, page_number.page_index);
         }
         // Drop guard only after page_allocator calls are completed
@@ -658,7 +749,10 @@ impl TransactionalMemory {
         let mutator = TransactionMutator::new(get_secondary(mmap), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
         assert_eq!(page.page_order, 0);
-        self.page_allocator.free(mem, page.page_index);
+        self.page_allocator
+            .as_ref()
+            .unwrap()
+            .free(mem, page.page_index);
         drop(guard);
         self.freed_since_commit.borrow_mut().push(page);
 
@@ -672,7 +766,10 @@ impl TransactionalMemory {
             let mutator = TransactionMutator::new(get_secondary(mmap), guard);
             let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
             assert_eq!(page.page_order, 0);
-            self.page_allocator.free(mem, page.page_index);
+            self.page_allocator
+                .as_ref()
+                .unwrap()
+                .free(mem, page.page_index);
             drop(guard);
 
             Ok(true)
@@ -692,7 +789,7 @@ impl TransactionalMemory {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mutator = TransactionMutator::new(get_secondary(mmap), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
-        let page_number = PageNumber::new(self.page_allocator.alloc(mem)?, 0);
+        let page_number = PageNumber::new(self.page_allocator.as_ref().unwrap().alloc(mem)?, 0);
         // Drop guard only after page_allocator.alloc() is completed
         drop(guard);
 
@@ -723,7 +820,7 @@ impl TransactionalMemory {
         // and avoid dirtying the allocator state
         let mutator = TransactionMutator::new(get_secondary(mmap), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator).unwrap();
-        let count = self.page_allocator.count_free_pages(mem);
+        let count = self.page_allocator.as_ref().unwrap().count_free_pages(mem);
         // Drop guard only after page_allocator.count_free() is completed
         drop(guard);
 
@@ -739,11 +836,63 @@ impl Drop for TransactionalMemory {
             self.commit(non_durable_transaction_id)
                 .expect("Failure while finalizing non-durable commit. Database may be corrupted");
         }
-        if self.mmap.flush().is_ok() {
+        if self.mmap.flush().is_ok() && self.page_allocator.is_some() {
             let (metamem, guard) = self.acquire_mutable_metapage();
             let mut mutator = TransactionMutator::new(get_secondary(metamem), guard);
             mutator.set_allocator_dirty(false);
             let _ = self.mmap.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::tree_store::page_store::page_manager::{
+        get_primary_mut, get_secondary, MetapageGuard, TransactionMutator,
+    };
+    use crate::tree_store::page_store::TransactionalMemory;
+    use crate::{Database, Table};
+    use memmap2::MmapMut;
+    use std::fs::OpenOptions;
+    use std::sync::Mutex;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn repair_allocator() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let write_txn = db.begin_write().unwrap();
+        let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+        table.insert(b"hello", b"world").unwrap();
+        write_txn.commit().unwrap();
+        drop(db);
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+
+        let mut mmap = unsafe { MmapMut::map_mut(&file) }.unwrap();
+
+        let mutex = Mutex::new(MetapageGuard {});
+        let mut mutator = TransactionMutator::new(get_secondary(&mut mmap), mutex.lock().unwrap());
+        mutator.set_allocator_dirty(true);
+        drop(mutator);
+        mmap.flush().unwrap();
+
+        let mut mutator =
+            TransactionMutator::new(get_primary_mut(&mut mmap), mutex.lock().unwrap());
+        mutator.set_allocator_dirty(true);
+        drop(mutator);
+        mmap.flush().unwrap();
+
+        assert!(TransactionalMemory::new(mmap, None).unwrap().needs_repair());
+
+        let db2 = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let write_txn = db2.begin_write().unwrap();
+        let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+        table.insert(b"hello2", b"world2").unwrap();
+        write_txn.commit().unwrap();
     }
 }
