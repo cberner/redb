@@ -61,6 +61,14 @@ pub(crate) enum RangeIterState<'a> {
 }
 
 impl<'a> RangeIterState<'a> {
+    fn page_number(&self) -> PageNumber {
+        match self {
+            RangeIterState::LeafLeft { page, .. } => page.get_page_number(),
+            RangeIterState::LeafRight { page, .. } => page.get_page_number(),
+            RangeIterState::Internal { page, .. } => page.get_page_number(),
+        }
+    }
+
     fn forward_next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match self {
             RangeIterState::LeafLeft { page, parent, .. } => Some(LeafRight {
@@ -199,6 +207,67 @@ impl<'a> RangeIterState<'a> {
             RangeIterState::LeafRight { page, .. } => LeafAccessor::new(page).greater(),
             _ => None,
         }
+    }
+}
+
+pub(crate) struct AllPageNumbersBtreeIter<'a> {
+    next: Option<RangeIterState<'a>>,
+    manager: &'a TransactionalMemory,
+}
+
+impl<'a> AllPageNumbersBtreeIter<'a> {
+    pub(crate) fn new(start: RangeIterState<'a>, manager: &'a TransactionalMemory) -> Self {
+        Self {
+            next: Some(start),
+            manager,
+        }
+    }
+}
+
+impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
+    type Item = PageNumber;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let state = self.next.take()?;
+        let value = state.page_number();
+        self.next = state.forward_next(self.manager);
+
+        Some(value)
+    }
+}
+
+pub(in crate) fn page_numbers_iter_start_state<'a>(
+    page: PageImpl<'a>,
+    valid_messages: u8,
+    mut parent: Option<Box<RangeIterState<'a>>>,
+    manager: &'a TransactionalMemory,
+) -> Option<RangeIterState<'a>> {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => Some(RangeIterState::LeafLeft {
+            page,
+            parent,
+            reversed: false,
+        }),
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page, valid_messages);
+            let child_page_number = accessor.child_page(0).unwrap();
+            let child_page = manager.get_page(child_page_number.get_page_number());
+            parent = Some(Box::new(Internal {
+                page,
+                valid_messages,
+                child: 0,
+                parent,
+                reversed: false,
+            }));
+            page_numbers_iter_start_state(
+                child_page,
+                child_page_number.get_valid_messages(),
+                parent,
+                manager,
+            )
+        }
+        _ => unreachable!(),
     }
 }
 

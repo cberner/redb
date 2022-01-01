@@ -1,8 +1,9 @@
 use crate::tree_store::base_types::NodeHandle;
 use crate::tree_store::btree_utils::{
     find_iter_start, find_iter_start_reversed, find_iter_unbounded_reversed,
-    find_iter_unbounded_start, lookup_in_raw, make_mut_single_leaf, print_tree, tree_delete,
-    tree_height, tree_insert, AccessGuardMut, BtreeEntry, BtreeRangeIter,
+    find_iter_unbounded_start, lookup_in_raw, make_mut_single_leaf, page_numbers_iter_start_state,
+    print_tree, tree_delete, tree_height, tree_insert, AccessGuardMut, AllPageNumbersBtreeIter,
+    BtreeEntry, BtreeRangeIter,
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
@@ -121,7 +122,18 @@ pub(in crate) struct Storage {
 
 impl Storage {
     pub(in crate) fn new(mmap: MmapMut, page_size: Option<usize>) -> Result<Storage, Error> {
-        let mem = TransactionalMemory::new(mmap, page_size)?;
+        let mut mem = TransactionalMemory::new(mmap, page_size)?;
+        while mem.needs_repair() {
+            let (root, messages) = mem
+                .get_primary_root_page()
+                .expect("Tried to repair an empty database");
+            let root_page = mem.get_page(root);
+            let start = page_numbers_iter_start_state(root_page, messages, None, &mem);
+            let iter = AllPageNumbersBtreeIter::new(start.unwrap(), &mem);
+            mem.repair_allocator(iter)?;
+        }
+        mem.finalize_repair_allocator();
+
         let next_transaction_id = mem.get_last_committed_transaction_id() + 1;
 
         Ok(Storage {
