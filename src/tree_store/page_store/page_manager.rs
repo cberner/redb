@@ -1,4 +1,4 @@
-use crate::tree_store::page_store::page_allocator::PageAllocator;
+use crate::tree_store::page_store::page_allocator::BuddyAllocator;
 use crate::tree_store::page_store::utils::get_page_size;
 use crate::Error;
 use memmap2::MmapMut;
@@ -10,6 +10,8 @@ use std::mem::size_of;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
+
+const MAX_PAGE_ORDER: usize = 0;
 
 const DB_METADATA_PAGE: u64 = 0;
 
@@ -319,7 +321,7 @@ pub(crate) struct TransactionalMemory {
     freed_since_commit: RefCell<Vec<PageNumber>>,
     // Metapage guard lock should be held when using this to modify the page allocator state
     // May be None, if the allocator state was corrupted when the file was opened
-    page_allocator: Option<PageAllocator>,
+    page_allocator: Option<BuddyAllocator>,
     mmap: MmapMut,
     // We use unsafe to access the metapage (page 0), and so guard it with this mutex
     // It would be nice if this was a RefCell<&[u8]> on the metapage. However, that would be
@@ -335,13 +337,14 @@ pub(crate) struct TransactionalMemory {
 impl TransactionalMemory {
     fn calculate_usable_pages(mmap_size: usize) -> usize {
         let mut guess = mmap_size / get_page_size();
-        let mut new_guess =
-            (mmap_size - 2 * PageAllocator::required_space(guess)) / get_page_size();
+        let mut new_guess = (mmap_size - 2 * BuddyAllocator::required_space(guess, MAX_PAGE_ORDER))
+            / get_page_size();
         // Make sure we don't loop forever. This might not converge if it oscillates
         let mut i = 0;
         while guess != new_guess && i < 1000 {
             guess = new_guess;
-            new_guess = (mmap_size - 2 * PageAllocator::required_space(guess)) / get_page_size();
+            new_guess = (mmap_size - 2 * BuddyAllocator::required_space(guess, MAX_PAGE_ORDER))
+                / get_page_size();
             i += 1;
         }
 
@@ -367,7 +370,7 @@ impl TransactionalMemory {
                 *i = 0
             }
 
-            let allocator_state_size = PageAllocator::required_space(usable_pages);
+            let allocator_state_size = BuddyAllocator::required_space(usable_pages, MAX_PAGE_ORDER);
 
             // Store the page & db size. These are immutable
             mmap[PAGE_SIZE_OFFSET] = page_size.trailing_zeros() as u8;
@@ -385,13 +388,15 @@ impl TransactionalMemory {
             mutator.set_allocator_dirty(false);
             mutator.set_allocator_data(start, allocator_state_size);
             drop(mutator);
-            let allocator = PageAllocator::init_new(
+            let allocator = BuddyAllocator::init_new(
                 &mut mmap[start..(start + allocator_state_size)],
                 usable_pages,
+                MAX_PAGE_ORDER,
             );
             allocator.record_alloc(
                 &mut mmap[start..(start + allocator_state_size)],
                 DB_METADATA_PAGE,
+                0,
             );
             // Make the state we just wrote the primary
             mmap[PRIMARY_BIT_OFFSET] = 0;
@@ -403,13 +408,15 @@ impl TransactionalMemory {
             mutator.set_allocator_dirty(false);
             mutator.set_allocator_data(start, allocator_state_size);
             drop(mutator);
-            let allocator = PageAllocator::init_new(
+            let allocator = BuddyAllocator::init_new(
                 &mut mmap[start..(start + allocator_state_size)],
                 usable_pages,
+                MAX_PAGE_ORDER,
             );
             allocator.record_alloc(
                 &mut mmap[start..(start + allocator_state_size)],
                 DB_METADATA_PAGE,
+                0,
             );
 
             mmap[VERSION_OFFSET] = 1;
@@ -445,7 +452,7 @@ impl TransactionalMemory {
             None
         } else {
             let usable_pages = Self::calculate_usable_pages(mmap.len());
-            Some(PageAllocator::new(usable_pages))
+            Some(BuddyAllocator::new(usable_pages, MAX_PAGE_ORDER))
         };
 
         Ok(TransactionalMemory {
@@ -485,9 +492,9 @@ impl TransactionalMemory {
             let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
 
             let usable_pages = Self::calculate_usable_pages(self.mmap.len());
-            let allocator = PageAllocator::init_new(mem, usable_pages);
+            let allocator = BuddyAllocator::init_new(mem, usable_pages, MAX_PAGE_ORDER);
             for page in allocated_pages {
-                allocator.record_alloc(mem, page.page_index);
+                allocator.record_alloc(mem, page.page_index, page.page_order as usize);
             }
             self.mmap.flush()?;
 
@@ -507,9 +514,9 @@ impl TransactionalMemory {
             let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
 
             let usable_pages = Self::calculate_usable_pages(self.mmap.len());
-            let allocator = PageAllocator::init_new(mem, usable_pages);
+            let allocator = BuddyAllocator::init_new(mem, usable_pages, MAX_PAGE_ORDER);
             for page in allocated_pages {
-                allocator.record_alloc(mem, page.page_index);
+                allocator.record_alloc(mem, page.page_index, page.page_order as usize);
             }
             self.mmap.flush()?;
 
@@ -526,7 +533,7 @@ impl TransactionalMemory {
     pub(crate) fn finalize_repair_allocator(&mut self) {
         assert!(!self.needs_repair());
         let usable_pages = Self::calculate_usable_pages(self.mmap.len());
-        let allocator = PageAllocator::new(usable_pages);
+        let allocator = BuddyAllocator::new(usable_pages, MAX_PAGE_ORDER);
         self.page_allocator = Some(allocator);
     }
 
@@ -594,17 +601,19 @@ impl TransactionalMemory {
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
             assert_eq!(page_number.page_order, 0);
-            self.page_allocator
-                .as_ref()
-                .unwrap()
-                .record_alloc(mem, page_number.page_index);
+            self.page_allocator.as_ref().unwrap().record_alloc(
+                mem,
+                page_number.page_index,
+                page_number.page_order as usize,
+            );
         }
         for page_number in self.freed_since_commit.borrow_mut().drain(..) {
             assert_eq!(page_number.page_order, 0);
-            self.page_allocator
-                .as_ref()
-                .unwrap()
-                .free(mem, page_number.page_index);
+            self.page_allocator.as_ref().unwrap().free(
+                mem,
+                page_number.page_index,
+                page_number.page_order as usize,
+            );
         }
         drop(guard); // Ensure the guard lives past all the writes to the page allocator state
         self.read_from_secondary.store(false, Ordering::SeqCst);
@@ -639,10 +648,11 @@ impl TransactionalMemory {
         let (mem, guard) = self.acquire_mutable_page_allocator(primary_mutator)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
             assert_eq!(page_number.page_order, 0);
-            self.page_allocator
-                .as_ref()
-                .unwrap()
-                .record_alloc(mem, page_number.page_index);
+            self.page_allocator.as_ref().unwrap().record_alloc(
+                mem,
+                page_number.page_index,
+                page_number.page_order as usize,
+            );
         }
         assert!(self.freed_since_commit.borrow().is_empty());
         drop(guard); // Ensure the guard lives past all the writes to the page allocator state
@@ -658,17 +668,19 @@ impl TransactionalMemory {
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
             assert_eq!(page_number.page_order, 0);
-            self.page_allocator
-                .as_ref()
-                .unwrap()
-                .free(mem, page_number.page_index);
+            self.page_allocator.as_ref().unwrap().free(
+                mem,
+                page_number.page_index,
+                page_number.page_order as usize,
+            );
         }
         for page_number in self.freed_since_commit.borrow_mut().drain(..) {
             assert_eq!(page_number.page_order, 0);
-            self.page_allocator
-                .as_ref()
-                .unwrap()
-                .record_alloc(mem, page_number.page_index);
+            self.page_allocator.as_ref().unwrap().record_alloc(
+                mem,
+                page_number.page_index,
+                page_number.page_order as usize,
+            );
         }
         // Drop guard only after page_allocator calls are completed
         drop(guard);
@@ -752,7 +764,7 @@ impl TransactionalMemory {
         self.page_allocator
             .as_ref()
             .unwrap()
-            .free(mem, page.page_index);
+            .free(mem, page.page_index, page.page_order as usize);
         drop(guard);
         self.freed_since_commit.borrow_mut().push(page);
 
@@ -766,10 +778,11 @@ impl TransactionalMemory {
             let mutator = TransactionMutator::new(get_secondary(mmap), guard);
             let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
             assert_eq!(page.page_order, 0);
-            self.page_allocator
-                .as_ref()
-                .unwrap()
-                .free(mem, page.page_index);
+            self.page_allocator.as_ref().unwrap().free(
+                mem,
+                page.page_index,
+                page.page_order as usize,
+            );
             drop(guard);
 
             Ok(true)
@@ -786,10 +799,25 @@ impl TransactionalMemory {
     pub(crate) fn allocate(&self, allocation_size: usize) -> Result<PageMut, Error> {
         assert!(allocation_size <= self.page_size);
 
+        let required_pages = (allocation_size + self.page_size - 1) / self.page_size;
+        let required_order = if required_pages.is_power_of_two() {
+            // TODO: use .log2() when it's stable
+            required_pages.trailing_zeros()
+        } else {
+            // TODO: use .log2() when it's stable
+            required_pages.next_power_of_two().trailing_zeros()
+        } as usize;
+
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mutator = TransactionMutator::new(get_secondary(mmap), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
-        let page_number = PageNumber::new(self.page_allocator.as_ref().unwrap().alloc(mem)?, 0);
+        let page_number = PageNumber::new(
+            self.page_allocator
+                .as_ref()
+                .unwrap()
+                .alloc(mem, required_order)?,
+            0,
+        );
         // Drop guard only after page_allocator.alloc() is completed
         drop(guard);
 
