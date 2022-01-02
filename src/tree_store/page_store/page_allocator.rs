@@ -53,7 +53,7 @@ impl<'a> U64GroupedBitMap<'a> {
     }
 }
 
-pub(crate) struct PageAllocator {
+struct PageAllocator {
     num_pages: usize,
     tree_level_offsets: Vec<(usize, usize)>,
 }
@@ -68,7 +68,7 @@ pub(crate) struct PageAllocator {
 // subtree layer: 2-64 u64s
 // ...consecutive layers. Except for the last level, all sub-trees of the root must be complete
 impl PageAllocator {
-    pub(crate) fn new(num_pages: usize) -> Self {
+    fn new(num_pages: usize) -> Self {
         let mut tree_level_offsets = vec![];
 
         let mut offset = 0;
@@ -106,7 +106,7 @@ impl PageAllocator {
         }
     }
 
-    pub(crate) fn init_new(data: &mut [u8], num_pages: usize) -> Self {
+    fn init_new(data: &mut [u8], num_pages: usize) -> Self {
         assert!(data.len() >= Self::required_space(num_pages));
         data[..8].copy_from_slice(&(num_pages as u64).to_be_bytes());
 
@@ -137,7 +137,7 @@ impl PageAllocator {
     }
 
     /// Returns the number of bytes required for the data argument of new()
-    pub(crate) fn required_space(num_pages: usize) -> usize {
+    fn required_space(num_pages: usize) -> usize {
         if Self::required_tree_height(num_pages) == 1 {
             assert!(num_pages <= 64);
             // Space for num_pages header, and root
@@ -183,7 +183,7 @@ impl PageAllocator {
         height
     }
 
-    pub(crate) fn count_free_pages(&self, data: &mut [u8]) -> usize {
+    fn count_free_pages(&self, data: &mut [u8]) -> usize {
         self.get_level(data, self.get_height() - 1).count_unset()
     }
 
@@ -228,7 +228,7 @@ impl PageAllocator {
     }
 
     /// data must have been initialized by Self::init_new()
-    pub(crate) fn alloc(&self, data: &mut [u8]) -> Result<u64, Error> {
+    fn alloc(&self, data: &mut [u8]) -> Result<u64, Error> {
         if let Some(mut entry) = self.get_level(data, 0).first_unset(0, 64) {
             let mut height = 0;
 
@@ -250,7 +250,7 @@ impl PageAllocator {
     }
 
     /// data must have been initialized by Self::init_new()
-    pub(crate) fn record_alloc(&self, data: &mut [u8], page_number: u64) {
+    fn record_alloc(&self, data: &mut [u8], page_number: u64) {
         assert!(page_number < self.get_num_pages());
         let full = self
             .get_level(data, self.get_height() - 1)
@@ -259,11 +259,119 @@ impl PageAllocator {
     }
 
     /// data must have been initialized by Self::init_new()
-    pub(crate) fn free(&self, data: &mut [u8], page_number: u64) {
+    fn free(&self, data: &mut [u8], page_number: u64) {
         assert!(page_number < self.get_num_pages());
         self.get_level(data, self.get_height() - 1)
             .clear(page_number as usize);
         self.update_to_root(data, page_number as usize, false);
+    }
+}
+
+pub(crate) struct BuddyAllocator {
+    orders: Vec<PageAllocator>,
+}
+
+// Handles allocation of dynamically sized pages, supports pages of up to page_size * 2^max_order bytes
+//
+// Data structure format:
+// max_order: big endian u64
+// order_offsets: array of (u64, u64), with offset & length for PageAllocator structure for the given order
+// ... PageAllocator structures
+impl BuddyAllocator {
+    pub(crate) fn new(mut num_pages: usize, max_order: usize) -> Self {
+        assert_eq!(max_order, 0);
+        let mut orders = vec![];
+        for _ in 0..=max_order {
+            orders.push(PageAllocator::new(num_pages));
+            num_pages /= 2;
+        }
+
+        Self { orders }
+    }
+
+    pub(crate) fn init_new(data: &mut [u8], mut num_pages: usize, max_order: usize) -> Self {
+        assert!(data.len() >= Self::required_space(num_pages, max_order));
+        data[..size_of::<u64>()].copy_from_slice(&(max_order as u64).to_be_bytes());
+
+        let mut metadata_offset = size_of::<u64>();
+        let mut data_offset = size_of::<u64>() + 2 * (max_order + 1) * size_of::<u64>();
+
+        let mut orders = vec![];
+        for order in 0..=max_order {
+            let required = PageAllocator::required_space(num_pages);
+            data[metadata_offset..metadata_offset + size_of::<u64>()]
+                .copy_from_slice(&(data_offset as u64).to_be_bytes());
+            data[metadata_offset + size_of::<u64>()..metadata_offset + 2 * size_of::<u64>()]
+                .copy_from_slice(&(required as u64).to_be_bytes());
+            orders.push(PageAllocator::init_new(
+                Self::get_order_bytes(data, order),
+                num_pages,
+            ));
+            num_pages /= 2;
+            metadata_offset += 2 * size_of::<u64>();
+            data_offset += required;
+        }
+
+        // TODO: divvy up the pages between the different allocators and mark them in the lower allocators
+        assert_eq!(max_order, 0);
+
+        Self { orders }
+    }
+
+    /// Returns the number of bytes required for the data argument of new()
+    pub(crate) fn required_space(mut num_pages: usize, max_order: usize) -> usize {
+        let mut required = size_of::<u64>() + 2 * (max_order + 1) * size_of::<u64>();
+        for _ in 0..=max_order {
+            required += PageAllocator::required_space(num_pages);
+            num_pages /= 2;
+        }
+
+        required
+    }
+
+    pub(crate) fn count_free_pages(&self, data: &mut [u8]) -> usize {
+        let mut pages = 0;
+        for (order, allocator) in self.orders.iter().enumerate() {
+            pages += allocator.count_free_pages(Self::get_order_bytes(data, order))
+                * 2usize.pow(order as u32);
+        }
+
+        pages
+    }
+
+    fn get_order_offset_and_length(data: &[u8], order: usize) -> (usize, usize) {
+        let max_order = u64::from_be_bytes(data[..size_of::<u64>()].try_into().unwrap()) as usize;
+        assert!(order <= max_order);
+        let base = size_of::<u64>() + order * 2 * size_of::<u64>();
+        let offset =
+            u64::from_be_bytes(data[base..base + size_of::<u64>()].try_into().unwrap()) as usize;
+        let length = u64::from_be_bytes(
+            data[base + size_of::<u64>()..base + 2 * size_of::<u64>()]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+
+        (offset, length)
+    }
+
+    fn get_order_bytes(data: &mut [u8], order: usize) -> &mut [u8] {
+        let (offset, length) = Self::get_order_offset_and_length(data, order);
+        &mut data[offset..(offset + length)]
+    }
+
+    /// data must have been initialized by Self::init_new()
+    pub(crate) fn alloc(&self, data: &mut [u8], order: usize) -> Result<u64, Error> {
+        self.orders[order].alloc(Self::get_order_bytes(data, order))
+    }
+
+    /// data must have been initialized by Self::init_new()
+    pub(crate) fn record_alloc(&self, data: &mut [u8], page_number: u64, order: usize) {
+        self.orders[order].record_alloc(Self::get_order_bytes(data, order), page_number);
+    }
+
+    /// data must have been initialized by Self::init_new()
+    pub(crate) fn free(&self, data: &mut [u8], page_number: u64, order: usize) {
+        self.orders[order].free(Self::get_order_bytes(data, order), page_number);
     }
 }
 
