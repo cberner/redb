@@ -128,7 +128,7 @@ impl Storage {
                 .get_primary_root_page()
                 .expect("Tried to repair an empty database");
             let root_page = mem.get_page(root);
-            let start = page_numbers_iter_start_state(root_page, messages, None, &mem);
+            let start = page_numbers_iter_start_state(root_page, messages);
             let iter = AllPageNumbersBtreeIter::new(start.unwrap(), &mem);
             mem.repair_allocator(iter)?;
         }
