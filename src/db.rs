@@ -87,7 +87,7 @@ impl DatabaseBuilder {
     ///
     /// The file referenced by `path` must only be concurrently modified by compatible versions
     /// of redb
-    pub unsafe fn open(self, path: impl AsRef<Path>, db_size: usize) -> Result<Database, Error> {
+    pub unsafe fn open(&self, path: impl AsRef<Path>, db_size: usize) -> Result<Database, Error> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)

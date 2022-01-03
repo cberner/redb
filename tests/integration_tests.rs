@@ -3,7 +3,8 @@ use tempfile::NamedTempFile;
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use redb::{
-    Database, Error, MultimapTable, ReadOnlyMultimapTable, ReadOnlyTable, ReadableTable, Table,
+    Database, DatabaseBuilder, Error, MultimapTable, ReadOnlyMultimapTable, ReadOnlyTable,
+    ReadableTable, Table,
 };
 
 const ELEMENTS: usize = 100;
@@ -167,6 +168,52 @@ fn large_keys() {
     let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
     {
         for i in 0..100 {
+            key[0] = i;
+            table.remove(&key).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
+fn multi_page_kv() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let elements = 4;
+    let page_size = 4096;
+
+    let db_size = 1024_1024;
+    let db = unsafe {
+        DatabaseBuilder::new()
+            .set_page_size(page_size)
+            .open(tmpfile.path(), db_size)
+            .unwrap()
+    };
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
+
+    let mut key = vec![0; page_size + 1];
+    let mut value = vec![0; page_size + 1];
+    {
+        for i in 0..elements {
+            key[0] = i;
+            value[0] = i;
+            table.insert(&key, &value).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = txn.open_table(b"x").unwrap();
+    for i in 0..elements {
+        key[0] = i;
+        value[0] = i;
+        assert_eq!(&value, table.get(&key).unwrap().unwrap().to_value());
+    }
+
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
+    {
+        for i in 0..elements {
             key[0] = i;
             table.remove(&key).unwrap();
         }

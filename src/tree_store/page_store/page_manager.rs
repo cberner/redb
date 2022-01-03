@@ -621,7 +621,6 @@ impl TransactionalMemory {
 
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
-            assert_eq!(page_number.page_order, 0);
             self.page_allocator.as_ref().unwrap().record_alloc(
                 mem,
                 page_number.page_index,
@@ -629,7 +628,6 @@ impl TransactionalMemory {
             );
         }
         for page_number in self.freed_since_commit.borrow_mut().drain(..) {
-            assert_eq!(page_number.page_order, 0);
             self.page_allocator.as_ref().unwrap().free(
                 mem,
                 page_number.page_index,
@@ -668,7 +666,6 @@ impl TransactionalMemory {
         // Modify the primary allocator state directly. This is only safe because we first set the dirty bit
         let (mem, guard) = self.acquire_mutable_page_allocator(primary_mutator)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
-            assert_eq!(page_number.page_order, 0);
             self.page_allocator.as_ref().unwrap().record_alloc(
                 mem,
                 page_number.page_index,
@@ -688,7 +685,6 @@ impl TransactionalMemory {
         let mutator = TransactionMutator::new(get_secondary(metamem), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
-            assert_eq!(page_number.page_order, 0);
             self.page_allocator.as_ref().unwrap().free(
                 mem,
                 page_number.page_index,
@@ -696,7 +692,6 @@ impl TransactionalMemory {
             );
         }
         for page_number in self.freed_since_commit.borrow_mut().drain(..) {
-            assert_eq!(page_number.page_order, 0);
             self.page_allocator.as_ref().unwrap().record_alloc(
                 mem,
                 page_number.page_index,
@@ -781,7 +776,6 @@ impl TransactionalMemory {
         let (mmap, guard) = self.acquire_mutable_metapage();
         let mutator = TransactionMutator::new(get_secondary(mmap), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
-        assert_eq!(page.page_order, 0);
         self.page_allocator
             .as_ref()
             .unwrap()
@@ -798,7 +792,6 @@ impl TransactionalMemory {
             let (mmap, guard) = self.acquire_mutable_metapage();
             let mutator = TransactionMutator::new(get_secondary(mmap), guard);
             let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
-            assert_eq!(page.page_order, 0);
             self.page_allocator.as_ref().unwrap().free(
                 mem,
                 page.page_index,
@@ -818,8 +811,6 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn allocate(&self, allocation_size: usize) -> Result<PageMut, Error> {
-        assert!(allocation_size <= self.page_size);
-
         let required_pages = (allocation_size + self.page_size - 1) / self.page_size;
         let required_order = if required_pages.is_power_of_two() {
             // TODO: use .log2() when it's stable
@@ -837,7 +828,7 @@ impl TransactionalMemory {
                 .as_ref()
                 .unwrap()
                 .alloc(mem, required_order)?,
-            0,
+            required_order as u8,
         );
         // Drop guard only after page_allocator.alloc() is completed
         drop(guard);
@@ -855,6 +846,7 @@ impl TransactionalMemory {
         let mem = unsafe { &mut (*address)[address_range] };
         // Zero the memory
         mem.copy_from_slice(&vec![0u8; page_number.page_size_bytes(self.page_size)]);
+        debug_assert!(mem.len() >= allocation_size);
 
         assert_ne!(page_number.page_index, 0);
 

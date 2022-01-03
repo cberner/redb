@@ -12,11 +12,6 @@ use std::ops::{Bound, RangeBounds};
 
 const BTREE_ORDER: usize = 40;
 const MESSAGE_BUFFER: usize = 32;
-// TODO: dynamically calculate this based on the actual page size
-const MAX_KEY_SPACE_PER_PAGE: usize = 4096
-    - NodeHandle::serialized_size() * BTREE_ORDER
-    - 24 * BTREE_ORDER
-    - (1 + NodeHandle::serialized_size()) * MESSAGE_BUFFER;
 
 pub struct AccessGuardMut<'a> {
     page: PageMut<'a>,
@@ -1140,23 +1135,7 @@ fn split_index(
     let page = manager.get_page(index.get_page_number());
     let accessor = InternalAccessor::new(&page, index.get_valid_messages());
 
-    let has_enough_slots = accessor.child_page(BTREE_ORDER - partial.len()).is_none();
-    let required_key_space: usize = partial
-        .iter()
-        .map(|p| {
-            max_table_key(
-                manager.get_page(p.get_page_number()),
-                p.get_valid_messages(),
-                manager,
-            )
-            .1
-            .len()
-        })
-        .sum();
-    // TODO: Note we could get a false negative here, since we don't need to store the last key
-    // The total_key_length calculation below does it correctly
-    let has_space = accessor.total_key_length() + required_key_space < MAX_KEY_SPACE_PER_PAGE;
-    if has_space && has_enough_slots {
+    if accessor.child_page(BTREE_ORDER - partial.len()).is_none() {
         return Ok(None);
     }
 
@@ -1176,40 +1155,7 @@ fn split_index(
         )
     });
 
-    let total_key_length: usize = pages
-        .iter()
-        .map(|p| {
-            max_table_key(
-                manager.get_page(p.get_page_number()),
-                p.get_valid_messages(),
-                manager,
-            )
-            .1
-            .len()
-        })
-        .sum();
-    let division = if total_key_length < MAX_KEY_SPACE_PER_PAGE {
-        // Use tree order if we did not run out of space
-        pages.len() / 2
-    } else {
-        // Otherwise balance the nodes based on the key size
-        let mut index = pages.len() - 2;
-        let mut cumulative = 0;
-        for (i, p) in pages.iter().enumerate() {
-            cumulative += max_table_key(
-                manager.get_page(p.get_page_number()),
-                p.get_valid_messages(),
-                manager,
-            )
-            .1
-            .len();
-            if cumulative > total_key_length / 2 {
-                index = i;
-                break;
-            }
-        }
-        index
-    };
+    let division = pages.len() / 2;
 
     let page1 = make_index_many_pages(&pages[0..division], manager)?;
     let page2 = make_index_many_pages(&pages[division..], manager)?;
@@ -1835,13 +1781,12 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
             if let Some((index_table2, index_key2, page2)) = more {
                 let new_children_count = 1 + accessor.count_children();
-                let new_total_key_size = index_key2.len() + accessor.total_key_length();
 
-                if new_children_count <= BTREE_ORDER && new_total_key_size < MAX_KEY_SPACE_PER_PAGE
-                {
+                if new_children_count <= BTREE_ORDER {
                     // Rewrite page since we're splitting a child
-                    let mut new_page =
-                        manager.allocate(accessor.total_key_length() + index_key2.len())?;
+                    let mut new_page = manager.allocate(InternalBuilder::required_bytes(
+                        accessor.total_key_length() + index_key2.len(),
+                    ))?;
                     let mut builder = InternalBuilder::new(&mut new_page);
 
                     copy_to_builder_and_patch(
@@ -1885,22 +1830,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         }
                     }
 
-                    let division = if new_total_key_size < MAX_KEY_SPACE_PER_PAGE {
-                        // Use tree order if we did not run out of space
-                        BTREE_ORDER / 2
-                    } else {
-                        // Otherwise balance the nodes based on the key size
-                        let mut index = index_table_keys.len() - 1;
-                        let mut cumulative = 0;
-                        for (i, (_, key)) in index_table_keys.iter().enumerate() {
-                            cumulative += key.len();
-                            if cumulative > new_total_key_size / 2 {
-                                index = i;
-                                break;
-                            }
-                        }
-                        index
-                    };
+                    let division = BTREE_ORDER / 2;
 
                     // Rewrite page since we're splitting a child
                     let key_size = index_table_keys[0..division]
