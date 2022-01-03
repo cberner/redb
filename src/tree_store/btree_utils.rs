@@ -217,6 +217,13 @@ pub(crate) struct AllPageNumbersBtreeIter<'a> {
 
 impl<'a> AllPageNumbersBtreeIter<'a> {
     pub(crate) fn new(start: RangeIterState<'a>, manager: &'a TransactionalMemory) -> Self {
+        match start {
+            RangeIterState::LeafLeft { .. } => {}
+            RangeIterState::LeafRight { .. } => unreachable!(),
+            RangeIterState::Internal { child, .. } => {
+                assert_eq!(child, 0)
+            }
+        }
         Self {
             next: Some(start),
             manager,
@@ -228,45 +235,52 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
     type Item = PageNumber;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let state = self.next.take()?;
+        let mut state = self.next.take()?;
         let value = state.page_number();
-        self.next = state.forward_next(self.manager);
+        // Only return each page number the first time we visit it
+        loop {
+            if let Some(next_state) = state.forward_next(self.manager) {
+                state = next_state;
+            } else {
+                self.next = None;
+                return Some(value);
+            }
 
-        Some(value)
+            match state {
+                RangeIterState::LeafLeft { .. } => {
+                    self.next = Some(state);
+                    return Some(value);
+                }
+                RangeIterState::LeafRight { .. } => {}
+                RangeIterState::Internal { child, .. } => {
+                    if child == 0 {
+                        self.next = Some(state);
+                        return Some(value);
+                    }
+                }
+            }
+        }
     }
 }
 
-pub(in crate) fn page_numbers_iter_start_state<'a>(
-    page: PageImpl<'a>,
+pub(in crate) fn page_numbers_iter_start_state(
+    page: PageImpl,
     valid_messages: u8,
-    mut parent: Option<Box<RangeIterState<'a>>>,
-    manager: &'a TransactionalMemory,
-) -> Option<RangeIterState<'a>> {
+) -> Option<RangeIterState> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => Some(RangeIterState::LeafLeft {
             page,
-            parent,
+            parent: None,
             reversed: false,
         }),
-        INTERNAL => {
-            let accessor = InternalAccessor::new(&page, valid_messages);
-            let child_page_number = accessor.child_page(0).unwrap();
-            let child_page = manager.get_page(child_page_number.get_page_number());
-            parent = Some(Box::new(Internal {
-                page,
-                valid_messages,
-                child: 0,
-                parent,
-                reversed: false,
-            }));
-            page_numbers_iter_start_state(
-                child_page,
-                child_page_number.get_valid_messages(),
-                parent,
-                manager,
-            )
-        }
+        INTERNAL => Some(RangeIterState::Internal {
+            page,
+            valid_messages,
+            child: 0,
+            parent: None,
+            reversed: false,
+        }),
         _ => unreachable!(),
     }
 }

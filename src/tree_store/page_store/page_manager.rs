@@ -3,6 +3,7 @@ use crate::tree_store::page_store::utils::get_page_size;
 use crate::Error;
 use memmap2::MmapMut;
 use std::cell::RefCell;
+use std::cmp::min;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
@@ -11,7 +12,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-const MAX_PAGE_ORDER: usize = 0;
+const MAX_PAGE_ORDER: usize = 20;
 
 const DB_METADATA_PAGE: u64 = 0;
 
@@ -335,16 +336,25 @@ pub(crate) struct TransactionalMemory {
 }
 
 impl TransactionalMemory {
-    fn calculate_usable_pages(mmap_size: usize) -> usize {
-        let mut guess = mmap_size / get_page_size();
-        let mut new_guess = (mmap_size - 2 * BuddyAllocator::required_space(guess, MAX_PAGE_ORDER))
-            / get_page_size();
+    fn calculate_usable_order(mmap_size: usize, page_size: usize) -> usize {
+        let total_pages = mmap_size / page_size;
+        // Require at least 10 of the highest order pages
+        let largest_order_in_pages = total_pages / 10;
+        assert!(largest_order_in_pages > 0);
+        let max_order = (64 - largest_order_in_pages.leading_zeros() - 1) as usize;
+        min(MAX_PAGE_ORDER, max_order)
+    }
+
+    fn calculate_usable_pages(mmap_size: usize, page_size: usize, max_order: usize) -> usize {
+        let mut guess = mmap_size / page_size;
+        let mut new_guess =
+            (mmap_size - 2 * BuddyAllocator::required_space(guess, max_order)) / page_size;
         // Make sure we don't loop forever. This might not converge if it oscillates
         let mut i = 0;
         while guess != new_guess && i < 1000 {
             guess = new_guess;
-            new_guess = (mmap_size - 2 * BuddyAllocator::required_space(guess, MAX_PAGE_ORDER))
-                / get_page_size();
+            new_guess =
+                (mmap_size - 2 * BuddyAllocator::required_space(guess, max_order)) / page_size;
             i += 1;
         }
 
@@ -362,7 +372,8 @@ impl TransactionalMemory {
             assert!(page_size >= DB_METAPAGE_SIZE);
             assert!(page_size.is_power_of_two());
 
-            let usable_pages = Self::calculate_usable_pages(mmap.len());
+            let max_order = Self::calculate_usable_order(mmap.len(), page_size);
+            let usable_pages = Self::calculate_usable_pages(mmap.len(), page_size, max_order);
 
             // Explicitly zero the memory
             mmap[0..DB_METAPAGE_SIZE].copy_from_slice(&[0; DB_METAPAGE_SIZE]);
@@ -370,7 +381,7 @@ impl TransactionalMemory {
                 *i = 0
             }
 
-            let allocator_state_size = BuddyAllocator::required_space(usable_pages, MAX_PAGE_ORDER);
+            let allocator_state_size = BuddyAllocator::required_space(usable_pages, max_order);
 
             // Store the page & db size. These are immutable
             mmap[PAGE_SIZE_OFFSET] = page_size.trailing_zeros() as u8;
@@ -391,7 +402,7 @@ impl TransactionalMemory {
             let allocator = BuddyAllocator::init_new(
                 &mut mmap[start..(start + allocator_state_size)],
                 usable_pages,
-                MAX_PAGE_ORDER,
+                max_order,
             );
             allocator.record_alloc(
                 &mut mmap[start..(start + allocator_state_size)],
@@ -411,7 +422,7 @@ impl TransactionalMemory {
             let allocator = BuddyAllocator::init_new(
                 &mut mmap[start..(start + allocator_state_size)],
                 usable_pages,
-                MAX_PAGE_ORDER,
+                max_order,
             );
             allocator.record_alloc(
                 &mut mmap[start..(start + allocator_state_size)],
@@ -451,8 +462,9 @@ impl TransactionalMemory {
         let page_allocator = if allocator_dirty {
             None
         } else {
-            let usable_pages = Self::calculate_usable_pages(mmap.len());
-            Some(BuddyAllocator::new(usable_pages, MAX_PAGE_ORDER))
+            let max_order = Self::calculate_usable_order(mmap.len(), page_size);
+            let usable_pages = Self::calculate_usable_pages(mmap.len(), page_size, max_order);
+            Some(BuddyAllocator::new(usable_pages, max_order))
         };
 
         Ok(TransactionalMemory {
@@ -491,8 +503,11 @@ impl TransactionalMemory {
         if mutator.get_allocator_dirty() {
             let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
 
-            let usable_pages = Self::calculate_usable_pages(self.mmap.len());
-            let allocator = BuddyAllocator::init_new(mem, usable_pages, MAX_PAGE_ORDER);
+            let max_order = Self::calculate_usable_order(self.mmap.len(), self.page_size);
+            let usable_pages =
+                Self::calculate_usable_pages(self.mmap.len(), self.page_size, max_order);
+            let allocator = BuddyAllocator::init_new(mem, usable_pages, max_order);
+            allocator.record_alloc(mem, DB_METADATA_PAGE, 0);
             for page in allocated_pages {
                 allocator.record_alloc(mem, page.page_index, page.page_order as usize);
             }
@@ -513,8 +528,13 @@ impl TransactionalMemory {
 
             let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
 
-            let usable_pages = Self::calculate_usable_pages(self.mmap.len());
-            let allocator = BuddyAllocator::init_new(mem, usable_pages, MAX_PAGE_ORDER);
+            let max_order = Self::calculate_usable_order(self.mmap.len(), self.page_size);
+            let usable_pages =
+                Self::calculate_usable_pages(self.mmap.len(), self.page_size, max_order);
+            let allocator = BuddyAllocator::init_new(mem, usable_pages, max_order);
+            // TODO: make the metapage not part of the allocator. This caused a bug, and also prevents
+            // the first high order pages from being ever allocated
+            allocator.record_alloc(mem, DB_METADATA_PAGE, 0);
             for page in allocated_pages {
                 allocator.record_alloc(mem, page.page_index, page.page_order as usize);
             }
@@ -532,8 +552,9 @@ impl TransactionalMemory {
 
     pub(crate) fn finalize_repair_allocator(&mut self) {
         assert!(!self.needs_repair());
-        let usable_pages = Self::calculate_usable_pages(self.mmap.len());
-        let allocator = BuddyAllocator::new(usable_pages, MAX_PAGE_ORDER);
+        let max_order = Self::calculate_usable_order(self.mmap.len(), self.page_size);
+        let usable_pages = Self::calculate_usable_pages(self.mmap.len(), self.page_size, max_order);
+        let allocator = BuddyAllocator::new(usable_pages, max_order);
         self.page_allocator = Some(allocator);
     }
 
@@ -834,6 +855,8 @@ impl TransactionalMemory {
         let mem = unsafe { &mut (*address)[address_range] };
         // Zero the memory
         mem.copy_from_slice(&vec![0u8; page_number.page_size_bytes(self.page_size)]);
+
+        assert_ne!(page_number.page_index, 0);
 
         Ok(PageMut {
             mem,
