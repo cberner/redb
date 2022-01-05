@@ -1,11 +1,11 @@
 use crate::multimap_table::MultimapTable;
 use crate::table::{ReadOnlyTable, Table};
-use crate::tree_store::{DbStats, NodeHandle, Storage, TableType};
+use crate::tree_store::{get_db_size, DbStats, NodeHandle, Storage, TableType};
 use crate::types::{RedbKey, RedbValue};
 use crate::{Error, ReadOnlyMultimapTable};
 use memmap2::MmapMut;
 use std::cell::Cell;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -28,13 +28,27 @@ impl Database {
     /// The file referenced by `path` must only be concurrently modified by compatible versions
     /// of redb
     pub unsafe fn open(path: impl AsRef<Path>, db_size: usize) -> Result<Database, Error> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path)?;
+        let file = if path.as_ref().exists() && File::open(path.as_ref())?.metadata()?.len() > 0 {
+            let existing_size = get_db_size(path.as_ref())?;
+            if existing_size != db_size {
+                return Err(Error::DbSizeMismatch(format!(
+                    "Database {} is of size {} bytes, but you requested {} bytes",
+                    path.as_ref().to_string_lossy(),
+                    existing_size,
+                    db_size
+                )));
+            }
+            OpenOptions::new().read(true).write(true).open(path)?
+        } else {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(path)?;
 
-        file.set_len(db_size as u64)?;
+            file.set_len(db_size as u64)?;
+            file
+        };
 
         let mmap = MmapMut::map_mut(&file)?;
         let storage = Storage::new(mmap, None)?;
