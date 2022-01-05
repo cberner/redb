@@ -5,6 +5,7 @@ use std::io;
 pub enum Error {
     Corrupted(String),
     TableTypeMismatch(String),
+    DbSizeMismatch(String),
     DoesNotExist(String),
     LeakedWriteTransaction(String),
     OutOfSpace,

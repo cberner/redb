@@ -7,8 +7,12 @@ use std::cmp::min;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
+use std::fs::File;
+use std::io;
+use std::io::Read;
 use std::mem::size_of;
 use std::ops::Range;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -35,6 +39,16 @@ const ALLOCATOR_STATE_PTR_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u128
 const ALLOCATOR_STATE_LEN_OFFSET: usize = ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>();
 // TODO: these dirty flags should be part of the PRIMARY_BIT byte, so that they can be written atomically
 const ALLOCATOR_STATE_DIRTY_OFFSET: usize = ALLOCATOR_STATE_LEN_OFFSET + size_of::<u64>();
+
+pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
+    let mut buffer = [0u8; DB_SIZE_OFFSET];
+    let mut db_size = [0u8; size_of::<u64>()];
+    let mut file = File::open(path)?;
+    file.read_exact(&mut buffer)?;
+    file.read_exact(&mut db_size)?;
+
+    Ok(u64::from_be_bytes(db_size) as usize)
+}
 
 // Marker struct for the mutex guarding the meta page
 struct MetapageGuard;
