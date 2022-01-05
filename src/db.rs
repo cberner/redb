@@ -25,8 +25,7 @@ impl Database {
     ///
     /// # Safety
     ///
-    /// The file referenced by `path` must only be concurrently modified by compatible versions
-    /// of redb
+    /// The file referenced by `path` must not be concurrently modified by any other process
     pub unsafe fn open(path: impl AsRef<Path>, db_size: usize) -> Result<Database, Error> {
         let file = if path.as_ref().exists() && File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = get_db_size(path.as_ref())?;
