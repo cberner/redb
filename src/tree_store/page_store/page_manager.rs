@@ -50,6 +50,7 @@ pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
     Ok(u64::from_be_bytes(db_size) as usize)
 }
 
+// TODO: make this function transactional and crash safe
 pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result<(), Error> {
     let old_size = get_db_size(path.as_ref())?;
 
