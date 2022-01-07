@@ -108,6 +108,45 @@ fn change_db_size() {
 }
 
 #[test]
+fn resize_db() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 16 * 1024 * 1024;
+    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
+    let mut i = 0u64;
+    loop {
+        // Fill the database
+        match table.insert(&i, &i) {
+            Ok(_) => {}
+            Err(err) => match err {
+                Error::OutOfSpace => break,
+                _ => unreachable!(),
+            },
+        }
+        i += 1;
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
+    assert!(matches!(table.insert(&i, &i), Err(Error::OutOfSpace)));
+    txn.abort().unwrap();
+    drop(db);
+
+    unsafe {
+        Database::resize(tmpfile.path(), db_size * 2).unwrap();
+    }
+
+    let db = unsafe { Database::open(tmpfile.path(), db_size * 2).unwrap() };
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
+    assert!(table.insert(&i, &i).is_ok());
+    txn.commit().unwrap();
+}
+
+#[test]
 fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 

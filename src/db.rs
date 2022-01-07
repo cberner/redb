@@ -1,6 +1,6 @@
 use crate::multimap_table::MultimapTable;
 use crate::table::{ReadOnlyTable, Table};
-use crate::tree_store::{get_db_size, DbStats, NodeHandle, Storage, TableType};
+use crate::tree_store::{expand_db_size, get_db_size, DbStats, NodeHandle, Storage, TableType};
 use crate::types::{RedbKey, RedbValue};
 use crate::{Error, ReadOnlyMultimapTable};
 use memmap2::MmapMut;
@@ -19,9 +19,7 @@ impl Database {
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
     ///
-    /// `db_size`: the maximum size in bytes of the database. Note: this cannot be changed after the
-    /// database is created.
-    /// TODO: remove the restriction that db_size cannot be changed
+    /// `db_size`: the maximum size in bytes of the database.
     ///
     /// # Safety
     ///
@@ -52,6 +50,17 @@ impl Database {
         let mmap = MmapMut::map_mut(&file)?;
         let storage = Storage::new(mmap, None)?;
         Ok(Database { storage })
+    }
+
+    /// # Safety
+    ///
+    /// The file referenced by `path` must not be concurrently modified by any other process
+    pub unsafe fn resize(path: impl AsRef<Path>, new_size: usize) -> Result<(), Error> {
+        expand_db_size(path.as_ref(), new_size)?;
+        // Open the database to rebuild the allocator state
+        Self::open(path, new_size)?;
+
+        Ok(())
     }
 
     pub fn begin_write(&self) -> Result<DatabaseTransaction, Error> {
@@ -92,9 +101,7 @@ impl DatabaseBuilder {
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
     ///
-    /// `db_size`: the maximum size in bytes of the database. Note: this cannot be changed after the
-    /// database is created.
-    /// TODO: remove the restriction that db_size cannot be changed
+    /// `db_size`: the maximum size in bytes of the database.
     ///
     /// # Safety
     ///
