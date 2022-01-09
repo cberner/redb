@@ -950,8 +950,11 @@ impl Drop for TransactionalMemory {
         // Commit any non-durable transactions that are outstanding
         if self.read_from_secondary.load(Ordering::SeqCst) {
             let non_durable_transaction_id = self.get_last_committed_transaction_id();
-            self.commit(non_durable_transaction_id)
-                .expect("Failure while finalizing non-durable commit. Database may be corrupted");
+            if self.commit(non_durable_transaction_id).is_err() {
+                eprintln!(
+                    "Failure while finalizing non-durable commit. Database may have rolled back"
+                );
+            }
         }
         if self.mmap.flush().is_ok() && self.page_allocator.is_some() {
             let (metamem, guard) = self.acquire_mutable_metapage();
