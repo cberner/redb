@@ -11,7 +11,9 @@ use std::mem::size_of;
 use std::ops::{Bound, RangeBounds};
 
 const BTREE_ORDER: usize = 40;
-const MESSAGE_BUFFER: usize = 32;
+// TODO: re-enable this feature. It may be unsound at the moment, because pages with both mutable
+// and immutable references could exist at the same time
+const MESSAGE_BUFFER: usize = 0;
 
 pub struct AccessGuardMut<'a> {
     page: PageMut<'a>,
