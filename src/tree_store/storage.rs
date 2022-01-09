@@ -123,7 +123,7 @@ pub(in crate) struct Storage {
 impl Storage {
     pub(in crate) fn new(mmap: MmapMut, page_size: Option<usize>) -> Result<Storage, Error> {
         let mut mem = TransactionalMemory::new(mmap, page_size)?;
-        while mem.needs_repair() {
+        while mem.needs_repair()? {
             let (root, messages) = mem
                 .get_primary_root_page()
                 .expect("Tried to repair an empty database");
@@ -132,9 +132,9 @@ impl Storage {
             let iter = AllPageNumbersBtreeIter::new(start.unwrap(), &mem);
             mem.repair_allocator(iter)?;
         }
-        mem.finalize_repair_allocator();
+        mem.finalize_repair_allocator()?;
 
-        let next_transaction_id = mem.get_last_committed_transaction_id() + 1;
+        let next_transaction_id = mem.get_last_committed_transaction_id()? + 1;
 
         Ok(Storage {
             mem,
@@ -382,9 +382,9 @@ impl Storage {
 
         if let Some(ptr) = new_root {
             self.mem
-                .set_secondary_root_page(ptr.get_page_number(), ptr.get_valid_messages());
+                .set_secondary_root_page(ptr.get_page_number(), ptr.get_valid_messages())?;
         } else {
-            self.mem.set_secondary_root_page(PageNumber::null(), 0);
+            self.mem.set_secondary_root_page(PageNumber::null(), 0)?;
         }
 
         self.mem.commit(transaction_id)?;
@@ -404,9 +404,9 @@ impl Storage {
 
         if let Some(ptr) = new_root {
             self.mem
-                .set_secondary_root_page(ptr.get_page_number(), ptr.get_valid_messages());
+                .set_secondary_root_page(ptr.get_page_number(), ptr.get_valid_messages())?;
         } else {
-            self.mem.set_secondary_root_page(PageNumber::null(), 0);
+            self.mem.set_secondary_root_page(PageNumber::null(), 0)?;
         }
 
         self.mem.non_durable_commit(transaction_id)?;
@@ -515,7 +515,7 @@ impl Storage {
                 )
             })
             .unwrap_or(0);
-        Ok(DbStats::new(tree_height, self.mem.count_free_pages()))
+        Ok(DbStats::new(tree_height, self.mem.count_free_pages()?))
     }
 
     #[allow(dead_code)]

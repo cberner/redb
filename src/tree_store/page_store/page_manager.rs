@@ -553,17 +553,17 @@ impl TransactionalMemory {
         })
     }
 
-    pub(crate) fn needs_repair(&self) -> bool {
-        let (mmap, guard) = self.acquire_mutable_metapage();
+    pub(crate) fn needs_repair(&self) -> Result<bool, Error> {
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
         let accessor = TransactionAccessor::new(get_primary(mmap), guard);
         let mut allocator_dirty = accessor.get_allocator_dirty();
         drop(accessor);
 
-        let (mmap, guard) = self.acquire_mutable_metapage();
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
         let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
         allocator_dirty |= accessor.get_allocator_dirty();
 
-        allocator_dirty
+        Ok(allocator_dirty)
     }
 
     // Returns true if the repair is complete. If false, this method must be called again
@@ -572,7 +572,7 @@ impl TransactionalMemory {
         allocated_pages: impl Iterator<Item = PageNumber>,
     ) -> Result<bool, Error> {
         // TODO: clean up all the duplicated code in this function
-        let (mmap, guard) = self.acquire_mutable_metapage();
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
         if mutator.get_allocator_dirty() {
             let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
@@ -588,7 +588,7 @@ impl TransactionalMemory {
             self.mmap.flush()?;
 
             drop(guard);
-            let (mmap, guard) = self.acquire_mutable_metapage();
+            let (mmap, guard) = self.acquire_mutable_metapage()?;
             let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
             mutator.set_allocator_dirty(false);
             self.mmap.flush()?;
@@ -597,7 +597,7 @@ impl TransactionalMemory {
         } else {
             // Repair the primary instead
             drop(mutator);
-            let (mmap, guard) = self.acquire_mutable_metapage();
+            let (mmap, guard) = self.acquire_mutable_metapage()?;
             mutator = TransactionMutator::new(get_primary_mut(mmap), guard);
 
             let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
@@ -615,7 +615,7 @@ impl TransactionalMemory {
             self.mmap.flush()?;
 
             drop(guard);
-            let (mmap, guard) = self.acquire_mutable_metapage();
+            let (mmap, guard) = self.acquire_mutable_metapage()?;
             mutator = TransactionMutator::new(get_primary_mut(mmap), guard);
             mutator.set_allocator_dirty(false);
             self.mmap.flush()?;
@@ -624,21 +624,23 @@ impl TransactionalMemory {
         }
     }
 
-    pub(crate) fn finalize_repair_allocator(&mut self) {
-        assert!(!self.needs_repair());
+    pub(crate) fn finalize_repair_allocator(&mut self) -> Result<(), Error> {
+        assert!(!self.needs_repair()?);
         let max_order = Self::calculate_usable_order(self.mmap.len(), self.page_size);
         let usable_pages = Self::calculate_usable_pages(self.mmap.len(), self.page_size, max_order);
         let allocator = BuddyAllocator::new(usable_pages, max_order);
         self.page_allocator = Some(allocator);
+
+        Ok(())
     }
 
-    fn acquire_mutable_metapage(&self) -> (&mut [u8], MutexGuard<MetapageGuard>) {
+    fn acquire_mutable_metapage(&self) -> Result<(&mut [u8], MutexGuard<MetapageGuard>), Error> {
         let guard = self.metapage_guard.lock().unwrap();
         let ptr = &self.mmap as *const MmapMut as *mut MmapMut;
         // Safety: we acquire the metapage lock and only access the metapage
         let mem = unsafe { &mut (*ptr)[0..DB_METAPAGE_SIZE] };
 
-        (mem, guard)
+        Ok((mem, guard))
     }
 
     fn acquire_mutable_page_allocator<'a>(
@@ -669,7 +671,7 @@ impl TransactionalMemory {
         assert!(self.open_dirty_pages.borrow().is_empty());
         assert!(self.page_allocator.is_some());
 
-        let (mmap, guard) = self.acquire_mutable_metapage();
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
         mutator.set_last_committed_transaction_id(transaction_id);
         drop(mutator);
@@ -681,11 +683,11 @@ impl TransactionalMemory {
             1 => 0,
             _ => unreachable!(),
         };
-        let (mmap, guard) = self.acquire_mutable_metapage();
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
         mutator.set_allocator_dirty(false);
         drop(mutator);
-        let (mmap, guard) = self.acquire_mutable_metapage();
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
 
         mmap[PRIMARY_BIT_OFFSET] = next;
         // Dirty the current primary (we just switched them on the previous line)
@@ -722,7 +724,7 @@ impl TransactionalMemory {
         assert!(self.open_dirty_pages.borrow().is_empty());
         assert!(self.page_allocator.is_some());
 
-        let (mmap, guard) = self.acquire_mutable_metapage();
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
         mutator.set_last_committed_transaction_id(transaction_id);
         drop(mutator);
@@ -755,7 +757,7 @@ impl TransactionalMemory {
 
     pub(crate) fn rollback_uncommited_writes(&self) -> Result<(), Error> {
         assert!(self.open_dirty_pages.borrow().is_empty());
-        let (metamem, guard) = self.acquire_mutable_metapage();
+        let (metamem, guard) = self.acquire_mutable_metapage()?;
         let mutator = TransactionMutator::new(get_secondary(metamem), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
@@ -825,29 +827,34 @@ impl TransactionalMemory {
         }
     }
 
-    pub(crate) fn get_last_committed_transaction_id(&self) -> u128 {
-        if self.read_from_secondary.load(Ordering::SeqCst) {
-            TransactionAccessor::new(
-                get_secondary_const(&self.mmap),
-                self.metapage_guard.lock().unwrap(),
-            )
-            .get_last_committed_transaction_id()
-        } else {
-            TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock().unwrap())
+    pub(crate) fn get_last_committed_transaction_id(&self) -> Result<u128, Error> {
+        let id = if self.read_from_secondary.load(Ordering::SeqCst) {
+            TransactionAccessor::new(get_secondary_const(&self.mmap), self.metapage_guard.lock()?)
                 .get_last_committed_transaction_id()
-        }
+        } else {
+            TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock()?)
+                .get_last_committed_transaction_id()
+        };
+
+        Ok(id)
     }
 
     // TODO: valid_message_bytes kind of breaks the separation of concerns for the PageManager.
     // It's only used by the delta message protocol of the b-tree
-    pub(crate) fn set_secondary_root_page(&self, root_page: PageNumber, valid_messages: u8) {
-        let (mmap, guard) = self.acquire_mutable_metapage();
+    pub(crate) fn set_secondary_root_page(
+        &self,
+        root_page: PageNumber,
+        valid_messages: u8,
+    ) -> Result<(), Error> {
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
         mutator.set_root_page(root_page, valid_messages);
+
+        Ok(())
     }
 
     pub(crate) fn free(&self, page: PageNumber) -> Result<(), Error> {
-        let (mmap, guard) = self.acquire_mutable_metapage();
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
         let mutator = TransactionMutator::new(get_secondary(mmap), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
         self.page_allocator
@@ -863,7 +870,7 @@ impl TransactionalMemory {
     // Frees the page if it was allocated since the last commit. Returns true, if the page was freed
     pub(crate) fn free_if_uncommitted(&self, page: PageNumber) -> Result<bool, Error> {
         if self.allocated_since_commit.borrow_mut().remove(&page) {
-            let (mmap, guard) = self.acquire_mutable_metapage();
+            let (mmap, guard) = self.acquire_mutable_metapage()?;
             let mutator = TransactionMutator::new(get_secondary(mmap), guard);
             let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
             self.page_allocator.as_ref().unwrap().free(
@@ -894,7 +901,7 @@ impl TransactionalMemory {
             required_pages.next_power_of_two().trailing_zeros()
         } as usize;
 
-        let (mmap, guard) = self.acquire_mutable_metapage();
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
         let mutator = TransactionMutator::new(get_secondary(mmap), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
         let page_number = PageNumber::new(
@@ -931,8 +938,8 @@ impl TransactionalMemory {
         })
     }
 
-    pub(crate) fn count_free_pages(&self) -> usize {
-        let (mmap, guard) = self.acquire_mutable_metapage();
+    pub(crate) fn count_free_pages(&self) -> Result<usize, Error> {
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
         // TODO: this is a read-only operation, so should be able to use an accessor
         // and avoid dirtying the allocator state
         let mutator = TransactionMutator::new(get_secondary(mmap), guard);
@@ -941,7 +948,7 @@ impl TransactionalMemory {
         // Drop guard only after page_allocator.count_free() is completed
         drop(guard);
 
-        count
+        Ok(count)
     }
 }
 
@@ -949,18 +956,24 @@ impl Drop for TransactionalMemory {
     fn drop(&mut self) {
         // Commit any non-durable transactions that are outstanding
         if self.read_from_secondary.load(Ordering::SeqCst) {
-            let non_durable_transaction_id = self.get_last_committed_transaction_id();
-            if self.commit(non_durable_transaction_id).is_err() {
+            if let Ok(non_durable_transaction_id) = self.get_last_committed_transaction_id() {
+                if self.commit(non_durable_transaction_id).is_err() {
+                    eprintln!(
+                        "Failure while finalizing non-durable commit. Database may have rolled back"
+                    );
+                }
+            } else {
                 eprintln!(
                     "Failure while finalizing non-durable commit. Database may have rolled back"
                 );
             }
         }
         if self.mmap.flush().is_ok() && self.page_allocator.is_some() {
-            let (metamem, guard) = self.acquire_mutable_metapage();
-            let mut mutator = TransactionMutator::new(get_secondary(metamem), guard);
-            mutator.set_allocator_dirty(false);
-            let _ = self.mmap.flush();
+            if let Ok((metamem, guard)) = self.acquire_mutable_metapage() {
+                let mut mutator = TransactionMutator::new(get_secondary(metamem), guard);
+                mutator.set_allocator_dirty(false);
+                let _ = self.mmap.flush();
+            }
         }
     }
 }
@@ -1007,7 +1020,10 @@ mod test {
         drop(mutator);
         mmap.flush().unwrap();
 
-        assert!(TransactionalMemory::new(mmap, None).unwrap().needs_repair());
+        assert!(TransactionalMemory::new(mmap, None)
+            .unwrap()
+            .needs_repair()
+            .unwrap());
 
         let db2 = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db2.begin_write().unwrap();
