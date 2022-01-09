@@ -1,3 +1,4 @@
+mod mmap;
 mod page_allocator;
 mod page_manager;
 mod utils;

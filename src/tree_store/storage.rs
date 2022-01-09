@@ -376,7 +376,11 @@ impl Storage {
             new_root = self.store_freed_pages(transaction_id, new_root)?;
         } else {
             for page in self.pending_freed_pages.borrow_mut().drain(..) {
-                self.mem.free(page)?;
+                // Safety: The oldest live read started after this transactions, so it can't
+                // have a references to this page, since we freed it in this transaction
+                unsafe {
+                    self.mem.free(page)?;
+                }
             }
         }
 
@@ -439,7 +443,11 @@ impl Storage {
             // 1..=length because the array is length prefixed
             for i in 1..=length {
                 let page = PageNumber::from_be_bytes(value[i * 8..(i + 1) * 8].try_into().unwrap());
-                self.mem.free(page)?;
+                // Safety: we free only pages that were marked to be freed before the oldest live transaction,
+                // therefore no one can have a reference to this page still
+                unsafe {
+                    self.mem.free(page)?;
+                }
             }
         }
         drop(iter);
