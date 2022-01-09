@@ -41,10 +41,9 @@ const ALLOCATOR_STATE_LEN_OFFSET: usize = ALLOCATOR_STATE_PTR_OFFSET + size_of::
 const ALLOCATOR_STATE_DIRTY_OFFSET: usize = ALLOCATOR_STATE_LEN_OFFSET + size_of::<u64>();
 
 pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
-    let mut buffer = [0u8; DB_SIZE_OFFSET];
     let mut db_size = [0u8; size_of::<u64>()];
     let mut file = File::open(path)?;
-    file.read_exact(&mut buffer)?;
+    file.seek(SeekFrom::Start(DB_SIZE_OFFSET as u64))?;
     file.read_exact(&mut db_size)?;
 
     Ok(u64::from_be_bytes(db_size) as usize)
