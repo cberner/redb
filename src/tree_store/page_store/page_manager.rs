@@ -1,3 +1,4 @@
+use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::page_allocator::BuddyAllocator;
 use crate::tree_store::page_store::utils::get_page_size;
 use crate::Error;
@@ -397,7 +398,7 @@ pub(crate) struct TransactionalMemory {
     // Metapage guard lock should be held when using this to modify the page allocator state
     // May be None, if the allocator state was corrupted when the file was opened
     page_allocator: Option<BuddyAllocator>,
-    mmap: MmapMut,
+    mmap: Mmap,
     // We use unsafe to access the metapage (page 0), and so guard it with this mutex
     // It would be nice if this was a RefCell<&[u8]> on the metapage. However, that would be
     // self-referential, since we also hold the mmap object
@@ -545,7 +546,7 @@ impl TransactionalMemory {
             allocated_since_commit: RefCell::new(HashSet::new()),
             freed_since_commit: RefCell::new(vec![]),
             page_allocator,
-            mmap,
+            mmap: Mmap::new(mmap),
             metapage_guard: mutex,
             open_dirty_pages: RefCell::new(HashSet::new()),
             read_from_secondary: AtomicBool::new(false),
@@ -636,9 +637,8 @@ impl TransactionalMemory {
 
     fn acquire_mutable_metapage(&self) -> Result<(&mut [u8], MutexGuard<MetapageGuard>), Error> {
         let guard = self.metapage_guard.lock().unwrap();
-        let ptr = &self.mmap as *const MmapMut as *mut MmapMut;
         // Safety: we acquire the metapage lock and only access the metapage
-        let mem = unsafe { &mut (*ptr)[0..DB_METAPAGE_SIZE] };
+        let mem = unsafe { self.mmap.get_memory_mut(0..DB_METAPAGE_SIZE) };
 
         Ok((mem, guard))
     }
@@ -653,12 +653,12 @@ impl TransactionalMemory {
             self.mmap.flush()?
         }
 
-        let ptr = &self.mmap as *const MmapMut as *mut MmapMut;
         // Safety: we have the metapage lock and only access the metapage
         // (page allocator state is logically part of the metapage)
         let (start, end) = mutator.get_allocator_data();
         assert!(end <= self.mmap.len());
-        let mem = unsafe { &mut (*ptr)[start..end] };
+        // Safety: the allocator state is considered part of the metapage, and we hold the lock
+        let mem = unsafe { self.mmap.get_memory_mut(start..end) };
 
         Ok((mem, mutator.into_guard()))
     }
@@ -678,7 +678,7 @@ impl TransactionalMemory {
 
         self.mmap.flush()?;
 
-        let next = match self.mmap[PRIMARY_BIT_OFFSET] {
+        let next = match self.mmap.get_memory(0..DB_METAPAGE_SIZE)[PRIMARY_BIT_OFFSET] {
             0 => 1,
             1 => 0,
             _ => unreachable!(),
@@ -789,23 +789,25 @@ impl TransactionalMemory {
         );
 
         PageImpl {
-            mem: &self.mmap[page_number.address_range(self.page_size)],
+            mem: self
+                .mmap
+                .get_memory(page_number.address_range(self.page_size)),
             page_number,
         }
     }
 
-    pub(crate) fn get_page_mut(&self, page_number: PageNumber) -> PageMut {
+    // Safety: the caller must ensure that no references to the memory in `page` exist
+    pub(crate) unsafe fn get_page_mut(&self, page_number: PageNumber) -> PageMut {
         self.open_dirty_pages.borrow_mut().insert(page_number);
 
-        let address = &self.mmap as *const MmapMut as *mut MmapMut;
-        // Safety:
-        // All PageMut are registered in open_dirty_pages, and no immutable references are allowed
-        // to those pages
         // TODO: change this to take a NodeHandle, and check that future get_page() calls don't
         // request valid_message bytes after this request. Otherwise, we could get a race.
         // Immutable references are allowed, they just need to be to a strict subset of the
         // valid delta message bytes
-        let mem = unsafe { &mut (*address)[page_number.address_range(self.page_size)] };
+
+        let mem = self
+            .mmap
+            .get_memory_mut(page_number.address_range(self.page_size));
 
         PageMut {
             mem,
@@ -817,23 +819,32 @@ impl TransactionalMemory {
     pub(crate) fn get_primary_root_page(&self) -> Option<(PageNumber, u8)> {
         if self.read_from_secondary.load(Ordering::SeqCst) {
             TransactionAccessor::new(
-                get_secondary_const(&self.mmap),
+                get_secondary_const(self.mmap.get_memory(0..DB_METAPAGE_SIZE)),
                 self.metapage_guard.lock().unwrap(),
             )
             .get_root_page()
         } else {
-            TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock().unwrap())
-                .get_root_page()
+            TransactionAccessor::new(
+                get_primary(self.mmap.get_memory(0..DB_METAPAGE_SIZE)),
+                self.metapage_guard.lock().unwrap(),
+            )
+            .get_root_page()
         }
     }
 
     pub(crate) fn get_last_committed_transaction_id(&self) -> Result<u128, Error> {
         let id = if self.read_from_secondary.load(Ordering::SeqCst) {
-            TransactionAccessor::new(get_secondary_const(&self.mmap), self.metapage_guard.lock()?)
-                .get_last_committed_transaction_id()
+            TransactionAccessor::new(
+                get_secondary_const(self.mmap.get_memory(0..DB_METAPAGE_SIZE)),
+                self.metapage_guard.lock()?,
+            )
+            .get_last_committed_transaction_id()
         } else {
-            TransactionAccessor::new(get_primary(&self.mmap), self.metapage_guard.lock()?)
-                .get_last_committed_transaction_id()
+            TransactionAccessor::new(
+                get_primary(self.mmap.get_memory(0..DB_METAPAGE_SIZE)),
+                self.metapage_guard.lock()?,
+            )
+            .get_last_committed_transaction_id()
         };
 
         Ok(id)
@@ -853,7 +864,8 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn free(&self, page: PageNumber) -> Result<(), Error> {
+    // Safety: the caller must ensure that no references to the memory in `page` exist
+    pub(crate) unsafe fn free(&self, page: PageNumber) -> Result<(), Error> {
         let (mmap, guard) = self.acquire_mutable_metapage()?;
         let mutator = TransactionMutator::new(get_secondary(mmap), guard);
         let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
@@ -868,7 +880,8 @@ impl TransactionalMemory {
     }
 
     // Frees the page if it was allocated since the last commit. Returns true, if the page was freed
-    pub(crate) fn free_if_uncommitted(&self, page: PageNumber) -> Result<bool, Error> {
+    // Safety: the caller must ensure that no references to the memory in `page` exist
+    pub(crate) unsafe fn free_if_uncommitted(&self, page: PageNumber) -> Result<bool, Error> {
         if self.allocated_since_commit.borrow_mut().remove(&page) {
             let (mmap, guard) = self.acquire_mutable_metapage()?;
             let mutator = TransactionMutator::new(get_secondary(mmap), guard);
@@ -917,14 +930,11 @@ impl TransactionalMemory {
         self.allocated_since_commit.borrow_mut().insert(page_number);
         self.open_dirty_pages.borrow_mut().insert(page_number);
 
-        let address = &self.mmap as *const MmapMut as *mut MmapMut;
-
         let address_range = page_number.address_range(self.page_size);
         assert!(address_range.end <= self.mmap.len());
         // Safety:
-        // All PageMut are registered in open_dirty_pages, and no immutable references are allowed
-        // to those pages
-        let mem = unsafe { &mut (*address)[address_range] };
+        // The address range we're returning was just allocated, so no other references exist
+        let mem = unsafe { self.mmap.get_memory_mut(address_range) };
         // Zero the memory
         mem.copy_from_slice(&vec![0u8; page_number.page_size_bytes(self.page_size)]);
         debug_assert!(mem.len() >= allocation_size);

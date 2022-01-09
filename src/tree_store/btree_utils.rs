@@ -906,11 +906,13 @@ impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
         Self { page }
     }
 
+    #[allow(dead_code)]
     fn can_write_delta_message(&self, message_offset: u8) -> bool {
         message_offset < MESSAGE_BUFFER as u8
     }
 
     // Returns the new valid message offset
+    #[allow(dead_code)]
     fn write_delta_message(
         &mut self,
         existing_messages: u8,
@@ -1670,8 +1672,14 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                             manager,
                         )?;
 
-                        if !manager.free_if_uncommitted(page.get_page_number())? {
-                            freed.push(page.get_page_number());
+                        let page_number = page.get_page_number();
+                        drop(page);
+                        // Safety: If the page is uncommitted, no other transactions can have references to it,
+                        // and we just dropped ours on the line above
+                        unsafe {
+                            if !manager.free_if_uncommitted(page_number)? {
+                                freed.push(page_number);
+                            }
                         }
 
                         (new_page, None, guard)
@@ -1693,8 +1701,14 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                                 let right =
                                     make_single_leaf(right_table, right_key, right_value, manager)?;
 
-                                if !manager.free_if_uncommitted(page.get_page_number())? {
-                                    freed.push(page.get_page_number());
+                                let page_number = page.get_page_number();
+                                drop(page);
+                                // Safety: If the page is uncommitted, no other transactions can have references to it,
+                                // and we just dropped ours on the line above
+                                unsafe {
+                                    if !manager.free_if_uncommitted(page_number)? {
+                                        freed.push(page_number);
+                                    }
                                 }
 
                                 (left, Some((table, key.to_vec(), right)), guard)
@@ -1710,8 +1724,14 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                                     manager,
                                 )?;
 
-                                if !manager.free_if_uncommitted(page.get_page_number())? {
-                                    freed.push(page.get_page_number());
+                                let page_number = page.get_page_number();
+                                drop(page);
+                                // Safety: If the page is uncommitted, no other transactions can have references to it,
+                                // and we just dropped ours on the line above
+                                unsafe {
+                                    if !manager.free_if_uncommitted(page_number)? {
+                                        freed.push(page_number);
+                                    }
                                 }
 
                                 (new_page, None, guard)
@@ -1723,11 +1743,19 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                                 let right =
                                     make_single_leaf(right_table, right_key, right_value, manager)?;
 
-                                if !manager.free_if_uncommitted(page.get_page_number())? {
-                                    freed.push(page.get_page_number());
+                                let left_key_vec = left_key.to_vec();
+
+                                let page_number = page.get_page_number();
+                                drop(page);
+                                // Safety: If the page is uncommitted, no other transactions can have references to it,
+                                // and we just dropped ours on the line above
+                                unsafe {
+                                    if !manager.free_if_uncommitted(page_number)? {
+                                        freed.push(page_number);
+                                    }
                                 }
 
-                                (left, Some((left_table, left_key.to_vec(), right)), guard)
+                                (left, Some((left_table, left_key_vec, right)), guard)
                             }
                         }
                     }
@@ -1760,8 +1788,14 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     )?,
                 };
 
-                if !manager.free_if_uncommitted(page.get_page_number())? {
-                    freed.push(page.get_page_number());
+                let page_number = page.get_page_number();
+                drop(page);
+                // Safety: If the page is uncommitted, no other transactions can have references to it,
+                // and we just dropped ours on the line above
+                unsafe {
+                    if !manager.free_if_uncommitted(page_number)? {
+                        freed.push(page_number);
+                    }
                 }
 
                 (new_page, None, guard)
@@ -1801,8 +1835,14 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         Some((index_table2, &index_key2, page2)),
                     );
                     // Free the original page, since we've replaced it
-                    if !manager.free_if_uncommitted(page.get_page_number())? {
-                        freed.push(page.get_page_number());
+                    let page_number = page.get_page_number();
+                    drop(page);
+                    // Safety: If the page is uncommitted, no other transactions can have references to it,
+                    // and we just dropped ours on the line above
+                    unsafe {
+                        if !manager.free_if_uncommitted(page_number)? {
+                            freed.push(page_number);
+                        }
                     }
                     (NodeHandle::new(new_page.get_page_number(), 0), None, guard)
                 } else {
@@ -1864,31 +1904,45 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         builder2.write_nth_key(*table, key, children[i + 1], i - (division + 1));
                     }
 
+                    let index_table = *index_table;
+                    let index_key_vec = index_key.to_vec();
+
                     // Free the original page, since we've replaced it
-                    if !manager.free_if_uncommitted(page.get_page_number())? {
-                        freed.push(page.get_page_number());
+                    let page_number = page.get_page_number();
+                    drop(page);
+                    // Safety: If the page is uncommitted, no other transactions can have references to it,
+                    // and we just dropped ours on the line above
+                    unsafe {
+                        if !manager.free_if_uncommitted(page_number)? {
+                            freed.push(page_number);
+                        }
                     }
                     (
                         NodeHandle::new(new_page.get_page_number(), 0),
                         Some((
-                            *index_table,
-                            index_key.to_vec(),
+                            index_table,
+                            index_key_vec,
                             NodeHandle::new(new_page2.get_page_number(), 0),
                         )),
                         guard,
                     )
                 }
             } else {
-                let mut mutpage = manager.get_page_mut(page.get_page_number());
-                let mut mutator = InternalMutator::new(&mut mutpage);
+                #[allow(clippy::collapsible_else_if)]
                 if page1 == child_page {
                     // NO-OP. One of our descendants is uncommitted, so there was no change
                     (
-                        NodeHandle::new(mutpage.get_page_number(), valid_messages),
+                        NodeHandle::new(page.get_page_number(), valid_messages),
                         None,
                         guard,
                     )
                 } else if manager.uncommitted(page.get_page_number()) {
+                    let page_number = page.get_page_number();
+                    drop(page);
+                    // Safety: Since the page is uncommitted, no other transactions could have it open
+                    // and we just dropped our reference to it, on the line above
+                    let mut mutpage = unsafe { manager.get_page_mut(page_number) };
+                    let mut mutator = InternalMutator::new(&mut mutpage);
                     assert_eq!(valid_messages, 0);
                     mutator.write_child_page(child_index, page1);
                     (
@@ -1896,14 +1950,18 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         None,
                         guard,
                     )
-                } else if mutator.can_write_delta_message(valid_messages) {
-                    let new_messages =
-                        mutator.write_delta_message(valid_messages, child_index as u8, page1);
-                    (
-                        NodeHandle::new(mutpage.get_page_number(), new_messages),
-                        None,
-                        guard,
-                    )
+                // TODO: re-enable this delta message code path
+                // } else if mutator.can_write_delta_message(valid_messages) {
+                //     todo!();
+                // let mut mutpage = unsafe { manager.get_page_mut(page.get_page_number()) };
+                // let mut mutator = InternalMutator::new(&mut mutpage);
+                // let new_messages =
+                //     mutator.write_delta_message(valid_messages, child_index as u8, page1);
+                // (
+                //     NodeHandle::new(mutpage.get_page_number(), new_messages),
+                //     None,
+                //     guard,
+                // )
                 } else {
                     // Page is full of delta messages, so rewrite it
                     let mut new_page = manager
@@ -1920,8 +1978,14 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     );
 
                     // Free the original page, since we've replaced it
-                    if !manager.free_if_uncommitted(page.get_page_number())? {
-                        freed.push(page.get_page_number());
+                    let page_number = page.get_page_number();
+                    drop(page);
+                    // Safety: If the page is uncommitted, no other transactions can have references to it,
+                    // and we just dropped ours on the line above
+                    unsafe {
+                        if !manager.free_if_uncommitted(page_number)? {
+                            freed.push(page_number);
+                        }
                     }
                     (NodeHandle::new(new_page.get_page_number(), 0), None, guard)
                 }
