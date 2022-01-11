@@ -10,7 +10,7 @@ use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use memmap2::MmapMut;
 use std::cell::{Cell, RefCell};
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::collections::{BTreeSet, Bound};
 use std::convert::TryInto;
 use std::marker::PhantomData;
@@ -18,16 +18,13 @@ use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull, RangeTo};
 use std::panic;
 
-// The table of name -> table_id mappings
-const TABLE_TABLE_ID: u64 = 0;
 // The table of freed pages by transaction. (transaction id, pagination counter) -> binary.
 // The binary blob is a length-prefixed array of big endian PageNumber
-const FREED_TABLE_ID: u64 = TABLE_TABLE_ID + 1;
-// Table with a single entry indicating the largest valid table id. u64 -> u64, with a key of LAST_TABLE_ID_KEY
-const LAST_TABLE_ID_TABLE: u64 = FREED_TABLE_ID + 1;
-const LAST_SYSTEM_TABLE: u64 = LAST_TABLE_ID_TABLE;
+// TODO: prevent user from opening and modifying this table
+const FREED_TABLE: &[u8] = b"$$internal$$freed";
 
-const LAST_TABLE_ID_KEY: u64 = 0;
+// TODO: Remove this
+const TODO_REMOVE_THIS_FAKE_TABLE_ID: u64 = u64::MAX;
 
 #[derive(Debug)]
 pub struct DbStats {
@@ -78,14 +75,19 @@ impl From<u8> for TableType {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct TableDefinition {
-    table_id: u64,
+    table_root: Option<NodeHandle>,
     table_type: TableType,
 }
 
 impl TableDefinition {
-    pub(crate) fn get_id(&self) -> u64 {
-        self.table_id
+    pub(crate) fn get_root(&self) -> Option<NodeHandle> {
+        self.table_root
+    }
+
+    pub(crate) fn set_root(&mut self, new_root: Option<NodeHandle>) {
+        self.table_root = new_root;
     }
 
     pub(crate) fn get_type(&self) -> TableType {
@@ -94,18 +96,28 @@ impl TableDefinition {
 
     fn to_bytes(&self) -> Vec<u8> {
         let mut result = vec![self.table_type.into()];
-        result.extend_from_slice(&self.table_id.to_be_bytes());
+        result.extend_from_slice(
+            &self
+                .table_root
+                .unwrap_or_else(|| NodeHandle::new(PageNumber::null(), 0))
+                .to_be_bytes(),
+        );
 
         result
     }
 
     fn from_bytes(value: &[u8]) -> Self {
         assert_eq!(9, value.len());
-        let table_id = u64::from_be_bytes(value[1..9].try_into().unwrap());
+        let table_root = NodeHandle::from_be_bytes(value[1..9].try_into().unwrap());
+        let table_root = if table_root.get_page_number() == PageNumber::null() {
+            None
+        } else {
+            Some(table_root)
+        };
         let table_type = TableType::from(value[0]);
 
         TableDefinition {
-            table_id,
+            table_root,
             table_type,
         }
     }
@@ -129,12 +141,52 @@ impl Storage {
                 .expect("Tried to repair an empty database");
             let root_page = mem.get_page(root);
             let start = page_numbers_iter_start_state(root_page, messages);
-            let iter = AllPageNumbersBtreeIter::new(start.unwrap(), &mem);
-            mem.repair_allocator(iter)?;
+            let mut all_pages_iter: Box<dyn Iterator<Item = PageNumber>> =
+                Box::new(AllPageNumbersBtreeIter::new(start, &mem));
+
+            let start_state = find_iter_unbounded_start(
+                mem.get_page(root),
+                messages,
+                None,
+                TODO_REMOVE_THIS_FAKE_TABLE_ID,
+                &mem,
+            );
+            let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
+                BtreeRangeIter::new(start_state, TODO_REMOVE_THIS_FAKE_TABLE_ID, .., &mem);
+
+            while let Some(entry) = iter.next() {
+                let definition = TableDefinition::from_bytes(entry.value());
+                if let Some(table_root) = definition.get_root() {
+                    let page = mem.get_page(table_root.get_page_number());
+                    let table_start =
+                        page_numbers_iter_start_state(page, table_root.get_valid_messages());
+                    let table_pages_iter = AllPageNumbersBtreeIter::new(table_start, &mem);
+                    all_pages_iter = Box::new(all_pages_iter.chain(table_pages_iter));
+                }
+            }
+
+            mem.repair_allocator(all_pages_iter)?;
         }
         mem.finalize_repair_allocator()?;
 
-        let next_transaction_id = mem.get_last_committed_transaction_id()? + 1;
+        let mut next_transaction_id = mem.get_last_committed_transaction_id()? + 1;
+        // TODO: make this detection more reliable
+        if mem.get_primary_root_page().is_none() {
+            // Empty database, so insert the freed table.
+            let freed_table = TableDefinition {
+                table_root: None,
+                table_type: TableType::Normal,
+            };
+            let (new_root, _) = make_mut_single_leaf(
+                TODO_REMOVE_THIS_FAKE_TABLE_ID,
+                FREED_TABLE,
+                &freed_table.to_bytes(),
+                &mem,
+            )?;
+            mem.set_secondary_root_page(new_root.get_page_number(), new_root.get_valid_messages())?;
+            mem.commit(next_transaction_id)?;
+            next_transaction_id += 1;
+        }
 
         Ok(Storage {
             mem,
@@ -176,13 +228,29 @@ impl Storage {
         self.live_read_transactions.borrow_mut().remove(&id);
     }
 
+    pub(in crate) fn update_table_root(
+        &self,
+        name: &[u8],
+        table_type: TableType,
+        table_root: Option<NodeHandle>,
+        transaction_id: u128,
+        master_root: Option<NodeHandle>,
+    ) -> Result<NodeHandle, Error> {
+        let definition = TableDefinition {
+            table_root,
+            table_type,
+        };
+        self.insert::<[u8]>(name, &definition.to_bytes(), transaction_id, master_root)
+    }
+
+    // root_page: the root of the master table
     pub(in crate) fn get_table(
         &self,
         name: &[u8],
         table_type: TableType,
         root_page: Option<NodeHandle>,
     ) -> Result<Option<TableDefinition>, Error> {
-        if let Some(found) = self.get::<[u8], [u8]>(TABLE_TABLE_ID, name, root_page)? {
+        if let Some(found) = self.get::<[u8], [u8]>(name, root_page)? {
             let definition = TableDefinition::from_bytes(found.as_ref());
             if definition.get_type() != table_type {
                 return Err(Error::TableTypeMismatch(format!(
@@ -197,6 +265,7 @@ impl Storage {
         }
     }
 
+    // root_page: the root of the master table
     pub(in crate) fn delete_table(
         &self,
         name: &[u8],
@@ -205,34 +274,23 @@ impl Storage {
         mut root_page: Option<NodeHandle>,
     ) -> Result<Option<NodeHandle>, Error> {
         if let Some(definition) = self.get_table(name, table_type, root_page)? {
-            // TODO optimize this
-            loop {
-                // We want to delete everything in the table, so just re-interpret it as a table of slices
-                let mut iter = self.get_range::<RangeFull, &[u8], [u8], [u8]>(
-                    definition.get_id(),
-                    ..,
-                    root_page,
-                )?;
-                if let Some(first_entry) = iter.next() {
-                    let first_key = first_entry.key().to_vec();
-                    root_page = self.remove::<[u8]>(
-                        definition.get_id(),
-                        &first_key,
-                        transaction_id,
-                        root_page,
-                    )?;
-                } else {
-                    break;
+            if let Some(table_root) = definition.get_root() {
+                let page = self.mem.get_page(table_root.get_page_number());
+                let start = page_numbers_iter_start_state(page, table_root.get_valid_messages());
+                let iter = AllPageNumbersBtreeIter::new(start, &self.mem);
+                for page_number in iter {
+                    self.pending_freed_pages.borrow_mut().push(page_number);
                 }
             }
 
-            root_page = self.remove::<[u8]>(TABLE_TABLE_ID, name, transaction_id, root_page)?;
+            root_page = self.remove::<[u8]>(name, transaction_id, root_page)?;
         }
 
         Ok(root_page)
     }
 
     // Returns a tuple of the table id and the new root page
+    // root_page: the root of the master table
     pub(in crate) fn get_or_create_table(
         &self,
         name: &[u8],
@@ -240,51 +298,22 @@ impl Storage {
         transaction_id: u128,
         root_page: Option<NodeHandle>,
     ) -> Result<(TableDefinition, NodeHandle), Error> {
-        if let Some(found) = self.get::<[u8], [u8]>(TABLE_TABLE_ID, name, root_page)? {
-            let definition = TableDefinition::from_bytes(found.as_ref());
-            if definition.get_type() != table_type {
-                return Err(Error::TableTypeMismatch(format!(
-                    "{:?} is not of type {:?}",
-                    name, table_type
-                )));
-            }
-            return Ok((definition, root_page.unwrap()));
+        if let Some(found) = self.get_table(name, table_type, root_page)? {
+            return Ok((found, root_page.unwrap()));
         }
 
-        let largest_id = self
-            .get::<u64, u64>(
-                LAST_TABLE_ID_TABLE,
-                &LAST_TABLE_ID_KEY.to_be_bytes(),
-                root_page,
-            )?
-            .map(|x| x.to_value())
-            .unwrap_or(LAST_SYSTEM_TABLE);
-        let new_id = largest_id + 1;
         let definition = TableDefinition {
-            table_id: new_id,
+            table_root: None,
             table_type,
         };
-        let new_root = self.insert::<u64>(
-            LAST_TABLE_ID_TABLE,
-            &LAST_TABLE_ID_KEY.to_be_bytes(),
-            &new_id.to_be_bytes(),
-            transaction_id,
-            root_page,
-        )?;
-        let new_root = self.insert::<[u8]>(
-            TABLE_TABLE_ID,
-            name,
-            &definition.to_bytes(),
-            transaction_id,
-            Some(new_root),
-        )?;
+        let new_root =
+            self.insert::<[u8]>(name, &definition.to_bytes(), transaction_id, root_page)?;
         Ok((definition, new_root))
     }
 
     // Returns the new root page number
     pub(in crate) fn insert<K: RedbKey + ?Sized>(
         &self,
-        table_id: u64,
         key: &[u8],
         value: &[u8],
         transaction_id: u128,
@@ -296,7 +325,7 @@ impl Storage {
             let (new_root, _, freed) = tree_insert::<K>(
                 root,
                 handle.get_valid_messages(),
-                table_id,
+                TODO_REMOVE_THIS_FAKE_TABLE_ID,
                 key,
                 value,
                 &self.mem,
@@ -306,7 +335,8 @@ impl Storage {
                 .extend_from_slice(&freed);
             Ok(new_root)
         } else {
-            let (new_root, _) = make_mut_single_leaf(table_id, key, value, &self.mem)?;
+            let (new_root, _) =
+                make_mut_single_leaf(TODO_REMOVE_THIS_FAKE_TABLE_ID, key, value, &self.mem)?;
             Ok(new_root)
         }
     }
@@ -314,7 +344,6 @@ impl Storage {
     // Returns the new root page number, and accessor for writing the value
     pub(in crate) fn insert_reserve<K: RedbKey + ?Sized>(
         &self,
-        table_id: u64,
         key: &[u8],
         value_len: usize,
         transaction_id: u128,
@@ -327,7 +356,7 @@ impl Storage {
             let (new_root, guard, freed) = tree_insert::<K>(
                 root,
                 handle.get_valid_messages(),
-                table_id,
+                TODO_REMOVE_THIS_FAKE_TABLE_ID,
                 key,
                 &value,
                 &self.mem,
@@ -337,14 +366,14 @@ impl Storage {
                 .extend_from_slice(&freed);
             (new_root, guard)
         } else {
-            make_mut_single_leaf(table_id, key, &value, &self.mem)?
+            make_mut_single_leaf(TODO_REMOVE_THIS_FAKE_TABLE_ID, key, &value, &self.mem)?
         };
         Ok((new_root, guard))
     }
 
-    pub(in crate) fn len(&self, table: u64, root_page: Option<NodeHandle>) -> Result<usize, Error> {
+    pub(in crate) fn len(&self, root_page: Option<NodeHandle>) -> Result<usize, Error> {
         let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
-            self.get_range(table, .., root_page)?;
+            self.get_range(.., root_page)?;
         let mut count = 0;
         while iter.next().is_some() {
             count += 1;
@@ -360,7 +389,7 @@ impl Storage {
 
     pub(in crate) fn commit(
         &self,
-        mut new_root: Option<NodeHandle>,
+        mut new_master_root: Option<NodeHandle>,
         transaction_id: u128,
     ) -> Result<(), Error> {
         let oldest_live_read = self
@@ -371,9 +400,10 @@ impl Storage {
             .cloned()
             .unwrap_or_else(|| self.next_transaction_id.get());
 
-        new_root = self.process_freed_pages(oldest_live_read, transaction_id, new_root)?;
+        new_master_root =
+            self.process_freed_pages(oldest_live_read, transaction_id, new_master_root)?;
         if oldest_live_read < transaction_id {
-            new_root = self.store_freed_pages(transaction_id, new_root)?;
+            new_master_root = self.store_freed_pages(transaction_id, new_master_root)?;
         } else {
             for page in self.pending_freed_pages.borrow_mut().drain(..) {
                 // Safety: The oldest live read started after this transactions, so it can't
@@ -384,7 +414,7 @@ impl Storage {
             }
         }
 
-        if let Some(ptr) = new_root {
+        if let Some(ptr) = new_master_root {
             self.mem
                 .set_secondary_root_page(ptr.get_page_number(), ptr.get_valid_messages())?;
         } else {
@@ -399,14 +429,14 @@ impl Storage {
     // Commit without a durability guarantee
     pub(in crate) fn non_durable_commit(
         &self,
-        mut new_root: Option<NodeHandle>,
+        mut new_master_root: Option<NodeHandle>,
         transaction_id: u128,
     ) -> Result<(), Error> {
         // Store all freed pages for a future commit(), since we can't free pages during a
         // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
-        new_root = self.store_freed_pages(transaction_id, new_root)?;
+        new_master_root = self.store_freed_pages(transaction_id, new_master_root)?;
 
-        if let Some(ptr) = new_root {
+        if let Some(ptr) = new_master_root {
             self.mem
                 .set_secondary_root_page(ptr.get_page_number(), ptr.get_valid_messages())?;
         } else {
@@ -424,7 +454,7 @@ impl Storage {
         &self,
         oldest_live_read: u128,
         transaction_id: u128,
-        mut root: Option<NodeHandle>,
+        mut master_root: Option<NodeHandle>,
     ) -> Result<Option<NodeHandle>, Error> {
         assert_eq!(transaction_id, self.live_write_transaction.get().unwrap());
         assert_eq!(PageNumber::null().to_be_bytes().len(), 8); // We assume below that PageNumber is length 8
@@ -433,9 +463,12 @@ impl Storage {
         // second element of pair is already zero
 
         let mut to_remove = vec![];
+        let mut freed_table = self
+            .get_table(FREED_TABLE, TableType::Normal, master_root)?
+            .unwrap();
         #[allow(clippy::type_complexity)]
         let mut iter: BtreeRangeIter<'_, RangeTo<&[u8]>, &[u8], [u8], [u8]> =
-            self.get_range(FREED_TABLE_ID, ..lookup_key.as_ref(), root)?;
+            self.get_range(..lookup_key.as_ref(), freed_table.get_root())?;
         while let Some(entry) = iter.next() {
             to_remove.push(entry.key().to_vec());
             let value = entry.value();
@@ -454,21 +487,31 @@ impl Storage {
 
         // Remove all the old transactions. Note: this may create new pages that need to be freed
         for key in to_remove {
-            root = self.remove::<[u8]>(FREED_TABLE_ID, &key, transaction_id, root)?;
+            freed_table.table_root =
+                self.remove::<[u8]>(&key, transaction_id, freed_table.table_root)?;
         }
+        master_root = Some(self.insert::<[u8]>(
+            FREED_TABLE,
+            &freed_table.to_bytes(),
+            transaction_id,
+            master_root,
+        )?);
 
-        Ok(root)
+        Ok(master_root)
     }
 
     fn store_freed_pages(
         &self,
         transaction_id: u128,
-        mut root: Option<NodeHandle>,
+        mut master_root: Option<NodeHandle>,
     ) -> Result<Option<NodeHandle>, Error> {
         assert_eq!(transaction_id, self.live_write_transaction.get().unwrap());
         assert_eq!(PageNumber::null().to_be_bytes().len(), 8); // We assume below that PageNumber is length 8
 
         let mut pagination_counter = 0u64;
+        let mut freed_table = self
+            .get_table(FREED_TABLE, TableType::Normal, master_root)?
+            .unwrap();
         while !self.pending_freed_pages.borrow().is_empty() {
             // TODO: dynamically size this
             let chunk_size = 100;
@@ -477,13 +520,20 @@ impl Storage {
             key[0..size_of::<u128>()].copy_from_slice(&transaction_id.to_be_bytes());
             key[size_of::<u128>()..].copy_from_slice(&pagination_counter.to_be_bytes());
             let (r, mut access_guard) = self.insert_reserve::<[u8]>(
-                FREED_TABLE_ID,
                 key.as_ref(),
                 buffer_size,
                 transaction_id,
-                root,
+                freed_table.table_root,
             )?;
-            root = Some(r);
+            freed_table.table_root = Some(r);
+
+            // TODO: only update the master root on the last iteration
+            master_root = Some(self.insert::<[u8]>(
+                FREED_TABLE,
+                &freed_table.to_bytes(),
+                transaction_id,
+                master_root,
+            )?);
 
             let len = self.pending_freed_pages.borrow().len();
             access_guard.as_mut()[..8]
@@ -501,7 +551,7 @@ impl Storage {
             pagination_counter += 1;
         }
 
-        Ok(root)
+        Ok(master_root)
     }
 
     pub(in crate) fn rollback_uncommited_writes(&self, transaction_id: u128) -> Result<(), Error> {
@@ -513,7 +563,7 @@ impl Storage {
     }
 
     pub(in crate) fn storage_stats(&self) -> Result<DbStats, Error> {
-        let tree_height = self
+        let master_tree_height = self
             .get_root_page_number()
             .map(|p| {
                 tree_height(
@@ -523,22 +573,51 @@ impl Storage {
                 )
             })
             .unwrap_or(0);
-        Ok(DbStats::new(tree_height, self.mem.count_free_pages()?))
+        let mut max_subtree_height = 0;
+        let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
+            self.get_range(.., self.get_root_page_number())?;
+        while let Some(entry) = iter.next() {
+            let definition = TableDefinition::from_bytes(entry.value());
+            if let Some(table_root) = definition.get_root() {
+                let height = tree_height(
+                    self.mem.get_page(table_root.get_page_number()),
+                    table_root.get_valid_messages(),
+                    &self.mem,
+                );
+                max_subtree_height = max(max_subtree_height, height);
+            }
+        }
+        Ok(DbStats::new(
+            master_tree_height + max_subtree_height,
+            self.mem.count_free_pages()?,
+        ))
     }
 
     #[allow(dead_code)]
     pub(in crate) fn print_debug(&self) {
         if let Some(page) = self.get_root_page_number() {
+            eprintln!("Master tree:");
             print_tree(
                 self.mem.get_page(page.get_page_number()),
                 page.get_valid_messages(),
                 &self.mem,
             );
+
+            let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
+                self.get_range(.., Some(page)).unwrap();
+
+            while let Some(entry) = iter.next() {
+                eprintln!("{} tree:", String::from_utf8_lossy(entry.key()));
+                let definition = TableDefinition::from_bytes(entry.value());
+                if let Some(table_root) = definition.get_root() {
+                    self.print_dirty_tree_debug(table_root);
+                }
+            }
         }
     }
 
     #[allow(dead_code)]
-    pub(in crate) fn print_dirty_debug(&self, root_page: NodeHandle) {
+    pub(in crate) fn print_dirty_tree_debug(&self, root_page: NodeHandle) {
         print_tree(
             self.mem.get_page(root_page.get_page_number()),
             root_page.get_valid_messages(),
@@ -548,7 +627,6 @@ impl Storage {
 
     pub(in crate) fn get<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
-        table_id: u64,
         key: &[u8],
         root_page_handle: Option<NodeHandle>,
     ) -> Result<Option<AccessGuard<V>>, Error> {
@@ -557,7 +635,7 @@ impl Storage {
             if let Some((page, offset, len)) = lookup_in_raw::<K>(
                 root_page,
                 handle.get_valid_messages(),
-                table_id,
+                TODO_REMOVE_THIS_FAKE_TABLE_ID,
                 key,
                 &self.mem,
             ) {
@@ -575,7 +653,6 @@ impl Storage {
         V: RedbValue + ?Sized + 'a,
     >(
         &'a self,
-        table_id: u64,
         range: T,
         root_page: Option<NodeHandle>,
     ) -> Result<BtreeRangeIter<T, KR, K, V>, Error> {
@@ -586,25 +663,40 @@ impl Storage {
                         self.mem.get_page(root.get_page_number()),
                         root.get_valid_messages(),
                         None,
-                        table_id,
+                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
                         k.as_ref().as_bytes().as_ref(),
                         &self.mem,
                     );
-                    Ok(BtreeRangeIter::new(start_state, table_id, range, &self.mem))
+                    Ok(BtreeRangeIter::new(
+                        start_state,
+                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
+                        range,
+                        &self.mem,
+                    ))
                 }
                 Bound::Unbounded => {
                     let start_state = find_iter_unbounded_start(
                         self.mem.get_page(root.get_page_number()),
                         root.get_valid_messages(),
                         None,
-                        table_id,
+                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
                         &self.mem,
                     );
-                    Ok(BtreeRangeIter::new(start_state, table_id, range, &self.mem))
+                    Ok(BtreeRangeIter::new(
+                        start_state,
+                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
+                        range,
+                        &self.mem,
+                    ))
                 }
             }
         } else {
-            Ok(BtreeRangeIter::new(None, table_id, range, &self.mem))
+            Ok(BtreeRangeIter::new(
+                None,
+                TODO_REMOVE_THIS_FAKE_TABLE_ID,
+                range,
+                &self.mem,
+            ))
         }
     }
 
@@ -616,7 +708,6 @@ impl Storage {
         V: RedbValue + ?Sized + 'a,
     >(
         &'a self,
-        table_id: u64,
         range: T,
         root_page: Option<NodeHandle>,
     ) -> Result<BtreeRangeIter<T, KR, K, V>, Error> {
@@ -627,13 +718,13 @@ impl Storage {
                         self.mem.get_page(root.get_page_number()),
                         root.get_valid_messages(),
                         None,
-                        table_id,
+                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
                         k.as_ref().as_bytes().as_ref(),
                         &self.mem,
                     );
                     Ok(BtreeRangeIter::new_reversed(
                         start_state,
-                        table_id,
+                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
                         range,
                         &self.mem,
                     ))
@@ -643,12 +734,12 @@ impl Storage {
                         self.mem.get_page(root.get_page_number()),
                         root.get_valid_messages(),
                         None,
-                        table_id,
+                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
                         &self.mem,
                     );
                     Ok(BtreeRangeIter::new_reversed(
                         start_state,
-                        table_id,
+                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
                         range,
                         &self.mem,
                     ))
@@ -656,7 +747,10 @@ impl Storage {
             }
         } else {
             Ok(BtreeRangeIter::new_reversed(
-                None, table_id, range, &self.mem,
+                None,
+                TODO_REMOVE_THIS_FAKE_TABLE_ID,
+                range,
+                &self.mem,
             ))
         }
     }
@@ -664,7 +758,6 @@ impl Storage {
     // Returns the new root page. To determine if an entry was remove test whether equal to root_page
     pub(in crate) fn remove<K: RedbKey + ?Sized>(
         &self,
-        table_id: u64,
         key: &[u8],
         transaction_id: u128,
         root_handle: Option<NodeHandle>,
@@ -675,7 +768,7 @@ impl Storage {
             let (new_root, freed) = tree_delete::<K>(
                 root_page,
                 handle.get_valid_messages(),
-                table_id,
+                TODO_REMOVE_THIS_FAKE_TABLE_ID,
                 key,
                 &self.mem,
             )?;

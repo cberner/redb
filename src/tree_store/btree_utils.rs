@@ -263,21 +263,21 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
 pub(in crate) fn page_numbers_iter_start_state(
     page: PageImpl,
     valid_messages: u8,
-) -> Option<RangeIterState> {
+) -> RangeIterState {
     let node_mem = page.memory();
     match node_mem[0] {
-        LEAF => Some(RangeIterState::LeafLeft {
+        LEAF => RangeIterState::LeafLeft {
             page,
             parent: None,
             reversed: false,
-        }),
-        INTERNAL => Some(RangeIterState::Internal {
+        },
+        INTERNAL => RangeIterState::Internal {
             page,
             valid_messages,
             child: 0,
             parent: None,
             reversed: false,
-        }),
+        },
         _ => unreachable!(),
     }
 }
@@ -357,6 +357,8 @@ impl<
                 // Return None if the next state is None
                 self.next.as_ref()?;
             }
+
+            self.next.as_ref()?;
 
             self.consumed = true;
             if let Some(entry) = self.next.as_ref().unwrap().get_entry() {

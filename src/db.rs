@@ -1,10 +1,13 @@
 use crate::multimap_table::MultimapTable;
 use crate::table::{ReadOnlyTable, Table};
-use crate::tree_store::{expand_db_size, get_db_size, DbStats, NodeHandle, Storage, TableType};
+use crate::tree_store::{
+    expand_db_size, get_db_size, DbStats, NodeHandle, Storage, TableDefinition, TableType,
+};
 use crate::types::{RedbKey, RedbValue};
 use crate::{Error, ReadOnlyMultimapTable};
 use memmap2::MmapMut;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -126,6 +129,7 @@ pub struct DatabaseTransaction<'a> {
     storage: &'a Storage,
     transaction_id: u128,
     root_page: Cell<Option<NodeHandle>>,
+    pending_table_root_changes: RefCell<HashMap<Vec<u8>, TableDefinition>>,
     completed: AtomicBool,
 }
 
@@ -137,6 +141,7 @@ impl<'a> DatabaseTransaction<'a> {
             storage,
             transaction_id,
             root_page: Cell::new(root_page),
+            pending_table_root_changes: RefCell::new(Default::default()),
             completed: Default::default(),
         })
     }
@@ -157,10 +162,15 @@ impl<'a> DatabaseTransaction<'a> {
         )?;
         self.root_page.set(Some(root));
 
+        self.pending_table_root_changes
+            .borrow_mut()
+            .insert(name.as_ref().to_vec(), definition.clone());
+
         Ok(Table::new(
-            definition.get_id(),
+            name,
             self.transaction_id,
-            &self.root_page,
+            &self.pending_table_root_changes,
+            definition.get_root(),
             self.storage,
         ))
     }
@@ -217,26 +227,70 @@ impl<'a> DatabaseTransaction<'a> {
         )?;
         self.root_page.set(Some(root));
 
+        self.pending_table_root_changes
+            .borrow_mut()
+            .insert(name.as_ref().to_vec(), definition.clone());
+
         Ok(MultimapTable::new(
-            definition.get_id(),
+            name,
             self.transaction_id,
-            &self.root_page,
+            &self.pending_table_root_changes,
+            definition.get_root(),
             self.storage,
         ))
     }
 
     pub fn commit(self) -> Result<(), Error> {
-        self.storage
-            .commit(self.root_page.get(), self.transaction_id)?;
-        self.completed.store(true, Ordering::SeqCst);
-        Ok(())
+        match self.commit_helper(false) {
+            Ok(_) => Ok(()),
+            Err(err) => match err {
+                // Rollback the transaction if we ran out of space during commit
+                // TODO: maybe rollback on other errors too?
+                Error::OutOfSpace => {
+                    self.abort()?;
+                    Err(err)
+                }
+                err => Err(err),
+            },
+        }
     }
 
     /// Note: pages are only freed during commit(). So exclusively using this function may result
     /// in an out-of-memory error
     pub fn non_durable_commit(self) -> Result<(), Error> {
-        self.storage
-            .non_durable_commit(self.root_page.get(), self.transaction_id)?;
+        match self.commit_helper(true) {
+            Ok(_) => Ok(()),
+            Err(err) => match err {
+                // Rollback the transaction if we ran out of space during commit
+                // TODO: maybe rollback on other errors too?
+                Error::OutOfSpace => {
+                    self.abort()?;
+                    Err(err)
+                }
+                err => Err(err),
+            },
+        }
+    }
+
+    pub fn commit_helper(&self, non_durable: bool) -> Result<(), Error> {
+        // Update all the table roots in the master table, before committing
+        for (name, update) in self.pending_table_root_changes.borrow_mut().drain() {
+            let new_root = self.storage.update_table_root(
+                &name,
+                update.get_type(),
+                update.get_root(),
+                self.transaction_id,
+                self.root_page.get(),
+            )?;
+            self.root_page.set(Some(new_root));
+        }
+        if non_durable {
+            self.storage
+                .non_durable_commit(self.root_page.get(), self.transaction_id)?;
+        } else {
+            self.storage
+                .commit(self.root_page.get(), self.transaction_id)?;
+        }
         self.completed.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -291,11 +345,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
                 ))
             })?;
 
-        Ok(ReadOnlyTable::new(
-            definition.get_id(),
-            self.root_page,
-            self.storage,
-        ))
+        Ok(ReadOnlyTable::new(definition.get_root(), self.storage))
     }
 
     /// Open the given table
@@ -315,8 +365,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
             })?;
 
         Ok(ReadOnlyMultimapTable::new(
-            definition.get_id(),
-            self.root_page,
+            definition.get_root(),
             self.storage,
         ))
     }
