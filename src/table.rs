@@ -1,32 +1,39 @@
 use crate::error::Error;
-use crate::tree_store::{AccessGuardMut, BtreeEntry, BtreeRangeIter, NodeHandle, Storage};
+use crate::tree_store::{
+    AccessGuardMut, BtreeEntry, BtreeRangeIter, NodeHandle, Storage, TableDefinition,
+};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::AccessGuard;
-use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 
 pub struct Table<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     storage: &'s Storage,
-    table_id: u64,
+    name: Vec<u8>,
     transaction_id: u128,
-    root_page: &'t Cell<Option<NodeHandle>>,
+    // TODO: this can probably be merged into table_root, if table_root was an Rc<Cell<TableDefinition>>
+    pending_table_root_changes: &'t RefCell<HashMap<Vec<u8>, TableDefinition>>,
+    table_root: Option<NodeHandle>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
 impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
     pub(in crate) fn new(
-        table_id: u64,
+        name: impl AsRef<[u8]>,
         transaction_id: u128,
-        root_page: &'t Cell<Option<NodeHandle>>,
+        pending_table_root_changes: &'t RefCell<HashMap<Vec<u8>, TableDefinition>>,
+        table_root: Option<NodeHandle>,
         storage: &'s Storage,
     ) -> Table<'s, 't, K, V> {
         Table {
             storage,
-            table_id,
+            name: name.as_ref().to_vec(),
             transaction_id,
-            root_page,
+            pending_table_root_changes,
+            table_root,
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -34,20 +41,24 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
 
     #[allow(dead_code)]
     pub(in crate) fn print_debug(&self) {
-        if let Some(page) = self.root_page.get() {
-            self.storage.print_dirty_debug(page);
+        if let Some(page) = self.table_root {
+            self.storage.print_dirty_tree_debug(page);
         }
     }
 
     pub fn insert(&mut self, key: &K, value: &V) -> Result<(), Error> {
-        let page = Some(self.storage.insert::<K>(
-            self.table_id,
+        let root_page = self.storage.insert::<K>(
             key.as_bytes().as_ref(),
             value.as_bytes().as_ref(),
             self.transaction_id,
-            self.root_page.get(),
-        )?);
-        self.root_page.set(page);
+            self.table_root,
+        )?;
+        self.table_root = Some(root_page);
+        self.pending_table_root_changes
+            .borrow_mut()
+            .get_mut(&self.name)
+            .unwrap()
+            .set_root(self.table_root);
         Ok(())
     }
 
@@ -59,24 +70,32 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
         value_length: usize,
     ) -> Result<AccessGuardMut, Error> {
         let (root_page, guard) = self.storage.insert_reserve::<K>(
-            self.table_id,
             key.as_bytes().as_ref(),
             value_length,
             self.transaction_id,
-            self.root_page.get(),
+            self.table_root,
         )?;
-        self.root_page.set(Some(root_page));
+        self.table_root = Some(root_page);
+        self.pending_table_root_changes
+            .borrow_mut()
+            .get_mut(&self.name)
+            .unwrap()
+            .set_root(self.table_root);
         Ok(guard)
     }
 
     pub fn remove(&mut self, key: &K) -> Result<(), Error> {
-        let page = self.storage.remove::<K>(
-            self.table_id,
+        let root_page = self.storage.remove::<K>(
             key.as_bytes().as_ref(),
             self.transaction_id,
-            self.root_page.get(),
+            self.table_root,
         )?;
-        self.root_page.set(page);
+        self.table_root = root_page;
+        self.pending_table_root_changes
+            .borrow_mut()
+            .get_mut(&self.name)
+            .unwrap()
+            .set_root(self.table_root);
         Ok(())
     }
 }
@@ -86,7 +105,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<'s, K, V>
 {
     fn get(&self, key: &K) -> Result<Option<AccessGuard<'s, V>>, Error> {
         self.storage
-            .get::<K, V>(self.table_id, key.as_bytes().as_ref(), self.root_page.get())
+            .get::<K, V>(key.as_bytes().as_ref(), self.table_root)
     }
 
     fn get_range<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
@@ -94,7 +113,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<'s, K, V>
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
         self.storage
-            .get_range(self.table_id, range, self.root_page.get())
+            .get_range(range, self.table_root)
             .map(RangeIter::new)
     }
 
@@ -103,18 +122,16 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<'s, K, V>
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
         self.storage
-            .get_range_reversed(self.table_id, range, self.root_page.get())
+            .get_range_reversed(range, self.table_root)
             .map(RangeIter::new)
     }
 
     fn len(&self) -> Result<usize, Error> {
-        self.storage.len(self.table_id, self.root_page.get())
+        self.storage.len(self.table_root)
     }
 
     fn is_empty(&self) -> Result<bool, Error> {
-        self.storage
-            .len(self.table_id, self.root_page.get())
-            .map(|x| x == 0)
+        self.storage.len(self.table_root).map(|x| x == 0)
     }
 }
 
@@ -138,22 +155,19 @@ pub trait ReadableTable<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 
 pub struct ReadOnlyTable<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     storage: &'s Storage,
-    root_page: Option<NodeHandle>,
-    table_id: u64,
+    table_root: Option<NodeHandle>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
 impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
     pub(in crate) fn new(
-        table_id: u64,
         root_page: Option<NodeHandle>,
         storage: &'s Storage,
     ) -> ReadOnlyTable<'s, K, V> {
         ReadOnlyTable {
             storage,
-            root_page,
-            table_id,
+            table_root: root_page,
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -165,7 +179,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<'s, K, V>
 {
     fn get(&self, key: &K) -> Result<Option<AccessGuard<'s, V>>, Error> {
         self.storage
-            .get::<K, V>(self.table_id, key.as_bytes().as_ref(), self.root_page)
+            .get::<K, V>(key.as_bytes().as_ref(), self.table_root)
     }
 
     fn get_range<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
@@ -173,7 +187,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<'s, K, V>
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
         self.storage
-            .get_range(self.table_id, range, self.root_page)
+            .get_range(range, self.table_root)
             .map(RangeIter::new)
     }
 
@@ -182,18 +196,16 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<'s, K, V>
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
         self.storage
-            .get_range_reversed(self.table_id, range, self.root_page)
+            .get_range_reversed(range, self.table_root)
             .map(RangeIter::new)
     }
 
     fn len(&self) -> Result<usize, Error> {
-        self.storage.len(self.table_id, self.root_page)
+        self.storage.len(self.table_root)
     }
 
     fn is_empty(&self) -> Result<bool, Error> {
-        self.storage
-            .len(self.table_id, self.root_page)
-            .map(|x| x == 0)
+        self.storage.len(self.table_root).map(|x| x == 0)
     }
 }
 

@@ -1,11 +1,11 @@
 use crate::error::Error;
-use crate::tree_store::{BtreeEntry, BtreeRangeIter, NodeHandle, Storage};
+use crate::tree_store::{BtreeEntry, BtreeRangeIter, NodeHandle, Storage, TableDefinition};
 use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
 };
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::Bound;
+use std::collections::{Bound, HashMap};
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ops::{RangeBounds, RangeInclusive};
@@ -299,25 +299,28 @@ impl<
 
 pub struct MultimapTable<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     storage: &'s Storage,
-    table_id: u64,
+    name: Vec<u8>,
     transaction_id: u128,
-    root_page: &'t Cell<Option<NodeHandle>>,
+    pending_table_root_changes: &'t RefCell<HashMap<Vec<u8>, TableDefinition>>,
+    table_root: Option<NodeHandle>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
 impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, V> {
     pub(in crate) fn new(
-        table_id: u64,
+        name: impl AsRef<[u8]>,
         transaction_id: u128,
-        root_page: &'t Cell<Option<NodeHandle>>,
+        pending_table_root_changes: &'t RefCell<HashMap<Vec<u8>, TableDefinition>>,
+        table_root: Option<NodeHandle>,
         storage: &'s Storage,
     ) -> MultimapTable<'s, 't, K, V> {
         MultimapTable {
             storage,
-            table_id,
+            name: name.as_ref().to_vec(),
             transaction_id,
-            root_page,
+            pending_table_root_changes,
+            table_root,
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -325,33 +328,41 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
 
     #[allow(dead_code)]
     pub(in crate) fn print_debug(&self) {
-        if let Some(page) = self.root_page.get() {
-            self.storage.print_dirty_debug(page);
+        if let Some(page) = self.table_root {
+            self.storage.print_dirty_tree_debug(page);
         }
     }
 
     pub fn insert(&mut self, key: &K, value: &V) -> Result<(), Error> {
         let kv = make_serialized_kv(key, value);
-        let page = Some(self.storage.insert::<MultimapKVPair<K, V>>(
-            self.table_id,
+        let root_page = self.storage.insert::<MultimapKVPair<K, V>>(
             &kv,
             b"",
             self.transaction_id,
-            self.root_page.get(),
-        )?);
-        self.root_page.set(page);
+            self.table_root,
+        )?;
+        self.table_root = Some(root_page);
+        self.pending_table_root_changes
+            .borrow_mut()
+            .get_mut(&self.name)
+            .unwrap()
+            .set_root(self.table_root);
         Ok(())
     }
 
     pub fn remove(&mut self, key: &K, value: &V) -> Result<(), Error> {
         let kv = make_serialized_kv(key, value);
-        let page = self.storage.remove::<MultimapKVPair<K, V>>(
-            self.table_id,
+        let root_page = self.storage.remove::<MultimapKVPair<K, V>>(
             &kv,
             self.transaction_id,
-            self.root_page.get(),
+            self.table_root,
         )?;
-        self.root_page.set(page);
+        self.table_root = root_page;
+        self.pending_table_root_changes
+            .borrow_mut()
+            .get_mut(&self.name)
+            .unwrap()
+            .set_root(self.table_root);
         Ok(())
     }
 
@@ -359,17 +370,20 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
         // Match only on the key, so that we can remove all the associated values
         let key_only = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyOnly);
         loop {
-            let old_root = self.root_page.get();
             let new_root = self.storage.remove::<MultimapKVPair<K, V>>(
-                self.table_id,
                 &key_only,
                 self.transaction_id,
-                self.root_page.get(),
+                self.table_root,
             )?;
-            if old_root == new_root {
+            if self.table_root == new_root {
                 break;
             }
-            self.root_page.set(new_root);
+            self.table_root = new_root;
+            self.pending_table_root_changes
+                .borrow_mut()
+                .get_mut(&self.name)
+                .unwrap()
+                .set_root(self.table_root);
         }
         Ok(())
     }
@@ -384,7 +398,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s,
         let lower = MultimapKVPair::<K, V>::new(lower_bytes);
         let upper = MultimapKVPair::<K, V>::new(upper_bytes);
         self.storage
-            .get_range(self.table_id, lower..=upper, self.root_page.get())
+            .get_range(lower..=upper, self.table_root)
             .map(MultimapValueIter::new)
     }
 
@@ -399,7 +413,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s,
         let end = make_bound(end_kv);
 
         self.storage
-            .get_range(self.table_id, (start, end), self.root_page.get())
+            .get_range((start, end), self.table_root)
             .map(MultimapRangeIter::new)
     }
 
@@ -414,18 +428,16 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s,
         let end = make_bound(end_kv);
 
         self.storage
-            .get_range_reversed(self.table_id, (start, end), self.root_page.get())
+            .get_range_reversed((start, end), self.table_root)
             .map(MultimapRangeIter::new)
     }
 
     fn len(&self) -> Result<usize, Error> {
-        self.storage.len(self.table_id, self.root_page.get())
+        self.storage.len(self.table_root)
     }
 
     fn is_empty(&self) -> Result<bool, Error> {
-        self.storage
-            .len(self.table_id, self.root_page.get())
-            .map(|x| x == 0)
+        self.storage.len(self.table_root).map(|x| x == 0)
     }
 }
 
@@ -454,22 +466,19 @@ pub trait ReadableMultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
 
 pub struct ReadOnlyMultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     storage: &'s Storage,
-    root_page: Option<NodeHandle>,
-    table_id: u64,
+    table_root: Option<NodeHandle>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
 impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, V> {
     pub(in crate) fn new(
-        table_id: u64,
         root_page: Option<NodeHandle>,
         storage: &'s Storage,
     ) -> ReadOnlyMultimapTable<'s, K, V> {
         ReadOnlyMultimapTable {
             storage,
-            root_page,
-            table_id,
+            table_root: root_page,
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -485,7 +494,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s, K, 
         let lower = MultimapKVPair::<K, V>::new(lower_bytes);
         let upper = MultimapKVPair::<K, V>::new(upper_bytes);
         self.storage
-            .get_range(self.table_id, lower..=upper, self.root_page)
+            .get_range(lower..=upper, self.table_root)
             .map(MultimapValueIter::new)
     }
 
@@ -500,7 +509,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s, K, 
         let end = make_bound(end_kv);
 
         self.storage
-            .get_range(self.table_id, (start, end), self.root_page)
+            .get_range((start, end), self.table_root)
             .map(MultimapRangeIter::new)
     }
 
@@ -515,17 +524,15 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s, K, 
         let end = make_bound(end_kv);
 
         self.storage
-            .get_range_reversed(self.table_id, (start, end), self.root_page)
+            .get_range_reversed((start, end), self.table_root)
             .map(MultimapRangeIter::new)
     }
 
     fn len(&self) -> Result<usize, Error> {
-        self.storage.len(self.table_id, self.root_page)
+        self.storage.len(self.table_root)
     }
 
     fn is_empty(&self) -> Result<bool, Error> {
-        self.storage
-            .len(self.table_id, self.root_page)
-            .map(|x| x == 0)
+        self.storage.len(self.table_root).map(|x| x == 0)
     }
 }

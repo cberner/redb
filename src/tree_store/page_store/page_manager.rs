@@ -1008,6 +1008,7 @@ mod test {
         let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
         table.insert(b"hello", b"world").unwrap();
         write_txn.commit().unwrap();
+        let free_pages = db.stats().unwrap().free_pages();
         drop(db);
 
         let file = OpenOptions::new()
@@ -1036,6 +1037,7 @@ mod test {
             .unwrap());
 
         let db2 = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        assert_eq!(free_pages, db2.stats().unwrap().free_pages());
         let write_txn = db2.begin_write().unwrap();
         let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
         table.insert(b"hello2", b"world2").unwrap();

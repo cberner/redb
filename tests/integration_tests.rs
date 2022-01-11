@@ -113,10 +113,10 @@ fn resize_db() {
 
     let db_size = 16 * 1024 * 1024;
     let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
-    let txn = db.begin_write().unwrap();
-    let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
     let mut i = 0u64;
     loop {
+        let txn = db.begin_write().unwrap();
+        let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
         // Fill the database
         match table.insert(&i, &i) {
             Ok(_) => {}
@@ -125,13 +125,26 @@ fn resize_db() {
                 _ => unreachable!(),
             },
         }
+        match txn.non_durable_commit() {
+            Ok(_) => {}
+            Err(err) => match err {
+                Error::OutOfSpace => break,
+                _ => unreachable!(),
+            },
+        };
         i += 1;
     }
-    txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
     let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
-    assert!(matches!(table.insert(&i, &i), Err(Error::OutOfSpace)));
+    let mut found = false;
+    for _ in 0..999 {
+        if matches!(table.insert(&i, &i), Err(Error::OutOfSpace)) {
+            found = true;
+            break;
+        }
+    }
+    assert!(found);
     txn.abort().unwrap();
     drop(db);
 
