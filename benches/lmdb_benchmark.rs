@@ -169,7 +169,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) {
     let end = SystemTime::now();
     let duration = end.duration_since(start).unwrap();
     println!(
-        "{}: Removed {} individual items in {}ms",
+        "{}: Removed {} items in {}ms",
         T::db_type_name(),
         deletes,
         duration.as_millis()
