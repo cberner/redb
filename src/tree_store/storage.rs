@@ -500,13 +500,16 @@ impl Storage {
             )?;
             freed_table.table_root = Some(r);
 
-            // TODO: only update the master root on the last iteration
-            master_root = Some(self.insert::<[u8]>(
-                FREED_TABLE,
-                &freed_table.to_bytes(),
-                transaction_id,
-                master_root,
-            )?);
+            if self.pending_freed_pages.borrow().len() <= chunk_size {
+                // Update the master root, only on the last loop iteration (this may cause another
+                // iteration, but that's ok since it would have very few pages to process)
+                master_root = Some(self.insert::<[u8]>(
+                    FREED_TABLE,
+                    &freed_table.to_bytes(),
+                    transaction_id,
+                    master_root,
+                )?);
+            }
 
             let len = self.pending_freed_pages.borrow().len();
             access_guard.as_mut()[..8]
