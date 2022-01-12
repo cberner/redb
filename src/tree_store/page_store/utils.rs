@@ -1,5 +1,3 @@
-// TODO: add Windows version of this function
-
 #[cfg(unix)]
 pub(crate) fn get_page_size() -> usize {
     use libc::{sysconf, _SC_PAGESIZE};
