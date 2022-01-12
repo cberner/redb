@@ -104,7 +104,7 @@ fn change_db_size() {
     drop(db);
 
     let db = unsafe { Database::open(tmpfile.path(), db_size * 2) };
-    assert!(matches!(db.err().unwrap(), Error::DbSizeMismatch(_)));
+    assert!(matches!(db.err().unwrap(), Error::DbSizeMismatch { .. }));
 }
 
 #[test]
