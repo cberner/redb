@@ -8,7 +8,7 @@ use crate::tree_store::btree_utils::{
 use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
-use memmap2::MmapMut;
+use memmap2::MmapRaw;
 use std::cell::{Cell, RefCell};
 use std::cmp::{max, min};
 use std::collections::{BTreeSet, Bound};
@@ -130,7 +130,7 @@ pub(in crate) struct Storage {
 }
 
 impl Storage {
-    pub(in crate) fn new(mmap: MmapMut, page_size: Option<usize>) -> Result<Storage, Error> {
+    pub(in crate) fn new(mmap: MmapRaw, page_size: Option<usize>) -> Result<Storage, Error> {
         let mut mem = TransactionalMemory::new(mmap, page_size)?;
         while mem.needs_repair()? {
             let (root, messages) = mem

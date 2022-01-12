@@ -2,7 +2,7 @@ use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::page_allocator::BuddyAllocator;
 use crate::tree_store::page_store::utils::get_page_size;
 use crate::Error;
-use memmap2::MmapMut;
+use memmap2::MmapRaw;
 use std::cell::RefCell;
 use std::cmp::min;
 use std::collections::HashSet;
@@ -436,10 +436,8 @@ impl TransactionalMemory {
         guess
     }
 
-    pub(crate) fn new(
-        mut mmap: MmapMut,
-        requested_page_size: Option<usize>,
-    ) -> Result<Self, Error> {
+    pub(crate) fn new(mmap: MmapRaw, requested_page_size: Option<usize>) -> Result<Self, Error> {
+        let mut mmap = Mmap::new(mmap);
         let mutex = Mutex::new(MetapageGuard {});
         if mmap[0..MAGICNUMBER.len()] != MAGICNUMBER {
             let page_size = requested_page_size.unwrap_or_else(get_page_size);
@@ -546,7 +544,7 @@ impl TransactionalMemory {
             allocated_since_commit: RefCell::new(HashSet::new()),
             freed_since_commit: RefCell::new(vec![]),
             page_allocator,
-            mmap: Mmap::new(mmap),
+            mmap,
             metapage_guard: mutex,
             open_dirty_pages: RefCell::new(HashSet::new()),
             read_from_secondary: AtomicBool::new(false),
@@ -995,7 +993,7 @@ mod test {
     };
     use crate::tree_store::page_store::TransactionalMemory;
     use crate::{Database, Table};
-    use memmap2::MmapMut;
+    use memmap2::{MmapMut, MmapRaw};
     use std::fs::OpenOptions;
     use std::sync::Mutex;
     use tempfile::NamedTempFile;
@@ -1030,6 +1028,10 @@ mod test {
         mutator.set_allocator_dirty(true);
         drop(mutator);
         mmap.flush().unwrap();
+
+        drop(mmap);
+
+        let mmap = MmapRaw::map_raw(&file).unwrap();
 
         assert!(TransactionalMemory::new(mmap, None)
             .unwrap()

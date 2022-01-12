@@ -5,7 +5,7 @@ use crate::tree_store::{
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{Error, ReadOnlyMultimapTable};
-use memmap2::MmapMut;
+use memmap2::MmapRaw;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -50,7 +50,7 @@ impl Database {
             file
         };
 
-        let mmap = MmapMut::map_mut(&file)?;
+        let mmap = MmapRaw::map_raw(&file)?;
         let storage = Storage::new(mmap, None)?;
         Ok(Database { storage })
     }
@@ -119,7 +119,7 @@ impl DatabaseBuilder {
 
         file.set_len(db_size as u64)?;
 
-        let mmap = MmapMut::map_mut(&file)?;
+        let mmap = MmapRaw::map_raw(&file)?;
         let storage = Storage::new(mmap, self.page_size)?;
         Ok(Database { storage })
     }
