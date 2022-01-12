@@ -298,7 +298,7 @@ impl BuddyAllocator {
         let mut orders = vec![];
         for _ in 0..=max_order {
             orders.push(PageAllocator::new(num_pages));
-            num_pages = Self::higher_order(num_pages);
+            num_pages = Self::next_higher_order(num_pages as u64) as usize;
         }
 
         Self { orders }
@@ -322,7 +322,7 @@ impl BuddyAllocator {
                 Self::get_order_bytes(data, order),
                 num_pages,
             ));
-            num_pages = Self::higher_order(num_pages);
+            num_pages = Self::next_higher_order(num_pages as u64) as usize;
             metadata_offset += 2 * size_of::<u64>();
             data_offset += required;
         }
@@ -347,7 +347,7 @@ impl BuddyAllocator {
         let mut required = size_of::<u64>() + 2 * (max_order + 1) * size_of::<u64>();
         for _ in 0..=max_order {
             required += PageAllocator::required_space(num_pages);
-            num_pages = Self::higher_order(num_pages);
+            num_pages = Self::next_higher_order(num_pages as u64) as usize;
         }
 
         required
@@ -383,11 +383,11 @@ impl BuddyAllocator {
         &mut data[offset..(offset + length)]
     }
 
-    fn higher_order(page_number: usize) -> usize {
+    fn next_higher_order(page_number: u64) -> u64 {
         page_number / 2
     }
 
-    fn buddy_page(page_number: usize) -> usize {
+    fn buddy_page(page_number: u64) -> u64 {
         page_number ^ 1
     }
 
@@ -423,8 +423,7 @@ impl BuddyAllocator {
         assert!(order < self.orders.len());
         if self.orders[order].is_allocated(Self::get_order_bytes(data, order), page_number) {
             // Need to split parent page
-            // TODO: make the use of usize vs u64 consistent
-            let upper_page = Self::higher_order(page_number as usize) as u64;
+            let upper_page = Self::next_higher_order(page_number);
             self.record_alloc(data, upper_page, order + 1);
 
             let (free1, free2) = (upper_page * 2, upper_page * 2 + 1);
@@ -446,17 +445,13 @@ impl BuddyAllocator {
             return;
         }
 
-        let buddy = Self::buddy_page(page_number as usize) as u64;
+        let buddy = Self::buddy_page(page_number);
         if self.orders[order].is_allocated(Self::get_order_bytes(data, order), buddy) {
             self.orders[order].free(Self::get_order_bytes(data, order), page_number);
         } else {
             // Merge into higher order page
             self.orders[order].record_alloc(Self::get_order_bytes(data, order), buddy);
-            self.free(
-                data,
-                Self::higher_order(page_number as usize) as u64,
-                order + 1,
-            );
+            self.free(data, Self::next_higher_order(page_number), order + 1);
         }
     }
 }
