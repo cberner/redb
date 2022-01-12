@@ -241,28 +241,21 @@ impl<'a> DatabaseTransaction<'a> {
     }
 
     pub fn commit(self) -> Result<(), Error> {
-        match self.commit_helper(false) {
-            Ok(_) => Ok(()),
-            Err(err) => match err {
-                // Rollback the transaction if we ran out of space during commit
-                // TODO: maybe rollback on other errors too?
-                Error::OutOfSpace => {
-                    self.abort()?;
-                    Err(err)
-                }
-                err => Err(err),
-            },
-        }
+        self.commit_helper(false)
     }
 
     /// Note: pages are only freed during commit(). So exclusively using this function may result
-    /// in an out-of-memory error
+    /// in Error::OutOfSpace
     pub fn non_durable_commit(self) -> Result<(), Error> {
-        match self.commit_helper(true) {
+        self.commit_helper(true)
+    }
+
+    pub fn commit_helper(self, non_durable: bool) -> Result<(), Error> {
+        match self.commit_helper_inner(non_durable) {
             Ok(_) => Ok(()),
             Err(err) => match err {
-                // Rollback the transaction if we ran out of space during commit
-                // TODO: maybe rollback on other errors too?
+                // Rollback the transaction if we ran out of space during commit, so that user may
+                // continue with another transaction (like a delete)
                 Error::OutOfSpace => {
                     self.abort()?;
                     Err(err)
@@ -272,7 +265,7 @@ impl<'a> DatabaseTransaction<'a> {
         }
     }
 
-    pub fn commit_helper(&self, non_durable: bool) -> Result<(), Error> {
+    pub fn commit_helper_inner(&self, non_durable: bool) -> Result<(), Error> {
         // Update all the table roots in the master table, before committing
         for (name, update) in self.pending_table_root_changes.borrow_mut().drain() {
             let new_root = self.storage.update_table_root(
