@@ -192,7 +192,7 @@ impl Storage {
 
     pub(crate) fn allocate_write_transaction(&self) -> Result<u128, Error> {
         if let Some(leaked) = self.leaked_write_transaction.get() {
-            return Err(Error::LeakedWriteTransaction(leaked.to_string()));
+            return Err(Error::LeakedWriteTransaction(leaked));
         }
 
         assert!(self.live_write_transaction.get().is_none());

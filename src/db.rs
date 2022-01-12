@@ -31,12 +31,11 @@ impl Database {
         let file = if path.as_ref().exists() && File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = get_db_size(path.as_ref())?;
             if existing_size != db_size {
-                return Err(Error::DbSizeMismatch(format!(
-                    "Database {} is of size {} bytes, but you requested {} bytes",
-                    path.as_ref().to_string_lossy(),
-                    existing_size,
-                    db_size
-                )));
+                return Err(Error::DbSizeMismatch {
+                    path: path.as_ref().to_string_lossy().to_string(),
+                    size: existing_size,
+                    requested_size: db_size,
+                });
             }
             OpenOptions::new().read(true).write(true).open(path)?
         } else {
