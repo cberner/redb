@@ -1,27 +1,9 @@
 use crate::Error;
-use std::ops::{Deref, DerefMut, Range};
+use std::ops::Range;
 use std::slice;
 
 pub(crate) struct Mmap {
     inner: memmap2::MmapRaw,
-}
-
-// TODO: remove these, they're dangerous mixed with the get_memory() methods
-impl Deref for Mmap {
-    type Target = [u8];
-
-    #[inline]
-    fn deref(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.inner.as_ptr(), self.inner.len()) }
-    }
-}
-
-// TODO: remove these, they're dangerous mixed with the get_memory() methods
-impl DerefMut for Mmap {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut [u8] {
-        unsafe { slice::from_raw_parts_mut(self.inner.as_mut_ptr(), self.inner.len()) }
-    }
 }
 
 impl Mmap {

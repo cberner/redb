@@ -437,9 +437,12 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn new(mmap: MmapRaw, requested_page_size: Option<usize>) -> Result<Self, Error> {
-        let mut mmap = Mmap::new(mmap);
+        let mmap = Mmap::new(mmap);
+        // Safety: we have exclusive access to the mmap
+        let all_memory = unsafe { mmap.get_memory_mut(0..mmap.len()) };
+
         let mutex = Mutex::new(MetapageGuard {});
-        if mmap[0..MAGICNUMBER.len()] != MAGICNUMBER {
+        if all_memory[0..MAGICNUMBER.len()] != MAGICNUMBER {
             let page_size = requested_page_size.unwrap_or_else(get_page_size);
             // Ensure that the database metadata fits into the first page
             assert!(page_size >= DB_METAPAGE_SIZE);
@@ -449,86 +452,86 @@ impl TransactionalMemory {
             let usable_pages = Self::calculate_usable_pages(mmap.len(), page_size, max_order);
 
             // Explicitly zero the memory
-            mmap[0..DB_METAPAGE_SIZE].copy_from_slice(&[0; DB_METAPAGE_SIZE]);
-            for i in &mut mmap[(usable_pages * page_size)..] {
+            all_memory[0..DB_METAPAGE_SIZE].copy_from_slice(&[0; DB_METAPAGE_SIZE]);
+            for i in &mut all_memory[(usable_pages * page_size)..] {
                 *i = 0
             }
 
             let allocator_state_size = BuddyAllocator::required_space(usable_pages, max_order);
 
             // Store the page & db size. These are immutable
-            mmap[PAGE_SIZE_OFFSET] = page_size.trailing_zeros() as u8;
+            all_memory[PAGE_SIZE_OFFSET] = page_size.trailing_zeros() as u8;
             let length = mmap.len() as u64;
-            mmap[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
+            all_memory[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
                 .copy_from_slice(&length.to_be_bytes());
 
             // Set to 1, so that we can mutate the first transaction state
-            mmap[PRIMARY_BIT_OFFSET] = 1;
+            all_memory[PRIMARY_BIT_OFFSET] = 1;
             let start = mmap.len() - 2 * allocator_state_size;
             let mut mutator =
-                TransactionMutator::new(get_secondary(&mut mmap), mutex.lock().unwrap());
+                TransactionMutator::new(get_secondary(all_memory), mutex.lock().unwrap());
             mutator.set_root_page(PageNumber::new(0, 0), 0);
             mutator.set_last_committed_transaction_id(0);
             mutator.set_allocator_dirty(false);
             mutator.set_allocator_data(start, allocator_state_size);
             drop(mutator);
             let allocator = BuddyAllocator::init_new(
-                &mut mmap[start..(start + allocator_state_size)],
+                &mut all_memory[start..(start + allocator_state_size)],
                 usable_pages,
                 max_order,
             );
             allocator.record_alloc(
-                &mut mmap[start..(start + allocator_state_size)],
+                &mut all_memory[start..(start + allocator_state_size)],
                 DB_METADATA_PAGE,
                 0,
             );
             // Make the state we just wrote the primary
-            mmap[PRIMARY_BIT_OFFSET] = 0;
+            all_memory[PRIMARY_BIT_OFFSET] = 0;
 
             // Initialize the secondary allocator state
             let start = mmap.len() - allocator_state_size;
             let mut mutator =
-                TransactionMutator::new(get_secondary(&mut mmap), mutex.lock().unwrap());
+                TransactionMutator::new(get_secondary(all_memory), mutex.lock().unwrap());
             mutator.set_allocator_dirty(false);
             mutator.set_allocator_data(start, allocator_state_size);
             drop(mutator);
             let allocator = BuddyAllocator::init_new(
-                &mut mmap[start..(start + allocator_state_size)],
+                &mut all_memory[start..(start + allocator_state_size)],
                 usable_pages,
                 max_order,
             );
             allocator.record_alloc(
-                &mut mmap[start..(start + allocator_state_size)],
+                &mut all_memory[start..(start + allocator_state_size)],
                 DB_METADATA_PAGE,
                 0,
             );
 
-            mmap[VERSION_OFFSET] = 1;
+            all_memory[VERSION_OFFSET] = 1;
 
             mmap.flush()?;
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
-            mmap[0..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
+            all_memory[0..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
             mmap.flush()?;
         }
 
-        let page_size = (1 << mmap[PAGE_SIZE_OFFSET]) as usize;
+        let page_size = (1 << all_memory[PAGE_SIZE_OFFSET]) as usize;
         if let Some(size) = requested_page_size {
             assert_eq!(page_size, size);
         }
         assert_eq!(
             u64::from_be_bytes(
-                mmap[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
+                all_memory[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
                     .try_into()
                     .unwrap()
             ) as usize,
             mmap.len()
         );
 
-        let accessor = TransactionAccessor::new(get_primary(&mmap), mutex.lock().unwrap());
+        let accessor = TransactionAccessor::new(get_primary(all_memory), mutex.lock().unwrap());
         let mut allocator_dirty = accessor.get_allocator_dirty();
         drop(accessor);
-        let accessor = TransactionAccessor::new(get_secondary(&mut mmap), mutex.lock().unwrap());
+        let accessor = TransactionAccessor::new(get_secondary(all_memory), mutex.lock().unwrap());
         allocator_dirty |= accessor.get_allocator_dirty();
         drop(accessor);
 
