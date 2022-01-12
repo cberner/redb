@@ -23,9 +23,6 @@ use std::panic;
 // TODO: prevent user from opening and modifying this table
 const FREED_TABLE: &[u8] = b"$$internal$$freed";
 
-// TODO: Remove this
-const TODO_REMOVE_THIS_FAKE_TABLE_ID: u64 = u64::MAX;
-
 #[derive(Debug)]
 pub struct DbStats {
     tree_height: usize,
@@ -144,15 +141,9 @@ impl Storage {
             let mut all_pages_iter: Box<dyn Iterator<Item = PageNumber>> =
                 Box::new(AllPageNumbersBtreeIter::new(start, &mem));
 
-            let start_state = find_iter_unbounded_start(
-                mem.get_page(root),
-                messages,
-                None,
-                TODO_REMOVE_THIS_FAKE_TABLE_ID,
-                &mem,
-            );
+            let start_state = find_iter_unbounded_start(mem.get_page(root), messages, None, &mem);
             let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
-                BtreeRangeIter::new(start_state, TODO_REMOVE_THIS_FAKE_TABLE_ID, .., &mem);
+                BtreeRangeIter::new(start_state, .., &mem);
 
             while let Some(entry) = iter.next() {
                 let definition = TableDefinition::from_bytes(entry.value());
@@ -177,12 +168,7 @@ impl Storage {
                 table_root: None,
                 table_type: TableType::Normal,
             };
-            let (new_root, _) = make_mut_single_leaf(
-                TODO_REMOVE_THIS_FAKE_TABLE_ID,
-                FREED_TABLE,
-                &freed_table.to_bytes(),
-                &mem,
-            )?;
+            let (new_root, _) = make_mut_single_leaf(FREED_TABLE, &freed_table.to_bytes(), &mem)?;
             mem.set_secondary_root_page(new_root.get_page_number(), new_root.get_valid_messages())?;
             mem.commit(next_transaction_id)?;
             next_transaction_id += 1;
@@ -322,21 +308,14 @@ impl Storage {
         assert_eq!(transaction_id, self.live_write_transaction.get().unwrap());
         if let Some(handle) = root_page {
             let root = self.mem.get_page(handle.get_page_number());
-            let (new_root, _, freed) = tree_insert::<K>(
-                root,
-                handle.get_valid_messages(),
-                TODO_REMOVE_THIS_FAKE_TABLE_ID,
-                key,
-                value,
-                &self.mem,
-            )?;
+            let (new_root, _, freed) =
+                tree_insert::<K>(root, handle.get_valid_messages(), key, value, &self.mem)?;
             self.pending_freed_pages
                 .borrow_mut()
                 .extend_from_slice(&freed);
             Ok(new_root)
         } else {
-            let (new_root, _) =
-                make_mut_single_leaf(TODO_REMOVE_THIS_FAKE_TABLE_ID, key, value, &self.mem)?;
+            let (new_root, _) = make_mut_single_leaf(key, value, &self.mem)?;
             Ok(new_root)
         }
     }
@@ -353,20 +332,14 @@ impl Storage {
         let value = vec![0u8; value_len];
         let (new_root, guard) = if let Some(handle) = root_page {
             let root = self.mem.get_page(handle.get_page_number());
-            let (new_root, guard, freed) = tree_insert::<K>(
-                root,
-                handle.get_valid_messages(),
-                TODO_REMOVE_THIS_FAKE_TABLE_ID,
-                key,
-                &value,
-                &self.mem,
-            )?;
+            let (new_root, guard, freed) =
+                tree_insert::<K>(root, handle.get_valid_messages(), key, &value, &self.mem)?;
             self.pending_freed_pages
                 .borrow_mut()
                 .extend_from_slice(&freed);
             (new_root, guard)
         } else {
-            make_mut_single_leaf(TODO_REMOVE_THIS_FAKE_TABLE_ID, key, &value, &self.mem)?
+            make_mut_single_leaf(key, &value, &self.mem)?
         };
         Ok((new_root, guard))
     }
@@ -632,13 +605,9 @@ impl Storage {
     ) -> Result<Option<AccessGuard<V>>, Error> {
         if let Some(handle) = root_page_handle {
             let root_page = self.mem.get_page(handle.get_page_number());
-            if let Some((page, offset, len)) = lookup_in_raw::<K>(
-                root_page,
-                handle.get_valid_messages(),
-                TODO_REMOVE_THIS_FAKE_TABLE_ID,
-                key,
-                &self.mem,
-            ) {
+            if let Some((page, offset, len)) =
+                lookup_in_raw::<K>(root_page, handle.get_valid_messages(), key, &self.mem)
+            {
                 return Ok(Some(AccessGuard::new(page, offset, len)));
             }
         }
@@ -663,40 +632,23 @@ impl Storage {
                         self.mem.get_page(root.get_page_number()),
                         root.get_valid_messages(),
                         None,
-                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
                         k.as_ref().as_bytes().as_ref(),
                         &self.mem,
                     );
-                    Ok(BtreeRangeIter::new(
-                        start_state,
-                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
-                        range,
-                        &self.mem,
-                    ))
+                    Ok(BtreeRangeIter::new(start_state, range, &self.mem))
                 }
                 Bound::Unbounded => {
                     let start_state = find_iter_unbounded_start(
                         self.mem.get_page(root.get_page_number()),
                         root.get_valid_messages(),
                         None,
-                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
                         &self.mem,
                     );
-                    Ok(BtreeRangeIter::new(
-                        start_state,
-                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
-                        range,
-                        &self.mem,
-                    ))
+                    Ok(BtreeRangeIter::new(start_state, range, &self.mem))
                 }
             }
         } else {
-            Ok(BtreeRangeIter::new(
-                None,
-                TODO_REMOVE_THIS_FAKE_TABLE_ID,
-                range,
-                &self.mem,
-            ))
+            Ok(BtreeRangeIter::new(None, range, &self.mem))
         }
     }
 
@@ -718,40 +670,23 @@ impl Storage {
                         self.mem.get_page(root.get_page_number()),
                         root.get_valid_messages(),
                         None,
-                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
                         k.as_ref().as_bytes().as_ref(),
                         &self.mem,
                     );
-                    Ok(BtreeRangeIter::new_reversed(
-                        start_state,
-                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
-                        range,
-                        &self.mem,
-                    ))
+                    Ok(BtreeRangeIter::new_reversed(start_state, range, &self.mem))
                 }
                 Bound::Unbounded => {
                     let start_state = find_iter_unbounded_reversed(
                         self.mem.get_page(root.get_page_number()),
                         root.get_valid_messages(),
                         None,
-                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
                         &self.mem,
                     );
-                    Ok(BtreeRangeIter::new_reversed(
-                        start_state,
-                        TODO_REMOVE_THIS_FAKE_TABLE_ID,
-                        range,
-                        &self.mem,
-                    ))
+                    Ok(BtreeRangeIter::new_reversed(start_state, range, &self.mem))
                 }
             }
         } else {
-            Ok(BtreeRangeIter::new_reversed(
-                None,
-                TODO_REMOVE_THIS_FAKE_TABLE_ID,
-                range,
-                &self.mem,
-            ))
+            Ok(BtreeRangeIter::new_reversed(None, range, &self.mem))
         }
     }
 
@@ -765,13 +700,8 @@ impl Storage {
         assert_eq!(transaction_id, self.live_write_transaction.get().unwrap());
         if let Some(handle) = root_handle {
             let root_page = self.mem.get_page(handle.get_page_number());
-            let (new_root, freed) = tree_delete::<K>(
-                root_page,
-                handle.get_valid_messages(),
-                TODO_REMOVE_THIS_FAKE_TABLE_ID,
-                key,
-                &self.mem,
-            )?;
+            let (new_root, freed) =
+                tree_delete::<K>(root_page, handle.get_valid_messages(), key, &self.mem)?;
             self.pending_freed_pages
                 .borrow_mut()
                 .extend_from_slice(&freed);
