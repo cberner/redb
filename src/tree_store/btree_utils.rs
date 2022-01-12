@@ -1535,6 +1535,10 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         drop(page);
                         // Safety: If the page is uncommitted, no other transactions can have references to it,
                         // and we just dropped ours on the line above
+
+                        // TODO: This call seems like it may be unsound. Another Table instance in the
+                        // same transaction could have a reference to this page. We probably need to
+                        // ensure this is only a single instance of each table
                         unsafe {
                             if !manager.free_if_uncommitted(page_number)? {
                                 freed.push(page_number);
