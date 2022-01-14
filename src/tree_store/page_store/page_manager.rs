@@ -25,11 +25,16 @@ const MAGICNUMBER: [u8; 4] = [b'r', b'e', b'd', b'b'];
 const VERSION_OFFSET: usize = MAGICNUMBER.len();
 const PAGE_SIZE_OFFSET: usize = VERSION_OFFSET + 1;
 const DB_SIZE_OFFSET: usize = PAGE_SIZE_OFFSET + 1;
-const PRIMARY_BIT_OFFSET: usize = DB_SIZE_OFFSET + size_of::<u64>();
+const GOD_BYTE_OFFSET: usize = DB_SIZE_OFFSET + size_of::<u64>();
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 128;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
 const DB_METAPAGE_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
+
+// God byte flags
+const PRIMARY_BIT: u8 = 1;
+const ALLOCATOR_STATE_0_DIRTY: u8 = 2;
+const ALLOCATOR_STATE_1_DIRTY: u8 = 4;
 
 // Structure of each metapage
 const ROOT_PAGE_OFFSET: usize = 0;
@@ -38,8 +43,6 @@ const TRANSACTION_ID_OFFSET: usize = ROOT_PAGE_MESSAGES_OFFSET + size_of::<u8>()
 // Memory pointed to by this ptr is logically part of the metapage
 const ALLOCATOR_STATE_PTR_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u128>();
 const ALLOCATOR_STATE_LEN_OFFSET: usize = ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>();
-// TODO: these dirty flags should be part of the PRIMARY_BIT byte, so that they can be written atomically
-const ALLOCATOR_STATE_DIRTY_OFFSET: usize = ALLOCATOR_STATE_LEN_OFFSET + size_of::<u64>();
 
 pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
     let mut db_size = [0u8; size_of::<u64>()];
@@ -71,14 +74,12 @@ pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result<
     let allocator_state_size = BuddyAllocator::required_space(usable_pages, max_order);
 
     // Dirty the allocator state, so that it will be rebuilt
-    file.seek(SeekFrom::Start(
-        (TRANSACTION_0_OFFSET + ALLOCATOR_STATE_DIRTY_OFFSET) as u64,
-    ))?;
-    file.write_all(&[1])?;
-    file.seek(SeekFrom::Start(
-        (TRANSACTION_1_OFFSET + ALLOCATOR_STATE_DIRTY_OFFSET) as u64,
-    ))?;
-    file.write_all(&[1])?;
+    file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;
+    let mut buffer = [0u8; 1];
+    file.read_exact(&mut buffer)?;
+    let new_god_byte = buffer[0] | ALLOCATOR_STATE_0_DIRTY | ALLOCATOR_STATE_1_DIRTY;
+    file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;
+    file.write_all(&[new_god_byte])?;
 
     // Write the new allocator state pointers
     let start = new_size - 2 * allocator_state_size;
@@ -115,7 +116,7 @@ pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result<
 struct MetapageGuard;
 
 fn get_primary(metapage: &[u8]) -> &[u8] {
-    let start = if metapage[PRIMARY_BIT_OFFSET] == 0 {
+    let start = if metapage[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
         TRANSACTION_0_OFFSET
     } else {
         TRANSACTION_1_OFFSET
@@ -128,7 +129,7 @@ fn get_primary(metapage: &[u8]) -> &[u8] {
 // Warning! This method is only safe to use when modifying the allocator state and when the dirty bit
 // is already set and fsync'ed to the backing file
 fn get_primary_mut(metapage: &mut [u8]) -> &mut [u8] {
-    let start = if metapage[PRIMARY_BIT_OFFSET] == 0 {
+    let start = if metapage[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
         TRANSACTION_0_OFFSET
     } else {
         TRANSACTION_1_OFFSET
@@ -139,7 +140,7 @@ fn get_primary_mut(metapage: &mut [u8]) -> &mut [u8] {
 }
 
 fn get_secondary(metapage: &mut [u8]) -> &mut [u8] {
-    let start = if metapage[PRIMARY_BIT_OFFSET] == 0 {
+    let start = if metapage[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
         TRANSACTION_1_OFFSET
     } else {
         TRANSACTION_0_OFFSET
@@ -149,8 +150,35 @@ fn get_secondary(metapage: &mut [u8]) -> &mut [u8] {
     &mut metapage[start..end]
 }
 
+fn get_allocator_dirty(metapage: &mut [u8], primary: bool) -> bool {
+    let god_byte = metapage[GOD_BYTE_OFFSET];
+    if primary && god_byte & PRIMARY_BIT == 0 || !primary && god_byte & PRIMARY_BIT != 0 {
+        god_byte & ALLOCATOR_STATE_0_DIRTY != 0
+    } else {
+        god_byte & ALLOCATOR_STATE_1_DIRTY != 0
+    }
+}
+
+// Set the allocator dirty bit to `dirty` for the primary or secondary slot, according to `primary`
+fn set_allocator_dirty(god_byte: u8, primary: bool, dirty: bool) -> u8 {
+    #[allow(clippy::collapsible_else_if)]
+    if primary && god_byte & PRIMARY_BIT == 0 || !primary && god_byte & PRIMARY_BIT != 0 {
+        if dirty {
+            god_byte | ALLOCATOR_STATE_0_DIRTY
+        } else {
+            god_byte & !ALLOCATOR_STATE_0_DIRTY
+        }
+    } else {
+        if dirty {
+            god_byte | ALLOCATOR_STATE_1_DIRTY
+        } else {
+            god_byte & !ALLOCATOR_STATE_1_DIRTY
+        }
+    }
+}
+
 fn get_secondary_const(metapage: &[u8]) -> &[u8] {
-    let start = if metapage[PRIMARY_BIT_OFFSET] == 0 {
+    let start = if metapage[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
         TRANSACTION_1_OFFSET
     } else {
         TRANSACTION_0_OFFSET
@@ -237,7 +265,6 @@ impl<'a> TransactionAccessor<'a> {
         )
     }
 
-    #[allow(dead_code)]
     fn get_allocator_data(&self) -> (usize, usize) {
         let start = u64::from_be_bytes(
             self.mem[ALLOCATOR_STATE_PTR_OFFSET..(ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>())]
@@ -252,18 +279,8 @@ impl<'a> TransactionAccessor<'a> {
         (start as usize, (start + len) as usize)
     }
 
-    fn get_allocator_dirty(&self) -> bool {
-        let value = u8::from_be_bytes(
-            self.mem
-                [ALLOCATOR_STATE_DIRTY_OFFSET..(ALLOCATOR_STATE_DIRTY_OFFSET + size_of::<u8>())]
-                .try_into()
-                .unwrap(),
-        );
-        match value {
-            0 => false,
-            1 => true,
-            _ => unreachable!(),
-        }
+    fn into_guard(self) -> MutexGuard<'a, MetapageGuard> {
+        self._guard
     }
 }
 
@@ -293,46 +310,6 @@ impl<'a> TransactionMutator<'a> {
             .copy_from_slice(&(start as u64).to_be_bytes());
         self.mem[ALLOCATOR_STATE_LEN_OFFSET..(ALLOCATOR_STATE_LEN_OFFSET + size_of::<u64>())]
             .copy_from_slice(&(len as u64).to_be_bytes());
-    }
-
-    fn get_allocator_data(&self) -> (usize, usize) {
-        let start = u64::from_be_bytes(
-            self.mem[ALLOCATOR_STATE_PTR_OFFSET..(ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>())]
-                .try_into()
-                .unwrap(),
-        );
-        let len = u64::from_be_bytes(
-            self.mem[ALLOCATOR_STATE_LEN_OFFSET..(ALLOCATOR_STATE_LEN_OFFSET + size_of::<u64>())]
-                .try_into()
-                .unwrap(),
-        );
-        (start as usize, (start + len) as usize)
-    }
-
-    fn set_allocator_dirty(&mut self, dirty: bool) {
-        if dirty {
-            self.mem[ALLOCATOR_STATE_DIRTY_OFFSET] = 1;
-        } else {
-            self.mem[ALLOCATOR_STATE_DIRTY_OFFSET] = 0;
-        }
-    }
-
-    fn get_allocator_dirty(&self) -> bool {
-        let value = u8::from_be_bytes(
-            self.mem
-                [ALLOCATOR_STATE_DIRTY_OFFSET..(ALLOCATOR_STATE_DIRTY_OFFSET + size_of::<u8>())]
-                .try_into()
-                .unwrap(),
-        );
-        match value {
-            0 => false,
-            1 => true,
-            _ => unreachable!(),
-        }
-    }
-
-    fn into_guard(self) -> MutexGuard<'a, MetapageGuard> {
-        self._guard
     }
 }
 
@@ -466,13 +443,12 @@ impl TransactionalMemory {
                 .copy_from_slice(&length.to_be_bytes());
 
             // Set to 1, so that we can mutate the first transaction state
-            all_memory[PRIMARY_BIT_OFFSET] = 1;
+            all_memory[GOD_BYTE_OFFSET] = PRIMARY_BIT;
             let start = mmap.len() - 2 * allocator_state_size;
             let mut mutator =
                 TransactionMutator::new(get_secondary(all_memory), mutex.lock().unwrap());
             mutator.set_root_page(PageNumber::new(0, 0), 0);
             mutator.set_last_committed_transaction_id(0);
-            mutator.set_allocator_dirty(false);
             mutator.set_allocator_data(start, allocator_state_size);
             drop(mutator);
             let allocator = BuddyAllocator::init_new(
@@ -486,13 +462,12 @@ impl TransactionalMemory {
                 0,
             );
             // Make the state we just wrote the primary
-            all_memory[PRIMARY_BIT_OFFSET] = 0;
+            all_memory[GOD_BYTE_OFFSET] &= !PRIMARY_BIT;
 
             // Initialize the secondary allocator state
             let start = mmap.len() - allocator_state_size;
             let mut mutator =
                 TransactionMutator::new(get_secondary(all_memory), mutex.lock().unwrap());
-            mutator.set_allocator_dirty(false);
             mutator.set_allocator_data(start, allocator_state_size);
             drop(mutator);
             let allocator = BuddyAllocator::init_new(
@@ -528,12 +503,8 @@ impl TransactionalMemory {
             mmap.len()
         );
 
-        let accessor = TransactionAccessor::new(get_primary(all_memory), mutex.lock().unwrap());
-        let mut allocator_dirty = accessor.get_allocator_dirty();
-        drop(accessor);
-        let accessor = TransactionAccessor::new(get_secondary(all_memory), mutex.lock().unwrap());
-        allocator_dirty |= accessor.get_allocator_dirty();
-        drop(accessor);
+        let allocator_dirty =
+            all_memory[GOD_BYTE_OFFSET] & (ALLOCATOR_STATE_0_DIRTY | ALLOCATOR_STATE_1_DIRTY) != 0;
 
         let page_allocator = if allocator_dirty {
             None
@@ -557,13 +528,9 @@ impl TransactionalMemory {
 
     pub(crate) fn needs_repair(&self) -> Result<bool, Error> {
         let (mmap, guard) = self.acquire_mutable_metapage()?;
-        let accessor = TransactionAccessor::new(get_primary(mmap), guard);
-        let mut allocator_dirty = accessor.get_allocator_dirty();
-        drop(accessor);
-
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-        let accessor = TransactionAccessor::new(get_secondary(mmap), guard);
-        allocator_dirty |= accessor.get_allocator_dirty();
+        let allocator_dirty =
+            mmap[GOD_BYTE_OFFSET] & (ALLOCATOR_STATE_0_DIRTY | ALLOCATOR_STATE_1_DIRTY) != 0;
+        drop(guard);
 
         Ok(allocator_dirty)
     }
@@ -575,9 +542,9 @@ impl TransactionalMemory {
     ) -> Result<bool, Error> {
         // TODO: clean up all the duplicated code in this function
         let (mmap, guard) = self.acquire_mutable_metapage()?;
-        let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        if mutator.get_allocator_dirty() {
-            let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
+        if get_allocator_dirty(mmap, false) {
+            drop(guard);
+            let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
 
             let max_order = Self::calculate_usable_order(self.mmap.len(), self.page_size);
             let usable_pages =
@@ -591,18 +558,16 @@ impl TransactionalMemory {
 
             drop(guard);
             let (mmap, guard) = self.acquire_mutable_metapage()?;
-            let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
-            mutator.set_allocator_dirty(false);
+            let new_god_byte = set_allocator_dirty(mmap[GOD_BYTE_OFFSET], false, false);
+            mmap[GOD_BYTE_OFFSET] = new_god_byte;
+            drop(guard);
             self.mmap.flush()?;
 
             Ok(false)
         } else {
-            // Repair the primary instead
-            drop(mutator);
-            let (mmap, guard) = self.acquire_mutable_metapage()?;
-            mutator = TransactionMutator::new(get_primary_mut(mmap), guard);
-
-            let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
+            drop(guard);
+            // Repair the primary
+            let (mem, guard) = self.acquire_mutable_page_allocator(true)?;
 
             let max_order = Self::calculate_usable_order(self.mmap.len(), self.page_size);
             let usable_pages =
@@ -618,8 +583,9 @@ impl TransactionalMemory {
 
             drop(guard);
             let (mmap, guard) = self.acquire_mutable_metapage()?;
-            mutator = TransactionMutator::new(get_primary_mut(mmap), guard);
-            mutator.set_allocator_dirty(false);
+            let new_god_byte = set_allocator_dirty(mmap[GOD_BYTE_OFFSET], true, false);
+            mmap[GOD_BYTE_OFFSET] = new_god_byte;
+            drop(guard);
             self.mmap.flush()?;
 
             Ok(true)
@@ -644,24 +610,31 @@ impl TransactionalMemory {
         Ok((mem, guard))
     }
 
-    fn acquire_mutable_page_allocator<'a>(
+    fn acquire_mutable_page_allocator(
         &self,
-        mut mutator: TransactionMutator<'a>,
-    ) -> Result<(&mut [u8], MutexGuard<'a, MetapageGuard>), Error> {
+        primary: bool,
+    ) -> Result<(&mut [u8], MutexGuard<MetapageGuard>), Error> {
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
         // The allocator is a cache, and therefore can only be modified when it's marked dirty
-        if !mutator.get_allocator_dirty() {
-            mutator.set_allocator_dirty(true);
+        if !get_allocator_dirty(mmap, primary) {
+            let god_byte = mmap[GOD_BYTE_OFFSET];
+            mmap[GOD_BYTE_OFFSET] = set_allocator_dirty(god_byte, primary, true);
             self.mmap.flush()?
         }
 
         // Safety: we have the metapage lock and only access the metapage
         // (page allocator state is logically part of the metapage)
-        let (start, end) = mutator.get_allocator_data();
+        let accessor = if primary {
+            TransactionAccessor::new(get_primary_mut(mmap), guard)
+        } else {
+            TransactionAccessor::new(get_secondary(mmap), guard)
+        };
+        let (start, end) = accessor.get_allocator_data();
         assert!(end <= self.mmap.len());
         // Safety: the allocator state is considered part of the metapage, and we hold the lock
         let mem = unsafe { self.mmap.get_memory_mut(start..end) };
 
-        Ok((mem, mutator.into_guard()))
+        Ok((mem, accessor.into_guard()))
     }
 
     // Commit all outstanding changes and make them visible as the primary
@@ -679,24 +652,20 @@ impl TransactionalMemory {
 
         self.mmap.flush()?;
 
-        let next = match self.mmap.get_memory(0..DB_METAPAGE_SIZE)[PRIMARY_BIT_OFFSET] {
-            0 => 1,
-            1 => 0,
+        let god_byte = self.mmap.get_memory(0..DB_METAPAGE_SIZE)[GOD_BYTE_OFFSET];
+        let mut next = match god_byte & PRIMARY_BIT {
+            0 => god_byte | PRIMARY_BIT,
+            1 => god_byte & !PRIMARY_BIT,
             _ => unreachable!(),
         };
         let (mmap, guard) = self.acquire_mutable_metapage()?;
-        let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        mutator.set_allocator_dirty(false);
-        drop(mutator);
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-
-        mmap[PRIMARY_BIT_OFFSET] = next;
-        // Dirty the current primary (we just switched them on the previous line)
-        let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        mutator.set_allocator_dirty(true);
+        next = set_allocator_dirty(next, true, false);
+        next = set_allocator_dirty(next, false, true);
+        mmap[GOD_BYTE_OFFSET] = next;
+        drop(guard);
         self.mmap.flush()?;
 
-        let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
+        let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
             self.page_allocator.as_ref().unwrap().record_alloc(
                 mem,
@@ -730,18 +699,19 @@ impl TransactionalMemory {
         mutator.set_last_committed_transaction_id(transaction_id);
         drop(mutator);
 
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
         // Ensure the dirty bit is set on the primary page, so that the following updates to it are safe
-        let mut primary_mutator =
-            TransactionMutator::new(get_primary_mut(mmap), self.metapage_guard.lock().unwrap());
-        if !primary_mutator.get_allocator_dirty() {
-            primary_mutator.set_allocator_dirty(true);
+        if !get_allocator_dirty(mmap, true) {
+            let god_byte = mmap[GOD_BYTE_OFFSET];
+            mmap[GOD_BYTE_OFFSET] = set_allocator_dirty(god_byte, true, true);
             // Must fsync this, even though we're in a non-durable commit. Because we're dirtying
             // the primary allocator state
             self.mmap.flush()?;
         }
+        drop(guard);
 
         // Modify the primary allocator state directly. This is only safe because we first set the dirty bit
-        let (mem, guard) = self.acquire_mutable_page_allocator(primary_mutator)?;
+        let (mem, guard) = self.acquire_mutable_page_allocator(true)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
             self.page_allocator.as_ref().unwrap().record_alloc(
                 mem,
@@ -758,9 +728,7 @@ impl TransactionalMemory {
 
     pub(crate) fn rollback_uncommited_writes(&self) -> Result<(), Error> {
         assert!(self.open_dirty_pages.borrow().is_empty());
-        let (metamem, guard) = self.acquire_mutable_metapage()?;
-        let mutator = TransactionMutator::new(get_secondary(metamem), guard);
-        let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
+        let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
         for page_number in self.allocated_since_commit.borrow_mut().drain() {
             self.page_allocator.as_ref().unwrap().free(
                 mem,
@@ -867,9 +835,7 @@ impl TransactionalMemory {
 
     // Safety: the caller must ensure that no references to the memory in `page` exist
     pub(crate) unsafe fn free(&self, page: PageNumber) -> Result<(), Error> {
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-        let mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
+        let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
         self.page_allocator
             .as_ref()
             .unwrap()
@@ -884,9 +850,7 @@ impl TransactionalMemory {
     // Safety: the caller must ensure that no references to the memory in `page` exist
     pub(crate) unsafe fn free_if_uncommitted(&self, page: PageNumber) -> Result<bool, Error> {
         if self.allocated_since_commit.borrow_mut().remove(&page) {
-            let (mmap, guard) = self.acquire_mutable_metapage()?;
-            let mutator = TransactionMutator::new(get_secondary(mmap), guard);
-            let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
+            let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
             self.page_allocator.as_ref().unwrap().free(
                 mem,
                 page.page_index,
@@ -915,9 +879,7 @@ impl TransactionalMemory {
             required_pages.next_power_of_two().trailing_zeros()
         } as usize;
 
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-        let mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        let (mem, guard) = self.acquire_mutable_page_allocator(mutator)?;
+        let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
         let page_number = PageNumber::new(
             self.page_allocator
                 .as_ref()
@@ -950,11 +912,9 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn count_free_pages(&self) -> Result<usize, Error> {
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
         // TODO: this is a read-only operation, so should be able to use an accessor
         // and avoid dirtying the allocator state
-        let mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        let (mem, guard) = self.acquire_mutable_page_allocator(mutator).unwrap();
+        let (mem, guard) = self.acquire_mutable_page_allocator(false).unwrap();
         let count = self.page_allocator.as_ref().unwrap().count_free_pages(mem);
         // Drop guard only after page_allocator.count_free() is completed
         drop(guard);
@@ -981,8 +941,9 @@ impl Drop for TransactionalMemory {
         }
         if self.mmap.flush().is_ok() && self.page_allocator.is_some() {
             if let Ok((metamem, guard)) = self.acquire_mutable_metapage() {
-                let mut mutator = TransactionMutator::new(get_secondary(metamem), guard);
-                mutator.set_allocator_dirty(false);
+                metamem[GOD_BYTE_OFFSET] =
+                    set_allocator_dirty(metamem[GOD_BYTE_OFFSET], false, false);
+                drop(guard);
                 let _ = self.mmap.flush();
             }
         }
@@ -991,14 +952,11 @@ impl Drop for TransactionalMemory {
 
 #[cfg(test)]
 mod test {
-    use crate::tree_store::page_store::page_manager::{
-        get_primary_mut, get_secondary, MetapageGuard, TransactionMutator,
-    };
+    use crate::tree_store::page_store::page_manager::{set_allocator_dirty, GOD_BYTE_OFFSET};
     use crate::tree_store::page_store::TransactionalMemory;
     use crate::{Database, Table};
     use memmap2::{MmapMut, MmapRaw};
     use std::fs::OpenOptions;
-    use std::sync::Mutex;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -1019,19 +977,12 @@ mod test {
             .unwrap();
 
         let mut mmap = unsafe { MmapMut::map_mut(&file) }.unwrap();
+        let mut god_byte = mmap[GOD_BYTE_OFFSET];
+        god_byte = set_allocator_dirty(god_byte, true, true);
+        god_byte = set_allocator_dirty(god_byte, false, true);
+        mmap[GOD_BYTE_OFFSET] = god_byte;
 
-        let mutex = Mutex::new(MetapageGuard {});
-        let mut mutator = TransactionMutator::new(get_secondary(&mut mmap), mutex.lock().unwrap());
-        mutator.set_allocator_dirty(true);
-        drop(mutator);
         mmap.flush().unwrap();
-
-        let mut mutator =
-            TransactionMutator::new(get_primary_mut(&mut mmap), mutex.lock().unwrap());
-        mutator.set_allocator_dirty(true);
-        drop(mutator);
-        mmap.flush().unwrap();
-
         drop(mmap);
 
         let mmap = MmapRaw::map_raw(&file).unwrap();
