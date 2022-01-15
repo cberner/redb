@@ -155,8 +155,8 @@ impl Storage {
         mem.finalize_repair_allocator()?;
 
         let mut next_transaction_id = mem.get_last_committed_transaction_id()? + 1;
-        // TODO: make this detection more reliable
         if mem.get_primary_root_page().is_none() {
+            assert_eq!(next_transaction_id, 1);
             // Empty database, so insert the freed table.
             let freed_table = TableDefinition {
                 table_root: None,
