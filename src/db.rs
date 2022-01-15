@@ -1,8 +1,6 @@
 use crate::multimap_table::MultimapTable;
 use crate::table::{ReadOnlyTable, Table};
-use crate::tree_store::{
-    expand_db_size, get_db_size, DbStats, PageNumber, Storage, TableDefinition, TableType,
-};
+use crate::tree_store::{expand_db_size, get_db_size, DbStats, PageNumber, Storage, TableType};
 use crate::types::{RedbKey, RedbValue};
 use crate::{Error, ReadOnlyMultimapTable};
 use memmap2::MmapRaw;
@@ -10,6 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct Database {
@@ -124,11 +123,13 @@ impl DatabaseBuilder {
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub struct DatabaseTransaction<'a> {
     storage: &'a Storage,
     transaction_id: u128,
     root_page: Cell<Option<PageNumber>>,
-    pending_table_root_changes: RefCell<HashMap<Vec<u8>, TableDefinition>>,
+    pending_table_root_changes:
+        RefCell<HashMap<(Vec<u8>, TableType), Rc<Cell<Option<PageNumber>>>>>,
     completed: AtomicBool,
 }
 
@@ -151,7 +152,7 @@ impl<'a> DatabaseTransaction<'a> {
     pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         name: impl AsRef<[u8]>,
-    ) -> Result<Table<'a, '_, K, V>, Error> {
+    ) -> Result<Table<'a, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
         let (definition, root) = self.storage.get_or_create_table(
             name.as_ref(),
@@ -161,17 +162,42 @@ impl<'a> DatabaseTransaction<'a> {
         )?;
         self.root_page.set(Some(root));
 
-        self.pending_table_root_changes
+        let key = (name.as_ref().to_vec(), TableType::Normal);
+        let root = self
+            .pending_table_root_changes
             .borrow_mut()
-            .insert(name.as_ref().to_vec(), definition.clone());
+            .entry(key)
+            .or_insert_with(|| Rc::new(Cell::new(definition.get_root())))
+            .clone();
 
-        Ok(Table::new(
-            name,
+        Ok(Table::new(self.transaction_id, root, self.storage))
+    }
+
+    /// Open the given table
+    ///
+    /// The table will be created if it does not exist
+    pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
+        &self,
+        name: impl AsRef<[u8]>,
+    ) -> Result<MultimapTable<'a, K, V>, Error> {
+        assert!(!name.as_ref().is_empty());
+        let (definition, root) = self.storage.get_or_create_table(
+            name.as_ref(),
+            TableType::Multimap,
             self.transaction_id,
-            &self.pending_table_root_changes,
-            definition.get_root(),
-            self.storage,
-        ))
+            self.root_page.get(),
+        )?;
+        self.root_page.set(Some(root));
+
+        let key = (name.as_ref().to_vec(), TableType::Multimap);
+        let root = self
+            .pending_table_root_changes
+            .borrow_mut()
+            .entry(key)
+            .or_insert_with(|| Rc::new(Cell::new(definition.get_root())))
+            .clone();
+
+        Ok(MultimapTable::new(self.transaction_id, root, self.storage))
     }
 
     /// Delete the given table
@@ -210,35 +236,6 @@ impl<'a> DatabaseTransaction<'a> {
         Ok(root != original_root)
     }
 
-    /// Open the given table
-    ///
-    /// The table will be created if it does not exist
-    pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
-        &self,
-        name: impl AsRef<[u8]>,
-    ) -> Result<MultimapTable<'a, '_, K, V>, Error> {
-        assert!(!name.as_ref().is_empty());
-        let (definition, root) = self.storage.get_or_create_table(
-            name.as_ref(),
-            TableType::Multimap,
-            self.transaction_id,
-            self.root_page.get(),
-        )?;
-        self.root_page.set(Some(root));
-
-        self.pending_table_root_changes
-            .borrow_mut()
-            .insert(name.as_ref().to_vec(), definition.clone());
-
-        Ok(MultimapTable::new(
-            name,
-            self.transaction_id,
-            &self.pending_table_root_changes,
-            definition.get_root(),
-            self.storage,
-        ))
-    }
-
     pub fn commit(self) -> Result<(), Error> {
         self.commit_helper(false)
     }
@@ -266,11 +263,11 @@ impl<'a> DatabaseTransaction<'a> {
 
     pub fn commit_helper_inner(&self, non_durable: bool) -> Result<(), Error> {
         // Update all the table roots in the master table, before committing
-        for (name, update) in self.pending_table_root_changes.borrow_mut().drain() {
+        for ((name, table_type), update) in self.pending_table_root_changes.borrow_mut().drain() {
             let new_root = self.storage.update_table_root(
                 &name,
-                update.get_type(),
-                update.get_root(),
+                table_type,
+                update.get(),
                 self.transaction_id,
                 self.root_page.get(),
             )?;

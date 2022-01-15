@@ -45,7 +45,7 @@ impl DbStats {
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub(crate) enum TableType {
     Normal,
     Multimap,
@@ -80,10 +80,6 @@ pub(crate) struct TableDefinition {
 impl TableDefinition {
     pub(crate) fn get_root(&self) -> Option<PageNumber> {
         self.table_root
-    }
-
-    pub(crate) fn set_root(&mut self, new_root: Option<PageNumber>) {
-        self.table_root = new_root;
     }
 
     pub(crate) fn get_type(&self) -> TableType {
