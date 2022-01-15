@@ -1,14 +1,15 @@
 use crate::error::Error;
-use crate::tree_store::{BtreeEntry, BtreeRangeIter, PageNumber, Storage, TableDefinition};
+use crate::tree_store::{BtreeEntry, BtreeRangeIter, PageNumber, Storage};
 use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
 };
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::cmp::Ordering;
-use std::collections::{Bound, HashMap};
+use std::collections::Bound;
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ops::{RangeBounds, RangeInclusive};
+use std::rc::Rc;
 
 #[derive(Eq, PartialEq)]
 #[allow(clippy::enum_variant_names)]
@@ -297,29 +298,23 @@ impl<
     }
 }
 
-pub struct MultimapTable<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+pub struct MultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     storage: &'s Storage,
-    name: Vec<u8>,
     transaction_id: u128,
-    pending_table_root_changes: &'t RefCell<HashMap<Vec<u8>, TableDefinition>>,
-    table_root: Option<PageNumber>,
+    table_root: Rc<Cell<Option<PageNumber>>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, V> {
+impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
     pub(in crate) fn new(
-        name: impl AsRef<[u8]>,
         transaction_id: u128,
-        pending_table_root_changes: &'t RefCell<HashMap<Vec<u8>, TableDefinition>>,
-        table_root: Option<PageNumber>,
+        table_root: Rc<Cell<Option<PageNumber>>>,
         storage: &'s Storage,
-    ) -> MultimapTable<'s, 't, K, V> {
+    ) -> MultimapTable<'s, K, V> {
         MultimapTable {
             storage,
-            name: name.as_ref().to_vec(),
             transaction_id,
-            pending_table_root_changes,
             table_root,
             _key_type: Default::default(),
             _value_type: Default::default(),
@@ -328,7 +323,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
 
     #[allow(dead_code)]
     pub(in crate) fn print_debug(&self) {
-        if let Some(page) = self.table_root {
+        if let Some(page) = self.table_root.get() {
             self.storage.print_dirty_tree_debug(page);
         }
     }
@@ -339,14 +334,9 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
             &kv,
             b"",
             self.transaction_id,
-            self.table_root,
+            self.table_root.get(),
         )?;
-        self.table_root = Some(root_page);
-        self.pending_table_root_changes
-            .borrow_mut()
-            .get_mut(&self.name)
-            .unwrap()
-            .set_root(self.table_root);
+        self.table_root.set(Some(root_page));
         Ok(())
     }
 
@@ -355,14 +345,9 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
         let root_page = self.storage.remove::<MultimapKVPair<K, V>>(
             &kv,
             self.transaction_id,
-            self.table_root,
+            self.table_root.get(),
         )?;
-        self.table_root = root_page;
-        self.pending_table_root_changes
-            .borrow_mut()
-            .get_mut(&self.name)
-            .unwrap()
-            .set_root(self.table_root);
+        self.table_root.set(root_page);
         Ok(())
     }
 
@@ -373,24 +358,19 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
             let new_root = self.storage.remove::<MultimapKVPair<K, V>>(
                 &key_only,
                 self.transaction_id,
-                self.table_root,
+                self.table_root.get(),
             )?;
-            if self.table_root == new_root {
+            if self.table_root.get() == new_root {
                 break;
             }
-            self.table_root = new_root;
-            self.pending_table_root_changes
-                .borrow_mut()
-                .get_mut(&self.name)
-                .unwrap()
-                .set_root(self.table_root);
+            self.table_root.set(new_root);
         }
         Ok(())
     }
 }
 
-impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s, K, V>
-    for MultimapTable<'s, 't, K, V>
+impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s, K, V>
+    for MultimapTable<'s, K, V>
 {
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapGetIterType<'a, K, V>, Error> {
         let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
@@ -398,7 +378,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s,
         let lower = MultimapKVPair::<K, V>::new(lower_bytes);
         let upper = MultimapKVPair::<K, V>::new(upper_bytes);
         self.storage
-            .get_range(lower..=upper, self.table_root)
+            .get_range(lower..=upper, self.table_root.get())
             .map(MultimapValueIter::new)
     }
 
@@ -413,7 +393,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s,
         let end = make_bound(end_kv);
 
         self.storage
-            .get_range((start, end), self.table_root)
+            .get_range((start, end), self.table_root.get())
             .map(MultimapRangeIter::new)
     }
 
@@ -428,16 +408,16 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s,
         let end = make_bound(end_kv);
 
         self.storage
-            .get_range_reversed((start, end), self.table_root)
+            .get_range_reversed((start, end), self.table_root.get())
             .map(MultimapRangeIter::new)
     }
 
     fn len(&self) -> Result<usize, Error> {
-        self.storage.len(self.table_root)
+        self.storage.len(self.table_root.get())
     }
 
     fn is_empty(&self) -> Result<bool, Error> {
-        self.storage.len(self.table_root).map(|x| x == 0)
+        self.storage.len(self.table_root.get()).map(|x| x == 0)
     }
 }
 
