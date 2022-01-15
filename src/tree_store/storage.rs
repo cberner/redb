@@ -19,8 +19,7 @@ use std::panic;
 
 // The table of freed pages by transaction. (transaction id, pagination counter) -> binary.
 // The binary blob is a length-prefixed array of big endian PageNumber
-// TODO: prevent user from opening and modifying this table
-const FREED_TABLE: &[u8] = b"$$internal$$freed";
+pub(crate) const FREED_TABLE: &[u8] = b"$$internal$$freed";
 
 #[derive(Debug)]
 pub struct DbStats {
