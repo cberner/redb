@@ -1,6 +1,6 @@
 use crate::error::Error;
 use crate::tree_store::{
-    AccessGuardMut, BtreeEntry, BtreeRangeIter, NodeHandle, Storage, TableDefinition,
+    AccessGuardMut, BtreeEntry, BtreeRangeIter, PageNumber, Storage, TableDefinition,
 };
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::AccessGuard;
@@ -15,7 +15,7 @@ pub struct Table<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     transaction_id: u128,
     // TODO: this can probably be merged into table_root, if table_root was an Rc<Cell<TableDefinition>>
     pending_table_root_changes: &'t RefCell<HashMap<Vec<u8>, TableDefinition>>,
-    table_root: Option<NodeHandle>,
+    table_root: Option<PageNumber>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
@@ -25,7 +25,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
         name: impl AsRef<[u8]>,
         transaction_id: u128,
         pending_table_root_changes: &'t RefCell<HashMap<Vec<u8>, TableDefinition>>,
-        table_root: Option<NodeHandle>,
+        table_root: Option<PageNumber>,
         storage: &'s Storage,
     ) -> Table<'s, 't, K, V> {
         Table {
@@ -155,14 +155,14 @@ pub trait ReadableTable<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 
 pub struct ReadOnlyTable<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     storage: &'s Storage,
-    table_root: Option<NodeHandle>,
+    table_root: Option<PageNumber>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
 impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
     pub(in crate) fn new(
-        root_page: Option<NodeHandle>,
+        root_page: Option<PageNumber>,
         storage: &'s Storage,
     ) -> ReadOnlyTable<'s, K, V> {
         ReadOnlyTable {

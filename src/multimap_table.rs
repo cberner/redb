@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::tree_store::{BtreeEntry, BtreeRangeIter, NodeHandle, Storage, TableDefinition};
+use crate::tree_store::{BtreeEntry, BtreeRangeIter, PageNumber, Storage, TableDefinition};
 use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
 };
@@ -302,7 +302,7 @@ pub struct MultimapTable<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     name: Vec<u8>,
     transaction_id: u128,
     pending_table_root_changes: &'t RefCell<HashMap<Vec<u8>, TableDefinition>>,
-    table_root: Option<NodeHandle>,
+    table_root: Option<PageNumber>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
@@ -312,7 +312,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
         name: impl AsRef<[u8]>,
         transaction_id: u128,
         pending_table_root_changes: &'t RefCell<HashMap<Vec<u8>, TableDefinition>>,
-        table_root: Option<NodeHandle>,
+        table_root: Option<PageNumber>,
         storage: &'s Storage,
     ) -> MultimapTable<'s, 't, K, V> {
         MultimapTable {
@@ -466,14 +466,14 @@ pub trait ReadableMultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
 
 pub struct ReadOnlyMultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     storage: &'s Storage,
-    table_root: Option<NodeHandle>,
+    table_root: Option<PageNumber>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
 impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, V> {
     pub(in crate) fn new(
-        root_page: Option<NodeHandle>,
+        root_page: Option<PageNumber>,
         storage: &'s Storage,
     ) -> ReadOnlyMultimapTable<'s, K, V> {
         ReadOnlyMultimapTable {

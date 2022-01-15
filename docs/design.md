@@ -22,7 +22,7 @@ therefore we make only a few assumptions about the guarantees provided by the un
  
 ## File format
 
-A redb database file consists of a header, and several modified B-trees (described below):
+A redb database file consists of a header, and several B-trees:
 * free space tree: mapping from transaction ids to the list of pages they freed
 * table tree: name -> table definition mapping of table names to their definitions
 * data tree(s) (per one table): key -> value mapping for table
@@ -81,26 +81,3 @@ both in sync, an in-memory flag is set to direct readers to read from the second
 primary. In the event of a crash, the primary page allocator state will be corrupt, but since it is marked dirty it will
 be safely rebuilt on the next database open.
 Note that freeing pages during a non-durable commit is not permitted, because it could be rolled back at anytime.
-
-### Modified B-tree
-We use a modified B-tree that uses a delta update approach similar to Bw-trees (described in [The Bw-Tree A B-tree for New Hardware
-Platforms](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/bw-tree-icde2013-final.pdf)),
-to create a lock-free, versioned, B-tree, without relying on copy-on-write. The main benefit over a traditional B-tree
-is that it avoids write amplification when implementing an MVCC data store.
-
-Both internal & leaf nodes are extended to include a messages field: `Vec<Message>`. Also, internal node's
-child pointers are extended to include a count of valid messages in that child.
-
-Internal node messages have the form `(child_index, page_ptr, valid_messages_count)`, and leaf messages have the form
-`(key, optional value)`.
-
-When inserting, a message containing the new key & value is inserted into the leaf. If the messages
-buffer is full then the leaf is compacted by applying all the messages to the keys & values. Finally, the new page number
-and count of valid messages are inserted into the parent as a message, and compacted if necessary.
-Deletes are handled the same way, with an empty value being inserted.
-
-During a lookup, the valid messages (as defined by its parent) for each node are scanned from back to front, and the
-message's value is used instead, if a matching one is found.
-
-The fact that parents always define the valid range of messages provides the required MVCC semantics, by allowing two
-transactions to have differing views of the same node, and even allows the node to be mutated by appending new messages
