@@ -1,6 +1,8 @@
 use crate::multimap_table::MultimapTable;
 use crate::table::{ReadOnlyTable, Table};
-use crate::tree_store::{expand_db_size, get_db_size, DbStats, PageNumber, Storage, TableType};
+use crate::tree_store::{
+    expand_db_size, get_db_size, DbStats, PageNumber, Storage, TableType, FREED_TABLE,
+};
 use crate::types::{RedbKey, RedbValue};
 use crate::{Error, ReadOnlyMultimapTable};
 use memmap2::MmapRaw;
@@ -154,6 +156,7 @@ impl<'a> DatabaseTransaction<'a> {
         name: impl AsRef<[u8]>,
     ) -> Result<Table<'a, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
+        assert_ne!(name.as_ref(), FREED_TABLE);
         let (definition, root) = self.storage.get_or_create_table(
             name.as_ref(),
             TableType::Normal,
@@ -181,6 +184,7 @@ impl<'a> DatabaseTransaction<'a> {
         name: impl AsRef<[u8]>,
     ) -> Result<MultimapTable<'a, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
+        assert_ne!(name.as_ref(), FREED_TABLE);
         let (definition, root) = self.storage.get_or_create_table(
             name.as_ref(),
             TableType::Multimap,
@@ -324,6 +328,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
         name: impl AsRef<[u8]>,
     ) -> Result<ReadOnlyTable<'a, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
+        assert_ne!(name.as_ref(), FREED_TABLE);
         let definition = self
             .storage
             .get_table(name.as_ref(), TableType::Normal, self.root_page)?
@@ -343,6 +348,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
         name: impl AsRef<[u8]>,
     ) -> Result<ReadOnlyMultimapTable<'a, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
+        assert_ne!(name.as_ref(), FREED_TABLE);
         let definition = self
             .storage
             .get_table(name.as_ref(), TableType::Multimap, self.root_page)?
