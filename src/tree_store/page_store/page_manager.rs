@@ -43,6 +43,14 @@ const TRANSACTION_ID_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
 const ALLOCATOR_STATE_PTR_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u128>();
 const ALLOCATOR_STATE_LEN_OFFSET: usize = ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>();
 
+fn ceil_log2(x: usize) -> usize {
+    if x.is_power_of_two() {
+        x.trailing_zeros() as usize
+    } else {
+        x.next_power_of_two().trailing_zeros() as usize
+    }
+}
+
 pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
     let mut db_size = [0u8; size_of::<u64>()];
     let mut file = File::open(path)?;
@@ -842,13 +850,7 @@ impl TransactionalMemory {
 
     pub(crate) fn allocate(&self, allocation_size: usize) -> Result<PageMut, Error> {
         let required_pages = (allocation_size + self.page_size - 1) / self.page_size;
-        let required_order = if required_pages.is_power_of_two() {
-            // TODO: use .log2() when it's stable
-            required_pages.trailing_zeros()
-        } else {
-            // TODO: use .log2() when it's stable
-            required_pages.next_power_of_two().trailing_zeros()
-        } as usize;
+        let required_order = ceil_log2(required_pages);
 
         let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
         let page_number = PageNumber::new(
