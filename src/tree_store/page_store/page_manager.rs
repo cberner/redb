@@ -542,56 +542,36 @@ impl TransactionalMemory {
         &self,
         allocated_pages: impl Iterator<Item = PageNumber>,
     ) -> Result<bool, Error> {
-        // TODO: clean up all the duplicated code in this function
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-        if get_allocator_dirty(mmap, false) {
-            drop(guard);
-            let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
-
-            let max_order = Self::calculate_usable_order(self.mmap.len(), self.page_size);
-            let usable_pages =
-                Self::calculate_usable_pages(self.mmap.len(), self.page_size, max_order);
-            let allocator = BuddyAllocator::init_new(mem, usable_pages, max_order);
-            allocator.record_alloc(mem, DB_METADATA_PAGE, 0);
-            for page in allocated_pages {
-                allocator.record_alloc(mem, page.page_index, page.page_order as usize);
-            }
-            self.mmap.flush()?;
-
-            drop(guard);
+        for primary in [false, true] {
             let (mmap, guard) = self.acquire_mutable_metapage()?;
-            let new_god_byte = set_allocator_dirty(mmap[GOD_BYTE_OFFSET], false, false);
-            mmap[GOD_BYTE_OFFSET] = new_god_byte;
-            drop(guard);
-            self.mmap.flush()?;
+            if get_allocator_dirty(mmap, primary) {
+                drop(guard);
+                let (mem, guard) = self.acquire_mutable_page_allocator(primary)?;
 
-            Ok(false)
-        } else {
-            drop(guard);
-            // Repair the primary
-            let (mem, guard) = self.acquire_mutable_page_allocator(true)?;
+                let max_order = Self::calculate_usable_order(self.mmap.len(), self.page_size);
+                let usable_pages =
+                    Self::calculate_usable_pages(self.mmap.len(), self.page_size, max_order);
+                let allocator = BuddyAllocator::init_new(mem, usable_pages, max_order);
+                // TODO: make the metapage not part of the allocator. This caused a bug, and also prevents
+                // the first high order pages from ever being allocated
+                allocator.record_alloc(mem, DB_METADATA_PAGE, 0);
+                for page in allocated_pages {
+                    allocator.record_alloc(mem, page.page_index, page.page_order as usize);
+                }
+                self.mmap.flush()?;
 
-            let max_order = Self::calculate_usable_order(self.mmap.len(), self.page_size);
-            let usable_pages =
-                Self::calculate_usable_pages(self.mmap.len(), self.page_size, max_order);
-            let allocator = BuddyAllocator::init_new(mem, usable_pages, max_order);
-            // TODO: make the metapage not part of the allocator. This caused a bug, and also prevents
-            // the first high order pages from being ever allocated
-            allocator.record_alloc(mem, DB_METADATA_PAGE, 0);
-            for page in allocated_pages {
-                allocator.record_alloc(mem, page.page_index, page.page_order as usize);
+                drop(guard);
+                let (mmap, guard) = self.acquire_mutable_metapage()?;
+                let new_god_byte = set_allocator_dirty(mmap[GOD_BYTE_OFFSET], primary, false);
+                mmap[GOD_BYTE_OFFSET] = new_god_byte;
+                drop(guard);
+                self.mmap.flush()?;
+
+                return Ok(primary);
             }
-            self.mmap.flush()?;
-
-            drop(guard);
-            let (mmap, guard) = self.acquire_mutable_metapage()?;
-            let new_god_byte = set_allocator_dirty(mmap[GOD_BYTE_OFFSET], true, false);
-            mmap[GOD_BYTE_OFFSET] = new_god_byte;
-            drop(guard);
-            self.mmap.flush()?;
-
-            Ok(true)
         }
+
+        Ok(true)
     }
 
     pub(crate) fn finalize_repair_allocator(&mut self) -> Result<(), Error> {
