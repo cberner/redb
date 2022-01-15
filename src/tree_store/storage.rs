@@ -474,7 +474,6 @@ impl Storage {
             .get_table(FREED_TABLE, TableType::Normal, master_root)?
             .unwrap();
         while !self.pending_freed_pages.borrow().is_empty() {
-            // TODO: dynamically size this
             let chunk_size = 100;
             let buffer_size = size_of::<u64>() + 8 * chunk_size;
             let mut key = [0u8; 24];
