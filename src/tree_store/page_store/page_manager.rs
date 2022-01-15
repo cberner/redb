@@ -38,8 +38,7 @@ const ALLOCATOR_STATE_1_DIRTY: u8 = 4;
 
 // Structure of each metapage
 const ROOT_PAGE_OFFSET: usize = 0;
-const ROOT_PAGE_MESSAGES_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
-const TRANSACTION_ID_OFFSET: usize = ROOT_PAGE_MESSAGES_OFFSET + size_of::<u8>();
+const TRANSACTION_ID_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
 // Memory pointed to by this ptr is logically part of the metapage
 const ALLOCATOR_STATE_PTR_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u128>();
 const ALLOCATOR_STATE_LEN_OFFSET: usize = ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>();
@@ -200,6 +199,11 @@ impl PageNumber {
         Self::new(0, 0)
     }
 
+    #[inline(always)]
+    pub(crate) const fn serialized_size() -> usize {
+        8
+    }
+
     fn new(page_index: u64, page_order: u8) -> Self {
         Self {
             page_index,
@@ -243,17 +247,16 @@ impl<'a> TransactionAccessor<'a> {
         TransactionAccessor { mem, _guard: guard }
     }
 
-    fn get_root_page(&self) -> Option<(PageNumber, u8)> {
+    fn get_root_page(&self) -> Option<PageNumber> {
         let num = PageNumber::from_be_bytes(
             self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + 8)]
                 .try_into()
                 .unwrap(),
         );
-        let messages = self.mem[ROOT_PAGE_MESSAGES_OFFSET];
         if num.page_index == 0 {
             None
         } else {
-            Some((num, messages))
+            Some(num)
         }
     }
 
@@ -294,10 +297,9 @@ impl<'a> TransactionMutator<'a> {
         TransactionMutator { mem, _guard: guard }
     }
 
-    fn set_root_page(&mut self, page_number: PageNumber, valid_messages: u8) {
+    fn set_root_page(&mut self, page_number: PageNumber) {
         self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + 8)]
             .copy_from_slice(&page_number.to_be_bytes());
-        self.mem[ROOT_PAGE_MESSAGES_OFFSET] = valid_messages;
     }
 
     fn set_last_committed_transaction_id(&mut self, transaction_id: u128) {
@@ -447,7 +449,7 @@ impl TransactionalMemory {
             let start = mmap.len() - 2 * allocator_state_size;
             let mut mutator =
                 TransactionMutator::new(get_secondary(all_memory), mutex.lock().unwrap());
-            mutator.set_root_page(PageNumber::new(0, 0), 0);
+            mutator.set_root_page(PageNumber::new(0, 0));
             mutator.set_last_committed_transaction_id(0);
             mutator.set_allocator_data(start, allocator_state_size);
             drop(mutator);
@@ -769,11 +771,6 @@ impl TransactionalMemory {
     pub(crate) unsafe fn get_page_mut(&self, page_number: PageNumber) -> PageMut {
         self.open_dirty_pages.borrow_mut().insert(page_number);
 
-        // TODO: change this to take a NodeHandle, and check that future get_page() calls don't
-        // request valid_message bytes after this request. Otherwise, we could get a race.
-        // Immutable references are allowed, they just need to be to a strict subset of the
-        // valid delta message bytes
-
         let mem = self
             .mmap
             .get_memory_mut(page_number.address_range(self.page_size));
@@ -785,7 +782,7 @@ impl TransactionalMemory {
         }
     }
 
-    pub(crate) fn get_primary_root_page(&self) -> Option<(PageNumber, u8)> {
+    pub(crate) fn get_primary_root_page(&self) -> Option<PageNumber> {
         if self.read_from_secondary.load(Ordering::SeqCst) {
             TransactionAccessor::new(
                 get_secondary_const(self.mmap.get_memory(0..DB_METAPAGE_SIZE)),
@@ -819,16 +816,10 @@ impl TransactionalMemory {
         Ok(id)
     }
 
-    // TODO: valid_message_bytes kind of breaks the separation of concerns for the PageManager.
-    // It's only used by the delta message protocol of the b-tree
-    pub(crate) fn set_secondary_root_page(
-        &self,
-        root_page: PageNumber,
-        valid_messages: u8,
-    ) -> Result<(), Error> {
+    pub(crate) fn set_secondary_root_page(&self, root_page: PageNumber) -> Result<(), Error> {
         let (mmap, guard) = self.acquire_mutable_metapage()?;
         let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        mutator.set_root_page(root_page, valid_messages);
+        mutator.set_root_page(root_page);
 
         Ok(())
     }

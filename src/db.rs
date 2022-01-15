@@ -1,7 +1,7 @@
 use crate::multimap_table::MultimapTable;
 use crate::table::{ReadOnlyTable, Table};
 use crate::tree_store::{
-    expand_db_size, get_db_size, DbStats, NodeHandle, Storage, TableDefinition, TableType,
+    expand_db_size, get_db_size, DbStats, PageNumber, Storage, TableDefinition, TableType,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{Error, ReadOnlyMultimapTable};
@@ -127,7 +127,7 @@ impl DatabaseBuilder {
 pub struct DatabaseTransaction<'a> {
     storage: &'a Storage,
     transaction_id: u128,
-    root_page: Cell<Option<NodeHandle>>,
+    root_page: Cell<Option<PageNumber>>,
     pending_table_root_changes: RefCell<HashMap<Vec<u8>, TableDefinition>>,
     completed: AtomicBool,
 }
@@ -307,7 +307,7 @@ impl<'a> Drop for DatabaseTransaction<'a> {
 pub struct ReadOnlyDatabaseTransaction<'a> {
     storage: &'a Storage,
     transaction_id: u128,
-    root_page: Option<NodeHandle>,
+    root_page: Option<PageNumber>,
 }
 
 impl<'a> ReadOnlyDatabaseTransaction<'a> {
