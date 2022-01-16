@@ -31,9 +31,11 @@ impl<'a> AsMut<[u8]> for AccessGuardMut<'a> {
         &mut self.page.memory_mut()[self.offset..(self.offset + self.len)]
     }
 }
+
 // Provides a simple zero-copy way to access entries
 //
 // Entry format is:
+// TODO: use 4 bytes instead of 8
 // * (8 bytes) key_size
 // * (key_size bytes) key_data
 // * (8 bytes) value_size
@@ -296,6 +298,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
 // repeating (BTREE_ORDER times):
 // 8 bytes: node handle
 // repeating (BTREE_ORDER - 1 times):
+// TODO: use 4 bytes instead of 8
 // * 8 bytes: key len. Zero length indicates no key, or following page
 // repeating (BTREE_ORDER - 1 times):
 // * 8 bytes: key offset. Offset to the key data
