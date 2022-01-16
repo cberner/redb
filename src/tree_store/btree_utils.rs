@@ -37,7 +37,7 @@ pub(in crate) fn print_node(page: &impl Page) {
             eprint!(
                 "Leaf[ (page={:?}), lt_key={:?}",
                 page.get_page_number(),
-                accessor.lesser().key()
+                accessor.first_entry().key()
             );
             if let Some(greater) = accessor.greater() {
                 eprint!(" gt_key={:?}", greater.key());
@@ -144,7 +144,7 @@ fn split_leaf(
     let page = manager.get_page(leaf);
     let accessor = LeafAccessor::new(&page);
     if let Some(greater) = accessor.greater() {
-        let lesser = accessor.lesser();
+        let lesser = accessor.first_entry();
         let page1 = make_single_leaf(lesser.key(), lesser.value(), manager)?;
         let page2 = make_single_leaf(greater.key(), greater.value(), manager)?;
         freed.push(page.get_page_number());
@@ -333,7 +333,7 @@ fn max_key(page: PageImpl, manager: &TransactionalMemory) -> Vec<u8> {
             if let Some(greater) = accessor.greater() {
                 greater.key().to_vec()
             } else {
-                accessor.lesser().key().to_vec()
+                accessor.first_entry().key().to_vec()
             }
         }
         INTERNAL => {
@@ -364,17 +364,17 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
             let accessor = LeafAccessor::new(&page);
             #[allow(clippy::collapsible_else_if)]
             if let Some(greater) = accessor.greater() {
-                if K::compare(accessor.lesser().key(), key).is_ne()
+                if K::compare(accessor.first_entry().key(), key).is_ne()
                     && K::compare(greater.key(), key).is_ne()
                 {
                     // Not found
                     return Ok(Subtree(page.get_page_number()));
                 }
                 let (new_leaf_key, new_leaf_value) =
-                    if K::compare(accessor.lesser().key(), key).is_eq() {
+                    if K::compare(accessor.first_entry().key(), key).is_eq() {
                         (greater.key(), greater.value())
                     } else {
-                        (accessor.lesser().key(), accessor.lesser().value())
+                        (accessor.first_entry().key(), accessor.first_entry().value())
                     };
 
                 freed.push(page.get_page_number());
@@ -384,7 +384,7 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     manager,
                 )?))
             } else {
-                if K::compare(accessor.lesser().key(), key).is_eq() {
+                if K::compare(accessor.first_entry().key(), key).is_eq() {
                     // Deleted the entire left
                     freed.push(page.get_page_number());
                     Ok(PartialLeaf(vec![]))
@@ -462,12 +462,12 @@ pub(in crate) fn make_mut_single_leaf<'a>(
     manager: &'a TransactionalMemory,
 ) -> Result<(PageNumber, AccessGuardMut<'a>), Error> {
     let mut page = manager.allocate(LeafBuilder::required_bytes(&[key, value]))?;
-    let mut builder = LeafBuilder::new(&mut page);
-    builder.write_lesser(key, value);
-    builder.write_greater(None);
+    let mut builder = LeafBuilder::new(&mut page, 1);
+    builder.append(key, value);
+    drop(builder);
 
     let accessor = LeafAccessor::new(&page);
-    let offset = accessor.offset_of_lesser() + accessor.lesser().value_offset();
+    let offset = accessor.offset_of_first_value();
 
     let page_num = page.get_page_number();
     let guard = AccessGuardMut::new(page, offset, value.len());
@@ -484,12 +484,13 @@ pub(in crate) fn make_mut_double_leaf_right<'a, K: RedbKey + ?Sized>(
 ) -> Result<(PageNumber, AccessGuardMut<'a>), Error> {
     debug_assert!(K::compare(key1, key2).is_lt());
     let mut page = manager.allocate(LeafBuilder::required_bytes(&[key1, value1, key2, value2]))?;
-    let mut builder = LeafBuilder::new(&mut page);
-    builder.write_lesser(key1, value1);
-    builder.write_greater(Some((key2, value2)));
+    let mut builder = LeafBuilder::new(&mut page, 2);
+    builder.append(key1, value1);
+    builder.append(key2, value2);
+    drop(builder);
 
     let accessor = LeafAccessor::new(&page);
-    let offset = accessor.offset_of_greater() + accessor.greater().unwrap().value_offset();
+    let offset = accessor.offset_of_value(1).unwrap();
 
     let page_num = page.get_page_number();
     let guard = AccessGuardMut::new(page, offset, value2.len());
@@ -506,12 +507,13 @@ pub(in crate) fn make_mut_double_leaf_left<'a, K: RedbKey + ?Sized>(
 ) -> Result<(PageNumber, AccessGuardMut<'a>), Error> {
     debug_assert!(K::compare(key1, key2).is_lt());
     let mut page = manager.allocate(LeafBuilder::required_bytes(&[key1, value1, key2, value2]))?;
-    let mut builder = LeafBuilder::new(&mut page);
-    builder.write_lesser(key1, value1);
-    builder.write_greater(Some((key2, value2)));
+    let mut builder = LeafBuilder::new(&mut page, 2);
+    builder.append(key1, value1);
+    builder.append(key2, value2);
+    drop(builder);
 
     let accessor = LeafAccessor::new(&page);
-    let offset = accessor.offset_of_lesser() + accessor.lesser().value_offset();
+    let offset = accessor.offset_of_first_value();
 
     let page_num = page.get_page_number();
     let guard = AccessGuardMut::new(page, offset, value1.len());
@@ -525,9 +527,9 @@ pub(in crate) fn make_single_leaf<'a>(
     manager: &'a TransactionalMemory,
 ) -> Result<PageNumber, Error> {
     let mut page = manager.allocate(LeafBuilder::required_bytes(&[key, value]))?;
-    let mut builder = LeafBuilder::new(&mut page);
-    builder.write_lesser(key, value);
-    builder.write_greater(None);
+    let mut builder = LeafBuilder::new(&mut page, 1);
+    builder.append(key, value);
+    drop(builder);
     Ok(page.get_page_number())
 }
 
@@ -639,8 +641,8 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     }
                     Ordering::Equal => {
                         let (new_page, guard) = make_mut_double_leaf_right::<K>(
-                            accessor.lesser().key(),
-                            accessor.lesser().value(),
+                            accessor.first_entry().key(),
+                            accessor.first_entry().value(),
                             key,
                             value,
                             manager,
@@ -666,10 +668,10 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         let right_key = entry.key();
                         let right_value = entry.value();
 
-                        let left_key = accessor.lesser().key();
-                        let left_value = accessor.lesser().value();
+                        let left_key = accessor.first_entry().key();
+                        let left_value = accessor.first_entry().value();
 
-                        match K::compare(accessor.lesser().key(), key) {
+                        match K::compare(accessor.first_entry().key(), key) {
                             Ordering::Less => {
                                 let (left, guard) = make_mut_double_leaf_right::<K>(
                                     left_key, left_value, key, value, manager,
@@ -733,12 +735,12 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     }
                 }
             } else {
-                let key1 = accessor.lesser().key();
+                let key1 = accessor.first_entry().key();
                 let key2 = key;
                 let (new_page, guard) = match K::compare(key1, key2) {
                     Ordering::Less => make_mut_double_leaf_right::<K>(
-                        accessor.lesser().key(),
-                        accessor.lesser().value(),
+                        accessor.first_entry().key(),
+                        accessor.first_entry().value(),
                         key,
                         value,
                         manager,
@@ -747,8 +749,8 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     Ordering::Greater => make_mut_double_leaf_left::<K>(
                         key,
                         value,
-                        accessor.lesser().key(),
-                        accessor.lesser().value(),
+                        accessor.first_entry().key(),
+                        accessor.first_entry().value(),
                         manager,
                     )?,
                 };
@@ -940,17 +942,17 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
-            match K::compare(query, accessor.lesser().key()) {
+            match K::compare(query, accessor.first_entry().key()) {
                 Ordering::Less => None,
                 Ordering::Equal => {
-                    let offset = accessor.offset_of_lesser() + accessor.lesser().value_offset();
-                    let value_len = accessor.lesser().value().len();
+                    let offset = accessor.offset_of_first_value();
+                    let value_len = accessor.first_entry().value().len();
                     Some((page, offset, value_len))
                 }
                 Ordering::Greater => {
                     if let Some(entry) = accessor.greater() {
                         if K::compare(entry.key(), query).is_eq() {
-                            let offset = accessor.offset_of_greater() + entry.value_offset();
+                            let offset = accessor.offset_of_value(1).unwrap();
                             let value_len = entry.value().len();
                             Some((page, offset, value_len))
                         } else {
