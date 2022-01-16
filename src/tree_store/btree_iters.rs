@@ -192,7 +192,7 @@ impl<'a> RangeIterState<'a> {
 
     fn get_entry(&self) -> Option<EntryAccessor> {
         match self {
-            RangeIterState::LeafLeft { page, .. } => Some(LeafAccessor::new(page).lesser()),
+            RangeIterState::LeafLeft { page, .. } => Some(LeafAccessor::new(page).first_entry()),
             RangeIterState::LeafRight { page, .. } => LeafAccessor::new(page).greater(),
             _ => None,
         }

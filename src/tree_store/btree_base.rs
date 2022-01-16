@@ -33,85 +33,28 @@ impl<'a> AsMut<[u8]> for AccessGuardMut<'a> {
 }
 
 // Provides a simple zero-copy way to access entries
-//
-// Entry format is:
-// TODO: use 4 bytes instead of 8
-// * (8 bytes) key_size
-// * (key_size bytes) key_data
-// * (8 bytes) value_size
-// * (value_size bytes) value_data
 pub struct EntryAccessor<'a> {
-    raw: &'a [u8],
+    key: &'a [u8],
+    value: &'a [u8],
 }
 
 impl<'a> EntryAccessor<'a> {
-    pub(in crate::tree_store) fn new(raw: &'a [u8]) -> Self {
-        EntryAccessor { raw }
-    }
-
-    fn key_len(&self) -> usize {
-        u64::from_be_bytes(self.raw[0..8].try_into().unwrap()) as usize
-    }
-
-    pub(in crate::tree_store) fn value_offset(&self) -> usize {
-        8 + self.key_len() + 8
-    }
-
-    fn value_len(&self) -> usize {
-        let key_len = self.key_len();
-        u64::from_be_bytes(
-            self.raw[(8 + key_len)..(8 + key_len + 8)]
-                .try_into()
-                .unwrap(),
-        ) as usize
-    }
-
-    fn raw_len(&self) -> usize {
-        8 + self.key_len() + 8 + self.value_len()
+    fn new(key: &'a [u8], value: &'a [u8]) -> Self {
+        EntryAccessor { key, value }
     }
 }
 
 impl<'a: 'b, 'b> BtreeEntry<'a, 'b> for EntryAccessor<'a> {
     fn key(&'b self) -> &'a [u8] {
-        &self.raw[8..(8 + self.key_len())]
+        self.key
     }
 
     fn value(&'b self) -> &'a [u8] {
-        &self.raw[self.value_offset()..(self.value_offset() + self.value_len())]
+        self.value
     }
 }
 
-// Note the caller is responsible for ensuring that the buffer is large enough
-// and rewriting all fields if any dynamically sized fields are written
-struct EntryMutator<'a> {
-    raw: &'a mut [u8],
-}
-
-impl<'a> EntryMutator<'a> {
-    fn new(raw: &'a mut [u8]) -> Self {
-        EntryMutator { raw }
-    }
-
-    fn write_key(&mut self, key: &[u8]) {
-        self.raw[0..8].copy_from_slice(&(key.len() as u64).to_be_bytes());
-        self.raw[8..(8 + key.len())].copy_from_slice(key);
-    }
-
-    fn write_value(&mut self, value: &[u8]) {
-        let value_offset = EntryAccessor::new(self.raw).value_offset();
-        self.raw[(value_offset - 8)..value_offset]
-            .copy_from_slice(&(value.len() as u64).to_be_bytes());
-        self.raw[value_offset..(value_offset + value.len())].copy_from_slice(value);
-    }
-}
-
-// TODO: support more than 2 entries in a leaf
 // Provides a simple zero-copy way to access a leaf page
-//
-// Entry format is:
-// * (1 byte) type: 1 = LEAF
-// * (n bytes) lesser_entry
-// * (n bytes) greater_entry: optional
 pub(in crate::tree_store) struct LeafAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
     _page_lifetime: PhantomData<&'a ()>,
@@ -125,66 +68,151 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         }
     }
 
-    pub(in crate::tree_store) fn offset_of_lesser(&self) -> usize {
-        1
+    fn key_start(&self, n: usize) -> Option<usize> {
+        if n == 0 {
+            Some(4 + 2 * size_of::<u32>() * self.num_pairs())
+        } else {
+            self.value_end(n - 1)
+        }
     }
 
-    pub(in crate::tree_store) fn offset_of_greater(&self) -> usize {
-        1 + self.lesser().raw_len()
+    fn key_end(&self, n: usize) -> Option<usize> {
+        if n >= self.num_pairs() {
+            None
+        } else {
+            let offset = 4 + 2 * size_of::<u32>() * n;
+            let end = u32::from_be_bytes(
+                self.page.memory()[offset..(offset + size_of::<u32>())]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            Some(end)
+        }
     }
 
-    pub(in crate::tree_store) fn lesser(&self) -> EntryAccessor<'b> {
-        EntryAccessor::new(&self.page.memory()[self.offset_of_lesser()..])
+    fn value_end(&self, n: usize) -> Option<usize> {
+        if n >= self.num_pairs() {
+            None
+        } else {
+            let offset = 4 + 2 * size_of::<u32>() * n + size_of::<u32>();
+            let end = u32::from_be_bytes(
+                self.page.memory()[offset..(offset + size_of::<u32>())]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            Some(end)
+        }
+    }
+
+    fn num_pairs(&self) -> usize {
+        u16::from_be_bytes(self.page.memory()[2..4].try_into().unwrap()) as usize
+    }
+
+    pub(in crate::tree_store) fn offset_of_first_value(&self) -> usize {
+        self.key_end(0).unwrap()
+    }
+
+    pub(in crate::tree_store) fn offset_of_value(&self, n: usize) -> Option<usize> {
+        self.key_end(n)
+    }
+
+    pub(in crate::tree_store) fn entry(&self, n: usize) -> Option<EntryAccessor<'b>> {
+        let key = &self.page.memory()[self.key_start(n)?..self.key_end(n)?];
+        let value = &self.page.memory()[self.key_end(n)?..self.value_end(n)?];
+        Some(EntryAccessor::new(key, value))
+    }
+
+    pub(in crate::tree_store) fn first_entry(&self) -> EntryAccessor<'b> {
+        self.entry(0).unwrap()
     }
 
     pub(in crate::tree_store) fn greater(&self) -> Option<EntryAccessor<'b>> {
-        let entry = EntryAccessor::new(&self.page.memory()[self.offset_of_greater()..]);
-        if entry.key_len() == 0 {
-            None
-        } else {
-            Some(entry)
-        }
+        self.entry(1)
     }
 }
 
 // Note the caller is responsible for ensuring that the buffer is large enough
 // and rewriting all fields if any dynamically sized fields are written
+// Layout is:
+// 1 byte: type
+// 1 byte: reserved (padding to 32bits aligned)
+// 2 bytes: num_entries (number of pairs)
+// repeating num_entries times:
+// 4 bytes: key_end
+// 4 bytes: value_end
+// repeating (num_entries times):
+// * n bytes: key data
+// * n bytes: value data
 pub(in crate::tree_store) struct LeafBuilder<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
+    num_pairs: usize,
+    pairs_written: usize, // used for debugging
 }
 
 impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
     pub(in crate::tree_store) fn required_bytes(keys_values: &[&[u8]]) -> usize {
         assert_eq!(keys_values.len() % 2, 0);
-        // Page id;
-        let mut result = 1;
+        // Page id & header;
+        let mut result = 4;
         // key & value lengths
-        result += keys_values.len() * size_of::<u64>();
+        result += keys_values.len() * size_of::<u32>();
         result += keys_values.iter().map(|x| x.len()).sum::<usize>();
 
         result
     }
 
-    pub(in crate::tree_store) fn new(page: &'b mut PageMut<'a>) -> Self {
+    pub(in crate::tree_store) fn new(page: &'b mut PageMut<'a>, num_pairs: usize) -> Self {
         page.memory_mut()[0] = LEAF;
-        LeafBuilder { page }
-    }
-
-    pub(in crate::tree_store) fn write_lesser(&mut self, key: &[u8], value: &[u8]) {
-        let mut entry = EntryMutator::new(&mut self.page.memory_mut()[1..]);
-        entry.write_key(key);
-        entry.write_value(value);
-    }
-
-    pub(in crate::tree_store) fn write_greater(&mut self, entry: Option<(&[u8], &[u8])>) {
-        let offset = 1 + EntryAccessor::new(&self.page.memory()[1..]).raw_len();
-        let mut writer = EntryMutator::new(&mut self.page.memory_mut()[offset..]);
-        if let Some((key, value)) = entry {
-            writer.write_key(key);
-            writer.write_value(value);
-        } else {
-            writer.write_key(&[]);
+        page.memory_mut()[2..4].copy_from_slice(&(num_pairs as u16).to_be_bytes());
+        #[cfg(debug_assertions)]
+        {
+            // Poison all the key & value offsets, in case the caller forgets to write them
+            let last = 4 + 2 * size_of::<u32>() * num_pairs;
+            for x in &mut page.memory_mut()[4..last] {
+                *x = 0xFF;
+            }
         }
+        LeafBuilder {
+            page,
+            num_pairs,
+            pairs_written: 0,
+        }
+    }
+
+    fn pair_end(&self, n: usize) -> usize {
+        let offset = 4 + 2 * size_of::<u32>() * n + size_of::<u32>();
+        u32::from_be_bytes(
+            self.page.memory()[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    pub(in crate::tree_store) fn append(&mut self, key: &[u8], value: &[u8]) {
+        let key_offset = if self.pairs_written == 0 {
+            4 + 2 * size_of::<u32>() * self.num_pairs
+        } else {
+            self.pair_end(self.pairs_written - 1)
+        };
+
+        let n = self.pairs_written;
+        let offset = 4 + 2 * size_of::<u32>() * n;
+        self.page.memory_mut()[offset..(offset + size_of::<u32>())]
+            .copy_from_slice(&((key_offset + key.len()) as u32).to_be_bytes());
+        self.page.memory_mut()[key_offset..(key_offset + key.len())].copy_from_slice(key);
+
+        let offset = 4 + 2 * size_of::<u32>() * n + size_of::<u32>();
+        let value_offset = key_offset + key.len();
+        self.page.memory_mut()[offset..(offset + size_of::<u32>())]
+            .copy_from_slice(&((value_offset + value.len()) as u32).to_be_bytes());
+        self.page.memory_mut()[value_offset..(value_offset + value.len())].copy_from_slice(value);
+        self.pairs_written += 1;
+    }
+}
+
+impl<'a: 'b, 'b> Drop for LeafBuilder<'a, 'b> {
+    fn drop(&mut self) {
+        assert_eq!(self.pairs_written, self.num_pairs);
     }
 }
 
