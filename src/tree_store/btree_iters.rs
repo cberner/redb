@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{EntryAccessor, InternalAccessor, LeafAccessor};
 use crate::tree_store::btree_base::{BTREE_ORDER, INTERNAL, LEAF};
-use crate::tree_store::btree_iters::RangeIterState::{Internal, LeafLeft, LeafRight};
+use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{BtreeEntry, PageNumber};
 use crate::types::{RedbKey, RedbValue};
@@ -41,13 +41,9 @@ fn bound_contains_key<
 
 #[derive(Debug)]
 pub enum RangeIterState<'a> {
-    LeafLeft {
+    Leaf {
         page: PageImpl<'a>,
-        parent: Option<Box<RangeIterState<'a>>>,
-        reversed: bool,
-    },
-    LeafRight {
-        page: PageImpl<'a>,
+        entry: usize,
         parent: Option<Box<RangeIterState<'a>>>,
         reversed: bool,
     },
@@ -62,20 +58,31 @@ pub enum RangeIterState<'a> {
 impl<'a> RangeIterState<'a> {
     fn page_number(&self) -> PageNumber {
         match self {
-            LeafLeft { page, .. } => page.get_page_number(),
-            LeafRight { page, .. } => page.get_page_number(),
+            Leaf { page, .. } => page.get_page_number(),
             Internal { page, .. } => page.get_page_number(),
         }
     }
 
     fn forward_next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match self {
-            LeafLeft { page, parent, .. } => Some(LeafRight {
+            Leaf {
                 page,
+                entry,
                 parent,
-                reversed: false,
-            }),
-            LeafRight { parent, .. } => parent.map(|x| *x),
+                ..
+            } => {
+                let accessor = LeafAccessor::new(&page);
+                if accessor.entry(entry + 1).is_some() {
+                    Some(Leaf {
+                        page,
+                        entry: entry + 1,
+                        parent,
+                        reversed: false,
+                    })
+                } else {
+                    parent.map(|x| *x)
+                }
+            }
             Internal {
                 page,
                 child,
@@ -94,8 +101,9 @@ impl<'a> RangeIterState<'a> {
                     }));
                 }
                 match child_page.memory()[0] {
-                    LEAF => Some(LeafLeft {
+                    LEAF => Some(Leaf {
                         page: child_page,
+                        entry: 0,
                         parent,
                         reversed: false,
                     }),
@@ -113,12 +121,23 @@ impl<'a> RangeIterState<'a> {
 
     fn backward_next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match self {
-            LeafLeft { parent, .. } => parent.map(|x| *x),
-            LeafRight { page, parent, .. } => Some(LeafLeft {
+            Leaf {
                 page,
+                entry,
                 parent,
-                reversed: true,
-            }),
+                ..
+            } => {
+                if entry > 0 {
+                    Some(Leaf {
+                        page,
+                        entry: entry - 1,
+                        parent,
+                        reversed: true,
+                    })
+                } else {
+                    parent.map(|x| *x)
+                }
+            }
             Internal {
                 page,
                 child,
@@ -136,11 +155,17 @@ impl<'a> RangeIterState<'a> {
                     }));
                 }
                 match child_page.memory()[0] {
-                    LEAF => Some(LeafRight {
-                        page: child_page,
-                        parent,
-                        reversed: true,
-                    }),
+                    LEAF => {
+                        let accessor = LeafAccessor::new(&child_page);
+                        // TODO: seek to the correct entry
+                        let entry = accessor.num_pairs() - 1;
+                        Some(Leaf {
+                            page: child_page,
+                            entry,
+                            parent,
+                            reversed: true,
+                        })
+                    }
                     INTERNAL => {
                         let accessor = InternalAccessor::new(&child_page);
                         let mut index = 0;
@@ -166,14 +191,7 @@ impl<'a> RangeIterState<'a> {
 
     fn next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match &self {
-            LeafLeft { reversed, .. } => {
-                if *reversed {
-                    self.backward_next(manager)
-                } else {
-                    self.forward_next(manager)
-                }
-            }
-            LeafRight { reversed, .. } => {
+            Leaf { reversed, .. } => {
                 if *reversed {
                     self.backward_next(manager)
                 } else {
@@ -192,8 +210,7 @@ impl<'a> RangeIterState<'a> {
 
     fn get_entry(&self) -> Option<EntryAccessor> {
         match self {
-            RangeIterState::LeafLeft { page, .. } => Some(LeafAccessor::new(page).first_entry()),
-            RangeIterState::LeafRight { page, .. } => LeafAccessor::new(page).greater(),
+            Leaf { page, entry, .. } => LeafAccessor::new(page).entry(*entry),
             _ => None,
         }
     }
@@ -207,8 +224,9 @@ pub(crate) struct AllPageNumbersBtreeIter<'a> {
 impl<'a> AllPageNumbersBtreeIter<'a> {
     pub(crate) fn new(start: RangeIterState<'a>, manager: &'a TransactionalMemory) -> Self {
         match start {
-            LeafLeft { .. } => {}
-            LeafRight { .. } => unreachable!(),
+            Leaf { entry, .. } => {
+                assert_eq!(entry, 0)
+            }
             Internal { child, .. } => {
                 assert_eq!(child, 0)
             }
@@ -236,11 +254,12 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
             }
 
             match state {
-                LeafLeft { .. } => {
-                    self.next = Some(state);
-                    return Some(value);
+                Leaf { entry, .. } => {
+                    if entry == 0 {
+                        self.next = Some(state);
+                        return Some(value);
+                    }
                 }
-                LeafRight { .. } => {}
                 Internal { child, .. } => {
                     if child == 0 {
                         self.next = Some(state);
@@ -255,8 +274,9 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
 pub(in crate) fn page_numbers_iter_start_state(page: PageImpl) -> RangeIterState {
     let node_mem = page.memory();
     match node_mem[0] {
-        LEAF => LeafLeft {
+        LEAF => Leaf {
             page,
+            entry: 0,
             parent: None,
             reversed: false,
         },
@@ -383,8 +403,9 @@ pub(in crate) fn find_iter_unbounded_start<'a>(
 ) -> Option<RangeIterState<'a>> {
     let node_mem = page.memory();
     match node_mem[0] {
-        LEAF => Some(RangeIterState::LeafLeft {
+        LEAF => Some(Leaf {
             page,
+            entry: 0,
             parent,
             reversed: false,
         }),
@@ -411,11 +432,17 @@ pub(in crate) fn find_iter_unbounded_reversed<'a>(
 ) -> Option<RangeIterState<'a>> {
     let node_mem = page.memory();
     match node_mem[0] {
-        LEAF => Some(RangeIterState::LeafLeft {
-            page,
-            parent,
-            reversed: true,
-        }),
+        LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            // TODO: seek to the correct entry
+            let entry = accessor.num_pairs() - 1;
+            Some(Leaf {
+                page,
+                entry,
+                parent,
+                reversed: true,
+            })
+        }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             let child_index = accessor.count_children() - 1;
@@ -443,8 +470,9 @@ pub(in crate) fn find_iter_start<'a, K: RedbKey + ?Sized>(
 ) -> Option<RangeIterState<'a>> {
     let node_mem = page.memory();
     match node_mem[0] {
-        LEAF => Some(RangeIterState::LeafLeft {
+        LEAF => Some(Leaf {
             page,
+            entry: 0, // TODO: seek to the correct entry
             parent,
             reversed: false,
         }),
@@ -474,11 +502,17 @@ pub(in crate) fn find_iter_start_reversed<'a, K: RedbKey + ?Sized>(
 ) -> Option<RangeIterState<'a>> {
     let node_mem = page.memory();
     match node_mem[0] {
-        LEAF => Some(RangeIterState::LeafRight {
-            page,
-            parent,
-            reversed: true,
-        }),
+        LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            // TODO: seek to the correct entry
+            let entry = accessor.num_pairs() - 1;
+            Some(Leaf {
+                page,
+                entry,
+                parent,
+                reversed: true,
+            })
+        }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);

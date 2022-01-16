@@ -104,7 +104,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         }
     }
 
-    fn num_pairs(&self) -> usize {
+    pub(in crate::tree_store) fn num_pairs(&self) -> usize {
         u16::from_be_bytes(self.page.memory()[2..4].try_into().unwrap()) as usize
     }
 
