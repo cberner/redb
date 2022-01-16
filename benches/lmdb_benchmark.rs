@@ -8,7 +8,7 @@ use rand::Rng;
 use std::time::SystemTime;
 
 const ITERATIONS: usize = 3;
-const ELEMENTS: usize = 100_000;
+const ELEMENTS: usize = 1_000_000;
 
 /// Returns pairs of key, value
 fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -24,7 +24,7 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
 }
 
 fn benchmark<T: BenchDatabase>(mut db: T) {
-    let pairs = gen_data(1000, 16, 1500);
+    let pairs = gen_data(1000, 16, 150);
     let mut written = 0;
 
     let start = SystemTime::now();
