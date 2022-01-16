@@ -212,13 +212,17 @@ fn make_index_many_pages(
         key_size += key.len();
         keys.push(key);
     }
-    let mut page = manager.allocate(InternalBuilder::required_bytes(key_size))?;
-    let mut builder = InternalBuilder::new(&mut page);
+    let mut page = manager.allocate(InternalBuilder::required_bytes(
+        children.len() - 1,
+        key_size,
+    ))?;
+    let mut builder = InternalBuilder::new(&mut page, children.len() - 1);
     builder.write_first_page(children[0]);
     for i in 1..children.len() {
         let key = &keys[i - 1];
         builder.write_nth_key(key, children[i], i - 1);
     }
+    drop(builder);
     Ok(page.get_page_number())
 }
 
@@ -533,10 +537,11 @@ pub(in crate) fn make_index(
     gt_page: PageNumber,
     manager: &TransactionalMemory,
 ) -> Result<PageNumber, Error> {
-    let mut page = manager.allocate(InternalBuilder::required_bytes(key.len()))?;
-    let mut builder = InternalBuilder::new(&mut page);
+    let mut page = manager.allocate(InternalBuilder::required_bytes(1, key.len()))?;
+    let mut builder = InternalBuilder::new(&mut page, 1);
     builder.write_first_page(lte_page);
     builder.write_nth_key(key, gt_page, 0);
+    drop(builder);
     Ok(page.get_page_number())
 }
 
@@ -773,9 +778,10 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 if new_children_count <= BTREE_ORDER {
                     // Rewrite page since we're splitting a child
                     let mut new_page = manager.allocate(InternalBuilder::required_bytes(
+                        new_children_count - 1,
                         accessor.total_key_length() + index_key2.len(),
                     ))?;
-                    let mut builder = InternalBuilder::new(&mut new_page);
+                    let mut builder = InternalBuilder::new(&mut new_page, new_children_count - 1);
 
                     copy_to_builder_and_patch(
                         &accessor,
@@ -786,6 +792,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         page1,
                         Some((&index_key2, page2)),
                     );
+                    drop(builder);
                     // Free the original page, since we've replaced it
                     let page_number = page.get_page_number();
                     drop(page);
@@ -829,26 +836,31 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     // Rewrite page since we're splitting a child
                     let key_size = index_keys[0..division].iter().map(|k| k.len()).sum();
                     let mut new_page =
-                        manager.allocate(InternalBuilder::required_bytes(key_size))?;
-                    let mut builder = InternalBuilder::new(&mut new_page);
+                        manager.allocate(InternalBuilder::required_bytes(division, key_size))?;
+                    let mut builder = InternalBuilder::new(&mut new_page, division);
 
                     builder.write_first_page(children[0]);
                     for i in 0..division {
                         let key = &index_keys[i];
                         builder.write_nth_key(key, children[i + 1], i);
                     }
+                    drop(builder);
 
                     let index_key = &index_keys[division];
 
                     let key_size = index_keys[(division + 1)..].iter().map(|k| k.len()).sum();
-                    let mut new_page2 =
-                        manager.allocate(InternalBuilder::required_bytes(key_size))?;
-                    let mut builder2 = InternalBuilder::new(&mut new_page2);
+                    let mut new_page2 = manager.allocate(InternalBuilder::required_bytes(
+                        index_keys.len() - division - 1,
+                        key_size,
+                    ))?;
+                    let mut builder2 =
+                        InternalBuilder::new(&mut new_page2, index_keys.len() - division - 1);
                     builder2.write_first_page(children[division + 1]);
                     for i in (division + 1)..index_keys.len() {
                         let key = &index_keys[i];
                         builder2.write_nth_key(key, children[i + 1], i - (division + 1));
                     }
+                    drop(builder2);
 
                     let index_key_vec = index_key.to_vec();
 
@@ -883,9 +895,12 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     mutator.write_child_page(child_index, page1);
                     (mutpage.get_page_number(), None, guard)
                 } else {
-                    let mut new_page = manager
-                        .allocate(InternalBuilder::required_bytes(accessor.total_key_length()))?;
-                    let mut builder = InternalBuilder::new(&mut new_page);
+                    let mut new_page = manager.allocate(InternalBuilder::required_bytes(
+                        accessor.count_children() - 1,
+                        accessor.total_key_length(),
+                    ))?;
+                    let mut builder =
+                        InternalBuilder::new(&mut new_page, accessor.count_children() - 1);
                     copy_to_builder_and_patch(
                         &accessor,
                         0,
@@ -895,6 +910,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         page1,
                         None,
                     );
+                    drop(builder);
 
                     // Free the original page, since we've replaced it
                     let page_number = page.get_page_number();
