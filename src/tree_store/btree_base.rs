@@ -233,45 +233,45 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
     }
 
     fn key_offset(&self, n: usize) -> usize {
-        let offset =
-            1 + PageNumber::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
-        u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
+        if n == 0 {
+            4 + PageNumber::serialized_size() * self.count_children()
+                + size_of::<u32>() * self.num_keys()
+        } else {
+            self.key_end(n - 1)
+        }
     }
 
-    fn key_len(&self, n: usize) -> usize {
-        let offset = 1 + PageNumber::serialized_size() * BTREE_ORDER + 8 * n;
-        u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
+    fn key_end(&self, n: usize) -> usize {
+        let offset =
+            4 + PageNumber::serialized_size() * self.count_children() + size_of::<u32>() * n;
+        u32::from_be_bytes(
+            self.page.memory()[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize
     }
 
     pub(in crate::tree_store) fn key(&self, n: usize) -> Option<&[u8]> {
         debug_assert!(n < BTREE_ORDER - 1);
-        let offset = self.key_offset(n);
-        let len = self.key_len(n);
-        if len == 0 {
+        if n >= self.num_keys() {
             return None;
         }
-        Some(&self.page.memory()[offset..(offset + len)])
+        let offset = self.key_offset(n);
+        let end = self.key_end(n);
+        Some(&self.page.memory()[offset..end])
     }
 
     pub(in crate::tree_store) fn count_children(&self) -> usize {
-        let mut count = 1;
-        for i in 0..(BTREE_ORDER - 1) {
-            let length = self.key_len(i);
-            if length == 0 {
-                break;
-            }
-            count += 1;
-        }
-        count
+        self.num_keys() + 1
     }
 
     pub(in crate::tree_store) fn child_page(&self, n: usize) -> Option<PageNumber> {
         debug_assert!(n < BTREE_ORDER);
-        if n > 0 && self.key_len(n - 1) == 0 {
+        if n >= self.count_children() {
             return None;
         }
 
-        let offset = 1 + PageNumber::serialized_size() * n;
+        let offset = 4 + PageNumber::serialized_size() * n;
         Some(PageNumber::from_be_bytes(
             self.page.memory()[offset..(offset + PageNumber::serialized_size())]
                 .try_into()
@@ -280,67 +280,72 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
     }
 
     pub(in crate::tree_store) fn total_key_length(&self) -> usize {
-        let mut len = 0;
-        for i in 0..(BTREE_ORDER - 1) {
-            len += self.key_len(i);
-        }
+        self.key_end(self.num_keys() - 1)
+    }
 
-        len
+    fn num_keys(&self) -> usize {
+        u16::from_be_bytes(self.page.memory()[2..4].try_into().unwrap()) as usize
     }
 }
 
 // Note the caller is responsible for ensuring that the buffer is large enough
 // and rewriting all fields if any dynamically sized fields are written
-// TODO: change layout to include a length field, instead of always allocating enough fixed size
-// slots for BTREE_ORDER entries. This will free up extra space for long keys
 // Layout is:
 // 1 byte: type
-// repeating (BTREE_ORDER times):
-// 8 bytes: node handle
-// repeating (BTREE_ORDER - 1 times):
-// TODO: use 4 bytes instead of 8
-// * 8 bytes: key len. Zero length indicates no key, or following page
-// repeating (BTREE_ORDER - 1 times):
-// * 8 bytes: key offset. Offset to the key data
-// repeating (BTREE_ORDER - 1 times):
+// 1 byte: reserved (padding to 32bits aligned)
+// 2 bytes: num_keys (number of keys)
+// repeating (num_keys + 1 times):
+// 8 bytes: page number
+// repeating (num_keys times):
+// * 4 bytes: key end. Ending offset of the key, exclusive
+// repeating (num_keys times):
 // * n bytes: key data
 pub(in crate::tree_store) struct InternalBuilder<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
+    num_keys: usize,
+    keys_written: usize, // used for debugging
 }
 
 impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
-    pub(in crate::tree_store) fn required_bytes(size_of_keys: usize) -> usize {
+    pub(in crate::tree_store) fn required_bytes(num_keys: usize, size_of_keys: usize) -> usize {
         let fixed_size =
-            1 + PageNumber::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2;
+            4 + PageNumber::serialized_size() * (num_keys + 1) + size_of::<u32>() * num_keys;
         size_of_keys + fixed_size
     }
 
-    pub(in crate::tree_store) fn new(page: &'b mut PageMut<'a>) -> Self {
+    // Caller MUST write num_keys values
+    pub(in crate::tree_store) fn new(page: &'b mut PageMut<'a>, num_keys: usize) -> Self {
         page.memory_mut()[0] = INTERNAL;
-        //  ensure all the key lengths are zeroed, since we use those to indicate missing keys
-        let start = 1 + PageNumber::serialized_size() * BTREE_ORDER;
-        for i in 0..(BTREE_ORDER - 1) {
-            let offset = start + 8 * i;
-            page.memory_mut()[offset..(offset + 8)].copy_from_slice(&(0u64).to_be_bytes());
+        page.memory_mut()[2..4].copy_from_slice(&(num_keys as u16).to_be_bytes());
+        #[cfg(debug_assertions)]
+        {
+            // Poison all the child pointers & key offsets, in case the caller forgets to write them
+            let last =
+                4 + PageNumber::serialized_size() * (num_keys + 1) + size_of::<u32>() * num_keys;
+            for x in &mut page.memory_mut()[4..last] {
+                *x = 0xFF;
+            }
         }
-        InternalBuilder { page }
+        InternalBuilder {
+            page,
+            num_keys,
+            keys_written: 0,
+        }
     }
 
     pub(in crate::tree_store) fn write_first_page(&mut self, page_number: PageNumber) {
-        let offset = 1;
+        let offset = 4;
         self.page.memory_mut()[offset..(offset + PageNumber::serialized_size())]
             .copy_from_slice(&page_number.to_be_bytes());
     }
 
-    fn key_offset(&self, n: usize) -> usize {
-        let offset =
-            1 + PageNumber::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
-        u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
-    }
-
-    fn key_len(&self, n: usize) -> usize {
-        let offset = 1 + PageNumber::serialized_size() * BTREE_ORDER + 8 * n;
-        u64::from_be_bytes(self.page.memory()[offset..(offset + 8)].try_into().unwrap()) as usize
+    fn key_end(&self, n: usize) -> usize {
+        let offset = 4 + PageNumber::serialized_size() * (self.num_keys + 1) + size_of::<u32>() * n;
+        u32::from_be_bytes(
+            self.page.memory()[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize
     }
 
     // Write the nth key and page of values greater than this key, but less than or equal to the next
@@ -351,26 +356,31 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
         page_number: PageNumber,
         n: usize,
     ) {
-        assert!(n < BTREE_ORDER - 1);
-        let offset = 1 + PageNumber::serialized_size() * (n + 1);
+        assert!(n < self.num_keys as usize);
+        assert_eq!(n, self.keys_written);
+        self.keys_written += 1;
+        let offset = 4 + PageNumber::serialized_size() * (n + 1);
         self.page.memory_mut()[offset..(offset + PageNumber::serialized_size())]
             .copy_from_slice(&page_number.to_be_bytes());
 
-        let offset = 1 + PageNumber::serialized_size() * BTREE_ORDER + 8 * n;
-        self.page.memory_mut()[offset..(offset + 8)]
-            .copy_from_slice(&(key.len() as u64).to_be_bytes());
-
-        let offset =
-            1 + PageNumber::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) + 8 * n;
         let data_offset = if n > 0 {
-            self.key_offset(n - 1) + self.key_len(n - 1)
+            self.key_end(n - 1)
         } else {
-            1 + PageNumber::serialized_size() * BTREE_ORDER + 8 * (BTREE_ORDER - 1) * 2
+            4 + PageNumber::serialized_size() * (self.num_keys + 1)
+                + size_of::<u32>() * self.num_keys
         };
-        self.page.memory_mut()[offset..(offset + 8)]
-            .copy_from_slice(&(data_offset as u64).to_be_bytes());
+        let offset = 4 + PageNumber::serialized_size() * (self.num_keys + 1) + size_of::<u32>() * n;
+        self.page.memory_mut()[offset..(offset + size_of::<u32>())]
+            .copy_from_slice(&((data_offset + key.len()) as u32).to_be_bytes());
 
+        debug_assert!(data_offset > offset);
         self.page.memory_mut()[data_offset..(data_offset + key.len())].copy_from_slice(key);
+    }
+}
+
+impl<'a: 'b, 'b> Drop for InternalBuilder<'a, 'b> {
+    fn drop(&mut self) {
+        assert_eq!(self.keys_written, self.num_keys);
     }
 }
 
@@ -384,8 +394,13 @@ impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
         Self { page }
     }
 
+    fn num_keys(&self) -> usize {
+        u16::from_be_bytes(self.page.memory()[2..4].try_into().unwrap()) as usize
+    }
+
     pub(in crate::tree_store) fn write_child_page(&mut self, i: usize, page_number: PageNumber) {
-        let offset = 1 + PageNumber::serialized_size() * i;
+        debug_assert!(i <= self.num_keys());
+        let offset = 4 + PageNumber::serialized_size() * i;
         self.page.memory_mut()[offset..(offset + PageNumber::serialized_size())]
             .copy_from_slice(&page_number.to_be_bytes());
     }
