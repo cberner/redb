@@ -954,6 +954,7 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
         _ => unreachable!(),
     }
 }
+
 #[cfg(test)]
 mod test {
     use crate::tree_store::btree_utils::BTREE_ORDER;
