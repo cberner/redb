@@ -74,21 +74,44 @@ impl RedbKey for [u8] {
     }
 }
 
-impl RedbValue for u64 {
-    type View = OwnedLifetime<u64>;
-    type ToBytes = OwnedAsBytesLifetime<[u8; 8]>;
+macro_rules! be_value {
+    ($t:ty) => {
+        impl RedbValue for $t {
+            type View = OwnedLifetime<$t>;
+            type ToBytes = OwnedAsBytesLifetime<[u8; std::mem::size_of::<$t>()]>;
 
-    fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
-        u64::from_be_bytes(data.try_into().unwrap())
-    }
+            fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
+                <$t>::from_be_bytes(data.try_into().unwrap())
+            }
 
-    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
-        self.to_be_bytes()
-    }
+            fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+                self.to_be_bytes()
+            }
+        }
+    };
 }
 
-impl RedbKey for u64 {
-    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        data1.cmp(data2)
-    }
+macro_rules! be_impl {
+    ($t:ty) => {
+        be_value!($t);
+
+        impl RedbKey for $t {
+            fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+                Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
+            }
+        }
+    };
 }
+
+be_impl!(u8);
+be_impl!(u16);
+be_impl!(u32);
+be_impl!(u64);
+be_impl!(u128);
+be_impl!(i8);
+be_impl!(i16);
+be_impl!(i32);
+be_impl!(i64);
+be_impl!(i128);
+be_value!(f32);
+be_value!(f64);

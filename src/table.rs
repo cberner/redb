@@ -235,20 +235,6 @@ mod test {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn u64_type() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
-        let write_txn = db.begin_write().unwrap();
-        let mut table: Table<u64, u64> = write_txn.open_table(b"x").unwrap();
-        table.insert(&0, &1).unwrap();
-        write_txn.commit().unwrap();
-
-        let read_txn = db.begin_read().unwrap();
-        let table: ReadOnlyTable<u64, u64> = read_txn.open_table(b"x").unwrap();
-        assert_eq!(1, table.get(&0).unwrap().unwrap().to_value());
-    }
-
-    #[test]
     fn custom_ordering() {
         struct ReverseKey(Vec<u8>);
 

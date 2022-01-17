@@ -195,3 +195,52 @@ fn read_isolation() {
     assert!(table.get(b"hello3").unwrap().is_none());
     assert_eq!(table.len().unwrap(), 1);
 }
+
+#[test]
+fn u64_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let write_txn = db.begin_write().unwrap();
+    let mut table: Table<u64, u64> = write_txn.open_table(b"x").unwrap();
+    table.insert(&0, &1).unwrap();
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table: ReadOnlyTable<u64, u64> = read_txn.open_table(b"x").unwrap();
+    assert_eq!(1, table.get(&0).unwrap().unwrap().to_value());
+}
+
+#[test]
+fn i128_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let write_txn = db.begin_write().unwrap();
+    let mut table: Table<i128, i128> = write_txn.open_table(b"x").unwrap();
+    for i in -10..=10 {
+        table.insert(&i, &(i - 1)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table: ReadOnlyTable<i128, i128> = read_txn.open_table(b"x").unwrap();
+    assert_eq!(-2, table.get(&-1).unwrap().unwrap().to_value());
+    // TODO: enable this test
+    // let mut iter: RangeIter<RangeFull, i128, i128, i128> = table.get_range(..).unwrap();
+    // for i in -11..10 {
+    //     assert_eq!(iter.next().unwrap().1, i);
+    // }
+}
+
+#[test]
+fn f32_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let write_txn = db.begin_write().unwrap();
+    let mut table: Table<u8, f32> = write_txn.open_table(b"x").unwrap();
+    table.insert(&0, &0.3).unwrap();
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table: ReadOnlyTable<u8, f32> = read_txn.open_table(b"x").unwrap();
+    assert_eq!(0.3, table.get(&0).unwrap().unwrap().to_value());
+}
