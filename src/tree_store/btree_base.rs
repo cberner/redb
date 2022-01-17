@@ -183,10 +183,6 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
     pub(in crate::tree_store) fn last_entry(&self) -> EntryAccessor<'b> {
         self.entry(self.num_pairs() - 1).unwrap()
     }
-
-    pub(in crate::tree_store) fn greater(&self) -> Option<EntryAccessor<'b>> {
-        self.entry(1)
-    }
 }
 
 // Note the caller is responsible for ensuring that the buffer is large enough

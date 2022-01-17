@@ -110,8 +110,19 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
     let result = match tree_delete_helper::<K>(page, key, &mut freed, manager)? {
         DeletionResult::Subtree(page) => Some(page),
         DeletionResult::PartialLeaf(entries) => {
-            assert!(entries.is_empty());
-            None
+            if entries.is_empty() {
+                None
+            } else {
+                let size: usize = entries.iter().map(|(k, v)| k.len() + v.len()).sum();
+                let mut page =
+                    manager.allocate(LeafBuilder::required_bytes(entries.len(), size))?;
+                let mut builder = LeafBuilder::new(&mut page, entries.len());
+                for (key, value) in entries {
+                    builder.append(&key, &value);
+                }
+                drop(builder);
+                Some(page.get_page_number())
+            }
         }
         DeletionResult::PartialInternal(pages) => {
             assert_eq!(pages.len(), 1);
@@ -126,42 +137,145 @@ enum DeletionResult {
     // A proper subtree
     Subtree(PageNumber),
     // A leaf subtree with too few entries
-    PartialLeaf(Vec<(u64, Vec<u8>, Vec<u8>)>),
+    PartialLeaf(Vec<(Vec<u8>, Vec<u8>)>),
     // A index page subtree with too few children
     PartialInternal(Vec<PageNumber>),
 }
 
+// partials must be in sorted order, and be disjoint from the pairs in the leaf
 // Must return the pages in order
-fn split_leaf(
+fn split_leaf<K: RedbKey + ?Sized>(
     leaf: PageNumber,
-    partial: &[(u64, Vec<u8>, Vec<u8>)],
+    partial: &[(Vec<u8>, Vec<u8>)],
     manager: &TransactionalMemory,
     freed: &mut Vec<PageNumber>,
-) -> Result<Option<(PageNumber, PageNumber)>, Error> {
-    assert!(partial.is_empty());
+) -> Result<(PageNumber, PageNumber), Error> {
+    assert!(!partial.is_empty());
     let page = manager.get_page(leaf);
     let accessor = LeafAccessor::new(&page);
-    if let Some(greater) = accessor.greater() {
-        let lesser = accessor.first_entry();
-        let page1 = make_single_leaf(lesser.key(), lesser.value(), manager)?;
-        let page2 = make_single_leaf(greater.key(), greater.value(), manager)?;
+    assert!(partial.len() <= accessor.num_pairs());
+    // TODO: clean up this duplicated code
+    if K::compare(&partial[0].0, accessor.last_entry().key()).is_gt() {
+        // partials go after
+        let division = (accessor.num_pairs() + partial.len()) / 2;
+
+        let new_size1 = accessor.length_of_pairs(0, division);
+        let mut new_page = manager.allocate(LeafBuilder::required_bytes(division, new_size1))?;
+        let mut builder = LeafBuilder::new(&mut new_page, division);
+        for i in 0..division {
+            let entry = accessor.entry(i).unwrap();
+            builder.append(entry.key(), entry.value());
+        }
+        drop(builder);
+
+        let new_size2 = accessor.length_of_pairs(division, accessor.num_pairs())
+            + partial
+                .iter()
+                .map(|(k, v)| k.len() + v.len())
+                .sum::<usize>();
+        let num_pairs2 = accessor.num_pairs() - division + partial.len();
+        let mut new_page2 = manager.allocate(LeafBuilder::required_bytes(num_pairs2, new_size2))?;
+        let mut builder = LeafBuilder::new(&mut new_page2, num_pairs2);
+        for i in division..accessor.num_pairs() {
+            let entry = accessor.entry(i).unwrap();
+            builder.append(entry.key(), entry.value());
+        }
+        for (key, value) in partial {
+            builder.append(key, value);
+        }
+        drop(builder);
+
         freed.push(page.get_page_number());
-        Ok(Some((page1, page2)))
+        Ok((new_page.get_page_number(), new_page2.get_page_number()))
     } else {
-        Ok(None)
+        assert!(K::compare(&partial.last().unwrap().0, accessor.first_entry().key()).is_lt());
+        // partials go before
+        let division = (accessor.num_pairs() + partial.len()) / 2 - partial.len();
+
+        let new_size1 = accessor.length_of_pairs(0, division)
+            + partial
+                .iter()
+                .map(|(k, v)| k.len() + v.len())
+                .sum::<usize>();
+        let num_pairs1 = partial.len() + division;
+        let mut new_page = manager.allocate(LeafBuilder::required_bytes(num_pairs1, new_size1))?;
+        let mut builder = LeafBuilder::new(&mut new_page, num_pairs1);
+        for (key, value) in partial {
+            builder.append(key, value);
+        }
+        for i in 0..division {
+            let entry = accessor.entry(i).unwrap();
+            builder.append(entry.key(), entry.value());
+        }
+        drop(builder);
+
+        let new_size2 = accessor.length_of_pairs(division, accessor.num_pairs());
+        let num_pairs2 = accessor.num_pairs() - division;
+        let mut new_page2 = manager.allocate(LeafBuilder::required_bytes(num_pairs2, new_size2))?;
+        let mut builder = LeafBuilder::new(&mut new_page2, num_pairs2);
+        for i in division..accessor.num_pairs() {
+            let entry = accessor.entry(i).unwrap();
+            builder.append(entry.key(), entry.value());
+        }
+        drop(builder);
+
+        freed.push(page.get_page_number());
+        Ok((new_page.get_page_number(), new_page2.get_page_number()))
     }
 }
 
-fn merge_leaf(
+// partials must be in sorted order, and be disjoint from the pairs in the leaf
+// returns None if the merged page would be too large
+fn merge_leaf<K: RedbKey + ?Sized>(
     leaf: PageNumber,
-    partial: &[(u64, Vec<u8>, Vec<u8>)],
+    partial: &[(Vec<u8>, Vec<u8>)],
+    freed: &mut Vec<PageNumber>,
     manager: &TransactionalMemory,
-) -> PageNumber {
+) -> Result<Option<PageNumber>, Error> {
+    if partial.is_empty() {
+        return Ok(Some(leaf));
+    }
+
     let page = manager.get_page(leaf);
     let accessor = LeafAccessor::new(&page);
-    assert!(accessor.greater().is_none());
-    assert!(partial.is_empty());
-    leaf
+    if accessor.num_pairs() + partial.len() > BTREE_ORDER {
+        return Ok(None);
+    }
+
+    let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
+    let new_size = old_size
+        + partial
+            .iter()
+            .map(|(k, v)| k.len() + v.len())
+            .sum::<usize>();
+    let mut new_page = manager.allocate(LeafBuilder::required_bytes(
+        accessor.num_pairs() + partial.len(),
+        new_size,
+    ))?;
+    let mut builder = LeafBuilder::new(&mut new_page, accessor.num_pairs() + partial.len());
+    let mut i = 0;
+    // TODO: this can probably be simplified. partials should all be strictly lesser or
+    // greater than the entries in the page, since they're being merged from a neighboring leaf
+    for (key, value) in partial {
+        while i < accessor.num_pairs() && K::compare(accessor.entry(i).unwrap().key(), key).is_lt()
+        {
+            let entry = accessor.entry(i).unwrap();
+            builder.append(entry.key(), entry.value());
+            i += 1;
+        }
+        builder.append(key, value);
+    }
+    // Copy any remaining
+    while i < accessor.num_pairs() {
+        let entry = accessor.entry(i).unwrap();
+        builder.append(entry.key(), entry.value());
+        i += 1;
+    }
+    drop(builder);
+
+    freed.push(leaf);
+
+    Ok(Some(new_page.get_page_number()))
 }
 
 // Splits the page, if necessary, to fit the additional pages in `partial`
@@ -250,7 +364,7 @@ fn merge_index(
     make_index_many_pages(&pages, manager)
 }
 
-fn repair_children(
+fn repair_children<K: RedbKey + ?Sized>(
     children: Vec<DeletionResult>,
     manager: &TransactionalMemory,
     freed: &mut Vec<PageNumber>,
@@ -276,11 +390,12 @@ fn repair_children(
                 }
                 let offset = if i > 0 { i - 1 } else { i + 1 };
                 if let Some(PartialLeaf(partials)) = children.get(offset) {
-                    if let Some((page1, page2)) = split_leaf(*handle, partials, manager, freed)? {
+                    if let Some(new_page) = merge_leaf::<K>(*handle, partials, freed, manager)? {
+                        result.push(new_page);
+                    } else {
+                        let (page1, page2) = split_leaf::<K>(*handle, partials, manager, freed)?;
                         result.push(page1);
                         result.push(page2);
-                    } else {
-                        result.push(merge_leaf(*handle, partials, manager));
                     }
                     repaired = true;
                 } else {
@@ -356,36 +471,35 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
-            #[allow(clippy::collapsible_else_if)]
-            if let Some(greater) = accessor.greater() {
-                if K::compare(accessor.first_entry().key(), key).is_ne()
-                    && K::compare(greater.key(), key).is_ne()
-                {
-                    // Not found
-                    return Ok(Subtree(page.get_page_number()));
-                }
-                let (new_leaf_key, new_leaf_value) =
-                    if K::compare(accessor.first_entry().key(), key).is_eq() {
-                        (greater.key(), greater.value())
-                    } else {
-                        (accessor.first_entry().key(), accessor.first_entry().value())
-                    };
-
+            let (position, found) = accessor.position::<K>(key);
+            if !found {
+                return Ok(Subtree(page.get_page_number()));
+            }
+            // TODO: trigger the merge logic when num_pairs() < BTREE_ORDER / 2
+            if accessor.num_pairs() == 1 {
+                // Deleted the entire left
                 freed.push(page.get_page_number());
-                Ok(Subtree(make_single_leaf(
-                    new_leaf_key,
-                    new_leaf_value,
-                    manager,
-                )?))
+                Ok(PartialLeaf(vec![]))
             } else {
-                if K::compare(accessor.first_entry().key(), key).is_eq() {
-                    // Deleted the entire left
-                    freed.push(page.get_page_number());
-                    Ok(PartialLeaf(vec![]))
-                } else {
-                    // Not found
-                    Ok(Subtree(page.get_page_number()))
+                freed.push(page.get_page_number());
+
+                let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
+                let new_size =
+                    old_size - key.len() - accessor.entry(position).unwrap().value().len();
+                let mut new_page = manager.allocate(LeafBuilder::required_bytes(
+                    accessor.num_pairs() - 1,
+                    new_size,
+                ))?;
+                let mut builder = LeafBuilder::new(&mut new_page, accessor.num_pairs() - 1);
+                for i in 0..accessor.num_pairs() {
+                    if i == position {
+                        continue;
+                    }
+                    let entry = accessor.entry(i).unwrap();
+                    builder.append(entry.key(), entry.value());
                 }
+                drop(builder);
+                Ok(Subtree(new_page.get_page_number()))
             }
         }
         INTERNAL => {
@@ -439,7 +553,7 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
             assert!(found);
             assert!(children.len() > 1);
             freed.push(original_page_number);
-            let children = repair_children(children, manager, freed)?;
+            let children = repair_children::<K>(children, manager, freed)?;
             if children.len() == 1 {
                 return Ok(PartialInternal(children));
             }
@@ -467,18 +581,6 @@ pub(in crate) fn make_mut_single_leaf<'a>(
     let guard = AccessGuardMut::new(page, offset, value.len());
 
     Ok((page_num, guard))
-}
-
-pub(in crate) fn make_single_leaf<'a>(
-    key: &[u8],
-    value: &[u8],
-    manager: &'a TransactionalMemory,
-) -> Result<PageNumber, Error> {
-    let mut page = manager.allocate(LeafBuilder::required_bytes(1, key.len() + value.len()))?;
-    let mut builder = LeafBuilder::new(&mut page, 1);
-    builder.append(key, value);
-    drop(builder);
-    Ok(page.get_page_number())
 }
 
 pub(in crate) fn make_index(
