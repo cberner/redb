@@ -121,7 +121,10 @@ fn resize_db() {
         match table.insert(&i, &i) {
             Ok(_) => {}
             Err(err) => match err {
-                Error::OutOfSpace => break,
+                Error::OutOfSpace => {
+                    txn.abort().unwrap();
+                    break;
+                }
                 _ => unreachable!(),
             },
         }
@@ -177,8 +180,8 @@ fn free() {
 
     let key = vec![0; 100];
     let value = vec![0; 1024];
-    // Write 25% of db space each iteration
-    let num_writes = db_size / 4 / (key.len() + value.len());
+    // Write 20% of db space each iteration
+    let num_writes = db_size / 5 / (key.len() + value.len());
     // Make sure an internal index page is required
     assert!(num_writes > 64);
 

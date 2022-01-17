@@ -7,7 +7,7 @@ use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMem
 use crate::tree_store::{AccessGuardMut, BtreeEntry};
 use crate::types::RedbKey;
 use crate::Error;
-use std::cmp::{max, Ordering};
+use std::cmp::max;
 
 pub(in crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
     let node_mem = page.memory();
@@ -34,13 +34,11 @@ pub(in crate) fn print_node(page: &impl Page) {
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(page);
-            eprint!(
-                "Leaf[ (page={:?}), lt_key={:?}",
-                page.get_page_number(),
-                accessor.first_entry().key()
-            );
-            if let Some(greater) = accessor.greater() {
-                eprint!(" gt_key={:?}", greater.key());
+            eprint!("Leaf[ (page={:?})", page.get_page_number(),);
+            let mut i = 0;
+            while let Some(entry) = accessor.entry(i) {
+                eprint!(" key_{}={:?}", i, entry.key());
+                i += 1;
             }
             eprint!("]");
         }
@@ -330,11 +328,7 @@ fn max_key(page: PageImpl, manager: &TransactionalMemory) -> Vec<u8> {
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
-            if let Some(greater) = accessor.greater() {
-                greater.key().to_vec()
-            } else {
-                accessor.first_entry().key().to_vec()
-            }
+            accessor.last_entry().key().to_vec()
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
@@ -461,7 +455,7 @@ pub(in crate) fn make_mut_single_leaf<'a>(
     value: &[u8],
     manager: &'a TransactionalMemory,
 ) -> Result<(PageNumber, AccessGuardMut<'a>), Error> {
-    let mut page = manager.allocate(LeafBuilder::required_bytes(&[key, value]))?;
+    let mut page = manager.allocate(LeafBuilder::required_bytes(1, key.len() + value.len()))?;
     let mut builder = LeafBuilder::new(&mut page, 1);
     builder.append(key, value);
     drop(builder);
@@ -475,58 +469,12 @@ pub(in crate) fn make_mut_single_leaf<'a>(
     Ok((page_num, guard))
 }
 
-pub(in crate) fn make_mut_double_leaf_right<'a, K: RedbKey + ?Sized>(
-    key1: &[u8],
-    value1: &[u8],
-    key2: &[u8],
-    value2: &[u8],
-    manager: &'a TransactionalMemory,
-) -> Result<(PageNumber, AccessGuardMut<'a>), Error> {
-    debug_assert!(K::compare(key1, key2).is_lt());
-    let mut page = manager.allocate(LeafBuilder::required_bytes(&[key1, value1, key2, value2]))?;
-    let mut builder = LeafBuilder::new(&mut page, 2);
-    builder.append(key1, value1);
-    builder.append(key2, value2);
-    drop(builder);
-
-    let accessor = LeafAccessor::new(&page);
-    let offset = accessor.offset_of_value(1).unwrap();
-
-    let page_num = page.get_page_number();
-    let guard = AccessGuardMut::new(page, offset, value2.len());
-
-    Ok((page_num, guard))
-}
-
-pub(in crate) fn make_mut_double_leaf_left<'a, K: RedbKey + ?Sized>(
-    key1: &[u8],
-    value1: &[u8],
-    key2: &[u8],
-    value2: &[u8],
-    manager: &'a TransactionalMemory,
-) -> Result<(PageNumber, AccessGuardMut<'a>), Error> {
-    debug_assert!(K::compare(key1, key2).is_lt());
-    let mut page = manager.allocate(LeafBuilder::required_bytes(&[key1, value1, key2, value2]))?;
-    let mut builder = LeafBuilder::new(&mut page, 2);
-    builder.append(key1, value1);
-    builder.append(key2, value2);
-    drop(builder);
-
-    let accessor = LeafAccessor::new(&page);
-    let offset = accessor.offset_of_first_value();
-
-    let page_num = page.get_page_number();
-    let guard = AccessGuardMut::new(page, offset, value1.len());
-
-    Ok((page_num, guard))
-}
-
 pub(in crate) fn make_single_leaf<'a>(
     key: &[u8],
     value: &[u8],
     manager: &'a TransactionalMemory,
 ) -> Result<PageNumber, Error> {
-    let mut page = manager.allocate(LeafBuilder::required_bytes(&[key, value]))?;
+    let mut page = manager.allocate(LeafBuilder::required_bytes(1, key.len() + value.len()))?;
     let mut builder = LeafBuilder::new(&mut page, 1);
     builder.append(key, value);
     drop(builder);
@@ -629,143 +577,154 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
     Ok(match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
-            if let Some(entry) = accessor.greater() {
-                match K::compare(entry.key(), key) {
-                    Ordering::Less => {
-                        // New entry goes in a new page to the right, so leave this page untouched
-                        let left_page = page.get_page_number();
-
-                        let (right_page, guard) = make_mut_single_leaf(key, value, manager)?;
-
-                        (left_page, Some((entry.key().to_vec(), right_page)), guard)
-                    }
-                    Ordering::Equal => {
-                        let (new_page, guard) = make_mut_double_leaf_right::<K>(
-                            accessor.first_entry().key(),
-                            accessor.first_entry().value(),
-                            key,
-                            value,
-                            manager,
-                        )?;
-
-                        let page_number = page.get_page_number();
-                        drop(page);
-                        // Safety: If the page is uncommitted, no other transactions can have references to it,
-                        // and we just dropped ours on the line above
-
-                        // TODO: This call seems like it may be unsound. Another Table instance in the
-                        // same transaction could have a reference to this page. We probably need to
-                        // ensure this is only a single instance of each table
-                        unsafe {
-                            if !manager.free_if_uncommitted(page_number)? {
-                                freed.push(page_number);
-                            }
-                        }
-
-                        (new_page, None, guard)
-                    }
-                    Ordering::Greater => {
-                        let right_key = entry.key();
-                        let right_value = entry.value();
-
-                        let left_key = accessor.first_entry().key();
-                        let left_value = accessor.first_entry().value();
-
-                        match K::compare(accessor.first_entry().key(), key) {
-                            Ordering::Less => {
-                                let (left, guard) = make_mut_double_leaf_right::<K>(
-                                    left_key, left_value, key, value, manager,
-                                )?;
-                                let right = make_single_leaf(right_key, right_value, manager)?;
-
-                                let page_number = page.get_page_number();
-                                drop(page);
-                                // Safety: If the page is uncommitted, no other transactions can have references to it,
-                                // and we just dropped ours on the line above
-                                unsafe {
-                                    if !manager.free_if_uncommitted(page_number)? {
-                                        freed.push(page_number);
-                                    }
-                                }
-
-                                (left, Some((key.to_vec(), right)), guard)
-                            }
-                            Ordering::Equal => {
-                                let (new_page, guard) = make_mut_double_leaf_left::<K>(
-                                    key,
-                                    value,
-                                    right_key,
-                                    right_value,
-                                    manager,
-                                )?;
-
-                                let page_number = page.get_page_number();
-                                drop(page);
-                                // Safety: If the page is uncommitted, no other transactions can have references to it,
-                                // and we just dropped ours on the line above
-                                unsafe {
-                                    if !manager.free_if_uncommitted(page_number)? {
-                                        freed.push(page_number);
-                                    }
-                                }
-
-                                (new_page, None, guard)
-                            }
-                            Ordering::Greater => {
-                                let (left, guard) = make_mut_double_leaf_left::<K>(
-                                    key, value, left_key, left_value, manager,
-                                )?;
-                                let right = make_single_leaf(right_key, right_value, manager)?;
-
-                                let left_key_vec = left_key.to_vec();
-
-                                let page_number = page.get_page_number();
-                                drop(page);
-                                // Safety: If the page is uncommitted, no other transactions can have references to it,
-                                // and we just dropped ours on the line above
-                                unsafe {
-                                    if !manager.free_if_uncommitted(page_number)? {
-                                        freed.push(page_number);
-                                    }
-                                }
-
-                                (left, Some((left_key_vec, right)), guard)
-                            }
-                        }
+            let (position, found) = accessor.position::<K>(key);
+            // TODO: also split if page is too big
+            #[allow(clippy::collapsible_else_if)]
+            if found {
+                // Overwrite existing key
+                let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
+                let new_size =
+                    old_size + value.len() - accessor.entry(position).unwrap().value().len();
+                let mut new_page = manager
+                    .allocate(LeafBuilder::required_bytes(accessor.num_pairs(), new_size))?;
+                let mut builder = LeafBuilder::new(&mut new_page, accessor.num_pairs());
+                for i in 0..accessor.num_pairs() {
+                    if i == position {
+                        builder.append(key, value);
+                    } else {
+                        let entry = accessor.entry(i).unwrap();
+                        builder.append(entry.key(), entry.value());
                     }
                 }
-            } else {
-                let key1 = accessor.first_entry().key();
-                let key2 = key;
-                let (new_page, guard) = match K::compare(key1, key2) {
-                    Ordering::Less => make_mut_double_leaf_right::<K>(
-                        accessor.first_entry().key(),
-                        accessor.first_entry().value(),
-                        key,
-                        value,
-                        manager,
-                    )?,
-                    Ordering::Equal => make_mut_single_leaf(key, value, manager)?,
-                    Ordering::Greater => make_mut_double_leaf_left::<K>(
-                        key,
-                        value,
-                        accessor.first_entry().key(),
-                        accessor.first_entry().value(),
-                        manager,
-                    )?,
-                };
+                drop(builder);
 
                 let page_number = page.get_page_number();
                 drop(page);
-                // Safety: If the page is uncommitted, no other transactions can have references to it,
-                // and we just dropped ours on the line above
+                // TODO: This call seems like it may be unsound. Another Table instance in the
+                // same transaction could have a reference to this page. We probably need to
+                // ensure this is only a single instance of each table
                 unsafe {
                     if !manager.free_if_uncommitted(page_number)? {
                         freed.push(page_number);
                     }
                 }
 
-                (new_page, None, guard)
+                let new_page_number = new_page.get_page_number();
+                let accessor = LeafAccessor::new(&new_page);
+                let offset = accessor.offset_of_value(position).unwrap();
+                let guard = AccessGuardMut::new(new_page, offset, value.len());
+
+                (new_page_number, None, guard)
+            } else {
+                // TODO: use BTREE_ORDER instead of 2, to allow more than 2 entries per leaf
+                if accessor.num_pairs() >= 2 {
+                    // split
+                    let division = accessor.num_pairs() / 2;
+                    let mut new_size1 = accessor.length_of_pairs(0, division);
+                    let mut new_count1 = division;
+                    let mut new_size2 = accessor.length_of_pairs(division, accessor.num_pairs());
+                    let mut new_count2 = accessor.num_pairs() - division;
+                    if position < division {
+                        new_size1 += key.len() + value.len();
+                        new_count1 += 1;
+                    } else {
+                        new_size2 += key.len() + value.len();
+                        new_count2 += 1;
+                    }
+
+                    let mut new_page1 =
+                        manager.allocate(LeafBuilder::required_bytes(new_count1, new_size1))?;
+                    let mut builder = LeafBuilder::new(&mut new_page1, new_count1);
+                    for i in 0..division {
+                        if i == position {
+                            builder.append(key, value);
+                        }
+                        let entry = accessor.entry(i).unwrap();
+                        builder.append(entry.key(), entry.value());
+                    }
+                    drop(builder);
+
+                    let mut new_page2 =
+                        manager.allocate(LeafBuilder::required_bytes(new_count2, new_size2))?;
+                    let mut builder = LeafBuilder::new(&mut new_page2, new_count2);
+                    for i in division..accessor.num_pairs() {
+                        if i == position {
+                            builder.append(key, value);
+                        }
+                        let entry = accessor.entry(i).unwrap();
+                        builder.append(entry.key(), entry.value());
+                    }
+                    if accessor.num_pairs() == position {
+                        builder.append(key, value);
+                    }
+                    drop(builder);
+
+                    let page_number = page.get_page_number();
+                    drop(page);
+                    // TODO: This call seems like it may be unsound. Another Table instance in the
+                    // same transaction could have a reference to this page. We probably need to
+                    // ensure this is only a single instance of each table
+                    unsafe {
+                        if !manager.free_if_uncommitted(page_number)? {
+                            freed.push(page_number);
+                        }
+                    }
+
+                    let new_page_number = new_page1.get_page_number();
+                    let new_page_number2 = new_page2.get_page_number();
+                    let accessor = LeafAccessor::new(&new_page1);
+                    let split_key = accessor.last_entry().key().to_vec();
+                    let guard = if position < division {
+                        let accessor = LeafAccessor::new(&new_page1);
+                        let offset = accessor.offset_of_value(position).unwrap();
+                        AccessGuardMut::new(new_page1, offset, value.len())
+                    } else {
+                        let accessor = LeafAccessor::new(&new_page2);
+                        let offset = accessor.offset_of_value(position - division).unwrap();
+                        AccessGuardMut::new(new_page2, offset, value.len())
+                    };
+
+                    (new_page_number, Some((split_key, new_page_number2)), guard)
+                } else {
+                    // insert. leaf is not full
+
+                    let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
+                    let new_size = old_size + key.len() + value.len();
+                    let mut new_page = manager.allocate(LeafBuilder::required_bytes(
+                        accessor.num_pairs() + 1,
+                        new_size,
+                    ))?;
+                    let mut builder = LeafBuilder::new(&mut new_page, accessor.num_pairs() + 1);
+                    for i in 0..accessor.num_pairs() {
+                        if i == position {
+                            builder.append(key, value);
+                        }
+                        let entry = accessor.entry(i).unwrap();
+                        builder.append(entry.key(), entry.value());
+                    }
+                    if accessor.num_pairs() == position {
+                        builder.append(key, value);
+                    }
+                    drop(builder);
+
+                    let page_number = page.get_page_number();
+                    drop(page);
+                    // TODO: This call seems like it may be unsound. Another Table instance in the
+                    // same transaction could have a reference to this page. We probably need to
+                    // ensure this is only a single instance of each table
+                    unsafe {
+                        if !manager.free_if_uncommitted(page_number)? {
+                            freed.push(page_number);
+                        }
+                    }
+
+                    let new_page_number = new_page.get_page_number();
+                    let accessor = LeafAccessor::new(&new_page);
+                    let offset = accessor.offset_of_value(position).unwrap();
+                    let guard = AccessGuardMut::new(new_page, offset, value.len());
+
+                    (new_page_number, None, guard)
+                }
             }
         }
         INTERNAL => {
@@ -942,27 +901,10 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
-            match K::compare(query, accessor.first_entry().key()) {
-                Ordering::Less => None,
-                Ordering::Equal => {
-                    let offset = accessor.offset_of_first_value();
-                    let value_len = accessor.first_entry().value().len();
-                    Some((page, offset, value_len))
-                }
-                Ordering::Greater => {
-                    if let Some(entry) = accessor.greater() {
-                        if K::compare(entry.key(), query).is_eq() {
-                            let offset = accessor.offset_of_value(1).unwrap();
-                            let value_len = entry.value().len();
-                            Some((page, offset, value_len))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                }
-            }
+            let entry_index = accessor.find_key::<K>(query)?;
+            let offset = accessor.offset_of_value(entry_index).unwrap();
+            let value_len = accessor.entry(entry_index).unwrap().value().len();
+            Some((page, offset, value_len))
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);

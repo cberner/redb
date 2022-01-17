@@ -68,6 +68,53 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         }
     }
 
+    pub(in crate::tree_store) fn position<K: RedbKey + ?Sized>(
+        &self,
+        query: &[u8],
+    ) -> (usize, bool) {
+        let mut min_entry = 0; // inclusive
+                               // inclusive. Start past end, since it might be positioned beyond the end of the leaf
+        let mut max_entry = self.num_pairs();
+        while min_entry < max_entry {
+            let mid = (min_entry + max_entry) / 2;
+            if let Some(key) = self.entry(mid).map(|entry| entry.key()) {
+                match K::compare(query, key) {
+                    Ordering::Less => {
+                        max_entry = mid;
+                    }
+                    Ordering::Equal => {
+                        return (mid, true);
+                    }
+                    Ordering::Greater => {
+                        min_entry = mid + 1;
+                    }
+                }
+            } else {
+                max_entry = mid;
+            }
+        }
+        debug_assert_eq!(min_entry, max_entry);
+        if let Some(key) = self.entry(min_entry).map(|entry| entry.key()) {
+            if K::compare(query, key).is_eq() {
+                return (min_entry, true);
+            }
+        }
+
+        (min_entry, false)
+    }
+
+    pub(in crate::tree_store) fn find_key<K: RedbKey + ?Sized>(
+        &self,
+        query: &[u8],
+    ) -> Option<usize> {
+        let (entry, found) = self.position::<K>(query);
+        if found {
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
     fn key_start(&self, n: usize) -> Option<usize> {
         if n == 0 {
             Some(4 + 2 * size_of::<u32>() * self.num_pairs())
@@ -116,6 +163,13 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         self.key_end(n)
     }
 
+    // Returns the length of all keys and values between [start, end)
+    pub(in crate::tree_store) fn length_of_pairs(&self, start: usize, end: usize) -> usize {
+        let end_offset = self.value_end(end - 1).unwrap();
+        let start_offset = self.key_start(start).unwrap();
+        end_offset - start_offset
+    }
+
     pub(in crate::tree_store) fn entry(&self, n: usize) -> Option<EntryAccessor<'b>> {
         let key = &self.page.memory()[self.key_start(n)?..self.key_end(n)?];
         let value = &self.page.memory()[self.key_end(n)?..self.value_end(n)?];
@@ -124,6 +178,10 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
 
     pub(in crate::tree_store) fn first_entry(&self) -> EntryAccessor<'b> {
         self.entry(0).unwrap()
+    }
+
+    pub(in crate::tree_store) fn last_entry(&self) -> EntryAccessor<'b> {
+        self.entry(self.num_pairs() - 1).unwrap()
     }
 
     pub(in crate::tree_store) fn greater(&self) -> Option<EntryAccessor<'b>> {
@@ -150,13 +208,15 @@ pub(in crate::tree_store) struct LeafBuilder<'a: 'b, 'b> {
 }
 
 impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
-    pub(in crate::tree_store) fn required_bytes(keys_values: &[&[u8]]) -> usize {
-        assert_eq!(keys_values.len() % 2, 0);
+    pub(in crate::tree_store) fn required_bytes(
+        num_pairs: usize,
+        keys_values_bytes: usize,
+    ) -> usize {
         // Page id & header;
         let mut result = 4;
         // key & value lengths
-        result += keys_values.len() * size_of::<u32>();
-        result += keys_values.iter().map(|x| x.len()).sum::<usize>();
+        result += num_pairs * 2 * size_of::<u32>();
+        result += keys_values_bytes;
 
         result
     }
