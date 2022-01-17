@@ -718,8 +718,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                 (new_page_number, None, guard)
             } else {
-                // TODO: use BTREE_ORDER instead of 2, to allow more than 2 entries per leaf
-                if accessor.num_pairs() >= 2 {
+                if accessor.num_pairs() >= BTREE_ORDER {
                     // split
                     let division = accessor.num_pairs() / 2;
                     let mut new_size1 = accessor.length_of_pairs(0, division);

@@ -146,6 +146,7 @@ fn resize_db() {
             found = true;
             break;
         }
+        i += 1;
     }
     assert!(found);
     txn.abort().unwrap();
@@ -166,7 +167,7 @@ fn resize_db() {
 fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 512 * 1024;
+    let db_size = 8 * 1024 * 1024;
     let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
     let _table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
@@ -180,8 +181,8 @@ fn free() {
 
     let key = vec![0; 100];
     let value = vec![0; 1024];
-    // Write 20% of db space each iteration
-    let num_writes = db_size / 5 / (key.len() + value.len());
+    // Write 10% of db space each iteration
+    let num_writes = db_size / 10 / (key.len() + value.len());
     // Make sure an internal index page is required
     assert!(num_writes > 64);
 
