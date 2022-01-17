@@ -63,21 +63,23 @@ impl<'a> RangeIterState<'a> {
         }
     }
 
-    fn forward_next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
+    fn next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match self {
             Leaf {
                 page,
                 entry,
                 parent,
-                ..
+                reversed,
             } => {
                 let accessor = LeafAccessor::new(&page);
-                if accessor.entry(entry + 1).is_some() {
+                let direction = if reversed { -1 } else { 1 };
+                let next_entry = entry as isize + direction;
+                if 0 <= next_entry && next_entry < accessor.num_pairs() as isize {
                     Some(Leaf {
                         page,
-                        entry: entry + 1,
+                        entry: next_entry as usize,
                         parent,
-                        reversed: false,
+                        reversed,
                     })
                 } else {
                     parent.map(|x| *x)
@@ -87,122 +89,51 @@ impl<'a> RangeIterState<'a> {
                 page,
                 child,
                 mut parent,
-                ..
+                reversed,
             } => {
                 let accessor = InternalAccessor::new(&page);
                 let child_page = accessor.child_page(child).unwrap();
                 let child_page = manager.get_page(child_page);
-                if child < BTREE_ORDER - 1 && accessor.child_page(child + 1).is_some() {
+                let direction = if reversed { -1 } else { 1 };
+                let next_child = child as isize + direction;
+                if 0 <= next_child && next_child < accessor.count_children() as isize {
                     parent = Some(Box::new(Internal {
                         page,
-                        child: child + 1,
+                        child: next_child as usize,
                         parent,
-                        reversed: false,
-                    }));
-                }
-                match child_page.memory()[0] {
-                    LEAF => Some(Leaf {
-                        page: child_page,
-                        entry: 0,
-                        parent,
-                        reversed: false,
-                    }),
-                    INTERNAL => Some(Internal {
-                        page: child_page,
-                        child: 0,
-                        parent,
-                        reversed: false,
-                    }),
-                    _ => unreachable!(),
-                }
-            }
-        }
-    }
-
-    fn backward_next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
-        match self {
-            Leaf {
-                page,
-                entry,
-                parent,
-                ..
-            } => {
-                if entry > 0 {
-                    Some(Leaf {
-                        page,
-                        entry: entry - 1,
-                        parent,
-                        reversed: true,
-                    })
-                } else {
-                    parent.map(|x| *x)
-                }
-            }
-            Internal {
-                page,
-                child,
-                mut parent,
-                ..
-            } => {
-                let child_page = InternalAccessor::new(&page).child_page(child).unwrap();
-                let child_page = manager.get_page(child_page);
-                if child > 0 {
-                    parent = Some(Box::new(Internal {
-                        page,
-                        child: child - 1,
-                        parent,
-                        reversed: true,
+                        reversed,
                     }));
                 }
                 match child_page.memory()[0] {
                     LEAF => {
-                        let accessor = LeafAccessor::new(&child_page);
-                        // TODO: seek to the correct entry
-                        let entry = accessor.num_pairs() - 1;
+                        let child_accessor = LeafAccessor::new(&child_page);
+                        let entry = if reversed {
+                            child_accessor.num_pairs() - 1
+                        } else {
+                            0
+                        };
                         Some(Leaf {
                             page: child_page,
                             entry,
                             parent,
-                            reversed: true,
+                            reversed,
                         })
                     }
                     INTERNAL => {
-                        let accessor = InternalAccessor::new(&child_page);
-                        let mut index = 0;
-                        for i in (0..BTREE_ORDER).rev() {
-                            if accessor.child_page(i).is_some() {
-                                index = i;
-                                break;
-                            }
-                        }
-                        assert!(index > 0);
+                        let child_accessor = InternalAccessor::new(&child_page);
+                        let child = if reversed {
+                            child_accessor.count_children() - 1
+                        } else {
+                            0
+                        };
                         Some(Internal {
                             page: child_page,
-                            child: index,
+                            child,
                             parent,
-                            reversed: true,
+                            reversed,
                         })
                     }
                     _ => unreachable!(),
-                }
-            }
-        }
-    }
-
-    fn next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
-        match &self {
-            Leaf { reversed, .. } => {
-                if *reversed {
-                    self.backward_next(manager)
-                } else {
-                    self.forward_next(manager)
-                }
-            }
-            Internal { reversed, .. } => {
-                if *reversed {
-                    self.backward_next(manager)
-                } else {
-                    self.forward_next(manager)
                 }
             }
         }
@@ -246,7 +177,7 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
         let value = state.page_number();
         // Only return each page number the first time we visit it
         loop {
-            if let Some(next_state) = state.forward_next(self.manager) {
+            if let Some(next_state) = state.next(self.manager) {
                 state = next_state;
             } else {
                 self.next = None;
