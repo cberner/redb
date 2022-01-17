@@ -365,7 +365,6 @@ pub(in crate) fn find_iter_unbounded_reversed<'a>(
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
-            // TODO: seek to the correct entry
             let entry = accessor.num_pairs() - 1;
             Some(Leaf {
                 page,
@@ -401,12 +400,16 @@ pub(in crate) fn find_iter_start<'a, K: RedbKey + ?Sized>(
 ) -> Option<RangeIterState<'a>> {
     let node_mem = page.memory();
     match node_mem[0] {
-        LEAF => Some(Leaf {
-            page,
-            entry: 0, // TODO: seek to the correct entry
-            parent,
-            reversed: false,
-        }),
+        LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            let (position, _) = accessor.position::<K>(query);
+            Some(Leaf {
+                page,
+                entry: position,
+                parent,
+                reversed: false,
+            })
+        }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
@@ -435,11 +438,10 @@ pub(in crate) fn find_iter_start_reversed<'a, K: RedbKey + ?Sized>(
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
-            // TODO: seek to the correct entry
-            let entry = accessor.num_pairs() - 1;
+            let (position, _) = accessor.position::<K>(query);
             Some(Leaf {
                 page,
-                entry,
+                entry: position,
                 parent,
                 reversed: true,
             })
