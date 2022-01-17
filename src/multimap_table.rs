@@ -235,8 +235,6 @@ impl<
         Self { inner }
     }
 
-    // TODO: Simplify this when GATs are stable
-    #[allow(clippy::type_complexity)]
     // TODO: implement Iter when GATs are stable
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<<<V as RedbValue>::View as WithLifetime>::Out> {
