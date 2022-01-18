@@ -72,8 +72,9 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         &self,
         query: &[u8],
     ) -> (usize, bool) {
-        let mut min_entry = 0; // inclusive
-                               // inclusive. Start past end, since it might be positioned beyond the end of the leaf
+        // inclusive
+        let mut min_entry = 0;
+        // inclusive. Start past end, since it might be positioned beyond the end of the leaf
         let mut max_entry = self.num_pairs();
         while min_entry < max_entry {
             let mid = (min_entry + max_entry) / 2;
