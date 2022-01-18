@@ -475,11 +475,18 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
             if !found {
                 return Ok(Subtree(page.get_page_number()));
             }
-            // TODO: trigger the merge logic when num_pairs() < BTREE_ORDER / 2
-            if accessor.num_pairs() == 1 {
+            if accessor.num_pairs() < BTREE_ORDER / 2 {
+                let mut partial = Vec::with_capacity(accessor.num_pairs());
+                for i in 0..accessor.num_pairs() {
+                    if i == position {
+                        continue;
+                    }
+                    let entry = accessor.entry(i).unwrap();
+                    partial.push((entry.key().to_vec(), entry.value().to_vec()));
+                }
                 // Deleted the entire left
                 freed.push(page.get_page_number());
-                Ok(PartialLeaf(vec![]))
+                Ok(PartialLeaf(partial))
             } else {
                 freed.push(page.get_page_number());
 
