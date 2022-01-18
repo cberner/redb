@@ -253,23 +253,24 @@ fn merge_leaf<K: RedbKey + ?Sized>(
         new_size,
     ))?;
     let mut builder = LeafBuilder::new(&mut new_page, accessor.num_pairs() + partial.len());
-    let mut i = 0;
-    // TODO: this can probably be simplified. partials should all be strictly lesser or
-    // greater than the entries in the page, since they're being merged from a neighboring leaf
-    for (key, value) in partial {
-        while i < accessor.num_pairs() && K::compare(accessor.entry(i).unwrap().key(), key).is_lt()
-        {
-            let entry = accessor.entry(i).unwrap();
-            builder.append(entry.key(), entry.value());
-            i += 1;
+
+    // partials are all strictly lesser or all greater than the entries in the page, since they're
+    // being merged from a neighboring leaf
+    let partial_after = K::compare(&partial[0].0, accessor.last_entry().key()).is_gt();
+    if !partial_after {
+        assert!(K::compare(&partial.last().unwrap().0, accessor.first_entry().key()).is_lt());
+        for (key, value) in partial {
+            builder.append(key, value);
         }
-        builder.append(key, value);
     }
-    // Copy any remaining
-    while i < accessor.num_pairs() {
+    for i in 0..accessor.num_pairs() {
         let entry = accessor.entry(i).unwrap();
         builder.append(entry.key(), entry.value());
-        i += 1;
+    }
+    if partial_after {
+        for (key, value) in partial {
+            builder.append(key, value);
+        }
     }
     drop(builder);
 
