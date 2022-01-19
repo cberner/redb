@@ -285,23 +285,19 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
         query: &[u8],
     ) -> (usize, PageNumber) {
         let mut min_child = 0; // inclusive
-        let mut max_child = BTREE_ORDER - 1; // inclusive
+        let mut max_child = self.num_keys(); // inclusive
         while min_child < max_child {
             let mid = (min_child + max_child) / 2;
-            if let Some(key) = self.key(mid) {
-                match K::compare(query, key) {
-                    Ordering::Less => {
-                        max_child = mid;
-                    }
-                    Ordering::Equal => {
-                        return (mid, self.child_page(mid).unwrap());
-                    }
-                    Ordering::Greater => {
-                        min_child = mid + 1;
-                    }
+            match K::compare(query, self.key(mid).unwrap()) {
+                Ordering::Less => {
+                    max_child = mid;
                 }
-            } else {
-                max_child = mid;
+                Ordering::Equal => {
+                    return (mid, self.child_page(mid).unwrap());
+                }
+                Ordering::Greater => {
+                    min_child = mid + 1;
+                }
             }
         }
         debug_assert_eq!(min_child, max_child);
