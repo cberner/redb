@@ -78,29 +78,20 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         let mut max_entry = self.num_pairs();
         while min_entry < max_entry {
             let mid = (min_entry + max_entry) / 2;
-            if let Some(key) = self.entry(mid).map(|entry| entry.key()) {
-                match K::compare(query, key) {
-                    Ordering::Less => {
-                        max_entry = mid;
-                    }
-                    Ordering::Equal => {
-                        return (mid, true);
-                    }
-                    Ordering::Greater => {
-                        min_entry = mid + 1;
-                    }
+            let key = self.entry(mid).unwrap().key();
+            match K::compare(query, key) {
+                Ordering::Less => {
+                    max_entry = mid;
                 }
-            } else {
-                max_entry = mid;
+                Ordering::Equal => {
+                    return (mid, true);
+                }
+                Ordering::Greater => {
+                    min_entry = mid + 1;
+                }
             }
         }
         debug_assert_eq!(min_entry, max_entry);
-        if let Some(key) = self.entry(min_entry).map(|entry| entry.key()) {
-            if K::compare(query, key).is_eq() {
-                return (min_entry, true);
-            }
-        }
-
         (min_entry, false)
     }
 
