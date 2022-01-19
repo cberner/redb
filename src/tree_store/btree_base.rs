@@ -191,6 +191,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
 // 1 byte: type
 // 1 byte: reserved (padding to 32bits aligned)
 // 2 bytes: num_entries (number of pairs)
+// TODO: try separating key & value data for better lookup performance
 // repeating num_entries times:
 // 4 bytes: key_end
 // 4 bytes: value_end
