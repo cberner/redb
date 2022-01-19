@@ -24,7 +24,7 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
 }
 
 fn benchmark<T: BenchDatabase>(mut db: T) {
-    let pairs = gen_data(1000, 16, 150);
+    let pairs = gen_data(1_000_000, 16, 150);
     let mut written = 0;
 
     let start = SystemTime::now();
