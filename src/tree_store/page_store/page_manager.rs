@@ -883,6 +883,10 @@ impl TransactionalMemory {
         self.allocated_since_commit.borrow().contains(&page)
     }
 
+    pub(crate) fn native_page_size(&self) -> usize {
+        self.page_size
+    }
+
     pub(crate) fn allocate(&self, allocation_size: usize) -> Result<PageMut, Error> {
         let required_pages = (allocation_size + self.page_size - 1) / self.page_size;
         let required_order = ceil_log2(required_pages);
