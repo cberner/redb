@@ -23,6 +23,22 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
 }
 
 #[test]
+fn mixed_durable_commit() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 129 * 4096;
+    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let txn = db.begin_write().unwrap();
+    let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
+
+    table.insert(&0, &0).unwrap();
+    txn.non_durable_commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+}
+
+#[test]
 fn non_durable_commit_persistence() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
