@@ -378,10 +378,16 @@ impl<'a> Drop for PageMut<'a> {
     }
 }
 
+enum AllocationOp {
+    Allocate(PageNumber),
+    Free(PageNumber),
+    FreeUncommitted(PageNumber),
+}
+
 pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
     allocated_since_commit: RefCell<HashSet<PageNumber>>,
-    freed_since_commit: RefCell<Vec<PageNumber>>,
+    log_since_commit: RefCell<Vec<AllocationOp>>,
     // Metapage guard lock should be held when using this to modify the page allocator state
     // May be None, if the allocator state was corrupted when the file was opened
     page_allocator: Option<BuddyAllocator>,
@@ -526,7 +532,7 @@ impl TransactionalMemory {
 
         Ok(TransactionalMemory {
             allocated_since_commit: RefCell::new(HashSet::new()),
-            freed_since_commit: RefCell::new(vec![]),
+            log_since_commit: RefCell::new(vec![]),
             page_allocator,
             mmap,
             metapage_guard: mutex,
@@ -656,20 +662,25 @@ impl TransactionalMemory {
         self.mmap.flush()?;
 
         let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
-        for page_number in self.allocated_since_commit.borrow_mut().drain() {
-            self.page_allocator.as_ref().unwrap().record_alloc(
-                mem,
-                page_number.page_index,
-                page_number.page_order as usize,
-            );
+        for op in self.log_since_commit.borrow_mut().drain(..) {
+            match op {
+                AllocationOp::Allocate(page_number) => {
+                    self.page_allocator.as_ref().unwrap().record_alloc(
+                        mem,
+                        page_number.page_index,
+                        page_number.page_order as usize,
+                    );
+                }
+                AllocationOp::Free(page_number) | AllocationOp::FreeUncommitted(page_number) => {
+                    self.page_allocator.as_ref().unwrap().free(
+                        mem,
+                        page_number.page_index,
+                        page_number.page_order as usize,
+                    );
+                }
+            }
         }
-        for page_number in self.freed_since_commit.borrow_mut().drain(..) {
-            self.page_allocator.as_ref().unwrap().free(
-                mem,
-                page_number.page_index,
-                page_number.page_order as usize,
-            );
-        }
+        self.allocated_since_commit.borrow_mut().clear();
         drop(guard); // Ensure the guard lives past all the writes to the page allocator state
         self.read_from_secondary.store(false, Ordering::SeqCst);
 
@@ -702,14 +713,28 @@ impl TransactionalMemory {
 
         // Modify the primary allocator state directly. This is only safe because we first set the dirty bit
         let (mem, guard) = self.acquire_mutable_page_allocator(true)?;
-        for page_number in self.allocated_since_commit.borrow_mut().drain() {
-            self.page_allocator.as_ref().unwrap().record_alloc(
-                mem,
-                page_number.page_index,
-                page_number.page_order as usize,
-            );
+        for op in self.log_since_commit.borrow_mut().drain(..) {
+            match op {
+                AllocationOp::Allocate(page_number) => {
+                    self.page_allocator.as_ref().unwrap().record_alloc(
+                        mem,
+                        page_number.page_index,
+                        page_number.page_order as usize,
+                    );
+                }
+                AllocationOp::FreeUncommitted(page_number) => {
+                    self.page_allocator.as_ref().unwrap().free(
+                        mem,
+                        page_number.page_index,
+                        page_number.page_order as usize,
+                    );
+                }
+                AllocationOp::Free(_) => {
+                    unreachable!("Committed pages can't be freed during non-durable commit")
+                }
+            }
         }
-        assert!(self.freed_since_commit.borrow().is_empty());
+        self.allocated_since_commit.borrow_mut().clear();
         drop(guard); // Ensure the guard lives past all the writes to the page allocator state
         self.read_from_secondary.store(true, Ordering::SeqCst);
 
@@ -719,20 +744,25 @@ impl TransactionalMemory {
     pub(crate) fn rollback_uncommited_writes(&self) -> Result<(), Error> {
         assert!(self.open_dirty_pages.borrow().is_empty());
         let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
-        for page_number in self.allocated_since_commit.borrow_mut().drain() {
-            self.page_allocator.as_ref().unwrap().free(
-                mem,
-                page_number.page_index,
-                page_number.page_order as usize,
-            );
+        for op in self.log_since_commit.borrow_mut().drain(..).rev() {
+            match op {
+                AllocationOp::Allocate(page_number) => {
+                    self.page_allocator.as_ref().unwrap().free(
+                        mem,
+                        page_number.page_index,
+                        page_number.page_order as usize,
+                    );
+                }
+                AllocationOp::Free(page_number) | AllocationOp::FreeUncommitted(page_number) => {
+                    self.page_allocator.as_ref().unwrap().record_alloc(
+                        mem,
+                        page_number.page_index,
+                        page_number.page_order as usize,
+                    );
+                }
+            }
         }
-        for page_number in self.freed_since_commit.borrow_mut().drain(..) {
-            self.page_allocator.as_ref().unwrap().record_alloc(
-                mem,
-                page_number.page_index,
-                page_number.page_order as usize,
-            );
-        }
+        self.allocated_since_commit.borrow_mut().clear();
         // Drop guard only after page_allocator calls are completed
         drop(guard);
 
@@ -820,7 +850,9 @@ impl TransactionalMemory {
             .unwrap()
             .free(mem, page.page_index, page.page_order as usize);
         drop(guard);
-        self.freed_since_commit.borrow_mut().push(page);
+        self.log_since_commit
+            .borrow_mut()
+            .push(AllocationOp::Free(page));
 
         Ok(())
     }
@@ -835,6 +867,9 @@ impl TransactionalMemory {
                 page.page_index,
                 page.page_order as usize,
             );
+            self.log_since_commit
+                .borrow_mut()
+                .push(AllocationOp::FreeUncommitted(page));
             drop(guard);
 
             Ok(true)
@@ -864,6 +899,9 @@ impl TransactionalMemory {
         drop(guard);
 
         self.allocated_since_commit.borrow_mut().insert(page_number);
+        self.log_since_commit
+            .borrow_mut()
+            .push(AllocationOp::Allocate(page_number));
         self.open_dirty_pages.borrow_mut().insert(page_number);
 
         let address_range = page_number.address_range(self.page_size);
