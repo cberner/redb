@@ -1040,9 +1040,8 @@ pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
         LEAF => {
             let accessor = LeafAccessor::new(&page);
             let entry_index = accessor.find_key::<K>(query)?;
-            let offset = accessor.offset_of_value(entry_index).unwrap();
-            let value_len = accessor.entry(entry_index).unwrap().value().len();
-            Some((page, offset, value_len))
+            let (start, end) = accessor.value_range(entry_index).unwrap();
+            Some((page, start, end - start))
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
