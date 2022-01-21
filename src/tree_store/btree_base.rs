@@ -78,7 +78,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         let mut max_entry = self.num_pairs();
         while min_entry < max_entry {
             let mid = (min_entry + max_entry) / 2;
-            let key = self.entry(mid).unwrap().key();
+            let key = self.key_unchecked(mid);
             match K::compare(query, key) {
                 Ordering::Less => {
                     max_entry = mid;
@@ -179,6 +179,10 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         let end_offset = self.key_end(end - 1).unwrap();
         let start_offset = self.key_start(start).unwrap();
         end_offset - start_offset
+    }
+
+    fn key_unchecked(&self, n: usize) -> &[u8] {
+        &self.page.memory()[self.key_start(n).unwrap()..self.key_end(n).unwrap()]
     }
 
     pub(in crate::tree_store) fn entry(&self, n: usize) -> Option<EntryAccessor<'b>> {
