@@ -163,6 +163,10 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         self.value_start(n)
     }
 
+    pub(in crate::tree_store) fn value_range(&self, n: usize) -> Option<(usize, usize)> {
+        Some((self.value_start(n)?, self.value_end(n)?))
+    }
+
     // Returns the length of all keys and values between [start, end)
     pub(in crate::tree_store) fn length_of_pairs(&self, start: usize, end: usize) -> usize {
         self.length_of_values(start, end) + self.length_of_keys(start, end)
