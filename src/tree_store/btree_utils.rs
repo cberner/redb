@@ -114,9 +114,10 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
                 None
             } else {
                 let size: usize = entries.iter().map(|(k, v)| k.len() + v.len()).sum();
+                let key_size: usize = entries.iter().map(|(k, _)| k.len()).sum();
                 let mut page =
                     manager.allocate(LeafBuilder::required_bytes(entries.len(), size))?;
-                let mut builder = LeafBuilder::new(&mut page, entries.len());
+                let mut builder = LeafBuilder::new(&mut page, entries.len(), key_size);
                 for (key, value) in entries {
                     builder.append(&key, &value);
                 }
@@ -160,8 +161,9 @@ fn split_leaf<K: RedbKey + ?Sized>(
         let division = (accessor.num_pairs() + partial.len()) / 2;
 
         let new_size1 = accessor.length_of_pairs(0, division);
+        let new_key_size1 = accessor.length_of_keys(0, division);
         let mut new_page = manager.allocate(LeafBuilder::required_bytes(division, new_size1))?;
-        let mut builder = LeafBuilder::new(&mut new_page, division);
+        let mut builder = LeafBuilder::new(&mut new_page, division, new_key_size1);
         for i in 0..division {
             let entry = accessor.entry(i).unwrap();
             builder.append(entry.key(), entry.value());
@@ -173,9 +175,11 @@ fn split_leaf<K: RedbKey + ?Sized>(
                 .iter()
                 .map(|(k, v)| k.len() + v.len())
                 .sum::<usize>();
+        let new_key_size2 = accessor.length_of_keys(division, accessor.num_pairs())
+            + partial.iter().map(|(k, _)| k.len()).sum::<usize>();
         let num_pairs2 = accessor.num_pairs() - division + partial.len();
         let mut new_page2 = manager.allocate(LeafBuilder::required_bytes(num_pairs2, new_size2))?;
-        let mut builder = LeafBuilder::new(&mut new_page2, num_pairs2);
+        let mut builder = LeafBuilder::new(&mut new_page2, num_pairs2, new_key_size2);
         for i in division..accessor.num_pairs() {
             let entry = accessor.entry(i).unwrap();
             builder.append(entry.key(), entry.value());
@@ -197,9 +201,11 @@ fn split_leaf<K: RedbKey + ?Sized>(
                 .iter()
                 .map(|(k, v)| k.len() + v.len())
                 .sum::<usize>();
+        let new_key_size1 = accessor.length_of_keys(0, division)
+            + partial.iter().map(|(k, _)| k.len()).sum::<usize>();
         let num_pairs1 = partial.len() + division;
         let mut new_page = manager.allocate(LeafBuilder::required_bytes(num_pairs1, new_size1))?;
-        let mut builder = LeafBuilder::new(&mut new_page, num_pairs1);
+        let mut builder = LeafBuilder::new(&mut new_page, num_pairs1, new_key_size1);
         for (key, value) in partial {
             builder.append(key, value);
         }
@@ -210,9 +216,10 @@ fn split_leaf<K: RedbKey + ?Sized>(
         drop(builder);
 
         let new_size2 = accessor.length_of_pairs(division, accessor.num_pairs());
+        let new_key_size2 = accessor.length_of_keys(division, accessor.num_pairs());
         let num_pairs2 = accessor.num_pairs() - division;
         let mut new_page2 = manager.allocate(LeafBuilder::required_bytes(num_pairs2, new_size2))?;
-        let mut builder = LeafBuilder::new(&mut new_page2, num_pairs2);
+        let mut builder = LeafBuilder::new(&mut new_page2, num_pairs2, new_key_size2);
         for i in division..accessor.num_pairs() {
             let entry = accessor.entry(i).unwrap();
             builder.append(entry.key(), entry.value());
@@ -248,11 +255,17 @@ fn merge_leaf<K: RedbKey + ?Sized>(
             .iter()
             .map(|(k, v)| k.len() + v.len())
             .sum::<usize>();
+    let new_key_size = accessor.length_of_keys(0, accessor.num_pairs())
+        + partial.iter().map(|(k, _)| k.len()).sum::<usize>();
     let mut new_page = manager.allocate(LeafBuilder::required_bytes(
         accessor.num_pairs() + partial.len(),
         new_size,
     ))?;
-    let mut builder = LeafBuilder::new(&mut new_page, accessor.num_pairs() + partial.len());
+    let mut builder = LeafBuilder::new(
+        &mut new_page,
+        accessor.num_pairs() + partial.len(),
+        new_key_size,
+    );
 
     // partials are all strictly lesser or all greater than the entries in the page, since they're
     // being merged from a neighboring leaf
@@ -494,11 +507,13 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                 let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
                 let new_size =
                     old_size - key.len() - accessor.entry(position).unwrap().value().len();
+                let new_key_size = accessor.length_of_keys(0, accessor.num_pairs()) - key.len();
                 let mut new_page = manager.allocate(LeafBuilder::required_bytes(
                     accessor.num_pairs() - 1,
                     new_size,
                 ))?;
-                let mut builder = LeafBuilder::new(&mut new_page, accessor.num_pairs() - 1);
+                let mut builder =
+                    LeafBuilder::new(&mut new_page, accessor.num_pairs() - 1, new_key_size);
                 for i in 0..accessor.num_pairs() {
                     if i == position {
                         continue;
@@ -578,7 +593,7 @@ pub(in crate) fn make_mut_single_leaf<'a>(
     manager: &'a TransactionalMemory,
 ) -> Result<(PageNumber, AccessGuardMut<'a>), Error> {
     let mut page = manager.allocate(LeafBuilder::required_bytes(1, key.len() + value.len()))?;
-    let mut builder = LeafBuilder::new(&mut page, 1);
+    let mut builder = LeafBuilder::new(&mut page, 1, key.len());
     builder.append(key, value);
     drop(builder);
 
@@ -695,7 +710,11 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     old_size + value.len() - accessor.entry(position).unwrap().value().len();
                 let mut new_page = manager
                     .allocate(LeafBuilder::required_bytes(accessor.num_pairs(), new_size))?;
-                let mut builder = LeafBuilder::new(&mut new_page, accessor.num_pairs());
+                let mut builder = LeafBuilder::new(
+                    &mut new_page,
+                    accessor.num_pairs(),
+                    accessor.length_of_keys(0, accessor.num_pairs()),
+                );
                 for i in 0..accessor.num_pairs() {
                     if i == position {
                         builder.append(key, value);
@@ -734,20 +753,24 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     // split
                     let division = accessor.num_pairs() / 2;
                     let mut new_size1 = accessor.length_of_pairs(0, division);
+                    let mut new_key_size1 = accessor.length_of_keys(0, division);
                     let mut new_count1 = division;
                     let mut new_size2 = accessor.length_of_pairs(division, accessor.num_pairs());
+                    let mut new_key_size2 = accessor.length_of_keys(division, accessor.num_pairs());
                     let mut new_count2 = accessor.num_pairs() - division;
                     if position < division {
                         new_size1 += key.len() + value.len();
+                        new_key_size1 += key.len();
                         new_count1 += 1;
                     } else {
                         new_size2 += key.len() + value.len();
+                        new_key_size2 += key.len();
                         new_count2 += 1;
                     }
 
                     let mut new_page1 =
                         manager.allocate(LeafBuilder::required_bytes(new_count1, new_size1))?;
-                    let mut builder = LeafBuilder::new(&mut new_page1, new_count1);
+                    let mut builder = LeafBuilder::new(&mut new_page1, new_count1, new_key_size1);
                     for i in 0..division {
                         if i == position {
                             builder.append(key, value);
@@ -759,7 +782,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                     let mut new_page2 =
                         manager.allocate(LeafBuilder::required_bytes(new_count2, new_size2))?;
-                    let mut builder = LeafBuilder::new(&mut new_page2, new_count2);
+                    let mut builder = LeafBuilder::new(&mut new_page2, new_count2, new_key_size2);
                     for i in division..accessor.num_pairs() {
                         if i == position {
                             builder.append(key, value);
@@ -803,11 +826,13 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                     let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
                     let new_size = old_size + key.len() + value.len();
+                    let new_key_size = accessor.length_of_keys(0, accessor.num_pairs()) + key.len();
                     let mut new_page = manager.allocate(LeafBuilder::required_bytes(
                         accessor.num_pairs() + 1,
                         new_size,
                     ))?;
-                    let mut builder = LeafBuilder::new(&mut new_page, accessor.num_pairs() + 1);
+                    let mut builder =
+                        LeafBuilder::new(&mut new_page, accessor.num_pairs() + 1, new_key_size);
                     for i in 0..accessor.num_pairs() {
                         if i == position {
                             builder.append(key, value);

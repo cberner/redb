@@ -111,7 +111,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         if n == 0 {
             Some(4 + 2 * size_of::<u32>() * self.num_pairs())
         } else {
-            self.value_end(n - 1)
+            self.key_end(n - 1)
         }
     }
 
@@ -119,7 +119,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         if n >= self.num_pairs() {
             None
         } else {
-            let offset = 4 + 2 * size_of::<u32>() * n;
+            let offset = 4 + size_of::<u32>() * self.num_pairs() + size_of::<u32>() * n;
             let end = u32::from_be_bytes(
                 self.page.memory()[offset..(offset + size_of::<u32>())]
                     .try_into()
@@ -129,11 +129,19 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         }
     }
 
+    fn value_start(&self, n: usize) -> Option<usize> {
+        if n == 0 {
+            self.key_end(self.num_pairs() - 1)
+        } else {
+            self.value_end(n - 1)
+        }
+    }
+
     fn value_end(&self, n: usize) -> Option<usize> {
         if n >= self.num_pairs() {
             None
         } else {
-            let offset = 4 + 2 * size_of::<u32>() * n + size_of::<u32>();
+            let offset = 4 + size_of::<u32>() * n;
             let end = u32::from_be_bytes(
                 self.page.memory()[offset..(offset + size_of::<u32>())]
                     .try_into()
@@ -148,23 +156,34 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
     }
 
     pub(in crate::tree_store) fn offset_of_first_value(&self) -> usize {
-        self.key_end(0).unwrap()
+        self.offset_of_value(0).unwrap()
     }
 
     pub(in crate::tree_store) fn offset_of_value(&self, n: usize) -> Option<usize> {
-        self.key_end(n)
+        self.value_start(n)
     }
 
     // Returns the length of all keys and values between [start, end)
     pub(in crate::tree_store) fn length_of_pairs(&self, start: usize, end: usize) -> usize {
+        self.length_of_values(start, end) + self.length_of_keys(start, end)
+    }
+
+    fn length_of_values(&self, start: usize, end: usize) -> usize {
         let end_offset = self.value_end(end - 1).unwrap();
+        let start_offset = self.value_start(start).unwrap();
+        end_offset - start_offset
+    }
+
+    // Returns the length of all keys between [start, end)
+    pub(in crate::tree_store) fn length_of_keys(&self, start: usize, end: usize) -> usize {
+        let end_offset = self.key_end(end - 1).unwrap();
         let start_offset = self.key_start(start).unwrap();
         end_offset - start_offset
     }
 
     pub(in crate::tree_store) fn entry(&self, n: usize) -> Option<EntryAccessor<'b>> {
         let key = &self.page.memory()[self.key_start(n)?..self.key_end(n)?];
-        let value = &self.page.memory()[self.key_end(n)?..self.value_end(n)?];
+        let value = &self.page.memory()[self.value_start(n)?..self.value_end(n)?];
         Some(EntryAccessor::new(key, value))
     }
 
@@ -183,16 +202,18 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
 // 1 byte: type
 // 1 byte: reserved (padding to 32bits aligned)
 // 2 bytes: num_entries (number of pairs)
-// TODO: try separating key & value data for better lookup performance
-// repeating num_entries times:
-// 4 bytes: key_end
+// repeating (num_entries times):
 // 4 bytes: value_end
 // repeating (num_entries times):
+// 4 bytes: key_end
+// repeating (num_entries times):
 // * n bytes: key data
+// repeating (num_entries times):
 // * n bytes: value data
 pub(in crate::tree_store) struct LeafBuilder<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
     num_pairs: usize,
+    provisioned_key_bytes: usize,
     pairs_written: usize, // used for debugging
 }
 
@@ -210,7 +231,11 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
         result
     }
 
-    pub(in crate::tree_store) fn new(page: &'b mut PageMut<'a>, num_pairs: usize) -> Self {
+    pub(in crate::tree_store) fn new(
+        page: &'b mut PageMut<'a>,
+        num_pairs: usize,
+        key_bytes: usize,
+    ) -> Self {
         page.memory_mut()[0] = LEAF;
         page.memory_mut()[2..4].copy_from_slice(&(num_pairs as u16).to_be_bytes());
         #[cfg(debug_assertions)]
@@ -224,12 +249,22 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
         LeafBuilder {
             page,
             num_pairs,
+            provisioned_key_bytes: key_bytes,
             pairs_written: 0,
         }
     }
 
-    fn pair_end(&self, n: usize) -> usize {
-        let offset = 4 + 2 * size_of::<u32>() * n + size_of::<u32>();
+    fn value_end(&self, n: usize) -> usize {
+        let offset = 4 + size_of::<u32>() * n;
+        u32::from_be_bytes(
+            self.page.memory()[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    fn key_end(&self, n: usize) -> usize {
+        let offset = 4 + size_of::<u32>() * self.num_pairs + size_of::<u32>() * n;
         u32::from_be_bytes(
             self.page.memory()[offset..(offset + size_of::<u32>())]
                 .try_into()
@@ -241,17 +276,23 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
         let key_offset = if self.pairs_written == 0 {
             4 + 2 * size_of::<u32>() * self.num_pairs
         } else {
-            self.pair_end(self.pairs_written - 1)
+            self.key_end(self.pairs_written - 1)
+        };
+        let value_offset = if self.pairs_written == 0 {
+            4 + 2 * size_of::<u32>() * self.num_pairs + self.provisioned_key_bytes
+        } else {
+            self.value_end(self.pairs_written - 1)
         };
 
         let n = self.pairs_written;
-        let offset = 4 + 2 * size_of::<u32>() * n;
+        let offset = 4 + size_of::<u32>() * self.num_pairs + size_of::<u32>() * n;
         self.page.memory_mut()[offset..(offset + size_of::<u32>())]
             .copy_from_slice(&((key_offset + key.len()) as u32).to_be_bytes());
         self.page.memory_mut()[key_offset..(key_offset + key.len())].copy_from_slice(key);
+        let written_key_len = key_offset + key.len() - 4 - 2 * size_of::<u32>() * self.num_pairs;
+        assert!(written_key_len <= self.provisioned_key_bytes);
 
-        let offset = 4 + 2 * size_of::<u32>() * n + size_of::<u32>();
-        let value_offset = key_offset + key.len();
+        let offset = 4 + size_of::<u32>() * n;
         self.page.memory_mut()[offset..(offset + size_of::<u32>())]
             .copy_from_slice(&((value_offset + value.len()) as u32).to_be_bytes());
         self.page.memory_mut()[value_offset..(value_offset + value.len())].copy_from_slice(value);
