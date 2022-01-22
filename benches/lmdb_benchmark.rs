@@ -158,9 +158,9 @@ fn benchmark<T: BenchDatabase>(mut db: T) {
         let mut inserter = txn.get_inserter();
         for i in 0..deletes {
             let len = pairs.len();
-            let (key, value) = &mut pairs[i % len];
+            let (key, _) = &mut pairs[i % len];
             key[16..].copy_from_slice(&(i as u64).to_be_bytes());
-            inserter.insert(&key, value).unwrap();
+            inserter.remove(&key).unwrap();
         }
         drop(inserter);
         txn.commit().unwrap();
