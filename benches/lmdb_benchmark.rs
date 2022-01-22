@@ -24,7 +24,7 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
 }
 
 fn benchmark<T: BenchDatabase>(mut db: T) {
-    let pairs = gen_data(1_000_000, 16, 150);
+    let mut pairs = gen_data(1_000_000, 24, 150);
     let mut written = 0;
 
     let start = SystemTime::now();
@@ -32,10 +32,10 @@ fn benchmark<T: BenchDatabase>(mut db: T) {
     let mut inserter = txn.get_inserter();
     {
         for _ in 0..ELEMENTS {
-            let (key, value) = &pairs[written % pairs.len()];
-            let mut mut_key = key.clone();
-            mut_key.extend_from_slice(&written.to_be_bytes());
-            inserter.insert(&mut_key, value).unwrap();
+            let len = pairs.len();
+            let (key, value) = &mut pairs[written % len];
+            key[16..].copy_from_slice(&(written as u64).to_be_bytes());
+            inserter.insert(&key, value).unwrap();
             written += 1;
         }
     }
@@ -57,10 +57,10 @@ fn benchmark<T: BenchDatabase>(mut db: T) {
         for _ in 0..writes {
             let txn = db.write_transaction();
             let mut inserter = txn.get_inserter();
-            let (key, value) = &pairs[written % pairs.len()];
-            let mut mut_key = key.clone();
-            mut_key.extend_from_slice(&written.to_be_bytes());
-            inserter.insert(&mut_key, value).unwrap();
+            let len = pairs.len();
+            let (key, value) = &mut pairs[written % len];
+            key[16..].copy_from_slice(&(written as u64).to_be_bytes());
+            inserter.insert(&key, value).unwrap();
             drop(inserter);
             txn.commit().unwrap();
             written += 1;
@@ -83,10 +83,10 @@ fn benchmark<T: BenchDatabase>(mut db: T) {
             let txn = db.write_transaction();
             let mut inserter = txn.get_inserter();
             for _ in 0..batch_size {
-                let (key, value) = &pairs[written % pairs.len()];
-                let mut mut_key = key.clone();
-                mut_key.extend_from_slice(&written.to_be_bytes());
-                inserter.insert(&mut_key, value).unwrap();
+                let len = pairs.len();
+                let (key, value) = &mut pairs[written % len];
+                key[16..].copy_from_slice(&(written as u64).to_be_bytes());
+                inserter.insert(&key, value).unwrap();
                 written += 1;
             }
             drop(inserter);
@@ -114,10 +114,10 @@ fn benchmark<T: BenchDatabase>(mut db: T) {
             let mut checksum = 0u64;
             let mut expected_checksum = 0u64;
             for i in &key_order {
-                let (key, value) = &pairs[*i % pairs.len()];
-                let mut mut_key = key.clone();
-                mut_key.extend_from_slice(&i.to_be_bytes());
-                let result = txn.get(&mut_key).unwrap();
+                let len = pairs.len();
+                let (key, value) = &mut pairs[i % len];
+                key[16..].copy_from_slice(&(*i as u64).to_be_bytes());
+                let result = txn.get(&key).unwrap();
                 checksum += result.as_ref()[0] as u64;
                 expected_checksum += value[0] as u64;
             }
@@ -135,10 +135,10 @@ fn benchmark<T: BenchDatabase>(mut db: T) {
         for _ in 0..ITERATIONS {
             let start = SystemTime::now();
             for i in &key_order {
-                let (key, _) = &pairs[*i % pairs.len()];
-                let mut mut_key = key.clone();
-                mut_key.extend_from_slice(&i.to_be_bytes());
-                txn.exists_after(&mut_key);
+                let len = pairs.len();
+                let (key, _) = &mut pairs[i % len];
+                key[16..].copy_from_slice(&(*i as u64).to_be_bytes());
+                txn.exists_after(&key);
             }
             let end = SystemTime::now();
             let duration = end.duration_since(start).unwrap();
@@ -157,10 +157,10 @@ fn benchmark<T: BenchDatabase>(mut db: T) {
         let txn = db.write_transaction();
         let mut inserter = txn.get_inserter();
         for i in 0..deletes {
-            let (key, value) = &pairs[i % pairs.len()];
-            let mut mut_key = key.clone();
-            mut_key.extend_from_slice(&i.to_be_bytes());
-            inserter.insert(&mut_key, value).unwrap();
+            let len = pairs.len();
+            let (key, value) = &mut pairs[i % len];
+            key[16..].copy_from_slice(&(i as u64).to_be_bytes());
+            inserter.insert(&key, value).unwrap();
         }
         drop(inserter);
         txn.commit().unwrap();
