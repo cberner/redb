@@ -252,8 +252,8 @@ impl Storage {
         name: &[u8],
         table_type: TableType,
         transaction_id: u128,
-        mut root_page: Option<PageNumber>,
-    ) -> Result<Option<PageNumber>, Error> {
+        root_page: Option<PageNumber>,
+    ) -> Result<(Option<PageNumber>, bool), Error> {
         if let Some(definition) = self.get_table(name, table_type, root_page)? {
             if let Some(table_root) = definition.get_root() {
                 let page = self.mem.get_page(table_root);
@@ -264,10 +264,11 @@ impl Storage {
                 }
             }
 
-            root_page = self.remove::<[u8]>(name, transaction_id, root_page)?;
+            let (new_root, found) = self.remove::<[u8]>(name, transaction_id, root_page)?;
+            return Ok((new_root, found));
         }
 
-        Ok(root_page)
+        Ok((root_page, false))
     }
 
     // Returns a tuple of the table id and the new root page
@@ -449,8 +450,9 @@ impl Storage {
 
         // Remove all the old transactions. Note: this may create new pages that need to be freed
         for key in to_remove {
-            freed_table.table_root =
+            let (new_root, _) =
                 self.remove::<[u8]>(&key, transaction_id, freed_table.table_root)?;
+            freed_table.table_root = new_root;
         }
         master_root = Some(self.insert::<[u8]>(
             FREED_TABLE,
@@ -651,23 +653,23 @@ impl Storage {
         }
     }
 
-    // Returns the new root page. To determine if an entry was remove test whether equal to root_page
+    // Returns the new root page, and a bool indicating whether the entry existed
     pub(in crate) fn remove<K: RedbKey + ?Sized>(
         &self,
         key: &[u8],
         transaction_id: u128,
         root_handle: Option<PageNumber>,
-    ) -> Result<Option<PageNumber>, Error> {
+    ) -> Result<(Option<PageNumber>, bool), Error> {
         assert_eq!(transaction_id, self.live_write_transaction.get().unwrap());
         if let Some(handle) = root_handle {
             let root_page = self.mem.get_page(handle);
-            let (new_root, freed) = tree_delete::<K>(root_page, key, &self.mem)?;
+            let (new_root, found, freed) = tree_delete::<K>(root_page, key, &self.mem)?;
             self.pending_freed_pages
                 .borrow_mut()
                 .extend_from_slice(&freed);
-            return Ok(new_root);
+            return Ok((new_root, found));
         }
-        Ok(root_handle)
+        Ok((root_handle, false))
     }
 }
 

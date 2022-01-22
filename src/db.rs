@@ -210,7 +210,7 @@ impl<'a> DatabaseTransaction<'a> {
     pub fn delete_table(&self, name: impl AsRef<[u8]>) -> Result<bool, Error> {
         assert!(!name.as_ref().is_empty());
         let original_root = self.root_page.get();
-        let root = self.storage.delete_table(
+        let (root, found) = self.storage.delete_table(
             name.as_ref(),
             TableType::Normal,
             self.transaction_id,
@@ -219,7 +219,7 @@ impl<'a> DatabaseTransaction<'a> {
 
         self.root_page.set(root);
 
-        Ok(root != original_root)
+        Ok(found)
     }
 
     /// Delete the given table
@@ -228,7 +228,7 @@ impl<'a> DatabaseTransaction<'a> {
     pub fn delete_multimap_table(&self, name: impl AsRef<[u8]>) -> Result<bool, Error> {
         assert!(!name.as_ref().is_empty());
         let original_root = self.root_page.get();
-        let root = self.storage.delete_table(
+        let (root, found) = self.storage.delete_table(
             name.as_ref(),
             TableType::Multimap,
             self.transaction_id,
@@ -237,7 +237,7 @@ impl<'a> DatabaseTransaction<'a> {
 
         self.root_page.set(root);
 
-        Ok(root != original_root)
+        Ok(found)
     }
 
     pub fn commit(self) -> Result<(), Error> {

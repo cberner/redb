@@ -109,7 +109,7 @@ impl BenchInserter for RedbBenchInserter<'_> {
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
-        self.table.remove(key).map_err(|_| ())
+        self.table.remove(key).map(|_| ()).map_err(|_| ())
     }
 }
 

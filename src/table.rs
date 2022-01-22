@@ -65,14 +65,14 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
         Ok(guard)
     }
 
-    pub fn remove(&mut self, key: &K) -> Result<(), Error> {
-        let root_page = self.storage.remove::<K>(
+    pub fn remove(&mut self, key: &K) -> Result<bool, Error> {
+        let (root_page, found) = self.storage.remove::<K>(
             key.as_bytes().as_ref(),
             self.transaction_id,
             self.table_root.get(),
         )?;
         self.table_root.set(root_page);
-        Ok(())
+        Ok(found)
     }
 }
 
