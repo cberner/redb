@@ -338,32 +338,34 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
         Ok(())
     }
 
-    pub fn remove(&mut self, key: &K, value: &V) -> Result<(), Error> {
+    pub fn remove(&mut self, key: &K, value: &V) -> Result<bool, Error> {
         let kv = make_serialized_kv(key, value);
-        let root_page = self.storage.remove::<MultimapKVPair<K, V>>(
+        let (root_page, found) = self.storage.remove::<MultimapKVPair<K, V>>(
             &kv,
             self.transaction_id,
             self.table_root.get(),
         )?;
         self.table_root.set(root_page);
-        Ok(())
+        Ok(found)
     }
 
-    pub fn remove_all(&mut self, key: &K) -> Result<(), Error> {
+    pub fn remove_all(&mut self, key: &K) -> Result<bool, Error> {
         // Match only on the key, so that we can remove all the associated values
         let key_only = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyOnly);
+        let mut any_found = false;
         loop {
-            let new_root = self.storage.remove::<MultimapKVPair<K, V>>(
+            let (new_root, found) = self.storage.remove::<MultimapKVPair<K, V>>(
                 &key_only,
                 self.transaction_id,
                 self.table_root.get(),
             )?;
-            if self.table_root.get() == new_root {
+            if !found {
                 break;
             }
             self.table_root.set(new_root);
+            any_found = true;
         }
-        Ok(())
+        Ok(any_found)
     }
 }
 

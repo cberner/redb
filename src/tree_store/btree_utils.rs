@@ -100,14 +100,15 @@ pub(in crate) fn print_tree<'a>(page: PageImpl<'a>, manager: &'a TransactionalMe
     }
 }
 
-// Returns the new root, and a list of freed pages
+// Returns the new root, bool indicating if the key existed, and a list of freed pages
 pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
     manager: &'a TransactionalMemory,
-) -> Result<(Option<PageNumber>, Vec<PageNumber>), Error> {
+) -> Result<(Option<PageNumber>, bool, Vec<PageNumber>), Error> {
     let mut freed = vec![];
-    let result = match tree_delete_helper::<K>(page, key, &mut freed, manager)? {
+    let (deletion_result, found) = tree_delete_helper::<K>(page, key, &mut freed, manager)?;
+    let result = match deletion_result {
         DeletionResult::Subtree(page) => Some(page),
         DeletionResult::PartialLeaf(entries) => {
             if entries.is_empty() {
@@ -130,7 +131,7 @@ pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
             Some(pages[0])
         }
     };
-    Ok((result, freed))
+    Ok((result, found, freed))
 }
 
 #[derive(Debug)]
@@ -480,14 +481,14 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
     key: &[u8],
     freed: &mut Vec<PageNumber>,
     manager: &'a TransactionalMemory,
-) -> Result<DeletionResult, Error> {
+) -> Result<(DeletionResult, bool), Error> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
             let (position, found) = accessor.position::<K>(key);
             if !found {
-                return Ok(Subtree(page.get_page_number()));
+                return Ok((Subtree(page.get_page_number()), false));
             }
             if accessor.num_pairs() < BTREE_ORDER / 2 {
                 let mut partial = Vec::with_capacity(accessor.num_pairs());
@@ -498,12 +499,16 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     let entry = accessor.entry(i).unwrap();
                     partial.push((entry.key().to_vec(), entry.value().to_vec()));
                 }
-                // Deleted the entire left
-                freed.push(page.get_page_number());
-                Ok(PartialLeaf(partial))
+                // TODO: This call seems like it may be unsound. Another Table instance in the
+                // same transaction could have a reference to this page. We probably need to
+                // ensure this is only a single instance of each table
+                unsafe {
+                    if !manager.free_if_uncommitted(page.get_page_number())? {
+                        freed.push(page.get_page_number());
+                    }
+                }
+                Ok((PartialLeaf(partial), true))
             } else {
-                freed.push(page.get_page_number());
-
                 let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
                 let new_size =
                     old_size - key.len() - accessor.entry(position).unwrap().value().len();
@@ -522,7 +527,15 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     builder.append(entry.key(), entry.value());
                 }
                 drop(builder);
-                Ok(Subtree(new_page.get_page_number()))
+                // TODO: This call seems like it may be unsound. Another Table instance in the
+                // same transaction could have a reference to this page. We probably need to
+                // ensure this is only a single instance of each table
+                unsafe {
+                    if !manager.free_if_uncommitted(page.get_page_number())? {
+                        freed.push(page.get_page_number());
+                    }
+                }
+                Ok((Subtree(new_page.get_page_number()), true))
             }
         }
         INTERNAL => {
@@ -536,17 +549,14 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     let child_page = accessor.child_page(i).unwrap();
                     if K::compare(key, index_key).is_le() && !found {
                         found = true;
-                        let result = tree_delete_helper::<K>(
+                        let (result, child_found) = tree_delete_helper::<K>(
                             manager.get_page(child_page),
                             key,
                             freed,
                             manager,
                         )?;
-                        // The key must not have been found, since the subtree didn't change
-                        if let Subtree(page_number) = result {
-                            if page_number == child_page {
-                                return Ok(Subtree(original_page_number));
-                            }
+                        if !child_found {
+                            return Ok((Subtree(original_page_number), false));
                         }
                         children.push(result);
                     } else {
@@ -562,26 +572,30 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                 // Already found the insertion place, so just copy
                 children.push(Subtree(last_page));
             } else {
-                let result =
+                let (result, child_found) =
                     tree_delete_helper::<K>(manager.get_page(last_page), key, freed, manager)?;
                 found = true;
-                // The key must not have been found, since the subtree didn't change
-                if let Subtree(page_number) = result {
-                    if page_number == last_page {
-                        return Ok(Subtree(original_page_number));
-                    }
+                if !child_found {
+                    return Ok((Subtree(original_page_number), false));
                 }
                 children.push(result);
             }
             assert!(found);
             assert!(children.len() > 1);
-            freed.push(original_page_number);
+            // TODO: This call seems like it may be unsound. Another Table instance in the
+            // same transaction could have a reference to this page. We probably need to
+            // ensure this is only a single instance of each table
+            unsafe {
+                if !manager.free_if_uncommitted(original_page_number)? {
+                    freed.push(original_page_number);
+                }
+            }
             let children = repair_children::<K>(children, manager, freed)?;
             if children.len() == 1 {
-                return Ok(PartialInternal(children));
+                return Ok((PartialInternal(children), true));
             }
 
-            Ok(Subtree(make_index_many_pages(&children, manager)?))
+            Ok((Subtree(make_index_many_pages(&children, manager)?), true))
         }
         _ => unreachable!(),
     }
