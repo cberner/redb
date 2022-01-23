@@ -156,80 +156,65 @@ fn split_leaf<K: RedbKey + ?Sized>(
     let page = manager.get_page(leaf);
     let accessor = LeafAccessor::new(&page);
     assert!(partial.len() <= accessor.num_pairs());
-    // TODO: clean up this duplicated code
-    if K::compare(&partial[0].0, accessor.last_entry().key()).is_gt() {
-        // partials go after
-        let division = (accessor.num_pairs() + partial.len()) / 2;
-
-        let new_size1 = accessor.length_of_pairs(0, division);
-        let new_key_size1 = accessor.length_of_keys(0, division);
-        let mut new_page = manager.allocate(LeafBuilder::required_bytes(division, new_size1))?;
-        let mut builder = LeafBuilder::new(&mut new_page, division, new_key_size1);
-        for i in 0..division {
-            let entry = accessor.entry(i).unwrap();
-            builder.append(entry.key(), entry.value());
-        }
-        drop(builder);
-
-        let new_size2 = accessor.length_of_pairs(division, accessor.num_pairs())
-            + partial
-                .iter()
-                .map(|(k, v)| k.len() + v.len())
-                .sum::<usize>();
-        let new_key_size2 = accessor.length_of_keys(division, accessor.num_pairs())
-            + partial.iter().map(|(k, _)| k.len()).sum::<usize>();
-        let num_pairs2 = accessor.num_pairs() - division + partial.len();
-        let mut new_page2 = manager.allocate(LeafBuilder::required_bytes(num_pairs2, new_size2))?;
-        let mut builder = LeafBuilder::new(&mut new_page2, num_pairs2, new_key_size2);
-        for i in division..accessor.num_pairs() {
-            let entry = accessor.entry(i).unwrap();
-            builder.append(entry.key(), entry.value());
-        }
-        for (key, value) in partial {
-            builder.append(key, value);
-        }
-        drop(builder);
-
-        freed.push(page.get_page_number());
-        Ok((new_page.get_page_number(), new_page2.get_page_number()))
-    } else {
+    let partials_last = K::compare(&partial[0].0, accessor.last_entry().key()).is_gt();
+    if !partials_last {
         assert!(K::compare(&partial.last().unwrap().0, accessor.first_entry().key()).is_lt());
-        // partials go before
-        let division = (accessor.num_pairs() + partial.len()) / 2 - partial.len();
+    }
 
-        let new_size1 = accessor.length_of_pairs(0, division)
-            + partial
-                .iter()
-                .map(|(k, v)| k.len() + v.len())
-                .sum::<usize>();
-        let new_key_size1 = accessor.length_of_keys(0, division)
-            + partial.iter().map(|(k, _)| k.len()).sum::<usize>();
-        let num_pairs1 = partial.len() + division;
-        let mut new_page = manager.allocate(LeafBuilder::required_bytes(num_pairs1, new_size1))?;
-        let mut builder = LeafBuilder::new(&mut new_page, num_pairs1, new_key_size1);
+    let division = if partials_last {
+        (accessor.num_pairs() + partial.len()) / 2
+    } else {
+        (accessor.num_pairs() + partial.len()) / 2 - partial.len()
+    };
+
+    let mut new_size1 = accessor.length_of_pairs(0, division);
+    let mut new_key_size1 = accessor.length_of_keys(0, division);
+    let mut new_size2 = accessor.length_of_pairs(division, accessor.num_pairs());
+    let mut new_key_size2 = accessor.length_of_keys(division, accessor.num_pairs());
+    let partial_size = partial
+        .iter()
+        .map(|(k, v)| k.len() + v.len())
+        .sum::<usize>();
+    let partial_key_size = partial.iter().map(|(k, _)| k.len()).sum::<usize>();
+    let (num_pairs1, num_pairs2) = if partials_last {
+        new_size2 += partial_size;
+        new_key_size2 += partial_key_size;
+        (division, accessor.num_pairs() - division + partial.len())
+    } else {
+        new_size1 += partial_size;
+        new_key_size1 += partial_key_size;
+        (partial.len() + division, accessor.num_pairs() - division)
+    };
+
+    let mut new_page = manager.allocate(LeafBuilder::required_bytes(num_pairs1, new_size1))?;
+    let mut builder = LeafBuilder::new(&mut new_page, num_pairs1, new_key_size1);
+
+    if !partials_last {
         for (key, value) in partial {
             builder.append(key, value);
         }
-        for i in 0..division {
-            let entry = accessor.entry(i).unwrap();
-            builder.append(entry.key(), entry.value());
-        }
-        drop(builder);
-
-        let new_size2 = accessor.length_of_pairs(division, accessor.num_pairs());
-        let new_key_size2 = accessor.length_of_keys(division, accessor.num_pairs());
-        let num_pairs2 = accessor.num_pairs() - division;
-        let mut new_page2 = manager.allocate(LeafBuilder::required_bytes(num_pairs2, new_size2))?;
-        let mut builder = LeafBuilder::new(&mut new_page2, num_pairs2, new_key_size2);
-        for i in division..accessor.num_pairs() {
-            let entry = accessor.entry(i).unwrap();
-            builder.append(entry.key(), entry.value());
-        }
-        drop(builder);
-
-        freed.push(page.get_page_number());
-        Ok((new_page.get_page_number(), new_page2.get_page_number()))
     }
+    for i in 0..division {
+        let entry = accessor.entry(i).unwrap();
+        builder.append(entry.key(), entry.value());
+    }
+    drop(builder);
+
+    let mut new_page2 = manager.allocate(LeafBuilder::required_bytes(num_pairs2, new_size2))?;
+    let mut builder = LeafBuilder::new(&mut new_page2, num_pairs2, new_key_size2);
+    for i in division..accessor.num_pairs() {
+        let entry = accessor.entry(i).unwrap();
+        builder.append(entry.key(), entry.value());
+    }
+    if partials_last {
+        for (key, value) in partial {
+            builder.append(key, value);
+        }
+    }
+    drop(builder);
+
+    freed.push(page.get_page_number());
+    Ok((new_page.get_page_number(), new_page2.get_page_number()))
 }
 
 // partials must be in sorted order, and be disjoint from the pairs in the leaf
