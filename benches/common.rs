@@ -1,4 +1,7 @@
 use redb::ReadableTable;
+use std::fs;
+use std::fs::File;
+use std::path::Path;
 
 pub trait BenchDatabase {
     type W: for<'a> BenchWriteTransaction<'a>;
@@ -115,11 +118,12 @@ impl BenchInserter for RedbBenchInserter<'_> {
 
 pub struct SledBenchDatabase<'a> {
     db: &'a sled::Db,
+    db_dir: &'a Path,
 }
 
 impl<'a> SledBenchDatabase<'a> {
-    pub fn new(db: &'a sled::Db) -> Self {
-        SledBenchDatabase { db }
+    pub fn new(db: &'a sled::Db, path: &'a Path) -> Self {
+        SledBenchDatabase { db, db_dir: path }
     }
 }
 
@@ -132,7 +136,10 @@ impl<'a> BenchDatabase for SledBenchDatabase<'a> {
     }
 
     fn write_transaction(&mut self) -> Self::W {
-        SledBenchWriteTransaction { db: self.db }
+        SledBenchWriteTransaction {
+            db: self.db,
+            db_dir: self.db_dir,
+        }
     }
 
     fn read_transaction(&self) -> Self::R {
@@ -158,6 +165,7 @@ impl<'a, 'b> BenchReadTransaction<'b> for SledBenchReadTransaction<'a> {
 
 pub struct SledBenchWriteTransaction<'a> {
     db: &'a sled::Db,
+    db_dir: &'a Path,
 }
 
 impl<'a, 'b> BenchWriteTransaction<'b> for SledBenchWriteTransaction<'a> {
@@ -168,7 +176,18 @@ impl<'a, 'b> BenchWriteTransaction<'b> for SledBenchWriteTransaction<'a> {
     }
 
     fn commit(self) -> Result<(), ()> {
-        self.db.flush().map(|_| ()).map_err(|_| ())
+        self.db.flush().unwrap();
+        // Workaround for sled durability
+        // Fsync all the files, because sled doesn't guarantee durability (it uses sync_file_range())
+        // See: https://github.com/spacejam/sled/issues/1351
+        for entry in fs::read_dir(self.db_dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                let file = File::open(entry.path()).unwrap();
+                file.sync_all().unwrap();
+            }
+        }
+        Ok(())
     }
 }
 
