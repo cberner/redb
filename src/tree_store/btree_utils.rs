@@ -484,9 +484,13 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     let entry = accessor.entry(i).unwrap();
                     partial.push((entry.key().to_vec(), entry.value().to_vec()));
                 }
-                // TODO: This call seems like it may be unsound. Another Table instance in the
-                // same transaction could have a reference to this page. We probably need to
-                // ensure this is only a single instance of each table
+                // Safety: No other references to this table can exist.
+                // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
+                // and all mutation method (e.g. insert() & remove()) borrow the Table object &mut self.
+                // open_table() & delete_table() which modify the master table, have no readers they
+                // can conflict with
+                // TODO: this method should be unsafe, with the caller expected to uphold the above
+                // guarantees
                 unsafe {
                     if !manager.free_if_uncommitted(page.get_page_number())? {
                         freed.push(page.get_page_number());
@@ -512,9 +516,6 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     builder.append(entry.key(), entry.value());
                 }
                 drop(builder);
-                // TODO: This call seems like it may be unsound. Another Table instance in the
-                // same transaction could have a reference to this page. We probably need to
-                // ensure this is only a single instance of each table
                 unsafe {
                     if !manager.free_if_uncommitted(page.get_page_number())? {
                         freed.push(page.get_page_number());
@@ -567,9 +568,6 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
             }
             assert!(found);
             assert!(children.len() > 1);
-            // TODO: This call seems like it may be unsound. Another Table instance in the
-            // same transaction could have a reference to this page. We probably need to
-            // ensure this is only a single instance of each table
             unsafe {
                 if !manager.free_if_uncommitted(original_page_number)? {
                     freed.push(original_page_number);
@@ -726,9 +724,13 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                 let page_number = page.get_page_number();
                 drop(page);
-                // TODO: This call seems like it may be unsound. Another Table instance in the
-                // same transaction could have a reference to this page. We probably need to
-                // ensure this is only a single instance of each table
+                // Safety: No other references to this table can exist.
+                // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
+                // and all mutation method (e.g. insert() & remove()) borrow the Table object &mut self.
+                // open_table() & delete_table() which modify the master table, have no readers they
+                // can conflict with
+                // TODO: this method should be unsafe, with the caller expected to uphold the above
+                // guarantees
                 unsafe {
                     if !manager.free_if_uncommitted(page_number)? {
                         freed.push(page_number);
@@ -796,9 +798,6 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                     let page_number = page.get_page_number();
                     drop(page);
-                    // TODO: This call seems like it may be unsound. Another Table instance in the
-                    // same transaction could have a reference to this page. We probably need to
-                    // ensure this is only a single instance of each table
                     unsafe {
                         if !manager.free_if_uncommitted(page_number)? {
                             freed.push(page_number);
@@ -846,9 +845,6 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                     let page_number = page.get_page_number();
                     drop(page);
-                    // TODO: This call seems like it may be unsound. Another Table instance in the
-                    // same transaction could have a reference to this page. We probably need to
-                    // ensure this is only a single instance of each table
                     unsafe {
                         if !manager.free_if_uncommitted(page_number)? {
                             freed.push(page_number);

@@ -1,3 +1,5 @@
+extern crate core;
+
 pub use db::{Database, DatabaseBuilder, DatabaseTransaction, ReadOnlyDatabaseTransaction};
 pub use error::Error;
 pub use multimap_table::{

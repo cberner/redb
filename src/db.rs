@@ -9,6 +9,7 @@ use memmap2::MmapRaw;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
+use std::panic;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -132,6 +133,7 @@ pub struct DatabaseTransaction<'a> {
     root_page: Cell<Option<PageNumber>>,
     pending_table_root_changes:
         RefCell<HashMap<(Vec<u8>, TableType), Rc<Cell<Option<PageNumber>>>>>,
+    open_tables: RefCell<HashMap<(Vec<u8>, TableType), &'static panic::Location<'static>>>,
     completed: AtomicBool,
 }
 
@@ -144,6 +146,7 @@ impl<'a> DatabaseTransaction<'a> {
             transaction_id,
             root_page: Cell::new(root_page),
             pending_table_root_changes: RefCell::new(Default::default()),
+            open_tables: RefCell::new(Default::default()),
             completed: Default::default(),
         })
     }
@@ -157,6 +160,14 @@ impl<'a> DatabaseTransaction<'a> {
     ) -> Result<Table<'a, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
         assert_ne!(name.as_ref(), FREED_TABLE);
+        let key = (name.as_ref().to_vec(), TableType::Normal);
+        if let Some(location) = self.open_tables.borrow().get(&key) {
+            return Err(Error::TableAlreadyOpen(location));
+        }
+        self.open_tables
+            .borrow_mut()
+            .insert(key.clone(), panic::Location::caller());
+
         let (definition, root) = self.storage.get_or_create_table(
             name.as_ref(),
             TableType::Normal,
@@ -165,7 +176,6 @@ impl<'a> DatabaseTransaction<'a> {
         )?;
         self.root_page.set(Some(root));
 
-        let key = (name.as_ref().to_vec(), TableType::Normal);
         let root = self
             .pending_table_root_changes
             .borrow_mut()
@@ -185,6 +195,14 @@ impl<'a> DatabaseTransaction<'a> {
     ) -> Result<MultimapTable<'a, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
         assert_ne!(name.as_ref(), FREED_TABLE);
+        let key = (name.as_ref().to_vec(), TableType::Multimap);
+        if let Some(location) = self.open_tables.borrow().get(&key) {
+            return Err(Error::TableAlreadyOpen(location));
+        }
+        self.open_tables
+            .borrow_mut()
+            .insert(key.clone(), panic::Location::caller());
+
         let (definition, root) = self.storage.get_or_create_table(
             name.as_ref(),
             TableType::Multimap,
@@ -193,7 +211,6 @@ impl<'a> DatabaseTransaction<'a> {
         )?;
         self.root_page.set(Some(root));
 
-        let key = (name.as_ref().to_vec(), TableType::Multimap);
         let root = self
             .pending_table_root_changes
             .borrow_mut()

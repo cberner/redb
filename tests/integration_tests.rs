@@ -468,6 +468,18 @@ fn range_query_reversed() {
 }
 
 #[test]
+fn alias_table() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let write_txn = db.begin_write().unwrap();
+    let table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let result: Result<Table<[u8], [u8]>, Error> = write_txn.open_table(b"x");
+    assert!(matches!(result.err().unwrap(), Error::TableAlreadyOpen(_)));
+    drop(table);
+}
+
+#[test]
 fn delete_table() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
