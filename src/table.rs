@@ -76,8 +76,8 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
     }
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<'s, K, V> for Table<'s, K, V> {
-    fn get(&self, key: &K) -> Result<Option<AccessGuard<'s, V>>, Error> {
+impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Table<'s, K, V> {
+    fn get(&self, key: &K) -> Result<Option<AccessGuard<V>>, Error> {
         self.storage
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root.get())
     }
@@ -109,8 +109,8 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<'s, K, V> for
     }
 }
 
-pub trait ReadableTable<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
-    fn get(&self, key: &K) -> Result<Option<AccessGuard<'s, V>>, Error>;
+pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+    fn get(&self, key: &K) -> Result<Option<AccessGuard<V>>, Error>;
 
     fn get_range<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
         &'a self,
@@ -148,10 +148,10 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
     }
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<'s, K, V>
+impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     for ReadOnlyTable<'s, K, V>
 {
-    fn get(&self, key: &K) -> Result<Option<AccessGuard<'s, V>>, Error> {
+    fn get(&self, key: &K) -> Result<Option<AccessGuard<V>>, Error> {
         self.storage
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root)
     }
