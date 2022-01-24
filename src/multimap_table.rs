@@ -369,7 +369,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
     }
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s, K, V>
+impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     for MultimapTable<'s, K, V>
 {
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapGetIterType<'a, K, V>, Error> {
@@ -426,7 +426,7 @@ type MultimapGetIterType<'a, K, V> =
 type MultimapGetRangeIterType<'a, K, V> =
     MultimapRangeIter<'a, (Bound<MultimapKVPair<K, V>>, Bound<MultimapKVPair<K, V>>), K, V>;
 
-pub trait ReadableMultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapGetIterType<'a, K, V>, Error>;
 
     fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
@@ -465,7 +465,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, 
     }
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<'s, K, V>
+impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     for ReadOnlyMultimapTable<'s, K, V>
 {
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapGetIterType<'a, K, V>, Error> {
