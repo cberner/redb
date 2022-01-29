@@ -4,6 +4,7 @@ use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{BtreeEntry, PageNumber};
 use crate::types::{RedbKey, RedbValue};
+use std::borrow::Borrow;
 use std::collections::Bound;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
@@ -11,27 +12,27 @@ use std::ops::RangeBounds;
 fn bound_contains_key<
     'a,
     T: RangeBounds<KR>,
-    KR: AsRef<K> + ?Sized + 'a,
+    KR: Borrow<K> + ?Sized + 'a,
     K: RedbKey + ?Sized + 'a,
 >(
     range: &T,
     key: &[u8],
 ) -> bool {
     if let Bound::Included(start) = range.start_bound() {
-        if K::compare(key, start.as_ref().as_bytes().as_ref()).is_lt() {
+        if K::compare(key, start.borrow().as_bytes().as_ref()).is_lt() {
             return false;
         }
     } else if let Bound::Excluded(start) = range.start_bound() {
-        if K::compare(key, start.as_ref().as_bytes().as_ref()).is_le() {
+        if K::compare(key, start.borrow().as_bytes().as_ref()).is_le() {
             return false;
         }
     }
     if let Bound::Included(end) = range.end_bound() {
-        if K::compare(key, end.as_ref().as_bytes().as_ref()).is_gt() {
+        if K::compare(key, end.borrow().as_bytes().as_ref()).is_gt() {
             return false;
         }
     } else if let Bound::Excluded(end) = range.end_bound() {
-        if K::compare(key, end.as_ref().as_bytes().as_ref()).is_ge() {
+        if K::compare(key, end.borrow().as_bytes().as_ref()).is_ge() {
             return false;
         }
     }
@@ -224,7 +225,7 @@ pub(in crate) fn page_numbers_iter_start_state(page: PageImpl) -> RangeIterState
 pub struct BtreeRangeIter<
     'a,
     T: RangeBounds<KR>,
-    KR: AsRef<K> + ?Sized + 'a,
+    KR: Borrow<K> + ?Sized + 'a,
     K: RedbKey + ?Sized + 'a,
     V: RedbValue + ?Sized + 'a,
 > {
@@ -243,7 +244,7 @@ pub struct BtreeRangeIter<
 impl<
         'a,
         T: RangeBounds<KR>,
-        KR: AsRef<K> + ?Sized + 'a,
+        KR: Borrow<K> + ?Sized + 'a,
         K: RedbKey + ?Sized + 'a,
         V: RedbValue + ?Sized + 'a,
     > BtreeRangeIter<'a, T, KR, K, V>
@@ -302,21 +303,21 @@ impl<
                     #[allow(clippy::collapsible_else_if)]
                     if self.reversed {
                         if let Bound::Included(start) = self.query_range.start_bound() {
-                            if K::compare(entry.key(), start.as_ref().as_bytes().as_ref()).is_lt() {
+                            if K::compare(entry.key(), start.borrow().as_bytes().as_ref()).is_lt() {
                                 self.next = None;
                             }
                         } else if let Bound::Excluded(start) = self.query_range.start_bound() {
-                            if K::compare(entry.key(), start.as_ref().as_bytes().as_ref()).is_le() {
+                            if K::compare(entry.key(), start.borrow().as_bytes().as_ref()).is_le() {
                                 self.next = None;
                             }
                         }
                     } else {
                         if let Bound::Included(end) = self.query_range.end_bound() {
-                            if K::compare(entry.key(), end.as_ref().as_bytes().as_ref()).is_gt() {
+                            if K::compare(entry.key(), end.borrow().as_bytes().as_ref()).is_gt() {
                                 self.next = None;
                             }
                         } else if let Bound::Excluded(end) = self.query_range.end_bound() {
-                            if K::compare(entry.key(), end.as_ref().as_bytes().as_ref()).is_ge() {
+                            if K::compare(entry.key(), end.borrow().as_bytes().as_ref()).is_ge() {
                                 self.next = None;
                             }
                         }

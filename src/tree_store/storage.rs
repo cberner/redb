@@ -10,6 +10,7 @@ use crate::tree_store::{AccessGuardMut, BtreeEntry, BtreeRangeIter};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use memmap2::MmapRaw;
+use std::borrow::Borrow;
 use std::cell::{Cell, RefCell};
 use std::cmp::{max, min};
 use std::collections::{BTreeSet, Bound};
@@ -590,7 +591,7 @@ impl Storage {
     pub(in crate) fn get_range<
         'a,
         T: RangeBounds<KR>,
-        KR: AsRef<K> + ?Sized + 'a,
+        KR: Borrow<K> + ?Sized + 'a,
         K: RedbKey + ?Sized + 'a,
         V: RedbValue + ?Sized + 'a,
     >(
@@ -604,7 +605,7 @@ impl Storage {
                     let start_state = find_iter_start::<K>(
                         self.mem.get_page(root),
                         None,
-                        k.as_ref().as_bytes().as_ref(),
+                        k.borrow().as_bytes().as_ref(),
                         &self.mem,
                     );
                     Ok(BtreeRangeIter::new(start_state, range, &self.mem))
@@ -623,7 +624,7 @@ impl Storage {
     pub(in crate) fn get_range_reversed<
         'a,
         T: RangeBounds<KR>,
-        KR: AsRef<K> + ?Sized + 'a,
+        KR: Borrow<K> + ?Sized + 'a,
         K: RedbKey + ?Sized + 'a,
         V: RedbValue + ?Sized + 'a,
     >(
@@ -637,7 +638,7 @@ impl Storage {
                     let start_state = find_iter_start_reversed::<K>(
                         self.mem.get_page(root),
                         None,
-                        k.as_ref().as_bytes().as_ref(),
+                        k.borrow().as_bytes().as_ref(),
                         &self.mem,
                     );
                     Ok(BtreeRangeIter::new_reversed(start_state, range, &self.mem))

@@ -431,7 +431,7 @@ fn range_query() {
     let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
     let start = vec![3u8];
     let end = vec![7u8];
-    let mut iter = table.get_range(start.as_slice()..end.as_slice()).unwrap();
+    let mut iter = table.get_range(start..end).unwrap();
     for i in 3..7u8 {
         let (key, value) = iter.next().unwrap();
         assert_eq!(&[i], key);

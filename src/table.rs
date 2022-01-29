@@ -2,6 +2,7 @@ use crate::error::Error;
 use crate::tree_store::{AccessGuardMut, BtreeEntry, BtreeRangeIter, PageNumber, Storage};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::AccessGuard;
+use std::borrow::Borrow;
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
@@ -82,7 +83,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root.get())
     }
 
-    fn get_range<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
+    fn get_range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
@@ -91,7 +92,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
             .map(RangeIter::new)
     }
 
-    fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
+    fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
@@ -112,12 +113,12 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
 pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     fn get(&self, key: &K) -> Result<Option<AccessGuard<V>>, Error>;
 
-    fn get_range<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
+    fn get_range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error>;
 
-    fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
+    fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error>;
@@ -156,7 +157,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root)
     }
 
-    fn get_range<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
+    fn get_range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
@@ -165,7 +166,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
             .map(RangeIter::new)
     }
 
-    fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: AsRef<K>>(
+    fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
@@ -186,7 +187,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
 pub struct RangeIter<
     'a,
     T: RangeBounds<KR>,
-    KR: AsRef<K>,
+    KR: Borrow<K>,
     K: RedbKey + ?Sized + 'a,
     V: RedbValue + ?Sized + 'a,
 > {
@@ -196,7 +197,7 @@ pub struct RangeIter<
 impl<
         'a,
         T: RangeBounds<KR>,
-        KR: AsRef<K>,
+        KR: Borrow<K>,
         K: RedbKey + ?Sized + 'a,
         V: RedbValue + ?Sized + 'a,
     > RangeIter<'a, T, KR, K, V>
@@ -237,12 +238,6 @@ mod test {
     #[test]
     fn custom_ordering() {
         struct ReverseKey(Vec<u8>);
-
-        impl AsRef<ReverseKey> for ReverseKey {
-            fn as_ref(&self) -> &ReverseKey {
-                self
-            }
-        }
 
         impl RedbValue for ReverseKey {
             type View = RefLifetime<[u8]>;
