@@ -1,4 +1,5 @@
-use redb::{Database, Error, ReadOnlyTable, ReadableTable, Table};
+use redb::{Database, Error, RangeIter, ReadOnlyTable, ReadableTable, Table};
+use std::ops::{Range, RangeFull};
 use tempfile::NamedTempFile;
 
 #[test]
@@ -233,11 +234,21 @@ fn i128_type() {
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<i128, i128> = read_txn.open_table(b"x").unwrap();
     assert_eq!(-2, table.get(&-1).unwrap().unwrap().to_value());
-    // TODO: enable this test
-    // let mut iter: RangeIter<RangeFull, i128, i128, i128> = table.get_range(..).unwrap();
-    // for i in -11..10 {
-    //     assert_eq!(iter.next().unwrap().1, i);
-    // }
+    let mut iter: RangeIter<RangeFull, i128, i128, i128> = table.get_range(..).unwrap();
+    for i in -11..10 {
+        assert_eq!(iter.next().unwrap().1, i);
+    }
+    assert!(iter.next().is_none());
+    let mut iter: RangeIter<Range<i128>, i128, i128, i128> = table.get_range(0..10).unwrap();
+    for i in -1..9 {
+        assert_eq!(iter.next().unwrap().1, i);
+    }
+    assert!(iter.next().is_none());
+    let mut iter: RangeIter<Range<&i128>, i128, i128, i128> = table.get_range(&0..&10).unwrap();
+    for i in -1..9 {
+        assert_eq!(iter.next().unwrap().1, i);
+    }
+    assert!(iter.next().is_none());
 }
 
 #[test]
