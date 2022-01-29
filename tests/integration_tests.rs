@@ -70,7 +70,7 @@ fn non_durable_commit_persistence() {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
             let result = &table.get(key).unwrap().unwrap();
-            assert_eq!(result.as_ref(), value);
+            assert_eq!(result.to_value(), value);
         }
     }
 }
@@ -106,7 +106,7 @@ fn persistence() {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
             let result = &table.get(key).unwrap().unwrap();
-            assert_eq!(result.as_ref(), value);
+            assert_eq!(result.to_value(), value);
         }
     }
 }
@@ -383,7 +383,7 @@ fn non_durable_read_isolation() {
     let read_table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
     assert_eq!(
         b"world",
-        read_table.get(b"hello").unwrap().unwrap().as_ref()
+        read_table.get(b"hello").unwrap().unwrap().to_value()
     );
 
     let write_txn = db.begin_write().unwrap();
@@ -398,17 +398,17 @@ fn non_durable_read_isolation() {
     assert!(read_table2.get(b"hello").unwrap().is_none());
     assert_eq!(
         b"world2",
-        read_table2.get(b"hello2").unwrap().unwrap().as_ref()
+        read_table2.get(b"hello2").unwrap().unwrap().to_value()
     );
     assert_eq!(
         b"world3",
-        read_table2.get(b"hello3").unwrap().unwrap().as_ref()
+        read_table2.get(b"hello3").unwrap().unwrap().to_value()
     );
     assert_eq!(read_table2.len().unwrap(), 2);
 
     assert_eq!(
         b"world",
-        read_table.get(b"hello").unwrap().unwrap().as_ref()
+        read_table.get(b"hello").unwrap().unwrap().to_value()
     );
     assert!(read_table.get(b"hello2").unwrap().is_none());
     assert!(read_table.get(b"hello3").unwrap().is_none());

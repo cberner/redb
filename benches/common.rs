@@ -67,16 +67,32 @@ impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
     }
 }
 
+pub struct RedbBenchAccessGuard<'b> {
+    access_guard: redb::AccessGuard<'b, [u8]>,
+}
+
+impl<'b> RedbBenchAccessGuard<'b> {
+    fn new(access_guard: redb::AccessGuard<'b, [u8]>) -> Self {
+        Self { access_guard }
+    }
+}
+
+impl<'b> AsRef<[u8]> for RedbBenchAccessGuard<'b> {
+    fn as_ref(&self) -> &[u8] {
+        self.access_guard.to_value()
+    }
+}
+
 pub struct RedbBenchReadTransaction<'a> {
     _txn: redb::ReadOnlyDatabaseTransaction<'a>,
     table: redb::ReadOnlyTable<'a, [u8], [u8]>,
 }
 
 impl<'a, 'b> BenchReadTransaction<'b> for RedbBenchReadTransaction<'a> {
-    type Output = redb::AccessGuard<'b, [u8]>;
+    type Output = RedbBenchAccessGuard<'b>;
 
-    fn get(&'b self, key: &[u8]) -> Option<redb::AccessGuard<'b, [u8]>> {
-        self.table.get(key).unwrap()
+    fn get(&'b self, key: &[u8]) -> Option<RedbBenchAccessGuard<'b>> {
+        self.table.get(key).unwrap().map(RedbBenchAccessGuard::new)
     }
 
     fn exists_after(&'b self, key: &[u8]) -> bool {
