@@ -232,7 +232,7 @@ impl Storage {
         root_page: Option<PageNumber>,
     ) -> Result<Option<TableDefinition>, Error> {
         if let Some(found) = self.get::<[u8], [u8]>(name, root_page)? {
-            let definition = TableDefinition::from_bytes(found.as_ref());
+            let definition = TableDefinition::from_bytes(found.to_value());
             if definition.get_type() != table_type {
                 return Err(Error::TableTypeMismatch(format!(
                     "{:?} is not of type {:?}",
@@ -692,11 +692,5 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
 
     pub fn to_value(&self) -> <<V as RedbValue>::View as WithLifetime>::Out {
         V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
-    }
-}
-
-impl<'a> AsRef<[u8]> for AccessGuard<'a, [u8]> {
-    fn as_ref(&self) -> &[u8] {
-        &self.page.memory()[self.offset..(self.offset + self.len)]
     }
 }
