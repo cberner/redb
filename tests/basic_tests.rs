@@ -239,16 +239,6 @@ fn i128_type() {
         assert_eq!(iter.next().unwrap().1, i);
     }
     assert!(iter.next().is_none());
-    let mut iter: RangeIter<Range<i128>, i128, i128, i128> = table.get_range(0..10).unwrap();
-    for i in -1..9 {
-        assert_eq!(iter.next().unwrap().1, i);
-    }
-    assert!(iter.next().is_none());
-    let mut iter: RangeIter<Range<&i128>, i128, i128, i128> = table.get_range(&0..&10).unwrap();
-    for i in -1..9 {
-        assert_eq!(iter.next().unwrap().1, i);
-    }
-    assert!(iter.next().is_none());
 }
 
 #[test]
@@ -263,4 +253,86 @@ fn f32_type() {
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<u8, f32> = read_txn.open_table(b"x").unwrap();
     assert_eq!(0.3, table.get(&0).unwrap().unwrap().to_value());
+}
+
+#[test]
+fn owned_get_signatures() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let write_txn = db.begin_write().unwrap();
+    let mut table: Table<u32, u32> = write_txn.open_table(b"x").unwrap();
+    for i in 0..10 {
+        table.insert(&i, &(i + 1)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table: ReadOnlyTable<u32, u32> = read_txn.open_table(b"x").unwrap();
+
+    assert_eq!(2, table.get(&1).unwrap().unwrap().to_value());
+
+    let mut iter: RangeIter<RangeFull, u32, u32, u32> = table.get_range(..).unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().1, i + 1);
+    }
+    assert!(iter.next().is_none());
+    let mut iter: RangeIter<Range<u32>, u32, u32, u32> = table.get_range(0..10).unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().1, i + 1);
+    }
+    assert!(iter.next().is_none());
+    let mut iter: RangeIter<Range<&u32>, u32, u32, u32> = table.get_range(&0..&10).unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().1, i + 1);
+    }
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn ref_get_signatures() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let write_txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    for i in 0..10 {
+        table.insert(&[i], &[i + 1]).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+
+    let zero = vec![0u8];
+    assert_eq!(&[1], table.get(&[0]).unwrap().unwrap().to_value());
+    assert_eq!(&[1], table.get(b"\0").unwrap().unwrap().to_value());
+    assert_eq!(&[1], table.get(&zero).unwrap().unwrap().to_value());
+
+    let start = vec![0u8];
+    let end = vec![10u8];
+    let mut iter: RangeIter<RangeFull, &[u8], [u8], [u8]> = table.get_range(..).unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().1, &[i + 1]);
+    }
+    assert!(iter.next().is_none());
+
+    let mut iter: RangeIter<Range<&[u8]>, &[u8], [u8], [u8]> =
+        table.get_range(start.as_slice()..&end).unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().1, &[i + 1]);
+    }
+    assert!(iter.next().is_none());
+
+    let mut iter = table.get_range(start..end).unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().1, &[i + 1]);
+    }
+    assert!(iter.next().is_none());
+
+    let mut iter = table
+        .get_range([0u8].as_slice()..[10u8].as_slice())
+        .unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().1, &[i + 1]);
+    }
+    assert!(iter.next().is_none());
 }
