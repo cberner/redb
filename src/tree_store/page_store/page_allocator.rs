@@ -2,6 +2,16 @@ use crate::Error;
 use std::convert::TryInto;
 use std::mem::size_of;
 
+struct U64GroupedBitMap<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> U64GroupedBitMap<'a> {
+    fn count_unset(&self) -> usize {
+        self.data.iter().map(|x| x.count_zeros() as usize).sum()
+    }
+}
+
 struct U64GroupedBitMapMut<'a> {
     data: &'a mut [u8],
 }
@@ -52,10 +62,6 @@ impl<'a> U64GroupedBitMapMut<'a> {
             64 => None,
             x => Some(start_bit + x as usize),
         }
-    }
-
-    fn count_unset(&self) -> usize {
-        self.data.iter().map(|x| x.count_zeros() as usize).sum()
     }
 }
 
@@ -195,9 +201,15 @@ impl PageAllocator {
         height
     }
 
-    fn count_free_pages(&self, data: &mut [u8]) -> usize {
-        self.get_level_mut(data, self.get_height() - 1)
-            .count_unset()
+    fn count_free_pages(&self, data: &[u8]) -> usize {
+        self.get_level(data, self.get_height() - 1).count_unset()
+    }
+
+    fn get_level<'a>(&self, data: &'a [u8], i: usize) -> U64GroupedBitMap<'a> {
+        let (start, end) = self.tree_level_offsets[i];
+        U64GroupedBitMap {
+            data: &data[start..end],
+        }
     }
 
     fn get_level_mut<'a>(&self, data: &'a mut [u8], i: usize) -> U64GroupedBitMapMut<'a> {
@@ -321,7 +333,7 @@ impl BuddyAllocator {
             data[metadata_offset + size_of::<u64>()..metadata_offset + 2 * size_of::<u64>()]
                 .copy_from_slice(&(required as u64).to_be_bytes());
             orders.push(PageAllocator::init_new(
-                Self::get_order_bytes(data, order),
+                Self::get_order_bytes_mut(data, order),
                 num_pages,
             ));
             num_pages = Self::next_higher_order(num_pages as u64) as usize;
@@ -332,9 +344,9 @@ impl BuddyAllocator {
         // Mark all the lower pages which exist in upper orders
         for (order, allocator) in orders.iter().enumerate() {
             if let Some(next_allocator) = orders.get(order + 1) {
-                let next_bytes = Self::get_order_bytes(data, order + 1);
+                let next_bytes = Self::get_order_bytes_mut(data, order + 1);
                 let next_pages = next_allocator.count_free_pages(next_bytes) as u64;
-                let bytes = Self::get_order_bytes(data, order);
+                let bytes = Self::get_order_bytes_mut(data, order);
                 for i in 0..(2 * next_pages) {
                     allocator.record_alloc(bytes, i);
                 }
@@ -355,7 +367,7 @@ impl BuddyAllocator {
         required
     }
 
-    pub(crate) fn count_free_pages(&self, data: &mut [u8]) -> usize {
+    pub(crate) fn count_free_pages(&self, data: &[u8]) -> usize {
         let mut pages = 0;
         for (order, allocator) in self.orders.iter().enumerate() {
             pages += allocator.count_free_pages(Self::get_order_bytes(data, order))
@@ -380,7 +392,12 @@ impl BuddyAllocator {
         (offset, length)
     }
 
-    fn get_order_bytes(data: &mut [u8], order: usize) -> &mut [u8] {
+    fn get_order_bytes(data: &[u8], order: usize) -> &[u8] {
+        let (offset, length) = Self::get_order_offset_and_length(data, order);
+        &data[offset..(offset + length)]
+    }
+
+    fn get_order_bytes_mut(data: &mut [u8], order: usize) -> &mut [u8] {
         let (offset, length) = Self::get_order_offset_and_length(data, order);
         &mut data[offset..(offset + length)]
     }
@@ -398,7 +415,7 @@ impl BuddyAllocator {
         if order >= self.orders.len() {
             return Err(Error::OutOfSpace);
         }
-        match self.orders[order].alloc(Self::get_order_bytes(data, order)) {
+        match self.orders[order].alloc(Self::get_order_bytes_mut(data, order)) {
             Ok(x) => Ok(x),
             Err(e) => {
                 match e {
@@ -407,10 +424,10 @@ impl BuddyAllocator {
                         let upper_page = self.alloc(data, order + 1)?;
                         let (free1, free2) = (upper_page * 2, upper_page * 2 + 1);
                         debug_assert!(self.orders[order]
-                            .is_allocated(Self::get_order_bytes(data, order), free1));
+                            .is_allocated(Self::get_order_bytes_mut(data, order), free1));
                         debug_assert!(self.orders[order]
-                            .is_allocated(Self::get_order_bytes(data, order), free2));
-                        self.orders[order].free(Self::get_order_bytes(data, order), free2);
+                            .is_allocated(Self::get_order_bytes_mut(data, order), free2));
+                        self.orders[order].free(Self::get_order_bytes_mut(data, order), free2);
 
                         Ok(free1)
                     }
@@ -423,7 +440,7 @@ impl BuddyAllocator {
     /// data must have been initialized by Self::init_new(), and page_number must be free
     pub(crate) fn record_alloc(&self, data: &mut [u8], page_number: u64, order: usize) {
         assert!(order < self.orders.len());
-        if self.orders[order].is_allocated(Self::get_order_bytes(data, order), page_number) {
+        if self.orders[order].is_allocated(Self::get_order_bytes_mut(data, order), page_number) {
             // Need to split parent page
             let upper_page = Self::next_higher_order(page_number);
             self.record_alloc(data, upper_page, order + 1);
@@ -431,28 +448,28 @@ impl BuddyAllocator {
             let (free1, free2) = (upper_page * 2, upper_page * 2 + 1);
             debug_assert!(free1 == page_number || free2 == page_number);
             if free1 == page_number {
-                self.orders[order].free(Self::get_order_bytes(data, order), free2);
+                self.orders[order].free(Self::get_order_bytes_mut(data, order), free2);
             } else {
-                self.orders[order].free(Self::get_order_bytes(data, order), free1);
+                self.orders[order].free(Self::get_order_bytes_mut(data, order), free1);
             }
         } else {
-            self.orders[order].record_alloc(Self::get_order_bytes(data, order), page_number);
+            self.orders[order].record_alloc(Self::get_order_bytes_mut(data, order), page_number);
         }
     }
 
     /// data must have been initialized by Self::init_new()
     pub(crate) fn free(&self, data: &mut [u8], page_number: u64, order: usize) {
         if order == self.orders.len() - 1 {
-            self.orders[order].free(Self::get_order_bytes(data, order), page_number);
+            self.orders[order].free(Self::get_order_bytes_mut(data, order), page_number);
             return;
         }
 
         let buddy = Self::buddy_page(page_number);
-        if self.orders[order].is_allocated(Self::get_order_bytes(data, order), buddy) {
-            self.orders[order].free(Self::get_order_bytes(data, order), page_number);
+        if self.orders[order].is_allocated(Self::get_order_bytes_mut(data, order), buddy) {
+            self.orders[order].free(Self::get_order_bytes_mut(data, order), page_number);
         } else {
             // Merge into higher order page
-            self.orders[order].record_alloc(Self::get_order_bytes(data, order), buddy);
+            self.orders[order].record_alloc(Self::get_order_bytes_mut(data, order), buddy);
             self.free(data, Self::next_higher_order(page_number), order + 1);
         }
     }
@@ -488,12 +505,12 @@ mod test {
         let max_order = 7;
         let mut data = vec![0; BuddyAllocator::required_space(num_pages, max_order)];
         let allocator = BuddyAllocator::init_new(&mut data, num_pages, max_order);
-        assert_eq!(allocator.count_free_pages(&mut data), num_pages);
+        assert_eq!(allocator.count_free_pages(&data), num_pages);
 
         for page in 0..num_pages {
             allocator.record_alloc(&mut data, page as u64, 0);
         }
-        assert_eq!(allocator.count_free_pages(&mut data), 0);
+        assert_eq!(allocator.count_free_pages(&data), 0);
 
         assert!(matches!(
             allocator.alloc(&mut data, 0).unwrap_err(),
@@ -503,7 +520,7 @@ mod test {
         for page in 0..num_pages {
             allocator.free(&mut data, page as u64, 0);
         }
-        assert_eq!(allocator.count_free_pages(&mut data), num_pages);
+        assert_eq!(allocator.count_free_pages(&data), num_pages);
     }
 
     #[test]
@@ -512,7 +529,7 @@ mod test {
         let max_order = 7;
         let mut data = vec![0; BuddyAllocator::required_space(num_pages, max_order)];
         let allocator = BuddyAllocator::init_new(&mut data, num_pages, max_order);
-        assert_eq!(allocator.count_free_pages(&mut data), num_pages);
+        assert_eq!(allocator.count_free_pages(&data), num_pages);
 
         for _ in 0..num_pages {
             allocator.alloc(&mut data, 0).unwrap();
@@ -520,7 +537,7 @@ mod test {
         for page in 0..num_pages {
             allocator.free(&mut data, page as u64, 0);
         }
-        assert_eq!(allocator.count_free_pages(&mut data), num_pages);
+        assert_eq!(allocator.count_free_pages(&data), num_pages);
 
         // Test that everything got merged back together, so that we fill order 7 allocations
         for _ in 0..(num_pages / 2usize.pow(7)) {
@@ -534,13 +551,13 @@ mod test {
         let max_order = 7;
         let mut data = vec![0; BuddyAllocator::required_space(num_pages, max_order)];
         let allocator = BuddyAllocator::init_new(&mut data, num_pages, max_order);
-        assert_eq!(allocator.count_free_pages(&mut data), num_pages);
+        assert_eq!(allocator.count_free_pages(&data), num_pages);
 
         let mut allocated = vec![];
         for order in 0..=max_order {
             allocated.push((allocator.alloc(&mut data, order).unwrap(), order));
         }
-        assert_eq!(allocator.count_free_pages(&mut data), 1);
+        assert_eq!(allocator.count_free_pages(&data), 1);
 
         for order in 1..=max_order {
             assert!(matches!(
@@ -552,7 +569,7 @@ mod test {
         for (page, order) in allocated {
             allocator.free(&mut data, page, order);
         }
-        assert_eq!(allocator.count_free_pages(&mut data), num_pages);
+        assert_eq!(allocator.count_free_pages(&data), num_pages);
     }
 
     #[test]
