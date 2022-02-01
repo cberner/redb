@@ -622,6 +622,24 @@ impl TransactionalMemory {
         Ok((mem, guard))
     }
 
+    fn acquire_page_allocator(
+        &self,
+        primary: bool,
+    ) -> Result<(&[u8], MutexGuard<MetapageGuard>), Error> {
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
+
+        let accessor = if primary {
+            TransactionAccessor::new(get_primary_mut(mmap), guard)
+        } else {
+            TransactionAccessor::new(get_secondary(mmap), guard)
+        };
+        let (start, end) = accessor.get_allocator_data();
+        assert!(end <= self.mmap.len());
+        let mem = self.mmap.get_memory(start..end);
+
+        Ok((mem, accessor.into_guard()))
+    }
+
     fn acquire_mutable_page_allocator(
         &self,
         primary: bool,
@@ -943,9 +961,7 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn count_free_pages(&self) -> Result<usize, Error> {
-        // TODO: this is a read-only operation, so should be able to use an accessor
-        // and avoid dirtying the allocator state
-        let (mem, guard) = self.acquire_mutable_page_allocator(false).unwrap();
+        let (mem, guard) = self.acquire_page_allocator(false).unwrap();
         let count = self.page_allocator.as_ref().unwrap().count_free_pages(mem);
         // Drop guard only after page_allocator.count_free() is completed
         drop(guard);
