@@ -2,11 +2,11 @@ use crate::Error;
 use std::convert::TryInto;
 use std::mem::size_of;
 
-struct U64GroupedBitMap<'a> {
+struct U64GroupedBitMapMut<'a> {
     data: &'a mut [u8],
 }
 
-impl<'a> U64GroupedBitMap<'a> {
+impl<'a> U64GroupedBitMapMut<'a> {
     fn data_index_of(&self, bit: usize) -> (usize, usize) {
         ((bit / 64) as usize * size_of::<u64>(), (bit % 64) as usize)
     }
@@ -125,12 +125,12 @@ impl PageAllocator {
 
         // Mark all the subtrees that don't exist
         for i in Self::required_subtrees(num_pages)..64 {
-            result.get_level(data, 0).set(i);
+            result.get_level_mut(data, 0).set(i);
         }
 
         if result.get_height() > 1 {
             // Mark excess space in the leaves
-            let mut leaf_level = result.get_level(data, result.get_height() - 1);
+            let mut leaf_level = result.get_level_mut(data, result.get_height() - 1);
             for i in num_pages..leaf_level.len() {
                 leaf_level.set(i);
             }
@@ -138,7 +138,8 @@ impl PageAllocator {
 
         if result.get_height() > 2 {
             // Mark excess index space in the last subtree
-            let total_indexable_pages = result.get_level(data, result.get_height() - 2).len() * 64;
+            let total_indexable_pages =
+                result.get_level_mut(data, result.get_height() - 2).len() * 64;
             for i in (num_pages + 63)..total_indexable_pages {
                 result.update_to_root(data, i, true);
             }
@@ -195,12 +196,13 @@ impl PageAllocator {
     }
 
     fn count_free_pages(&self, data: &mut [u8]) -> usize {
-        self.get_level(data, self.get_height() - 1).count_unset()
+        self.get_level_mut(data, self.get_height() - 1)
+            .count_unset()
     }
 
-    fn get_level<'a>(&self, data: &'a mut [u8], i: usize) -> U64GroupedBitMap<'a> {
+    fn get_level_mut<'a>(&self, data: &'a mut [u8], i: usize) -> U64GroupedBitMapMut<'a> {
         let (start, end) = self.tree_level_offsets[i];
-        U64GroupedBitMap {
+        U64GroupedBitMapMut {
             data: &mut data[start..end],
         }
     }
@@ -224,9 +226,9 @@ impl PageAllocator {
         let mut parent_entry = page_number / 64;
         loop {
             full = if full {
-                self.get_level(data, parent_height).set(parent_entry)
+                self.get_level_mut(data, parent_height).set(parent_entry)
             } else {
-                self.get_level(data, parent_height).clear(parent_entry);
+                self.get_level_mut(data, parent_height).clear(parent_entry);
                 false
             };
 
@@ -239,20 +241,20 @@ impl PageAllocator {
     }
 
     fn is_allocated(&self, data: &mut [u8], page_number: u64) -> bool {
-        self.get_level(data, self.get_height() - 1)
+        self.get_level_mut(data, self.get_height() - 1)
             .get(page_number as usize)
     }
 
     /// data must have been initialized by Self::init_new()
     fn alloc(&self, data: &mut [u8]) -> Result<u64, Error> {
-        if let Some(mut entry) = self.get_level(data, 0).first_unset(0, 64) {
+        if let Some(mut entry) = self.get_level_mut(data, 0).first_unset(0, 64) {
             let mut height = 0;
 
             while height < self.get_height() - 1 {
                 height += 1;
                 entry *= 64;
                 entry = self
-                    .get_level(data, height)
+                    .get_level_mut(data, height)
                     .first_unset(entry, entry + 64)
                     .unwrap();
             }
@@ -269,7 +271,7 @@ impl PageAllocator {
     fn record_alloc(&self, data: &mut [u8], page_number: u64) {
         assert!(page_number < self.get_num_pages());
         let full = self
-            .get_level(data, self.get_height() - 1)
+            .get_level_mut(data, self.get_height() - 1)
             .set(page_number as usize);
         self.update_to_root(data, page_number as usize, full);
     }
@@ -277,7 +279,7 @@ impl PageAllocator {
     /// data must have been initialized by Self::init_new()
     fn free(&self, data: &mut [u8], page_number: u64) {
         assert!(page_number < self.get_num_pages());
-        self.get_level(data, self.get_height() - 1)
+        self.get_level_mut(data, self.get_height() - 1)
             .clear(page_number as usize);
         self.update_to_root(data, page_number as usize, false);
     }
