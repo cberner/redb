@@ -56,7 +56,17 @@ fn ceil_log2(x: usize) -> usize {
 pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
     let mut db_size = [0u8; size_of::<u64>()];
     let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(DB_SIZE_OFFSET as u64))?;
+
+    file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;
+    let mut buffer = [0u8; 1];
+    file.read_exact(&mut buffer)?;
+    let god_byte = buffer[0];
+    if god_byte & UPGRADE_IN_PROGRESS == 0 {
+        file.seek(SeekFrom::Start(DB_SIZE_OFFSET as u64))?;
+    } else {
+        file.seek(SeekFrom::Start(UPGRADE_LOG_OFFSET as u64))?;
+    }
+
     file.read_exact(&mut db_size)?;
 
     Ok(u64::from_be_bytes(db_size) as usize)
@@ -519,8 +529,15 @@ impl TransactionalMemory {
             mmap.flush()?;
         }
 
-        // TODO: recover from failed upgrades
-        assert_eq!(all_memory[GOD_BYTE_OFFSET] & UPGRADE_IN_PROGRESS, 0);
+        if all_memory[GOD_BYTE_OFFSET] & UPGRADE_IN_PROGRESS != 0 {
+            let rollback =
+                all_memory[UPGRADE_LOG_OFFSET..(UPGRADE_LOG_OFFSET + size_of::<u64>())].to_vec();
+            all_memory[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
+                .copy_from_slice(&rollback);
+            mmap.flush()?;
+            all_memory[GOD_BYTE_OFFSET] &= !UPGRADE_IN_PROGRESS;
+            mmap.flush()?;
+        }
 
         let page_size = (1 << all_memory[PAGE_SIZE_OFFSET]) as usize;
         if let Some(size) = requested_page_size {
@@ -999,12 +1016,54 @@ impl Drop for TransactionalMemory {
 
 #[cfg(test)]
 mod test {
-    use crate::tree_store::page_store::page_manager::{set_allocator_dirty, GOD_BYTE_OFFSET};
+    use crate::tree_store::page_store::page_manager::{
+        set_allocator_dirty, DB_SIZE_OFFSET, GOD_BYTE_OFFSET, UPGRADE_IN_PROGRESS,
+        UPGRADE_LOG_OFFSET,
+    };
     use crate::tree_store::page_store::TransactionalMemory;
-    use crate::{Database, Table};
+    use crate::{Database, ReadOnlyTable, ReadableTable, Table};
     use memmap2::{MmapMut, MmapRaw};
     use std::fs::OpenOptions;
+    use std::mem::size_of;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn recover_upgrade() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let write_txn = db.begin_write().unwrap();
+        let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+        table.insert(b"hello", b"world").unwrap();
+        write_txn.commit().unwrap();
+        drop(db);
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+
+        let mut mmap = unsafe { MmapMut::map_mut(&file) }.unwrap();
+        let god_byte = mmap[GOD_BYTE_OFFSET];
+        mmap[GOD_BYTE_OFFSET] = god_byte | UPGRADE_IN_PROGRESS;
+        let old_size = u64::from_be_bytes(
+            mmap[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
+                .try_into()
+                .unwrap(),
+        );
+        mmap[UPGRADE_LOG_OFFSET..(UPGRADE_LOG_OFFSET + size_of::<u64>())]
+            .copy_from_slice(&old_size.to_be_bytes());
+        // Perform a partial increase of the db size. Intentionally don't resize the mmap file, so that it's invalid
+        mmap[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
+            .copy_from_slice(&(2 * old_size).to_be_bytes());
+        mmap.flush().unwrap();
+        drop(mmap);
+
+        let db2 = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let read_txn = db2.begin_read().unwrap();
+        let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+        assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    }
 
     #[test]
     fn repair_allocator() {
