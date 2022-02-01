@@ -26,6 +26,7 @@ const VERSION_OFFSET: usize = MAGICNUMBER.len();
 const PAGE_SIZE_OFFSET: usize = VERSION_OFFSET + 1;
 const DB_SIZE_OFFSET: usize = PAGE_SIZE_OFFSET + 1;
 const GOD_BYTE_OFFSET: usize = DB_SIZE_OFFSET + size_of::<u64>();
+const UPGRADE_LOG_OFFSET: usize = GOD_BYTE_OFFSET + 1;
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 128;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
@@ -35,6 +36,7 @@ const DB_METAPAGE_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
 const PRIMARY_BIT: u8 = 1;
 const ALLOCATOR_STATE_0_DIRTY: u8 = 2;
 const ALLOCATOR_STATE_1_DIRTY: u8 = 4;
+const UPGRADE_IN_PROGRESS: u8 = 8;
 
 // Structure of each metapage
 const ROOT_PAGE_OFFSET: usize = 0;
@@ -60,7 +62,6 @@ pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
     Ok(u64::from_be_bytes(db_size) as usize)
 }
 
-// TODO: make this function transactional and crash safe
 pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result<(), Error> {
     let old_size = get_db_size(path.as_ref())?;
 
@@ -84,9 +85,17 @@ pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result<
     file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;
     let mut buffer = [0u8; 1];
     file.read_exact(&mut buffer)?;
-    let new_god_byte = buffer[0] | ALLOCATOR_STATE_0_DIRTY | ALLOCATOR_STATE_1_DIRTY;
+    let in_progress_god_byte =
+        buffer[0] | ALLOCATOR_STATE_0_DIRTY | ALLOCATOR_STATE_1_DIRTY | UPGRADE_IN_PROGRESS;
+    let final_god_byte = buffer[0] | ALLOCATOR_STATE_0_DIRTY | ALLOCATOR_STATE_1_DIRTY;
     file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;
-    file.write_all(&[new_god_byte])?;
+    file.write_all(&[in_progress_god_byte])?;
+    file.sync_all()?;
+
+    // Write the WAL
+    file.seek(SeekFrom::Start(UPGRADE_LOG_OFFSET as u64))?;
+    file.write_all(&old_size.to_be_bytes())?;
+    file.sync_all()?;
 
     // Write the new allocator state pointers
     let start = new_size - 2 * allocator_state_size;
@@ -114,6 +123,10 @@ pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result<
     file.sync_all()?;
 
     file.set_len(new_size as u64)?;
+    file.sync_all()?;
+
+    file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;
+    file.write_all(&[final_god_byte])?;
     file.sync_all()?;
 
     Ok(())
@@ -505,6 +518,9 @@ impl TransactionalMemory {
             all_memory[0..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
             mmap.flush()?;
         }
+
+        // TODO: recover from failed upgrades
+        assert_eq!(all_memory[GOD_BYTE_OFFSET] & UPGRADE_IN_PROGRESS, 0);
 
         let page_size = (1 << all_memory[PAGE_SIZE_OFFSET]) as usize;
         if let Some(size) = requested_page_size {
