@@ -173,6 +173,9 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
     }
 
     fn length_of_values(&self, start: usize, end: usize) -> usize {
+        if end == 0 {
+            return 0;
+        }
         let end_offset = self.value_end(end - 1).unwrap();
         let start_offset = self.value_start(start).unwrap();
         end_offset - start_offset
@@ -180,6 +183,9 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
 
     // Returns the length of all keys between [start, end)
     pub(in crate::tree_store) fn length_of_keys(&self, start: usize, end: usize) -> usize {
+        if end == 0 {
+            return 0;
+        }
         let end_offset = self.key_end(end - 1).unwrap();
         let start_offset = self.key_start(start).unwrap();
         end_offset - start_offset
