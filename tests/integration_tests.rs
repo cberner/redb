@@ -370,6 +370,29 @@ fn regression2() {
 }
 
 #[test]
+// Test for a bug in deletion code, where deletions could delete neighboring keys in a leaf,
+// due to the partial leaf entries being dropped
+fn regression3() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024 * 1024;
+    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let tx = db.begin_write().unwrap();
+    let mut t: Table<[u8], [u8]> = tx.open_table("x").unwrap();
+    let big_value = vec![0u8; 1000];
+    for i in 0..20 {
+        t.insert(&[i], &big_value).unwrap();
+    }
+    for i in (10..20).rev() {
+        t.remove(&[i]).unwrap();
+        for j in 0..i {
+            assert!(t.get(&[j]).unwrap().is_some());
+        }
+    }
+    tx.commit().unwrap();
+}
+
+#[test]
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };

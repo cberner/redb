@@ -378,30 +378,35 @@ fn repair_children<K: RedbKey + ?Sized>(
             })
             .collect();
         Ok(page_numbers)
-    } else if children.iter().any(|x| matches!(x, PartialLeaf(_))) {
+    } else if let Some(position) = children.iter().position(|x| matches!(x, PartialLeaf(_))) {
+        let merge_with = if position == 0 { 1 } else { position - 1 };
         let mut result = vec![];
-        let mut repaired = false;
-        // For each whole subtree, try to merge it with a partial left to repair it, if one is neighboring
         for i in 0..children.len() {
-            if let Subtree(handle) = &children[i] {
-                if repaired {
-                    result.push(*handle);
-                    continue;
-                }
-                let offset = if i > 0 { i - 1 } else { i + 1 };
-                if let Some(PartialLeaf(partials)) = children.get(offset) {
-                    if let Some(new_page) = merge_leaf::<K>(*handle, partials, freed, manager)? {
-                        result.push(new_page);
+            match &children[i] {
+                Subtree(handle) => {
+                    if i == merge_with {
+                        if let PartialLeaf(partials) = children.get(position).unwrap() {
+                            if let Some(new_page) =
+                                merge_leaf::<K>(*handle, partials, freed, manager)?
+                            {
+                                result.push(new_page);
+                            } else {
+                                let (page1, page2) =
+                                    split_leaf::<K>(*handle, partials, manager, freed)?;
+                                result.push(page1);
+                                result.push(page2);
+                            }
+                        } else {
+                            unreachable!()
+                        };
                     } else {
-                        let (page1, page2) = split_leaf::<K>(*handle, partials, manager, freed)?;
-                        result.push(page1);
-                        result.push(page2);
+                        result.push(*handle);
                     }
-                    repaired = true;
-                } else {
-                    // No adjacent partial
-                    result.push(*handle);
                 }
+                PartialLeaf(_) => {
+                    // continue
+                }
+                PartialInternal(_) => unreachable!(),
             }
         }
         Ok(result)
