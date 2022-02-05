@@ -532,58 +532,76 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             let original_page_number = page.get_page_number();
-            let mut children = vec![];
-            let mut found = false;
-            let mut last_valid_child = BTREE_ORDER - 1;
-            for i in 0..(BTREE_ORDER - 1) {
-                if let Some(index_key) = accessor.key(i) {
-                    let child_page = accessor.child_page(i).unwrap();
-                    if K::compare(key, index_key).is_le() && !found {
-                        found = true;
-                        let (result, child_found) = tree_delete_helper::<K>(
-                            manager.get_page(child_page),
-                            key,
-                            freed,
-                            manager,
-                        )?;
-                        if !child_found {
-                            return Ok((Subtree(original_page_number), false));
+            let (child_index, child_page_number) = accessor.child_for_key::<K>(key);
+            let (result, found) =
+                tree_delete_helper::<K>(manager.get_page(child_page_number), key, freed, manager)?;
+            if !found {
+                return Ok((Subtree(original_page_number), false));
+            }
+            let final_result = match result {
+                Subtree(new_child) => {
+                    let mut new_page = manager.allocate(InternalBuilder::required_bytes(
+                        accessor.count_children() - 1,
+                        accessor.total_key_length(),
+                    ))?;
+                    let mut builder =
+                        InternalBuilder::new(&mut new_page, accessor.count_children() - 1);
+                    copy_to_builder_and_patch(
+                        &accessor,
+                        0,
+                        accessor.count_children(),
+                        &mut builder,
+                        child_index,
+                        new_child,
+                        None,
+                    );
+
+                    drop(builder);
+                    Subtree(new_page.get_page_number())
+                }
+                PartialLeaf(partial) => {
+                    // TODO optimize out this repair call
+                    let mut children = vec![];
+                    for i in 0..accessor.count_children() {
+                        if i == child_index {
+                            children.push(PartialLeaf(partial.clone()));
+                        } else {
+                            children.push(Subtree(accessor.child_page(i).unwrap()));
                         }
-                        children.push(result);
-                    } else {
-                        children.push(Subtree(child_page));
                     }
-                } else {
-                    last_valid_child = i;
-                    break;
+                    let children = repair_children::<K>(children, manager, freed)?;
+                    if children.len() == 1 {
+                        PartialInternal(children)
+                    } else {
+                        Subtree(make_index_many_pages(&children, manager)?)
+                    }
                 }
-            }
-            let last_page = accessor.child_page(last_valid_child).unwrap();
-            if found {
-                // Already found the insertion place, so just copy
-                children.push(Subtree(last_page));
-            } else {
-                let (result, child_found) =
-                    tree_delete_helper::<K>(manager.get_page(last_page), key, freed, manager)?;
-                found = true;
-                if !child_found {
-                    return Ok((Subtree(original_page_number), false));
+                PartialInternal(partial) => {
+                    // TODO optimize out this repair call
+                    let mut children = vec![];
+                    for i in 0..accessor.count_children() {
+                        if i == child_index {
+                            children.push(PartialInternal(partial.clone()));
+                        } else {
+                            children.push(Subtree(accessor.child_page(i).unwrap()));
+                        }
+                    }
+                    let children = repair_children::<K>(children, manager, freed)?;
+                    if children.len() == 1 {
+                        PartialInternal(children)
+                    } else {
+                        Subtree(make_index_many_pages(&children, manager)?)
+                    }
                 }
-                children.push(result);
-            }
-            assert!(found);
-            assert!(children.len() > 1);
+            };
+
             unsafe {
                 if !manager.free_if_uncommitted(original_page_number)? {
                     freed.push(original_page_number);
                 }
             }
-            let children = repair_children::<K>(children, manager, freed)?;
-            if children.len() == 1 {
-                return Ok((PartialInternal(children), true));
-            }
 
-            Ok((Subtree(make_index_many_pages(&children, manager)?), true))
+            Ok((final_result, true))
         }
         _ => unreachable!(),
     }
@@ -649,12 +667,12 @@ fn copy_to_builder_and_patch<'a>(
     start_child: usize,
     end_child: usize,
     builder: &mut InternalBuilder,
-    patch_index: u8,
+    patch_index: usize,
     patch_handle: PageNumber,
     patch_extension: Option<(&[u8], PageNumber)>,
 ) {
     let mut dest = 0;
-    if patch_index as usize == start_child {
+    if patch_index == start_child {
         builder.write_first_page(patch_handle);
         if let Some((extra_key, extra_handle)) = patch_extension {
             builder.write_nth_key(extra_key, extra_handle, dest);
@@ -666,7 +684,7 @@ fn copy_to_builder_and_patch<'a>(
 
     for i in (start_child + 1)..end_child {
         if let Some(key) = accessor.key(i - 1) {
-            let handle = if i == patch_index as usize {
+            let handle = if i == patch_index {
                 patch_handle
             } else {
                 accessor.child_page(i).unwrap()
@@ -887,7 +905,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         0,
                         BTREE_ORDER,
                         &mut builder,
-                        child_index as u8,
+                        child_index,
                         page1,
                         Some((&index_key2, page2)),
                     );
@@ -1005,7 +1023,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         0,
                         BTREE_ORDER,
                         &mut builder,
-                        child_index as u8,
+                        child_index,
                         page1,
                         None,
                     );
