@@ -15,7 +15,7 @@ pub enum Error {
     LeakedWriteTransaction(&'static panic::Location<'static>),
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
-    TableAlreadyOpen(&'static panic::Location<'static>),
+    TableAlreadyOpen(String, &'static panic::Location<'static>),
     OutOfSpace,
     Io(io::Error),
     LockPoisoned(&'static panic::Location<'static>),
@@ -59,8 +59,8 @@ impl Display for Error {
             Error::LeakedWriteTransaction(location) => {
                 write!(f, "Leaked write transaction: {}", location)
             }
-            Error::TableAlreadyOpen(location) => {
-                write!(f, "Table already opened at: {}", location)
+            Error::TableAlreadyOpen(name, location) => {
+                write!(f, "Table '{}' already opened at: {}", name, location)
             }
             Error::OutOfSpace => {
                 write!(f, "Database is out of space")
