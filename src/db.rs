@@ -162,7 +162,10 @@ impl<'a> DatabaseTransaction<'a> {
         assert_ne!(name.as_ref(), FREED_TABLE);
         let key = (name.as_ref().to_vec(), TableType::Normal);
         if let Some(location) = self.open_tables.borrow().get(&key) {
-            return Err(Error::TableAlreadyOpen(location));
+            return Err(Error::TableAlreadyOpen(
+                String::from_utf8_lossy(name.as_ref()).to_string(),
+                location,
+            ));
         }
         self.open_tables
             .borrow_mut()
@@ -197,7 +200,10 @@ impl<'a> DatabaseTransaction<'a> {
         assert_ne!(name.as_ref(), FREED_TABLE);
         let key = (name.as_ref().to_vec(), TableType::Multimap);
         if let Some(location) = self.open_tables.borrow().get(&key) {
-            return Err(Error::TableAlreadyOpen(location));
+            return Err(Error::TableAlreadyOpen(
+                String::from_utf8_lossy(name.as_ref()).to_string(),
+                location,
+            ));
         }
         self.open_tables
             .borrow_mut()

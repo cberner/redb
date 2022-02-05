@@ -498,7 +498,10 @@ fn alias_table() {
     let write_txn = db.begin_write().unwrap();
     let table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
     let result: Result<Table<[u8], [u8]>, Error> = write_txn.open_table(b"x");
-    assert!(matches!(result.err().unwrap(), Error::TableAlreadyOpen(_)));
+    assert!(matches!(
+        result.err().unwrap(),
+        Error::TableAlreadyOpen(_, _)
+    ));
     drop(table);
 }
 
