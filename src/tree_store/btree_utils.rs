@@ -1025,7 +1025,7 @@ mod test {
         // One for the last table id counter, and one for the "x" -> TableDefinition entry
         let num_internal_entries = 2;
 
-        let db = unsafe { Database::open(tmpfile.path(), 16 * 1024 * 1024).unwrap() };
+        let db = unsafe { Database::create(tmpfile.path(), 16 * 1024 * 1024).unwrap() };
         let txn = db.begin_write().unwrap();
         let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 

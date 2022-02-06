@@ -17,7 +17,7 @@ fn get_vec(table: &ReadOnlyMultimapTable<[u8], [u8]>, key: &[u8]) -> Vec<Vec<u8>
 #[test]
 fn len() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
 
@@ -34,7 +34,7 @@ fn len() {
 #[test]
 fn is_empty() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
     let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
@@ -49,7 +49,7 @@ fn is_empty() {
 #[test]
 fn insert() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
     table.insert(b"hello", b"world").unwrap();
@@ -68,7 +68,7 @@ fn insert() {
 #[test]
 fn range_query() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
     for i in 0..5u8 {
@@ -105,7 +105,7 @@ fn range_query() {
 #[test]
 fn delete() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
     table.insert(b"hello", b"world").unwrap();

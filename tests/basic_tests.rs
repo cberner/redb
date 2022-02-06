@@ -5,7 +5,7 @@ use tempfile::NamedTempFile;
 #[test]
 fn len() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
     table.insert(b"hello", b"world").unwrap();
@@ -21,7 +21,7 @@ fn len() {
 #[test]
 fn multiple_tables() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"1").unwrap();
     let mut table2: Table<[u8], [u8]> = write_txn.open_table(b"2").unwrap();
@@ -42,7 +42,7 @@ fn multiple_tables() {
 #[test]
 fn is_empty() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
@@ -57,7 +57,7 @@ fn is_empty() {
 #[test]
 fn abort() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
@@ -83,7 +83,7 @@ fn abort() {
 #[test]
 fn insert_overwrite() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
     table.insert(b"hello", b"world").unwrap();
@@ -109,7 +109,7 @@ fn insert_overwrite() {
 #[test]
 fn insert_reserve() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
     let value = b"world";
@@ -126,7 +126,7 @@ fn insert_reserve() {
 #[test]
 fn delete() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
     table.insert(b"hello", b"world").unwrap();
@@ -152,7 +152,7 @@ fn delete() {
 #[test]
 fn no_dirty_reads() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
     table.insert(b"hello", b"world").unwrap();
@@ -170,7 +170,7 @@ fn no_dirty_reads() {
 #[test]
 fn read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
     table.insert(b"hello", b"world").unwrap();
@@ -209,7 +209,7 @@ fn read_isolation() {
 #[test]
 fn u64_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<u64, u64> = write_txn.open_table(b"x").unwrap();
     table.insert(&0, &1).unwrap();
@@ -223,7 +223,7 @@ fn u64_type() {
 #[test]
 fn i128_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<i128, i128> = write_txn.open_table(b"x").unwrap();
     for i in -10..=10 {
@@ -244,7 +244,7 @@ fn i128_type() {
 #[test]
 fn f32_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<u8, f32> = write_txn.open_table(b"x").unwrap();
     table.insert(&0, &0.3).unwrap();
@@ -258,7 +258,7 @@ fn f32_type() {
 #[test]
 fn owned_get_signatures() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<u32, u32> = write_txn.open_table(b"x").unwrap();
     for i in 0..10 {
@@ -291,7 +291,7 @@ fn owned_get_signatures() {
 #[test]
 fn ref_get_signatures() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
     for i in 0..10 {

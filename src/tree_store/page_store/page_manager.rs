@@ -1030,7 +1030,7 @@ mod test {
     #[test]
     fn recover_upgrade() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
         let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
         table.insert(b"hello", b"world").unwrap();
@@ -1059,7 +1059,7 @@ mod test {
         mmap.flush().unwrap();
         drop(mmap);
 
-        let db2 = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let db2 = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let read_txn = db2.begin_read().unwrap();
         let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
         assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
@@ -1068,7 +1068,7 @@ mod test {
     #[test]
     fn repair_allocator() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
         let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
         table.insert(b"hello", b"world").unwrap();
@@ -1098,7 +1098,7 @@ mod test {
             .needs_repair()
             .unwrap());
 
-        let db2 = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let db2 = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         assert_eq!(free_pages, db2.stats().unwrap().free_pages());
         let write_txn = db2.begin_write().unwrap();
         let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
