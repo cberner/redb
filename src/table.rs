@@ -39,12 +39,17 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
     }
 
     pub fn insert(&mut self, key: &K, value: &V) -> Result<(), Error> {
-        let root_page = self.storage.insert::<K>(
-            key.as_bytes().as_ref(),
-            value.as_bytes().as_ref(),
-            self.transaction_id,
-            self.table_root.get(),
-        )?;
+        // Safety: No other references to this table can exist.
+        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
+        // and we borrow &mut self.
+        let root_page = unsafe {
+            self.storage.insert::<K>(
+                key.as_bytes().as_ref(),
+                value.as_bytes().as_ref(),
+                self.transaction_id,
+                self.table_root.get(),
+            )
+        }?;
         self.table_root.set(Some(root_page));
         Ok(())
     }
@@ -56,22 +61,32 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
         key: &K,
         value_length: usize,
     ) -> Result<AccessGuardMut, Error> {
-        let (root_page, guard) = self.storage.insert_reserve::<K>(
-            key.as_bytes().as_ref(),
-            value_length,
-            self.transaction_id,
-            self.table_root.get(),
-        )?;
+        // Safety: No other references to this table can exist.
+        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
+        // and we borrow &mut self.
+        let (root_page, guard) = unsafe {
+            self.storage.insert_reserve::<K>(
+                key.as_bytes().as_ref(),
+                value_length,
+                self.transaction_id,
+                self.table_root.get(),
+            )
+        }?;
         self.table_root.set(Some(root_page));
         Ok(guard)
     }
 
     pub fn remove(&mut self, key: &K) -> Result<bool, Error> {
-        let (root_page, found) = self.storage.remove::<K>(
-            key.as_bytes().as_ref(),
-            self.transaction_id,
-            self.table_root.get(),
-        )?;
+        // Safety: No other references to this table can exist.
+        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
+        // and we borrow &mut self.
+        let (root_page, found) = unsafe {
+            self.storage.remove::<K>(
+                key.as_bytes().as_ref(),
+                self.transaction_id,
+                self.table_root.get(),
+            )
+        }?;
         self.table_root.set(root_page);
         Ok(found)
     }

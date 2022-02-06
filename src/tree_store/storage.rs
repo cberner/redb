@@ -222,7 +222,8 @@ impl Storage {
             table_root,
             table_type,
         };
-        self.insert::<[u8]>(name, &definition.to_bytes(), transaction_id, master_root)
+        // Safety: References into the master table are never returned to the user
+        unsafe { self.insert::<[u8]>(name, &definition.to_bytes(), transaction_id, master_root) }
     }
 
     // root_page: the root of the master table
@@ -265,7 +266,9 @@ impl Storage {
                 }
             }
 
-            let (new_root, found) = self.remove::<[u8]>(name, transaction_id, root_page)?;
+            // Safety: References into the master table are never returned to the user
+            let (new_root, found) =
+                unsafe { self.remove::<[u8]>(name, transaction_id, root_page)? };
             return Ok((new_root, found));
         }
 
@@ -289,13 +292,17 @@ impl Storage {
             table_root: None,
             table_type,
         };
-        let new_root =
-            self.insert::<[u8]>(name, &definition.to_bytes(), transaction_id, root_page)?;
+        // Safety: References into the master table are never returned to the user
+        let new_root = unsafe {
+            self.insert::<[u8]>(name, &definition.to_bytes(), transaction_id, root_page)?
+        };
         Ok((definition, new_root))
     }
 
     // Returns the new root page number
-    pub(in crate) fn insert<K: RedbKey + ?Sized>(
+    // Safety: caller must ensure that no references to uncommitted data in this transaction exist
+    // TODO: this method could be made safe, if the transaction_id was not copy and was borrowed mut
+    pub(in crate) unsafe fn insert<K: RedbKey + ?Sized>(
         &self,
         key: &[u8],
         value: &[u8],
@@ -317,7 +324,9 @@ impl Storage {
     }
 
     // Returns the new root page number, and accessor for writing the value
-    pub(in crate) fn insert_reserve<K: RedbKey + ?Sized>(
+    // Safety: caller must ensure that no references to uncommitted data in this transaction exist
+    // TODO: this method could be made safe, if the transaction_id was not copy and was borrowed mut
+    pub(in crate) unsafe fn insert_reserve<K: RedbKey + ?Sized>(
         &self,
         key: &[u8],
         value_len: usize,
@@ -451,16 +460,20 @@ impl Storage {
 
         // Remove all the old transactions. Note: this may create new pages that need to be freed
         for key in to_remove {
+            // Safety: all references to the freed table above have already been dropped
             let (new_root, _) =
-                self.remove::<[u8]>(&key, transaction_id, freed_table.table_root)?;
+                unsafe { self.remove::<[u8]>(&key, transaction_id, freed_table.table_root)? };
             freed_table.table_root = new_root;
         }
-        master_root = Some(self.insert::<[u8]>(
-            FREED_TABLE,
-            &freed_table.to_bytes(),
-            transaction_id,
-            master_root,
-        )?);
+        // Safety: References into the master table are never returned to the user
+        unsafe {
+            master_root = Some(self.insert::<[u8]>(
+                FREED_TABLE,
+                &freed_table.to_bytes(),
+                transaction_id,
+                master_root,
+            )?);
+        }
 
         Ok(master_root)
     }
@@ -483,23 +496,31 @@ impl Storage {
             let mut key = [0u8; 24];
             key[0..size_of::<u128>()].copy_from_slice(&transaction_id.to_be_bytes());
             key[size_of::<u128>()..].copy_from_slice(&pagination_counter.to_be_bytes());
-            let (r, mut access_guard) = self.insert_reserve::<[u8]>(
-                key.as_ref(),
-                buffer_size,
-                transaction_id,
-                freed_table.table_root,
-            )?;
+            // Safety: The freed table is only accessed from the writer, so only this function
+            // is using it. The only reference retrieved, access_guard, is dropped before the next call
+            // to this method
+            let (r, mut access_guard) = unsafe {
+                self.insert_reserve::<[u8]>(
+                    key.as_ref(),
+                    buffer_size,
+                    transaction_id,
+                    freed_table.table_root,
+                )?
+            };
             freed_table.table_root = Some(r);
 
             if self.pending_freed_pages.borrow().len() <= chunk_size {
                 // Update the master root, only on the last loop iteration (this may cause another
                 // iteration, but that's ok since it would have very few pages to process)
-                master_root = Some(self.insert::<[u8]>(
-                    FREED_TABLE,
-                    &freed_table.to_bytes(),
-                    transaction_id,
-                    master_root,
-                )?);
+                // Safety: References into the master table are never returned to the user
+                unsafe {
+                    master_root = Some(self.insert::<[u8]>(
+                        FREED_TABLE,
+                        &freed_table.to_bytes(),
+                        transaction_id,
+                        master_root,
+                    )?);
+                }
             }
 
             let len = self.pending_freed_pages.borrow().len();
@@ -514,6 +535,7 @@ impl Storage {
                 access_guard.as_mut()[(i + 1) * 8..(i + 2) * 8]
                     .copy_from_slice(&page.to_be_bytes());
             }
+            drop(access_guard);
 
             pagination_counter += 1;
         }
@@ -655,7 +677,9 @@ impl Storage {
     }
 
     // Returns the new root page, and a bool indicating whether the entry existed
-    pub(in crate) fn remove<K: RedbKey + ?Sized>(
+    // Safety: caller must ensure that no references to uncommitted data in this transaction exist
+    // TODO: this method could be made safe, if the transaction_id was not copy and was borrowed mut
+    pub(in crate) unsafe fn remove<K: RedbKey + ?Sized>(
         &self,
         key: &[u8],
         transaction_id: u128,

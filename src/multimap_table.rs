@@ -328,23 +328,33 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
 
     pub fn insert(&mut self, key: &K, value: &V) -> Result<(), Error> {
         let kv = make_serialized_kv(key, value);
-        let root_page = self.storage.insert::<MultimapKVPair<K, V>>(
-            &kv,
-            b"",
-            self.transaction_id,
-            self.table_root.get(),
-        )?;
+        // Safety: No other references to this table can exist.
+        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
+        // and we borrow &mut self.
+        let root_page = unsafe {
+            self.storage.insert::<MultimapKVPair<K, V>>(
+                &kv,
+                b"",
+                self.transaction_id,
+                self.table_root.get(),
+            )
+        }?;
         self.table_root.set(Some(root_page));
         Ok(())
     }
 
     pub fn remove(&mut self, key: &K, value: &V) -> Result<bool, Error> {
         let kv = make_serialized_kv(key, value);
-        let (root_page, found) = self.storage.remove::<MultimapKVPair<K, V>>(
-            &kv,
-            self.transaction_id,
-            self.table_root.get(),
-        )?;
+        // Safety: No other references to this table can exist.
+        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
+        // and we borrow &mut self.
+        let (root_page, found) = unsafe {
+            self.storage.remove::<MultimapKVPair<K, V>>(
+                &kv,
+                self.transaction_id,
+                self.table_root.get(),
+            )?
+        };
         self.table_root.set(root_page);
         Ok(found)
     }
@@ -354,11 +364,16 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
         let key_only = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyOnly);
         let mut any_found = false;
         loop {
-            let (new_root, found) = self.storage.remove::<MultimapKVPair<K, V>>(
-                &key_only,
-                self.transaction_id,
-                self.table_root.get(),
-            )?;
+            // Safety: No other references to this table can exist.
+            // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
+            // and we borrow &mut self.
+            let (new_root, found) = unsafe {
+                self.storage.remove::<MultimapKVPair<K, V>>(
+                    &key_only,
+                    self.transaction_id,
+                    self.table_root.get(),
+                )?
+            };
             if !found {
                 break;
             }
