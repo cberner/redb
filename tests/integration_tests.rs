@@ -269,7 +269,7 @@ fn multi_page_kv() {
     let db = unsafe {
         DatabaseBuilder::new()
             .set_page_size(page_size)
-            .open(tmpfile.path(), db_size)
+            .create(tmpfile.path(), db_size)
             .unwrap()
     };
     let txn = db.begin_write().unwrap();
