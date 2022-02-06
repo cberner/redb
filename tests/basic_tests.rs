@@ -1,4 +1,4 @@
-use redb::{Database, Error, RangeIter, ReadOnlyTable, ReadableTable, Table};
+use redb::{Database, Error, MultimapTable, RangeIter, ReadOnlyTable, ReadableTable, Table};
 use std::ops::{Range, RangeFull};
 use tempfile::NamedTempFile;
 
@@ -54,6 +54,30 @@ fn multiple_tables() {
     assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
     assert_eq!(table2.len().unwrap(), 1);
     assert_eq!(b"world2", table2.get(b"hello").unwrap().unwrap().to_value());
+}
+
+#[test]
+fn list_tables() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let write_txn = db.begin_write().unwrap();
+    let _: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
+    let _: Table<[u8], [u8]> = write_txn.open_table("y").unwrap();
+    let _: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table("mx").unwrap();
+    let _: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table("my").unwrap();
+
+    let tables: Vec<String> = write_txn.list_tables().unwrap().collect();
+    let multimap_tables: Vec<String> = write_txn.list_multimap_tables().unwrap().collect();
+    assert_eq!(tables, &["x", "y"]);
+    assert_eq!(multimap_tables, &["mx", "my"]);
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let tables: Vec<String> = read_txn.list_tables().unwrap().collect();
+    let multimap_tables: Vec<String> = read_txn.list_multimap_tables().unwrap().collect();
+    assert_eq!(tables, &["x", "y"]);
+    assert_eq!(multimap_tables, &["mx", "my"]);
 }
 
 #[test]

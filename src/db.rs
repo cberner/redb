@@ -275,6 +275,16 @@ impl<'a> DatabaseTransaction<'a> {
         Ok(found)
     }
 
+    pub fn list_tables(&self) -> Result<impl Iterator<Item = String> + '_, Error> {
+        self.storage
+            .list_tables(TableType::Normal, self.root_page.get())
+    }
+
+    pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String> + '_, Error> {
+        self.storage
+            .list_tables(TableType::Multimap, self.root_page.get())
+    }
+
     pub fn commit(self) -> Result<(), Error> {
         self.commit_helper(false)
     }
@@ -392,6 +402,15 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
             definition.get_root(),
             self.storage,
         ))
+    }
+
+    pub fn list_tables(&self) -> Result<impl Iterator<Item = String> + '_, Error> {
+        self.storage.list_tables(TableType::Normal, self.root_page)
+    }
+
+    pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String> + '_, Error> {
+        self.storage
+            .list_tables(TableType::Multimap, self.root_page)
     }
 }
 

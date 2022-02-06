@@ -117,6 +117,27 @@ impl TableDefinition {
     }
 }
 
+pub struct TableNameIter<'a> {
+    inner: BtreeRangeIter<'a, RangeFull, &'static str, str, [u8]>,
+    table_type: TableType,
+}
+
+impl<'a> Iterator for TableNameIter<'a> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(entry) = self.inner.next() {
+            if str::from_bytes(entry.key()) == FREED_TABLE {
+                continue;
+            }
+            if TableDefinition::from_bytes(entry.value()).table_type == self.table_type {
+                return Some(str::from_bytes(entry.key()).to_string());
+            }
+        }
+        None
+    }
+}
+
 pub(in crate) struct Storage {
     mem: TransactionalMemory,
     next_transaction_id: Cell<u128>,
@@ -232,6 +253,19 @@ impl Storage {
                 master_root,
             )
         }
+    }
+
+    // root_page: the root of the master table
+    pub(in crate) fn list_tables(
+        &self,
+        table_type: TableType,
+        master_root_page: Option<PageNumber>,
+    ) -> Result<TableNameIter, Error> {
+        let iter = self.get_range(.., master_root_page)?;
+        Ok(TableNameIter {
+            inner: iter,
+            table_type,
+        })
     }
 
     // root_page: the root of the master table
