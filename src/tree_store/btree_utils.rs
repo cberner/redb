@@ -101,7 +101,8 @@ pub(in crate) fn print_tree<'a>(page: PageImpl<'a>, manager: &'a TransactionalMe
 }
 
 // Returns the new root, bool indicating if the key existed, and a list of freed pages
-pub(in crate) fn tree_delete<'a, K: RedbKey + ?Sized>(
+// Safety: see tree_delete_helper()
+pub(in crate) unsafe fn tree_delete<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
     manager: &'a TransactionalMemory,
@@ -386,7 +387,9 @@ fn max_key(page: PageImpl, manager: &TransactionalMemory) -> Vec<u8> {
 
 // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
 // If key is not found, guaranteed not to modify the tree
-fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
+//
+// Safety: caller must ensure that no references to uncommitted pages in this table exist
+unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
     freed: &mut Vec<PageNumber>,
@@ -409,17 +412,8 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     let entry = accessor.entry(i).unwrap();
                     partial.push((entry.key().to_vec(), entry.value().to_vec()));
                 }
-                // Safety: No other references to this table can exist.
-                // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-                // and all mutation method (e.g. insert() & remove()) borrow the Table object &mut self.
-                // open_table() & delete_table() which modify the master table, have no readers they
-                // can conflict with
-                // TODO: this method should be unsafe, with the caller expected to uphold the above
-                // guarantees
-                unsafe {
-                    if !manager.free_if_uncommitted(page.get_page_number())? {
-                        freed.push(page.get_page_number());
-                    }
+                if !manager.free_if_uncommitted(page.get_page_number())? {
+                    freed.push(page.get_page_number());
                 }
                 Ok((PartialLeaf(partial), true))
             } else {
@@ -441,10 +435,8 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     builder.append(entry.key(), entry.value());
                 }
                 drop(builder);
-                unsafe {
-                    if !manager.free_if_uncommitted(page.get_page_number())? {
-                        freed.push(page.get_page_number());
-                    }
+                if !manager.free_if_uncommitted(page.get_page_number())? {
+                    freed.push(page.get_page_number());
                 }
                 Ok((Subtree(new_page.get_page_number()), true))
             }
@@ -465,9 +457,9 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                         return Ok((Subtree(original_page_number), true));
                     } else if manager.uncommitted(original_page_number) {
                         drop(page);
-                        // Safety: Since the page is uncommitted, no other transactions could have it open
-                        // and we just dropped our reference to it, on the line above
-                        let mut mutpage = unsafe { manager.get_page_mut(original_page_number) };
+                        // Safety: Caller guarantees there are no references to uncommitted pages,
+                        // and we just dropped our reference to it on the line above
+                        let mut mutpage = manager.get_page_mut(original_page_number);
                         let mut mutator = InternalMutator::new(&mut mutpage);
                         mutator.write_child_page(child_index, new_child);
                         return Ok((Subtree(original_page_number), true));
@@ -552,10 +544,8 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                 }
             };
 
-            unsafe {
-                if !manager.free_if_uncommitted(original_page_number)? {
-                    freed.push(original_page_number);
-                }
+            if !manager.free_if_uncommitted(original_page_number)? {
+                freed.push(original_page_number);
             }
 
             Ok((final_result, true))
@@ -599,7 +589,8 @@ pub(in crate) fn make_index(
 
 // Returns the page number of the sub-tree into which the key was inserted,
 // and the guard which can be used to access the value, and a list of freed pages
-pub(in crate) fn tree_insert<'a, K: RedbKey + ?Sized>(
+// Safety: see tree_insert_helper
+pub(in crate) unsafe fn tree_insert<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
     value: &[u8],
@@ -661,7 +652,8 @@ fn copy_to_builder_and_patch<'a>(
 }
 
 #[allow(clippy::type_complexity)]
-fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
+// Safety: caller must ensure that no references to uncommitted pages in this table exist
+unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
     value: &[u8],
@@ -704,17 +696,8 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                 let page_number = page.get_page_number();
                 drop(page);
-                // Safety: No other references to this table can exist.
-                // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-                // and all mutation method (e.g. insert() & remove()) borrow the Table object &mut self.
-                // open_table() & delete_table() which modify the master table, have no readers they
-                // can conflict with
-                // TODO: this method should be unsafe, with the caller expected to uphold the above
-                // guarantees
-                unsafe {
-                    if !manager.free_if_uncommitted(page_number)? {
-                        freed.push(page_number);
-                    }
+                if !manager.free_if_uncommitted(page_number)? {
+                    freed.push(page_number);
                 }
 
                 let new_page_number = new_page.get_page_number();
@@ -778,10 +761,8 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                     let page_number = page.get_page_number();
                     drop(page);
-                    unsafe {
-                        if !manager.free_if_uncommitted(page_number)? {
-                            freed.push(page_number);
-                        }
+                    if !manager.free_if_uncommitted(page_number)? {
+                        freed.push(page_number);
                     }
 
                     let new_page_number = new_page1.get_page_number();
@@ -825,10 +806,8 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                     let page_number = page.get_page_number();
                     drop(page);
-                    unsafe {
-                        if !manager.free_if_uncommitted(page_number)? {
-                            freed.push(page_number);
-                        }
+                    if !manager.free_if_uncommitted(page_number)? {
+                        freed.push(page_number);
                     }
 
                     let new_page_number = new_page.get_page_number();
@@ -872,10 +851,8 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     drop(page);
                     // Safety: If the page is uncommitted, no other transactions can have references to it,
                     // and we just dropped ours on the line above
-                    unsafe {
-                        if !manager.free_if_uncommitted(page_number)? {
-                            freed.push(page_number);
-                        }
+                    if !manager.free_if_uncommitted(page_number)? {
+                        freed.push(page_number);
                     }
                     (new_page.get_page_number(), None, guard)
                 } else {
@@ -943,10 +920,8 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     drop(page);
                     // Safety: If the page is uncommitted, no other transactions can have references to it,
                     // and we just dropped ours on the line above
-                    unsafe {
-                        if !manager.free_if_uncommitted(page_number)? {
-                            freed.push(page_number);
-                        }
+                    if !manager.free_if_uncommitted(page_number)? {
+                        freed.push(page_number);
                     }
                     (
                         new_page.get_page_number(),
@@ -964,7 +939,7 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     drop(page);
                     // Safety: Since the page is uncommitted, no other transactions could have it open
                     // and we just dropped our reference to it, on the line above
-                    let mut mutpage = unsafe { manager.get_page_mut(page_number) };
+                    let mut mutpage = manager.get_page_mut(page_number);
                     let mut mutator = InternalMutator::new(&mut mutpage);
                     mutator.write_child_page(child_index, page1);
                     (mutpage.get_page_number(), None, guard)
@@ -989,12 +964,8 @@ fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     // Free the original page, since we've replaced it
                     let page_number = page.get_page_number();
                     drop(page);
-                    // Safety: If the page is uncommitted, no other transactions can have references to it,
-                    // and we just dropped ours on the line above
-                    unsafe {
-                        if !manager.free_if_uncommitted(page_number)? {
-                            freed.push(page_number);
-                        }
+                    if !manager.free_if_uncommitted(page_number)? {
+                        freed.push(page_number);
                     }
                     (new_page.get_page_number(), None, guard)
                 }
