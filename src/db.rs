@@ -150,9 +150,8 @@ pub struct DatabaseTransaction<'a> {
     storage: &'a Storage,
     transaction_id: u128,
     root_page: Cell<Option<PageNumber>>,
-    pending_table_root_changes:
-        RefCell<HashMap<(Vec<u8>, TableType), Rc<Cell<Option<PageNumber>>>>>,
-    open_tables: RefCell<HashMap<(Vec<u8>, TableType), &'static panic::Location<'static>>>,
+    pending_table_root_changes: RefCell<HashMap<(String, TableType), Rc<Cell<Option<PageNumber>>>>>,
+    open_tables: RefCell<HashMap<(String, TableType), &'static panic::Location<'static>>>,
     completed: AtomicBool,
 }
 
@@ -175,16 +174,13 @@ impl<'a> DatabaseTransaction<'a> {
     /// The table will be created if it does not exist
     pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
-        name: impl AsRef<[u8]>,
+        name: impl AsRef<str>,
     ) -> Result<Table<'a, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
         assert_ne!(name.as_ref(), FREED_TABLE);
-        let key = (name.as_ref().to_vec(), TableType::Normal);
+        let key = (name.as_ref().to_string(), TableType::Normal);
         if let Some(location) = self.open_tables.borrow().get(&key) {
-            return Err(Error::TableAlreadyOpen(
-                String::from_utf8_lossy(name.as_ref()).to_string(),
-                location,
-            ));
+            return Err(Error::TableAlreadyOpen(name.as_ref().to_string(), location));
         }
         self.open_tables
             .borrow_mut()
@@ -213,16 +209,13 @@ impl<'a> DatabaseTransaction<'a> {
     /// The table will be created if it does not exist
     pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
-        name: impl AsRef<[u8]>,
+        name: impl AsRef<str>,
     ) -> Result<MultimapTable<'a, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
         assert_ne!(name.as_ref(), FREED_TABLE);
-        let key = (name.as_ref().to_vec(), TableType::Multimap);
+        let key = (name.as_ref().to_string(), TableType::Multimap);
         if let Some(location) = self.open_tables.borrow().get(&key) {
-            return Err(Error::TableAlreadyOpen(
-                String::from_utf8_lossy(name.as_ref()).to_string(),
-                location,
-            ));
+            return Err(Error::TableAlreadyOpen(name.as_ref().to_string(), location));
         }
         self.open_tables
             .borrow_mut()
@@ -249,7 +242,7 @@ impl<'a> DatabaseTransaction<'a> {
     /// Delete the given table
     ///
     /// Returns a bool indicating whether the table existed
-    pub fn delete_table(&self, name: impl AsRef<[u8]>) -> Result<bool, Error> {
+    pub fn delete_table(&self, name: impl AsRef<str>) -> Result<bool, Error> {
         assert!(!name.as_ref().is_empty());
         let original_root = self.root_page.get();
         let (root, found) = self.storage.delete_table(
@@ -267,7 +260,7 @@ impl<'a> DatabaseTransaction<'a> {
     /// Delete the given table
     ///
     /// Returns a bool indicating whether the table existed
-    pub fn delete_multimap_table(&self, name: impl AsRef<[u8]>) -> Result<bool, Error> {
+    pub fn delete_multimap_table(&self, name: impl AsRef<str>) -> Result<bool, Error> {
         assert!(!name.as_ref().is_empty());
         let original_root = self.root_page.get();
         let (root, found) = self.storage.delete_table(
@@ -367,7 +360,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
     /// Open the given table
     pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
-        name: impl AsRef<[u8]>,
+        name: impl AsRef<str>,
     ) -> Result<ReadOnlyTable<'a, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
         assert_ne!(name.as_ref(), FREED_TABLE);
@@ -375,10 +368,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
             .storage
             .get_table(name.as_ref(), TableType::Normal, self.root_page)?
             .ok_or_else(|| {
-                Error::DoesNotExist(format!(
-                    "Table '{}' does not exist",
-                    String::from_utf8_lossy(name.as_ref())
-                ))
+                Error::DoesNotExist(format!("Table '{}' does not exist", name.as_ref()))
             })?;
 
         Ok(ReadOnlyTable::new(definition.get_root(), self.storage))
@@ -387,7 +377,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
     /// Open the given table
     pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
-        name: impl AsRef<[u8]>,
+        name: impl AsRef<str>,
     ) -> Result<ReadOnlyMultimapTable<'a, K, V>, Error> {
         assert!(!name.as_ref().is_empty());
         assert_ne!(name.as_ref(), FREED_TABLE);
@@ -395,10 +385,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
             .storage
             .get_table(name.as_ref(), TableType::Multimap, self.root_page)?
             .ok_or_else(|| {
-                Error::DoesNotExist(format!(
-                    "Table '{}' does not exist",
-                    String::from_utf8_lossy(name.as_ref())
-                ))
+                Error::DoesNotExist(format!("Table '{}' does not exist", name.as_ref()))
             })?;
 
         Ok(ReadOnlyMultimapTable::new(
@@ -425,7 +412,7 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+        let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
         table.insert(b"hello", b"world").unwrap();
         let first_txn_id = write_txn.transaction_id;
         write_txn.commit().unwrap();

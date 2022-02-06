@@ -22,7 +22,7 @@ use std::panic;
 
 // The table of freed pages by transaction. (transaction id, pagination counter) -> binary.
 // The binary blob is a length-prefixed array of big endian PageNumber
-pub(crate) const FREED_TABLE: &[u8] = b"$$internal$$freed";
+pub(crate) const FREED_TABLE: &str = "$$internal$$freed";
 
 #[derive(Debug)]
 pub struct DbStats {
@@ -164,7 +164,8 @@ impl Storage {
                 table_root: None,
                 table_type: TableType::Normal,
             };
-            let (new_root, _) = make_mut_single_leaf(FREED_TABLE, &freed_table.to_bytes(), &mem)?;
+            let (new_root, _) =
+                make_mut_single_leaf(FREED_TABLE.as_bytes(), &freed_table.to_bytes(), &mem)?;
             mem.set_secondary_root_page(new_root)?;
             mem.commit(next_transaction_id)?;
             next_transaction_id += 1;
@@ -212,7 +213,7 @@ impl Storage {
 
     pub(in crate) fn update_table_root(
         &self,
-        name: &[u8],
+        name: &str,
         table_type: TableType,
         table_root: Option<PageNumber>,
         transaction_id: u128,
@@ -223,17 +224,24 @@ impl Storage {
             table_type,
         };
         // Safety: References into the master table are never returned to the user
-        unsafe { self.insert::<[u8]>(name, &definition.to_bytes(), transaction_id, master_root) }
+        unsafe {
+            self.insert::<str>(
+                name.as_bytes(),
+                &definition.to_bytes(),
+                transaction_id,
+                master_root,
+            )
+        }
     }
 
     // root_page: the root of the master table
     pub(in crate) fn get_table(
         &self,
-        name: &[u8],
+        name: &str,
         table_type: TableType,
         root_page: Option<PageNumber>,
     ) -> Result<Option<TableDefinition>, Error> {
-        if let Some(found) = self.get::<[u8], [u8]>(name, root_page)? {
+        if let Some(found) = self.get::<str, [u8]>(name.as_bytes(), root_page)? {
             let definition = TableDefinition::from_bytes(found.to_value());
             if definition.get_type() != table_type {
                 return Err(Error::TableTypeMismatch(format!(
@@ -251,7 +259,7 @@ impl Storage {
     // root_page: the root of the master table
     pub(in crate) fn delete_table(
         &self,
-        name: &[u8],
+        name: &str,
         table_type: TableType,
         transaction_id: u128,
         root_page: Option<PageNumber>,
@@ -268,7 +276,7 @@ impl Storage {
 
             // Safety: References into the master table are never returned to the user
             let (new_root, found) =
-                unsafe { self.remove::<[u8]>(name, transaction_id, root_page)? };
+                unsafe { self.remove::<str>(name.as_bytes(), transaction_id, root_page)? };
             return Ok((new_root, found));
         }
 
@@ -279,7 +287,7 @@ impl Storage {
     // root_page: the root of the master table
     pub(in crate) fn get_or_create_table(
         &self,
-        name: &[u8],
+        name: &str,
         table_type: TableType,
         transaction_id: u128,
         root_page: Option<PageNumber>,
@@ -294,7 +302,12 @@ impl Storage {
         };
         // Safety: References into the master table are never returned to the user
         let new_root = unsafe {
-            self.insert::<[u8]>(name, &definition.to_bytes(), transaction_id, root_page)?
+            self.insert::<str>(
+                name.as_bytes(),
+                &definition.to_bytes(),
+                transaction_id,
+                root_page,
+            )?
         };
         Ok((definition, new_root))
     }
@@ -467,8 +480,8 @@ impl Storage {
         }
         // Safety: References into the master table are never returned to the user
         unsafe {
-            master_root = Some(self.insert::<[u8]>(
-                FREED_TABLE,
+            master_root = Some(self.insert::<str>(
+                FREED_TABLE.as_bytes(),
                 &freed_table.to_bytes(),
                 transaction_id,
                 master_root,
@@ -514,8 +527,8 @@ impl Storage {
                 // iteration, but that's ok since it would have very few pages to process)
                 // Safety: References into the master table are never returned to the user
                 unsafe {
-                    master_root = Some(self.insert::<[u8]>(
-                        FREED_TABLE,
+                    master_root = Some(self.insert::<str>(
+                        FREED_TABLE.as_bytes(),
                         &freed_table.to_bytes(),
                         transaction_id,
                         master_root,

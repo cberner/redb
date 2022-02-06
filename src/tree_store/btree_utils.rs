@@ -1027,7 +1027,7 @@ mod test {
 
         let db = unsafe { Database::create(tmpfile.path(), 16 * 1024 * 1024).unwrap() };
         let txn = db.begin_write().unwrap();
-        let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
+        let mut table: Table<[u8], [u8]> = txn.open_table("x").unwrap();
 
         let elements = (BTREE_ORDER / 2).pow(2) as usize - num_internal_entries;
 
@@ -1048,7 +1048,7 @@ mod test {
         let reduce_to = BTREE_ORDER / 2 - num_internal_entries;
 
         let txn = db.begin_write().unwrap();
-        let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
+        let mut table: Table<[u8], [u8]> = txn.open_table("x").unwrap();
         for i in 0..(elements - reduce_to) {
             table.remove(&i.to_be_bytes()).unwrap();
         }

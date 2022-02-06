@@ -19,7 +19,7 @@ fn len() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table("x").unwrap();
 
     table.insert(b"hello", b"world").unwrap();
     table.insert(b"hello", b"world2").unwrap();
@@ -27,7 +27,7 @@ fn len() {
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table("x").unwrap();
     assert_eq!(table.len().unwrap(), 3);
 }
 
@@ -37,12 +37,12 @@ fn is_empty() {
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
-    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table("x").unwrap();
     table.insert(b"hello", b"world").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table("x").unwrap();
     assert!(!table.is_empty().unwrap());
 }
 
@@ -51,13 +51,13 @@ fn insert() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table("x").unwrap();
     table.insert(b"hello", b"world").unwrap();
     table.insert(b"hello", b"world2").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table("x").unwrap();
     assert_eq!(
         vec![b"world".to_vec(), b"world2".to_vec()],
         get_vec(&table, b"hello")
@@ -70,7 +70,7 @@ fn range_query() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table("x").unwrap();
     for i in 0..5u8 {
         let value = vec![i];
         table.insert(b"0", &value).unwrap();
@@ -86,7 +86,7 @@ fn range_query() {
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table("x").unwrap();
     let start = b"0".as_ref();
     let end = b"1".as_ref();
     let mut iter = table.get_range(start..=end).unwrap();
@@ -107,13 +107,13 @@ fn delete() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table("x").unwrap();
     table.insert(b"hello", b"world").unwrap();
     table.insert(b"hello", b"world2").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table("x").unwrap();
     assert_eq!(
         vec![b"world".to_vec(), b"world2".to_vec()],
         get_vec(&table, b"hello")
@@ -121,22 +121,22 @@ fn delete() {
     assert_eq!(table.len().unwrap(), 2);
 
     let write_txn = db.begin_write().unwrap();
-    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table("x").unwrap();
     table.remove(b"hello", b"world2").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table("x").unwrap();
     assert_eq!(vec![b"world".to_vec()], get_vec(&table, b"hello"));
     assert_eq!(table.len().unwrap(), 1);
 
     let write_txn = db.begin_write().unwrap();
-    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table(b"x").unwrap();
+    let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table("x").unwrap();
     table.remove_all(b"hello").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table(b"x").unwrap();
+    let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table("x").unwrap();
     assert!(table.is_empty().unwrap());
     let empty: Vec<Vec<u8>> = vec![];
     assert_eq!(empty, get_vec(&table, b"hello"));
