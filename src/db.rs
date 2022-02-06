@@ -29,7 +29,7 @@ impl Database {
     /// # Safety
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
-    pub unsafe fn open(path: impl AsRef<Path>, db_size: usize) -> Result<Database, Error> {
+    pub unsafe fn create(path: impl AsRef<Path>, db_size: usize) -> Result<Database, Error> {
         let file = if path.as_ref().exists() && File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = get_db_size(path.as_ref())?;
             if existing_size != db_size {
@@ -62,7 +62,7 @@ impl Database {
     pub unsafe fn resize(path: impl AsRef<Path>, new_size: usize) -> Result<(), Error> {
         expand_db_size(path.as_ref(), new_size)?;
         // Open the database to rebuild the allocator state
-        Self::open(path, new_size)?;
+        Self::create(path, new_size)?;
 
         Ok(())
     }
@@ -404,7 +404,7 @@ mod test {
     #[test]
     fn transaction_id_persistence() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
         let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
         table.insert(b"hello", b"world").unwrap();
@@ -412,7 +412,7 @@ mod test {
         write_txn.commit().unwrap();
         drop(db);
 
-        let db2 = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let db2 = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db2.begin_write().unwrap();
         assert!(write_txn.transaction_id > first_txn_id);
     }

@@ -186,7 +186,7 @@ fn main() {
     }
     {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { redb::Database::open(tmpfile.path(), 4096 * 1024 * 1024).unwrap() };
+        let db = unsafe { redb::Database::create(tmpfile.path(), 4096 * 1024 * 1024).unwrap() };
         let table = RedbBenchDatabase::new(&db);
         benchmark(table);
     }

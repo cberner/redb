@@ -27,7 +27,7 @@ fn mixed_durable_commit() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 129 * 4096;
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
     let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
 
@@ -43,7 +43,7 @@ fn non_durable_commit_persistence() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 16 * 1024 * 1024;
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
@@ -59,7 +59,7 @@ fn non_durable_commit_persistence() {
 
     // Check that cleanly closing the database persists the non-durable commit
     drop(db);
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
@@ -80,7 +80,7 @@ fn persistence() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 16 * 1024 * 1024;
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
@@ -95,7 +95,7 @@ fn persistence() {
     txn.commit().unwrap();
 
     drop(db);
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
@@ -116,10 +116,10 @@ fn change_db_size() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 16 * 1024 * 1024;
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     drop(db);
 
-    let db = unsafe { Database::open(tmpfile.path(), db_size * 2) };
+    let db = unsafe { Database::create(tmpfile.path(), db_size * 2) };
     assert!(matches!(db.err().unwrap(), Error::DbSizeMismatch { .. }));
 }
 
@@ -128,7 +128,7 @@ fn resize_db() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 16 * 1024 * 1024;
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let mut i = 0u64;
     loop {
         let txn = db.begin_write().unwrap();
@@ -172,7 +172,7 @@ fn resize_db() {
         Database::resize(tmpfile.path(), db_size * 2).unwrap();
     }
 
-    let db = unsafe { Database::open(tmpfile.path(), db_size * 2).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size * 2).unwrap() };
     let txn = db.begin_write().unwrap();
     let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
     assert!(table.insert(&i, &i).is_ok());
@@ -184,7 +184,7 @@ fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 8 * 1024 * 1024;
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
     let _table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
     let _table: Table<[u8], [u8]> = txn.open_table(b"y").unwrap();
@@ -234,7 +234,7 @@ fn large_keys() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 1024_1024;
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 
@@ -311,7 +311,7 @@ fn regression() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 1024 * 1024;
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
     let mut table: Table<u64, u64> = txn.open_table(b"x").unwrap();
 
@@ -360,7 +360,7 @@ fn regression2() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 1024 * 1024;
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let tx = db.begin_write().unwrap();
     let _c: Table<[u8], [u8]> = tx.open_table("c").unwrap();
     let b: Table<[u8], [u8]> = tx.open_table("b").unwrap();
@@ -376,7 +376,7 @@ fn regression3() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 1024 * 1024;
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let tx = db.begin_write().unwrap();
     let mut t: Table<[u8], [u8]> = tx.open_table("x").unwrap();
     let big_value = vec![0u8; 1000];
@@ -395,7 +395,7 @@ fn regression3() {
 #[test]
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
 
@@ -441,7 +441,7 @@ fn non_durable_read_isolation() {
 #[test]
 fn range_query() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
     for i in 0..10u8 {
@@ -466,7 +466,7 @@ fn range_query() {
 #[test]
 fn range_query_reversed() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
     for i in 0..10u8 {
@@ -493,7 +493,7 @@ fn range_query_reversed() {
 #[test]
 fn alias_table() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
     let table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
@@ -508,7 +508,7 @@ fn alias_table() {
 #[test]
 fn delete_table() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
@@ -535,7 +535,7 @@ fn delete_table() {
 #[test]
 fn leaked_write() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
     drop(write_txn);
@@ -552,7 +552,7 @@ fn non_page_size_multiple() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 1024 * 1024 + 1;
-    let db = unsafe { Database::open(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = txn.open_table(b"x").unwrap();
 

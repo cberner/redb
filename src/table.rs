@@ -274,7 +274,7 @@ mod test {
         }
 
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::open(tmpfile.path(), 1024 * 1024).unwrap() };
+        let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
         let mut table: Table<ReverseKey, [u8]> = write_txn.open_table(b"x").unwrap();
         for i in 0..10u8 {
