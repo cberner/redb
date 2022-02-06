@@ -62,6 +62,7 @@ pub(in crate::tree_store) struct LeafAccessor<'a: 'b, 'b, T: Page + 'a> {
 
 impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
     pub(in crate::tree_store) fn new(page: &'b T) -> Self {
+        debug_assert_eq!(page.memory()[0], LEAF);
         LeafAccessor {
             page,
             _page_lifetime: Default::default(),

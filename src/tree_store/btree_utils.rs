@@ -364,85 +364,6 @@ fn merge_index(
     make_index_many_pages(&pages, manager)
 }
 
-fn repair_children<K: RedbKey + ?Sized>(
-    children: Vec<DeletionResult>,
-    manager: &TransactionalMemory,
-    freed: &mut Vec<PageNumber>,
-) -> Result<Vec<PageNumber>, Error> {
-    if children.iter().all(|x| matches!(x, Subtree(_))) {
-        let page_numbers: Vec<PageNumber> = children
-            .iter()
-            .map(|x| match x {
-                Subtree(page_number) => *page_number,
-                _ => unreachable!(),
-            })
-            .collect();
-        Ok(page_numbers)
-    } else if let Some(position) = children.iter().position(|x| matches!(x, PartialLeaf(_))) {
-        let merge_with = if position == 0 { 1 } else { position - 1 };
-        let mut result = vec![];
-        for i in 0..children.len() {
-            match &children[i] {
-                Subtree(handle) => {
-                    if i == merge_with {
-                        if let PartialLeaf(partials) = children.get(position).unwrap() {
-                            if let Some(new_page) =
-                                merge_leaf::<K>(*handle, partials, freed, manager)?
-                            {
-                                result.push(new_page);
-                            } else {
-                                let (page1, page2) =
-                                    split_leaf::<K>(*handle, partials, manager, freed)?;
-                                result.push(page1);
-                                result.push(page2);
-                            }
-                        } else {
-                            unreachable!()
-                        };
-                    } else {
-                        result.push(*handle);
-                    }
-                }
-                PartialLeaf(_) => {
-                    // continue
-                }
-                PartialInternal(_) => unreachable!(),
-            }
-        }
-        Ok(result)
-    } else if children.iter().any(|x| matches!(x, PartialInternal(_))) {
-        let mut result = vec![];
-        let mut repaired = false;
-        // For each whole subtree, try to merge it with a partial left to repair it, if one is neighboring
-        for i in 0..children.len() {
-            if let Subtree(page_number) = &children[i] {
-                if repaired {
-                    result.push(*page_number);
-                    continue;
-                }
-                let offset = if i > 0 { i - 1 } else { i + 1 };
-                if let Some(PartialInternal(partials)) = children.get(offset) {
-                    if let Some((page1, page2)) =
-                        split_index(*page_number, partials, manager, freed)?
-                    {
-                        result.push(page1);
-                        result.push(page2);
-                    } else {
-                        result.push(merge_index(*page_number, partials, manager, freed)?);
-                    }
-                    repaired = true;
-                } else {
-                    // No adjacent partial
-                    result.push(*page_number);
-                }
-            }
-        }
-        Ok(result)
-    } else {
-        unreachable!()
-    }
-}
-
 fn max_key(page: PageImpl, manager: &TransactionalMemory) -> Vec<u8> {
     let node_mem = page.memory();
     match node_mem[0] {
@@ -559,34 +480,58 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     drop(builder);
                     Subtree(new_page.get_page_number())
                 }
-                PartialLeaf(partial) => {
-                    // TODO optimize out this repair call
+                PartialLeaf(partials) => {
+                    let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                    debug_assert!(merge_with < accessor.count_children());
                     let mut children = vec![];
                     for i in 0..accessor.count_children() {
                         if i == child_index {
-                            children.push(PartialLeaf(partial.clone()));
+                            continue;
+                        }
+                        let page_number = accessor.child_page(i).unwrap();
+                        if i == merge_with {
+                            if let Some(new_page) =
+                                merge_leaf::<K>(page_number, &partials, freed, manager)?
+                            {
+                                children.push(new_page);
+                            } else {
+                                let (page1, page2) =
+                                    split_leaf::<K>(page_number, &partials, manager, freed)?;
+                                children.push(page1);
+                                children.push(page2);
+                            }
                         } else {
-                            children.push(Subtree(accessor.child_page(i).unwrap()));
+                            children.push(page_number);
                         }
                     }
-                    let children = repair_children::<K>(children, manager, freed)?;
                     if children.len() == 1 {
                         PartialInternal(children)
                     } else {
                         Subtree(make_index_many_pages(&children, manager)?)
                     }
                 }
-                PartialInternal(partial) => {
-                    // TODO optimize out this repair call
+                PartialInternal(partials) => {
+                    let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                    debug_assert!(merge_with < accessor.count_children());
                     let mut children = vec![];
                     for i in 0..accessor.count_children() {
                         if i == child_index {
-                            children.push(PartialInternal(partial.clone()));
+                            continue;
+                        }
+                        let page_number = accessor.child_page(i).unwrap();
+                        if i == merge_with {
+                            if let Some((page1, page2)) =
+                                split_index(page_number, &partials, manager, freed)?
+                            {
+                                children.push(page1);
+                                children.push(page2);
+                            } else {
+                                children.push(merge_index(page_number, &partials, manager, freed)?);
+                            }
                         } else {
-                            children.push(Subtree(accessor.child_page(i).unwrap()));
+                            children.push(page_number);
                         }
                     }
-                    let children = repair_children::<K>(children, manager, freed)?;
                     if children.len() == 1 {
                         PartialInternal(children)
                     } else {
