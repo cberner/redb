@@ -461,24 +461,37 @@ fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
             }
             let final_result = match result {
                 Subtree(new_child) => {
-                    let mut new_page = manager.allocate(InternalBuilder::required_bytes(
-                        accessor.count_children() - 1,
-                        accessor.total_key_length(),
-                    ))?;
-                    let mut builder =
-                        InternalBuilder::new(&mut new_page, accessor.count_children() - 1);
-                    copy_to_builder_and_patch(
-                        &accessor,
-                        0,
-                        accessor.count_children(),
-                        &mut builder,
-                        child_index,
-                        new_child,
-                        None,
-                    );
+                    if new_child == child_page_number {
+                        // NO-OP. One of our descendants is uncommitted, so there was no change
+                        return Ok((Subtree(original_page_number), true));
+                    } else if manager.uncommitted(original_page_number) {
+                        drop(page);
+                        // Safety: Since the page is uncommitted, no other transactions could have it open
+                        // and we just dropped our reference to it, on the line above
+                        let mut mutpage = unsafe { manager.get_page_mut(original_page_number) };
+                        let mut mutator = InternalMutator::new(&mut mutpage);
+                        mutator.write_child_page(child_index, new_child);
+                        return Ok((Subtree(original_page_number), true));
+                    } else {
+                        let mut new_page = manager.allocate(InternalBuilder::required_bytes(
+                            accessor.count_children() - 1,
+                            accessor.total_key_length(),
+                        ))?;
+                        let mut builder =
+                            InternalBuilder::new(&mut new_page, accessor.count_children() - 1);
+                        copy_to_builder_and_patch(
+                            &accessor,
+                            0,
+                            accessor.count_children(),
+                            &mut builder,
+                            child_index,
+                            new_child,
+                            None,
+                        );
 
-                    drop(builder);
-                    Subtree(new_page.get_page_number())
+                        drop(builder);
+                        Subtree(new_page.get_page_number())
+                    }
                 }
                 PartialLeaf(partials) => {
                     let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
