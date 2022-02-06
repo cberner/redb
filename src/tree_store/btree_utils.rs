@@ -386,7 +386,6 @@ fn max_key(page: PageImpl, manager: &TransactionalMemory) -> Vec<u8> {
 
 // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
 // If key is not found, guaranteed not to modify the tree
-#[allow(clippy::needless_return)]
 fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
