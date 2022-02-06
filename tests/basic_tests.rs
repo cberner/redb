@@ -273,6 +273,34 @@ fn f32_type() {
 }
 
 #[test]
+fn str_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let write_txn = db.begin_write().unwrap();
+    let mut table: Table<str, str> = write_txn.open_table(b"x").unwrap();
+    table.insert("hello", "world").unwrap();
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table: ReadOnlyTable<str, str> = read_txn.open_table(b"x").unwrap();
+    let hello = "hello".to_string();
+    assert_eq!("world", table.get(&hello).unwrap().unwrap().to_value());
+
+    let mut iter: RangeIter<RangeFull, &str, str, str> = table.get_range(..).unwrap();
+    assert_eq!(iter.next().unwrap().1, "world");
+    assert!(iter.next().is_none());
+
+    let mut iter: RangeIter<Range<String>, String, str, str> =
+        table.get_range("a".to_string().."z".to_string()).unwrap();
+    assert_eq!(iter.next().unwrap().1, "world");
+    assert!(iter.next().is_none());
+
+    let mut iter: RangeIter<Range<&str>, &str, str, str> = table.get_range("a".."z").unwrap();
+    assert_eq!(iter.next().unwrap().1, "world");
+    assert!(iter.next().is_none());
+}
+
+#[test]
 fn owned_get_signatures() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };

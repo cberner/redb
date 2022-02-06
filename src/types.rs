@@ -74,6 +74,27 @@ impl RedbKey for [u8] {
     }
 }
 
+impl RedbValue for str {
+    type View = RefLifetime<str>;
+    type ToBytes = RefAsBytesLifetime<str>;
+
+    fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
+        std::str::from_utf8(data).unwrap()
+    }
+
+    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+        self
+    }
+}
+
+impl RedbKey for str {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        let str1 = str::from_bytes(data1);
+        let str2 = str::from_bytes(data2);
+        str1.cmp(str2)
+    }
+}
+
 macro_rules! be_value {
     ($t:ty) => {
         impl RedbValue for $t {
