@@ -285,7 +285,7 @@ impl<'a> DatabaseTransaction<'a> {
         self.commit_helper(true)
     }
 
-    pub fn commit_helper(self, non_durable: bool) -> Result<(), Error> {
+    fn commit_helper(self, non_durable: bool) -> Result<(), Error> {
         match self.commit_helper_inner(non_durable) {
             Ok(_) => Ok(()),
             Err(err) => match err {
@@ -300,7 +300,7 @@ impl<'a> DatabaseTransaction<'a> {
         }
     }
 
-    pub fn commit_helper_inner(&self, non_durable: bool) -> Result<(), Error> {
+    fn commit_helper_inner(&self, non_durable: bool) -> Result<(), Error> {
         // Update all the table roots in the master table, before committing
         for ((name, table_type), update) in self.pending_table_root_changes.borrow_mut().drain() {
             let new_root = self.storage.update_table_root(
