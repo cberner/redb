@@ -7,14 +7,14 @@ fn len() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     table.insert(b"hello", b"world").unwrap();
     table.insert(b"hello2", b"world2").unwrap();
     table.insert(b"hi", b"world").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
     assert_eq!(table.len().unwrap(), 3);
 }
 
@@ -23,7 +23,7 @@ fn create_open() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<u64, u64> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<u64, u64> = write_txn.open_table("x").unwrap();
     table.insert(&0, &1).unwrap();
     write_txn.commit().unwrap();
     drop(db);
@@ -31,7 +31,7 @@ fn create_open() {
     let db2 = unsafe { Database::open(tmpfile.path()).unwrap() };
 
     let read_txn = db2.begin_read().unwrap();
-    let table: ReadOnlyTable<u64, u64> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<u64, u64> = read_txn.open_table("x").unwrap();
     assert_eq!(1, table.get(&0).unwrap().unwrap().to_value());
 }
 
@@ -40,16 +40,16 @@ fn multiple_tables() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"1").unwrap();
-    let mut table2: Table<[u8], [u8]> = write_txn.open_table(b"2").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("1").unwrap();
+    let mut table2: Table<[u8], [u8]> = write_txn.open_table("2").unwrap();
 
     table.insert(b"hello", b"world").unwrap();
     table2.insert(b"hello", b"world2").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"1").unwrap();
-    let table2: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"2").unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("1").unwrap();
+    let table2: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("2").unwrap();
     assert_eq!(table.len().unwrap(), 1);
     assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
     assert_eq!(table2.len().unwrap(), 1);
@@ -62,12 +62,12 @@ fn is_empty() {
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     table.insert(b"hello", b"world").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
     assert!(!table.is_empty().unwrap());
 }
 
@@ -77,22 +77,22 @@ fn abort() {
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     table.insert(b"hello", b"aborted").unwrap();
     assert_eq!(b"aborted", table.get(b"hello").unwrap().unwrap().to_value());
     write_txn.abort().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: Result<ReadOnlyTable<[u8], [u8]>, Error> = read_txn.open_table(b"x");
+    let table: Result<ReadOnlyTable<[u8], [u8]>, Error> = read_txn.open_table("x");
     assert!(table.is_err());
 
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     table.insert(b"hello", b"world").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
     assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
     assert_eq!(table.len().unwrap(), 1);
 }
@@ -102,21 +102,21 @@ fn insert_overwrite() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     table.insert(b"hello", b"world").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
     assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
 
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     table.insert(b"hello", b"replaced").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
     assert_eq!(
         b"replaced",
         table.get(b"hello").unwrap().unwrap().to_value()
@@ -128,7 +128,7 @@ fn insert_reserve() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     let value = b"world";
     let mut reserved = table.insert_reserve(b"hello", value.len()).unwrap();
     reserved.as_mut().copy_from_slice(value);
@@ -136,7 +136,7 @@ fn insert_reserve() {
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
     assert_eq!(value, table.get(b"hello").unwrap().unwrap().to_value());
 }
 
@@ -145,23 +145,23 @@ fn delete() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     table.insert(b"hello", b"world").unwrap();
     table.insert(b"hello2", b"world").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
     assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
     assert_eq!(table.len().unwrap(), 2);
 
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     table.remove(b"hello").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
     assert!(table.get(b"hello").unwrap().is_none());
     assert_eq!(table.len().unwrap(), 1);
 }
@@ -171,16 +171,16 @@ fn no_dirty_reads() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     table.insert(b"hello", b"world").unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: Result<ReadOnlyTable<[u8], [u8]>, Error> = read_txn.open_table(b"x");
+    let table: Result<ReadOnlyTable<[u8], [u8]>, Error> = read_txn.open_table("x");
     assert!(table.is_err());
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
     assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
 }
 
@@ -189,23 +189,23 @@ fn read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     table.insert(b"hello", b"world").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
     assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
 
     let write_txn = db.begin_write().unwrap();
-    let mut write_table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut write_table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     write_table.remove(b"hello").unwrap();
     write_table.insert(b"hello2", b"world2").unwrap();
     write_table.insert(b"hello3", b"world3").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn2 = db.begin_read().unwrap();
-    let table2: ReadOnlyTable<[u8], [u8]> = read_txn2.open_table(b"x").unwrap();
+    let table2: ReadOnlyTable<[u8], [u8]> = read_txn2.open_table("x").unwrap();
     assert!(table2.get(b"hello").unwrap().is_none());
     assert_eq!(
         b"world2",
@@ -228,12 +228,12 @@ fn u64_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<u64, u64> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<u64, u64> = write_txn.open_table("x").unwrap();
     table.insert(&0, &1).unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<u64, u64> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<u64, u64> = read_txn.open_table("x").unwrap();
     assert_eq!(1, table.get(&0).unwrap().unwrap().to_value());
 }
 
@@ -242,14 +242,14 @@ fn i128_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<i128, i128> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<i128, i128> = write_txn.open_table("x").unwrap();
     for i in -10..=10 {
         table.insert(&i, &(i - 1)).unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<i128, i128> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<i128, i128> = read_txn.open_table("x").unwrap();
     assert_eq!(-2, table.get(&-1).unwrap().unwrap().to_value());
     let mut iter: RangeIter<RangeFull, i128, i128, i128> = table.get_range(..).unwrap();
     for i in -11..10 {
@@ -263,12 +263,12 @@ fn f32_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<u8, f32> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<u8, f32> = write_txn.open_table("x").unwrap();
     table.insert(&0, &0.3).unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<u8, f32> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<u8, f32> = read_txn.open_table("x").unwrap();
     assert_eq!(0.3, table.get(&0).unwrap().unwrap().to_value());
 }
 
@@ -277,12 +277,12 @@ fn str_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<str, str> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<str, str> = write_txn.open_table("x").unwrap();
     table.insert("hello", "world").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<str, str> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<str, str> = read_txn.open_table("x").unwrap();
     let hello = "hello".to_string();
     assert_eq!("world", table.get(&hello).unwrap().unwrap().to_value());
 
@@ -305,14 +305,14 @@ fn owned_get_signatures() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<u32, u32> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<u32, u32> = write_txn.open_table("x").unwrap();
     for i in 0..10 {
         table.insert(&i, &(i + 1)).unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<u32, u32> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<u32, u32> = read_txn.open_table("x").unwrap();
 
     assert_eq!(2, table.get(&1).unwrap().unwrap().to_value());
 
@@ -338,14 +338,14 @@ fn ref_get_signatures() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     for i in 0..10 {
         table.insert(&[i], &[i + 1]).unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+    let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
 
     let zero = vec![0u8];
     assert_eq!(&[1], table.get(&[0]).unwrap().unwrap().to_value());

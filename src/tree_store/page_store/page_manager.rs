@@ -1032,7 +1032,7 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+        let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
         table.insert(b"hello", b"world").unwrap();
         write_txn.commit().unwrap();
         drop(db);
@@ -1061,7 +1061,7 @@ mod test {
 
         let db2 = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let read_txn = db2.begin_read().unwrap();
-        let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table(b"x").unwrap();
+        let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
         assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
     }
 
@@ -1070,7 +1070,7 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+        let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
         table.insert(b"hello", b"world").unwrap();
         write_txn.commit().unwrap();
         let free_pages = db.stats().unwrap().free_pages();
@@ -1101,7 +1101,7 @@ mod test {
         let db2 = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         assert_eq!(free_pages, db2.stats().unwrap().free_pages());
         let write_txn = db2.begin_write().unwrap();
-        let mut table: Table<[u8], [u8]> = write_txn.open_table(b"x").unwrap();
+        let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
         table.insert(b"hello2", b"world2").unwrap();
         write_txn.commit().unwrap();
     }
