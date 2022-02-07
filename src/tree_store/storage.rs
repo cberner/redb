@@ -310,8 +310,8 @@ impl Storage {
 
             // Safety: References into the master table are never returned to the user
             let (new_root, found) =
-                unsafe { self.remove::<str>(name.as_bytes(), transaction_id, root_page)? };
-            return Ok((new_root, found));
+                unsafe { self.remove::<str, [u8]>(name.as_bytes(), transaction_id, root_page)? };
+            return Ok((new_root, found.is_some()));
         }
 
         Ok((root_page, false))
@@ -509,7 +509,7 @@ impl Storage {
         for key in to_remove {
             // Safety: all references to the freed table above have already been dropped
             let (new_root, _) =
-                unsafe { self.remove::<[u8]>(&key, transaction_id, freed_table.table_root)? };
+                unsafe { self.remove::<[u8], [u8]>(&key, transaction_id, freed_table.table_root)? };
             freed_table.table_root = new_root;
         }
         // Safety: References into the master table are never returned to the user
@@ -724,21 +724,21 @@ impl Storage {
     // Returns the new root page, and a bool indicating whether the entry existed
     // Safety: caller must ensure that no references to uncommitted data in this transaction exist
     // TODO: this method could be made safe, if the transaction_id was not copy and was borrowed mut
-    pub(in crate) unsafe fn remove<K: RedbKey + ?Sized>(
+    pub(in crate) unsafe fn remove<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         key: &[u8],
         transaction_id: u128,
         root_handle: Option<PageNumber>,
-    ) -> Result<(Option<PageNumber>, bool), Error> {
+    ) -> Result<(Option<PageNumber>, Option<AccessGuard<V>>), Error> {
         assert_eq!(transaction_id, self.live_write_transaction.get().unwrap());
         if let Some(handle) = root_handle {
             let root_page = self.mem.get_page(handle);
-            let (new_root, found, freed) = tree_delete::<K>(root_page, key, &self.mem)?;
+            let (new_root, found, freed) = tree_delete::<K, V>(root_page, key, &self.mem)?;
             self.pending_freed_pages
                 .borrow_mut()
                 .extend_from_slice(&freed);
             return Ok((new_root, found));
         }
-        Ok((root_handle, false))
+        Ok((root_handle, None))
     }
 }

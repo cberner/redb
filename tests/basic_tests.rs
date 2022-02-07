@@ -181,7 +181,11 @@ fn delete() {
 
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
-    table.remove(b"hello").unwrap();
+    assert_eq!(
+        b"world",
+        table.remove(b"hello").unwrap().unwrap().to_value()
+    );
+    assert!(table.remove(b"hello").unwrap().is_none());
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();

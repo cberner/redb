@@ -1,4 +1,4 @@
-use crate::tree_store::page_store::{Page, PageImpl, PageMut};
+use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::PageNumber;
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use std::cmp::Ordering;
@@ -18,15 +18,25 @@ pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
     page: PageImpl<'a>,
     offset: usize,
     len: usize,
+    free_uncommitted_on_drop: bool,
+    mem: &'a TransactionalMemory,
     _value_type: PhantomData<V>,
 }
 
 impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
-    pub(in crate::tree_store) fn new(page: PageImpl<'a>, offset: usize, len: usize) -> Self {
+    pub(in crate::tree_store) fn new(
+        page: PageImpl<'a>,
+        offset: usize,
+        len: usize,
+        free_on_drop: bool,
+        mem: &'a TransactionalMemory,
+    ) -> Self {
         Self {
             page,
             offset,
             len,
+            free_uncommitted_on_drop: free_on_drop,
+            mem,
             _value_type: Default::default(),
         }
     }
@@ -34,6 +44,17 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
     // TODO: implement Deref instead of this to_value() method, when GAT is stable
     pub fn to_value(&self) -> <<V as RedbValue>::View as WithLifetime>::Out {
         V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+    }
+}
+
+impl<'a, V: RedbValue + ?Sized> Drop for AccessGuard<'a, V> {
+    fn drop(&mut self) {
+        if self.free_uncommitted_on_drop {
+            let page_number = self.page.get_page_number();
+            unsafe {
+                assert!(self.mem.free_if_uncommitted(page_number).unwrap());
+            }
+        }
     }
 }
 
