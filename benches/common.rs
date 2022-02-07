@@ -96,7 +96,7 @@ impl<'a, 'b> BenchReadTransaction<'b> for RedbBenchReadTransaction<'a> {
     }
 
     fn exists_after(&'b self, key: &[u8]) -> bool {
-        self.table.get_range(key..).unwrap().next().is_some()
+        self.table.range(key..).unwrap().next().is_some()
     }
 }
 
