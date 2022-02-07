@@ -24,7 +24,9 @@ pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
 }
 
 impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
-    pub(in crate::tree_store) fn new(
+    // Safety: if free_on_drop is true, caller must guarantee that no other references to page exist,
+    // and that no references will be created until this AccessGuard is dropped
+    pub(in crate::tree_store) unsafe fn new(
         page: PageImpl<'a>,
         offset: usize,
         len: usize,
@@ -51,6 +53,7 @@ impl<'a, V: RedbValue + ?Sized> Drop for AccessGuard<'a, V> {
     fn drop(&mut self) {
         if self.free_uncommitted_on_drop {
             let page_number = self.page.get_page_number();
+            // Safety: caller to new() guaranteed that no other references to this page exist
             unsafe {
                 assert!(self.mem.free_if_uncommitted(page_number).unwrap());
             }

@@ -1009,7 +1009,8 @@ pub(in crate) fn find_key<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
             let accessor = LeafAccessor::new(&page);
             let entry_index = accessor.find_key::<K>(query)?;
             let (start, end) = accessor.value_range(entry_index).unwrap();
-            let guard = AccessGuard::new(page, start, end - start, false, manager);
+            // Safety: free_on_drop is false
+            let guard = unsafe { AccessGuard::new(page, start, end - start, false, manager) };
             Some(guard)
         }
         INTERNAL => {
