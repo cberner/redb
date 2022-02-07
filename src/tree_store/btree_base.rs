@@ -1,6 +1,6 @@
-use crate::tree_store::page_store::{Page, PageMut};
+use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::PageNumber;
-use crate::types::RedbKey;
+use crate::types::{RedbKey, RedbValue, WithLifetime};
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
@@ -12,6 +12,29 @@ pub(in crate::tree_store) const INTERNAL: u8 = 2;
 pub trait BtreeEntry<'a: 'b, 'b> {
     fn key(&'b self) -> &'a [u8];
     fn value(&'b self) -> &'a [u8];
+}
+
+pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
+    page: PageImpl<'a>,
+    offset: usize,
+    len: usize,
+    _value_type: PhantomData<V>,
+}
+
+impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
+    pub(in crate::tree_store) fn new(page: PageImpl<'a>, offset: usize, len: usize) -> Self {
+        Self {
+            page,
+            offset,
+            len,
+            _value_type: Default::default(),
+        }
+    }
+
+    // TODO: implement Deref instead of this to_value() method, when GAT is stable
+    pub fn to_value(&self) -> <<V as RedbValue>::View as WithLifetime>::Out {
+        V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+    }
 }
 
 pub struct AccessGuardMut<'a> {
@@ -26,6 +49,7 @@ impl<'a> AccessGuardMut<'a> {
     }
 }
 
+// TODO: this should return a RedbValue typed reference
 impl<'a> AsMut<[u8]> for AccessGuardMut<'a> {
     fn as_mut(&mut self) -> &mut [u8] {
         &mut self.page.memory_mut()[self.offset..(self.offset + self.len)]

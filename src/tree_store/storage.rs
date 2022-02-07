@@ -1,13 +1,14 @@
+use crate::tree_store::btree_base::AccessGuard;
 use crate::tree_store::btree_iters::{
     find_iter_start, find_iter_start_reversed, find_iter_unbounded_reversed,
     find_iter_unbounded_start, page_numbers_iter_start_state, AllPageNumbersBtreeIter,
 };
 use crate::tree_store::btree_utils::{
-    lookup_in_raw, make_mut_single_leaf, print_tree, tree_delete, tree_height, tree_insert,
+    find_key, make_mut_single_leaf, print_tree, tree_delete, tree_height, tree_insert,
 };
-use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMemory};
+use crate::tree_store::page_store::{PageNumber, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeEntry, BtreeRangeIter};
-use crate::types::{RedbKey, RedbValue, WithLifetime};
+use crate::types::{RedbKey, RedbValue};
 use crate::Error;
 use memmap2::MmapRaw;
 use std::borrow::Borrow;
@@ -15,7 +16,6 @@ use std::cell::{Cell, RefCell};
 use std::cmp::{max, min};
 use std::collections::{BTreeSet, Bound};
 use std::convert::TryInto;
-use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull, RangeTo};
 use std::panic;
@@ -650,9 +650,7 @@ impl Storage {
     ) -> Result<Option<AccessGuard<V>>, Error> {
         if let Some(handle) = root_page_handle {
             let root_page = self.mem.get_page(handle);
-            if let Some((page, offset, len)) = lookup_in_raw::<K>(root_page, key, &self.mem) {
-                return Ok(Some(AccessGuard::new(page, offset, len)));
-            }
+            return Ok(find_key::<K, V>(root_page, key, &self.mem));
         }
         Ok(None)
     }
@@ -742,28 +740,5 @@ impl Storage {
             return Ok((new_root, found));
         }
         Ok((root_handle, false))
-    }
-}
-
-pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
-    page: PageImpl<'a>,
-    offset: usize,
-    len: usize,
-    _value_type: PhantomData<V>,
-}
-
-impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
-    fn new(page: PageImpl<'a>, offset: usize, len: usize) -> Self {
-        Self {
-            page,
-            offset,
-            len,
-            _value_type: Default::default(),
-        }
-    }
-
-    // TODO: implement Deref instead of this to_value() method, when GAT is stable
-    pub fn to_value(&self) -> <<V as RedbValue>::View as WithLifetime>::Out {
-        V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
     }
 }
