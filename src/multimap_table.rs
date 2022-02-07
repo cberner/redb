@@ -349,14 +349,14 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
         let (root_page, found) = unsafe {
-            self.storage.remove::<MultimapKVPair<K, V>>(
+            self.storage.remove::<MultimapKVPair<K, V>, [u8]>(
                 &kv,
                 self.transaction_id,
                 self.table_root.get(),
             )?
         };
         self.table_root.set(root_page);
-        Ok(found)
+        Ok(found.is_some())
     }
 
     // TODO: maybe this should return all the removed values as an iter?
@@ -369,13 +369,13 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
             // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
             // and we borrow &mut self.
             let (new_root, found) = unsafe {
-                self.storage.remove::<MultimapKVPair<K, V>>(
+                self.storage.remove::<MultimapKVPair<K, V>, [u8]>(
                     &key_only,
                     self.transaction_id,
                     self.table_root.get(),
                 )?
             };
-            if !found {
+            if found.is_none() {
                 break;
             }
             self.table_root.set(new_root);

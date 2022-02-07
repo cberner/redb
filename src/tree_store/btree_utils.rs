@@ -102,13 +102,21 @@ pub(in crate) fn print_tree<'a>(page: PageImpl<'a>, manager: &'a TransactionalMe
 
 // Returns the new root, bool indicating if the key existed, and a list of freed pages
 // Safety: see tree_delete_helper()
-pub(in crate) unsafe fn tree_delete<'a, K: RedbKey + ?Sized>(
+#[allow(clippy::type_complexity)]
+pub(in crate) unsafe fn tree_delete<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
     manager: &'a TransactionalMemory,
-) -> Result<(Option<PageNumber>, bool, Vec<PageNumber>), Error> {
+) -> Result<
+    (
+        Option<PageNumber>,
+        Option<AccessGuard<'a, V>>,
+        Vec<PageNumber>,
+    ),
+    Error,
+> {
     let mut freed = vec![];
-    let (deletion_result, found) = tree_delete_helper::<K>(page, key, &mut freed, manager)?;
+    let (deletion_result, found) = tree_delete_helper::<K, V>(page, key, &mut freed, manager)?;
     let result = match deletion_result {
         DeletionResult::Subtree(page) => Some(page),
         DeletionResult::PartialLeaf(entries) => {
@@ -389,19 +397,19 @@ fn max_key(page: PageImpl, manager: &TransactionalMemory) -> Vec<u8> {
 // If key is not found, guaranteed not to modify the tree
 //
 // Safety: caller must ensure that no references to uncommitted pages in this table exist
-unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
+unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
     freed: &mut Vec<PageNumber>,
     manager: &'a TransactionalMemory,
-) -> Result<(DeletionResult, bool), Error> {
+) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>), Error> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
             let (position, found) = accessor.position::<K>(key);
             if !found {
-                return Ok((Subtree(page.get_page_number()), false));
+                return Ok((Subtree(page.get_page_number()), None));
             }
             if accessor.num_pairs() < BTREE_ORDER / 2 {
                 let mut partial = Vec::with_capacity(accessor.num_pairs());
@@ -412,10 +420,15 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     let entry = accessor.entry(i).unwrap();
                     partial.push((entry.key().to_vec(), entry.value().to_vec()));
                 }
-                if !manager.free_if_uncommitted(page.get_page_number())? {
+                let uncommitted = manager.uncommitted(page.get_page_number());
+                if !uncommitted {
+                    // Won't be freed until the end of the transaction, so returning the page
+                    // in the AccessGuard below is still safe
                     freed.push(page.get_page_number());
                 }
-                Ok((PartialLeaf(partial), true))
+                let (start, end) = accessor.value_range(position).unwrap();
+                let guard = AccessGuard::new(page, start, end - start, uncommitted, manager);
+                Ok((PartialLeaf(partial), Some(guard)))
             } else {
                 let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
                 let new_size =
@@ -435,26 +448,35 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                     builder.append(entry.key(), entry.value());
                 }
                 drop(builder);
-                if !manager.free_if_uncommitted(page.get_page_number())? {
+                let uncommitted = manager.uncommitted(page.get_page_number());
+                if !uncommitted {
+                    // Won't be freed until the end of the transaction, so returning the page
+                    // in the AccessGuard below is still safe
                     freed.push(page.get_page_number());
                 }
-                Ok((Subtree(new_page.get_page_number()), true))
+                let (start, end) = accessor.value_range(position).unwrap();
+                let guard = AccessGuard::new(page, start, end - start, uncommitted, manager);
+                Ok((Subtree(new_page.get_page_number()), Some(guard)))
             }
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             let original_page_number = page.get_page_number();
             let (child_index, child_page_number) = accessor.child_for_key::<K>(key);
-            let (result, found) =
-                tree_delete_helper::<K>(manager.get_page(child_page_number), key, freed, manager)?;
-            if !found {
-                return Ok((Subtree(original_page_number), false));
+            let (result, found) = tree_delete_helper::<K, V>(
+                manager.get_page(child_page_number),
+                key,
+                freed,
+                manager,
+            )?;
+            if found.is_none() {
+                return Ok((Subtree(original_page_number), None));
             }
             let final_result = match result {
                 Subtree(new_child) => {
                     if new_child == child_page_number {
                         // NO-OP. One of our descendants is uncommitted, so there was no change
-                        return Ok((Subtree(original_page_number), true));
+                        return Ok((Subtree(original_page_number), found));
                     } else if manager.uncommitted(original_page_number) {
                         drop(page);
                         // Safety: Caller guarantees there are no references to uncommitted pages,
@@ -462,7 +484,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                         let mut mutpage = manager.get_page_mut(original_page_number);
                         let mut mutator = InternalMutator::new(&mut mutpage);
                         mutator.write_child_page(child_index, new_child);
-                        return Ok((Subtree(original_page_number), true));
+                        return Ok((Subtree(original_page_number), found));
                     } else {
                         let mut new_page = manager.allocate(InternalBuilder::required_bytes(
                             accessor.count_children() - 1,
@@ -548,7 +570,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized>(
                 freed.push(original_page_number);
             }
 
-            Ok((final_result, true))
+            Ok((final_result, found))
         }
         _ => unreachable!(),
     }
@@ -987,7 +1009,7 @@ pub(in crate) fn find_key<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
             let accessor = LeafAccessor::new(&page);
             let entry_index = accessor.find_key::<K>(query)?;
             let (start, end) = accessor.value_range(entry_index).unwrap();
-            let guard = AccessGuard::new(page, start, end - start);
+            let guard = AccessGuard::new(page, start, end - start, false, manager);
             Some(guard)
         }
         INTERNAL => {

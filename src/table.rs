@@ -76,13 +76,12 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
         Ok(guard)
     }
 
-    // TODO: maybe this should return the removed value?
-    pub fn remove(&mut self, key: &K) -> Result<bool, Error> {
+    pub fn remove(&mut self, key: &K) -> Result<Option<AccessGuard<V>>, Error> {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
         let (root_page, found) = unsafe {
-            self.storage.remove::<K>(
+            self.storage.remove::<K, V>(
                 key.as_bytes().as_ref(),
                 self.transaction_id,
                 self.table_root.get(),
