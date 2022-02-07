@@ -98,7 +98,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root.get())
     }
 
-    fn get_range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
+    fn range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
@@ -107,7 +107,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
             .map(RangeIter::new)
     }
 
-    fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
+    fn range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
@@ -128,12 +128,12 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
 pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     fn get(&self, key: &K) -> Result<Option<AccessGuard<V>>, Error>;
 
-    fn get_range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
+    fn range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error>;
 
-    fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
+    fn range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error>;
@@ -172,7 +172,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root)
     }
 
-    fn get_range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
+    fn range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
@@ -181,7 +181,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
             .map(RangeIter::new)
     }
 
-    fn get_range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
+    fn range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
@@ -287,7 +287,7 @@ mod test {
         let table: ReadOnlyTable<ReverseKey, [u8]> = read_txn.open_table("x").unwrap();
         let start = ReverseKey(vec![7u8]); // ReverseKey is used, so 7 < 3
         let end = ReverseKey(vec![3u8]);
-        let mut iter = table.get_range(start..=end).unwrap();
+        let mut iter = table.range(start..=end).unwrap();
         for i in (3..=7u8).rev() {
             let (key, value) = iter.next().unwrap();
             assert_eq!(&[i], key);

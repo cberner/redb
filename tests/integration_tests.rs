@@ -454,7 +454,7 @@ fn range_query() {
     let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
     let start = vec![3u8];
     let end = vec![7u8];
-    let mut iter = table.get_range(start..end).unwrap();
+    let mut iter = table.range(start..end).unwrap();
     for i in 3..7u8 {
         let (key, value) = iter.next().unwrap();
         assert_eq!(&[i], key);
@@ -480,7 +480,7 @@ fn range_query_reversed() {
     let start = vec![3u8];
     let end = vec![7u8];
     let mut iter = table
-        .get_range_reversed(start.as_slice()..end.as_slice())
+        .range_reversed(start.as_slice()..end.as_slice())
         .unwrap();
     for i in (3..7u8).rev() {
         let (key, value) = iter.next().unwrap();

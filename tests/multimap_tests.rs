@@ -89,7 +89,7 @@ fn range_query() {
     let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table("x").unwrap();
     let start = b"0".as_ref();
     let end = b"1".as_ref();
-    let mut iter = table.get_range(start..=end).unwrap();
+    let mut iter = table.range(start..=end).unwrap();
     for i in 0..10u8 {
         let (key, value) = iter.next().unwrap();
         if i < 5 {

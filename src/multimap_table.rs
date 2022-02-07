@@ -397,7 +397,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
             .map(MultimapValueIter::new)
     }
 
-    fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
+    fn range<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
     ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error> {
@@ -412,7 +412,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
             .map(MultimapRangeIter::new)
     }
 
-    fn get_range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
+    fn range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
     ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error> {
@@ -444,12 +444,12 @@ type MultimapGetRangeIterType<'a, K, V> =
 pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapGetIterType<'a, K, V>, Error>;
 
-    fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
+    fn range<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
     ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error>;
 
-    fn get_range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
+    fn range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
     ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error>;
@@ -493,7 +493,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
             .map(MultimapValueIter::new)
     }
 
-    fn get_range<'a, T: RangeBounds<&'a K> + 'a>(
+    fn range<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
     ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error> {
@@ -508,7 +508,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
             .map(MultimapRangeIter::new)
     }
 
-    fn get_range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
+    fn range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
     ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error> {
