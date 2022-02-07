@@ -1,11 +1,11 @@
 use crate::tree_store::btree_base::{
-    InternalAccessor, InternalBuilder, InternalMutator, LeafAccessor, LeafBuilder, BTREE_ORDER,
-    INTERNAL, LEAF,
+    AccessGuard, InternalAccessor, InternalBuilder, InternalMutator, LeafAccessor, LeafBuilder,
+    BTREE_ORDER, INTERNAL, LEAF,
 };
 use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
 use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeEntry};
-use crate::types::RedbKey;
+use crate::types::{RedbKey, RedbValue};
 use crate::Error;
 use std::cmp::max;
 
@@ -976,23 +976,24 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 }
 
 // Returns the (offset, len) of the value for the queried key, if present
-pub(in crate) fn lookup_in_raw<'a, K: RedbKey + ?Sized>(
+pub(in crate) fn find_key<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     query: &[u8],
     manager: &'a TransactionalMemory,
-) -> Option<(PageImpl<'a>, usize, usize)> {
+) -> Option<AccessGuard<'a, V>> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
             let entry_index = accessor.find_key::<K>(query)?;
             let (start, end) = accessor.value_range(entry_index).unwrap();
-            Some((page, start, end - start))
+            let guard = AccessGuard::new(page, start, end - start);
+            Some(guard)
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             let (_, child_page) = accessor.child_for_key::<K>(query);
-            return lookup_in_raw::<K>(manager.get_page(child_page), query, manager);
+            return find_key::<K, V>(manager.get_page(child_page), query, manager);
         }
         _ => unreachable!(),
     }
