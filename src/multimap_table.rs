@@ -359,6 +359,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
         Ok(found)
     }
 
+    // TODO: maybe this should return all the removed values as an iter?
     pub fn remove_all(&mut self, key: &K) -> Result<bool, Error> {
         // Match only on the key, so that we can remove all the associated values
         let key_only = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyOnly);

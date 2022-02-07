@@ -76,6 +76,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
         Ok(guard)
     }
 
+    // TODO: maybe this should return the removed value?
     pub fn remove(&mut self, key: &K) -> Result<bool, Error> {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
