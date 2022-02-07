@@ -275,11 +275,15 @@ impl<'a> DatabaseTransaction<'a> {
         Ok(found)
     }
 
+    /// List all the tables
+    // TODO: should return an iterator of &str, once GATs are available
     pub fn list_tables(&self) -> Result<impl Iterator<Item = String> + '_, Error> {
         self.storage
             .list_tables(TableType::Normal, self.root_page.get())
     }
 
+    /// List all the multimap tables
+    // TODO: should return an iterator of &str, once GATs are available
     pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String> + '_, Error> {
         self.storage
             .list_tables(TableType::Multimap, self.root_page.get())
@@ -404,10 +408,14 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
         ))
     }
 
+    /// List all the tables
+    // TODO: should return an iterator of &str, once GATs are available
     pub fn list_tables(&self) -> Result<impl Iterator<Item = String> + '_, Error> {
         self.storage.list_tables(TableType::Normal, self.root_page)
     }
 
+    /// List all the multimap tables
+    // TODO: should return an iterator of &str, once GATs are available
     pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String> + '_, Error> {
         self.storage
             .list_tables(TableType::Multimap, self.root_page)
