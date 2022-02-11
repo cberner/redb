@@ -126,6 +126,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
 }
 
 pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+    // TODO: it seems like AccessGuard could be replaced with <<V as RedbValue>::View as WithLifetime>::Out
     fn get(&self, key: &K) -> Result<Option<AccessGuard<V>>, Error>;
 
     fn range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
