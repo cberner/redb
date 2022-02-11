@@ -1,5 +1,7 @@
 use crate::error::Error;
-use crate::tree_store::{AccessGuardMut, BtreeEntry, BtreeRangeIter, PageNumber, Storage};
+use crate::tree_store::{
+    AccessGuardMut, BtreeEntry, BtreeRangeIter, PageNumber, Storage, TransactionId,
+};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::AccessGuard;
 use std::borrow::Borrow;
@@ -10,7 +12,7 @@ use std::rc::Rc;
 
 pub struct Table<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     storage: &'s Storage,
-    transaction_id: u128,
+    transaction_id: TransactionId,
     table_root: Rc<Cell<Option<PageNumber>>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -18,7 +20,7 @@ pub struct Table<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 
 impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
     pub(in crate) fn new(
-        transaction_id: u128,
+        transaction_id: TransactionId,
         table_root: Rc<Cell<Option<PageNumber>>>,
         storage: &'s Storage,
     ) -> Table<'s, K, V> {

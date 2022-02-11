@@ -1,7 +1,8 @@
 use crate::multimap_table::MultimapTable;
 use crate::table::{ReadOnlyTable, Table};
 use crate::tree_store::{
-    expand_db_size, get_db_size, DbStats, PageNumber, Storage, TableType, FREED_TABLE,
+    expand_db_size, get_db_size, DbStats, PageNumber, Storage, TableType, TransactionId,
+    FREED_TABLE,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{Error, ReadOnlyMultimapTable};
@@ -148,7 +149,7 @@ impl DatabaseBuilder {
 #[allow(clippy::type_complexity)]
 pub struct DatabaseTransaction<'a> {
     storage: &'a Storage,
-    transaction_id: u128,
+    transaction_id: TransactionId,
     root_page: Cell<Option<PageNumber>>,
     pending_table_root_changes: RefCell<HashMap<(String, TableType), Rc<Cell<Option<PageNumber>>>>>,
     open_tables: RefCell<HashMap<(String, TableType), &'static panic::Location<'static>>>,
@@ -356,7 +357,7 @@ impl<'a> Drop for DatabaseTransaction<'a> {
 
 pub struct ReadOnlyDatabaseTransaction<'a> {
     storage: &'a Storage,
-    transaction_id: u128,
+    transaction_id: TransactionId,
     root_page: Option<PageNumber>,
 }
 
