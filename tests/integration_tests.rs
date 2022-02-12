@@ -39,14 +39,6 @@ fn mixed_durable_commit() {
 }
 
 #[test]
-fn small_db() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-
-    let result = unsafe { Database::create(tmpfile.path(), 1024) };
-    assert!(matches!(result, Err(Error::OutOfSpace)))
-}
-
-#[test]
 fn non_durable_commit_persistence() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
