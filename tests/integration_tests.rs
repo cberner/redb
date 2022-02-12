@@ -70,7 +70,7 @@ fn non_durable_commit_persistence() {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
             let result = &table.get(key).unwrap().unwrap();
-            assert_eq!(result.to_value(), value);
+            assert_eq!(result, value);
         }
     }
 }
@@ -106,7 +106,7 @@ fn persistence() {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
             let result = &table.get(key).unwrap().unwrap();
-            assert_eq!(result.to_value(), value);
+            assert_eq!(result, value);
         }
     }
 }
@@ -291,7 +291,7 @@ fn multi_page_kv() {
     for i in 0..elements {
         key[0] = i;
         value[0] = i;
-        assert_eq!(&value, table.get(&key).unwrap().unwrap().to_value());
+        assert_eq!(&value, table.get(&key).unwrap().unwrap());
     }
 
     let txn = db.begin_write().unwrap();
@@ -350,7 +350,7 @@ fn regression() {
 
     let txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<u64, u64> = txn.open_table("x").unwrap();
-    let v = table.get(&6).unwrap().unwrap().to_value();
+    let v = table.get(&6).unwrap().unwrap();
     assert_eq!(v, 9);
 }
 
@@ -404,10 +404,7 @@ fn non_durable_read_isolation() {
 
     let read_txn = db.begin_read().unwrap();
     let read_table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
-    assert_eq!(
-        b"world",
-        read_table.get(b"hello").unwrap().unwrap().to_value()
-    );
+    assert_eq!(b"world", read_table.get(b"hello").unwrap().unwrap());
 
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
@@ -419,20 +416,11 @@ fn non_durable_read_isolation() {
     let read_txn2 = db.begin_read().unwrap();
     let read_table2: ReadOnlyTable<[u8], [u8]> = read_txn2.open_table("x").unwrap();
     assert!(read_table2.get(b"hello").unwrap().is_none());
-    assert_eq!(
-        b"world2",
-        read_table2.get(b"hello2").unwrap().unwrap().to_value()
-    );
-    assert_eq!(
-        b"world3",
-        read_table2.get(b"hello3").unwrap().unwrap().to_value()
-    );
+    assert_eq!(b"world2", read_table2.get(b"hello2").unwrap().unwrap());
+    assert_eq!(b"world3", read_table2.get(b"hello3").unwrap().unwrap());
     assert_eq!(read_table2.len().unwrap(), 2);
 
-    assert_eq!(
-        b"world",
-        read_table.get(b"hello").unwrap().unwrap().to_value()
-    );
+    assert_eq!(b"world", read_table.get(b"hello").unwrap().unwrap());
     assert!(read_table.get(b"hello2").unwrap().is_none());
     assert!(read_table.get(b"hello3").unwrap().is_none());
     assert_eq!(read_table.len().unwrap(), 1);

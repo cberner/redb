@@ -9,7 +9,7 @@ fn main() -> Result<(), Error> {
 
     let read_txn = db.begin_read()?;
     let table: ReadOnlyTable<u64, u64> = read_txn.open_table("my_data")?;
-    assert_eq!(table.get(&0)?.unwrap().to_value(), 0);
+    assert_eq!(table.get(&0)?.unwrap(), 0);
 
     Ok(())
 }

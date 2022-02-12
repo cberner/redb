@@ -5,7 +5,7 @@ use crate::tree_store::btree_base::{
 use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
 use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeEntry};
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use std::cmp::max;
 
@@ -1002,16 +1002,14 @@ pub(in crate) fn find_key<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     query: &[u8],
     manager: &'a TransactionalMemory,
-) -> Option<AccessGuard<'a, V>> {
+) -> Option<<<V as RedbValue>::View as WithLifetime<'a>>::Out> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
             let entry_index = accessor.find_key::<K>(query)?;
             let (start, end) = accessor.value_range(entry_index).unwrap();
-            // Safety: free_on_drop is false
-            let guard = unsafe { AccessGuard::new(page, start, end - start, false, manager) };
-            Some(guard)
+            Some(V::from_bytes(&page.into_memory()[start..end]))
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);

@@ -8,7 +8,7 @@ use crate::tree_store::btree_utils::{
 };
 use crate::tree_store::page_store::{PageNumber, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeEntry, BtreeRangeIter};
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use memmap2::MmapRaw;
 use std::borrow::Borrow;
@@ -282,7 +282,7 @@ impl Storage {
         root_page: Option<PageNumber>,
     ) -> Result<Option<TableDefinition>, Error> {
         if let Some(found) = self.get::<str, [u8]>(name.as_bytes(), root_page)? {
-            let definition = TableDefinition::from_bytes(found.to_value());
+            let definition = TableDefinition::from_bytes(found);
             if definition.get_type() != table_type {
                 return Err(Error::TableTypeMismatch(format!(
                     "{:?} is not of type {:?}",
@@ -682,7 +682,7 @@ impl Storage {
         &self,
         key: &[u8],
         root_page_handle: Option<PageNumber>,
-    ) -> Result<Option<AccessGuard<V>>, Error> {
+    ) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>, Error> {
         if let Some(handle) = root_page_handle {
             let root_page = self.mem.get_page(handle);
             return Ok(find_key::<K, V>(root_page, key, &self.mem));
