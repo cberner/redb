@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 const MAX_PAGE_ORDER: usize = 20;
+const MIN_USABLE_PAGES: usize = 10;
 
 const DB_METADATA_PAGE: u64 = 0;
 
@@ -435,7 +436,7 @@ impl TransactionalMemory {
     fn calculate_usable_order(mmap_size: usize, page_size: usize) -> usize {
         let total_pages = mmap_size / page_size;
         // Require at least 10 of the highest order pages
-        let largest_order_in_pages = total_pages / 10;
+        let largest_order_in_pages = total_pages / MIN_USABLE_PAGES;
         assert!(largest_order_in_pages > 0);
         let max_order = (64 - largest_order_in_pages.leading_zeros() - 1) as usize;
         min(MAX_PAGE_ORDER, max_order)
@@ -469,8 +470,17 @@ impl TransactionalMemory {
             assert!(page_size >= DB_METAPAGE_SIZE);
             assert!(page_size.is_power_of_two());
 
+            // calculate_usable_order() assumes that there are at least MIN_USABLE_PAGES total pages
+            if mmap.len() / page_size < MIN_USABLE_PAGES {
+                return Err(Error::OutOfSpace);
+            }
+
             let max_order = Self::calculate_usable_order(mmap.len(), page_size);
             let usable_pages = Self::calculate_usable_pages(mmap.len(), page_size, max_order);
+
+            if usable_pages < MIN_USABLE_PAGES {
+                return Err(Error::OutOfSpace);
+            }
 
             // Explicitly zero the memory
             all_memory[0..DB_METAPAGE_SIZE].copy_from_slice(&[0; DB_METAPAGE_SIZE]);
