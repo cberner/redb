@@ -462,6 +462,9 @@ impl TransactionalMemory {
         let mmap = Mmap::new(mmap);
         // Safety: we have exclusive access to the mmap
         let all_memory = unsafe { mmap.get_memory_mut(0..mmap.len()) };
+        if all_memory.len() < MAGICNUMBER.len() {
+            return Err(Error::OutOfSpace);
+        }
 
         let mutex = Mutex::new(MetapageGuard {});
         if all_memory[0..MAGICNUMBER.len()] != MAGICNUMBER {
@@ -1038,11 +1041,12 @@ impl Drop for TransactionalMemory {
 #[cfg(test)]
 mod test {
     use crate::tree_store::page_store::page_manager::{
-        set_allocator_dirty, DB_SIZE_OFFSET, GOD_BYTE_OFFSET, UPGRADE_IN_PROGRESS,
-        UPGRADE_LOG_OFFSET,
+        set_allocator_dirty, DB_SIZE_OFFSET, GOD_BYTE_OFFSET, MIN_USABLE_PAGES,
+        UPGRADE_IN_PROGRESS, UPGRADE_LOG_OFFSET,
     };
+    use crate::tree_store::page_store::utils::get_page_size;
     use crate::tree_store::page_store::TransactionalMemory;
-    use crate::{Database, ReadOnlyTable, ReadableTable, Table};
+    use crate::{Database, Error, ReadOnlyTable, ReadableTable, Table};
     use memmap2::{MmapMut, MmapRaw};
     use std::fs::OpenOptions;
     use std::mem::size_of;
@@ -1125,5 +1129,21 @@ mod test {
         let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
         table.insert(b"hello2", b"world2").unwrap();
         write_txn.commit().unwrap();
+    }
+
+    #[test]
+    fn too_small_db() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let result = unsafe { Database::create(tmpfile.path(), 1) };
+        assert!(matches!(result, Err(Error::OutOfSpace)));
+
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let result = unsafe { Database::create(tmpfile.path(), 1024) };
+        assert!(matches!(result, Err(Error::OutOfSpace)));
+
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let result =
+            unsafe { Database::create(tmpfile.path(), MIN_USABLE_PAGES * get_page_size() - 1) };
+        assert!(matches!(result, Err(Error::OutOfSpace)));
     }
 }
