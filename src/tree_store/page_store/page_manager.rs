@@ -362,6 +362,12 @@ impl<'a> Debug for PageImpl<'a> {
     }
 }
 
+impl<'a> PageImpl<'a> {
+    pub(crate) fn into_memory(self) -> &'a [u8] {
+        self.mem
+    }
+}
+
 impl<'a> Page for PageImpl<'a> {
     fn memory(&self) -> &[u8] {
         self.mem
@@ -1067,7 +1073,7 @@ mod test {
         let db2 = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let read_txn = db2.begin_read().unwrap();
         let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
-        assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+        assert_eq!(b"world", table.get(b"hello").unwrap().unwrap());
     }
 
     #[test]

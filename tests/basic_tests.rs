@@ -32,7 +32,7 @@ fn create_open() {
 
     let read_txn = db2.begin_read().unwrap();
     let table: ReadOnlyTable<u64, u64> = read_txn.open_table("x").unwrap();
-    assert_eq!(1, table.get(&0).unwrap().unwrap().to_value());
+    assert_eq!(1, table.get(&0).unwrap().unwrap());
 }
 
 #[test]
@@ -51,9 +51,9 @@ fn multiple_tables() {
     let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("1").unwrap();
     let table2: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("2").unwrap();
     assert_eq!(table.len().unwrap(), 1);
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap());
     assert_eq!(table2.len().unwrap(), 1);
-    assert_eq!(b"world2", table2.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world2", table2.get(b"hello").unwrap().unwrap());
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn abort() {
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
     table.insert(b"hello", b"aborted").unwrap();
-    assert_eq!(b"aborted", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"aborted", table.get(b"hello").unwrap().unwrap());
     write_txn.abort().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -117,7 +117,7 @@ fn abort() {
 
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap());
     assert_eq!(table.len().unwrap(), 1);
 }
 
@@ -132,7 +132,7 @@ fn insert_overwrite() {
 
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap());
 
     let write_txn = db.begin_write().unwrap();
     let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
@@ -141,10 +141,7 @@ fn insert_overwrite() {
 
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
-    assert_eq!(
-        b"replaced",
-        table.get(b"hello").unwrap().unwrap().to_value()
-    );
+    assert_eq!(b"replaced", table.get(b"hello").unwrap().unwrap());
 }
 
 #[test]
@@ -161,7 +158,7 @@ fn insert_reserve() {
 
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
-    assert_eq!(value, table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(value, table.get(b"hello").unwrap().unwrap());
 }
 
 #[test]
@@ -176,7 +173,7 @@ fn delete() {
 
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap());
     assert_eq!(table.len().unwrap(), 2);
 
     let write_txn = db.begin_write().unwrap();
@@ -209,7 +206,7 @@ fn no_dirty_reads() {
 
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap());
 }
 
 #[test]
@@ -223,7 +220,7 @@ fn read_isolation() {
 
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap());
 
     let write_txn = db.begin_write().unwrap();
     let mut write_table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
@@ -235,17 +232,11 @@ fn read_isolation() {
     let read_txn2 = db.begin_read().unwrap();
     let table2: ReadOnlyTable<[u8], [u8]> = read_txn2.open_table("x").unwrap();
     assert!(table2.get(b"hello").unwrap().is_none());
-    assert_eq!(
-        b"world2",
-        table2.get(b"hello2").unwrap().unwrap().to_value()
-    );
-    assert_eq!(
-        b"world3",
-        table2.get(b"hello3").unwrap().unwrap().to_value()
-    );
+    assert_eq!(b"world2", table2.get(b"hello2").unwrap().unwrap());
+    assert_eq!(b"world3", table2.get(b"hello3").unwrap().unwrap());
     assert_eq!(table2.len().unwrap(), 2);
 
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap());
     assert!(table.get(b"hello2").unwrap().is_none());
     assert!(table.get(b"hello3").unwrap().is_none());
     assert_eq!(table.len().unwrap(), 1);
@@ -262,7 +253,7 @@ fn u64_type() {
 
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<u64, u64> = read_txn.open_table("x").unwrap();
-    assert_eq!(1, table.get(&0).unwrap().unwrap().to_value());
+    assert_eq!(1, table.get(&0).unwrap().unwrap());
 }
 
 #[test]
@@ -278,7 +269,7 @@ fn i128_type() {
 
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<i128, i128> = read_txn.open_table("x").unwrap();
-    assert_eq!(-2, table.get(&-1).unwrap().unwrap().to_value());
+    assert_eq!(-2, table.get(&-1).unwrap().unwrap());
     let mut iter: RangeIter<RangeFull, i128, i128, i128> = table.range(..).unwrap();
     for i in -11..10 {
         assert_eq!(iter.next().unwrap().1, i);
@@ -297,7 +288,7 @@ fn f32_type() {
 
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<u8, f32> = read_txn.open_table("x").unwrap();
-    assert_eq!(0.3, table.get(&0).unwrap().unwrap().to_value());
+    assert_eq!(0.3, table.get(&0).unwrap().unwrap());
 }
 
 #[test]
@@ -312,7 +303,7 @@ fn str_type() {
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<str, str> = read_txn.open_table("x").unwrap();
     let hello = "hello".to_string();
-    assert_eq!("world", table.get(&hello).unwrap().unwrap().to_value());
+    assert_eq!("world", table.get(&hello).unwrap().unwrap());
 
     let mut iter: RangeIter<RangeFull, &str, str, str> = table.range(..).unwrap();
     assert_eq!(iter.next().unwrap().1, "world");
@@ -342,7 +333,7 @@ fn owned_get_signatures() {
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<u32, u32> = read_txn.open_table("x").unwrap();
 
-    assert_eq!(2, table.get(&1).unwrap().unwrap().to_value());
+    assert_eq!(2, table.get(&1).unwrap().unwrap());
 
     let mut iter: RangeIter<RangeFull, u32, u32, u32> = table.range(..).unwrap();
     for i in 0..10 {
@@ -376,9 +367,9 @@ fn ref_get_signatures() {
     let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
 
     let zero = vec![0u8];
-    assert_eq!(&[1], table.get(&[0]).unwrap().unwrap().to_value());
-    assert_eq!(&[1], table.get(b"\0").unwrap().unwrap().to_value());
-    assert_eq!(&[1], table.get(&zero).unwrap().unwrap().to_value());
+    assert_eq!(&[1], table.get(&[0]).unwrap().unwrap());
+    assert_eq!(&[1], table.get(b"\0").unwrap().unwrap());
+    assert_eq!(&[1], table.get(&zero).unwrap().unwrap());
 
     let start = vec![0u8];
     let end = vec![10u8];

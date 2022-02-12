@@ -95,7 +95,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
 }
 
 impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Table<'s, K, V> {
-    fn get(&self, key: &K) -> Result<Option<AccessGuard<V>>, Error> {
+    fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>, Error> {
         self.storage
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root.get())
     }
@@ -128,8 +128,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
 }
 
 pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
-    // TODO: it seems like AccessGuard could be replaced with <<V as RedbValue>::View as WithLifetime>::Out
-    fn get(&self, key: &K) -> Result<Option<AccessGuard<V>>, Error>;
+    fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>, Error>;
 
     fn range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
@@ -170,7 +169,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
 impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     for ReadOnlyTable<'s, K, V>
 {
-    fn get(&self, key: &K) -> Result<Option<AccessGuard<V>>, Error> {
+    fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>, Error> {
         self.storage
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root)
     }
