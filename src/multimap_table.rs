@@ -352,6 +352,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
             self.storage.remove::<MultimapKVPair<K, V>, [u8]>(
                 &kv,
                 self.transaction_id,
+                true,
                 self.table_root.get(),
             )?
         };
@@ -359,10 +360,10 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
         Ok(found.is_some())
     }
 
-    pub fn remove_all(&mut self, key: &K) -> Result<bool, Error> {
+    pub fn remove_all(&mut self, key: &K) -> Result<MultimapGetIterType<K, V>, Error> {
         // Match only on the key, so that we can remove all the associated values
         let key_only = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyOnly);
-        let mut any_found = false;
+        let original_root = self.table_root.get();
         loop {
             // Safety: No other references to this table can exist.
             // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
@@ -371,6 +372,8 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
                 self.storage.remove::<MultimapKVPair<K, V>, [u8]>(
                     &key_only,
                     self.transaction_id,
+                    // TODO: we should return an iterator that frees these pages even if they are uncommitted
+                    false,
                     self.table_root.get(),
                 )?
             };
@@ -378,9 +381,15 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
                 break;
             }
             self.table_root.set(new_root);
-            any_found = true;
         }
-        Ok(any_found)
+
+        let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
+        let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
+        let lower = MultimapKVPair::<K, V>::new(lower_bytes);
+        let upper = MultimapKVPair::<K, V>::new(upper_bytes);
+        self.storage
+            .get_range(lower..=upper, original_root)
+            .map(MultimapValueIter::new)
     }
 }
 

@@ -110,15 +110,16 @@ fn delete() {
     let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table("x").unwrap();
     table.insert(b"hello", b"world").unwrap();
     table.insert(b"hello", b"world2").unwrap();
+    table.insert(b"hello", b"world3").unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table("x").unwrap();
     assert_eq!(
-        vec![b"world".to_vec(), b"world2".to_vec()],
+        vec![b"world".to_vec(), b"world2".to_vec(), b"world3".to_vec()],
         get_vec(&table, b"hello")
     );
-    assert_eq!(table.len().unwrap(), 2);
+    assert_eq!(table.len().unwrap(), 3);
 
     let write_txn = db.begin_write().unwrap();
     let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table("x").unwrap();
@@ -127,12 +128,18 @@ fn delete() {
 
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyMultimapTable<[u8], [u8]> = read_txn.open_multimap_table("x").unwrap();
-    assert_eq!(vec![b"world".to_vec()], get_vec(&table, b"hello"));
-    assert_eq!(table.len().unwrap(), 1);
+    assert_eq!(
+        vec![b"world".to_vec(), b"world3".to_vec()],
+        get_vec(&table, b"hello")
+    );
+    assert_eq!(table.len().unwrap(), 2);
 
     let write_txn = db.begin_write().unwrap();
     let mut table: MultimapTable<[u8], [u8]> = write_txn.open_multimap_table("x").unwrap();
-    table.remove_all(b"hello").unwrap();
+    let mut iter = table.remove_all(b"hello").unwrap();
+    assert_eq!(b"world", iter.next().unwrap());
+    assert_eq!(b"world3", iter.next().unwrap());
+    assert!(iter.next().is_none());
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();

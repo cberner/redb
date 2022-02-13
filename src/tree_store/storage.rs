@@ -316,8 +316,9 @@ impl Storage {
             }
 
             // Safety: References into the master table are never returned to the user
-            let (new_root, found) =
-                unsafe { self.remove::<str, [u8]>(name.as_bytes(), transaction_id, root_page)? };
+            let (new_root, found) = unsafe {
+                self.remove::<str, [u8]>(name.as_bytes(), transaction_id, true, root_page)?
+            };
             return Ok((new_root, found.is_some()));
         }
 
@@ -533,8 +534,9 @@ impl Storage {
         // Remove all the old transactions. Note: this may create new pages that need to be freed
         for key in to_remove {
             // Safety: all references to the freed table above have already been dropped
-            let (new_root, _) =
-                unsafe { self.remove::<[u8], [u8]>(&key, transaction_id, freed_table.table_root)? };
+            let (new_root, _) = unsafe {
+                self.remove::<[u8], [u8]>(&key, transaction_id, true, freed_table.table_root)?
+            };
             freed_table.table_root = new_root;
         }
         // Safety: References into the master table are never returned to the user
@@ -757,12 +759,14 @@ impl Storage {
     }
 
     // Returns the new root page, and a bool indicating whether the entry existed
-    // Safety: caller must ensure that no references to uncommitted data in this transaction exist
+    // Safety: caller must ensure that no references to uncommitted data in this transaction exist,
+    // if free_uncommitted = true
     // TODO: this method could be made safe, if the transaction_id was not copy and was borrowed mut
     pub(in crate) unsafe fn remove<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         key: &[u8],
         transaction_id: TransactionId,
+        free_uncommitted: bool,
         root_handle: Option<PageNumber>,
     ) -> Result<(Option<PageNumber>, Option<AccessGuard<V>>), Error> {
         assert_eq!(
@@ -771,7 +775,8 @@ impl Storage {
         );
         if let Some(handle) = root_handle {
             let root_page = self.mem.get_page(handle);
-            let (new_root, found, freed) = tree_delete::<K, V>(root_page, key, &self.mem)?;
+            let (new_root, found, freed) =
+                tree_delete::<K, V>(root_page, key, free_uncommitted, &self.mem)?;
             self.pending_freed_pages
                 .lock()
                 .unwrap()
