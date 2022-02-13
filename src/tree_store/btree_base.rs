@@ -457,7 +457,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
     }
 
     pub(in crate::tree_store) fn total_key_length(&self) -> usize {
-        self.key_end(self.num_keys() - 1)
+        self.key_end(self.num_keys() - 1) - self.key_offset(0)
     }
 
     fn num_keys(&self) -> usize {
