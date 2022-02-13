@@ -134,6 +134,7 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error>;
 
+    // TODO: remove this method and make the iterator returned from range() double ended
     fn range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,

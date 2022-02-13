@@ -458,6 +458,7 @@ pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
         range: T,
     ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error>;
 
+    // TODO: remove this method and make the iterator returned from range() double ended
     fn range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
