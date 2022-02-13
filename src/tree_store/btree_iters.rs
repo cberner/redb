@@ -2,7 +2,7 @@ use crate::tree_store::btree_base::{EntryAccessor, InternalAccessor, LeafAccesso
 use crate::tree_store::btree_base::{BTREE_ORDER, INTERNAL, LEAF};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
-use crate::tree_store::{BtreeEntry, PageNumber};
+use crate::tree_store::PageNumber;
 use crate::types::{RedbKey, RedbValue};
 use std::borrow::Borrow;
 use std::collections::Bound;

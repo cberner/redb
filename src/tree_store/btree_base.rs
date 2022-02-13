@@ -9,11 +9,6 @@ pub(in crate::tree_store) const BTREE_ORDER: usize = 40;
 pub(in crate::tree_store) const LEAF: u8 = 1;
 pub(in crate::tree_store) const INTERNAL: u8 = 2;
 
-pub trait BtreeEntry<'a: 'b, 'b> {
-    fn key(&'b self) -> &'a [u8];
-    fn value(&'b self) -> &'a [u8];
-}
-
 pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
     page: PageImpl<'a>,
     offset: usize,
@@ -92,12 +87,12 @@ impl<'a> EntryAccessor<'a> {
     }
 }
 
-impl<'a: 'b, 'b> BtreeEntry<'a, 'b> for EntryAccessor<'a> {
-    fn key(&'b self) -> &'a [u8] {
+impl<'a: 'b, 'b> EntryAccessor<'a> {
+    pub(crate) fn key(&'b self) -> &'a [u8] {
         self.key
     }
 
-    fn value(&'b self) -> &'a [u8] {
+    pub(crate) fn value(&'b self) -> &'a [u8] {
         self.value
     }
 }
