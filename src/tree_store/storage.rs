@@ -7,7 +7,7 @@ use crate::tree_store::btree_utils::{
     find_key, make_mut_single_leaf, print_tree, tree_delete, tree_height, tree_insert,
 };
 use crate::tree_store::page_store::{PageNumber, TransactionalMemory};
-use crate::tree_store::{AccessGuardMut, BtreeEntry, BtreeRangeIter};
+use crate::tree_store::{AccessGuardMut, BtreeRangeIter};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use memmap2::MmapRaw;

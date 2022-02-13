@@ -1,7 +1,5 @@
 use crate::error::Error;
-use crate::tree_store::{
-    AccessGuardMut, BtreeEntry, BtreeRangeIter, PageNumber, Storage, TransactionId,
-};
+use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber, Storage, TransactionId};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::AccessGuard;
 use std::borrow::Borrow;

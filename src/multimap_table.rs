@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::tree_store::{BtreeEntry, BtreeRangeIter, PageNumber, Storage, TransactionId};
+use crate::tree_store::{BtreeRangeIter, PageNumber, Storage, TransactionId};
 use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
 };

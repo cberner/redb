@@ -4,7 +4,7 @@ use crate::tree_store::btree_base::{
 };
 use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
 use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMemory};
-use crate::tree_store::{AccessGuardMut, BtreeEntry};
+use crate::tree_store::AccessGuardMut;
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use std::cmp::max;
