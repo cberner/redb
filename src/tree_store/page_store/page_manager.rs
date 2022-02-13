@@ -382,6 +382,7 @@ impl<'a> Page for PageImpl<'a> {
 pub(crate) struct PageMut<'a> {
     mem: &'a mut [u8],
     page_number: PageNumber,
+    #[cfg(debug_assertions)]
     open_pages: &'a Mutex<HashSet<PageNumber>>,
 }
 
@@ -401,6 +402,7 @@ impl<'a> Page for PageMut<'a> {
     }
 }
 
+#[cfg(debug_assertions)]
 impl<'a> Drop for PageMut<'a> {
     fn drop(&mut self) {
         self.open_pages.lock().unwrap().remove(&self.page_number);
@@ -426,6 +428,7 @@ pub(crate) struct TransactionalMemory {
     // self-referential, since we also hold the mmap object
     metapage_guard: Mutex<MetapageGuard>,
     // The number of PageMut which are outstanding
+    #[cfg(debug_assertions)]
     open_dirty_pages: Mutex<HashSet<PageNumber>>,
     // Indicates that a non-durable commit has been made, so reads should be served from the secondary meta page
     read_from_secondary: AtomicBool,
@@ -587,6 +590,7 @@ impl TransactionalMemory {
             page_allocator,
             mmap,
             metapage_guard: mutex,
+            #[cfg(debug_assertions)]
             open_dirty_pages: Mutex::new(HashSet::new()),
             read_from_secondary: AtomicBool::new(false),
             page_size,
@@ -707,7 +711,8 @@ impl TransactionalMemory {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
-        assert!(self.open_dirty_pages.lock().unwrap().is_empty());
+        #[cfg(debug_assertions)]
+        debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
         assert!(self.page_allocator.is_some());
 
         let (mmap, guard) = self.acquire_mutable_metapage()?;
@@ -761,7 +766,8 @@ impl TransactionalMemory {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
-        assert!(self.open_dirty_pages.lock().unwrap().is_empty());
+        #[cfg(debug_assertions)]
+        debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
         assert!(self.page_allocator.is_some());
 
         let (mmap, guard) = self.acquire_mutable_metapage()?;
@@ -811,7 +817,8 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn rollback_uncommited_writes(&self) -> Result<(), Error> {
-        assert!(self.open_dirty_pages.lock().unwrap().is_empty());
+        #[cfg(debug_assertions)]
+        debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
         let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
         for op in self.log_since_commit.lock().unwrap().drain(..).rev() {
             match op {
@@ -840,7 +847,8 @@ impl TransactionalMemory {
 
     pub(crate) fn get_page(&self, page_number: PageNumber) -> PageImpl {
         // We must not retrieve an immutable reference to a page which already has a mutable ref to it
-        assert!(
+        #[cfg(debug_assertions)]
+        debug_assert!(
             !self.open_dirty_pages.lock().unwrap().contains(&page_number),
             "{:?}",
             page_number
@@ -856,6 +864,7 @@ impl TransactionalMemory {
 
     // Safety: the caller must ensure that no references to the memory in `page` exist
     pub(crate) unsafe fn get_page_mut(&self, page_number: PageNumber) -> PageMut {
+        #[cfg(debug_assertions)]
         self.open_dirty_pages.lock().unwrap().insert(page_number);
 
         let mem = self
@@ -865,6 +874,7 @@ impl TransactionalMemory {
         PageMut {
             mem,
             page_number,
+            #[cfg(debug_assertions)]
             open_pages: &self.open_dirty_pages,
         }
     }
@@ -981,6 +991,7 @@ impl TransactionalMemory {
             .lock()
             .unwrap()
             .push(AllocationOp::Allocate(page_number));
+        #[cfg(debug_assertions)]
         self.open_dirty_pages.lock().unwrap().insert(page_number);
 
         let address_range = page_number.address_range(self.page_size);
@@ -997,6 +1008,7 @@ impl TransactionalMemory {
         Ok(PageMut {
             mem,
             page_number,
+            #[cfg(debug_assertions)]
             open_pages: &self.open_dirty_pages,
         })
     }
