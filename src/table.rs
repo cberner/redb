@@ -84,6 +84,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
             self.storage.remove::<K, V>(
                 key.as_bytes().as_ref(),
                 self.transaction_id,
+                true,
                 self.table_root.get(),
             )
         }?;
