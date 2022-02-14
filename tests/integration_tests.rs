@@ -1,3 +1,5 @@
+use std::fs;
+use std::io::ErrorKind;
 use tempfile::NamedTempFile;
 
 use rand::prelude::SliceRandom;
@@ -552,4 +554,25 @@ fn non_page_size_multiple() {
     let read_txn = db.begin_read().unwrap();
     let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
     assert_eq!(table.len().unwrap(), 1);
+}
+
+#[test]
+fn does_not_exist() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    fs::remove_file(&tmpfile.path()).unwrap();
+    let result = unsafe { Database::open(tmpfile.path()) };
+    if let Err(Error::Io(e)) = result {
+        assert!(matches!(e.kind(), ErrorKind::NotFound));
+    } else {
+        panic!();
+    }
+
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let result = unsafe { Database::open(tmpfile.path()) };
+    if let Err(Error::Io(e)) = result {
+        assert!(matches!(e.kind(), ErrorKind::InvalidData));
+    } else {
+        panic!();
+    }
 }
