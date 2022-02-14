@@ -10,10 +10,11 @@ use memmap2::MmapRaw;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::panic;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::{io, panic};
 
 pub struct Database {
     storage: Storage,
@@ -63,16 +64,13 @@ impl Database {
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
     pub unsafe fn open(path: impl AsRef<Path>) -> Result<Database, Error> {
-        if path.as_ref().exists() && File::open(path.as_ref())?.metadata()?.len() > 0 {
+        if File::open(path.as_ref())?.metadata()?.len() > 0 {
             let file = OpenOptions::new().read(true).write(true).open(path)?;
             let mmap = MmapRaw::map_raw(&file)?;
             let storage = Storage::new(mmap, None)?;
             Ok(Database { storage })
         } else {
-            Err(Error::DoesNotExist(format!(
-                "{} is not a valid redb database",
-                path.as_ref().to_string_lossy()
-            )))
+            Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
         }
     }
 
