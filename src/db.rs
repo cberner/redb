@@ -380,9 +380,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
         let definition = self
             .storage
             .get_table(name.as_ref(), TableType::Normal, self.root_page)?
-            .ok_or_else(|| {
-                Error::DoesNotExist(format!("Table '{}' does not exist", name.as_ref()))
-            })?;
+            .ok_or_else(|| Error::TableDoesNotExist(name.as_ref().to_string()))?;
 
         Ok(ReadOnlyTable::new(definition.get_root(), self.storage))
     }
@@ -397,9 +395,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
         let definition = self
             .storage
             .get_table(name.as_ref(), TableType::Multimap, self.root_page)?
-            .ok_or_else(|| {
-                Error::DoesNotExist(format!("Table '{}' does not exist", name.as_ref()))
-            })?;
+            .ok_or_else(|| Error::TableDoesNotExist(name.as_ref().to_string()))?;
 
         Ok(ReadOnlyMultimapTable::new(
             definition.get_root(),
