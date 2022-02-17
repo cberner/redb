@@ -4,7 +4,8 @@ use crate::tree_store::btree_iters::{
     find_iter_unbounded_start, page_numbers_iter_start_state, AllPageNumbersBtreeIter,
 };
 use crate::tree_store::btree_utils::{
-    find_key, make_mut_single_leaf, print_tree, tree_delete, tree_height, tree_insert,
+    find_key, fragmented_bytes, make_mut_single_leaf, overhead_bytes, print_tree, stored_bytes,
+    tree_delete, tree_height, tree_insert,
 };
 use crate::tree_store::page_store::{PageNumber, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeRangeIter};
@@ -32,13 +33,25 @@ type AtomicTransactionId = AtomicU64;
 pub struct DbStats {
     tree_height: usize,
     free_pages: usize,
+    stored_leaf_bytes: usize,
+    overhead_bytes: usize,
+    fragmented_bytes: usize,
 }
 
 impl DbStats {
-    fn new(tree_height: usize, free_pages: usize) -> Self {
+    fn new(
+        tree_height: usize,
+        free_pages: usize,
+        stored_leaf_bytes: usize,
+        overhead_bytes: usize,
+        fragmented_bytes: usize,
+    ) -> Self {
         DbStats {
             tree_height,
             free_pages,
+            stored_leaf_bytes,
+            overhead_bytes,
+            fragmented_bytes,
         }
     }
 
@@ -48,6 +61,22 @@ impl DbStats {
 
     pub fn free_pages(&self) -> usize {
         self.free_pages
+    }
+
+    /// Number of bytes consumed by keys and values that have been inserted.
+    /// Does not include indexing overhead
+    pub fn stored_bytes(&self) -> usize {
+        self.stored_leaf_bytes
+    }
+
+    /// Number of bytes consumed by keys in internal index pages, plus other overhead
+    pub fn overhead_bytes(&self) -> usize {
+        self.overhead_bytes
+    }
+
+    /// Number of bytes consumed by fragmentation
+    pub fn fragmented_bytes(&self) -> usize {
+        self.fragmented_bytes
     }
 }
 
@@ -641,6 +670,19 @@ impl Storage {
             .map(|p| tree_height(self.mem.get_page(p), &self.mem))
             .unwrap_or(0);
         let mut max_subtree_height = 0;
+        let mut total_stored_bytes = 0;
+        // Include the master table in the overhead
+        let mut total_overhead = self
+            .get_root_page_number()
+            .map(|p| {
+                overhead_bytes(self.mem.get_page(p), &self.mem)
+                    + stored_bytes(self.mem.get_page(p), &self.mem)
+            })
+            .unwrap_or(0);
+        let mut total_fragmented = self
+            .get_root_page_number()
+            .map(|p| fragmented_bytes(self.mem.get_page(p), &self.mem))
+            .unwrap_or(0);
         let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
             self.get_range(.., self.get_root_page_number())?;
         while let Some(entry) = iter.next() {
@@ -648,11 +690,17 @@ impl Storage {
             if let Some(table_root) = definition.get_root() {
                 let height = tree_height(self.mem.get_page(table_root), &self.mem);
                 max_subtree_height = max(max_subtree_height, height);
+                total_stored_bytes += stored_bytes(self.mem.get_page(table_root), &self.mem);
+                total_overhead += overhead_bytes(self.mem.get_page(table_root), &self.mem);
+                total_fragmented += fragmented_bytes(self.mem.get_page(table_root), &self.mem);
             }
         }
         Ok(DbStats::new(
             master_tree_height + max_subtree_height,
             self.mem.count_free_pages()?,
+            total_stored_bytes,
+            total_overhead,
+            total_fragmented,
         ))
     }
 

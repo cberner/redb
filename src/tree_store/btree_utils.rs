@@ -29,6 +29,77 @@ pub(in crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalM
     }
 }
 
+pub(in crate) fn stored_bytes<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            accessor.length_of_pairs(0, accessor.num_pairs())
+        }
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page);
+            let mut bytes = 0;
+            for i in 0..accessor.count_children() {
+                if let Some(child) = accessor.child_page(i) {
+                    bytes += stored_bytes(manager.get_page(child), manager);
+                }
+            }
+
+            bytes
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub(in crate) fn overhead_bytes<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            accessor.total_length() - accessor.length_of_pairs(0, accessor.num_pairs())
+        }
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page);
+            // Internal pages are all "overhead"
+            let mut bytes = accessor.total_length();
+            for i in 0..accessor.count_children() {
+                if let Some(child) = accessor.child_page(i) {
+                    bytes += overhead_bytes(manager.get_page(child), manager);
+                }
+            }
+
+            bytes
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub(in crate) fn fragmented_bytes<'a>(
+    page: PageImpl<'a>,
+    manager: &'a TransactionalMemory,
+) -> usize {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            page.memory().len() - accessor.total_length()
+        }
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page);
+            // Internal pages are all "overhead"
+            let mut bytes = page.memory().len() - accessor.total_length();
+            for i in 0..accessor.count_children() {
+                if let Some(child) = accessor.child_page(i) {
+                    bytes += fragmented_bytes(manager.get_page(child), manager);
+                }
+            }
+
+            bytes
+        }
+        _ => unreachable!(),
+    }
+}
+
 pub(in crate) fn print_node(page: &impl Page) {
     let node_mem = page.memory();
     match node_mem[0] {

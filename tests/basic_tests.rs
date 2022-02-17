@@ -19,6 +19,20 @@ fn len() {
 }
 
 #[test]
+fn stored_size() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let write_txn = db.begin_write().unwrap();
+    let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
+    table.insert(b"hello", b"world").unwrap();
+    write_txn.commit().unwrap();
+
+    assert_eq!(db.stats().unwrap().stored_bytes(), 10);
+    assert!(db.stats().unwrap().fragmented_bytes() > 0);
+    assert!(db.stats().unwrap().overhead_bytes() > 0);
+}
+
+#[test]
 fn create_open() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };

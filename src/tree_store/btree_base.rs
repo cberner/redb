@@ -235,6 +235,11 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         end_offset - start_offset
     }
 
+    pub(in crate) fn total_length(&self) -> usize {
+        // Values are stored last
+        self.value_end(self.num_pairs() - 1).unwrap()
+    }
+
     fn key_unchecked(&self, n: usize) -> &[u8] {
         &self.page.memory()[self.key_start(n).unwrap()..self.key_end(n).unwrap()]
     }
@@ -377,6 +382,11 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
             page,
             _page_lifetime: Default::default(),
         }
+    }
+
+    pub(in crate) fn total_length(&self) -> usize {
+        // Keys are stored at the end
+        self.key_end(self.num_keys() - 1)
     }
 
     pub(in crate::tree_store) fn child_for_key<K: RedbKey + ?Sized>(
