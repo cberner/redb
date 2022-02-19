@@ -203,7 +203,7 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
     }
 }
 
-pub(in crate) fn page_numbers_iter_start_state(page: PageImpl) -> RangeIterState {
+pub(crate) fn page_numbers_iter_start_state(page: PageImpl) -> RangeIterState {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => Leaf {
@@ -249,7 +249,7 @@ impl<
         V: RedbValue + ?Sized + 'a,
     > BtreeRangeIter<'a, T, KR, K, V>
 {
-    pub(in crate) fn new(
+    pub(crate) fn new(
         state: Option<RangeIterState<'a>>,
         query_range: T,
         manager: &'a TransactionalMemory,
@@ -266,7 +266,7 @@ impl<
         }
     }
 
-    pub(in crate) fn new_reversed(
+    pub(crate) fn new_reversed(
         state: Option<RangeIterState<'a>>,
         query_range: T,
         manager: &'a TransactionalMemory,
@@ -328,7 +328,7 @@ impl<
     }
 }
 
-pub(in crate) fn find_iter_unbounded_start<'a>(
+pub(crate) fn find_iter_unbounded_start<'a>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     manager: &'a TransactionalMemory,
@@ -357,7 +357,7 @@ pub(in crate) fn find_iter_unbounded_start<'a>(
     }
 }
 
-pub(in crate) fn find_iter_unbounded_reversed<'a>(
+pub(crate) fn find_iter_unbounded_reversed<'a>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     manager: &'a TransactionalMemory,
@@ -393,7 +393,7 @@ pub(in crate) fn find_iter_unbounded_reversed<'a>(
     }
 }
 
-pub(in crate) fn find_iter_start<'a, K: RedbKey + ?Sized>(
+pub(crate) fn find_iter_start<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     query: &[u8],
@@ -429,7 +429,7 @@ pub(in crate) fn find_iter_start<'a, K: RedbKey + ?Sized>(
     }
 }
 
-pub(in crate) fn find_iter_start_reversed<'a, K: RedbKey + ?Sized>(
+pub(crate) fn find_iter_start_reversed<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     query: &[u8],
