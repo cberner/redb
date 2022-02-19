@@ -1021,6 +1021,10 @@ impl TransactionalMemory {
 
         Ok(count)
     }
+
+    pub(crate) fn get_page_size(&self) -> usize {
+        self.page_size
+    }
 }
 
 impl Drop for TransactionalMemory {

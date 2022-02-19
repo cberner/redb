@@ -31,30 +31,15 @@ type AtomicTransactionId = AtomicU64;
 
 #[derive(Debug)]
 pub struct DbStats {
-    tree_height: usize,
-    free_pages: usize,
-    stored_leaf_bytes: usize,
-    overhead_bytes: usize,
-    fragmented_bytes: usize,
+    pub(crate) tree_height: usize,
+    pub(crate) free_pages: usize,
+    pub(crate) stored_leaf_bytes: usize,
+    pub(crate) overhead_bytes: usize,
+    pub(crate) fragmented_bytes: usize,
+    pub(crate) page_size: usize,
 }
 
 impl DbStats {
-    fn new(
-        tree_height: usize,
-        free_pages: usize,
-        stored_leaf_bytes: usize,
-        overhead_bytes: usize,
-        fragmented_bytes: usize,
-    ) -> Self {
-        DbStats {
-            tree_height,
-            free_pages,
-            stored_leaf_bytes,
-            overhead_bytes,
-            fragmented_bytes,
-        }
-    }
-
     pub fn tree_height(&self) -> usize {
         self.tree_height
     }
@@ -77,6 +62,11 @@ impl DbStats {
     /// Number of bytes consumed by fragmentation
     pub fn fragmented_bytes(&self) -> usize {
         self.fragmented_bytes
+    }
+
+    /// Number of bytes per page
+    pub fn page_size(&self) -> usize {
+        self.page_size
     }
 }
 
@@ -695,13 +685,14 @@ impl Storage {
                 total_fragmented += fragmented_bytes(self.mem.get_page(table_root), &self.mem);
             }
         }
-        Ok(DbStats::new(
-            master_tree_height + max_subtree_height,
-            self.mem.count_free_pages()?,
-            total_stored_bytes,
-            total_overhead,
-            total_fragmented,
-        ))
+        Ok(DbStats {
+            tree_height: master_tree_height + max_subtree_height,
+            free_pages: self.mem.count_free_pages()?,
+            stored_leaf_bytes: total_stored_bytes,
+            overhead_bytes: total_overhead,
+            fragmented_bytes: total_fragmented,
+            page_size: self.mem.get_page_size(),
+        })
     }
 
     #[allow(dead_code)]
