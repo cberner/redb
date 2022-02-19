@@ -107,12 +107,12 @@ impl From<u8> for TableType {
 }
 
 #[derive(Clone)]
-pub(crate) struct TableDefinition {
+pub(crate) struct TableHeader {
     table_root: Option<PageNumber>,
     table_type: TableType,
 }
 
-impl TableDefinition {
+impl TableHeader {
     pub(crate) fn get_root(&self) -> Option<PageNumber> {
         self.table_root
     }
@@ -143,7 +143,7 @@ impl TableDefinition {
         };
         let table_type = TableType::from(value[0]);
 
-        TableDefinition {
+        TableHeader {
             table_root,
             table_type,
         }
@@ -163,7 +163,7 @@ impl<'a> Iterator for TableNameIter<'a> {
             if str::from_bytes(entry.key()) == FREED_TABLE {
                 continue;
             }
-            if TableDefinition::from_bytes(entry.value()).table_type == self.table_type {
+            if TableHeader::from_bytes(entry.value()).table_type == self.table_type {
                 return Some(str::from_bytes(entry.key()).to_string());
             }
         }
@@ -197,7 +197,7 @@ impl Storage {
                 BtreeRangeIter::new(start_state, .., &mem);
 
             while let Some(entry) = iter.next() {
-                let definition = TableDefinition::from_bytes(entry.value());
+                let definition = TableHeader::from_bytes(entry.value());
                 if let Some(table_root) = definition.get_root() {
                     let page = mem.get_page(table_root);
                     let table_start = page_numbers_iter_start_state(page);
@@ -214,7 +214,7 @@ impl Storage {
         if mem.get_primary_root_page().is_none() {
             assert_eq!(next_transaction_id, 1);
             // Empty database, so insert the freed table.
-            let freed_table = TableDefinition {
+            let freed_table = TableHeader {
                 table_root: None,
                 table_type: TableType::Normal,
             };
@@ -275,7 +275,7 @@ impl Storage {
         transaction_id: TransactionId,
         master_root: Option<PageNumber>,
     ) -> Result<PageNumber, Error> {
-        let definition = TableDefinition {
+        let definition = TableHeader {
             table_root,
             table_type,
         };
@@ -309,9 +309,9 @@ impl Storage {
         name: &str,
         table_type: TableType,
         root_page: Option<PageNumber>,
-    ) -> Result<Option<TableDefinition>, Error> {
+    ) -> Result<Option<TableHeader>, Error> {
         if let Some(found) = self.get::<str, [u8]>(name.as_bytes(), root_page)? {
-            let definition = TableDefinition::from_bytes(found);
+            let definition = TableHeader::from_bytes(found);
             if definition.get_type() != table_type {
                 return Err(Error::TableTypeMismatch(format!(
                     "{:?} is not of type {:?}",
@@ -362,12 +362,12 @@ impl Storage {
         table_type: TableType,
         transaction_id: TransactionId,
         root_page: Option<PageNumber>,
-    ) -> Result<(TableDefinition, PageNumber), Error> {
+    ) -> Result<(TableHeader, PageNumber), Error> {
         if let Some(found) = self.get_table(name, table_type, root_page)? {
             return Ok((found, root_page.unwrap()));
         }
 
-        let definition = TableDefinition {
+        let header = TableHeader {
             table_root: None,
             table_type,
         };
@@ -375,12 +375,12 @@ impl Storage {
         let new_root = unsafe {
             self.insert::<str>(
                 name.as_bytes(),
-                &definition.to_bytes(),
+                &header.to_bytes(),
                 transaction_id,
                 root_page,
             )?
         };
-        Ok((definition, new_root))
+        Ok((header, new_root))
     }
 
     // Returns the new root page number
@@ -686,7 +686,7 @@ impl Storage {
         let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
             self.get_range(.., self.get_root_page_number())?;
         while let Some(entry) = iter.next() {
-            let definition = TableDefinition::from_bytes(entry.value());
+            let definition = TableHeader::from_bytes(entry.value());
             if let Some(table_root) = definition.get_root() {
                 let height = tree_height(self.mem.get_page(table_root), &self.mem);
                 max_subtree_height = max(max_subtree_height, height);
@@ -715,7 +715,7 @@ impl Storage {
 
             while let Some(entry) = iter.next() {
                 eprintln!("{} tree:", String::from_utf8_lossy(entry.key()));
-                let definition = TableDefinition::from_bytes(entry.value());
+                let definition = TableHeader::from_bytes(entry.value());
                 if let Some(table_root) = definition.get_root() {
                     self.print_dirty_tree_debug(table_root);
                 }

@@ -11,10 +11,45 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
+use std::marker::PhantomData;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{io, panic};
+
+// TODO: add trait bounds once const_fn_trait_bound is stable
+pub struct TableDefinition<'a, K: ?Sized, V: ?Sized> {
+    name: &'a str,
+    _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
+}
+
+impl<'a, K: ?Sized, V: ?Sized> TableDefinition<'a, K, V> {
+    pub const fn new(name: &'a str) -> Self {
+        // TODO: enable once const_panic is stable
+        Self {
+            name,
+            _key_type: PhantomData,
+            _value_type: PhantomData,
+        }
+    }
+}
+
+pub struct MultimapTableDefinition<'a, K: ?Sized, V: ?Sized> {
+    name: &'a str,
+    _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
+}
+
+impl<'a, K: ?Sized, V: ?Sized> MultimapTableDefinition<'a, K, V> {
+    pub const fn new(name: &'a str) -> Self {
+        Self {
+            name,
+            _key_type: PhantomData,
+            _value_type: PhantomData,
+        }
+    }
+}
 
 pub struct Database {
     storage: Storage,
@@ -173,20 +208,23 @@ impl<'a> DatabaseTransaction<'a> {
     /// The table will be created if it does not exist
     pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
-        name: impl AsRef<str>,
+        definition: &TableDefinition<K, V>,
     ) -> Result<Table<'a, K, V>, Error> {
-        assert!(!name.as_ref().is_empty());
-        assert_ne!(name.as_ref(), FREED_TABLE);
-        let key = (name.as_ref().to_string(), TableType::Normal);
+        assert!(!definition.name.is_empty());
+        assert_ne!(definition.name, FREED_TABLE);
+        let key = (definition.name.to_string(), TableType::Normal);
         if let Some(location) = self.open_tables.borrow().get(&key) {
-            return Err(Error::TableAlreadyOpen(name.as_ref().to_string(), location));
+            return Err(Error::TableAlreadyOpen(
+                definition.name.to_string(),
+                location,
+            ));
         }
         self.open_tables
             .borrow_mut()
             .insert(key.clone(), panic::Location::caller());
 
-        let (definition, root) = self.storage.get_or_create_table(
-            name.as_ref(),
+        let (header, root) = self.storage.get_or_create_table(
+            definition.name,
             TableType::Normal,
             self.transaction_id,
             self.root_page.get(),
@@ -197,7 +235,7 @@ impl<'a> DatabaseTransaction<'a> {
             .pending_table_root_changes
             .borrow_mut()
             .entry(key)
-            .or_insert_with(|| Rc::new(Cell::new(definition.get_root())))
+            .or_insert_with(|| Rc::new(Cell::new(header.get_root())))
             .clone();
 
         Ok(Table::new(self.transaction_id, root, self.storage))
@@ -208,20 +246,23 @@ impl<'a> DatabaseTransaction<'a> {
     /// The table will be created if it does not exist
     pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
-        name: impl AsRef<str>,
+        definition: &MultimapTableDefinition<K, V>,
     ) -> Result<MultimapTable<'a, K, V>, Error> {
-        assert!(!name.as_ref().is_empty());
-        assert_ne!(name.as_ref(), FREED_TABLE);
-        let key = (name.as_ref().to_string(), TableType::Multimap);
+        assert!(!definition.name.is_empty());
+        assert_ne!(definition.name, FREED_TABLE);
+        let key = (definition.name.to_string(), TableType::Multimap);
         if let Some(location) = self.open_tables.borrow().get(&key) {
-            return Err(Error::TableAlreadyOpen(name.as_ref().to_string(), location));
+            return Err(Error::TableAlreadyOpen(
+                definition.name.to_string(),
+                location,
+            ));
         }
         self.open_tables
             .borrow_mut()
             .insert(key.clone(), panic::Location::caller());
 
-        let (definition, root) = self.storage.get_or_create_table(
-            name.as_ref(),
+        let (header, root) = self.storage.get_or_create_table(
+            definition.name,
             TableType::Multimap,
             self.transaction_id,
             self.root_page.get(),
@@ -232,7 +273,7 @@ impl<'a> DatabaseTransaction<'a> {
             .pending_table_root_changes
             .borrow_mut()
             .entry(key)
-            .or_insert_with(|| Rc::new(Cell::new(definition.get_root())))
+            .or_insert_with(|| Rc::new(Cell::new(header.get_root())))
             .clone();
 
         Ok(MultimapTable::new(self.transaction_id, root, self.storage))
@@ -241,11 +282,15 @@ impl<'a> DatabaseTransaction<'a> {
     /// Delete the given table
     ///
     /// Returns a bool indicating whether the table existed
-    pub fn delete_table(&self, name: impl AsRef<str>) -> Result<bool, Error> {
-        assert!(!name.as_ref().is_empty());
+    pub fn delete_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+        &self,
+        definition: &TableDefinition<K, V>,
+    ) -> Result<bool, Error> {
+        assert!(!definition.name.is_empty());
+        assert_ne!(definition.name, FREED_TABLE);
         let original_root = self.root_page.get();
         let (root, found) = self.storage.delete_table(
-            name.as_ref(),
+            definition.name,
             TableType::Normal,
             self.transaction_id,
             original_root,
@@ -259,11 +304,14 @@ impl<'a> DatabaseTransaction<'a> {
     /// Delete the given table
     ///
     /// Returns a bool indicating whether the table existed
-    pub fn delete_multimap_table(&self, name: impl AsRef<str>) -> Result<bool, Error> {
-        assert!(!name.as_ref().is_empty());
+    pub fn delete_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
+        &self,
+        definition: &MultimapTableDefinition<K, V>,
+    ) -> Result<bool, Error> {
+        assert!(!definition.name.is_empty());
         let original_root = self.root_page.get();
         let (root, found) = self.storage.delete_table(
-            name.as_ref(),
+            definition.name,
             TableType::Multimap,
             self.transaction_id,
             original_root,
@@ -373,34 +421,31 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
     /// Open the given table
     pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
-        name: impl AsRef<str>,
+        definition: &TableDefinition<K, V>,
     ) -> Result<ReadOnlyTable<'a, K, V>, Error> {
-        assert!(!name.as_ref().is_empty());
-        assert_ne!(name.as_ref(), FREED_TABLE);
-        let definition = self
+        assert!(!definition.name.is_empty());
+        assert_ne!(definition.name, FREED_TABLE);
+        let header = self
             .storage
-            .get_table(name.as_ref(), TableType::Normal, self.root_page)?
-            .ok_or_else(|| Error::TableDoesNotExist(name.as_ref().to_string()))?;
+            .get_table(definition.name, TableType::Normal, self.root_page)?
+            .ok_or_else(|| Error::TableDoesNotExist(definition.name.to_string()))?;
 
-        Ok(ReadOnlyTable::new(definition.get_root(), self.storage))
+        Ok(ReadOnlyTable::new(header.get_root(), self.storage))
     }
 
     /// Open the given table
     pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
-        name: impl AsRef<str>,
+        definition: &MultimapTableDefinition<K, V>,
     ) -> Result<ReadOnlyMultimapTable<'a, K, V>, Error> {
-        assert!(!name.as_ref().is_empty());
-        assert_ne!(name.as_ref(), FREED_TABLE);
-        let definition = self
+        assert!(!definition.name.is_empty());
+        assert_ne!(definition.name, FREED_TABLE);
+        let header = self
             .storage
-            .get_table(name.as_ref(), TableType::Multimap, self.root_page)?
-            .ok_or_else(|| Error::TableDoesNotExist(name.as_ref().to_string()))?;
+            .get_table(definition.name, TableType::Multimap, self.root_page)?
+            .ok_or_else(|| Error::TableDoesNotExist(definition.name.to_string()))?;
 
-        Ok(ReadOnlyMultimapTable::new(
-            definition.get_root(),
-            self.storage,
-        ))
+        Ok(ReadOnlyMultimapTable::new(header.get_root(), self.storage))
     }
 
     /// List all the tables
@@ -426,15 +471,17 @@ impl<'a> Drop for ReadOnlyDatabaseTransaction<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::{Database, Table};
+    use crate::{Database, TableDefinition};
     use tempfile::NamedTempFile;
+
+    const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
 
     #[test]
     fn transaction_id_persistence() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
+        let mut table = write_txn.open_table(&X).unwrap();
         table.insert(b"hello", b"world").unwrap();
         let first_txn_id = write_txn.transaction_id;
         write_txn.commit().unwrap();

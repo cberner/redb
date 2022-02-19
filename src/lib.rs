@@ -1,4 +1,7 @@
-pub use db::{Database, DatabaseBuilder, DatabaseTransaction, ReadOnlyDatabaseTransaction};
+pub use db::{
+    Database, DatabaseBuilder, DatabaseTransaction, MultimapTableDefinition,
+    ReadOnlyDatabaseTransaction, TableDefinition,
+};
 pub use error::Error;
 pub use multimap_table::{
     MultimapRangeIter, MultimapTable, MultimapValueIter, ReadOnlyMultimapTable,
