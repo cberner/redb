@@ -17,7 +17,7 @@ pub struct Table<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 }
 
 impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
-    pub(in crate) fn new(
+    pub(crate) fn new(
         transaction_id: TransactionId,
         table_root: Rc<Cell<Option<PageNumber>>>,
         storage: &'s Storage,
@@ -32,7 +32,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
     }
 
     #[allow(dead_code)]
-    pub(in crate) fn print_debug(&self) {
+    pub(crate) fn print_debug(&self) {
         if let Some(page) = self.table_root.get() {
             self.storage.print_dirty_tree_debug(page);
         }
@@ -153,7 +153,7 @@ pub struct ReadOnlyTable<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 }
 
 impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
-    pub(in crate) fn new(
+    pub(crate) fn new(
         root_page: Option<PageNumber>,
         storage: &'s Storage,
     ) -> ReadOnlyTable<'s, K, V> {

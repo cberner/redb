@@ -9,7 +9,7 @@ use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use std::cmp::max;
 
-pub(in crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
+pub(crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => 1,
@@ -29,7 +29,7 @@ pub(in crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalM
     }
 }
 
-pub(in crate) fn stored_bytes<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
+pub(crate) fn stored_bytes<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -51,7 +51,7 @@ pub(in crate) fn stored_bytes<'a>(page: PageImpl<'a>, manager: &'a Transactional
     }
 }
 
-pub(in crate) fn overhead_bytes<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
+pub(crate) fn overhead_bytes<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -74,10 +74,7 @@ pub(in crate) fn overhead_bytes<'a>(page: PageImpl<'a>, manager: &'a Transaction
     }
 }
 
-pub(in crate) fn fragmented_bytes<'a>(
-    page: PageImpl<'a>,
-    manager: &'a TransactionalMemory,
-) -> usize {
+pub(crate) fn fragmented_bytes<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -100,7 +97,7 @@ pub(in crate) fn fragmented_bytes<'a>(
     }
 }
 
-pub(in crate) fn print_node(page: &impl Page) {
+pub(crate) fn print_node(page: &impl Page) {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -133,7 +130,7 @@ pub(in crate) fn print_node(page: &impl Page) {
     }
 }
 
-pub(in crate) fn node_children<'a>(
+pub(crate) fn node_children<'a>(
     page: &PageImpl<'a>,
     manager: &'a TransactionalMemory,
 ) -> Vec<PageImpl<'a>> {
@@ -156,7 +153,7 @@ pub(in crate) fn node_children<'a>(
     }
 }
 
-pub(in crate) fn print_tree<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) {
+pub(crate) fn print_tree<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) {
     let mut pages = vec![page];
     while !pages.is_empty() {
         let mut next_children = vec![];
@@ -174,7 +171,7 @@ pub(in crate) fn print_tree<'a>(page: PageImpl<'a>, manager: &'a TransactionalMe
 // Returns the new root, bool indicating if the key existed, and a list of freed pages
 // Safety: see tree_delete_helper()
 #[allow(clippy::type_complexity)]
-pub(in crate) unsafe fn tree_delete<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+pub(crate) unsafe fn tree_delete<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
     free_uncommitted: bool,
@@ -667,7 +664,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     }
 }
 
-pub(in crate) fn make_mut_single_leaf<'a>(
+pub(crate) fn make_mut_single_leaf<'a>(
     key: &[u8],
     value: &[u8],
     manager: &'a TransactionalMemory,
@@ -686,7 +683,7 @@ pub(in crate) fn make_mut_single_leaf<'a>(
     Ok((page_num, guard))
 }
 
-pub(in crate) fn make_index(
+pub(crate) fn make_index(
     key: &[u8],
     lte_page: PageNumber,
     gt_page: PageNumber,
@@ -703,7 +700,7 @@ pub(in crate) fn make_index(
 // Returns the page number of the sub-tree into which the key was inserted,
 // and the guard which can be used to access the value, and a list of freed pages
 // Safety: see tree_insert_helper
-pub(in crate) unsafe fn tree_insert<'a, K: RedbKey + ?Sized>(
+pub(crate) unsafe fn tree_insert<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
     value: &[u8],
@@ -1089,7 +1086,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 }
 
 // Returns the (offset, len) of the value for the queried key, if present
-pub(in crate) fn find_key<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+pub(crate) fn find_key<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     query: &[u8],
     manager: &'a TransactionalMemory,

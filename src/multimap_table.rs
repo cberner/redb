@@ -305,7 +305,7 @@ pub struct MultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
 }
 
 impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
-    pub(in crate) fn new(
+    pub(crate) fn new(
         transaction_id: TransactionId,
         table_root: Rc<Cell<Option<PageNumber>>>,
         storage: &'s Storage,
@@ -320,7 +320,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
     }
 
     #[allow(dead_code)]
-    pub(in crate) fn print_debug(&self) {
+    pub(crate) fn print_debug(&self) {
         if let Some(page) = self.table_root.get() {
             self.storage.print_dirty_tree_debug(page);
         }
@@ -477,7 +477,7 @@ pub struct ReadOnlyMultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
 }
 
 impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, V> {
-    pub(in crate) fn new(
+    pub(crate) fn new(
         root_page: Option<PageNumber>,
         storage: &'s Storage,
     ) -> ReadOnlyMultimapTable<'s, K, V> {

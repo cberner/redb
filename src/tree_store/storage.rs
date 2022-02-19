@@ -161,7 +161,7 @@ impl<'a> Iterator for TableNameIter<'a> {
     }
 }
 
-pub(in crate) struct Storage {
+pub(crate) struct Storage {
     mem: TransactionalMemory,
     next_transaction_id: AtomicTransactionId,
     live_read_transactions: Mutex<BTreeSet<TransactionId>>,
@@ -171,7 +171,7 @@ pub(in crate) struct Storage {
 }
 
 impl Storage {
-    pub(in crate) fn new(mmap: MmapRaw, page_size: Option<usize>) -> Result<Storage, Error> {
+    pub(crate) fn new(mmap: MmapRaw, page_size: Option<usize>) -> Result<Storage, Error> {
         let mut mem = TransactionalMemory::new(mmap, page_size)?;
         while mem.needs_repair()? {
             let root = mem
@@ -257,7 +257,7 @@ impl Storage {
         self.live_read_transactions.lock().unwrap().remove(&id);
     }
 
-    pub(in crate) fn update_table_root(
+    pub(crate) fn update_table_root(
         &self,
         name: &str,
         table_type: TableType,
@@ -281,7 +281,7 @@ impl Storage {
     }
 
     // root_page: the root of the master table
-    pub(in crate) fn list_tables(
+    pub(crate) fn list_tables(
         &self,
         table_type: TableType,
         master_root_page: Option<PageNumber>,
@@ -294,7 +294,7 @@ impl Storage {
     }
 
     // root_page: the root of the master table
-    pub(in crate) fn get_table(
+    pub(crate) fn get_table(
         &self,
         name: &str,
         table_type: TableType,
@@ -316,7 +316,7 @@ impl Storage {
     }
 
     // root_page: the root of the master table
-    pub(in crate) fn delete_table(
+    pub(crate) fn delete_table(
         &self,
         name: &str,
         table_type: TableType,
@@ -346,7 +346,7 @@ impl Storage {
 
     // Returns a tuple of the table id and the new root page
     // root_page: the root of the master table
-    pub(in crate) fn get_or_create_table(
+    pub(crate) fn get_or_create_table(
         &self,
         name: &str,
         table_type: TableType,
@@ -376,7 +376,7 @@ impl Storage {
     // Returns the new root page number
     // Safety: caller must ensure that no references to uncommitted data in this transaction exist
     // TODO: this method could be made safe, if the transaction_id was not copy and was borrowed mut
-    pub(in crate) unsafe fn insert<K: RedbKey + ?Sized>(
+    pub(crate) unsafe fn insert<K: RedbKey + ?Sized>(
         &self,
         key: &[u8],
         value: &[u8],
@@ -404,7 +404,7 @@ impl Storage {
     // Returns the new root page number, and accessor for writing the value
     // Safety: caller must ensure that no references to uncommitted data in this transaction exist
     // TODO: this method could be made safe, if the transaction_id was not copy and was borrowed mut
-    pub(in crate) unsafe fn insert_reserve<K: RedbKey + ?Sized>(
+    pub(crate) unsafe fn insert_reserve<K: RedbKey + ?Sized>(
         &self,
         key: &[u8],
         value_len: usize,
@@ -430,7 +430,7 @@ impl Storage {
         Ok((new_root, guard))
     }
 
-    pub(in crate) fn len(&self, root_page: Option<PageNumber>) -> Result<usize, Error> {
+    pub(crate) fn len(&self, root_page: Option<PageNumber>) -> Result<usize, Error> {
         let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
             self.get_range(.., root_page)?;
         let mut count = 0;
@@ -440,11 +440,11 @@ impl Storage {
         Ok(count)
     }
 
-    pub(in crate) fn get_root_page_number(&self) -> Option<PageNumber> {
+    pub(crate) fn get_root_page_number(&self) -> Option<PageNumber> {
         self.mem.get_primary_root_page()
     }
 
-    pub(in crate) fn commit(
+    pub(crate) fn commit(
         &self,
         mut new_master_root: Option<PageNumber>,
         transaction_id: TransactionId,
@@ -487,7 +487,7 @@ impl Storage {
     }
 
     // Commit without a durability guarantee
-    pub(in crate) fn non_durable_commit(
+    pub(crate) fn non_durable_commit(
         &self,
         mut new_master_root: Option<PageNumber>,
         transaction_id: TransactionId,
@@ -640,7 +640,7 @@ impl Storage {
         Ok(master_root)
     }
 
-    pub(in crate) fn rollback_uncommited_writes(
+    pub(crate) fn rollback_uncommited_writes(
         &self,
         transaction_id: TransactionId,
     ) -> Result<(), Error> {
@@ -654,7 +654,7 @@ impl Storage {
         result
     }
 
-    pub(in crate) fn storage_stats(&self) -> Result<DbStats, Error> {
+    pub(crate) fn storage_stats(&self) -> Result<DbStats, Error> {
         let master_tree_height = self
             .get_root_page_number()
             .map(|p| tree_height(self.mem.get_page(p), &self.mem))
@@ -696,7 +696,7 @@ impl Storage {
     }
 
     #[allow(dead_code)]
-    pub(in crate) fn print_debug(&self) {
+    pub(crate) fn print_debug(&self) {
         if let Some(page) = self.get_root_page_number() {
             eprintln!("Master tree:");
             print_tree(self.mem.get_page(page), &self.mem);
@@ -715,11 +715,11 @@ impl Storage {
     }
 
     #[allow(dead_code)]
-    pub(in crate) fn print_dirty_tree_debug(&self, root_page: PageNumber) {
+    pub(crate) fn print_dirty_tree_debug(&self, root_page: PageNumber) {
         print_tree(self.mem.get_page(root_page), &self.mem);
     }
 
-    pub(in crate) fn get<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub(crate) fn get<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         key: &[u8],
         root_page_handle: Option<PageNumber>,
@@ -731,7 +731,7 @@ impl Storage {
         Ok(None)
     }
 
-    pub(in crate) fn get_range<
+    pub(crate) fn get_range<
         'a,
         T: RangeBounds<KR>,
         KR: Borrow<K> + ?Sized + 'a,
@@ -764,7 +764,7 @@ impl Storage {
         }
     }
 
-    pub(in crate) fn get_range_reversed<
+    pub(crate) fn get_range_reversed<
         'a,
         T: RangeBounds<KR>,
         KR: Borrow<K> + ?Sized + 'a,
@@ -801,7 +801,7 @@ impl Storage {
     // Safety: caller must ensure that no references to uncommitted data in this transaction exist,
     // if free_uncommitted = true
     // TODO: this method could be made safe, if the transaction_id was not copy and was borrowed mut
-    pub(in crate) unsafe fn remove<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub(crate) unsafe fn remove<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         key: &[u8],
         transaction_id: TransactionId,

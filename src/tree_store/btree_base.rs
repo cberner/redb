@@ -235,7 +235,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         end_offset - start_offset
     }
 
-    pub(in crate) fn total_length(&self) -> usize {
+    pub(crate) fn total_length(&self) -> usize {
         // Values are stored last
         self.value_end(self.num_pairs() - 1).unwrap()
     }
@@ -384,7 +384,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
         }
     }
 
-    pub(in crate) fn total_length(&self) -> usize {
+    pub(crate) fn total_length(&self) -> usize {
         // Keys are stored at the end
         self.key_end(self.num_keys() - 1)
     }
