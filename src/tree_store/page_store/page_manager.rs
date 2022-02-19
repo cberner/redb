@@ -1052,24 +1052,27 @@ impl Drop for TransactionalMemory {
 
 #[cfg(test)]
 mod test {
+    use crate::db::TableDefinition;
     use crate::tree_store::page_store::page_manager::{
         set_allocator_dirty, DB_SIZE_OFFSET, GOD_BYTE_OFFSET, MIN_USABLE_PAGES,
         UPGRADE_IN_PROGRESS, UPGRADE_LOG_OFFSET,
     };
     use crate::tree_store::page_store::utils::get_page_size;
     use crate::tree_store::page_store::TransactionalMemory;
-    use crate::{Database, Error, ReadOnlyTable, ReadableTable, Table};
+    use crate::{Database, Error, ReadableTable};
     use memmap2::{MmapMut, MmapRaw};
     use std::fs::OpenOptions;
     use std::mem::size_of;
     use tempfile::NamedTempFile;
+
+    const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
 
     #[test]
     fn recover_upgrade() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
+        let mut table = write_txn.open_table(&X).unwrap();
         table.insert(b"hello", b"world").unwrap();
         write_txn.commit().unwrap();
         drop(db);
@@ -1098,7 +1101,7 @@ mod test {
 
         let db2 = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let read_txn = db2.begin_read().unwrap();
-        let table: ReadOnlyTable<[u8], [u8]> = read_txn.open_table("x").unwrap();
+        let table = read_txn.open_table(&X).unwrap();
         assert_eq!(b"world", table.get(b"hello").unwrap().unwrap());
     }
 
@@ -1107,7 +1110,7 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
+        let mut table = write_txn.open_table(&X).unwrap();
         table.insert(b"hello", b"world").unwrap();
         write_txn.commit().unwrap();
         let free_pages = db.stats().unwrap().free_pages();
@@ -1138,7 +1141,7 @@ mod test {
         let db2 = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         assert_eq!(free_pages, db2.stats().unwrap().free_pages());
         let write_txn = db2.begin_write().unwrap();
-        let mut table: Table<[u8], [u8]> = write_txn.open_table("x").unwrap();
+        let mut table = write_txn.open_table(&X).unwrap();
         table.insert(b"hello2", b"world2").unwrap();
         write_txn.commit().unwrap();
     }

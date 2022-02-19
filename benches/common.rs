@@ -1,7 +1,9 @@
-use redb::ReadableTable;
+use redb::{ReadableTable, TableDefinition};
 use std::fs;
 use std::fs::File;
 use std::path::Path;
+
+const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
 
 pub trait BenchDatabase {
     type W: for<'a> BenchWriteTransaction<'a>;
@@ -62,7 +64,7 @@ impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
 
     fn read_transaction(&self) -> Self::R {
         let txn = self.db.begin_read().unwrap();
-        let table = txn.open_table("x").unwrap();
+        let table = txn.open_table(&X).unwrap();
         RedbBenchReadTransaction { _txn: txn, table }
     }
 }
@@ -93,7 +95,7 @@ impl<'a, 'b> BenchWriteTransaction<'b> for RedbBenchWriteTransaction<'a> {
 
     fn get_inserter(&'b self) -> Self::T {
         RedbBenchInserter {
-            table: self.txn.open_table("x").unwrap(),
+            table: self.txn.open_table(&X).unwrap(),
         }
     }
 
