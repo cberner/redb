@@ -30,4 +30,5 @@ mod table;
 mod transaction_tracker;
 mod transactions;
 mod tree_store;
+mod tuple_types;
 mod types;
