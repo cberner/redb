@@ -265,8 +265,6 @@ impl<
     }
 
     pub(crate) fn reverse(self) -> Self {
-        // TODO: support reversing in the middle of iteration
-        assert!(!self.reversed);
         Self {
             left: self.left,
             right: self.right,
@@ -286,6 +284,26 @@ impl<
                 self.left = self.left.take()?.next(self.reversed, self.manager);
                 // Return None if the next state is None
                 self.left.as_ref()?;
+
+                if let (
+                    Some(Leaf {
+                        page: left_page,
+                        entry: left_entry,
+                        parent: _,
+                    }),
+                    Some(Leaf {
+                        page: right_page,
+                        entry: right_entry,
+                        parent: _,
+                    }),
+                ) = (&self.left, &self.right)
+                {
+                    if left_page.get_page_number() == right_page.get_page_number()
+                        && left_entry >= right_entry
+                    {
+                        return None;
+                    }
+                }
 
                 if let Some(entry) = self.left.as_ref().unwrap().get_entry() {
                     if bound_contains_key::<T, KR, K>(&self.query_range, entry.key()) {
@@ -307,6 +325,26 @@ impl<
                 self.right = self.right.take()?.next(self.reversed, self.manager);
                 // Return None if the next state is None
                 self.right.as_ref()?;
+
+                if let (
+                    Some(Leaf {
+                        page: left_page,
+                        entry: left_entry,
+                        parent: _,
+                    }),
+                    Some(Leaf {
+                        page: right_page,
+                        entry: right_entry,
+                        parent: _,
+                    }),
+                ) = (&self.left, &self.right)
+                {
+                    if left_page.get_page_number() == right_page.get_page_number()
+                        && left_entry >= right_entry
+                    {
+                        return None;
+                    }
+                }
 
                 if let Some(entry) = self.right.as_ref().unwrap().get_entry() {
                     if bound_contains_key::<T, KR, K>(&self.query_range, entry.key()) {
