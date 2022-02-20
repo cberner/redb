@@ -441,22 +441,27 @@ fn range_query() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(&SLICE_TABLE).unwrap();
-    for i in 0..10u8 {
-        let key = vec![i];
-        table.insert(&key, b"value").unwrap();
+    let mut table = write_txn.open_table(&U64_TABLE).unwrap();
+    for i in 0..10 {
+        table.insert(&i, &i).unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(&SLICE_TABLE).unwrap();
-    let start = vec![3u8];
-    let end = vec![7u8];
-    let mut iter = table.range(start..end).unwrap();
-    for i in 3..7u8 {
+    let table = read_txn.open_table(&U64_TABLE).unwrap();
+    let mut iter = table.range(3..7).unwrap();
+    for i in 3..7u64 {
         let (key, value) = iter.next().unwrap();
-        assert_eq!(&[i], key);
-        assert_eq!(b"value", value);
+        assert_eq!(i, key);
+        assert_eq!(i, value);
+    }
+    assert!(iter.next().is_none());
+
+    let mut iter = table.range(3..=7).unwrap();
+    for i in 3..=7u64 {
+        let (key, value) = iter.next().unwrap();
+        assert_eq!(i, key);
+        assert_eq!(i, value);
     }
     assert!(iter.next().is_none());
 }

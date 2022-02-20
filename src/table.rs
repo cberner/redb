@@ -113,7 +113,8 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
         self.storage
-            .get_range_reversed(range, self.table_root.get())
+            .get_range(range, self.table_root.get())
+            .map(BtreeRangeIter::reverse)
             .map(RangeIter::new)
     }
 
@@ -188,7 +189,8 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
         self.storage
-            .get_range_reversed(range, self.table_root)
+            .get_range(range, self.table_root)
+            .map(BtreeRangeIter::reverse)
             .map(RangeIter::new)
     }
 

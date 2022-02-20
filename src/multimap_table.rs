@@ -432,7 +432,8 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
         let end = make_bound(end_kv);
 
         self.storage
-            .get_range_reversed((start, end), self.table_root.get())
+            .get_range((start, end), self.table_root.get())
+            .map(BtreeRangeIter::reverse)
             .map(MultimapRangeIter::new)
     }
 
@@ -529,7 +530,8 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
         let end = make_bound(end_kv);
 
         self.storage
-            .get_range_reversed((start, end), self.table_root)
+            .get_range((start, end), self.table_root)
+            .map(BtreeRangeIter::reverse)
             .map(MultimapRangeIter::new)
     }
 
