@@ -1,8 +1,5 @@
 use crate::tree_store::btree_base::AccessGuard;
-use crate::tree_store::btree_iters::{
-    find_iter_left, find_iter_right, find_iter_unbounded_left, find_iter_unbounded_right,
-    page_numbers_iter_start_state, AllPageNumbersBtreeIter,
-};
+use crate::tree_store::btree_iters::{page_numbers_iter_start_state, AllPageNumbersBtreeIter};
 use crate::tree_store::btree_utils::{
     find_key, fragmented_bytes, make_mut_single_leaf, overhead_bytes, print_tree, stored_bytes,
     tree_delete, tree_height, tree_insert,
@@ -14,10 +11,10 @@ use crate::Error;
 use memmap2::MmapRaw;
 use std::borrow::Borrow;
 use std::cmp::{max, min};
-use std::collections::{BTreeSet, Bound};
+use std::collections::BTreeSet;
 use std::convert::TryInto;
 use std::mem::size_of;
-use std::ops::{RangeBounds, RangeFull, RangeTo};
+use std::ops::{RangeBounds, RangeFull};
 use std::panic;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -141,7 +138,7 @@ impl TableHeader {
 }
 
 pub struct TableNameIter<'a> {
-    inner: BtreeRangeIter<'a, RangeFull, &'static str, str, [u8]>,
+    inner: BtreeRangeIter<'a, str, [u8]>,
     table_type: TableType,
 }
 
@@ -182,10 +179,8 @@ impl Storage {
             let mut all_pages_iter: Box<dyn Iterator<Item = PageNumber>> =
                 Box::new(AllPageNumbersBtreeIter::new(start, &mem));
 
-            let left = find_iter_unbounded_left(mem.get_page(root), None, &mem);
-            let right = find_iter_unbounded_right(mem.get_page(root), None, &mem);
-            let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
-                BtreeRangeIter::new(left, right, .., &mem);
+            let mut iter: BtreeRangeIter<[u8], [u8]> =
+                BtreeRangeIter::new::<RangeFull, [u8]>(.., Some(root), &mem);
 
             while let Some(entry) = iter.next() {
                 let definition = TableHeader::from_bytes(entry.value());
@@ -287,7 +282,7 @@ impl Storage {
         table_type: TableType,
         master_root_page: Option<PageNumber>,
     ) -> Result<TableNameIter, Error> {
-        let iter = self.get_range(.., master_root_page)?;
+        let iter = self.get_range::<RangeFull, str, str, [u8]>(.., master_root_page)?;
         Ok(TableNameIter {
             inner: iter,
             table_type,
@@ -432,8 +427,8 @@ impl Storage {
     }
 
     pub(crate) fn len(&self, root_page: Option<PageNumber>) -> Result<usize, Error> {
-        let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
-            self.get_range(.., root_page)?;
+        let mut iter: BtreeRangeIter<[u8], [u8]> =
+            self.get_range::<RangeFull, [u8], [u8], [u8]>(.., root_page)?;
         let mut count = 0;
         while iter.next().is_some() {
             count += 1;
@@ -533,7 +528,7 @@ impl Storage {
             .get_table(FREED_TABLE, TableType::Normal, master_root)?
             .unwrap();
         #[allow(clippy::type_complexity)]
-        let mut iter: BtreeRangeIter<'_, RangeTo<&[u8]>, &[u8], [u8], [u8]> =
+        let mut iter: BtreeRangeIter<'_, [u8], [u8]> =
             self.get_range(..lookup_key.as_ref(), freed_table.get_root())?;
         while let Some(entry) = iter.next() {
             to_remove.push(entry.key().to_vec());
@@ -674,8 +669,8 @@ impl Storage {
             .get_root_page_number()
             .map(|p| fragmented_bytes(self.mem.get_page(p), &self.mem))
             .unwrap_or(0);
-        let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
-            self.get_range(.., self.get_root_page_number())?;
+        let mut iter: BtreeRangeIter<[u8], [u8]> =
+            self.get_range::<RangeFull, [u8], [u8], [u8]>(.., self.get_root_page_number())?;
         while let Some(entry) = iter.next() {
             let definition = TableHeader::from_bytes(entry.value());
             if let Some(table_root) = definition.get_root() {
@@ -702,8 +697,9 @@ impl Storage {
             eprintln!("Master tree:");
             print_tree(self.mem.get_page(page), &self.mem);
 
-            let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
-                self.get_range(.., Some(page)).unwrap();
+            let mut iter: BtreeRangeIter<[u8], [u8]> = self
+                .get_range::<RangeFull, [u8], [u8], [u8]>(.., Some(page))
+                .unwrap();
 
             while let Some(entry) = iter.next() {
                 eprintln!("{} tree:", String::from_utf8_lossy(entry.key()));
@@ -742,34 +738,8 @@ impl Storage {
         &'a self,
         range: T,
         root_page: Option<PageNumber>,
-    ) -> Result<BtreeRangeIter<T, KR, K, V>, Error> {
-        if let Some(root) = root_page {
-            let left = match range.start_bound() {
-                Bound::Included(k) | Bound::Excluded(k) => find_iter_left::<K>(
-                    self.mem.get_page(root),
-                    None,
-                    k.borrow().as_bytes().as_ref(),
-                    &self.mem,
-                ),
-                Bound::Unbounded => {
-                    find_iter_unbounded_left(self.mem.get_page(root), None, &self.mem)
-                }
-            };
-            let right = match range.end_bound() {
-                Bound::Included(k) | Bound::Excluded(k) => find_iter_right::<K>(
-                    self.mem.get_page(root),
-                    None,
-                    k.borrow().as_bytes().as_ref(),
-                    &self.mem,
-                ),
-                Bound::Unbounded => {
-                    find_iter_unbounded_right(self.mem.get_page(root), None, &self.mem)
-                }
-            };
-            Ok(BtreeRangeIter::new(left, right, range, &self.mem))
-        } else {
-            Ok(BtreeRangeIter::new(None, None, range, &self.mem))
-        }
+    ) -> Result<BtreeRangeIter<K, V>, Error> {
+        Ok(BtreeRangeIter::new(range, root_page, &self.mem))
     }
 
     // Returns the new root page, and a bool indicating whether the entry existed
