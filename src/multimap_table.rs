@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 use std::collections::Bound;
 use std::convert::TryInto;
 use std::marker::PhantomData;
-use std::ops::{RangeBounds, RangeInclusive};
+use std::ops::RangeBounds;
 use std::rc::Rc;
 
 #[derive(Eq, PartialEq)]
@@ -215,23 +215,12 @@ fn make_bound<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a>(
     }
 }
 
-pub struct MultimapValueIter<
-    'a,
-    T: RangeBounds<MultimapKVPair<K, V>>,
-    K: RedbKey + ?Sized + 'a,
-    V: RedbKey + ?Sized + 'a,
-> {
-    inner: BtreeRangeIter<'a, T, MultimapKVPair<K, V>, MultimapKVPair<K, V>, [u8]>,
+pub struct MultimapValueIter<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> {
+    inner: BtreeRangeIter<'a, MultimapKVPair<K, V>, [u8]>,
 }
 
-impl<
-        'a,
-        T: RangeBounds<MultimapKVPair<K, V>>,
-        K: RedbKey + ?Sized + 'a,
-        V: RedbKey + ?Sized + 'a,
-    > MultimapValueIter<'a, T, K, V>
-{
-    fn new(inner: BtreeRangeIter<'a, T, MultimapKVPair<K, V>, MultimapKVPair<K, V>, [u8]>) -> Self {
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, K, V> {
+    fn new(inner: BtreeRangeIter<'a, MultimapKVPair<K, V>, [u8]>) -> Self {
         Self { inner }
     }
 
@@ -255,23 +244,12 @@ impl<
     }
 }
 
-pub struct MultimapRangeIter<
-    'a,
-    T: RangeBounds<MultimapKVPair<K, V>>,
-    K: RedbKey + ?Sized + 'a,
-    V: RedbKey + ?Sized + 'a,
-> {
-    inner: BtreeRangeIter<'a, T, MultimapKVPair<K, V>, MultimapKVPair<K, V>, [u8]>,
+pub struct MultimapRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> {
+    inner: BtreeRangeIter<'a, MultimapKVPair<K, V>, [u8]>,
 }
 
-impl<
-        'a,
-        T: RangeBounds<MultimapKVPair<K, V>>,
-        K: RedbKey + ?Sized + 'a,
-        V: RedbKey + ?Sized + 'a,
-    > MultimapRangeIter<'a, T, K, V>
-{
-    fn new(inner: BtreeRangeIter<'a, T, MultimapKVPair<K, V>, MultimapKVPair<K, V>, [u8]>) -> Self {
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'a, K, V> {
+    fn new(inner: BtreeRangeIter<'a, MultimapKVPair<K, V>, [u8]>) -> Self {
         Self { inner }
     }
 
@@ -368,7 +346,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
         Ok(found.is_some())
     }
 
-    pub fn remove_all(&mut self, key: &K) -> Result<MultimapGetIterType<K, V>, Error> {
+    pub fn remove_all(&mut self, key: &K) -> Result<MultimapValueIter<K, V>, Error> {
         // Match only on the key, so that we can remove all the associated values
         let key_only = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyOnly);
         let original_root = self.table_root.get();
@@ -404,7 +382,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
 impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     for MultimapTable<'s, K, V>
 {
-    fn get<'a>(&'a self, key: &'a K) -> Result<MultimapGetIterType<'a, K, V>, Error> {
+    fn get<'a>(&'a self, key: &'a K) -> Result<MultimapValueIter<'a, K, V>, Error> {
         let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
         let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
         let lower = MultimapKVPair::<K, V>::new(lower_bytes);
@@ -417,7 +395,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     fn range<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error> {
+    ) -> Result<MultimapRangeIter<'a, K, V>, Error> {
         let (start_bytes, end_bytes) = make_inclusive_query_range(range);
         let start_kv = start_bytes.map(MultimapKVPair::<K, V>::new);
         let end_kv = end_bytes.map(MultimapKVPair::<K, V>::new);
@@ -438,18 +416,13 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     }
 }
 
-type MultimapGetIterType<'a, K, V> =
-    MultimapValueIter<'a, RangeInclusive<MultimapKVPair<K, V>>, K, V>;
-type MultimapGetRangeIterType<'a, K, V> =
-    MultimapRangeIter<'a, (Bound<MultimapKVPair<K, V>>, Bound<MultimapKVPair<K, V>>), K, V>;
-
 pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
-    fn get<'a>(&'a self, key: &'a K) -> Result<MultimapGetIterType<'a, K, V>, Error>;
+    fn get<'a>(&'a self, key: &'a K) -> Result<MultimapValueIter<'a, K, V>, Error>;
 
     fn range<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error>;
+    ) -> Result<MultimapRangeIter<'a, K, V>, Error>;
 
     fn len(&self) -> Result<usize, Error>;
 
@@ -480,7 +453,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, 
 impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     for ReadOnlyMultimapTable<'s, K, V>
 {
-    fn get<'a>(&'a self, key: &'a K) -> Result<MultimapGetIterType<'a, K, V>, Error> {
+    fn get<'a>(&'a self, key: &'a K) -> Result<MultimapValueIter<'a, K, V>, Error> {
         let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
         let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
         let lower = MultimapKVPair::<K, V>::new(lower_bytes);
@@ -493,7 +466,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     fn range<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error> {
+    ) -> Result<MultimapRangeIter<'a, K, V>, Error> {
         let (start_bytes, end_bytes) = make_inclusive_query_range(range);
         let start_kv = start_bytes.map(MultimapKVPair::<K, V>::new);
         let end_kv = end_bytes.map(MultimapKVPair::<K, V>::new);

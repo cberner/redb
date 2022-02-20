@@ -99,10 +99,10 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root.get())
     }
 
-    fn range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
+    fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<RangeIter<T, KR, K, V>, Error> {
+    ) -> Result<RangeIter<K, V>, Error> {
         self.storage
             .get_range(range, self.table_root.get())
             .map(RangeIter::new)
@@ -120,10 +120,10 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
 pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>, Error>;
 
-    fn range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
+    fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<RangeIter<T, KR, K, V>, Error>;
+    ) -> Result<RangeIter<K, V>, Error>;
 
     fn len(&self) -> Result<usize, Error>;
 
@@ -159,10 +159,10 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root)
     }
 
-    fn range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
+    fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<RangeIter<T, KR, K, V>, Error> {
+    ) -> Result<RangeIter<K, V>, Error> {
         self.storage
             .get_range(range, self.table_root)
             .map(RangeIter::new)
@@ -177,25 +177,12 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     }
 }
 
-pub struct RangeIter<
-    'a,
-    T: RangeBounds<KR>,
-    KR: Borrow<K>,
-    K: RedbKey + ?Sized + 'a,
-    V: RedbValue + ?Sized + 'a,
-> {
-    inner: BtreeRangeIter<'a, T, KR, K, V>,
+pub struct RangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> {
+    inner: BtreeRangeIter<'a, K, V>,
 }
 
-impl<
-        'a,
-        T: RangeBounds<KR>,
-        KR: Borrow<K>,
-        K: RedbKey + ?Sized + 'a,
-        V: RedbValue + ?Sized + 'a,
-    > RangeIter<'a, T, KR, K, V>
-{
-    fn new(inner: BtreeRangeIter<'a, T, KR, K, V>) -> Self {
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> RangeIter<'a, K, V> {
+    fn new(inner: BtreeRangeIter<'a, K, V>) -> Self {
         Self { inner }
     }
 

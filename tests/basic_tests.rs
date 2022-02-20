@@ -298,7 +298,7 @@ fn i128_type() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(&definition).unwrap();
     assert_eq!(-2, table.get(&-1).unwrap().unwrap());
-    let mut iter: RangeIter<RangeFull, i128, i128, i128> = table.range(..).unwrap();
+    let mut iter: RangeIter<i128, i128> = table.range::<RangeFull, i128>(..).unwrap();
     for i in -11..10 {
         assert_eq!(iter.next().unwrap().1, i);
     }
@@ -339,16 +339,15 @@ fn str_type() {
     let hello = "hello".to_string();
     assert_eq!("world", table.get(&hello).unwrap().unwrap());
 
-    let mut iter: RangeIter<RangeFull, &str, str, str> = table.range(..).unwrap();
+    let mut iter: RangeIter<str, str> = table.range::<RangeFull, &str>(..).unwrap();
     assert_eq!(iter.next().unwrap().1, "world");
     assert!(iter.next().is_none());
 
-    let mut iter: RangeIter<Range<String>, String, str, str> =
-        table.range("a".to_string().."z".to_string()).unwrap();
+    let mut iter: RangeIter<str, str> = table.range("a".to_string().."z".to_string()).unwrap();
     assert_eq!(iter.next().unwrap().1, "world");
     assert!(iter.next().is_none());
 
-    let mut iter: RangeIter<Range<&str>, &str, str, str> = table.range("a".."z").unwrap();
+    let mut iter: RangeIter<str, str> = table.range("a".."z").unwrap();
     assert_eq!(iter.next().unwrap().1, "world");
     assert!(iter.next().is_none());
 }
@@ -372,17 +371,18 @@ fn owned_get_signatures() {
 
     assert_eq!(2, table.get(&1).unwrap().unwrap());
 
-    let mut iter: RangeIter<RangeFull, u32, u32, u32> = table.range(..).unwrap();
+    let mut iter: RangeIter<u32, u32> = table.range::<RangeFull, u32>(..).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, i + 1);
     }
     assert!(iter.next().is_none());
-    let mut iter: RangeIter<Range<u32>, u32, u32, u32> = table.range(0..10).unwrap();
+    let mut iter: RangeIter<u32, u32> = table.range(0..10).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, i + 1);
     }
     assert!(iter.next().is_none());
-    let mut iter: RangeIter<Range<&u32>, u32, u32, u32> = table.range(&0..&10).unwrap();
+    // TODO: is there a way to remove the type hint on range()?
+    let mut iter: RangeIter<u32, u32> = table.range::<Range<&u32>, &u32>(&0..&10).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, i + 1);
     }
@@ -410,14 +410,14 @@ fn ref_get_signatures() {
 
     let start = vec![0u8];
     let end = vec![10u8];
-    let mut iter: RangeIter<RangeFull, &[u8], [u8], [u8]> = table.range(..).unwrap();
+    // TODO: is there a way to make RangeFull queries work without the type hint?
+    let mut iter: RangeIter<[u8], [u8]> = table.range::<RangeFull, &[u8]>(..).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, &[i + 1]);
     }
     assert!(iter.next().is_none());
 
-    let mut iter: RangeIter<Range<&[u8]>, &[u8], [u8], [u8]> =
-        table.range(start.as_slice()..&end).unwrap();
+    let mut iter: RangeIter<[u8], [u8]> = table.range(start.as_slice()..&end).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, &[i + 1]);
     }
