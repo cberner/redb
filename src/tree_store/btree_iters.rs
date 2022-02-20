@@ -47,13 +47,11 @@ pub enum RangeIterState<'a> {
         page: PageImpl<'a>,
         entry: usize,
         parent: Option<Box<RangeIterState<'a>>>,
-        reversed: bool,
     },
     Internal {
         page: PageImpl<'a>,
         child: usize,
         parent: Option<Box<RangeIterState<'a>>>,
-        reversed: bool,
     },
     Repeat {
         inner: Box<RangeIterState<'a>>,
@@ -69,23 +67,21 @@ impl<'a> RangeIterState<'a> {
         }
     }
 
-    fn next(self, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
+    fn next(self, reverse: bool, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
         match self {
             Leaf {
                 page,
                 entry,
                 parent,
-                reversed,
             } => {
                 let accessor = LeafAccessor::new(&page);
-                let direction = if reversed { -1 } else { 1 };
+                let direction = if reverse { -1 } else { 1 };
                 let next_entry = entry as isize + direction;
                 if 0 <= next_entry && next_entry < accessor.num_pairs() as isize {
                     Some(Leaf {
                         page,
                         entry: next_entry as usize,
                         parent,
-                        reversed,
                     })
                 } else {
                     parent.map(|x| *x)
@@ -95,25 +91,23 @@ impl<'a> RangeIterState<'a> {
                 page,
                 child,
                 mut parent,
-                reversed,
             } => {
                 let accessor = InternalAccessor::new(&page);
                 let child_page = accessor.child_page(child).unwrap();
                 let child_page = manager.get_page(child_page);
-                let direction = if reversed { -1 } else { 1 };
+                let direction = if reverse { -1 } else { 1 };
                 let next_child = child as isize + direction;
                 if 0 <= next_child && next_child < accessor.count_children() as isize {
                     parent = Some(Box::new(Internal {
                         page,
                         child: next_child as usize,
                         parent,
-                        reversed,
                     }));
                 }
                 match child_page.memory()[0] {
                     LEAF => {
                         let child_accessor = LeafAccessor::new(&child_page);
-                        let entry = if reversed {
+                        let entry = if reverse {
                             child_accessor.num_pairs() - 1
                         } else {
                             0
@@ -122,12 +116,11 @@ impl<'a> RangeIterState<'a> {
                             page: child_page,
                             entry,
                             parent,
-                            reversed,
                         })
                     }
                     INTERNAL => {
                         let child_accessor = InternalAccessor::new(&child_page);
-                        let child = if reversed {
+                        let child = if reverse {
                             child_accessor.count_children() - 1
                         } else {
                             0
@@ -136,7 +129,6 @@ impl<'a> RangeIterState<'a> {
                             page: child_page,
                             child,
                             parent,
-                            reversed,
                         })
                     }
                     _ => unreachable!(),
@@ -185,7 +177,7 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
         let value = state.page_number();
         // Only return each page number the first time we visit it
         loop {
-            if let Some(next_state) = state.next(self.manager) {
+            if let Some(next_state) = state.next(false, self.manager) {
                 state = next_state;
             } else {
                 self.next = None;
@@ -218,13 +210,11 @@ pub(crate) fn page_numbers_iter_start_state(page: PageImpl) -> RangeIterState {
             page,
             entry: 0,
             parent: None,
-            reversed: false,
         },
         INTERNAL => Internal {
             page,
             child: 0,
             parent: None,
-            reversed: false,
         },
         _ => unreachable!(),
     }
@@ -237,7 +227,9 @@ pub struct BtreeRangeIter<
     K: RedbKey + ?Sized + 'a,
     V: RedbValue + ?Sized + 'a,
 > {
-    last: Option<RangeIterState<'a>>,
+    left: Option<RangeIterState<'a>>, // Exclusive. The previous element returned
+    right: Option<RangeIterState<'a>>, // Exclusive. The previous element returned
+    // TODO: refactor away this query_range field
     query_range: T,
     reversed: bool,
     manager: &'a TransactionalMemory,
@@ -255,12 +247,14 @@ impl<
     > BtreeRangeIter<'a, T, KR, K, V>
 {
     pub(crate) fn new(
-        state: Option<RangeIterState<'a>>,
+        left: Option<RangeIterState<'a>>,
+        right: Option<RangeIterState<'a>>,
         query_range: T,
         manager: &'a TransactionalMemory,
     ) -> Self {
         Self {
-            last: state.map(|s| Repeat { inner: Box::new(s) }),
+            left: left.map(|s| Repeat { inner: Box::new(s) }),
+            right: right.map(|s| Repeat { inner: Box::new(s) }),
             query_range,
             reversed: false,
             manager,
@@ -270,16 +264,15 @@ impl<
         }
     }
 
-    pub(crate) fn new_reversed(
-        state: Option<RangeIterState<'a>>,
-        query_range: T,
-        manager: &'a TransactionalMemory,
-    ) -> Self {
+    pub(crate) fn reverse(self) -> Self {
+        // TODO: support reversing in the middle of iteration
+        assert!(!self.reversed);
         Self {
-            last: state.map(|s| Repeat { inner: Box::new(s) }),
-            query_range,
-            reversed: true,
-            manager,
+            left: self.left,
+            right: self.right,
+            query_range: self.query_range,
+            reversed: !self.reversed,
+            manager: self.manager,
             _key_type: Default::default(),
             _key_ref_type: Default::default(),
             _value_type: Default::default(),
@@ -289,43 +282,54 @@ impl<
     // TODO: we need generic-associated-types to implement Iterator
     pub fn next(&mut self) -> Option<EntryAccessor> {
         loop {
-            self.last = self.last.take()?.next(self.manager);
-            // Return None if the next state is None
-            self.last.as_ref()?;
+            if !self.reversed {
+                self.left = self.left.take()?.next(self.reversed, self.manager);
+                // Return None if the next state is None
+                self.left.as_ref()?;
 
-            if let Some(entry) = self.last.as_ref().unwrap().get_entry() {
-                if bound_contains_key::<T, KR, K>(&self.query_range, entry.key()) {
-                    return self.last.as_ref().map(|s| s.get_entry().unwrap());
-                } else {
-                    #[allow(clippy::collapsible_else_if)]
-                    if self.reversed {
-                        if let Bound::Included(start) = self.query_range.start_bound() {
-                            if K::compare(entry.key(), start.borrow().as_bytes().as_ref()).is_lt() {
-                                self.last = None;
-                            }
-                        } else if let Bound::Excluded(start) = self.query_range.start_bound() {
-                            if K::compare(entry.key(), start.borrow().as_bytes().as_ref()).is_le() {
-                                self.last = None;
-                            }
-                        }
+                if let Some(entry) = self.left.as_ref().unwrap().get_entry() {
+                    if bound_contains_key::<T, KR, K>(&self.query_range, entry.key()) {
+                        return self.left.as_ref().map(|s| s.get_entry().unwrap());
                     } else {
+                        #[allow(clippy::collapsible_else_if)]
                         if let Bound::Included(end) = self.query_range.end_bound() {
                             if K::compare(entry.key(), end.borrow().as_bytes().as_ref()).is_gt() {
-                                self.last = None;
+                                self.left = None;
                             }
                         } else if let Bound::Excluded(end) = self.query_range.end_bound() {
                             if K::compare(entry.key(), end.borrow().as_bytes().as_ref()).is_ge() {
-                                self.last = None;
+                                self.left = None;
                             }
                         }
-                    };
+                    }
+                }
+            } else {
+                self.right = self.right.take()?.next(self.reversed, self.manager);
+                // Return None if the next state is None
+                self.right.as_ref()?;
+
+                if let Some(entry) = self.right.as_ref().unwrap().get_entry() {
+                    if bound_contains_key::<T, KR, K>(&self.query_range, entry.key()) {
+                        return self.right.as_ref().map(|s| s.get_entry().unwrap());
+                    } else {
+                        #[allow(clippy::collapsible_else_if)]
+                        if let Bound::Included(start) = self.query_range.start_bound() {
+                            if K::compare(entry.key(), start.borrow().as_bytes().as_ref()).is_lt() {
+                                self.right = None;
+                            }
+                        } else if let Bound::Excluded(start) = self.query_range.start_bound() {
+                            if K::compare(entry.key(), start.borrow().as_bytes().as_ref()).is_le() {
+                                self.right = None;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-pub(crate) fn find_iter_unbounded_start<'a>(
+pub(crate) fn find_iter_unbounded_left<'a>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     manager: &'a TransactionalMemory,
@@ -336,7 +340,6 @@ pub(crate) fn find_iter_unbounded_start<'a>(
             page,
             entry: 0,
             parent,
-            reversed: false,
         }),
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
@@ -346,15 +349,14 @@ pub(crate) fn find_iter_unbounded_start<'a>(
                 page,
                 child: 1,
                 parent,
-                reversed: false,
             }));
-            find_iter_unbounded_start(child_page, parent, manager)
+            find_iter_unbounded_left(child_page, parent, manager)
         }
         _ => unreachable!(),
     }
 }
 
-pub(crate) fn find_iter_unbounded_reversed<'a>(
+pub(crate) fn find_iter_unbounded_right<'a>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     manager: &'a TransactionalMemory,
@@ -368,7 +370,6 @@ pub(crate) fn find_iter_unbounded_reversed<'a>(
                 page,
                 entry,
                 parent,
-                reversed: true,
             })
         }
         INTERNAL => {
@@ -381,16 +382,15 @@ pub(crate) fn find_iter_unbounded_reversed<'a>(
                     page,
                     child: child_index - 1,
                     parent,
-                    reversed: true,
                 }));
             }
-            find_iter_unbounded_reversed(child_page, parent, manager)
+            find_iter_unbounded_right(child_page, parent, manager)
         }
         _ => unreachable!(),
     }
 }
 
-pub(crate) fn find_iter_start<'a, K: RedbKey + ?Sized>(
+pub(crate) fn find_iter_left<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     query: &[u8],
@@ -405,7 +405,6 @@ pub(crate) fn find_iter_start<'a, K: RedbKey + ?Sized>(
                 page,
                 entry: position,
                 parent,
-                reversed: false,
             })
         }
         INTERNAL => {
@@ -417,16 +416,15 @@ pub(crate) fn find_iter_start<'a, K: RedbKey + ?Sized>(
                     page,
                     child: child_index + 1,
                     parent,
-                    reversed: false,
                 }));
             }
-            find_iter_start::<K>(child_page, parent, query, manager)
+            find_iter_left::<K>(child_page, parent, query, manager)
         }
         _ => unreachable!(),
     }
 }
 
-pub(crate) fn find_iter_start_reversed<'a, K: RedbKey + ?Sized>(
+pub(crate) fn find_iter_right<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     query: &[u8],
@@ -441,7 +439,6 @@ pub(crate) fn find_iter_start_reversed<'a, K: RedbKey + ?Sized>(
                 page,
                 entry: position,
                 parent,
-                reversed: true,
             })
         }
         INTERNAL => {
@@ -453,10 +450,9 @@ pub(crate) fn find_iter_start_reversed<'a, K: RedbKey + ?Sized>(
                     page,
                     child: child_index - 1,
                     parent,
-                    reversed: true,
                 }));
             }
-            find_iter_start_reversed::<K>(child_page, parent, query, manager)
+            find_iter_right::<K>(child_page, parent, query, manager)
         }
         _ => unreachable!(),
     }

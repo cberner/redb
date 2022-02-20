@@ -1,7 +1,7 @@
 use crate::tree_store::btree_base::AccessGuard;
 use crate::tree_store::btree_iters::{
-    find_iter_start, find_iter_start_reversed, find_iter_unbounded_reversed,
-    find_iter_unbounded_start, page_numbers_iter_start_state, AllPageNumbersBtreeIter,
+    find_iter_left, find_iter_right, find_iter_unbounded_left, find_iter_unbounded_right,
+    page_numbers_iter_start_state, AllPageNumbersBtreeIter,
 };
 use crate::tree_store::btree_utils::{
     find_key, fragmented_bytes, make_mut_single_leaf, overhead_bytes, print_tree, stored_bytes,
@@ -182,9 +182,10 @@ impl Storage {
             let mut all_pages_iter: Box<dyn Iterator<Item = PageNumber>> =
                 Box::new(AllPageNumbersBtreeIter::new(start, &mem));
 
-            let start_state = find_iter_unbounded_start(mem.get_page(root), None, &mem);
+            let left = find_iter_unbounded_left(mem.get_page(root), None, &mem);
+            let right = find_iter_unbounded_right(mem.get_page(root), None, &mem);
             let mut iter: BtreeRangeIter<RangeFull, [u8], [u8], [u8]> =
-                BtreeRangeIter::new(start_state, .., &mem);
+                BtreeRangeIter::new(left, right, .., &mem);
 
             while let Some(entry) = iter.next() {
                 let definition = TableHeader::from_bytes(entry.value());
@@ -743,57 +744,31 @@ impl Storage {
         root_page: Option<PageNumber>,
     ) -> Result<BtreeRangeIter<T, KR, K, V>, Error> {
         if let Some(root) = root_page {
-            match range.start_bound() {
-                Bound::Included(k) | Bound::Excluded(k) => {
-                    let start_state = find_iter_start::<K>(
-                        self.mem.get_page(root),
-                        None,
-                        k.borrow().as_bytes().as_ref(),
-                        &self.mem,
-                    );
-                    Ok(BtreeRangeIter::new(start_state, range, &self.mem))
-                }
+            let left = match range.start_bound() {
+                Bound::Included(k) | Bound::Excluded(k) => find_iter_left::<K>(
+                    self.mem.get_page(root),
+                    None,
+                    k.borrow().as_bytes().as_ref(),
+                    &self.mem,
+                ),
                 Bound::Unbounded => {
-                    let start_state =
-                        find_iter_unbounded_start(self.mem.get_page(root), None, &self.mem);
-                    Ok(BtreeRangeIter::new(start_state, range, &self.mem))
+                    find_iter_unbounded_left(self.mem.get_page(root), None, &self.mem)
                 }
-            }
-        } else {
-            Ok(BtreeRangeIter::new(None, range, &self.mem))
-        }
-    }
-
-    pub(crate) fn get_range_reversed<
-        'a,
-        T: RangeBounds<KR>,
-        KR: Borrow<K> + ?Sized + 'a,
-        K: RedbKey + ?Sized + 'a,
-        V: RedbValue + ?Sized + 'a,
-    >(
-        &'a self,
-        range: T,
-        root_page: Option<PageNumber>,
-    ) -> Result<BtreeRangeIter<T, KR, K, V>, Error> {
-        if let Some(root) = root_page {
-            match range.end_bound() {
-                Bound::Included(k) | Bound::Excluded(k) => {
-                    let start_state = find_iter_start_reversed::<K>(
-                        self.mem.get_page(root),
-                        None,
-                        k.borrow().as_bytes().as_ref(),
-                        &self.mem,
-                    );
-                    Ok(BtreeRangeIter::new_reversed(start_state, range, &self.mem))
-                }
+            };
+            let right = match range.end_bound() {
+                Bound::Included(k) | Bound::Excluded(k) => find_iter_right::<K>(
+                    self.mem.get_page(root),
+                    None,
+                    k.borrow().as_bytes().as_ref(),
+                    &self.mem,
+                ),
                 Bound::Unbounded => {
-                    let start_state =
-                        find_iter_unbounded_reversed(self.mem.get_page(root), None, &self.mem);
-                    Ok(BtreeRangeIter::new_reversed(start_state, range, &self.mem))
+                    find_iter_unbounded_right(self.mem.get_page(root), None, &self.mem)
                 }
-            }
+            };
+            Ok(BtreeRangeIter::new(left, right, range, &self.mem))
         } else {
-            Ok(BtreeRangeIter::new_reversed(None, range, &self.mem))
+            Ok(BtreeRangeIter::new(None, None, range, &self.mem))
         }
     }
 
