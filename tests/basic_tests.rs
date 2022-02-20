@@ -119,6 +119,290 @@ fn list_tables() {
 }
 
 #[test]
+fn tuple2_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let table_def: TableDefinition<(&str, u8), (u16, u32)> = TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert(&("hello", 5), &(0, 123)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(table.get(&("hello", 5)).unwrap().unwrap(), (0, 123));
+}
+
+#[test]
+fn tuple3_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let table_def: TableDefinition<(&str, u8, u16), (u16, u32)> = TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert(&("hello", 5, 6), &(0, 123)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(table.get(&("hello", 5, 6)).unwrap().unwrap(), (0, 123));
+}
+
+#[test]
+fn tuple4_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let table_def: TableDefinition<(&str, u8, u16, u32), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert(&("hello", 5, 6, 7), &(0, 123)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(table.get(&("hello", 5, 6, 7)).unwrap().unwrap(), (0, 123));
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple5_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let table_def: TableDefinition<(&str, u8, u16, u32, u64), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert(&("hello", 5, 6, 7, 8), &(0, 123)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table.get(&("hello", 5, 6, 7, 8)).unwrap().unwrap(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple6_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert(&("hello", 5, 6, 7, 8, 9), &(0, 123)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table.get(&("hello", 5, 6, 7, 8, 9)).unwrap().unwrap(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple7_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(&("hello", 5, 6, 7, 8, 9, -1), &(0, 123))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table.get(&("hello", 5, 6, 7, 8, 9, -1)).unwrap().unwrap(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple8_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8, i16), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(&("hello", 5, 6, 7, 8, 9, -1, -2), &(0, 123))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table
+            .get(&("hello", 5, 6, 7, 8, 9, -1, -2))
+            .unwrap()
+            .unwrap(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple9_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8, i16, i32), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(&("hello", 5, 6, 7, 8, 9, -1, -2, -3), &(0, 123))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table
+            .get(&("hello", 5, 6, 7, 8, 9, -1, -2, -3))
+            .unwrap()
+            .unwrap(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple10_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8, i16, i32, i64), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4), &(0, 123))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table
+            .get(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4))
+            .unwrap()
+            .unwrap(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple11_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let table_def: TableDefinition<
+        (&str, u8, u16, u32, u64, u128, i8, i16, i32, i64, i128),
+        (u16, u32),
+    > = TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4, -5), &(0, 123))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table
+            .get(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4, -5))
+            .unwrap()
+            .unwrap(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple12_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let table_def: TableDefinition<
+        (&str, u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, &str),
+        (u16, u32),
+    > = TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(
+                &("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4, -5, "end"),
+                &(0, 123),
+            )
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table
+            .get(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4, -5, "end"))
+            .unwrap()
+            .unwrap(),
+        (0, 123)
+    );
+}
+
+#[test]
 fn is_empty() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
