@@ -471,25 +471,37 @@ fn range_query_reversed() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(&SLICE_TABLE).unwrap();
-    for i in 0..10u8 {
-        let key = vec![i];
-        table.insert(&key, b"value").unwrap();
+    let mut table = write_txn.open_table(&U64_TABLE).unwrap();
+    for i in 0..10 {
+        table.insert(&i, &i).unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(&SLICE_TABLE).unwrap();
-    let start = vec![3u8];
-    let end = vec![7u8];
-    let mut iter = table
-        .range_reversed(start.as_slice()..end.as_slice())
-        .unwrap();
-    for i in (3..7u8).rev() {
+    let table = read_txn.open_table(&U64_TABLE).unwrap();
+    let mut iter = table.range(3..7).unwrap().rev();
+    for i in (3..7u64).rev() {
         let (key, value) = iter.next().unwrap();
-        assert_eq!(&[i], key);
-        assert_eq!(b"value", value);
+        assert_eq!(i, key);
+        assert_eq!(i, value);
     }
+    assert!(iter.next().is_none());
+
+    // Test reversing multiple times
+    let mut iter = table.range(3..7).unwrap();
+    let (key, _) = iter.next().unwrap();
+    assert_eq!(3, key);
+
+    iter = iter.rev();
+    let (key, _) = iter.next().unwrap();
+    assert_eq!(6, key);
+    let (key, _) = iter.next().unwrap();
+    assert_eq!(5, key);
+
+    iter = iter.rev();
+    let (key, _) = iter.next().unwrap();
+    assert_eq!(4, key);
+
     assert!(iter.next().is_none());
 }
 

@@ -249,6 +249,10 @@ impl<
             None
         }
     }
+
+    pub fn rev(self) -> Self {
+        Self::new(self.inner.reverse())
+    }
 }
 
 pub struct MultimapRangeIter<
@@ -293,6 +297,10 @@ impl<
         } else {
             None
         }
+    }
+
+    pub fn rev(self) -> Self {
+        Self::new(self.inner.reverse())
     }
 }
 
@@ -421,22 +429,6 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
             .map(MultimapRangeIter::new)
     }
 
-    fn range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
-        &'a self,
-        range: T,
-    ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error> {
-        let (start_bytes, end_bytes) = make_inclusive_query_range(range);
-        let start_kv = start_bytes.map(MultimapKVPair::<K, V>::new);
-        let end_kv = end_bytes.map(MultimapKVPair::<K, V>::new);
-        let start = make_bound(start_kv);
-        let end = make_bound(end_kv);
-
-        self.storage
-            .get_range((start, end), self.table_root.get())
-            .map(BtreeRangeIter::reverse)
-            .map(MultimapRangeIter::new)
-    }
-
     fn len(&self) -> Result<usize, Error> {
         self.storage.len(self.table_root.get())
     }
@@ -455,12 +447,6 @@ pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapGetIterType<'a, K, V>, Error>;
 
     fn range<'a, T: RangeBounds<&'a K> + 'a>(
-        &'a self,
-        range: T,
-    ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error>;
-
-    // TODO: remove this method and make the iterator returned from range() double ended
-    fn range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
     ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error>;
@@ -516,22 +502,6 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
 
         self.storage
             .get_range((start, end), self.table_root)
-            .map(MultimapRangeIter::new)
-    }
-
-    fn range_reversed<'a, T: RangeBounds<&'a K> + 'a>(
-        &'a self,
-        range: T,
-    ) -> Result<MultimapGetRangeIterType<'a, K, V>, Error> {
-        let (start_bytes, end_bytes) = make_inclusive_query_range(range);
-        let start_kv = start_bytes.map(MultimapKVPair::<K, V>::new);
-        let end_kv = end_bytes.map(MultimapKVPair::<K, V>::new);
-        let start = make_bound(start_kv);
-        let end = make_bound(end_kv);
-
-        self.storage
-            .get_range((start, end), self.table_root)
-            .map(BtreeRangeIter::reverse)
             .map(MultimapRangeIter::new)
     }
 

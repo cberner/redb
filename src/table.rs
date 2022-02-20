@@ -108,16 +108,6 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
             .map(RangeIter::new)
     }
 
-    fn range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
-        &'a self,
-        range: T,
-    ) -> Result<RangeIter<T, KR, K, V>, Error> {
-        self.storage
-            .get_range(range, self.table_root.get())
-            .map(BtreeRangeIter::reverse)
-            .map(RangeIter::new)
-    }
-
     fn len(&self) -> Result<usize, Error> {
         self.storage.len(self.table_root.get())
     }
@@ -131,12 +121,6 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>, Error>;
 
     fn range<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
-        &'a self,
-        range: T,
-    ) -> Result<RangeIter<T, KR, K, V>, Error>;
-
-    // TODO: remove this method and make the iterator returned from range() double ended
-    fn range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<T, KR, K, V>, Error>;
@@ -181,16 +165,6 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     ) -> Result<RangeIter<T, KR, K, V>, Error> {
         self.storage
             .get_range(range, self.table_root)
-            .map(RangeIter::new)
-    }
-
-    fn range_reversed<'a, T: RangeBounds<KR> + 'a, KR: Borrow<K>>(
-        &'a self,
-        range: T,
-    ) -> Result<RangeIter<T, KR, K, V>, Error> {
-        self.storage
-            .get_range(range, self.table_root)
-            .map(BtreeRangeIter::reverse)
             .map(RangeIter::new)
     }
 
@@ -242,6 +216,10 @@ impl<
         } else {
             None
         }
+    }
+
+    pub fn rev(self) -> Self {
+        Self::new(self.inner.reverse())
     }
 }
 
