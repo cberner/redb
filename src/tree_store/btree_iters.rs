@@ -8,6 +8,7 @@ use std::borrow::Borrow;
 use std::collections::Bound;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
+use RangeIterState::Repeat;
 
 fn bound_contains_key<
     'a,
@@ -54,6 +55,9 @@ pub enum RangeIterState<'a> {
         parent: Option<Box<RangeIterState<'a>>>,
         reversed: bool,
     },
+    Repeat {
+        inner: Box<RangeIterState<'a>>,
+    },
 }
 
 impl<'a> RangeIterState<'a> {
@@ -61,6 +65,7 @@ impl<'a> RangeIterState<'a> {
         match self {
             Leaf { page, .. } => page.get_page_number(),
             Internal { page, .. } => page.get_page_number(),
+            Repeat { .. } => unreachable!(),
         }
     }
 
@@ -137,6 +142,7 @@ impl<'a> RangeIterState<'a> {
                     _ => unreachable!(),
                 }
             }
+            Repeat { inner } => Some(*inner),
         }
     }
 
@@ -162,6 +168,7 @@ impl<'a> AllPageNumbersBtreeIter<'a> {
             Internal { child, .. } => {
                 assert_eq!(child, 0)
             }
+            Repeat { .. } => unreachable!(),
         }
         Self {
             next: Some(start),
@@ -198,6 +205,7 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
                         return Some(value);
                     }
                 }
+                Repeat { .. } => unreachable!(),
             }
         }
     }
@@ -229,10 +237,7 @@ pub struct BtreeRangeIter<
     K: RedbKey + ?Sized + 'a,
     V: RedbValue + ?Sized + 'a,
 > {
-    // whether we've returned the value for the self.next state. We don't want to advance the initial
-    // state, until it has been returned
-    consumed: bool,
-    next: Option<RangeIterState<'a>>,
+    last: Option<RangeIterState<'a>>,
     query_range: T,
     reversed: bool,
     manager: &'a TransactionalMemory,
@@ -255,8 +260,7 @@ impl<
         manager: &'a TransactionalMemory,
     ) -> Self {
         Self {
-            consumed: false,
-            next: state,
+            last: state.map(|s| Repeat { inner: Box::new(s) }),
             query_range,
             reversed: false,
             manager,
@@ -272,8 +276,7 @@ impl<
         manager: &'a TransactionalMemory,
     ) -> Self {
         Self {
-            consumed: false,
-            next: state,
+            last: state.map(|s| Repeat { inner: Box::new(s) }),
             query_range,
             reversed: true,
             manager,
@@ -286,39 +289,33 @@ impl<
     // TODO: we need generic-associated-types to implement Iterator
     pub fn next(&mut self) -> Option<EntryAccessor> {
         loop {
-            if self.consumed {
-                let state = self.next.take()?;
-                self.next = state.next(self.manager);
-                // Return None if the next state is None
-                self.next.as_ref()?;
-            }
+            self.last = self.last.take()?.next(self.manager);
+            // Return None if the next state is None
+            self.last.as_ref()?;
 
-            self.next.as_ref()?;
-
-            self.consumed = true;
-            if let Some(entry) = self.next.as_ref().unwrap().get_entry() {
+            if let Some(entry) = self.last.as_ref().unwrap().get_entry() {
                 if bound_contains_key::<T, KR, K>(&self.query_range, entry.key()) {
-                    return self.next.as_ref().map(|s| s.get_entry().unwrap());
+                    return self.last.as_ref().map(|s| s.get_entry().unwrap());
                 } else {
                     #[allow(clippy::collapsible_else_if)]
                     if self.reversed {
                         if let Bound::Included(start) = self.query_range.start_bound() {
                             if K::compare(entry.key(), start.borrow().as_bytes().as_ref()).is_lt() {
-                                self.next = None;
+                                self.last = None;
                             }
                         } else if let Bound::Excluded(start) = self.query_range.start_bound() {
                             if K::compare(entry.key(), start.borrow().as_bytes().as_ref()).is_le() {
-                                self.next = None;
+                                self.last = None;
                             }
                         }
                     } else {
                         if let Bound::Included(end) = self.query_range.end_bound() {
                             if K::compare(entry.key(), end.borrow().as_bytes().as_ref()).is_gt() {
-                                self.next = None;
+                                self.last = None;
                             }
                         } else if let Bound::Excluded(end) = self.query_range.end_bound() {
                             if K::compare(entry.key(), end.borrow().as_bytes().as_ref()).is_ge() {
-                                self.next = None;
+                                self.last = None;
                             }
                         }
                     };
