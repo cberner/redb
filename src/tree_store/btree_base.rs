@@ -163,7 +163,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         if n >= self.num_pairs() {
             None
         } else {
-            let offset = 4 + size_of::<u32>() * self.num_pairs() + size_of::<u32>() * n;
+            let offset = 4 + size_of::<u32>() * n;
             let end = u32::from_be_bytes(
                 self.page.memory()[offset..(offset + size_of::<u32>())]
                     .try_into()
@@ -185,7 +185,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         if n >= self.num_pairs() {
             None
         } else {
-            let offset = 4 + size_of::<u32>() * n;
+            let offset = 4 + size_of::<u32>() * self.num_pairs() + size_of::<u32>() * n;
             let end = u32::from_be_bytes(
                 self.page.memory()[offset..(offset + size_of::<u32>())]
                     .try_into()
@@ -266,9 +266,9 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
 // 1 byte: reserved (padding to 32bits aligned)
 // 2 bytes: num_entries (number of pairs)
 // repeating (num_entries times):
-// 4 bytes: value_end
-// repeating (num_entries times):
 // 4 bytes: key_end
+// repeating (num_entries times):
+// 4 bytes: value_end
 // repeating (num_entries times):
 // * n bytes: key data
 // repeating (num_entries times):
@@ -318,7 +318,7 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
     }
 
     fn value_end(&self, n: usize) -> usize {
-        let offset = 4 + size_of::<u32>() * n;
+        let offset = 4 + size_of::<u32>() * self.num_pairs + size_of::<u32>() * n;
         u32::from_be_bytes(
             self.page.memory()[offset..(offset + size_of::<u32>())]
                 .try_into()
@@ -327,7 +327,7 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
     }
 
     fn key_end(&self, n: usize) -> usize {
-        let offset = 4 + size_of::<u32>() * self.num_pairs + size_of::<u32>() * n;
+        let offset = 4 + size_of::<u32>() * n;
         u32::from_be_bytes(
             self.page.memory()[offset..(offset + size_of::<u32>())]
                 .try_into()
@@ -348,14 +348,14 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
         };
 
         let n = self.pairs_written;
-        let offset = 4 + size_of::<u32>() * self.num_pairs + size_of::<u32>() * n;
+        let offset = 4 + size_of::<u32>() * n;
         self.page.memory_mut()[offset..(offset + size_of::<u32>())]
             .copy_from_slice(&((key_offset + key.len()) as u32).to_be_bytes());
         self.page.memory_mut()[key_offset..(key_offset + key.len())].copy_from_slice(key);
         let written_key_len = key_offset + key.len() - 4 - 2 * size_of::<u32>() * self.num_pairs;
         assert!(written_key_len <= self.provisioned_key_bytes);
 
-        let offset = 4 + size_of::<u32>() * n;
+        let offset = 4 + size_of::<u32>() * self.num_pairs + size_of::<u32>() * n;
         self.page.memory_mut()[offset..(offset + size_of::<u32>())]
             .copy_from_slice(&((value_offset + value.len()) as u32).to_be_bytes());
         self.page.memory_mut()[value_offset..(value_offset + value.len())].copy_from_slice(value);
