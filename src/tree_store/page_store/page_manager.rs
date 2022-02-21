@@ -121,6 +121,13 @@ pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result<
 
     let allocator_state_size = BuddyAllocator::required_space(usable_pages, max_order);
 
+    // Write the WAL
+    file.seek(SeekFrom::Start(UPGRADE_LOG_OFFSET as u64))?;
+    file.write_all(&(old_size as u64).to_be_bytes())?;
+    file.seek(SeekFrom::Start(UPGRADE_LOG_LEN_OFFSET as u64))?;
+    file.write_all(&(size_of::<u64>() as u64).to_be_bytes())?;
+    file.sync_all()?;
+
     // Dirty the allocator state, so that it will be rebuilt
     file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;
     let mut buffer = [0u8; 1];
@@ -130,13 +137,6 @@ pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result<
     let final_god_byte = buffer[0] | ALLOCATOR_STATE_0_DIRTY | ALLOCATOR_STATE_1_DIRTY;
     file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;
     file.write_all(&[in_progress_god_byte])?;
-    file.sync_all()?;
-
-    // Write the WAL
-    file.seek(SeekFrom::Start(UPGRADE_LOG_OFFSET as u64))?;
-    file.write_all(&(old_size as u64).to_be_bytes())?;
-    file.seek(SeekFrom::Start(UPGRADE_LOG_LEN_OFFSET as u64))?;
-    file.write_all(&(size_of::<u64>() as u64).to_be_bytes())?;
     file.sync_all()?;
 
     // Write the new allocator state pointers
