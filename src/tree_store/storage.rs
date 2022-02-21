@@ -37,10 +37,12 @@ pub struct DbStats {
 }
 
 impl DbStats {
+    /// Maximum traversal distance to reach the deepest (key, value) pair, across all tables
     pub fn tree_height(&self) -> usize {
         self.tree_height
     }
 
+    /// Number of free pages remaining
     pub fn free_pages(&self) -> usize {
         self.free_pages
     }
@@ -56,7 +58,7 @@ impl DbStats {
         self.overhead_bytes
     }
 
-    /// Number of bytes consumed by fragmentation
+    /// Number of bytes consumed by fragmentation, both in data pages and internal metadata tables
     pub fn fragmented_bytes(&self) -> usize {
         self.fragmented_bytes
     }
