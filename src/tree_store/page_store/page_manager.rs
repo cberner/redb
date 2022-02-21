@@ -21,8 +21,9 @@ use std::sync::{Mutex, MutexGuard};
 // 9 bytes: magic number
 // 1 byte: version number
 // 1 byte: page size exponent
-// 8 bytes: database max size
 // 1 byte: god byte
+// 4 bytes: padding to 64-bit aligned
+// 8 bytes: database max size
 // 8 bytes: upgrade log offset
 //
 // Commit slot 0 (next 128 bytes):
@@ -45,10 +46,11 @@ const DB_METADATA_PAGE: u64 = 0;
 // Inspired by PNG's magic number
 const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
 const VERSION_OFFSET: usize = MAGICNUMBER.len();
-const PAGE_SIZE_OFFSET: usize = VERSION_OFFSET + 1;
-const DB_SIZE_OFFSET: usize = PAGE_SIZE_OFFSET + 1;
-const GOD_BYTE_OFFSET: usize = DB_SIZE_OFFSET + size_of::<u64>();
-const UPGRADE_LOG_OFFSET: usize = GOD_BYTE_OFFSET + 1;
+const PAGE_SIZE_OFFSET: usize = VERSION_OFFSET + size_of::<u8>();
+const GOD_BYTE_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u8>();
+const RESERVED: usize = 4;
+const DB_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + RESERVED;
+const UPGRADE_LOG_OFFSET: usize = DB_SIZE_OFFSET + size_of::<u64>();
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 128;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
