@@ -16,6 +16,27 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
+// Database layout:
+// Header (first 128 bytes):
+// 4 bytes: magic number
+// 1 byte: version number
+// 1 byte: page size exponent
+// 8 bytes: database max size
+// 1 byte: god byte
+// 8 bytes: upgrade log offset
+//
+// Commit slot 0 (next 128 bytes):
+// 8 bytes: root page
+// 8 bytes: last committed transaction id
+// 8 bytes: allocator state pointer
+// 8 bytes: allocator state length
+//
+// Commit slot 1 (next 128 bytes):
+// 8 bytes: root page
+// 8 bytes: last committed transaction id
+// 8 bytes: allocator state pointer
+// 8 bytes: allocator state length
+
 const MAX_PAGE_ORDER: usize = 20;
 const MIN_USABLE_PAGES: usize = 10;
 
