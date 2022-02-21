@@ -18,7 +18,7 @@ use std::sync::{Mutex, MutexGuard};
 
 // Database layout:
 // Header (first 128 bytes):
-// 4 bytes: magic number
+// 9 bytes: magic number
 // 1 byte: version number
 // 1 byte: page size exponent
 // 8 bytes: database max size
@@ -42,7 +42,8 @@ const MIN_USABLE_PAGES: usize = 10;
 
 const DB_METADATA_PAGE: u64 = 0;
 
-const MAGICNUMBER: [u8; 4] = [b'r', b'e', b'd', b'b'];
+// Inspired by PNG's magic number
+const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
 const VERSION_OFFSET: usize = MAGICNUMBER.len();
 const PAGE_SIZE_OFFSET: usize = VERSION_OFFSET + 1;
 const DB_SIZE_OFFSET: usize = PAGE_SIZE_OFFSET + 1;
@@ -1079,7 +1080,7 @@ impl Drop for TransactionalMemory {
 mod test {
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::page_manager::{
-        set_allocator_dirty, DB_SIZE_OFFSET, GOD_BYTE_OFFSET, MIN_USABLE_PAGES,
+        set_allocator_dirty, DB_SIZE_OFFSET, GOD_BYTE_OFFSET, MAGICNUMBER, MIN_USABLE_PAGES,
         UPGRADE_IN_PROGRESS, UPGRADE_LOG_OFFSET,
     };
     use crate::tree_store::page_store::utils::get_page_size;
@@ -1185,5 +1186,27 @@ mod test {
         let result =
             unsafe { Database::create(tmpfile.path(), MIN_USABLE_PAGES * get_page_size() - 1) };
         assert!(matches!(result, Err(Error::OutOfSpace)));
+    }
+
+    #[test]
+    fn magic_number() {
+        // Test compliance with some, but not all, provisions recommended by
+        // IETF Memo "Care and Feeding of Magic Numbers"
+
+        // Test that magic number is not valid utf-8
+        assert!(std::str::from_utf8(&MAGICNUMBER).is_err());
+        // Test there is a octet with high-bit set
+        assert!(MAGICNUMBER.iter().any(|x| *x & 0x80 != 0));
+        // Test there is a non-printable ASCII character
+        assert!(MAGICNUMBER.iter().any(|x| *x < 0x20 || *x > 0x7E));
+        // Test there is a printable ASCII character
+        assert!(MAGICNUMBER.iter().any(|x| *x >= 0x20 && *x <= 0x7E));
+        // Test there is a printable ISO-8859 that's non-ASCII printable
+        assert!(MAGICNUMBER.iter().any(|x| *x >= 0xA0));
+        // Test there is a ISO-8859 control character other than 0x09, 0x0A, 0x0C, 0x0D
+        assert!(MAGICNUMBER.iter().any(|x| *x < 0x09
+            || *x == 0x0B
+            || (0x0E <= *x && *x <= 0x1F)
+            || (0x7F <= *x && *x <= 0x9F)));
     }
 }
