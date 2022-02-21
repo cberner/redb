@@ -25,6 +25,7 @@ use std::sync::{Mutex, MutexGuard};
 // 4 bytes: padding to 64-bit aligned
 // 8 bytes: database max size
 // 8 bytes: upgrade log offset
+// 8 bytes: upgrade log length
 //
 // Commit slot 0 (next 128 bytes):
 // 8 bytes: root page
@@ -51,6 +52,7 @@ const GOD_BYTE_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u8>();
 const RESERVED: usize = 4;
 const DB_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + RESERVED;
 const UPGRADE_LOG_OFFSET: usize = DB_SIZE_OFFSET + size_of::<u64>();
+const UPGRADE_LOG_LEN_OFFSET: usize = UPGRADE_LOG_OFFSET + size_of::<u64>();
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 128;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
@@ -88,6 +90,10 @@ pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
     if god_byte & UPGRADE_IN_PROGRESS == 0 {
         file.seek(SeekFrom::Start(DB_SIZE_OFFSET as u64))?;
     } else {
+        let mut log_size = [0u8; size_of::<u64>()];
+        file.seek(SeekFrom::Start(UPGRADE_LOG_LEN_OFFSET as u64))?;
+        file.read_exact(&mut log_size)?;
+        assert_eq!(u64::from_be_bytes(log_size) as usize, size_of::<u64>());
         file.seek(SeekFrom::Start(UPGRADE_LOG_OFFSET as u64))?;
     }
 
@@ -128,7 +134,9 @@ pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result<
 
     // Write the WAL
     file.seek(SeekFrom::Start(UPGRADE_LOG_OFFSET as u64))?;
-    file.write_all(&old_size.to_be_bytes())?;
+    file.write_all(&(old_size as u64).to_be_bytes())?;
+    file.seek(SeekFrom::Start(UPGRADE_LOG_LEN_OFFSET as u64))?;
+    file.write_all(&(size_of::<u64>() as u64).to_be_bytes())?;
     file.sync_all()?;
 
     // Write the new allocator state pointers
@@ -575,8 +583,14 @@ impl TransactionalMemory {
         }
 
         if all_memory[GOD_BYTE_OFFSET] & UPGRADE_IN_PROGRESS != 0 {
+            let upgrade_log_len = u64::from_be_bytes(
+                all_memory[UPGRADE_LOG_LEN_OFFSET..(UPGRADE_LOG_LEN_OFFSET + size_of::<u64>())]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            assert_eq!(upgrade_log_len, size_of::<u64>());
             let rollback =
-                all_memory[UPGRADE_LOG_OFFSET..(UPGRADE_LOG_OFFSET + size_of::<u64>())].to_vec();
+                all_memory[UPGRADE_LOG_OFFSET..(UPGRADE_LOG_OFFSET + upgrade_log_len)].to_vec();
             all_memory[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
                 .copy_from_slice(&rollback);
             mmap.flush()?;
@@ -1083,7 +1097,7 @@ mod test {
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::page_manager::{
         set_allocator_dirty, DB_SIZE_OFFSET, GOD_BYTE_OFFSET, MAGICNUMBER, MIN_USABLE_PAGES,
-        UPGRADE_IN_PROGRESS, UPGRADE_LOG_OFFSET,
+        UPGRADE_IN_PROGRESS, UPGRADE_LOG_LEN_OFFSET, UPGRADE_LOG_OFFSET,
     };
     use crate::tree_store::page_store::utils::get_page_size;
     use crate::tree_store::page_store::TransactionalMemory;
@@ -1120,7 +1134,9 @@ mod test {
                 .unwrap(),
         );
         mmap[UPGRADE_LOG_OFFSET..(UPGRADE_LOG_OFFSET + size_of::<u64>())]
-            .copy_from_slice(&old_size.to_be_bytes());
+            .copy_from_slice(&(old_size as u64).to_be_bytes());
+        mmap[UPGRADE_LOG_LEN_OFFSET..(UPGRADE_LOG_LEN_OFFSET + size_of::<u64>())]
+            .copy_from_slice(&8u64.to_be_bytes());
         // Perform a partial increase of the db size. Intentionally don't resize the mmap file, so that it's invalid
         mmap[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
             .copy_from_slice(&(2 * old_size).to_be_bytes());
