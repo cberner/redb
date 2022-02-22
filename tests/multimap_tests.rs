@@ -1,4 +1,4 @@
-use redb::{Database, MultimapTableDefinition, ReadableMultimapTable};
+use redb::{Database, Error, MultimapTableDefinition, ReadableMultimapTable};
 use tempfile::NamedTempFile;
 
 const SLICE_TABLE: MultimapTableDefinition<[u8], [u8]> =
@@ -150,4 +150,31 @@ fn delete() {
     assert!(table.is_empty().unwrap());
     let empty: Vec<Vec<u8>> = vec![];
     assert_eq!(empty, get_vec(&table, b"hello"));
+}
+
+#[test]
+fn wrong_types() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let definition: MultimapTableDefinition<u32, u32> = MultimapTableDefinition::new("x");
+    let wrong_definition: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("x");
+
+    let txn = db.begin_write().unwrap();
+    txn.open_multimap_table(&definition).unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    assert!(matches!(
+        txn.open_multimap_table(&wrong_definition),
+        Err(Error::TableTypeMismatch(_))
+    ));
+    txn.abort().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    txn.open_multimap_table(&definition).unwrap();
+    assert!(matches!(
+        txn.open_multimap_table(&wrong_definition),
+        Err(Error::TableTypeMismatch(_))
+    ));
 }

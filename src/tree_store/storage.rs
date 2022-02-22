@@ -99,6 +99,8 @@ impl From<u8> for TableType {
 pub(crate) struct TableHeader {
     table_root: Option<PageNumber>,
     table_type: TableType,
+    key_type: String,
+    value_type: String,
 }
 
 impl TableHeader {
@@ -118,23 +120,35 @@ impl TableHeader {
                 .unwrap_or_else(PageNumber::null)
                 .to_be_bytes(),
         );
+        result.extend_from_slice(&(self.key_type.as_bytes().len() as u32).to_be_bytes());
+        result.extend_from_slice(self.key_type.as_bytes());
+        result.extend_from_slice(self.value_type.as_bytes());
 
         result
     }
 
     fn from_bytes(value: &[u8]) -> Self {
-        assert_eq!(9, value.len());
+        debug_assert!(value.len() > 14);
+        let table_type = TableType::from(value[0]);
         let table_root = PageNumber::from_be_bytes(value[1..9].try_into().unwrap());
         let table_root = if table_root == PageNumber::null() {
             None
         } else {
             Some(table_root)
         };
-        let table_type = TableType::from(value[0]);
+        let key_type_len = u32::from_be_bytes(value[9..13].try_into().unwrap()) as usize;
+        let key_type = std::str::from_utf8(&value[13..(13 + key_type_len)])
+            .unwrap()
+            .to_string();
+        let value_type = std::str::from_utf8(&value[(13 + key_type_len)..])
+            .unwrap()
+            .to_string();
 
         TableHeader {
             table_root,
             table_type,
+            key_type,
+            value_type,
         }
     }
 }
@@ -205,6 +219,8 @@ impl Storage {
             let freed_table = TableHeader {
                 table_root: None,
                 table_type: TableType::Normal,
+                key_type: <[u8]>::redb_type_name().to_string(),
+                value_type: <[u8]>::redb_type_name().to_string(),
             };
             let (new_root, _) =
                 make_mut_single_leaf(FREED_TABLE.as_bytes(), &freed_table.to_bytes(), &mem)?;
@@ -258,15 +274,18 @@ impl Storage {
     pub(crate) fn update_table_root(
         &self,
         name: &str,
-        table_type: TableType,
         table_root: Option<PageNumber>,
         transaction_id: TransactionId,
         master_root: Option<PageNumber>,
     ) -> Result<PageNumber, Error> {
-        let definition = TableHeader {
-            table_root,
-            table_type,
-        };
+        // Bypass .get_table() since the table types are dynamic
+        // TODO: optimize way this get()
+        let bytes = self
+            .get::<str, [u8]>(name.as_bytes(), master_root)
+            .unwrap()
+            .unwrap();
+        let mut definition = TableHeader::from_bytes(bytes);
+        definition.table_root = table_root;
         // Safety: References into the master table are never returned to the user
         unsafe {
             self.insert::<str>(
@@ -292,7 +311,7 @@ impl Storage {
     }
 
     // root_page: the root of the master table
-    pub(crate) fn get_table(
+    pub(crate) fn get_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         name: &str,
         table_type: TableType,
@@ -306,6 +325,18 @@ impl Storage {
                     name, table_type
                 )));
             }
+            if definition.key_type != K::redb_type_name()
+                || definition.value_type != V::redb_type_name()
+            {
+                return Err(Error::TableTypeMismatch(format!(
+                    "{} is of type Table<{}, {}> not Table<{}, {}>",
+                    name,
+                    &definition.key_type,
+                    &definition.value_type,
+                    K::redb_type_name(),
+                    V::redb_type_name()
+                )));
+            }
 
             Ok(Some(definition))
         } else {
@@ -314,14 +345,14 @@ impl Storage {
     }
 
     // root_page: the root of the master table
-    pub(crate) fn delete_table(
+    pub(crate) fn delete_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         name: &str,
         table_type: TableType,
         transaction_id: TransactionId,
         root_page: Option<PageNumber>,
     ) -> Result<(Option<PageNumber>, bool), Error> {
-        if let Some(definition) = self.get_table(name, table_type, root_page)? {
+        if let Some(definition) = self.get_table::<K, V>(name, table_type, root_page)? {
             if let Some(table_root) = definition.get_root() {
                 let page = self.mem.get_page(table_root);
                 let start = page_numbers_iter_start_state(page);
@@ -344,20 +375,22 @@ impl Storage {
 
     // Returns a tuple of the table id and the new root page
     // root_page: the root of the master table
-    pub(crate) fn get_or_create_table(
+    pub(crate) fn get_or_create_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         name: &str,
         table_type: TableType,
         transaction_id: TransactionId,
         root_page: Option<PageNumber>,
     ) -> Result<(TableHeader, PageNumber), Error> {
-        if let Some(found) = self.get_table(name, table_type, root_page)? {
+        if let Some(found) = self.get_table::<K, V>(name, table_type, root_page)? {
             return Ok((found, root_page.unwrap()));
         }
 
         let header = TableHeader {
             table_root: None,
             table_type,
+            key_type: K::redb_type_name().to_string(),
+            value_type: V::redb_type_name().to_string(),
         };
         // Safety: References into the master table are never returned to the user
         let new_root = unsafe {
@@ -527,7 +560,7 @@ impl Storage {
 
         let mut to_remove = vec![];
         let mut freed_table = self
-            .get_table(FREED_TABLE, TableType::Normal, master_root)?
+            .get_table::<[u8], [u8]>(FREED_TABLE, TableType::Normal, master_root)?
             .unwrap();
         #[allow(clippy::type_complexity)]
         let mut iter: BtreeRangeIter<'_, [u8], [u8]> =
@@ -582,7 +615,7 @@ impl Storage {
 
         let mut pagination_counter = 0u64;
         let mut freed_table = self
-            .get_table(FREED_TABLE, TableType::Normal, master_root)?
+            .get_table::<[u8], [u8]>(FREED_TABLE, TableType::Normal, master_root)?
             .unwrap();
         while !self.pending_freed_pages.lock().unwrap().is_empty() {
             let chunk_size = 100;

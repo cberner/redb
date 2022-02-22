@@ -602,3 +602,30 @@ fn does_not_exist() {
         panic!();
     }
 }
+
+#[test]
+fn wrong_types() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let definition: TableDefinition<u32, u32> = TableDefinition::new("x");
+    let wrong_definition: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    let txn = db.begin_write().unwrap();
+    txn.open_table(&definition).unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    assert!(matches!(
+        txn.open_table(&wrong_definition),
+        Err(Error::TableTypeMismatch(_))
+    ));
+    txn.abort().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    txn.open_table(&definition).unwrap();
+    assert!(matches!(
+        txn.open_table(&wrong_definition),
+        Err(Error::TableTypeMismatch(_))
+    ));
+}

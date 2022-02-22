@@ -65,6 +65,10 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> RedbValue for Multi
     fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
         &self.data
     }
+
+    fn redb_type_name() -> &'static str {
+        unreachable!()
+    }
 }
 
 impl<K: RedbKey + ?Sized, V: RedbKey + ?Sized> RedbKey for MultimapKVPair<K, V> {
