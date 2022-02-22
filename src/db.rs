@@ -184,8 +184,8 @@ pub struct DatabaseTransaction<'a> {
     storage: &'a Storage,
     transaction_id: TransactionId,
     root_page: Cell<Option<PageNumber>>,
-    pending_table_root_changes: RefCell<HashMap<(String, TableType), Rc<Cell<Option<PageNumber>>>>>,
-    open_tables: RefCell<HashMap<(String, TableType), &'static panic::Location<'static>>>,
+    pending_table_root_changes: RefCell<HashMap<String, Rc<Cell<Option<PageNumber>>>>>,
+    open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
     completed: AtomicBool,
 }
 
@@ -212,8 +212,7 @@ impl<'a> DatabaseTransaction<'a> {
     ) -> Result<Table<'a, K, V>, Error> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
-        let key = (definition.name.to_string(), TableType::Normal);
-        if let Some(location) = self.open_tables.borrow().get(&key) {
+        if let Some(location) = self.open_tables.borrow().get(definition.name) {
             return Err(Error::TableAlreadyOpen(
                 definition.name.to_string(),
                 location,
@@ -221,9 +220,9 @@ impl<'a> DatabaseTransaction<'a> {
         }
         self.open_tables
             .borrow_mut()
-            .insert(key.clone(), panic::Location::caller());
+            .insert(definition.name.to_string(), panic::Location::caller());
 
-        let (header, root) = self.storage.get_or_create_table(
+        let (header, root) = self.storage.get_or_create_table::<K, V>(
             definition.name,
             TableType::Normal,
             self.transaction_id,
@@ -234,7 +233,7 @@ impl<'a> DatabaseTransaction<'a> {
         let root = self
             .pending_table_root_changes
             .borrow_mut()
-            .entry(key)
+            .entry(definition.name.to_string())
             .or_insert_with(|| Rc::new(Cell::new(header.get_root())))
             .clone();
 
@@ -250,8 +249,7 @@ impl<'a> DatabaseTransaction<'a> {
     ) -> Result<MultimapTable<'a, K, V>, Error> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
-        let key = (definition.name.to_string(), TableType::Multimap);
-        if let Some(location) = self.open_tables.borrow().get(&key) {
+        if let Some(location) = self.open_tables.borrow().get(definition.name) {
             return Err(Error::TableAlreadyOpen(
                 definition.name.to_string(),
                 location,
@@ -259,9 +257,9 @@ impl<'a> DatabaseTransaction<'a> {
         }
         self.open_tables
             .borrow_mut()
-            .insert(key.clone(), panic::Location::caller());
+            .insert(definition.name.to_string(), panic::Location::caller());
 
-        let (header, root) = self.storage.get_or_create_table(
+        let (header, root) = self.storage.get_or_create_table::<K, V>(
             definition.name,
             TableType::Multimap,
             self.transaction_id,
@@ -272,7 +270,7 @@ impl<'a> DatabaseTransaction<'a> {
         let root = self
             .pending_table_root_changes
             .borrow_mut()
-            .entry(key)
+            .entry(definition.name.to_string())
             .or_insert_with(|| Rc::new(Cell::new(header.get_root())))
             .clone();
 
@@ -289,7 +287,7 @@ impl<'a> DatabaseTransaction<'a> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
         let original_root = self.root_page.get();
-        let (root, found) = self.storage.delete_table(
+        let (root, found) = self.storage.delete_table::<K, V>(
             definition.name,
             TableType::Normal,
             self.transaction_id,
@@ -310,7 +308,7 @@ impl<'a> DatabaseTransaction<'a> {
     ) -> Result<bool, Error> {
         assert!(!definition.name.is_empty());
         let original_root = self.root_page.get();
-        let (root, found) = self.storage.delete_table(
+        let (root, found) = self.storage.delete_table::<K, V>(
             definition.name,
             TableType::Multimap,
             self.transaction_id,
@@ -363,10 +361,9 @@ impl<'a> DatabaseTransaction<'a> {
 
     fn commit_helper_inner(&self, non_durable: bool) -> Result<(), Error> {
         // Update all the table roots in the master table, before committing
-        for ((name, table_type), update) in self.pending_table_root_changes.borrow_mut().drain() {
+        for (name, update) in self.pending_table_root_changes.borrow_mut().drain() {
             let new_root = self.storage.update_table_root(
                 &name,
-                table_type,
                 update.get(),
                 self.transaction_id,
                 self.root_page.get(),
@@ -427,7 +424,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
         assert_ne!(definition.name, FREED_TABLE);
         let header = self
             .storage
-            .get_table(definition.name, TableType::Normal, self.root_page)?
+            .get_table::<K, V>(definition.name, TableType::Normal, self.root_page)?
             .ok_or_else(|| Error::TableDoesNotExist(definition.name.to_string()))?;
 
         Ok(ReadOnlyTable::new(header.get_root(), self.storage))
@@ -442,7 +439,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
         assert_ne!(definition.name, FREED_TABLE);
         let header = self
             .storage
-            .get_table(definition.name, TableType::Multimap, self.root_page)?
+            .get_table::<K, V>(definition.name, TableType::Multimap, self.root_page)?
             .ok_or_else(|| Error::TableDoesNotExist(definition.name.to_string()))?;
 
         Ok(ReadOnlyMultimapTable::new(header.get_root(), self.storage))

@@ -48,6 +48,9 @@ pub trait RedbValue {
 
     /// Serialize the key to a slice
     fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out;
+
+    /// Globally unique identifier for this type
+    fn redb_type_name() -> &'static str;
 }
 
 pub trait RedbKey: RedbValue {
@@ -65,6 +68,10 @@ impl RedbValue for [u8] {
 
     fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
         self
+    }
+
+    fn redb_type_name() -> &'static str {
+        "[u8]"
     }
 }
 
@@ -84,6 +91,10 @@ impl RedbValue for str {
 
     fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
         self
+    }
+
+    fn redb_type_name() -> &'static str {
+        "str"
     }
 }
 
@@ -107,6 +118,10 @@ macro_rules! be_value {
 
             fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
                 self.to_be_bytes()
+            }
+
+            fn redb_type_name() -> &'static str {
+                stringify!($t)
             }
         }
     };

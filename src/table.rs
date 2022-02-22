@@ -234,6 +234,10 @@ mod test {
             fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
                 &self.0
             }
+
+            fn redb_type_name() -> &'static str {
+                "ReverseKey"
+            }
         }
 
         impl RedbKey for ReverseKey {
