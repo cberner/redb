@@ -32,7 +32,7 @@ fn stored_size() {
 
     assert_eq!(db.stats().unwrap().stored_bytes(), 10);
     assert!(db.stats().unwrap().fragmented_bytes() > 0);
-    assert!(db.stats().unwrap().overhead_bytes() > 0);
+    assert!(db.stats().unwrap().metadata_bytes() > 0);
 }
 
 #[test]

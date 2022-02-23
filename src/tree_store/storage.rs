@@ -53,8 +53,8 @@ impl DbStats {
         self.stored_leaf_bytes
     }
 
-    /// Number of bytes consumed by keys in internal index pages, plus other overhead
-    pub fn overhead_bytes(&self) -> usize {
+    /// Number of bytes consumed by keys in internal index pages, plus other metadata
+    pub fn metadata_bytes(&self) -> usize {
         self.overhead_bytes
     }
 
