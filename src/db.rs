@@ -1,7 +1,7 @@
 use crate::multimap_table::MultimapTable;
 use crate::table::{ReadOnlyTable, Table};
 use crate::tree_store::{
-    expand_db_size, get_db_size, DbStats, PageNumber, Storage, TableType, TransactionId,
+    expand_db_size, get_db_size, DatabaseStats, PageNumber, Storage, TableType, TransactionId,
     FREED_TABLE,
 };
 use crate::types::{RedbKey, RedbValue};
@@ -128,7 +128,7 @@ impl Database {
         Ok(ReadOnlyDatabaseTransaction::new(&self.storage))
     }
 
-    pub fn stats(&self) -> Result<DbStats, Error> {
+    pub fn stats(&self) -> Result<DatabaseStats, Error> {
         self.storage.storage_stats()
     }
 

@@ -27,7 +27,7 @@ pub(crate) type TransactionId = u64;
 type AtomicTransactionId = AtomicU64;
 
 #[derive(Debug)]
-pub struct DbStats {
+pub struct DatabaseStats {
     pub(crate) tree_height: usize,
     pub(crate) free_pages: usize,
     pub(crate) stored_leaf_bytes: usize,
@@ -36,7 +36,7 @@ pub struct DbStats {
     pub(crate) page_size: usize,
 }
 
-impl DbStats {
+impl DatabaseStats {
     /// Maximum traversal distance to reach the deepest (key, value) pair, across all tables
     pub fn tree_height(&self) -> usize {
         self.tree_height
@@ -685,7 +685,7 @@ impl Storage {
         result
     }
 
-    pub(crate) fn storage_stats(&self) -> Result<DbStats, Error> {
+    pub(crate) fn storage_stats(&self) -> Result<DatabaseStats, Error> {
         let master_tree_height = self
             .get_root_page_number()
             .map(|p| tree_height(self.mem.get_page(p), &self.mem))
@@ -716,7 +716,7 @@ impl Storage {
                 total_fragmented += fragmented_bytes(self.mem.get_page(table_root), &self.mem);
             }
         }
-        Ok(DbStats {
+        Ok(DatabaseStats {
             tree_height: master_tree_height + max_subtree_height,
             free_pages: self.mem.count_free_pages()?,
             stored_leaf_bytes: total_stored_bytes,
