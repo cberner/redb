@@ -8,7 +8,7 @@ pub use multimap_table::{
     ReadableMultimapTable,
 };
 pub use table::{RangeIter, ReadOnlyTable, ReadableTable, Table};
-pub use tree_store::AccessGuard;
+pub use tree_store::{AccessGuard, DatabaseStats};
 
 #[cfg(feature = "python")]
 pub use crate::python::redb;
