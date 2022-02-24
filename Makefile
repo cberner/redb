@@ -27,7 +27,7 @@ install_py: pre
 	maturin develop
 
 test: pre
-	cargo test
+	RUST_BACKTRACE=1 cargo test
 
 bench: pre
 	cargo bench
