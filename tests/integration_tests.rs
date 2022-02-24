@@ -132,6 +132,65 @@ fn change_db_size() {
 fn resize_db() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
+    let db_size = 128 * 1024;
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let mut i = 0u64;
+    loop {
+        let txn = db.begin_write().unwrap();
+        let mut table = txn.open_table(&U64_TABLE).unwrap();
+        // Fill the database
+        match table.insert(&i, &i) {
+            Ok(_) => {}
+            Err(err) => match err {
+                Error::OutOfSpace => {
+                    txn.abort().unwrap();
+                    break;
+                }
+                _ => unreachable!(),
+            },
+        }
+        match txn.commit() {
+            Ok(_) => {}
+            Err(err) => match err {
+                Error::OutOfSpace => break,
+                _ => unreachable!(),
+            },
+        };
+        i += 1;
+    }
+
+    let txn = db.begin_write().unwrap();
+    let mut table = txn.open_table(&U64_TABLE).unwrap();
+    let mut found = false;
+    let mut j = i;
+    for _ in 0..999 {
+        if matches!(table.insert(&j, &j), Err(Error::OutOfSpace)) {
+            found = true;
+            break;
+        }
+        j += 1;
+    }
+    assert!(found);
+    txn.abort().unwrap();
+    drop(db);
+
+    unsafe {
+        Database::resize(tmpfile.path(), db_size * 2).unwrap();
+    }
+
+    let db = unsafe { Database::open(tmpfile.path()).unwrap() };
+    let txn = db.begin_write().unwrap();
+    let mut table = txn.open_table(&U64_TABLE).unwrap();
+    for k in i..(j + 2) {
+        table.insert(&k, &k).unwrap();
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
+fn regression4() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
     let db_size = 16 * 1024 * 1024;
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let mut i = 0u64;
@@ -162,12 +221,13 @@ fn resize_db() {
     let txn = db.begin_write().unwrap();
     let mut table = txn.open_table(&U64_TABLE).unwrap();
     let mut found = false;
+    let mut j = i;
     for _ in 0..999 {
-        if matches!(table.insert(&i, &i), Err(Error::OutOfSpace)) {
+        if matches!(table.insert(&j, &j), Err(Error::OutOfSpace)) {
             found = true;
             break;
         }
-        i += 1;
+        j += 1;
     }
     assert!(found);
     txn.abort().unwrap();
@@ -177,10 +237,12 @@ fn resize_db() {
         Database::resize(tmpfile.path(), db_size * 2).unwrap();
     }
 
-    let db = unsafe { Database::create(tmpfile.path(), db_size * 2).unwrap() };
+    let db = unsafe { Database::open(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
     let mut table = txn.open_table(&U64_TABLE).unwrap();
-    assert!(table.insert(&i, &i).is_ok());
+    for k in i..(j + 2) {
+        table.insert(&k, &k).unwrap();
+    }
     txn.commit().unwrap();
 }
 

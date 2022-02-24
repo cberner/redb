@@ -1,11 +1,11 @@
-use crate::tree_store::btree_base::AccessGuard;
+use crate::tree_store::btree_base::{AccessGuard, InternalAccessor, LeafAccessor};
 use crate::tree_store::btree_iters::{page_numbers_iter_start_state, AllPageNumbersBtreeIter};
 use crate::tree_store::btree_utils::{
     find_key, fragmented_bytes, make_mut_single_leaf, overhead_bytes, print_tree, stored_bytes,
     tree_delete, tree_height, tree_insert,
 };
-use crate::tree_store::page_store::{PageNumber, TransactionalMemory};
-use crate::tree_store::{AccessGuardMut, BtreeRangeIter};
+use crate::tree_store::page_store::{Page, PageMut, PageNumber, TransactionalMemory};
+use crate::tree_store::{btree_base, AccessGuardMut, BtreeRangeIter};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use memmap2::MmapRaw;
@@ -174,6 +174,31 @@ impl<'a> Iterator for TableNameIter<'a> {
     }
 }
 
+// Returns the mutable value for the queried key, if present
+// Safety: caller must ensure that not other references to the page storing the queried key exist
+unsafe fn get_mut_value<'a, K: RedbKey + ?Sized>(
+    page: PageMut<'a>,
+    query: &[u8],
+    manager: &'a TransactionalMemory,
+) -> Option<AccessGuardMut<'a>> {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        btree_base::LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            let entry_index = accessor.find_key::<K>(query)?;
+            let (start, end) = accessor.value_range(entry_index).unwrap();
+            let guard = AccessGuardMut::new(page, start, end - start);
+            Some(guard)
+        }
+        btree_base::INTERNAL => {
+            let accessor = InternalAccessor::new(&page);
+            let (_, child_page) = accessor.child_for_key::<K>(query);
+            return get_mut_value::<K>(manager.get_page_mut(child_page), query, manager);
+        }
+        _ => unreachable!(),
+    }
+}
+
 pub(crate) struct Storage {
     mem: TransactionalMemory,
     next_transaction_id: AtomicTransactionId,
@@ -186,18 +211,38 @@ pub(crate) struct Storage {
 impl Storage {
     pub(crate) fn new(mmap: MmapRaw, page_size: Option<usize>) -> Result<Storage, Error> {
         let mut mem = TransactionalMemory::new(mmap, page_size)?;
+        if mem.needs_repair()? {
+            let root = mem
+                .get_primary_root_page()
+                .expect("Tried to repair an empty database");
+            // Clear the freed table. We're about to rebuild the allocator state by walking
+            // all the reachable pages, which will implicitly free them
+
+            // Safety: we own the mem object, and just created it, so there can't be other references.
+            let mut bytes = unsafe {
+                get_mut_value::<str>(mem.get_page_mut(root), FREED_TABLE.as_bytes(), &mem).unwrap()
+            };
+            let mut header = TableHeader::from_bytes(bytes.as_mut());
+            header.table_root = None;
+            assert_eq!(bytes.as_mut().len(), header.to_bytes().len());
+            bytes.as_mut().copy_from_slice(&header.to_bytes());
+        }
         while mem.needs_repair()? {
             let root = mem
                 .get_primary_root_page()
                 .expect("Tried to repair an empty database");
             let root_page = mem.get_page(root);
             let start = page_numbers_iter_start_state(root_page);
+
+            // All pages in the master table
             let mut all_pages_iter: Box<dyn Iterator<Item = PageNumber>> =
                 Box::new(AllPageNumbersBtreeIter::new(start, &mem));
 
+            // Iterate over all other tables
             let mut iter: BtreeRangeIter<[u8], [u8]> =
                 BtreeRangeIter::new::<RangeFull, [u8]>(.., Some(root), &mem);
 
+            // Chain all the other tables to the master table iter
             while let Some(entry) = iter.next() {
                 let definition = TableHeader::from_bytes(entry.value());
                 if let Some(table_root) = definition.get_root() {
