@@ -135,30 +135,17 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
     type Item = PageNumber;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut state = self.next.take()?;
-        let value = state.page_number();
-        // Only return each page number the first time we visit it
         loop {
-            if let Some(next_state) = state.next(false, self.manager) {
-                state = next_state;
-            } else {
-                self.next = None;
+            let state = self.next.take()?;
+            let value = state.page_number();
+            // Only return each page number once
+            let once = match state {
+                Leaf { entry, .. } => entry == 0,
+                Internal { child, .. } => child == 0,
+            };
+            self.next = state.next(false, self.manager);
+            if once {
                 return Some(value);
-            }
-
-            match state {
-                Leaf { entry, .. } => {
-                    if entry == 0 {
-                        self.next = Some(state);
-                        return Some(value);
-                    }
-                }
-                Internal { child, .. } => {
-                    if child == 0 {
-                        self.next = Some(state);
-                        return Some(value);
-                    }
-                }
             }
         }
     }
