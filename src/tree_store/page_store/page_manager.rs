@@ -117,9 +117,10 @@ pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result<
     let max_order = TransactionalMemory::calculate_usable_order(new_size, page_size as usize);
     let usable_pages =
         TransactionalMemory::calculate_usable_pages(new_size, page_size as usize, max_order);
-    assert!(usable_pages >= old_usable_pages);
 
     let allocator_state_size = BuddyAllocator::required_space(usable_pages, max_order);
+    assert!(usable_pages >= old_usable_pages);
+    assert!(usable_pages * page_size + allocator_state_size * 2 <= new_size);
 
     // Write the WAL
     file.seek(SeekFrom::Start(UPGRADE_LOG_OFFSET as u64))?;
@@ -137,6 +138,9 @@ pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result<
     let final_god_byte = buffer[0] | ALLOCATOR_STATE_0_DIRTY | ALLOCATOR_STATE_1_DIRTY;
     file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;
     file.write_all(&[in_progress_god_byte])?;
+    file.sync_all()?;
+
+    file.set_len(new_size as u64)?;
     file.sync_all()?;
 
     // Write the new allocator state pointers
@@ -162,9 +166,6 @@ pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result<
     file.sync_all()?;
     file.seek(SeekFrom::Start(DB_SIZE_OFFSET as u64))?;
     file.write_all(&(new_size as u64).to_be_bytes())?;
-    file.sync_all()?;
-
-    file.set_len(new_size as u64)?;
     file.sync_all()?;
 
     file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;

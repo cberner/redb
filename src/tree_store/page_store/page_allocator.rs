@@ -303,6 +303,8 @@ pub(crate) struct BuddyAllocator {
 
 // Handles allocation of dynamically sized pages, supports pages of up to page_size * 2^max_order bytes
 //
+// Pages are marked free at only a single order, and it must always be the largest order
+//
 // Data structure format:
 // max_order: big endian u64
 // order_offsets: array of (u64, u64), with offset & length for PageAllocator structure for the given order

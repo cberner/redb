@@ -1085,7 +1085,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
     })
 }
 
-// Returns the (offset, len) of the value for the queried key, if present
+// Returns the value for the queried key, if present
 pub(crate) fn find_key<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     query: &[u8],
