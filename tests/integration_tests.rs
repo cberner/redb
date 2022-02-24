@@ -187,6 +187,8 @@ fn resize_db() {
     txn.commit().unwrap();
 }
 
+// Test for bug in resize where a double free could occur if there were pending pages to free
+// in the internal "freed" table
 #[test]
 fn regression4() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
