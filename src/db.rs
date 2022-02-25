@@ -136,12 +136,12 @@ impl Database {
         Ok(())
     }
 
-    pub fn begin_write(&self) -> Result<DatabaseTransaction, Error> {
-        DatabaseTransaction::new(&self.storage)
+    pub fn begin_write(&self) -> Result<WriteTransaction, Error> {
+        WriteTransaction::new(&self.storage)
     }
 
-    pub fn begin_read(&self) -> Result<ReadOnlyDatabaseTransaction, Error> {
-        Ok(ReadOnlyDatabaseTransaction::new(&self.storage))
+    pub fn begin_read(&self) -> Result<ReadTransaction, Error> {
+        Ok(ReadTransaction::new(&self.storage))
     }
 
     pub fn stats(&self) -> Result<DatabaseStats, Error> {
@@ -196,7 +196,7 @@ impl DatabaseBuilder {
 }
 
 #[allow(clippy::type_complexity)]
-pub struct DatabaseTransaction<'a> {
+pub struct WriteTransaction<'a> {
     storage: &'a Storage,
     transaction_id: TransactionId,
     root_page: Cell<Option<PageNumber>>,
@@ -205,7 +205,7 @@ pub struct DatabaseTransaction<'a> {
     completed: AtomicBool,
 }
 
-impl<'a> DatabaseTransaction<'a> {
+impl<'a> WriteTransaction<'a> {
     fn new(storage: &'a Storage) -> Result<Self, Error> {
         let transaction_id = storage.allocate_write_transaction()?;
         let root_page = storage.get_root_page_number();
@@ -405,7 +405,7 @@ impl<'a> DatabaseTransaction<'a> {
     }
 }
 
-impl<'a> Drop for DatabaseTransaction<'a> {
+impl<'a> Drop for WriteTransaction<'a> {
     fn drop(&mut self) {
         if !self.completed.load(Ordering::SeqCst) {
             self.storage
@@ -414,13 +414,13 @@ impl<'a> Drop for DatabaseTransaction<'a> {
     }
 }
 
-pub struct ReadOnlyDatabaseTransaction<'a> {
+pub struct ReadTransaction<'a> {
     storage: &'a Storage,
     transaction_id: TransactionId,
     root_page: Option<PageNumber>,
 }
 
-impl<'a> ReadOnlyDatabaseTransaction<'a> {
+impl<'a> ReadTransaction<'a> {
     fn new(storage: &'a Storage) -> Self {
         let transaction_id = storage.allocate_read_transaction();
         let root_page = storage.get_root_page_number();
@@ -475,7 +475,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
     }
 }
 
-impl<'a> Drop for ReadOnlyDatabaseTransaction<'a> {
+impl<'a> Drop for ReadTransaction<'a> {
     fn drop(&mut self) {
         self.storage
             .deallocate_read_transaction(self.transaction_id);
