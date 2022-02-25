@@ -64,7 +64,7 @@ impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
 
     fn read_transaction(&self) -> Self::R {
         let txn = self.db.begin_read().unwrap();
-        let table = txn.open_table(&X).unwrap();
+        let table = txn.open_table(X).unwrap();
         RedbBenchReadTransaction { _txn: txn, table }
     }
 }

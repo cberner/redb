@@ -35,6 +35,14 @@ impl<'a, K: ?Sized, V: ?Sized> TableDefinition<'a, K, V> {
     }
 }
 
+impl<'a, K: ?Sized, V: ?Sized> Clone for TableDefinition<'a, K, V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, K: ?Sized, V: ?Sized> Copy for TableDefinition<'a, K, V> {}
+
 pub struct MultimapTableDefinition<'a, K: ?Sized, V: ?Sized> {
     name: &'a str,
     _key_type: PhantomData<K>,
@@ -50,6 +58,14 @@ impl<'a, K: ?Sized, V: ?Sized> MultimapTableDefinition<'a, K, V> {
         }
     }
 }
+
+impl<'a, K: ?Sized, V: ?Sized> Clone for MultimapTableDefinition<'a, K, V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, K: ?Sized, V: ?Sized> Copy for MultimapTableDefinition<'a, K, V> {}
 
 pub struct Database {
     storage: Storage,
@@ -208,7 +224,7 @@ impl<'a> DatabaseTransaction<'a> {
     /// The table will be created if it does not exist
     pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
-        definition: &TableDefinition<K, V>,
+        definition: TableDefinition<K, V>,
     ) -> Result<Table<'a, K, V>, Error> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
@@ -245,7 +261,7 @@ impl<'a> DatabaseTransaction<'a> {
     /// The table will be created if it does not exist
     pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
-        definition: &MultimapTableDefinition<K, V>,
+        definition: MultimapTableDefinition<K, V>,
     ) -> Result<MultimapTable<'a, K, V>, Error> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
@@ -282,7 +298,7 @@ impl<'a> DatabaseTransaction<'a> {
     /// Returns a bool indicating whether the table existed
     pub fn delete_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
-        definition: &TableDefinition<K, V>,
+        definition: TableDefinition<K, V>,
     ) -> Result<bool, Error> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
@@ -304,7 +320,7 @@ impl<'a> DatabaseTransaction<'a> {
     /// Returns a bool indicating whether the table existed
     pub fn delete_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
-        definition: &MultimapTableDefinition<K, V>,
+        definition: MultimapTableDefinition<K, V>,
     ) -> Result<bool, Error> {
         assert!(!definition.name.is_empty());
         let original_root = self.root_page.get();
@@ -418,7 +434,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
     /// Open the given table
     pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
-        definition: &TableDefinition<K, V>,
+        definition: TableDefinition<K, V>,
     ) -> Result<ReadOnlyTable<'a, K, V>, Error> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
@@ -433,7 +449,7 @@ impl<'a> ReadOnlyDatabaseTransaction<'a> {
     /// Open the given table
     pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
-        definition: &MultimapTableDefinition<K, V>,
+        definition: MultimapTableDefinition<K, V>,
     ) -> Result<ReadOnlyMultimapTable<'a, K, V>, Error> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
@@ -478,7 +494,7 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table = write_txn.open_table(&X).unwrap();
+        let mut table = write_txn.open_table(X).unwrap();
         table.insert(b"hello", b"world").unwrap();
         let first_txn_id = write_txn.transaction_id;
         write_txn.commit().unwrap();
