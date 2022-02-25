@@ -1,5 +1,5 @@
 use crate::tree_store::btree_base::{EntryAccessor, InternalAccessor, LeafAccessor};
-use crate::tree_store::btree_base::{BTREE_ORDER, INTERNAL, LEAF};
+use crate::tree_store::btree_base::{INTERNAL, LEAF};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::PageNumber;
@@ -440,7 +440,7 @@ fn find_iter_left<'a, K: RedbKey + ?Sized>(
             let accessor = InternalAccessor::new(&page);
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
             let child_page = manager.get_page(child_page_number);
-            if child_index < BTREE_ORDER - 1 && accessor.child_page(child_index + 1).is_some() {
+            if child_index < accessor.count_children() - 1 {
                 parent = Some(Box::new(Internal {
                     page,
                     child: child_index + 1,

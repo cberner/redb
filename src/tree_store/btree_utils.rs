@@ -16,7 +16,7 @@ pub(crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemo
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             let mut max_child_height = 0;
-            for i in 0..BTREE_ORDER {
+            for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
                     let height = tree_height(manager.get_page(child), manager);
                     max_child_height = max(max_child_height, height);
@@ -117,7 +117,7 @@ pub(crate) fn print_node(page: &impl Page) {
                 page.get_page_number(),
                 accessor.child_page(0).unwrap()
             );
-            for i in 0..(BTREE_ORDER - 1) {
+            for i in 0..(accessor.count_children() - 1) {
                 if let Some(child) = accessor.child_page(i + 1) {
                     let key = accessor.key(i).unwrap();
                     eprint!(" key_{}={:?}", i, key);
@@ -142,10 +142,9 @@ pub(crate) fn node_children<'a>(
         INTERNAL => {
             let mut children = vec![];
             let accessor = InternalAccessor::new(page);
-            for i in 0..BTREE_ORDER {
-                if let Some(child) = accessor.child_page(i) {
-                    children.push(manager.get_page(child));
-                }
+            for i in 0..accessor.count_children() {
+                let child = accessor.child_page(i).unwrap();
+                children.push(manager.get_page(child));
             }
             children
         }
@@ -376,10 +375,9 @@ fn split_index(
 
     let mut pages = vec![];
     pages.extend_from_slice(partial);
-    for i in 0..BTREE_ORDER {
-        if let Some(child) = accessor.child_page(i) {
-            pages.push(child);
-        }
+    for i in 0..accessor.count_children() {
+        let child = accessor.child_page(i).unwrap();
+        pages.push(child);
     }
 
     pages.sort_by_key(|p| max_key(manager.get_page(*p), manager));
@@ -432,10 +430,9 @@ fn merge_index(
 
     let mut pages = vec![];
     pages.extend_from_slice(partial);
-    for i in 0..BTREE_ORDER {
-        if let Some(page_number) = accessor.child_page(i) {
-            pages.push(page_number);
-        }
+    for i in 0..accessor.count_children() {
+        let child = accessor.child_page(i).unwrap();
+        pages.push(child);
     }
 
     pages.sort_by_key(|p| max_key(manager.get_page(*p), manager));
@@ -456,12 +453,8 @@ fn max_key(page: PageImpl, manager: &TransactionalMemory) -> Vec<u8> {
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
-            for i in (0..BTREE_ORDER).rev() {
-                if let Some(child) = accessor.child_page(i) {
-                    return max_key(manager.get_page(child), manager);
-                }
-            }
-            unreachable!();
+            let last_child = accessor.child_page(accessor.count_children() - 1).unwrap();
+            max_key(manager.get_page(last_child), manager)
         }
         _ => unreachable!(),
     }
@@ -949,7 +942,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     copy_to_builder_and_patch(
                         &accessor,
                         0,
-                        BTREE_ORDER,
+                        accessor.count_children(),
                         &mut builder,
                         child_index,
                         page1,
@@ -977,7 +970,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     } else {
                         children.push(accessor.child_page(0).unwrap());
                     };
-                    for i in 1..BTREE_ORDER {
+                    for i in 1..accessor.count_children() {
                         if let Some(temp_key) = accessor.key(i - 1) {
                             index_keys.push(temp_key);
                             if i == child_index as usize {
@@ -1063,7 +1056,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     copy_to_builder_and_patch(
                         &accessor,
                         0,
-                        BTREE_ORDER,
+                        accessor.count_children(),
                         &mut builder,
                         child_index,
                         page1,
