@@ -95,7 +95,7 @@ impl<'a, 'b> BenchWriteTransaction<'b> for RedbBenchWriteTransaction<'a> {
 
     fn get_inserter(&'b self) -> Self::T {
         RedbBenchInserter {
-            table: self.txn.open_table(&X).unwrap(),
+            table: self.txn.open_table(X).unwrap(),
         }
     }
 
