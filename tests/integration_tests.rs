@@ -132,7 +132,7 @@ fn change_db_size() {
 fn resize_db() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 128 * 1024;
+    let db_size = 256 * 1024;
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let mut i = 0u64;
     loop {
