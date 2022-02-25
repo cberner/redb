@@ -251,7 +251,7 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table = write_txn.open_table(&definition).unwrap();
+        let mut table = write_txn.open_table(definition).unwrap();
         for i in 0..10u8 {
             let key = vec![i];
             table.insert(&ReverseKey(key), b"value").unwrap();
@@ -259,7 +259,7 @@ mod test {
         write_txn.commit().unwrap();
 
         let read_txn = db.begin_read().unwrap();
-        let table = read_txn.open_table(&definition).unwrap();
+        let table = read_txn.open_table(definition).unwrap();
         let start = ReverseKey(vec![7u8]); // ReverseKey is used, so 7 < 3
         let end = ReverseKey(vec![3u8]);
         let mut iter = table.range(start..=end).unwrap();
