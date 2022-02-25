@@ -32,7 +32,7 @@ jobs:
         run: cargo install --force --version 0.9.1 cargo-deny --locked
 
       - name: Run tests
-        run: make test
+        run: make build test
 
       - name: Run CPython wrapper tests
         run: |
