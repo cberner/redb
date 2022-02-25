@@ -70,7 +70,7 @@ impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
 }
 
 pub struct RedbBenchReadTransaction<'a> {
-    _txn: redb::ReadOnlyDatabaseTransaction<'a>,
+    _txn: redb::ReadTransaction<'a>,
     table: redb::ReadOnlyTable<'a, [u8], [u8]>,
 }
 
@@ -87,7 +87,7 @@ impl<'a, 'b> BenchReadTransaction<'b> for RedbBenchReadTransaction<'a> {
 }
 
 pub struct RedbBenchWriteTransaction<'a> {
-    txn: redb::DatabaseTransaction<'a>,
+    txn: redb::WriteTransaction<'a>,
 }
 
 impl<'a, 'b> BenchWriteTransaction<'b> for RedbBenchWriteTransaction<'a> {

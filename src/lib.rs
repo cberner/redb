@@ -1,6 +1,6 @@
 pub use db::{
-    Database, DatabaseBuilder, DatabaseTransaction, MultimapTableDefinition,
-    ReadOnlyDatabaseTransaction, TableDefinition,
+    Database, DatabaseBuilder, MultimapTableDefinition, ReadTransaction, TableDefinition,
+    WriteTransaction,
 };
 pub use error::Error;
 pub use multimap_table::{
