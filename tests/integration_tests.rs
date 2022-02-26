@@ -132,12 +132,18 @@ fn change_db_size() {
 fn resize_db() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 256 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
-    let mut i = 0u64;
+    let definition: TableDefinition<u128, u128> = TableDefinition::new("x");
+    let db_size = 64 * 1024;
+    let db = unsafe {
+        DatabaseBuilder::new()
+            .set_page_size(4096)
+            .create(tmpfile.path(), db_size)
+            .unwrap()
+    };
+    let mut i = 0u128;
     loop {
         let txn = db.begin_write().unwrap();
-        let mut table = txn.open_table(U64_TABLE).unwrap();
+        let mut table = txn.open_table(definition).unwrap();
         // Fill the database
         match table.insert(&i, &i) {
             Ok(_) => {}
@@ -160,7 +166,7 @@ fn resize_db() {
     }
 
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(U64_TABLE).unwrap();
+    let mut table = txn.open_table(definition).unwrap();
     let mut found = false;
     let mut j = i;
     for _ in 0..999 {
@@ -180,7 +186,7 @@ fn resize_db() {
 
     let db = unsafe { Database::open(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(U64_TABLE).unwrap();
+    let mut table = txn.open_table(definition).unwrap();
     for k in i..(j + 2) {
         table.insert(&k, &k).unwrap();
     }
