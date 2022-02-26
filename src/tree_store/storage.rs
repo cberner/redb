@@ -8,11 +8,11 @@ use crate::tree_store::page_store::{Page, PageMut, PageNumber, TransactionalMemo
 use crate::tree_store::{btree_base, AccessGuardMut, BtreeRangeIter};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
-use memmap2::MmapRaw;
 use std::borrow::Borrow;
 use std::cmp::{max, min};
 use std::collections::BTreeSet;
 use std::convert::TryInto;
+use std::fs::File;
 use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull};
 use std::panic;
@@ -209,8 +209,8 @@ pub(crate) struct Storage {
 }
 
 impl Storage {
-    pub(crate) fn new(mmap: MmapRaw, page_size: Option<usize>) -> Result<Storage, Error> {
-        let mut mem = TransactionalMemory::new(mmap, page_size)?;
+    pub(crate) fn new(file: File, page_size: Option<usize>) -> Result<Storage, Error> {
+        let mut mem = TransactionalMemory::new(file, page_size)?;
         if mem.needs_repair()? {
             let root = mem
                 .get_primary_root_page()

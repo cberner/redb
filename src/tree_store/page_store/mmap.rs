@@ -1,23 +1,38 @@
 use crate::Error;
+use memmap2::MmapRaw;
+use std::fs::File;
 use std::ops::Range;
+use std::os::unix::io::AsRawFd;
 use std::slice;
 
 pub(crate) struct Mmap {
+    file: File,
     inner: memmap2::MmapRaw,
 }
 
 impl Mmap {
-    pub(crate) fn new(mmap: memmap2::MmapRaw) -> Self {
-        Self { inner: mmap }
+    pub(crate) fn new(file: File) -> Result<Self, Error> {
+        Ok(Self {
+            inner: MmapRaw::map_raw(&file)?,
+            file,
+        })
     }
 
     pub(crate) fn len(&self) -> usize {
         self.inner.len()
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn flush(&self) -> Result<(), Error> {
+        let fd = self.file.as_raw_fd();
+        let code = unsafe { libc::fcntl(fd, libc::F_BARRIERFSYNC) };
+        assert_eq!(code, 0);
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn flush(&self) -> Result<(), Error> {
         self.inner.flush()?;
-
         Ok(())
     }
 
