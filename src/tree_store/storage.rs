@@ -31,7 +31,7 @@ pub struct DatabaseStats {
     pub(crate) tree_height: usize,
     pub(crate) free_pages: usize,
     pub(crate) stored_leaf_bytes: usize,
-    pub(crate) overhead_bytes: usize,
+    pub(crate) metadata_bytes: usize,
     pub(crate) fragmented_bytes: usize,
     pub(crate) page_size: usize,
 }
@@ -55,7 +55,7 @@ impl DatabaseStats {
 
     /// Number of bytes consumed by keys in internal index pages, plus other metadata
     pub fn metadata_bytes(&self) -> usize {
-        self.overhead_bytes
+        self.metadata_bytes
     }
 
     /// Number of bytes consumed by fragmentation, both in data pages and internal metadata tables
@@ -738,7 +738,7 @@ impl Storage {
         let mut max_subtree_height = 0;
         let mut total_stored_bytes = 0;
         // Include the master table in the overhead
-        let mut total_overhead = self
+        let mut total_metadata_bytes = self
             .get_root_page_number()
             .map(|p| {
                 overhead_bytes(self.mem.get_page(p), &self.mem)
@@ -754,18 +754,27 @@ impl Storage {
         while let Some(entry) = iter.next() {
             let definition = TableHeader::from_bytes(entry.value());
             if let Some(table_root) = definition.get_root() {
-                let height = tree_height(self.mem.get_page(table_root), &self.mem);
-                max_subtree_height = max(max_subtree_height, height);
-                total_stored_bytes += stored_bytes(self.mem.get_page(table_root), &self.mem);
-                total_overhead += overhead_bytes(self.mem.get_page(table_root), &self.mem);
-                total_fragmented += fragmented_bytes(self.mem.get_page(table_root), &self.mem);
+                if std::str::from_utf8(entry.key()).unwrap() == FREED_TABLE {
+                    // Count the stored bytes of the freed table as metadata overhead
+                    total_metadata_bytes += stored_bytes(self.mem.get_page(table_root), &self.mem);
+                    total_metadata_bytes +=
+                        overhead_bytes(self.mem.get_page(table_root), &self.mem);
+                    total_fragmented += fragmented_bytes(self.mem.get_page(table_root), &self.mem);
+                } else {
+                    let height = tree_height(self.mem.get_page(table_root), &self.mem);
+                    max_subtree_height = max(max_subtree_height, height);
+                    total_stored_bytes += stored_bytes(self.mem.get_page(table_root), &self.mem);
+                    total_metadata_bytes +=
+                        overhead_bytes(self.mem.get_page(table_root), &self.mem);
+                    total_fragmented += fragmented_bytes(self.mem.get_page(table_root), &self.mem);
+                }
             }
         }
         Ok(DatabaseStats {
             tree_height: master_tree_height + max_subtree_height,
             free_pages: self.mem.count_free_pages()?,
             stored_leaf_bytes: total_stored_bytes,
-            overhead_bytes: total_overhead,
+            metadata_bytes: total_metadata_bytes,
             fragmented_bytes: total_fragmented,
             page_size: self.mem.get_page_size(),
         })
