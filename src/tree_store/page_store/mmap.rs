@@ -1,12 +1,15 @@
 use crate::Result;
 use memmap2::MmapRaw;
 use std::fs::File;
+#[cfg(target_os = "macos")]
 use std::io;
 use std::ops::Range;
+#[cfg(target_os = "macos")]
 use std::os::unix::io::AsRawFd;
 use std::slice;
 
 pub(crate) struct Mmap {
+    #[allow(dead_code)]
     file: File,
     inner: memmap2::MmapRaw,
 }
