@@ -1,6 +1,8 @@
 use crate::Result;
+use errno::errno;
 use memmap2::MmapRaw;
 use std::fs::File;
+use std::io;
 use std::ops::Range;
 use std::os::unix::io::AsRawFd;
 use std::slice;
@@ -24,9 +26,10 @@ impl Mmap {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn flush(&self) -> Result {
-        let fd = self.file.as_raw_fd();
-        let code = unsafe { libc::fcntl(fd, libc::F_BARRIERFSYNC) };
-        assert_eq!(code, 0);
+        let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
+        if code == -1 {
+            return Err(io::Error::new(io::ErrorKind::Other, errno()).into());
+        }
         Ok(())
     }
 
