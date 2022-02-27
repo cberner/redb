@@ -1,7 +1,7 @@
-use crate::error::Error;
 use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber, Storage, TransactionId};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::AccessGuard;
+use crate::Result;
 use std::borrow::Borrow;
 use std::cell::Cell;
 use std::marker::PhantomData;
@@ -38,7 +38,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
         }
     }
 
-    pub fn insert(&mut self, key: &K, value: &V) -> Result<(), Error> {
+    pub fn insert(&mut self, key: &K, value: &V) -> Result {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
@@ -56,11 +56,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
 
     /// Reserve space to insert a key-value pair
     /// The returned reference will have length equal to value_length
-    pub fn insert_reserve(
-        &mut self,
-        key: &K,
-        value_length: usize,
-    ) -> Result<AccessGuardMut, Error> {
+    pub fn insert_reserve(&mut self, key: &K, value_length: usize) -> Result<AccessGuardMut> {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
@@ -76,7 +72,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
         Ok(guard)
     }
 
-    pub fn remove(&mut self, key: &K) -> Result<Option<AccessGuard<V>>, Error> {
+    pub fn remove(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
@@ -94,7 +90,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
 }
 
 impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Table<'s, K, V> {
-    fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>, Error> {
+    fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
         self.storage
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root.get())
     }
@@ -102,32 +98,32 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
     fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<RangeIter<K, V>, Error> {
+    ) -> Result<RangeIter<K, V>> {
         self.storage
             .get_range(range, self.table_root.get())
             .map(RangeIter::new)
     }
 
-    fn len(&self) -> Result<usize, Error> {
+    fn len(&self) -> Result<usize> {
         self.storage.len(self.table_root.get())
     }
 
-    fn is_empty(&self) -> Result<bool, Error> {
+    fn is_empty(&self) -> Result<bool> {
         self.storage.len(self.table_root.get()).map(|x| x == 0)
     }
 }
 
 pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
-    fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>, Error>;
+    fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>>;
 
     fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<RangeIter<K, V>, Error>;
+    ) -> Result<RangeIter<K, V>>;
 
-    fn len(&self) -> Result<usize, Error>;
+    fn len(&self) -> Result<usize>;
 
-    fn is_empty(&self) -> Result<bool, Error>;
+    fn is_empty(&self) -> Result<bool>;
 }
 
 pub struct ReadOnlyTable<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
@@ -154,7 +150,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
 impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     for ReadOnlyTable<'s, K, V>
 {
-    fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>, Error> {
+    fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
         self.storage
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root)
     }
@@ -162,17 +158,17 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
         &'a self,
         range: T,
-    ) -> Result<RangeIter<K, V>, Error> {
+    ) -> Result<RangeIter<K, V>> {
         self.storage
             .get_range(range, self.table_root)
             .map(RangeIter::new)
     }
 
-    fn len(&self) -> Result<usize, Error> {
+    fn len(&self) -> Result<usize> {
         self.storage.len(self.table_root)
     }
 
-    fn is_empty(&self) -> Result<bool, Error> {
+    fn is_empty(&self) -> Result<bool> {
         self.storage.len(self.table_root).map(|x| x == 0)
     }
 }

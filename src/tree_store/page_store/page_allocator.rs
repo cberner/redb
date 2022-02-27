@@ -1,4 +1,5 @@
 use crate::Error;
+use crate::Result;
 use std::convert::TryInto;
 use std::mem::size_of;
 
@@ -258,7 +259,7 @@ impl PageAllocator {
     }
 
     /// data must have been initialized by Self::init_new()
-    fn alloc(&self, data: &mut [u8]) -> Result<u64, Error> {
+    fn alloc(&self, data: &mut [u8]) -> Result<u64> {
         if let Some(mut entry) = self.get_level_mut(data, 0).first_unset(0, 64) {
             let mut height = 0;
 
@@ -413,7 +414,7 @@ impl BuddyAllocator {
     }
 
     /// data must have been initialized by Self::init_new()
-    pub(crate) fn alloc(&self, data: &mut [u8], order: usize) -> Result<u64, Error> {
+    pub(crate) fn alloc(&self, data: &mut [u8], order: usize) -> Result<u64> {
         if order >= self.orders.len() {
             return Err(Error::OutOfSpace);
         }

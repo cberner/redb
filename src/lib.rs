@@ -10,6 +10,8 @@ pub use multimap_table::{
 pub use table::{RangeIter, ReadOnlyTable, ReadableTable, Table};
 pub use tree_store::{AccessGuard, DatabaseStats};
 
+type Result<T = (), E = Error> = std::result::Result<T, E>;
+
 #[cfg(feature = "python")]
 pub use crate::python::redb;
 
