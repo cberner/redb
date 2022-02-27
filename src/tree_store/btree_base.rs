@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
 
+// TODO: make configurable, or remove this constant and just rely on page size
 pub(in crate::tree_store) const BTREE_ORDER: usize = 40;
 pub(in crate::tree_store) const LEAF: u8 = 1;
 pub(in crate::tree_store) const INTERNAL: u8 = 2;

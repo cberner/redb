@@ -311,6 +311,7 @@ fn merge_leaf<K: RedbKey + ?Sized>(
 
     let page = manager.get_page(leaf);
     let accessor = LeafAccessor::new(&page);
+    // TODO: also check that page won't be too large
     if accessor.num_pairs() + partial.len() > BTREE_ORDER {
         return Ok(None);
     }
@@ -480,6 +481,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
             if !found {
                 return Ok((Subtree(page.get_page_number()), None));
             }
+            // TODO: also check if page is large enough
             if accessor.num_pairs() < BTREE_ORDER / 2 {
                 let mut partial = Vec::with_capacity(accessor.num_pairs());
                 for i in 0..accessor.num_pairs() {
@@ -932,6 +934,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
             if let Some((index_key2, page2)) = more {
                 let new_children_count = 1 + accessor.count_children();
 
+                // TODO: also check if page is large enough
                 if new_children_count <= BTREE_ORDER {
                     // Rewrite page since we're splitting a child
                     let mut new_page = manager.allocate(InternalBuilder::required_bytes(
@@ -986,6 +989,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                         }
                     }
 
+                    // TODO: split based on size, if page is going to be too large
                     let division = BTREE_ORDER / 2;
 
                     // Rewrite page since we're splitting a child
