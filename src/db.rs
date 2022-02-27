@@ -5,6 +5,7 @@ use crate::tree_store::{
     FREED_TABLE,
 };
 use crate::types::{RedbKey, RedbValue};
+use crate::Result;
 use crate::{Error, ReadOnlyMultimapTable};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -81,7 +82,7 @@ impl Database {
     /// # Safety
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
-    pub unsafe fn create(path: impl AsRef<Path>, db_size: usize) -> Result<Database, Error> {
+    pub unsafe fn create(path: impl AsRef<Path>, db_size: usize) -> Result<Database> {
         let file = if path.as_ref().exists() && File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = get_db_size(path.as_ref())?;
             if existing_size != db_size {
@@ -112,7 +113,7 @@ impl Database {
     /// # Safety
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
-    pub unsafe fn open(path: impl AsRef<Path>) -> Result<Database, Error> {
+    pub unsafe fn open(path: impl AsRef<Path>) -> Result<Database> {
         if File::open(path.as_ref())?.metadata()?.len() > 0 {
             let file = OpenOptions::new().read(true).write(true).open(path)?;
             let storage = Storage::new(file, None)?;
@@ -125,7 +126,7 @@ impl Database {
     /// # Safety
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
-    pub unsafe fn resize(path: impl AsRef<Path>, new_size: usize) -> Result<(), Error> {
+    pub unsafe fn resize(path: impl AsRef<Path>, new_size: usize) -> Result {
         expand_db_size(path.as_ref(), new_size)?;
         // Open the database to rebuild the allocator state
         Self::create(path, new_size)?;
@@ -133,15 +134,15 @@ impl Database {
         Ok(())
     }
 
-    pub fn begin_write(&self) -> Result<WriteTransaction, Error> {
+    pub fn begin_write(&self) -> Result<WriteTransaction> {
         WriteTransaction::new(&self.storage)
     }
 
-    pub fn begin_read(&self) -> Result<ReadTransaction, Error> {
+    pub fn begin_read(&self) -> Result<ReadTransaction> {
         Ok(ReadTransaction::new(&self.storage))
     }
 
-    pub fn stats(&self) -> Result<DatabaseStats, Error> {
+    pub fn stats(&self) -> Result<DatabaseStats> {
         self.storage.storage_stats()
     }
 
@@ -177,7 +178,7 @@ impl DatabaseBuilder {
     ///
     /// The file referenced by `path` must only be concurrently modified by compatible versions
     /// of redb
-    pub unsafe fn create(&self, path: impl AsRef<Path>, db_size: usize) -> Result<Database, Error> {
+    pub unsafe fn create(&self, path: impl AsRef<Path>, db_size: usize) -> Result<Database> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -202,7 +203,7 @@ pub struct WriteTransaction<'a> {
 }
 
 impl<'a> WriteTransaction<'a> {
-    fn new(storage: &'a Storage) -> Result<Self, Error> {
+    fn new(storage: &'a Storage) -> Result<Self> {
         let transaction_id = storage.allocate_write_transaction()?;
         let root_page = storage.get_root_page_number();
         Ok(Self {
@@ -221,7 +222,7 @@ impl<'a> WriteTransaction<'a> {
     pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         definition: TableDefinition<K, V>,
-    ) -> Result<Table<'a, K, V>, Error> {
+    ) -> Result<Table<'a, K, V>> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
         if let Some(location) = self.open_tables.borrow().get(definition.name) {
@@ -258,7 +259,7 @@ impl<'a> WriteTransaction<'a> {
     pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
         definition: MultimapTableDefinition<K, V>,
-    ) -> Result<MultimapTable<'a, K, V>, Error> {
+    ) -> Result<MultimapTable<'a, K, V>> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
         if let Some(location) = self.open_tables.borrow().get(definition.name) {
@@ -295,7 +296,7 @@ impl<'a> WriteTransaction<'a> {
     pub fn delete_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         definition: TableDefinition<K, V>,
-    ) -> Result<bool, Error> {
+    ) -> Result<bool> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
         let original_root = self.root_page.get();
@@ -317,7 +318,7 @@ impl<'a> WriteTransaction<'a> {
     pub fn delete_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
         definition: MultimapTableDefinition<K, V>,
-    ) -> Result<bool, Error> {
+    ) -> Result<bool> {
         assert!(!definition.name.is_empty());
         let original_root = self.root_page.get();
         let (root, found) = self.storage.delete_table::<K, V>(
@@ -334,29 +335,29 @@ impl<'a> WriteTransaction<'a> {
 
     /// List all the tables
     // TODO: should return an iterator of &str, once GATs are available
-    pub fn list_tables(&self) -> Result<impl Iterator<Item = String> + '_, Error> {
+    pub fn list_tables(&self) -> Result<impl Iterator<Item = String> + '_> {
         self.storage
             .list_tables(TableType::Normal, self.root_page.get())
     }
 
     /// List all the multimap tables
     // TODO: should return an iterator of &str, once GATs are available
-    pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String> + '_, Error> {
+    pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String> + '_> {
         self.storage
             .list_tables(TableType::Multimap, self.root_page.get())
     }
 
-    pub fn commit(self) -> Result<(), Error> {
+    pub fn commit(self) -> Result {
         self.commit_helper(false)
     }
 
     /// Note: pages are only freed during commit(). So exclusively using this function may result
     /// in Error::OutOfSpace
-    pub fn non_durable_commit(self) -> Result<(), Error> {
+    pub fn non_durable_commit(self) -> Result {
         self.commit_helper(true)
     }
 
-    fn commit_helper(self, non_durable: bool) -> Result<(), Error> {
+    fn commit_helper(self, non_durable: bool) -> Result {
         match self.commit_helper_inner(non_durable) {
             Ok(_) => Ok(()),
             Err(err) => match err {
@@ -371,7 +372,7 @@ impl<'a> WriteTransaction<'a> {
         }
     }
 
-    fn commit_helper_inner(&self, non_durable: bool) -> Result<(), Error> {
+    fn commit_helper_inner(&self, non_durable: bool) -> Result {
         // Update all the table roots in the master table, before committing
         for (name, update) in self.pending_table_root_changes.borrow_mut().drain() {
             let new_root = self.storage.update_table_root(
@@ -393,7 +394,7 @@ impl<'a> WriteTransaction<'a> {
         Ok(())
     }
 
-    pub fn abort(self) -> Result<(), Error> {
+    pub fn abort(self) -> Result {
         self.storage
             .rollback_uncommited_writes(self.transaction_id)?;
         self.completed.store(true, Ordering::SeqCst);
@@ -431,7 +432,7 @@ impl<'a> ReadTransaction<'a> {
     pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         definition: TableDefinition<K, V>,
-    ) -> Result<ReadOnlyTable<'a, K, V>, Error> {
+    ) -> Result<ReadOnlyTable<'a, K, V>> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
         let header = self
@@ -446,7 +447,7 @@ impl<'a> ReadTransaction<'a> {
     pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
         &self,
         definition: MultimapTableDefinition<K, V>,
-    ) -> Result<ReadOnlyMultimapTable<'a, K, V>, Error> {
+    ) -> Result<ReadOnlyMultimapTable<'a, K, V>> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
         let header = self
@@ -459,13 +460,13 @@ impl<'a> ReadTransaction<'a> {
 
     /// List all the tables
     // TODO: should return an iterator of &str, once GATs are available
-    pub fn list_tables(&self) -> Result<impl Iterator<Item = String> + '_, Error> {
+    pub fn list_tables(&self) -> Result<impl Iterator<Item = String> + '_> {
         self.storage.list_tables(TableType::Normal, self.root_page)
     }
 
     /// List all the multimap tables
     // TODO: should return an iterator of &str, once GATs are available
-    pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String> + '_, Error> {
+    pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String> + '_> {
         self.storage
             .list_tables(TableType::Multimap, self.root_page)
     }

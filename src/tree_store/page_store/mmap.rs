@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::Result;
 use memmap2::MmapRaw;
 use std::fs::File;
 use std::ops::Range;
@@ -11,7 +11,7 @@ pub(crate) struct Mmap {
 }
 
 impl Mmap {
-    pub(crate) fn new(file: File) -> Result<Self, Error> {
+    pub(crate) fn new(file: File) -> Result<Self> {
         Ok(Self {
             inner: MmapRaw::map_raw(&file)?,
             file,
@@ -23,7 +23,7 @@ impl Mmap {
     }
 
     #[cfg(target_os = "macos")]
-    pub(crate) fn flush(&self) -> Result<(), Error> {
+    pub(crate) fn flush(&self) -> Result {
         let fd = self.file.as_raw_fd();
         let code = unsafe { libc::fcntl(fd, libc::F_BARRIERFSYNC) };
         assert_eq!(code, 0);
@@ -31,7 +31,7 @@ impl Mmap {
     }
 
     #[cfg(not(target_os = "macos"))]
-    pub(crate) fn flush(&self) -> Result<(), Error> {
+    pub(crate) fn flush(&self) -> Result {
         self.inner.flush()?;
         Ok(())
     }

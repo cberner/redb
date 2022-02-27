@@ -8,6 +8,7 @@ use crate::tree_store::page_store::{Page, PageMut, PageNumber, TransactionalMemo
 use crate::tree_store::{btree_base, AccessGuardMut, BtreeRangeIter};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
+use crate::Result;
 use std::borrow::Borrow;
 use std::cmp::{max, min};
 use std::collections::BTreeSet;
@@ -209,7 +210,7 @@ pub(crate) struct Storage {
 }
 
 impl Storage {
-    pub(crate) fn new(file: File, page_size: Option<usize>) -> Result<Storage, Error> {
+    pub(crate) fn new(file: File, page_size: Option<usize>) -> Result<Storage> {
         let mut mem = TransactionalMemory::new(file, page_size)?;
         if mem.needs_repair()? {
             let root = mem
@@ -292,7 +293,7 @@ impl Storage {
         *self.leaked_write_transaction.lock().unwrap() = Some(panic::Location::caller());
     }
 
-    pub(crate) fn allocate_write_transaction(&self) -> Result<TransactionId, Error> {
+    pub(crate) fn allocate_write_transaction(&self) -> Result<TransactionId> {
         let guard = self.leaked_write_transaction.lock().unwrap();
         if let Some(leaked) = *guard {
             return Err(Error::LeakedWriteTransaction(leaked));
@@ -322,7 +323,7 @@ impl Storage {
         table_root: Option<PageNumber>,
         transaction_id: TransactionId,
         master_root: Option<PageNumber>,
-    ) -> Result<PageNumber, Error> {
+    ) -> Result<PageNumber> {
         // Bypass .get_table() since the table types are dynamic
         // TODO: optimize way this get()
         let bytes = self
@@ -347,7 +348,7 @@ impl Storage {
         &self,
         table_type: TableType,
         master_root_page: Option<PageNumber>,
-    ) -> Result<TableNameIter, Error> {
+    ) -> Result<TableNameIter> {
         let iter = self.get_range::<RangeFull, str, str, [u8]>(.., master_root_page)?;
         Ok(TableNameIter {
             inner: iter,
@@ -361,7 +362,7 @@ impl Storage {
         name: &str,
         table_type: TableType,
         root_page: Option<PageNumber>,
-    ) -> Result<Option<TableHeader>, Error> {
+    ) -> Result<Option<TableHeader>> {
         if let Some(found) = self.get::<str, [u8]>(name.as_bytes(), root_page)? {
             let definition = TableHeader::from_bytes(found);
             if definition.get_type() != table_type {
@@ -396,7 +397,7 @@ impl Storage {
         table_type: TableType,
         transaction_id: TransactionId,
         root_page: Option<PageNumber>,
-    ) -> Result<(Option<PageNumber>, bool), Error> {
+    ) -> Result<(Option<PageNumber>, bool)> {
         if let Some(definition) = self.get_table::<K, V>(name, table_type, root_page)? {
             if let Some(table_root) = definition.get_root() {
                 let page = self.mem.get_page(table_root);
@@ -426,7 +427,7 @@ impl Storage {
         table_type: TableType,
         transaction_id: TransactionId,
         root_page: Option<PageNumber>,
-    ) -> Result<(TableHeader, PageNumber), Error> {
+    ) -> Result<(TableHeader, PageNumber)> {
         if let Some(found) = self.get_table::<K, V>(name, table_type, root_page)? {
             return Ok((found, root_page.unwrap()));
         }
@@ -458,7 +459,7 @@ impl Storage {
         value: &[u8],
         transaction_id: TransactionId,
         root_page: Option<PageNumber>,
-    ) -> Result<PageNumber, Error> {
+    ) -> Result<PageNumber> {
         assert_eq!(
             transaction_id,
             self.live_write_transaction.lock().unwrap().unwrap()
@@ -486,7 +487,7 @@ impl Storage {
         value_len: usize,
         transaction_id: TransactionId,
         root_page: Option<PageNumber>,
-    ) -> Result<(PageNumber, AccessGuardMut), Error> {
+    ) -> Result<(PageNumber, AccessGuardMut)> {
         assert_eq!(
             transaction_id,
             self.live_write_transaction.lock().unwrap().unwrap()
@@ -506,7 +507,7 @@ impl Storage {
         Ok((new_root, guard))
     }
 
-    pub(crate) fn len(&self, root_page: Option<PageNumber>) -> Result<usize, Error> {
+    pub(crate) fn len(&self, root_page: Option<PageNumber>) -> Result<usize> {
         let mut iter: BtreeRangeIter<[u8], [u8]> =
             self.get_range::<RangeFull, [u8], [u8], [u8]>(.., root_page)?;
         let mut count = 0;
@@ -524,7 +525,7 @@ impl Storage {
         &self,
         mut new_master_root: Option<PageNumber>,
         transaction_id: TransactionId,
-    ) -> Result<(), Error> {
+    ) -> Result {
         let oldest_live_read = self
             .live_read_transactions
             .lock()
@@ -567,7 +568,7 @@ impl Storage {
         &self,
         mut new_master_root: Option<PageNumber>,
         transaction_id: TransactionId,
-    ) -> Result<(), Error> {
+    ) -> Result {
         // Store all freed pages for a future commit(), since we can't free pages during a
         // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
         new_master_root = self.store_freed_pages(transaction_id, new_master_root)?;
@@ -593,7 +594,7 @@ impl Storage {
         oldest_live_read: TransactionId,
         transaction_id: TransactionId,
         mut master_root: Option<PageNumber>,
-    ) -> Result<Option<PageNumber>, Error> {
+    ) -> Result<Option<PageNumber>> {
         assert_eq!(
             transaction_id,
             self.live_write_transaction.lock().unwrap().unwrap()
@@ -651,7 +652,7 @@ impl Storage {
         &self,
         transaction_id: TransactionId,
         mut master_root: Option<PageNumber>,
-    ) -> Result<Option<PageNumber>, Error> {
+    ) -> Result<Option<PageNumber>> {
         assert_eq!(
             transaction_id,
             self.live_write_transaction.lock().unwrap().unwrap()
@@ -716,10 +717,7 @@ impl Storage {
         Ok(master_root)
     }
 
-    pub(crate) fn rollback_uncommited_writes(
-        &self,
-        transaction_id: TransactionId,
-    ) -> Result<(), Error> {
+    pub(crate) fn rollback_uncommited_writes(&self, transaction_id: TransactionId) -> Result {
         self.pending_freed_pages.lock().unwrap().clear();
         let result = self.mem.rollback_uncommited_writes();
         assert_eq!(
@@ -730,7 +728,7 @@ impl Storage {
         result
     }
 
-    pub(crate) fn storage_stats(&self) -> Result<DatabaseStats, Error> {
+    pub(crate) fn storage_stats(&self) -> Result<DatabaseStats> {
         let master_tree_height = self
             .get_root_page_number()
             .map(|p| tree_height(self.mem.get_page(p), &self.mem))
@@ -809,7 +807,7 @@ impl Storage {
         &self,
         key: &[u8],
         root_page_handle: Option<PageNumber>,
-    ) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>, Error> {
+    ) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
         if let Some(handle) = root_page_handle {
             let root_page = self.mem.get_page(handle);
             return Ok(find_key::<K, V>(root_page, key, &self.mem));
@@ -827,7 +825,7 @@ impl Storage {
         &'a self,
         range: T,
         root_page: Option<PageNumber>,
-    ) -> Result<BtreeRangeIter<K, V>, Error> {
+    ) -> Result<BtreeRangeIter<K, V>> {
         Ok(BtreeRangeIter::new(range, root_page, &self.mem))
     }
 
@@ -841,7 +839,7 @@ impl Storage {
         transaction_id: TransactionId,
         free_uncommitted: bool,
         root_handle: Option<PageNumber>,
-    ) -> Result<(Option<PageNumber>, Option<AccessGuard<V>>), Error> {
+    ) -> Result<(Option<PageNumber>, Option<AccessGuard<V>>)> {
         assert_eq!(
             transaction_id,
             self.live_write_transaction.lock().unwrap().unwrap()
