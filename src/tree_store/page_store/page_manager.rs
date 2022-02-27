@@ -3,7 +3,6 @@ use crate::tree_store::page_store::page_allocator::BuddyAllocator;
 use crate::tree_store::page_store::utils::get_page_size;
 use crate::Error;
 use crate::Result;
-use memmap2::MmapRaw;
 use std::cmp::min;
 use std::collections::HashSet;
 use std::convert::TryInto;
@@ -495,8 +494,8 @@ impl TransactionalMemory {
         guess
     }
 
-    pub(crate) fn new(mmap: MmapRaw, requested_page_size: Option<usize>) -> Result<Self> {
-        let mmap = Mmap::new(mmap);
+    pub(crate) fn new(file: File, requested_page_size: Option<usize>) -> Result<Self> {
+        let mmap = Mmap::new(file)?;
         // Safety: we have exclusive access to the mmap
         let all_memory = unsafe { mmap.get_memory_mut(0..mmap.len()) };
         if all_memory.len() < MAGICNUMBER.len() {
@@ -1101,7 +1100,7 @@ mod test {
     use crate::tree_store::page_store::utils::get_page_size;
     use crate::tree_store::page_store::TransactionalMemory;
     use crate::{Database, Error, ReadableTable};
-    use memmap2::{MmapMut, MmapRaw};
+    use memmap2::MmapMut;
     use std::fs::OpenOptions;
     use std::mem::size_of;
     use tempfile::NamedTempFile;
@@ -1174,9 +1173,7 @@ mod test {
         mmap.flush().unwrap();
         drop(mmap);
 
-        let mmap = MmapRaw::map_raw(&file).unwrap();
-
-        assert!(TransactionalMemory::new(mmap, None)
+        assert!(TransactionalMemory::new(file, None)
             .unwrap()
             .needs_repair()
             .unwrap());

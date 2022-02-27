@@ -1,23 +1,42 @@
 use crate::Result;
+use memmap2::MmapRaw;
+use std::fs::File;
+use std::io;
 use std::ops::Range;
+use std::os::unix::io::AsRawFd;
 use std::slice;
 
 pub(crate) struct Mmap {
+    file: File,
     inner: memmap2::MmapRaw,
 }
 
 impl Mmap {
-    pub(crate) fn new(mmap: memmap2::MmapRaw) -> Self {
-        Self { inner: mmap }
+    pub(crate) fn new(file: File) -> Result<Self> {
+        Ok(Self {
+            inner: MmapRaw::map_raw(&file)?,
+            file,
+        })
     }
 
     pub(crate) fn len(&self) -> usize {
         self.inner.len()
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn flush(&self) -> Result {
+        // TODO: It may be unsafe to mix F_BARRIERFSYNC with writes to the mmap.
+        //       Investigate switching to `write()`
+        let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
+        if code == -1 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn flush(&self) -> Result {
         self.inner.flush()?;
-
         Ok(())
     }
 

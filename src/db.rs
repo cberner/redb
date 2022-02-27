@@ -7,7 +7,6 @@ use crate::tree_store::{
 use crate::types::{RedbKey, RedbValue};
 use crate::Result;
 use crate::{Error, ReadOnlyMultimapTable};
-use memmap2::MmapRaw;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -105,8 +104,7 @@ impl Database {
             file
         };
 
-        let mmap = MmapRaw::map_raw(&file)?;
-        let storage = Storage::new(mmap, None)?;
+        let storage = Storage::new(file, None)?;
         Ok(Database { storage })
     }
 
@@ -118,8 +116,7 @@ impl Database {
     pub unsafe fn open(path: impl AsRef<Path>) -> Result<Database> {
         if File::open(path.as_ref())?.metadata()?.len() > 0 {
             let file = OpenOptions::new().read(true).write(true).open(path)?;
-            let mmap = MmapRaw::map_raw(&file)?;
-            let storage = Storage::new(mmap, None)?;
+            let storage = Storage::new(file, None)?;
             Ok(Database { storage })
         } else {
             Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
@@ -190,8 +187,7 @@ impl DatabaseBuilder {
 
         file.set_len(db_size as u64)?;
 
-        let mmap = MmapRaw::map_raw(&file)?;
-        let storage = Storage::new(mmap, self.page_size)?;
+        let storage = Storage::new(file, self.page_size)?;
         Ok(Database { storage })
     }
 }
