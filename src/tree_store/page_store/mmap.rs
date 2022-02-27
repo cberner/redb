@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::Result;
 use std::ops::Range;
 use std::slice;
 
@@ -15,7 +15,7 @@ impl Mmap {
         self.inner.len()
     }
 
-    pub(crate) fn flush(&self) -> Result<(), Error> {
+    pub(crate) fn flush(&self) -> Result {
         self.inner.flush()?;
 
         Ok(())

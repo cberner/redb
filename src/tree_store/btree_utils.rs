@@ -7,6 +7,7 @@ use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMem
 use crate::tree_store::AccessGuardMut;
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
+use crate::Result;
 use std::cmp::max;
 
 pub(crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
@@ -229,7 +230,7 @@ fn split_leaf<K: RedbKey + ?Sized>(
     partial: &[(Vec<u8>, Vec<u8>)],
     manager: &TransactionalMemory,
     freed: &mut Vec<PageNumber>,
-) -> Result<(PageNumber, PageNumber), Error> {
+) -> Result<(PageNumber, PageNumber)> {
     assert!(!partial.is_empty());
     let page = manager.get_page(leaf);
     let accessor = LeafAccessor::new(&page);
@@ -303,7 +304,7 @@ fn merge_leaf<K: RedbKey + ?Sized>(
     partial: &[(Vec<u8>, Vec<u8>)],
     freed: &mut Vec<PageNumber>,
     manager: &TransactionalMemory,
-) -> Result<Option<PageNumber>, Error> {
+) -> Result<Option<PageNumber>> {
     if partial.is_empty() {
         return Ok(Some(leaf));
     }
@@ -365,7 +366,7 @@ fn split_index(
     partial: &[PageNumber],
     manager: &TransactionalMemory,
     freed: &mut Vec<PageNumber>,
-) -> Result<Option<(PageNumber, PageNumber)>, Error> {
+) -> Result<Option<(PageNumber, PageNumber)>> {
     let page = manager.get_page(index);
     let accessor = InternalAccessor::new(&page);
 
@@ -396,7 +397,7 @@ fn split_index(
 fn make_index_many_pages(
     children: &[PageNumber],
     manager: &TransactionalMemory,
-) -> Result<PageNumber, Error> {
+) -> Result<PageNumber> {
     let mut keys = vec![];
     let mut key_size = 0;
     for i in 1..children.len() {
@@ -423,7 +424,7 @@ fn merge_index(
     partial: &[PageNumber],
     manager: &TransactionalMemory,
     freed: &mut Vec<PageNumber>,
-) -> Result<PageNumber, Error> {
+) -> Result<PageNumber> {
     let page = manager.get_page(index);
     let accessor = InternalAccessor::new(&page);
     assert!(accessor.child_page(BTREE_ORDER - partial.len()).is_none());
@@ -470,7 +471,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     free_uncommitted: bool,
     freed: &mut Vec<PageNumber>,
     manager: &'a TransactionalMemory,
-) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>), Error> {
+) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -661,7 +662,7 @@ pub(crate) fn make_mut_single_leaf<'a>(
     key: &[u8],
     value: &[u8],
     manager: &'a TransactionalMemory,
-) -> Result<(PageNumber, AccessGuardMut<'a>), Error> {
+) -> Result<(PageNumber, AccessGuardMut<'a>)> {
     let mut page = manager.allocate(LeafBuilder::required_bytes(1, key.len() + value.len()))?;
     let mut builder = LeafBuilder::new(&mut page, 1, key.len());
     builder.append(key, value);
@@ -681,7 +682,7 @@ pub(crate) fn make_index(
     lte_page: PageNumber,
     gt_page: PageNumber,
     manager: &TransactionalMemory,
-) -> Result<PageNumber, Error> {
+) -> Result<PageNumber> {
     let mut page = manager.allocate(InternalBuilder::required_bytes(1, key.len()))?;
     let mut builder = InternalBuilder::new(&mut page, 1);
     builder.write_first_page(lte_page);
@@ -698,7 +699,7 @@ pub(crate) unsafe fn tree_insert<'a, K: RedbKey + ?Sized>(
     key: &[u8],
     value: &[u8],
     manager: &'a TransactionalMemory,
-) -> Result<(PageNumber, AccessGuardMut<'a>, Vec<PageNumber>), Error> {
+) -> Result<(PageNumber, AccessGuardMut<'a>, Vec<PageNumber>)> {
     let mut freed = vec![];
     let (page1, more, guard) = tree_insert_helper::<K>(page, key, value, &mut freed, manager)?;
 
