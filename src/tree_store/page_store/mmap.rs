@@ -1,5 +1,4 @@
 use crate::Result;
-use errno::errno;
 use memmap2::MmapRaw;
 use std::fs::File;
 use std::io;
@@ -30,7 +29,7 @@ impl Mmap {
         //       Investigate switching to `write()`
         let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
         if code == -1 {
-            return Err(io::Error::new(io::ErrorKind::Other, errno()).into());
+            return Err(io::Error::last_os_error().into());
         }
         Ok(())
     }
