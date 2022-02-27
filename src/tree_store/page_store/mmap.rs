@@ -26,6 +26,8 @@ impl Mmap {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn flush(&self) -> Result {
+        // TODO: It may be unsafe to mix F_BARRIERFSYNC with writes to the mmap.
+        //       Investigate switching to `write()`
         let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
         if code == -1 {
             return Err(io::Error::new(io::ErrorKind::Other, errno()).into());
