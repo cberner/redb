@@ -33,7 +33,7 @@ impl Mmap {
 
     #[cfg(not(target_os = "macos"))]
     pub(crate) fn eventual_flush(&self) -> Result {
-        self.immediate_flush()
+        self.flush()
     }
 
     #[cfg(target_os = "macos")]
