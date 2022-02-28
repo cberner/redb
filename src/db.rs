@@ -192,6 +192,22 @@ impl DatabaseBuilder {
     }
 }
 
+#[derive(Copy, Clone)]
+pub enum Durability {
+    /// Commits with this durability level will not be persisted to disk unless followed by a
+    /// commit with a higher durability level.
+    ///
+    /// Note: Pages are only freed during commits with higher durability levels. Exclusively using
+    /// this function may result in Error::OutOfSpace.
+    None,
+    /// Commits with this durability level have been queued for persitance to disk, and should be
+    /// persistant some time after [WriteTransaction::commit] returns.
+    Eventual,
+    /// Commits with this durability level are guaranteed to be persistant as soon as
+    /// [WriteTransaction::commit] returns.
+    Immediate,
+}
+
 #[allow(clippy::type_complexity)]
 pub struct WriteTransaction<'a> {
     storage: &'a Storage,
@@ -200,6 +216,7 @@ pub struct WriteTransaction<'a> {
     pending_table_root_changes: RefCell<HashMap<String, Rc<Cell<Option<PageNumber>>>>>,
     open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
     completed: AtomicBool,
+    durability: Durability,
 }
 
 impl<'a> WriteTransaction<'a> {
@@ -213,7 +230,12 @@ impl<'a> WriteTransaction<'a> {
             pending_table_root_changes: RefCell::new(Default::default()),
             open_tables: RefCell::new(Default::default()),
             completed: Default::default(),
+            durability: Durability::Immediate,
         })
+    }
+
+    pub fn set_durability(&mut self, durability: Durability) {
+        self.durability = durability;
     }
 
     /// Open the given table
@@ -348,17 +370,7 @@ impl<'a> WriteTransaction<'a> {
     }
 
     pub fn commit(self) -> Result {
-        self.commit_helper(false)
-    }
-
-    /// Note: pages are only freed during commit(). So exclusively using this function may result
-    /// in Error::OutOfSpace
-    pub fn non_durable_commit(self) -> Result {
-        self.commit_helper(true)
-    }
-
-    fn commit_helper(self, non_durable: bool) -> Result {
-        match self.commit_helper_inner(non_durable) {
+        match self.commit_inner() {
             Ok(_) => Ok(()),
             Err(err) => match err {
                 // Rollback the transaction if we ran out of space during commit, so that user may
@@ -372,7 +384,7 @@ impl<'a> WriteTransaction<'a> {
         }
     }
 
-    fn commit_helper_inner(&self, non_durable: bool) -> Result {
+    fn commit_inner(&self) -> Result {
         // Update all the table roots in the master table, before committing
         for (name, update) in self.pending_table_root_changes.borrow_mut().drain() {
             let new_root = self.storage.update_table_root(
@@ -383,14 +395,23 @@ impl<'a> WriteTransaction<'a> {
             )?;
             self.root_page.set(Some(new_root));
         }
-        if non_durable {
-            self.storage
-                .non_durable_commit(self.root_page.get(), self.transaction_id)?;
-        } else {
-            self.storage
-                .commit(self.root_page.get(), self.transaction_id)?;
+
+        match self.durability {
+            Durability::None => self
+                .storage
+                .non_durable_commit(self.root_page.get(), self.transaction_id)?,
+            Durability::Eventual => {
+                self.storage
+                    .durable_commit(self.root_page.get(), self.transaction_id, true)?
+            }
+            Durability::Immediate => {
+                self.storage
+                    .durable_commit(self.root_page.get(), self.transaction_id, false)?
+            }
         }
+
         self.completed.store(true, Ordering::SeqCst);
+
         Ok(())
     }
 
