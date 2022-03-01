@@ -39,6 +39,9 @@ jobs:
       - name: Run tests
         run: make build test
 
+      - name: Clippy
+        run: cargo clippy --all
+
       - name: Format
         run: cargo fmt --all -- --check
 
