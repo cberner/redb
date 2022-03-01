@@ -5,6 +5,7 @@ use rand::prelude::SliceRandom;
 use rand::Rng;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
