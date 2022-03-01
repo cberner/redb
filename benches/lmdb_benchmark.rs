@@ -208,26 +208,25 @@ fn main() {
         benchmark(table)
     };
 
-    let mut table = comfy_table::Table::new();
-    table.set_table_width(100);
-
-    table.set_header(&["", "redb", "lmdb", "sled"]);
+    let mut rows = Vec::new();
 
     for (benchmark, _duration) in &redb_results {
-        table.add_row(&[benchmark]);
+        rows.push(vec![benchmark.to_string()]);
     }
 
     for results in [redb_results, lmdb_results, sled_results] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
-            table
-                .get_row_mut(i)
-                .unwrap()
-                .add_cell(comfy_table::Cell::new(format!(
-                    "{}ms",
-                    duration.as_millis()
-                )));
+            rows[i].push(format!("{}ms", duration.as_millis()));
         }
     }
 
+    let mut table = comfy_table::Table::new();
+    table.set_table_width(100);
+    table.set_header(&["", "redb", "lmdb", "sled"]);
+    for row in rows {
+        table.add_row(row);
+    }
+
+    println!();
     println!("{table}");
 }
