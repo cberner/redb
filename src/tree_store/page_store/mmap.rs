@@ -26,8 +26,18 @@ impl Mmap {
         self.inner.len()
     }
 
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn flush(&self) -> Result {
         self.inner.flush()?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn flush(&self) -> Result {
+        let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_FULLFSYNC) };
+        if code == -1 {
+            return Err(io::Error::last_os_error().into());
+        }
         Ok(())
     }
 
