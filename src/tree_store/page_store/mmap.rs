@@ -26,11 +26,15 @@ impl Mmap {
         self.inner.len()
     }
 
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn flush(&self) -> Result {
+        self.inner.flush()?;
+        Ok(())
+    }
+
     #[cfg(target_os = "macos")]
     pub(crate) fn flush(&self) -> Result {
-        // TODO: It may be unsafe to mix F_BARRIERFSYNC with writes to the mmap.
-        //       Investigate switching to `write()`
-        let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
+        let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_FULLFSYNC) };
         if code == -1 {
             return Err(io::Error::last_os_error().into());
         }
@@ -38,8 +42,18 @@ impl Mmap {
     }
 
     #[cfg(not(target_os = "macos"))]
-    pub(crate) fn flush(&self) -> Result {
-        self.inner.flush()?;
+    pub(crate) fn eventual_flush(&self) -> Result {
+        self.flush()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn eventual_flush(&self) -> Result {
+        // TODO: It may be unsafe to mix F_BARRIERFSYNC with writes to the mmap.
+        //       Investigate switching to `write()`
+        let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
+        if code == -1 {
+            return Err(io::Error::last_os_error().into());
+        }
         Ok(())
     }
 

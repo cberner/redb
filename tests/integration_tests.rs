@@ -5,7 +5,8 @@ use tempfile::NamedTempFile;
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use redb::{
-    Database, DatabaseBuilder, Error, MultimapTableDefinition, ReadableTable, TableDefinition,
+    Database, DatabaseBuilder, Durability, Error, MultimapTableDefinition, ReadableTable,
+    TableDefinition,
 };
 
 const ELEMENTS: usize = 100;
@@ -33,11 +34,12 @@ fn mixed_durable_commit() {
 
     let db_size = 129 * 4096;
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
-    let txn = db.begin_write().unwrap();
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None);
     let mut table = txn.open_table(U64_TABLE).unwrap();
 
     table.insert(&0, &0).unwrap();
-    txn.non_durable_commit().unwrap();
+    txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
     txn.commit().unwrap();
@@ -49,7 +51,8 @@ fn non_durable_commit_persistence() {
 
     let db_size = 16 * 1024 * 1024;
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
-    let txn = db.begin_write().unwrap();
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None);
     let mut table = txn.open_table(SLICE_TABLE).unwrap();
 
     let pairs = gen_data(100, 16, 20);
@@ -60,7 +63,7 @@ fn non_durable_commit_persistence() {
             table.insert(key, value).unwrap();
         }
     }
-    txn.non_durable_commit().unwrap();
+    txn.commit().unwrap();
 
     // Check that cleanly closing the database persists the non-durable commit
     drop(db);
@@ -80,13 +83,13 @@ fn non_durable_commit_persistence() {
     }
 }
 
-#[test]
-fn persistence() {
+fn test_persistence(durability: Durability) {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 16 * 1024 * 1024;
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
-    let txn = db.begin_write().unwrap();
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(durability);
     let mut table = txn.open_table(SLICE_TABLE).unwrap();
 
     let pairs = gen_data(100, 16, 20);
@@ -114,6 +117,16 @@ fn persistence() {
             assert_eq!(result, value);
         }
     }
+}
+
+#[test]
+fn eventual_persistence() {
+    test_persistence(Durability::Eventual);
+}
+
+#[test]
+fn immediate_persistence() {
+    test_persistence(Durability::Immediate);
 }
 
 #[test]
@@ -203,7 +216,8 @@ fn regression4() {
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let mut i = 0u64;
     loop {
-        let txn = db.begin_write().unwrap();
+        let mut txn = db.begin_write().unwrap();
+        txn.set_durability(Durability::None);
         let mut table = txn.open_table(U64_TABLE).unwrap();
         // Fill the database
         match table.insert(&i, &i) {
@@ -216,7 +230,7 @@ fn regression4() {
                 _ => unreachable!(),
             },
         }
-        match txn.non_durable_commit() {
+        match txn.commit() {
             Ok(_) => {}
             Err(err) => match err {
                 Error::OutOfSpace => break,
@@ -476,22 +490,24 @@ fn regression3() {
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
-    let write_txn = db.begin_write().unwrap();
+    let mut write_txn = db.begin_write().unwrap();
+    write_txn.set_durability(Durability::None);
     let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
 
     table.insert(b"hello", b"world").unwrap();
-    write_txn.non_durable_commit().unwrap();
+    write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
     let read_table = read_txn.open_table(SLICE_TABLE).unwrap();
     assert_eq!(b"world", read_table.get(b"hello").unwrap().unwrap());
 
-    let write_txn = db.begin_write().unwrap();
+    let mut write_txn = db.begin_write().unwrap();
+    write_txn.set_durability(Durability::None);
     let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
     table.remove(b"hello").unwrap();
     table.insert(b"hello2", b"world2").unwrap();
     table.insert(b"hello3", b"world3").unwrap();
-    write_txn.non_durable_commit().unwrap();
+    write_txn.commit().unwrap();
 
     let read_txn2 = db.begin_read().unwrap();
     let read_table2 = read_txn2.open_table(SLICE_TABLE).unwrap();

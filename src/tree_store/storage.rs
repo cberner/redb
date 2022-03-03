@@ -271,7 +271,7 @@ impl Storage {
             let (new_root, _) =
                 make_mut_single_leaf(FREED_TABLE.as_bytes(), &freed_table.to_bytes(), &mem)?;
             mem.set_secondary_root_page(new_root)?;
-            mem.commit(next_transaction_id)?;
+            mem.commit(next_transaction_id, false)?;
             next_transaction_id += 1;
         }
 
@@ -521,10 +521,11 @@ impl Storage {
         self.mem.get_primary_root_page()
     }
 
-    pub(crate) fn commit(
+    pub(crate) fn durable_commit(
         &self,
         mut new_master_root: Option<PageNumber>,
         transaction_id: TransactionId,
+        eventual: bool,
     ) -> Result {
         let oldest_live_read = self
             .live_read_transactions
@@ -555,7 +556,7 @@ impl Storage {
             self.mem.set_secondary_root_page(PageNumber::null())?;
         }
 
-        self.mem.commit(transaction_id)?;
+        self.mem.commit(transaction_id, eventual)?;
         assert_eq!(
             Some(transaction_id),
             self.live_write_transaction.lock().unwrap().take()
