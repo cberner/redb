@@ -17,6 +17,7 @@ crate-type = ["cdylib", "rlib"]
 memmap2 = "0.5.2"
 libc = "0.2.104"
 pyo3 = {version = "0.15", features=["extension-module", "abi3-py36"], optional = true }
+comfy-table = "5.0.1"
 
 [dev-dependencies]
 rand = "0.8"
