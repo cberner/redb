@@ -83,13 +83,13 @@ fn non_durable_commit_persistence() {
     }
 }
 
-#[test]
-fn persistence() {
+fn test_persistence(durability: Durability) {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 16 * 1024 * 1024;
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
-    let txn = db.begin_write().unwrap();
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(durability);
     let mut table = txn.open_table(SLICE_TABLE).unwrap();
 
     let pairs = gen_data(100, 16, 20);
@@ -121,40 +121,12 @@ fn persistence() {
 
 #[test]
 fn eventual_persistence() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    test_persistence(Durability::Eventual);
+}
 
-    let db_size = 16 * 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
-    let mut txn = db.begin_write().unwrap();
-    txn.set_durability(Durability::Eventual);
-
-    let mut table = txn.open_table(SLICE_TABLE).unwrap();
-
-    let pairs = gen_data(100, 16, 20);
-
-    {
-        for i in 0..ELEMENTS {
-            let (key, value) = &pairs[i % pairs.len()];
-            table.insert(key, value).unwrap();
-        }
-    }
-    txn.commit().unwrap();
-
-    drop(db);
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
-    let txn = db.begin_read().unwrap();
-    let table = txn.open_table(SLICE_TABLE).unwrap();
-
-    let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-    key_order.shuffle(&mut rand::thread_rng());
-
-    {
-        for i in &key_order {
-            let (key, value) = &pairs[*i % pairs.len()];
-            let result = &table.get(key).unwrap().unwrap();
-            assert_eq!(result, value);
-        }
-    }
+#[test]
+fn immediate_persistence() {
+    test_persistence(Durability::Immediate);
 }
 
 #[test]
