@@ -14,11 +14,11 @@ authors = ["Christopher Berner <christopherberner@gmail.com>"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-memmap2 = "0.5.2"
 libc = "0.2.104"
 pyo3 = {version = "0.15", features=["extension-module", "abi3-py36"], optional = true }
 
 [dev-dependencies]
+memmap2 = "0.5.2"
 rand = "0.8"
 lmdb-zero = "0.4.4"
 lmdb-rkv = "0.14.0"
