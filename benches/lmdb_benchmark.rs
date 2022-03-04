@@ -36,7 +36,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
             let len = pairs.len();
             let (key, value) = &mut pairs[written % len];
             key[16..].copy_from_slice(&(written as u64).to_be_bytes());
-            inserter.insert(&key, value).unwrap();
+            inserter.insert(key, value).unwrap();
             written += 1;
         }
     }
@@ -62,7 +62,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
             let len = pairs.len();
             let (key, value) = &mut pairs[written % len];
             key[16..].copy_from_slice(&(written as u64).to_be_bytes());
-            inserter.insert(&key, value).unwrap();
+            inserter.insert(key, value).unwrap();
             drop(inserter);
             txn.commit().unwrap();
             written += 1;
@@ -89,7 +89,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
                 let len = pairs.len();
                 let (key, value) = &mut pairs[written % len];
                 key[16..].copy_from_slice(&(written as u64).to_be_bytes());
-                inserter.insert(&key, value).unwrap();
+                inserter.insert(key, value).unwrap();
                 written += 1;
             }
             drop(inserter);
@@ -121,7 +121,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
                 let len = pairs.len();
                 let (key, value) = &mut pairs[i % len];
                 key[16..].copy_from_slice(&(*i as u64).to_be_bytes());
-                let result = txn.get(&key).unwrap();
+                let result = txn.get(key).unwrap();
                 checksum += result.as_ref()[0] as u64;
                 expected_checksum += value[0] as u64;
             }
@@ -143,7 +143,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
                 let len = pairs.len();
                 let (key, _) = &mut pairs[i % len];
                 key[16..].copy_from_slice(&(*i as u64).to_be_bytes());
-                txn.exists_after(&key);
+                txn.exists_after(key);
             }
             let end = Instant::now();
             let duration = end - start;
@@ -166,7 +166,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
             let len = pairs.len();
             let (key, _) = &mut pairs[i % len];
             key[16..].copy_from_slice(&(i as u64).to_be_bytes());
-            inserter.remove(&key).unwrap();
+            inserter.remove(key).unwrap();
         }
         drop(inserter);
         txn.commit().unwrap();

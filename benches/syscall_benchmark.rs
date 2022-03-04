@@ -17,15 +17,15 @@ const ELEMENTS: usize = 100_000;
 
 fn human_readable_bytes(bytes: usize) -> String {
     if bytes < 1024 {
-        format!("{}B", bytes).to_string()
+        format!("{}B", bytes)
     } else if bytes < 1024 * 1024 {
-        format!("{}KiB", bytes / 1024).to_string()
+        format!("{}KiB", bytes / 1024)
     } else if bytes < 1024 * 1024 * 1024 {
-        format!("{}MiB", bytes / 1024 / 1024).to_string()
+        format!("{}MiB", bytes / 1024 / 1024)
     } else if bytes < 1024 * 1024 * 1024 * 1024 {
-        format!("{}GiB", bytes / 1024 / 1024 / 1024).to_string()
+        format!("{}GiB", bytes / 1024 / 1024 / 1024)
     } else {
-        format!("{}TiB", bytes / 1024 / 1024 / 1024 / 1024).to_string()
+        format!("{}TiB", bytes / 1024 / 1024 / 1024 / 1024)
     }
 }
 
@@ -287,7 +287,7 @@ fn mmap_bench(path: &Path) {
             mut_key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
             mmap[write_index..(write_index + mut_key.len())].copy_from_slice(&mut_key);
             write_index += mut_key.len();
-            mmap[write_index..(write_index + value.len())].copy_from_slice(&value);
+            mmap[write_index..(write_index + value.len())].copy_from_slice(value);
             write_index += value.len();
         }
     }

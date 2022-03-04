@@ -21,12 +21,15 @@ pub trait BenchWriteTransaction<'a> {
 
     fn get_inserter(&'a self) -> Self::T;
 
+    #[allow(clippy::result_unit_err)]
     fn commit(self) -> Result<(), ()>;
 }
 
 pub trait BenchInserter {
+    #[allow(clippy::result_unit_err)]
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()>;
 
+    #[allow(clippy::result_unit_err)]
     fn remove(&mut self, key: &[u8]) -> Result<(), ()>;
 }
 
@@ -267,6 +270,7 @@ pub struct LmdbRkvBenchInserter<'a> {
 impl BenchInserter for LmdbRkvBenchInserter<'_> {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         // TODO: this might be UB, but I couldn't figure out how to fix the lifetimes without GATs
+        #[allow(clippy::cast_ref_to_mut)]
         let mut_txn =
             unsafe { &mut *(self.txn as *const lmdb::RwTransaction as *mut lmdb::RwTransaction) };
         mut_txn
@@ -276,6 +280,7 @@ impl BenchInserter for LmdbRkvBenchInserter<'_> {
 
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
         // TODO: this might be UB, but I couldn't figure out how to fix the lifetimes without GATs
+        #[allow(clippy::cast_ref_to_mut)]
         let mut_txn =
             unsafe { &mut *(self.txn as *const lmdb::RwTransaction as *mut lmdb::RwTransaction) };
         mut_txn.del(self.db, &key, None).map_err(|_| ())
