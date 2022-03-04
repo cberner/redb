@@ -649,11 +649,9 @@ mod test {
                 } else {
                     assert_eq!(allocated.len(), num_pages);
                 }
-            } else {
-                if let Some(to_free) = allocated.iter().choose(&mut rng).cloned() {
-                    allocator.free(&mut data, to_free);
-                    allocated.remove(&to_free);
-                }
+            } else if let Some(to_free) = allocated.iter().choose(&mut rng).cloned() {
+                allocator.free(&mut data, to_free);
+                allocated.remove(&to_free);
             }
         }
 

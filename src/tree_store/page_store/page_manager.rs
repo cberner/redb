@@ -743,7 +743,7 @@ impl TransactionalMemory {
     }
 
     // Commit all outstanding changes and make them visible as the primary
-    pub(crate) fn commit(&self, transaction_id: u64) -> Result {
+    pub(crate) fn commit(&self, transaction_id: u64, eventual: bool) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
@@ -756,7 +756,11 @@ impl TransactionalMemory {
         mutator.set_last_committed_transaction_id(transaction_id);
         drop(mutator);
 
-        self.mmap.flush()?;
+        if eventual {
+            self.mmap.eventual_flush()?;
+        } else {
+            self.mmap.flush()?;
+        }
 
         let god_byte = self.mmap.get_memory(0..DB_METAPAGE_SIZE)[GOD_BYTE_OFFSET];
         let mut next = match god_byte & PRIMARY_BIT {
@@ -1068,7 +1072,7 @@ impl Drop for TransactionalMemory {
         // Commit any non-durable transactions that are outstanding
         if self.read_from_secondary.load(Ordering::SeqCst) {
             if let Ok(non_durable_transaction_id) = self.get_last_committed_transaction_id() {
-                if self.commit(non_durable_transaction_id).is_err() {
+                if self.commit(non_durable_transaction_id, false).is_err() {
                     eprintln!(
                         "Failure while finalizing non-durable commit. Database may have rolled back"
                     );
