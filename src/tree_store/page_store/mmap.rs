@@ -1,35 +1,59 @@
 use crate::Result;
-use memmap2::MmapRaw;
 use std::fs::File;
-#[cfg(target_os = "macos")]
 use std::io;
 use std::ops::Range;
-#[cfg(target_os = "macos")]
 use std::os::unix::io::AsRawFd;
-use std::slice;
+use std::{ptr, slice};
 
 pub(crate) struct Mmap {
     #[allow(dead_code)]
     file: File,
-    inner: memmap2::MmapRaw,
+    mmap: *mut u8,
+    len: usize,
 }
+
+// mmap() is documented as being multi-thread safe
+unsafe impl Send for Mmap {}
+unsafe impl Sync for Mmap {}
 
 impl Mmap {
     pub(crate) fn new(file: File) -> Result<Self> {
+        let len = file.metadata()?.len();
+        let mmap = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                len as libc::size_t,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            ) as *mut u8
+        };
         Ok(Self {
-            inner: MmapRaw::map_raw(&file)?,
+            mmap,
             file,
+            len: len as usize,
         })
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.inner.len()
+        self.len
     }
 
     #[cfg(not(target_os = "macos"))]
     pub(crate) fn flush(&self) -> Result {
-        self.inner.flush()?;
-        Ok(())
+        let result = unsafe {
+            libc::msync(
+                self.mmap as *mut libc::c_void,
+                self.len as libc::size_t,
+                libc::MS_SYNC,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error().into())
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -58,9 +82,9 @@ impl Mmap {
     }
 
     pub(crate) fn get_memory(&self, range: Range<usize>) -> &[u8] {
-        assert!(range.end <= self.inner.len());
+        assert!(range.end <= self.len);
         unsafe {
-            let ptr = self.inner.as_ptr().add(range.start);
+            let ptr = self.mmap.add(range.start);
             slice::from_raw_parts(ptr, range.len())
         }
     }
@@ -69,8 +93,8 @@ impl Mmap {
     // from .get_memory() or .get_memory_mut()
     #[allow(clippy::mut_from_ref)]
     pub(crate) unsafe fn get_memory_mut(&self, range: Range<usize>) -> &mut [u8] {
-        assert!(range.end <= self.inner.len());
-        let ptr = self.inner.as_mut_ptr().add(range.start);
+        assert!(range.end <= self.len);
+        let ptr = self.mmap.add(range.start);
         slice::from_raw_parts_mut(ptr, range.len())
     }
 }
