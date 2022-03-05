@@ -17,7 +17,6 @@ crate-type = ["cdylib", "rlib"]
 memmap2 = "0.5.2"
 libc = "0.2.104"
 pyo3 = {version = "0.15", features=["extension-module", "abi3-py36"], optional = true }
-comfy-table = "5.0.1"
 
 [dev-dependencies]
 rand = "0.8"
@@ -26,6 +25,7 @@ lmdb-rkv = "0.14.0"
 tempfile = "3.2.0"
 sled = "0.34.6"
 libc = "0.2.99"
+comfy-table = "5.0.1"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 io-uring = "0.5.1"
