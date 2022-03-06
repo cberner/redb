@@ -81,12 +81,12 @@ impl Mmap {
         Ok(())
     }
 
-    pub(crate) fn get_memory(&self, range: Range<usize>) -> &[u8] {
+    // Safety: caller must ensure that [start, end) does not alias any existing references returned
+    // from .get_memory_mut()
+    pub(crate) unsafe fn get_memory(&self, range: Range<usize>) -> &[u8] {
         assert!(range.end <= self.len);
-        unsafe {
-            let ptr = self.mmap.add(range.start);
-            slice::from_raw_parts(ptr, range.len())
-        }
+        let ptr = self.mmap.add(range.start);
+        slice::from_raw_parts(ptr, range.len())
     }
 
     // Safety: caller must ensure that [start, end) does not alias any existing references returned
