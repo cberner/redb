@@ -710,7 +710,9 @@ impl TransactionalMemory {
         };
         let (start, end) = accessor.get_allocator_data();
         assert!(end <= self.mmap.len());
-        let mem = self.mmap.get_memory(start..end);
+        // Safety: we have the metapage lock and only access the metapage
+        // (page allocator state is logically part of the metapage)
+        let mem = unsafe { self.mmap.get_memory(start..end) };
 
         Ok((mem, accessor.into_guard()))
     }
@@ -762,13 +764,14 @@ impl TransactionalMemory {
             self.mmap.flush()?;
         }
 
-        let god_byte = self.mmap.get_memory(0..DB_METAPAGE_SIZE)[GOD_BYTE_OFFSET];
+        let (mmap, guard) = self.acquire_mutable_metapage()?;
+        // Safety: we acquire the metapage lock and only access the metapage
+        let god_byte = unsafe { self.mmap.get_memory(0..DB_METAPAGE_SIZE) }[GOD_BYTE_OFFSET];
         let mut next = match god_byte & PRIMARY_BIT {
             0 => god_byte | PRIMARY_BIT,
             1 => god_byte & !PRIMARY_BIT,
             _ => unreachable!(),
         };
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
         next = set_allocator_dirty(next, true, false);
         next = set_allocator_dirty(next, false, true);
         mmap[GOD_BYTE_OFFSET] = next;
@@ -894,12 +897,13 @@ impl TransactionalMemory {
             page_number
         );
 
-        PageImpl {
-            mem: self
-                .mmap
-                .get_memory(page_number.address_range(self.page_size)),
-            page_number,
-        }
+        // Safety: we asserted that no mutable references are open
+        let mem = unsafe {
+            self.mmap
+                .get_memory(page_number.address_range(self.page_size))
+        };
+
+        PageImpl { mem, page_number }
     }
 
     // Safety: the caller must ensure that no references to the memory in `page` exist
@@ -920,37 +924,28 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn get_primary_root_page(&self) -> Option<PageNumber> {
-        if self.read_from_secondary.load(Ordering::SeqCst) {
-            TransactionAccessor::new(
-                get_secondary_const(self.mmap.get_memory(0..DB_METAPAGE_SIZE)),
-                self.metapage_guard.lock().unwrap(),
-            )
-            .get_root_page()
+        let guard = self.metapage_guard.lock().unwrap();
+        let mem = if self.read_from_secondary.load(Ordering::SeqCst) {
+            // Safety: we have the metapage lock and only access the metapage
+            unsafe { get_secondary_const(self.mmap.get_memory(0..DB_METAPAGE_SIZE)) }
         } else {
-            TransactionAccessor::new(
-                get_primary(self.mmap.get_memory(0..DB_METAPAGE_SIZE)),
-                self.metapage_guard.lock().unwrap(),
-            )
-            .get_root_page()
-        }
+            // Safety: we have the metapage lock and only access the metapage
+            unsafe { get_primary(self.mmap.get_memory(0..DB_METAPAGE_SIZE)) }
+        };
+        TransactionAccessor::new(mem, guard).get_root_page()
     }
 
     pub(crate) fn get_last_committed_transaction_id(&self) -> Result<u64> {
-        let id = if self.read_from_secondary.load(Ordering::SeqCst) {
-            TransactionAccessor::new(
-                get_secondary_const(self.mmap.get_memory(0..DB_METAPAGE_SIZE)),
-                self.metapage_guard.lock()?,
-            )
-            .get_last_committed_transaction_id()
+        let guard = self.metapage_guard.lock().unwrap();
+        let mem = if self.read_from_secondary.load(Ordering::SeqCst) {
+            // Safety: we have the metapage lock and only access the metapage
+            unsafe { get_secondary_const(self.mmap.get_memory(0..DB_METAPAGE_SIZE)) }
         } else {
-            TransactionAccessor::new(
-                get_primary(self.mmap.get_memory(0..DB_METAPAGE_SIZE)),
-                self.metapage_guard.lock()?,
-            )
-            .get_last_committed_transaction_id()
+            // Safety: we have the metapage lock and only access the metapage
+            unsafe { get_primary(self.mmap.get_memory(0..DB_METAPAGE_SIZE)) }
         };
 
-        Ok(id)
+        Ok(TransactionAccessor::new(mem, guard).get_last_committed_transaction_id())
     }
 
     pub(crate) fn set_secondary_root_page(&self, root_page: PageNumber) -> Result {
