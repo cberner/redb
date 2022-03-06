@@ -123,6 +123,10 @@ impl Database {
         }
     }
 
+    pub fn builder() -> DatabaseBuilder {
+        DatabaseBuilder::new()
+    }
+
     /// # Safety
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
