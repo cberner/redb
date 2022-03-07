@@ -1,5 +1,5 @@
+use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::mmap::Mmap;
-use crate::tree_store::page_store::page_allocator::BuddyAllocator;
 use crate::tree_store::page_store::utils::get_page_size;
 use crate::Error;
 use crate::Result;
