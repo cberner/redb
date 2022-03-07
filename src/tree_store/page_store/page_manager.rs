@@ -7,9 +7,9 @@ use std::cmp::min;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::mem::size_of;
 use std::ops::Range;
 use std::path::Path;
@@ -100,79 +100,6 @@ pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
     file.read_exact(&mut db_size)?;
 
     Ok(u64::from_be_bytes(db_size) as usize)
-}
-
-pub(crate) fn expand_db_size(path: impl AsRef<Path>, new_size: usize) -> Result {
-    let old_size = get_db_size(path.as_ref())?;
-
-    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-    file.seek(SeekFrom::Start(PAGE_SIZE_OFFSET as u64))?;
-    let mut buffer = [0; 1];
-    file.read_exact(&mut buffer)?;
-
-    let page_size = 1usize << buffer[0];
-    let max_order = TransactionalMemory::calculate_usable_order(old_size, page_size as usize);
-    let old_usable_pages =
-        TransactionalMemory::calculate_usable_pages(old_size, page_size as usize, max_order);
-    let max_order = TransactionalMemory::calculate_usable_order(new_size, page_size as usize);
-    let usable_pages =
-        TransactionalMemory::calculate_usable_pages(new_size, page_size as usize, max_order);
-
-    let allocator_state_size = BuddyAllocator::required_space(usable_pages, max_order);
-    assert!(usable_pages >= old_usable_pages);
-    assert!(usable_pages * page_size + allocator_state_size * 2 <= new_size);
-
-    // Write the WAL
-    file.seek(SeekFrom::Start(UPGRADE_LOG_OFFSET as u64))?;
-    file.write_all(&(old_size as u64).to_be_bytes())?;
-    file.seek(SeekFrom::Start(UPGRADE_LOG_LEN_OFFSET as u64))?;
-    file.write_all(&(size_of::<u64>() as u64).to_be_bytes())?;
-    file.sync_all()?;
-
-    // Dirty the allocator state, so that it will be rebuilt
-    file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;
-    let mut buffer = [0u8; 1];
-    file.read_exact(&mut buffer)?;
-    let in_progress_god_byte =
-        buffer[0] | ALLOCATOR_STATE_0_DIRTY | ALLOCATOR_STATE_1_DIRTY | UPGRADE_IN_PROGRESS;
-    let final_god_byte = buffer[0] | ALLOCATOR_STATE_0_DIRTY | ALLOCATOR_STATE_1_DIRTY;
-    file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;
-    file.write_all(&[in_progress_god_byte])?;
-    file.sync_all()?;
-
-    file.set_len(new_size as u64)?;
-    file.sync_all()?;
-
-    // Write the new allocator state pointers
-    let start = new_size - 2 * allocator_state_size;
-    file.seek(SeekFrom::Start(
-        (TRANSACTION_0_OFFSET + ALLOCATOR_STATE_PTR_OFFSET) as u64,
-    ))?;
-    file.write_all(&(start as u64).to_be_bytes())?;
-    file.seek(SeekFrom::Start(
-        (TRANSACTION_0_OFFSET + ALLOCATOR_STATE_LEN_OFFSET) as u64,
-    ))?;
-    file.write_all(&(allocator_state_size as u64).to_be_bytes())?;
-    let start = new_size - allocator_state_size;
-    file.seek(SeekFrom::Start(
-        (TRANSACTION_1_OFFSET + ALLOCATOR_STATE_PTR_OFFSET) as u64,
-    ))?;
-    file.write_all(&(start as u64).to_be_bytes())?;
-    file.seek(SeekFrom::Start(
-        (TRANSACTION_1_OFFSET + ALLOCATOR_STATE_LEN_OFFSET) as u64,
-    ))?;
-    file.write_all(&(allocator_state_size as u64).to_be_bytes())?;
-
-    file.sync_all()?;
-    file.seek(SeekFrom::Start(DB_SIZE_OFFSET as u64))?;
-    file.write_all(&(new_size as u64).to_be_bytes())?;
-    file.sync_all()?;
-
-    file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64))?;
-    file.write_all(&[final_god_byte])?;
-    file.sync_all()?;
-
-    Ok(())
 }
 
 // Marker struct for the mutex guarding the meta page
