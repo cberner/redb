@@ -2,7 +2,7 @@
 
 redb is a simple, portable, high-performance, ACID, embedded key-value store.
 
-Each redb database contains a collection of tables, and supports a single writer and multiple 
+Each redb database contains a collection of tables, and supports a single writer and multiple
 concurrent readers. redb uses MVCC to provide isolation, and provides a single isolation level:
 serializable, in which all writes are applied sequentially.
 
@@ -19,7 +19,7 @@ therefore we make only a few assumptions about the guarantees provided by the un
    a range of bytes in a file, no bytes outside of that range will change,
    even if the write occurs just before a crash or power failure. sqlite makes this same
    assumption, by default, in all modern versions.
- 
+
 ## File format
 
 A redb database file consists of a header, and several B-trees:
@@ -49,28 +49,15 @@ inactive copy, which is then atomically promoted to the primary via the `field_m
   versioned field is valid, or `2` indicating that the second version of each versioned field is valid.
 
 ### Page allocator state
-The page allocator state is double buffered, and the state is technically just a cache: it can be reconstructed
-by walking the btree from all active roots.
-Both copies of the page allocator state are kept up to date after a transaction commit. This is done safely by
-using the following protocol:
-1) the shadow copy is updated
-2) the dirty bit is set for the primary copy. If the system crashes at this point, and the dirty bit gets written out,
-   then when the database is next opened the page allocation state will need to be reconstructed by walking the entire
-   btree. Setting this dirty bit on the primary before fsync'ing to swap the buffers is necessary because we do not
-   fsync after step (4) to avoid introducing an extra fsync in the commit protocol, but those writes must be marked
-   dirty.
-3) fsync the shadow metadata & shadow page allocator state.
-4) fsync to swap the shadow copy with the primary copy is completed, and unset the dirty bit on the shadow page
-   allocator state as clean
-5) the old primary copy is updated
+The page allocator uses a two level allocator approach. The top level, the "region allocator", allocates regions of memory
+in the data section.
+Each region has a "regional allocator", which is stored in the footer of the region. This allocator uses a buddy allocator
+approach to allocate pages of sizes between the configured page size and the size of the region.
 
-When the database is closed, the shadow copy should be fsync'ed, it's dirty bit should be cleared, and a second
-fsync performed.
-
-If the dirty bit is found set on the primary page allocator state, when the database is opened, it can be ignored. It
-must have come from a crash during or after step 2, but before step 5, therefore the state is correct.
+The page allocator state is technically just a cache: it can be reconstructed by walking the btree from all active roots.
+The dirty bit is set on the allocator state before it is written to, and cleared when the database is closed.
 If the dirty bit is found set on the shadow page allocator state, when the database is opened, then it must be repaired
-by copying it from the primary or re-walking all the btree roots.
+by re-walking all the btree roots.
 
 ### Non-durable commits
 redb supports "non-durable" commits, meaning that there is no guarantee of durability. However, in the event of a crash
