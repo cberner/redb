@@ -1,4 +1,5 @@
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
+use crate::tree_store::page_store::grouped_bitmap::U64GroupedBitMapMut;
 use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::utils::get_page_size;
 use crate::Error;
@@ -30,19 +31,18 @@ use std::sync::{Mutex, MutexGuard};
 // Commit slot 0 (next 128 bytes):
 // 8 bytes: root page
 // 8 bytes: last committed transaction id
-// 8 bytes: allocator state pointer
-// 8 bytes: allocator state length
+// (db layout size) bytes: active database layout
 //
 // Commit slot 1 (next 128 bytes):
 // 8 bytes: root page
 // 8 bytes: last committed transaction id
-// 8 bytes: allocator state pointer
-// 8 bytes: allocator state length
+// (db layout size) bytes: active database layout
 
+// Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
+// because the leaf node format uses 32bit offsets
+const MAX_USABLE_REGION_SPACE: usize = 4 * 1024 * 1024 * 1024;
 const MAX_PAGE_ORDER: usize = 20;
 const MIN_USABLE_PAGES: usize = 10;
-
-const DB_METADATA_PAGE: u64 = 0;
 
 // Inspired by PNG's magic number
 const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
@@ -50,26 +50,24 @@ const VERSION_OFFSET: usize = MAGICNUMBER.len();
 const PAGE_SIZE_OFFSET: usize = VERSION_OFFSET + size_of::<u8>();
 const GOD_BYTE_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u8>();
 const RESERVED: usize = 4;
-const DB_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + RESERVED;
+const REGION_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + RESERVED;
+const DB_SIZE_OFFSET: usize = REGION_SIZE_OFFSET + size_of::<u64>();
 const UPGRADE_LOG_OFFSET: usize = DB_SIZE_OFFSET + size_of::<u64>();
 const UPGRADE_LOG_LEN_OFFSET: usize = UPGRADE_LOG_OFFSET + size_of::<u64>();
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 128;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
-const DB_METAPAGE_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
+const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
 
 // God byte flags
 const PRIMARY_BIT: u8 = 1;
-const ALLOCATOR_STATE_0_DIRTY: u8 = 2;
-const ALLOCATOR_STATE_1_DIRTY: u8 = 4;
-const UPGRADE_IN_PROGRESS: u8 = 8;
+const ALLOCATOR_STATE_DIRTY: u8 = 2;
+const UPGRADE_IN_PROGRESS: u8 = 4;
 
-// Structure of each metapage
+// Structure of each commit slot
 const ROOT_PAGE_OFFSET: usize = 0;
 const TRANSACTION_ID_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
-// Memory pointed to by this ptr is logically part of the metapage
-const ALLOCATOR_STATE_PTR_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
-const ALLOCATOR_STATE_LEN_OFFSET: usize = ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>();
+const DATA_LAYOUT_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
 
 fn ceil_log2(x: usize) -> usize {
     if x.is_power_of_two() {
@@ -102,92 +100,171 @@ pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
     Ok(u64::from_be_bytes(db_size) as usize)
 }
 
-// Marker struct for the mutex guarding the meta page
-struct MetapageGuard;
+// Marker struct for the mutex guarding the metadata (header & allocators)
+struct MetadataGuard;
 
-fn get_primary(metapage: &[u8]) -> &[u8] {
-    let start = if metapage[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
-        TRANSACTION_0_OFFSET
-    } else {
-        TRANSACTION_1_OFFSET
-    };
-    let end = start + TRANSACTION_SIZE;
-
-    &metapage[start..end]
+// Safety: MetadataAccessor may only use self.mmap to access the allocator states
+struct MetadataAccessor<'a> {
+    header: &'a mut [u8],
+    mmap: &'a Mmap,
+    guard: MutexGuard<'a, MetadataGuard>,
 }
 
-// Warning! This method is only safe to use when modifying the allocator state and when the dirty bit
-// is already set and fsync'ed to the backing file
-fn get_primary_mut(metapage: &mut [u8]) -> &mut [u8] {
-    let start = if metapage[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
-        TRANSACTION_0_OFFSET
-    } else {
-        TRANSACTION_1_OFFSET
-    };
-    let end = start + TRANSACTION_SIZE;
+impl<'a> MetadataAccessor<'a> {
+    // Safety: Caller must ensure that no other references to metadata memory exist, or are created
+    // during the lifetime 'a
+    unsafe fn new(mmap: &'a Mmap, guard: MutexGuard<'a, MetadataGuard>) -> Self {
+        let header = mmap.get_memory_mut(0..DB_HEADER_SIZE);
+        Self {
+            header,
+            mmap,
+            guard,
+        }
+    }
 
-    &mut metapage[start..end]
-}
+    fn primary_slot(&self) -> TransactionAccessor {
+        let start = if self.header[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
+            TRANSACTION_0_OFFSET
+        } else {
+            TRANSACTION_1_OFFSET
+        };
+        let end = start + TRANSACTION_SIZE;
 
-fn get_secondary(metapage: &mut [u8]) -> &mut [u8] {
-    let start = if metapage[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
-        TRANSACTION_1_OFFSET
-    } else {
-        TRANSACTION_0_OFFSET
-    };
-    let end = start + TRANSACTION_SIZE;
+        let mem = &self.header[start..end];
+        TransactionAccessor::new(mem, &self.guard)
+    }
 
-    &mut metapage[start..end]
-}
+    fn secondary_slot(&self) -> TransactionAccessor {
+        let start = if self.header[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
+            TRANSACTION_1_OFFSET
+        } else {
+            TRANSACTION_0_OFFSET
+        };
+        let end = start + TRANSACTION_SIZE;
 
-fn get_allocator_dirty(metapage: &mut [u8], primary: bool) -> bool {
-    let god_byte = metapage[GOD_BYTE_OFFSET];
-    if primary && god_byte & PRIMARY_BIT == 0 || !primary && god_byte & PRIMARY_BIT != 0 {
-        god_byte & ALLOCATOR_STATE_0_DIRTY != 0
-    } else {
-        god_byte & ALLOCATOR_STATE_1_DIRTY != 0
+        let mem = &self.header[start..end];
+        TransactionAccessor::new(mem, &self.guard)
+    }
+
+    fn secondary_slot_mut(&mut self) -> TransactionMutator {
+        let start = if self.header[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
+            TRANSACTION_1_OFFSET
+        } else {
+            TRANSACTION_0_OFFSET
+        };
+        let end = start + TRANSACTION_SIZE;
+
+        let mem = &mut self.header[start..end];
+        TransactionMutator::new(mem)
+    }
+
+    fn swap_primary(&mut self) {
+        if self.header[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
+            self.header[GOD_BYTE_OFFSET] |= PRIMARY_BIT;
+        } else {
+            self.header[GOD_BYTE_OFFSET] &= !PRIMARY_BIT;
+        }
+    }
+
+    fn get_allocator_dirty(&self) -> bool {
+        self.header[GOD_BYTE_OFFSET] & ALLOCATOR_STATE_DIRTY != 0
+    }
+
+    fn set_allocator_dirty(&mut self, dirty: bool) {
+        if dirty {
+            self.header[GOD_BYTE_OFFSET] |= ALLOCATOR_STATE_DIRTY;
+        } else {
+            self.header[GOD_BYTE_OFFSET] &= !ALLOCATOR_STATE_DIRTY;
+        }
+    }
+
+    fn get_regional_allocator(&mut self, region: usize, layout: &DataSectionLayout) -> &[u8] {
+        let base = layout.region_base_address(region);
+        let relative = layout.region_layout(region).allocator_state;
+        let absolute = (base + relative.start)..(base + relative.end);
+
+        // Safety: We own the metadata lock, so there can't be any other references
+        // and this function takes &mut self, so the returned lifetime can't overlap with any other
+        // calls into MetadataAccessor
+        unsafe { self.mmap.get_memory(absolute) }
+    }
+
+    // Note: It's very important that the lifetime of the returned allocator accessors is the same
+    // as self, since self holds the metadata lock
+    fn allocators_mut(
+        &mut self,
+        layout: &DataSectionLayout,
+    ) -> Result<(U64GroupedBitMapMut, RegionsAccessor)> {
+        if !self.get_allocator_dirty() {
+            self.set_allocator_dirty(true);
+            self.mmap.flush()?
+        }
+
+        let range = layout.region_allocator_address_range();
+
+        // Safety: We own the metadata lock, so there can't be any other references
+        // and this function takes &mut self, so the returned lifetime can't overlap with any other
+        // calls into MetadataAccessor
+        assert!(range.start >= DB_HEADER_SIZE);
+        let mem = unsafe { self.mmap.get_memory_mut(range) };
+
+        // Safety: Same as above, and RegionAccessor promises to only access regional metadata,
+        // which does not overlap the above
+        let region_accessor = RegionsAccessor {
+            mmap: self.mmap,
+            layout: layout.clone(),
+        };
+        Ok((U64GroupedBitMapMut::new(mem), region_accessor))
     }
 }
 
-// Set the allocator dirty bit to `dirty` for the primary or secondary slot, according to `primary`
-fn set_allocator_dirty(god_byte: u8, primary: bool, dirty: bool) -> u8 {
-    #[allow(clippy::collapsible_else_if)]
-    if primary && god_byte & PRIMARY_BIT == 0 || !primary && god_byte & PRIMARY_BIT != 0 {
-        if dirty {
-            god_byte | ALLOCATOR_STATE_0_DIRTY
-        } else {
-            god_byte & !ALLOCATOR_STATE_0_DIRTY
-        }
-    } else {
-        if dirty {
-            god_byte | ALLOCATOR_STATE_1_DIRTY
-        } else {
-            god_byte & !ALLOCATOR_STATE_1_DIRTY
-        }
+// Safety: RegionAccessor may only access regional metadata, and no other references to it may exist
+struct RegionsAccessor<'a> {
+    mmap: &'a Mmap,
+    layout: DataSectionLayout,
+}
+
+impl<'a> RegionsAccessor<'a> {
+    fn get_regional_allocator_mut(&mut self, region: usize) -> &mut [u8] {
+        // Safety: We have exclusive access to regional metadata
+        let base = self.layout.region_base_address(region);
+        let relative = &self.layout.region_layout(region).allocator_state;
+        let absolute = (base + relative.start)..(base + relative.end);
+
+        assert!(absolute.start >= DB_HEADER_SIZE);
+        unsafe { self.mmap.get_memory_mut(absolute) }
     }
 }
 
-fn get_secondary_const(metapage: &[u8]) -> &[u8] {
-    let start = if metapage[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
+fn get_secondary(header: &mut [u8]) -> &mut [u8] {
+    let start = if header[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
         TRANSACTION_1_OFFSET
     } else {
         TRANSACTION_0_OFFSET
     };
     let end = start + TRANSACTION_SIZE;
 
-    &metapage[start..end]
+    &mut header[start..end]
 }
 
+// On-disk format is:
+// lowest 20bits: page index within the region
+// second 20bits: region number
+// 19bits: reserved
+// highest 5bits: page order exponent
+//
+// Assuming a reasonable page size, like 4kiB, this allows for 4kiB * 2^20 * 2^20 = 4PiB of usable space
 #[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub(crate) struct PageNumber {
-    page_index: u64,
+    region: u32,
+    page_index: u32,
     page_order: u8,
 }
 
 impl PageNumber {
     // TODO: remove this
     pub(crate) fn null() -> Self {
-        Self::new(0, 0)
+        Self::new(u16::MAX as u32, 0, 0)
     }
 
     #[inline(always)]
@@ -195,31 +272,41 @@ impl PageNumber {
         8
     }
 
-    fn new(page_index: u64, page_order: u8) -> Self {
+    fn new(region: u32, page_index: u32, page_order: u8) -> Self {
         Self {
+            region,
             page_index,
             page_order,
         }
     }
 
     pub(crate) fn to_be_bytes(self) -> [u8; 8] {
-        let mut temp = self.page_index;
-        temp |= (self.page_order as u64) << 48;
+        let mut temp = (0x000F_FFFF & self.page_index) as u64;
+        temp |= (0x000F_FFFF & self.region as u64) << 20;
+        temp |= (0b0001_1111 & self.page_order as u64) << 59;
         temp.to_be_bytes()
     }
 
     pub(crate) fn from_be_bytes(bytes: [u8; 8]) -> Self {
         let temp = u64::from_be_bytes(bytes);
-        let index = temp & 0x0000_FFFF_FFFF_FFFF;
-        let order = (temp >> 48) as u8;
+        let index = (temp & 0x000F_FFFF) as u32;
+        let region = ((temp >> 20) & 0x000F_FFFF) as u32;
+        let order = (temp >> 59) as u8;
 
-        Self::new(index, order)
+        Self::new(region, index, order)
     }
 
-    fn address_range(&self, page_size: usize) -> Range<usize> {
-        let pages = 1usize << self.page_order;
-        (self.page_index as usize * pages * page_size)
-            ..((self.page_index as usize + 1) * pages * page_size)
+    fn address_range(
+        &self,
+        data_section_offset: usize,
+        region_size: usize,
+        page_size: usize,
+    ) -> Range<usize> {
+        let regional_start = self.page_index as usize * self.page_size_bytes(page_size);
+        debug_assert!(regional_start < region_size);
+        let start = regional_start + self.region as usize * region_size;
+        let end = start + self.page_size_bytes(page_size);
+        (start + data_section_offset)..(end + data_section_offset)
     }
 
     fn page_size_bytes(&self, page_size: usize) -> usize {
@@ -230,11 +317,11 @@ impl PageNumber {
 
 struct TransactionAccessor<'a> {
     mem: &'a [u8],
-    _guard: MutexGuard<'a, MetapageGuard>,
+    _guard: &'a MutexGuard<'a, MetadataGuard>,
 }
 
 impl<'a> TransactionAccessor<'a> {
-    fn new(mem: &'a [u8], guard: MutexGuard<'a, MetapageGuard>) -> Self {
+    fn new(mem: &'a [u8], guard: &'a MutexGuard<'a, MetadataGuard>) -> Self {
         TransactionAccessor { mem, _guard: guard }
     }
 
@@ -244,7 +331,7 @@ impl<'a> TransactionAccessor<'a> {
                 .try_into()
                 .unwrap(),
         );
-        if num.page_index == 0 {
+        if num == PageNumber::null() {
             None
         } else {
             Some(num)
@@ -259,33 +346,23 @@ impl<'a> TransactionAccessor<'a> {
         )
     }
 
-    fn get_allocator_data(&self) -> (usize, usize) {
-        let start = u64::from_be_bytes(
-            self.mem[ALLOCATOR_STATE_PTR_OFFSET..(ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>())]
+    fn get_data_section_layout(&self) -> DataSectionLayout {
+        DataSectionLayout::from_be_bytes(
+            self.mem
+                [DATA_LAYOUT_OFFSET..(DATA_LAYOUT_OFFSET + DataSectionLayout::serialized_size())]
                 .try_into()
                 .unwrap(),
-        );
-        let len = u64::from_be_bytes(
-            self.mem[ALLOCATOR_STATE_LEN_OFFSET..(ALLOCATOR_STATE_LEN_OFFSET + size_of::<u64>())]
-                .try_into()
-                .unwrap(),
-        );
-        (start as usize, (start + len) as usize)
-    }
-
-    fn into_guard(self) -> MutexGuard<'a, MetapageGuard> {
-        self._guard
+        )
     }
 }
 
 struct TransactionMutator<'a> {
     mem: &'a mut [u8],
-    _guard: MutexGuard<'a, MetapageGuard>,
 }
 
 impl<'a> TransactionMutator<'a> {
-    fn new(mem: &'a mut [u8], guard: MutexGuard<'a, MetapageGuard>) -> Self {
-        TransactionMutator { mem, _guard: guard }
+    fn new(mem: &'a mut [u8]) -> Self {
+        TransactionMutator { mem }
     }
 
     fn set_root_page(&mut self, page_number: PageNumber) {
@@ -298,11 +375,9 @@ impl<'a> TransactionMutator<'a> {
             .copy_from_slice(&transaction_id.to_be_bytes());
     }
 
-    fn set_allocator_data(&mut self, start: usize, len: usize) {
-        self.mem[ALLOCATOR_STATE_PTR_OFFSET..(ALLOCATOR_STATE_PTR_OFFSET + size_of::<u64>())]
-            .copy_from_slice(&(start as u64).to_be_bytes());
-        self.mem[ALLOCATOR_STATE_LEN_OFFSET..(ALLOCATOR_STATE_LEN_OFFSET + size_of::<u64>())]
-            .copy_from_slice(&(len as u64).to_be_bytes());
+    fn set_data_section_layout(&mut self, layout: &DataSectionLayout) {
+        self.mem[DATA_LAYOUT_OFFSET..(DATA_LAYOUT_OFFSET + DataSectionLayout::serialized_size())]
+            .copy_from_slice(&layout.to_be_bytes());
     }
 }
 
@@ -369,6 +444,250 @@ impl<'a> Drop for PageMut<'a> {
     }
 }
 
+// Regions are laid out starting with the pages, and ending with the allocator state
+#[derive(Clone)]
+struct RegionLayout {
+    num_pages: usize,
+    // Range of the allocator state, relative to the start of the region
+    allocator_state: Range<usize>,
+}
+
+impl RegionLayout {
+    fn calculate_usable_order(space: usize, page_size: usize) -> Option<usize> {
+        if space < page_size {
+            return None;
+        }
+        let total_pages = space / page_size;
+        let max_order = (64 - total_pages.leading_zeros() - 1) as usize;
+        Some(min(MAX_PAGE_ORDER, max_order))
+    }
+
+    fn calculate_usable_pages(space: usize, page_size: usize, max_order: usize) -> usize {
+        let mut upper_bound = space / page_size;
+        let mut lower_bound =
+            (space - BuddyAllocator::required_space(upper_bound, max_order)) / page_size;
+        // Make sure we don't loop forever. This might not converge if it oscillates
+        let mut i = 0;
+        while upper_bound != lower_bound && i < 1000 {
+            upper_bound = lower_bound;
+            lower_bound =
+                (space - BuddyAllocator::required_space(upper_bound, max_order)) / page_size;
+            i += 1;
+        }
+
+        lower_bound
+    }
+
+    fn calculate(available_space: usize, page_size: usize) -> Option<RegionLayout> {
+        let max_order =
+            Self::calculate_usable_order(min(available_space, MAX_USABLE_REGION_SPACE), page_size)?;
+        let max_region_size = MAX_USABLE_REGION_SPACE
+            + BuddyAllocator::required_space(MAX_USABLE_REGION_SPACE / page_size, max_order);
+        let used_space = min(max_region_size, available_space);
+
+        let num_pages = Self::calculate_usable_pages(used_space, page_size, max_order);
+        if num_pages < MIN_USABLE_PAGES {
+            return None;
+        }
+        let allocator_start = num_pages * page_size;
+        let allocator_end = allocator_start + BuddyAllocator::required_space(num_pages, max_order);
+
+        Some(RegionLayout {
+            num_pages,
+            allocator_state: allocator_start..allocator_end,
+        })
+    }
+
+    fn full_region_layout(page_size: usize) -> RegionLayout {
+        let max_order = Self::calculate_usable_order(MAX_USABLE_REGION_SPACE, page_size).unwrap();
+        let max_region_size = MAX_USABLE_REGION_SPACE
+            + BuddyAllocator::required_space(MAX_USABLE_REGION_SPACE / page_size, max_order);
+
+        Self::calculate(max_region_size, page_size).unwrap()
+    }
+
+    fn len(&self) -> usize {
+        self.allocator_state.end
+    }
+
+    fn max_order(&self) -> usize {
+        Self::calculate_usable_order(
+            self.allocator_state.start,
+            self.allocator_state.start / self.num_pages,
+        )
+        .unwrap()
+    }
+
+    const fn serialized_size() -> usize {
+        size_of::<u32>() + 2 * size_of::<u64>()
+    }
+
+    fn to_be_bytes(&self) -> [u8; Self::serialized_size()] {
+        let mut result = [0; Self::serialized_size()];
+        result[..size_of::<u32>()].copy_from_slice(&(self.num_pages as u32).to_be_bytes());
+        result[size_of::<u32>()..size_of::<u32>() + size_of::<u64>()]
+            .copy_from_slice(&(self.allocator_state.start as u64).to_be_bytes());
+        result[size_of::<u32>() + size_of::<u64>()..]
+            .copy_from_slice(&(self.allocator_state.end as u64).to_be_bytes());
+
+        result
+    }
+
+    fn from_be_bytes(data: [u8; Self::serialized_size()]) -> Self {
+        let num_pages = u32::from_be_bytes(data[..size_of::<u32>()].try_into().unwrap()) as usize;
+        let allocator_start = u64::from_be_bytes(
+            data[size_of::<u32>()..size_of::<u32>() + size_of::<u64>()]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let allocator_end = u64::from_be_bytes(
+            data[size_of::<u32>() + size_of::<u64>()..]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+
+        Self {
+            num_pages,
+            allocator_state: allocator_start..allocator_end,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DataSectionLayout {
+    db_header_bytes: usize,
+    full_region_layout: RegionLayout,
+    num_full_regions: usize,
+    trailing_partial_region: Option<RegionLayout>,
+}
+
+impl DataSectionLayout {
+    fn calculate(total_db_space: usize, page_size: usize) -> Result<Self> {
+        let full_region_layout = RegionLayout::full_region_layout(page_size);
+        let min_header_size = DB_HEADER_SIZE + U64GroupedBitMapMut::required_bytes(1);
+        if total_db_space - min_header_size <= full_region_layout.len() {
+            // Single region layout
+            let region_layout =
+                RegionLayout::calculate(total_db_space - min_header_size, page_size)
+                    .ok_or(Error::OutOfSpace)?;
+            Ok(DataSectionLayout {
+                db_header_bytes: min_header_size,
+                full_region_layout,
+                num_full_regions: 0,
+                trailing_partial_region: Some(region_layout),
+            })
+        } else {
+            // Multi region layout
+            let max_regions = (total_db_space - min_header_size + full_region_layout.len() - 1)
+                / full_region_layout.len();
+            let db_header_bytes = DB_HEADER_SIZE + U64GroupedBitMapMut::required_bytes(max_regions);
+            let num_full_regions = (total_db_space - db_header_bytes) / full_region_layout.len();
+            assert_ne!(num_full_regions, 0);
+            let remaining_space =
+                total_db_space - db_header_bytes - num_full_regions * full_region_layout.len();
+            Ok(DataSectionLayout {
+                db_header_bytes,
+                full_region_layout,
+                num_full_regions,
+                trailing_partial_region: RegionLayout::calculate(remaining_space, page_size),
+            })
+        }
+    }
+
+    fn num_regions(&self) -> usize {
+        if self.trailing_partial_region.is_some() {
+            self.num_full_regions + 1
+        } else {
+            self.num_full_regions
+        }
+    }
+
+    // TODO: move this to a HeaderLayout structure
+    fn region_allocator_address_range(&self) -> Range<usize> {
+        DB_HEADER_SIZE..self.db_header_bytes
+    }
+
+    fn region_base_address(&self, region: usize) -> usize {
+        assert!(region < self.num_regions());
+
+        self.db_header_bytes + region * self.full_region_layout.len()
+    }
+
+    fn region_layout(&self, region: usize) -> RegionLayout {
+        assert!(region < self.num_regions());
+        if region == self.num_full_regions {
+            self.trailing_partial_region.as_ref().unwrap().clone()
+        } else {
+            self.full_region_layout.clone()
+        }
+    }
+
+    const fn serialized_size() -> usize {
+        2 * size_of::<u64>() + 2 * RegionLayout::serialized_size() + 1
+    }
+
+    // TODO: use le instead of be for everything? ARM is le by default, and x86 is always le
+    fn to_be_bytes(&self) -> [u8; Self::serialized_size()] {
+        let mut result = [0; Self::serialized_size()];
+        let mut offset = 0;
+        result[offset..offset + size_of::<u64>()]
+            .copy_from_slice(&(self.db_header_bytes as u64).to_be_bytes());
+        offset += size_of::<u64>();
+        result[offset..offset + size_of::<u64>()]
+            .copy_from_slice(&(self.num_full_regions as u64).to_be_bytes());
+        offset += size_of::<u64>();
+        result[offset..offset + RegionLayout::serialized_size()]
+            .copy_from_slice(&self.full_region_layout.to_be_bytes());
+        offset += RegionLayout::serialized_size();
+        if let Some(trailing) = self.trailing_partial_region.as_ref() {
+            result[offset..offset + RegionLayout::serialized_size()]
+                .copy_from_slice(&trailing.to_be_bytes());
+            offset += RegionLayout::serialized_size();
+            result[offset] = 1;
+        } else {
+            result[offset..offset + RegionLayout::serialized_size()].fill(0);
+            offset += RegionLayout::serialized_size();
+            result[offset] = 0;
+        }
+
+        result
+    }
+
+    fn from_be_bytes(data: [u8; Self::serialized_size()]) -> Self {
+        let mut offset = 0;
+        let db_header_bytes =
+            u64::from_be_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
+                as usize;
+        offset += size_of::<u64>();
+        let num_full_regions =
+            u64::from_be_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
+                as usize;
+        offset += size_of::<u64>();
+        let full_region_layout = RegionLayout::from_be_bytes(
+            data[offset..offset + RegionLayout::serialized_size()]
+                .try_into()
+                .unwrap(),
+        );
+        offset += RegionLayout::serialized_size();
+        let trailing_partial_region = if data[Self::serialized_size() - 1] == 0 {
+            None
+        } else {
+            Some(RegionLayout::from_be_bytes(
+                data[offset..offset + RegionLayout::serialized_size()]
+                    .try_into()
+                    .unwrap(),
+            ))
+        };
+
+        Self {
+            db_header_bytes,
+            full_region_layout,
+            num_full_regions,
+            trailing_partial_region,
+        }
+    }
+}
+
 enum AllocationOp {
     Allocate(PageNumber),
     Free(PageNumber),
@@ -379,48 +698,25 @@ pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
     allocated_since_commit: Mutex<HashSet<PageNumber>>,
     log_since_commit: Mutex<Vec<AllocationOp>>,
-    // Metapage guard lock should be held when using this to modify the page allocator state
+    // Metadata guard lock should be held when using this to modify the page allocator state
     // May be None, if the allocator state was corrupted when the file was opened
-    page_allocator: Option<BuddyAllocator>,
+    regional_allocators: Option<Vec<BuddyAllocator>>,
     mmap: Mmap,
-    // We use unsafe to access the metapage (page 0), and so guard it with this mutex
-    // It would be nice if this was a RefCell<&[u8]> on the metapage. However, that would be
+    // We use unsafe to access the metadata, and so guard it with this mutex
+    // It would be nice if this was a RefCell<&[u8]> on the metadata. However, that would be
     // self-referential, since we also hold the mmap object
-    metapage_guard: Mutex<MetapageGuard>,
+    metadata_guard: Mutex<MetadataGuard>,
     // The number of PageMut which are outstanding
     #[cfg(debug_assertions)]
     open_dirty_pages: Mutex<HashSet<PageNumber>>,
     // Indicates that a non-durable commit has been made, so reads should be served from the secondary meta page
     read_from_secondary: AtomicBool,
     page_size: usize,
+    region_size: usize,
+    header_size: usize,
 }
 
 impl TransactionalMemory {
-    fn calculate_usable_order(mmap_size: usize, page_size: usize) -> usize {
-        let total_pages = mmap_size / page_size;
-        // Require at least 10 of the highest order pages
-        let largest_order_in_pages = total_pages / MIN_USABLE_PAGES;
-        assert!(largest_order_in_pages > 0);
-        let max_order = (64 - largest_order_in_pages.leading_zeros() - 1) as usize;
-        min(MAX_PAGE_ORDER, max_order)
-    }
-
-    fn calculate_usable_pages(mmap_size: usize, page_size: usize, max_order: usize) -> usize {
-        let mut guess = mmap_size / page_size;
-        let mut new_guess =
-            (mmap_size - 2 * BuddyAllocator::required_space(guess, max_order)) / page_size;
-        // Make sure we don't loop forever. This might not converge if it oscillates
-        let mut i = 0;
-        while guess != new_guess && i < 1000 {
-            guess = new_guess;
-            new_guess =
-                (mmap_size - 2 * BuddyAllocator::required_space(guess, max_order)) / page_size;
-            i += 1;
-        }
-
-        guess
-    }
-
     pub(crate) fn new(file: File, requested_page_size: Option<usize>) -> Result<Self> {
         let mmap = Mmap::new(file)?;
         // Safety: we have exclusive access to the mmap
@@ -429,32 +725,38 @@ impl TransactionalMemory {
             return Err(Error::OutOfSpace);
         }
 
-        let mutex = Mutex::new(MetapageGuard {});
+        let mutex = Mutex::new(MetadataGuard {});
         if all_memory[0..MAGICNUMBER.len()] != MAGICNUMBER {
             let page_size = requested_page_size.unwrap_or_else(get_page_size);
             // Ensure that the database metadata fits into the first page
-            assert!(page_size >= DB_METAPAGE_SIZE);
+            assert!(page_size >= DB_HEADER_SIZE);
             assert!(page_size.is_power_of_two());
 
-            // calculate_usable_order() assumes that there are at least MIN_USABLE_PAGES total pages
-            if mmap.len() / page_size < MIN_USABLE_PAGES {
-                return Err(Error::OutOfSpace);
+            let layout = DataSectionLayout::calculate(mmap.len(), page_size)?;
+
+            // Explicitly zero the header
+            all_memory[0..layout.db_header_bytes].fill(0);
+
+            // Initialize the region allocator
+            let num_regions = layout.num_regions();
+            let mut region_allocator =
+                U64GroupedBitMapMut::new(&mut all_memory[layout.region_allocator_address_range()]);
+            for i in num_regions..region_allocator.len() {
+                region_allocator.set(i);
             }
 
-            let max_order = Self::calculate_usable_order(mmap.len(), page_size);
-            let usable_pages = Self::calculate_usable_pages(mmap.len(), page_size, max_order);
-
-            if usable_pages < MIN_USABLE_PAGES {
-                return Err(Error::OutOfSpace);
+            // Initialize all the regional allocators
+            for i in 0..num_regions {
+                let base = layout.region_base_address(i);
+                let region_layout = layout.region_layout(i);
+                let relative = &region_layout.allocator_state;
+                let absolute = (base + relative.start)..(base + relative.end);
+                BuddyAllocator::init_new(
+                    &mut all_memory[absolute],
+                    region_layout.num_pages,
+                    region_layout.max_order(),
+                );
             }
-
-            // Explicitly zero the memory
-            all_memory[0..DB_METAPAGE_SIZE].copy_from_slice(&[0; DB_METAPAGE_SIZE]);
-            for i in &mut all_memory[(usable_pages * page_size)..] {
-                *i = 0
-            }
-
-            let allocator_state_size = BuddyAllocator::required_space(usable_pages, max_order);
 
             // Store the page & db size. These are immutable
             all_memory[PAGE_SIZE_OFFSET] = page_size.trailing_zeros() as u8;
@@ -464,42 +766,18 @@ impl TransactionalMemory {
 
             // Set to 1, so that we can mutate the first transaction state
             all_memory[GOD_BYTE_OFFSET] = PRIMARY_BIT;
-            let start = mmap.len() - 2 * allocator_state_size;
-            let mut mutator =
-                TransactionMutator::new(get_secondary(all_memory), mutex.lock().unwrap());
-            mutator.set_root_page(PageNumber::new(0, 0));
+            let mut mutator = TransactionMutator::new(get_secondary(all_memory));
+            mutator.set_root_page(PageNumber::null());
             mutator.set_last_committed_transaction_id(0);
-            mutator.set_allocator_data(start, allocator_state_size);
+            mutator.set_data_section_layout(&layout);
             drop(mutator);
-            let allocator = BuddyAllocator::init_new(
-                &mut all_memory[start..(start + allocator_state_size)],
-                usable_pages,
-                max_order,
-            );
-            allocator.record_alloc(
-                &mut all_memory[start..(start + allocator_state_size)],
-                DB_METADATA_PAGE,
-                0,
-            );
             // Make the state we just wrote the primary
             all_memory[GOD_BYTE_OFFSET] &= !PRIMARY_BIT;
 
             // Initialize the secondary allocator state
-            let start = mmap.len() - allocator_state_size;
-            let mut mutator =
-                TransactionMutator::new(get_secondary(all_memory), mutex.lock().unwrap());
-            mutator.set_allocator_data(start, allocator_state_size);
+            let mut mutator = TransactionMutator::new(get_secondary(all_memory));
+            mutator.set_data_section_layout(&layout);
             drop(mutator);
-            let allocator = BuddyAllocator::init_new(
-                &mut all_memory[start..(start + allocator_state_size)],
-                usable_pages,
-                max_order,
-            );
-            allocator.record_alloc(
-                &mut all_memory[start..(start + allocator_state_size)],
-                DB_METADATA_PAGE,
-                0,
-            );
 
             all_memory[VERSION_OFFSET] = 1;
 
@@ -539,37 +817,52 @@ impl TransactionalMemory {
             mmap.len()
         );
 
-        let allocator_dirty =
-            all_memory[GOD_BYTE_OFFSET] & (ALLOCATOR_STATE_0_DIRTY | ALLOCATOR_STATE_1_DIRTY) != 0;
+        let allocator_dirty = all_memory[GOD_BYTE_OFFSET] & (ALLOCATOR_STATE_DIRTY) != 0;
 
-        let page_allocator = if allocator_dirty {
+        // Ensure that all_memory reference does not exist, because it must not for the safety guarantees
+        // of MetadataAccessor to hold
+        #[allow(clippy::drop_ref)]
+        drop(all_memory);
+        // Safety: we just dropped our reference to all the mmap memory
+        let metadata = unsafe { MetadataAccessor::new(&mmap, mutex.lock().unwrap()) };
+        let layout = metadata.primary_slot().get_data_section_layout();
+        let region_size = layout.full_region_layout.len();
+
+        let regional_allocators = if allocator_dirty {
             None
         } else {
-            let max_order = Self::calculate_usable_order(mmap.len(), page_size);
-            let usable_pages = Self::calculate_usable_pages(mmap.len(), page_size, max_order);
-            Some(BuddyAllocator::new(usable_pages, max_order))
+            let full_regional_allocator = BuddyAllocator::new(
+                layout.full_region_layout.num_pages,
+                layout.full_region_layout.max_order(),
+            );
+            let mut allocators = vec![full_regional_allocator; layout.num_full_regions];
+            if let Some(region_layout) = layout.trailing_partial_region {
+                let trailing =
+                    BuddyAllocator::new(region_layout.num_pages, region_layout.max_order());
+                allocators.push(trailing);
+            }
+
+            Some(allocators)
         };
+        drop(metadata);
 
         Ok(TransactionalMemory {
             allocated_since_commit: Mutex::new(HashSet::new()),
             log_since_commit: Mutex::new(vec![]),
-            page_allocator,
+            regional_allocators,
             mmap,
-            metapage_guard: mutex,
+            metadata_guard: mutex,
             #[cfg(debug_assertions)]
             open_dirty_pages: Mutex::new(HashSet::new()),
             read_from_secondary: AtomicBool::new(false),
             page_size,
+            region_size,
+            header_size: layout.db_header_bytes,
         })
     }
 
     pub(crate) fn needs_repair(&self) -> Result<bool> {
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-        let allocator_dirty =
-            mmap[GOD_BYTE_OFFSET] & (ALLOCATOR_STATE_0_DIRTY | ALLOCATOR_STATE_1_DIRTY) != 0;
-        drop(guard);
-
-        Ok(allocator_dirty)
+        Ok(self.lock_metadata().get_allocator_dirty())
     }
 
     // Returns true if the repair is complete. If false, this method must be called again
@@ -577,98 +870,73 @@ impl TransactionalMemory {
         &self,
         allocated_pages: impl Iterator<Item = PageNumber>,
     ) -> Result<bool> {
-        for primary in [false, true] {
-            let (mmap, guard) = self.acquire_mutable_metapage()?;
-            if get_allocator_dirty(mmap, primary) {
-                drop(guard);
-                let (mem, guard) = self.acquire_mutable_page_allocator(primary)?;
+        let mut metadata = self.lock_metadata();
+        let layout = metadata.primary_slot().get_data_section_layout();
+        let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
 
-                let max_order = Self::calculate_usable_order(self.mmap.len(), self.page_size);
-                let usable_pages =
-                    Self::calculate_usable_pages(self.mmap.len(), self.page_size, max_order);
-                let allocator = BuddyAllocator::init_new(mem, usable_pages, max_order);
-                // TODO: make the metapage not part of the allocator. This caused a bug, and also prevents
-                // the first high order pages from ever being allocated
-                allocator.record_alloc(mem, DB_METADATA_PAGE, 0);
-                for page in allocated_pages {
-                    allocator.record_alloc(mem, page.page_index, page.page_order as usize);
-                }
-                self.mmap.flush()?;
-
-                drop(guard);
-                let (mmap, guard) = self.acquire_mutable_metapage()?;
-                let new_god_byte = set_allocator_dirty(mmap[GOD_BYTE_OFFSET], primary, false);
-                mmap[GOD_BYTE_OFFSET] = new_god_byte;
-                drop(guard);
-                self.mmap.flush()?;
-
-                return Ok(primary);
-            }
+        // Initialize the region allocator
+        let num_regions = layout.num_regions();
+        for i in num_regions..region_allocator.len() {
+            region_allocator.set(i);
         }
+        // Since the region allocator is lazily set, we can leave it all free, and it will be
+        // populated lazily when a region is discovered to be full
+
+        // Initialize all the regional allocators
+        let mut regional_allocators = vec![];
+        for i in 0..num_regions {
+            let mem = regions.get_regional_allocator_mut(i);
+            let region_layout = layout.region_layout(i);
+            regional_allocators.push(BuddyAllocator::init_new(
+                mem,
+                region_layout.num_pages,
+                region_layout.max_order(),
+            ));
+        }
+
+        for page_number in allocated_pages {
+            let region = page_number.region as usize;
+            let mem = regions.get_regional_allocator_mut(region);
+            regional_allocators[region].record_alloc(
+                mem,
+                page_number.page_index as u64,
+                page_number.page_order as usize,
+            );
+        }
+        self.mmap.flush()?;
+
+        metadata.set_allocator_dirty(false);
+        self.mmap.flush()?;
+        // Retain the metadata lock until flush is done
+        drop(metadata);
 
         Ok(true)
     }
 
+    // TODO: remove this method
     pub(crate) fn finalize_repair_allocator(&mut self) -> Result {
         assert!(!self.needs_repair()?);
-        let max_order = Self::calculate_usable_order(self.mmap.len(), self.page_size);
-        let usable_pages = Self::calculate_usable_pages(self.mmap.len(), self.page_size, max_order);
-        let allocator = BuddyAllocator::new(usable_pages, max_order);
-        self.page_allocator = Some(allocator);
+        let metadata = self.lock_metadata();
+        let layout = metadata.primary_slot().get_data_section_layout();
+        let full_regional_allocator = BuddyAllocator::new(
+            layout.full_region_layout.num_pages,
+            layout.full_region_layout.max_order(),
+        );
+        let mut allocators = vec![full_regional_allocator; layout.num_full_regions];
+        if let Some(region_layout) = layout.trailing_partial_region {
+            let trailing = BuddyAllocator::new(region_layout.num_pages, region_layout.max_order());
+            allocators.push(trailing);
+        }
+        drop(metadata);
+
+        self.regional_allocators = Some(allocators);
 
         Ok(())
     }
 
-    fn acquire_mutable_metapage(&self) -> Result<(&mut [u8], MutexGuard<MetapageGuard>)> {
-        let guard = self.metapage_guard.lock().unwrap();
-        // Safety: we acquire the metapage lock and only access the metapage
-        let mem = unsafe { self.mmap.get_memory_mut(0..DB_METAPAGE_SIZE) };
-
-        Ok((mem, guard))
-    }
-
-    fn acquire_page_allocator(&self, primary: bool) -> Result<(&[u8], MutexGuard<MetapageGuard>)> {
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-
-        let accessor = if primary {
-            TransactionAccessor::new(get_primary_mut(mmap), guard)
-        } else {
-            TransactionAccessor::new(get_secondary(mmap), guard)
-        };
-        let (start, end) = accessor.get_allocator_data();
-        assert!(end <= self.mmap.len());
-        // Safety: we have the metapage lock and only access the metapage
-        // (page allocator state is logically part of the metapage)
-        let mem = unsafe { self.mmap.get_memory(start..end) };
-
-        Ok((mem, accessor.into_guard()))
-    }
-
-    fn acquire_mutable_page_allocator(
-        &self,
-        primary: bool,
-    ) -> Result<(&mut [u8], MutexGuard<MetapageGuard>)> {
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-        // The allocator is a cache, and therefore can only be modified when it's marked dirty
-        if !get_allocator_dirty(mmap, primary) {
-            let god_byte = mmap[GOD_BYTE_OFFSET];
-            mmap[GOD_BYTE_OFFSET] = set_allocator_dirty(god_byte, primary, true);
-            self.mmap.flush()?
-        }
-
-        // Safety: we have the metapage lock and only access the metapage
-        // (page allocator state is logically part of the metapage)
-        let accessor = if primary {
-            TransactionAccessor::new(get_primary_mut(mmap), guard)
-        } else {
-            TransactionAccessor::new(get_secondary(mmap), guard)
-        };
-        let (start, end) = accessor.get_allocator_data();
-        assert!(end <= self.mmap.len());
-        // Safety: the allocator state is considered part of the metapage, and we hold the lock
-        let mem = unsafe { self.mmap.get_memory_mut(start..end) };
-
-        Ok((mem, accessor.into_guard()))
+    fn lock_metadata(&self) -> MetadataAccessor {
+        // Safety: Access to metadata is only allowed by the owner of the metadata_guard lock
+        unsafe { MetadataAccessor::new(&self.mmap, self.metadata_guard.lock().unwrap()) }
     }
 
     // Commit all outstanding changes and make them visible as the primary
@@ -678,12 +946,12 @@ impl TransactionalMemory {
         // to future read transactions
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
-        assert!(self.page_allocator.is_some());
+        assert!(self.regional_allocators.is_some());
 
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-        let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        mutator.set_last_committed_transaction_id(transaction_id);
-        drop(mutator);
+        let mut metadata = self.lock_metadata();
+        metadata
+            .secondary_slot_mut()
+            .set_last_committed_transaction_id(transaction_id);
 
         if eventual {
             self.mmap.eventual_flush()?;
@@ -691,41 +959,12 @@ impl TransactionalMemory {
             self.mmap.flush()?;
         }
 
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-        // Safety: we acquire the metapage lock and only access the metapage
-        let god_byte = unsafe { self.mmap.get_memory(0..DB_METAPAGE_SIZE) }[GOD_BYTE_OFFSET];
-        let mut next = match god_byte & PRIMARY_BIT {
-            0 => god_byte | PRIMARY_BIT,
-            1 => god_byte & !PRIMARY_BIT,
-            _ => unreachable!(),
-        };
-        next = set_allocator_dirty(next, true, false);
-        next = set_allocator_dirty(next, false, true);
-        mmap[GOD_BYTE_OFFSET] = next;
-        drop(guard);
+        metadata.swap_primary();
         self.mmap.flush()?;
+        drop(metadata);
 
-        let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
-        for op in self.log_since_commit.lock().unwrap().drain(..) {
-            match op {
-                AllocationOp::Allocate(page_number) => {
-                    self.page_allocator.as_ref().unwrap().record_alloc(
-                        mem,
-                        page_number.page_index,
-                        page_number.page_order as usize,
-                    );
-                }
-                AllocationOp::Free(page_number) | AllocationOp::FreeUncommitted(page_number) => {
-                    self.page_allocator.as_ref().unwrap().free(
-                        mem,
-                        page_number.page_index,
-                        page_number.page_order as usize,
-                    );
-                }
-            }
-        }
+        self.log_since_commit.lock().unwrap().clear();
         self.allocated_since_commit.lock().unwrap().clear();
-        drop(guard); // Ensure the guard lives past all the writes to the page allocator state
         self.read_from_secondary.store(false, Ordering::SeqCst);
 
         Ok(())
@@ -738,49 +977,14 @@ impl TransactionalMemory {
         // to future read transactions
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
-        assert!(self.page_allocator.is_some());
+        assert!(self.regional_allocators.is_some());
 
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-        let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        mutator.set_last_committed_transaction_id(transaction_id);
-        drop(mutator);
+        self.lock_metadata()
+            .secondary_slot_mut()
+            .set_last_committed_transaction_id(transaction_id);
 
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-        // Ensure the dirty bit is set on the primary page, so that the following updates to it are safe
-        if !get_allocator_dirty(mmap, true) {
-            let god_byte = mmap[GOD_BYTE_OFFSET];
-            mmap[GOD_BYTE_OFFSET] = set_allocator_dirty(god_byte, true, true);
-            // Must fsync this, even though we're in a non-durable commit. Because we're dirtying
-            // the primary allocator state
-            self.mmap.flush()?;
-        }
-        drop(guard);
-
-        // Modify the primary allocator state directly. This is only safe because we first set the dirty bit
-        let (mem, guard) = self.acquire_mutable_page_allocator(true)?;
-        for op in self.log_since_commit.lock().unwrap().drain(..) {
-            match op {
-                AllocationOp::Allocate(page_number) => {
-                    self.page_allocator.as_ref().unwrap().record_alloc(
-                        mem,
-                        page_number.page_index,
-                        page_number.page_order as usize,
-                    );
-                }
-                AllocationOp::FreeUncommitted(page_number) => {
-                    self.page_allocator.as_ref().unwrap().free(
-                        mem,
-                        page_number.page_index,
-                        page_number.page_order as usize,
-                    );
-                }
-                AllocationOp::Free(_) => {
-                    unreachable!("Committed pages can't be freed during non-durable commit")
-                }
-            }
-        }
+        self.log_since_commit.lock().unwrap().clear();
         self.allocated_since_commit.lock().unwrap().clear();
-        drop(guard); // Ensure the guard lives past all the writes to the page allocator state
         self.read_from_secondary.store(true, Ordering::SeqCst);
 
         Ok(())
@@ -789,28 +993,33 @@ impl TransactionalMemory {
     pub(crate) fn rollback_uncommited_writes(&self) -> Result {
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
-        let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
+        let mut metadata = self.lock_metadata();
+        let secondary_layout = metadata.secondary_slot().get_data_section_layout();
+        let (mut region_allocator, mut regions) = metadata.allocators_mut(&secondary_layout)?;
         for op in self.log_since_commit.lock().unwrap().drain(..).rev() {
             match op {
                 AllocationOp::Allocate(page_number) => {
-                    self.page_allocator.as_ref().unwrap().free(
+                    let region = page_number.region as usize;
+                    region_allocator.clear(region);
+                    let mem = regions.get_regional_allocator_mut(region);
+                    self.regional_allocators.as_ref().unwrap()[region].free(
                         mem,
-                        page_number.page_index,
+                        page_number.page_index as u64,
                         page_number.page_order as usize,
                     );
                 }
                 AllocationOp::Free(page_number) | AllocationOp::FreeUncommitted(page_number) => {
-                    self.page_allocator.as_ref().unwrap().record_alloc(
+                    let region = page_number.region as usize;
+                    let mem = regions.get_regional_allocator_mut(region);
+                    self.regional_allocators.as_ref().unwrap()[region].record_alloc(
                         mem,
-                        page_number.page_index,
+                        page_number.page_index as u64,
                         page_number.page_order as usize,
                     );
                 }
             }
         }
         self.allocated_since_commit.lock().unwrap().clear();
-        // Drop guard only after page_allocator calls are completed
-        drop(guard);
 
         Ok(())
     }
@@ -826,8 +1035,11 @@ impl TransactionalMemory {
 
         // Safety: we asserted that no mutable references are open
         let mem = unsafe {
-            self.mmap
-                .get_memory(page_number.address_range(self.page_size))
+            self.mmap.get_memory(page_number.address_range(
+                self.header_size,
+                self.region_size,
+                self.page_size,
+            ))
         };
 
         PageImpl { mem, page_number }
@@ -838,9 +1050,11 @@ impl TransactionalMemory {
         #[cfg(debug_assertions)]
         self.open_dirty_pages.lock().unwrap().insert(page_number);
 
-        let mem = self
-            .mmap
-            .get_memory_mut(page_number.address_range(self.page_size));
+        let mem = self.mmap.get_memory_mut(page_number.address_range(
+            self.header_size,
+            self.region_size,
+            self.page_size,
+        ));
 
         PageMut {
             mem,
@@ -851,46 +1065,48 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn get_primary_root_page(&self) -> Option<PageNumber> {
-        let guard = self.metapage_guard.lock().unwrap();
-        let mem = if self.read_from_secondary.load(Ordering::SeqCst) {
-            // Safety: we have the metapage lock and only access the metapage
-            unsafe { get_secondary_const(self.mmap.get_memory(0..DB_METAPAGE_SIZE)) }
+        let metadata = self.lock_metadata();
+        if self.read_from_secondary.load(Ordering::SeqCst) {
+            metadata.secondary_slot().get_root_page()
         } else {
-            // Safety: we have the metapage lock and only access the metapage
-            unsafe { get_primary(self.mmap.get_memory(0..DB_METAPAGE_SIZE)) }
-        };
-        TransactionAccessor::new(mem, guard).get_root_page()
+            metadata.primary_slot().get_root_page()
+        }
     }
 
     pub(crate) fn get_last_committed_transaction_id(&self) -> Result<u64> {
-        let guard = self.metapage_guard.lock().unwrap();
-        let mem = if self.read_from_secondary.load(Ordering::SeqCst) {
-            // Safety: we have the metapage lock and only access the metapage
-            unsafe { get_secondary_const(self.mmap.get_memory(0..DB_METAPAGE_SIZE)) }
+        let metadata = self.lock_metadata();
+        if self.read_from_secondary.load(Ordering::SeqCst) {
+            Ok(metadata
+                .secondary_slot()
+                .get_last_committed_transaction_id())
         } else {
-            // Safety: we have the metapage lock and only access the metapage
-            unsafe { get_primary(self.mmap.get_memory(0..DB_METAPAGE_SIZE)) }
-        };
-
-        Ok(TransactionAccessor::new(mem, guard).get_last_committed_transaction_id())
+            Ok(metadata.primary_slot().get_last_committed_transaction_id())
+        }
     }
 
     pub(crate) fn set_secondary_root_page(&self, root_page: PageNumber) -> Result {
-        let (mmap, guard) = self.acquire_mutable_metapage()?;
-        let mut mutator = TransactionMutator::new(get_secondary(mmap), guard);
-        mutator.set_root_page(root_page);
+        self.lock_metadata()
+            .secondary_slot_mut()
+            .set_root_page(root_page);
 
         Ok(())
     }
 
     // Safety: the caller must ensure that no references to the memory in `page` exist
     pub(crate) unsafe fn free(&self, page: PageNumber) -> Result {
-        let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
-        self.page_allocator
-            .as_ref()
-            .unwrap()
-            .free(mem, page.page_index, page.page_order as usize);
-        drop(guard);
+        let mut metadata = self.lock_metadata();
+        let layout = metadata.secondary_slot().get_data_section_layout();
+        let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
+        let region = page.region as usize;
+        // Free in the regional allocator
+        let mem = regions.get_regional_allocator_mut(region);
+        self.regional_allocators.as_ref().unwrap()[region].free(
+            mem,
+            page.page_index as u64,
+            page.page_order as usize,
+        );
+        // Ensure that the region is marked as having free space
+        region_allocator.clear(region);
         self.log_since_commit
             .lock()
             .unwrap()
@@ -903,17 +1119,23 @@ impl TransactionalMemory {
     // Safety: the caller must ensure that no references to the memory in `page` exist
     pub(crate) unsafe fn free_if_uncommitted(&self, page: PageNumber) -> Result<bool> {
         if self.allocated_since_commit.lock().unwrap().remove(&page) {
-            let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
-            self.page_allocator.as_ref().unwrap().free(
+            let mut metadata = self.lock_metadata();
+            let layout = metadata.secondary_slot().get_data_section_layout();
+            let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
+            // Free in the regional allocator
+            let mem = regions.get_regional_allocator_mut(page.region as usize);
+            self.regional_allocators.as_ref().unwrap()[page.region as usize].free(
                 mem,
-                page.page_index,
+                page.page_index as u64,
                 page.page_order as usize,
             );
+            // Ensure that the region is marked as having free space
+            region_allocator.clear(page.region as usize);
+
             self.log_since_commit
                 .lock()
                 .unwrap()
                 .push(AllocationOp::FreeUncommitted(page));
-            drop(guard);
 
             Ok(true)
         } else {
@@ -934,16 +1156,43 @@ impl TransactionalMemory {
         let required_pages = (allocation_size + self.page_size - 1) / self.page_size;
         let required_order = ceil_log2(required_pages);
 
-        let (mem, guard) = self.acquire_mutable_page_allocator(false)?;
+        let mut metadata = self.lock_metadata();
+        let layout = metadata.primary_slot().get_data_section_layout();
+        let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
+        let mut allocated_page = None;
+        let mut allocated_region = 0;
+        for region in 0..region_allocator.len() {
+            allocated_region = region;
+            if !region_allocator.get(region) {
+                let mem = regions.get_regional_allocator_mut(region);
+                match self.regional_allocators.as_ref().unwrap()[region].alloc(mem, required_order)
+                {
+                    Ok(page) => {
+                        allocated_page = Some(page);
+                        break;
+                    }
+                    Err(err) => {
+                        if matches!(err, Error::OutOfSpace) {
+                            // Mark the region, if it's full
+                            if required_order == 0 {
+                                region_allocator.set(region);
+                            }
+                        } else {
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+        }
+
+        if allocated_page.is_none() {
+            return Err(Error::OutOfSpace);
+        }
         let page_number = PageNumber::new(
-            self.page_allocator
-                .as_ref()
-                .unwrap()
-                .alloc(mem, required_order)?,
+            allocated_region as u32,
+            allocated_page.unwrap() as u32,
             required_order as u8,
         );
-        // Drop guard only after page_allocator.alloc() is completed
-        drop(guard);
 
         self.allocated_since_commit
             .lock()
@@ -956,7 +1205,8 @@ impl TransactionalMemory {
         #[cfg(debug_assertions)]
         self.open_dirty_pages.lock().unwrap().insert(page_number);
 
-        let address_range = page_number.address_range(self.page_size);
+        let address_range =
+            page_number.address_range(self.header_size, self.region_size, self.page_size);
         assert!(address_range.end <= self.mmap.len());
         // Safety:
         // The address range we're returning was just allocated, so no other references exist
@@ -964,8 +1214,6 @@ impl TransactionalMemory {
         // Zero the memory
         mem.copy_from_slice(&vec![0u8; page_number.page_size_bytes(self.page_size)]);
         debug_assert!(mem.len() >= allocation_size);
-
-        assert_ne!(page_number.page_index, 0);
 
         Ok(PageMut {
             mem,
@@ -976,10 +1224,13 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn count_free_pages(&self) -> Result<usize> {
-        let (mem, guard) = self.acquire_page_allocator(false).unwrap();
-        let count = self.page_allocator.as_ref().unwrap().count_free_pages(mem);
-        // Drop guard only after page_allocator.count_free() is completed
-        drop(guard);
+        let mut metadata = self.lock_metadata();
+        let layout = metadata.primary_slot().get_data_section_layout();
+        let mut count = 0;
+        for i in 0..layout.num_regions() {
+            let mem = metadata.get_regional_allocator(i, &layout);
+            count += self.regional_allocators.as_ref().unwrap()[i].count_free_pages(mem);
+        }
 
         Ok(count)
     }
@@ -1005,13 +1256,9 @@ impl Drop for TransactionalMemory {
                 );
             }
         }
-        if self.mmap.flush().is_ok() && self.page_allocator.is_some() {
-            if let Ok((metamem, guard)) = self.acquire_mutable_metapage() {
-                metamem[GOD_BYTE_OFFSET] =
-                    set_allocator_dirty(metamem[GOD_BYTE_OFFSET], false, false);
-                drop(guard);
-                let _ = self.mmap.flush();
-            }
+        if self.mmap.flush().is_ok() && self.regional_allocators.is_some() {
+            self.lock_metadata().set_allocator_dirty(false);
+            let _ = self.mmap.flush();
         }
     }
 }
@@ -1020,7 +1267,7 @@ impl Drop for TransactionalMemory {
 mod test {
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::page_manager::{
-        set_allocator_dirty, DB_SIZE_OFFSET, GOD_BYTE_OFFSET, MAGICNUMBER, MIN_USABLE_PAGES,
+        ALLOCATOR_STATE_DIRTY, DB_SIZE_OFFSET, GOD_BYTE_OFFSET, MAGICNUMBER, MIN_USABLE_PAGES,
         UPGRADE_IN_PROGRESS, UPGRADE_LOG_LEN_OFFSET, UPGRADE_LOG_OFFSET,
     };
     use crate::tree_store::page_store::utils::get_page_size;
@@ -1091,10 +1338,7 @@ mod test {
             .unwrap();
 
         let mut mmap = unsafe { MmapMut::map_mut(&file) }.unwrap();
-        let mut god_byte = mmap[GOD_BYTE_OFFSET];
-        god_byte = set_allocator_dirty(god_byte, true, true);
-        god_byte = set_allocator_dirty(god_byte, false, true);
-        mmap[GOD_BYTE_OFFSET] = god_byte;
+        mmap[GOD_BYTE_OFFSET] |= ALLOCATOR_STATE_DIRTY;
 
         mmap.flush().unwrap();
         drop(mmap);

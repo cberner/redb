@@ -22,6 +22,11 @@ pub(crate) struct U64GroupedBitMapMut<'a> {
 }
 
 impl<'a> U64GroupedBitMapMut<'a> {
+    pub(crate) fn required_bytes(elements: usize) -> usize {
+        let words = (elements + 63) / 64;
+        words * size_of::<u64>()
+    }
+
     pub(crate) fn new(data: &'a mut [u8]) -> Self {
         assert_eq!(data.len() % 8, 0);
         Self { data }
@@ -41,7 +46,7 @@ impl<'a> U64GroupedBitMapMut<'a> {
         group == u64::MAX
     }
 
-    pub(crate) fn get(&mut self, bit: usize) -> bool {
+    pub(crate) fn get(&self, bit: usize) -> bool {
         let (index, bit_index) = self.data_index_of(bit);
         let group = u64::from_be_bytes(self.data[index..(index + 8)].try_into().unwrap());
         group & Self::select_mask(bit_index) != 0
