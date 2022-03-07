@@ -1,8 +1,7 @@
 use crate::multimap_table::MultimapTable;
 use crate::table::{ReadOnlyTable, Table};
 use crate::tree_store::{
-    expand_db_size, get_db_size, DatabaseStats, PageNumber, Storage, TableType, TransactionId,
-    FREED_TABLE,
+    get_db_size, DatabaseStats, PageNumber, Storage, TableType, TransactionId, FREED_TABLE,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Result;
@@ -125,17 +124,6 @@ impl Database {
 
     pub fn builder() -> DatabaseBuilder {
         DatabaseBuilder::new()
-    }
-
-    /// # Safety
-    ///
-    /// The file referenced by `path` must not be concurrently modified by any other process
-    pub unsafe fn resize(path: impl AsRef<Path>, new_size: usize) -> Result {
-        expand_db_size(path.as_ref(), new_size)?;
-        // Open the database to rebuild the allocator state
-        Self::create(path, new_size)?;
-
-        Ok(())
     }
 
     pub fn begin_write(&self) -> Result<WriteTransaction> {
