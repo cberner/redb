@@ -478,11 +478,15 @@ impl RegionLayout {
         lower_bound
     }
 
-    fn calculate(available_space: usize, page_size: usize) -> Option<RegionLayout> {
+    fn calculate(
+        available_space: usize,
+        desired_usable_bytes: usize,
+        page_size: usize,
+    ) -> Option<RegionLayout> {
         let max_order =
-            Self::calculate_usable_order(min(available_space, MAX_USABLE_REGION_SPACE), page_size)?;
-        let max_region_size = MAX_USABLE_REGION_SPACE
-            + BuddyAllocator::required_space(MAX_USABLE_REGION_SPACE / page_size, max_order);
+            Self::calculate_usable_order(min(available_space, desired_usable_bytes), page_size)?;
+        let max_region_size = desired_usable_bytes
+            + BuddyAllocator::required_space(desired_usable_bytes / page_size, max_order);
         let used_space = min(max_region_size, available_space);
 
         let num_pages = Self::calculate_usable_pages(used_space, page_size, max_order);
@@ -503,7 +507,7 @@ impl RegionLayout {
         let max_region_size = MAX_USABLE_REGION_SPACE
             + BuddyAllocator::required_space(MAX_USABLE_REGION_SPACE / page_size, max_order);
 
-        Self::calculate(max_region_size, page_size).unwrap()
+        Self::calculate(max_region_size, MAX_USABLE_REGION_SPACE, page_size).unwrap()
     }
 
     fn len(&self) -> usize {
@@ -562,14 +566,22 @@ struct DataSectionLayout {
 }
 
 impl DataSectionLayout {
-    fn calculate(total_db_space: usize, page_size: usize) -> Result<Self> {
+    fn calculate(
+        db_capacity: usize,
+        desired_usable_bytes: usize,
+        page_size: usize,
+    ) -> Result<Self> {
+        assert!(desired_usable_bytes <= db_capacity);
         let full_region_layout = RegionLayout::full_region_layout(page_size);
         let min_header_size = DB_HEADER_SIZE + U64GroupedBitMapMut::required_bytes(1);
-        if total_db_space - min_header_size <= full_region_layout.len() {
+        if db_capacity - min_header_size <= full_region_layout.len() {
             // Single region layout
-            let region_layout =
-                RegionLayout::calculate(total_db_space - min_header_size, page_size)
-                    .ok_or(Error::OutOfSpace)?;
+            let region_layout = RegionLayout::calculate(
+                db_capacity - min_header_size,
+                desired_usable_bytes,
+                page_size,
+            )
+            .ok_or(Error::OutOfSpace)?;
             Ok(DataSectionLayout {
                 db_header_bytes: min_header_size,
                 full_region_layout,
@@ -578,18 +590,25 @@ impl DataSectionLayout {
             })
         } else {
             // Multi region layout
-            let max_regions = (total_db_space - min_header_size + full_region_layout.len() - 1)
+            let max_regions = (db_capacity - min_header_size + full_region_layout.len() - 1)
                 / full_region_layout.len();
             let db_header_bytes = DB_HEADER_SIZE + U64GroupedBitMapMut::required_bytes(max_regions);
-            let num_full_regions = (total_db_space - db_header_bytes) / full_region_layout.len();
-            assert_ne!(num_full_regions, 0);
+            let max_full_regions = (db_capacity - db_header_bytes) / full_region_layout.len();
+            let desired_full_regions = desired_usable_bytes / MAX_USABLE_REGION_SPACE;
+            let num_full_regions = min(max_full_regions, desired_full_regions);
             let remaining_space =
-                total_db_space - db_header_bytes - num_full_regions * full_region_layout.len();
+                db_capacity - db_header_bytes - num_full_regions * full_region_layout.len();
+            let remaining_desired =
+                desired_usable_bytes - num_full_regions * full_region_layout.len();
             Ok(DataSectionLayout {
                 db_header_bytes,
                 full_region_layout,
                 num_full_regions,
-                trailing_partial_region: RegionLayout::calculate(remaining_space, page_size),
+                trailing_partial_region: RegionLayout::calculate(
+                    remaining_space,
+                    remaining_desired,
+                    page_size,
+                ),
             })
         }
     }
@@ -600,6 +619,11 @@ impl DataSectionLayout {
         } else {
             self.num_full_regions
         }
+    }
+
+    fn len(&self) -> usize {
+        let last = self.num_regions() - 1;
+        self.region_base_address(last) + self.region_layout(last).len()
     }
 
     // TODO: move this to a HeaderLayout structure
@@ -706,6 +730,7 @@ pub(crate) struct TransactionalMemory {
     // It would be nice if this was a RefCell<&[u8]> on the metadata. However, that would be
     // self-referential, since we also hold the mmap object
     metadata_guard: Mutex<MetadataGuard>,
+    layout: Mutex<DataSectionLayout>,
     // The number of PageMut which are outstanding
     #[cfg(debug_assertions)]
     open_dirty_pages: Mutex<HashSet<PageNumber>>,
@@ -717,22 +742,45 @@ pub(crate) struct TransactionalMemory {
 }
 
 impl TransactionalMemory {
-    pub(crate) fn new(file: File, requested_page_size: Option<usize>) -> Result<Self> {
-        let mmap = Mmap::new(file)?;
-        // Safety: we have exclusive access to the mmap
-        let all_memory = unsafe { mmap.get_memory_mut(0..mmap.len()) };
-        if all_memory.len() < MAGICNUMBER.len() {
+    pub(crate) fn new(
+        file: File,
+        max_capacity: usize,
+        requested_page_size: Option<usize>,
+    ) -> Result<Self> {
+        let mmap = Mmap::new(file, max_capacity)?;
+        if max_capacity < DB_HEADER_SIZE {
             return Err(Error::OutOfSpace);
         }
 
+        if mmap.len() < DB_HEADER_SIZE {
+            // Safety: we have exclusive access to the mmap
+            unsafe {
+                mmap.resize(DB_HEADER_SIZE)?;
+            }
+        }
+
         let mutex = Mutex::new(MetadataGuard {});
-        if all_memory[0..MAGICNUMBER.len()] != MAGICNUMBER {
+        let magic_number: [u8; 9] = {
+            // Safety: we have exclusive access to the mmap
+            let header = unsafe { mmap.get_memory_mut(0..DB_HEADER_SIZE) };
+            header[..MAGICNUMBER.len()].try_into().unwrap()
+        };
+
+        if magic_number != MAGICNUMBER {
             let page_size = requested_page_size.unwrap_or_else(get_page_size);
-            // Ensure that the database metadata fits into the first page
-            assert!(page_size >= DB_HEADER_SIZE);
             assert!(page_size.is_power_of_two());
 
-            let layout = DataSectionLayout::calculate(mmap.len(), page_size)?;
+            // TODO: start at smallest size and grow db
+            let layout = DataSectionLayout::calculate(max_capacity, max_capacity, page_size)?;
+
+            if mmap.len() < layout.len() {
+                // Safety: we have exclusive access to the mmap
+                unsafe {
+                    mmap.resize(layout.len())?;
+                }
+            }
+
+            let all_memory = unsafe { mmap.get_memory_mut(0..layout.len()) };
 
             // Explicitly zero the header
             all_memory[0..layout.db_header_bytes].fill(0);
@@ -760,9 +808,8 @@ impl TransactionalMemory {
 
             // Store the page & db size. These are immutable
             all_memory[PAGE_SIZE_OFFSET] = page_size.trailing_zeros() as u8;
-            let length = mmap.len() as u64;
             all_memory[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
-                .copy_from_slice(&length.to_be_bytes());
+                .copy_from_slice(&(max_capacity as u64).to_be_bytes());
 
             // Set to 1, so that we can mutate the first transaction state
             all_memory[GOD_BYTE_OFFSET] = PRIMARY_BIT;
@@ -788,6 +835,7 @@ impl TransactionalMemory {
             mmap.flush()?;
         }
 
+        let all_memory = unsafe { mmap.get_memory_mut(0..mmap.len()) };
         if all_memory[GOD_BYTE_OFFSET] & UPGRADE_IN_PROGRESS != 0 {
             let upgrade_log_len = u64::from_be_bytes(
                 all_memory[UPGRADE_LOG_LEN_OFFSET..(UPGRADE_LOG_LEN_OFFSET + size_of::<u64>())]
@@ -808,14 +856,6 @@ impl TransactionalMemory {
         if let Some(size) = requested_page_size {
             assert_eq!(page_size, size);
         }
-        assert_eq!(
-            u64::from_be_bytes(
-                all_memory[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
-                    .try_into()
-                    .unwrap()
-            ) as usize,
-            mmap.len()
-        );
 
         let allocator_dirty = all_memory[GOD_BYTE_OFFSET] & (ALLOCATOR_STATE_DIRTY) != 0;
 
@@ -836,7 +876,7 @@ impl TransactionalMemory {
                 layout.full_region_layout.max_order(),
             );
             let mut allocators = vec![full_regional_allocator; layout.num_full_regions];
-            if let Some(region_layout) = layout.trailing_partial_region {
+            if let Some(ref region_layout) = layout.trailing_partial_region {
                 let trailing =
                     BuddyAllocator::new(region_layout.num_pages, region_layout.max_order());
                 allocators.push(trailing);
@@ -852,6 +892,7 @@ impl TransactionalMemory {
             regional_allocators,
             mmap,
             metadata_guard: mutex,
+            layout: Mutex::new(layout.clone()),
             #[cfg(debug_assertions)]
             open_dirty_pages: Mutex::new(HashSet::new()),
             read_from_secondary: AtomicBool::new(false),
@@ -871,7 +912,7 @@ impl TransactionalMemory {
         allocated_pages: impl Iterator<Item = PageNumber>,
     ) -> Result<bool> {
         let mut metadata = self.lock_metadata();
-        let layout = metadata.primary_slot().get_data_section_layout();
+        let layout = self.layout.lock().unwrap();
         let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
 
         // Initialize the region allocator
@@ -917,13 +958,13 @@ impl TransactionalMemory {
     pub(crate) fn finalize_repair_allocator(&mut self) -> Result {
         assert!(!self.needs_repair()?);
         let metadata = self.lock_metadata();
-        let layout = metadata.primary_slot().get_data_section_layout();
+        let layout = self.layout.lock().unwrap();
         let full_regional_allocator = BuddyAllocator::new(
             layout.full_region_layout.num_pages,
             layout.full_region_layout.max_order(),
         );
         let mut allocators = vec![full_regional_allocator; layout.num_full_regions];
-        if let Some(region_layout) = layout.trailing_partial_region {
+        if let Some(ref region_layout) = layout.trailing_partial_region {
             let trailing = BuddyAllocator::new(region_layout.num_pages, region_layout.max_order());
             allocators.push(trailing);
         }
@@ -949,9 +990,10 @@ impl TransactionalMemory {
         assert!(self.regional_allocators.is_some());
 
         let mut metadata = self.lock_metadata();
-        metadata
-            .secondary_slot_mut()
-            .set_last_committed_transaction_id(transaction_id);
+        let layout = self.layout.lock().unwrap();
+        let mut secondary = metadata.secondary_slot_mut();
+        secondary.set_last_committed_transaction_id(transaction_id);
+        secondary.set_data_section_layout(&layout);
 
         if eventual {
             self.mmap.eventual_flush()?;
@@ -979,9 +1021,11 @@ impl TransactionalMemory {
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
         assert!(self.regional_allocators.is_some());
 
-        self.lock_metadata()
-            .secondary_slot_mut()
-            .set_last_committed_transaction_id(transaction_id);
+        let mut metadata = self.lock_metadata();
+        let layout = self.layout.lock().unwrap();
+        let mut secondary = metadata.secondary_slot_mut();
+        secondary.set_last_committed_transaction_id(transaction_id);
+        secondary.set_data_section_layout(&layout);
 
         self.log_since_commit.lock().unwrap().clear();
         self.allocated_since_commit.lock().unwrap().clear();
@@ -994,8 +1038,8 @@ impl TransactionalMemory {
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
         let mut metadata = self.lock_metadata();
-        let secondary_layout = metadata.secondary_slot().get_data_section_layout();
-        let (mut region_allocator, mut regions) = metadata.allocators_mut(&secondary_layout)?;
+        let mut layout = self.layout.lock().unwrap();
+        let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
         for op in self.log_since_commit.lock().unwrap().drain(..).rev() {
             match op {
                 AllocationOp::Allocate(page_number) => {
@@ -1020,6 +1064,12 @@ impl TransactionalMemory {
             }
         }
         self.allocated_since_commit.lock().unwrap().clear();
+        // Reset the layout, in case it changed during the writes
+        if self.read_from_secondary.load(Ordering::SeqCst) {
+            *layout = metadata.secondary_slot().get_data_section_layout();
+        } else {
+            *layout = metadata.primary_slot().get_data_section_layout();
+        }
 
         Ok(())
     }
@@ -1120,7 +1170,7 @@ impl TransactionalMemory {
     pub(crate) unsafe fn free_if_uncommitted(&self, page: PageNumber) -> Result<bool> {
         if self.allocated_since_commit.lock().unwrap().remove(&page) {
             let mut metadata = self.lock_metadata();
-            let layout = metadata.secondary_slot().get_data_section_layout();
+            let layout = self.layout.lock().unwrap();
             let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
             // Free in the regional allocator
             let mem = regions.get_regional_allocator_mut(page.region as usize);
@@ -1157,7 +1207,7 @@ impl TransactionalMemory {
         let required_order = ceil_log2(required_pages);
 
         let mut metadata = self.lock_metadata();
-        let layout = metadata.primary_slot().get_data_section_layout();
+        let layout = self.layout.lock().unwrap();
         let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
         let mut allocated_page = None;
         let mut allocated_region = 0;
@@ -1207,7 +1257,6 @@ impl TransactionalMemory {
 
         let address_range =
             page_number.address_range(self.header_size, self.region_size, self.page_size);
-        assert!(address_range.end <= self.mmap.len());
         // Safety:
         // The address range we're returning was just allocated, so no other references exist
         let mem = unsafe { self.mmap.get_memory_mut(address_range) };
@@ -1225,7 +1274,7 @@ impl TransactionalMemory {
 
     pub(crate) fn count_free_pages(&self) -> Result<usize> {
         let mut metadata = self.lock_metadata();
-        let layout = metadata.primary_slot().get_data_section_layout();
+        let layout = self.layout.lock().unwrap();
         let mut count = 0;
         for i in 0..layout.num_regions() {
             let mem = metadata.get_regional_allocator(i, &layout);
@@ -1323,7 +1372,8 @@ mod test {
     #[test]
     fn repair_allocator() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+        let max_size = 1024 * 1024;
+        let db = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
         let write_txn = db.begin_write().unwrap();
         let mut table = write_txn.open_table(X).unwrap();
         table.insert(b"hello", b"world").unwrap();
@@ -1343,12 +1393,12 @@ mod test {
         mmap.flush().unwrap();
         drop(mmap);
 
-        assert!(TransactionalMemory::new(file, None)
+        assert!(TransactionalMemory::new(file, max_size, None)
             .unwrap()
             .needs_repair()
             .unwrap());
 
-        let db2 = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+        let db2 = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
         assert_eq!(free_pages, db2.stats().unwrap().free_pages());
         let write_txn = db2.begin_write().unwrap();
         let mut table = write_txn.open_table(X).unwrap();

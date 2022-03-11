@@ -99,11 +99,10 @@ impl Database {
                 .create(true)
                 .open(path)?;
 
-            file.set_len(db_size as u64)?;
             file
         };
 
-        let storage = Storage::new(file, None)?;
+        let storage = Storage::new(file, db_size, None)?;
         Ok(Database { storage })
     }
 
@@ -114,8 +113,9 @@ impl Database {
     /// The file referenced by `path` must not be concurrently modified by any other process
     pub unsafe fn open(path: impl AsRef<Path>) -> Result<Database> {
         if File::open(path.as_ref())?.metadata()?.len() > 0 {
+            let existing_size = get_db_size(path.as_ref())?;
             let file = OpenOptions::new().read(true).write(true).open(path)?;
-            let storage = Storage::new(file, None)?;
+            let storage = Storage::new(file, existing_size, None)?;
             Ok(Database { storage })
         } else {
             Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
@@ -177,9 +177,7 @@ impl DatabaseBuilder {
             .create(true)
             .open(path)?;
 
-        file.set_len(db_size as u64)?;
-
-        let storage = Storage::new(file, self.page_size)?;
+        let storage = Storage::new(file, db_size, self.page_size)?;
         Ok(Database { storage })
     }
 }
