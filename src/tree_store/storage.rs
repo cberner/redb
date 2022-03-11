@@ -210,8 +210,12 @@ pub(crate) struct Storage {
 }
 
 impl Storage {
-    pub(crate) fn new(file: File, page_size: Option<usize>) -> Result<Storage> {
-        let mut mem = TransactionalMemory::new(file, page_size)?;
+    pub(crate) fn new(
+        file: File,
+        max_capacity: usize,
+        page_size: Option<usize>,
+    ) -> Result<Storage> {
+        let mut mem = TransactionalMemory::new(file, max_capacity, page_size)?;
         if mem.needs_repair()? {
             let root = mem
                 .get_primary_root_page()
