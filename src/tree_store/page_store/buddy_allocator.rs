@@ -6,6 +6,8 @@ use std::mem::size_of;
 #[derive(Clone)]
 pub(crate) struct BuddyAllocator {
     orders: Vec<PageAllocator>,
+    num_pages: usize,
+    capacity: usize,
 }
 
 // Handles allocation of dynamically sized pages, supports pages of up to page_size * 2^max_order bytes
@@ -17,35 +19,46 @@ pub(crate) struct BuddyAllocator {
 // order_offsets: array of (u64, u64), with offset & length for PageAllocator structure for the given order
 // ... PageAllocator structures
 impl BuddyAllocator {
-    pub(crate) fn new(mut num_pages: usize, max_order: usize) -> Self {
+    pub(crate) fn new(num_pages: usize, max_capacity: usize, max_order: usize) -> Self {
         let mut orders = vec![];
+        let mut pages_for_order = max_capacity;
         for _ in 0..=max_order {
-            orders.push(PageAllocator::new(num_pages));
-            num_pages = Self::next_higher_order(num_pages as u64) as usize;
+            orders.push(PageAllocator::new(pages_for_order));
+            pages_for_order = Self::next_higher_order(pages_for_order as u64) as usize;
         }
 
-        Self { orders }
+        Self {
+            orders,
+            num_pages,
+            capacity: max_capacity,
+        }
     }
 
-    pub(crate) fn init_new(data: &mut [u8], mut num_pages: usize, max_order: usize) -> Self {
-        assert!(data.len() >= Self::required_space(num_pages, max_order));
+    pub(crate) fn init_new(
+        data: &mut [u8],
+        num_pages: usize,
+        max_page_capacity: usize,
+        max_order: usize,
+    ) -> Self {
+        assert!(data.len() >= Self::required_space(max_page_capacity, max_order));
         data[..size_of::<u64>()].copy_from_slice(&(max_order as u64).to_be_bytes());
 
         let mut metadata_offset = size_of::<u64>();
         let mut data_offset = size_of::<u64>() + 2 * (max_order + 1) * size_of::<u64>();
 
         let mut orders = vec![];
+        let mut pages_for_order = max_page_capacity;
         for order in 0..=max_order {
-            let required = PageAllocator::required_space(num_pages);
+            let required = PageAllocator::required_space(pages_for_order);
             data[metadata_offset..metadata_offset + size_of::<u64>()]
                 .copy_from_slice(&(data_offset as u64).to_be_bytes());
             data[metadata_offset + size_of::<u64>()..metadata_offset + 2 * size_of::<u64>()]
                 .copy_from_slice(&(required as u64).to_be_bytes());
             orders.push(PageAllocator::init_new(
                 Self::get_order_bytes_mut(data, order),
-                num_pages,
+                pages_for_order,
             ));
-            num_pages = Self::next_higher_order(num_pages as u64) as usize;
+            pages_for_order = Self::next_higher_order(pages_for_order as u64) as usize;
             metadata_offset += 2 * size_of::<u64>();
             data_offset += required;
         }
@@ -62,15 +75,34 @@ impl BuddyAllocator {
             }
         }
 
-        Self { orders }
+        let result = Self {
+            orders,
+            num_pages,
+            capacity: max_page_capacity,
+        };
+        // TODO: optimize this to avoid all these writes
+        for i in num_pages..max_page_capacity {
+            result.record_alloc(data, i as u64, 0);
+        }
+
+        result
+    }
+
+    pub(crate) fn resize(&mut self, data: &mut [u8], new_size: usize) {
+        assert!(new_size <= self.capacity);
+        // TODO: optimize to avoid all these writes
+        for i in self.num_pages..new_size {
+            self.free(data, i as u64, 0);
+        }
+        self.num_pages = new_size;
     }
 
     /// Returns the number of bytes required for the data argument of new()
-    pub(crate) fn required_space(mut num_pages: usize, max_order: usize) -> usize {
+    pub(crate) fn required_space(mut capacity: usize, max_order: usize) -> usize {
         let mut required = size_of::<u64>() + 2 * (max_order + 1) * size_of::<u64>();
         for _ in 0..=max_order {
-            required += PageAllocator::required_space(num_pages);
-            num_pages = Self::next_higher_order(num_pages as u64) as usize;
+            required += PageAllocator::required_space(capacity);
+            capacity = Self::next_higher_order(capacity as u64) as usize;
         }
 
         required
@@ -97,6 +129,8 @@ impl BuddyAllocator {
                 .try_into()
                 .unwrap(),
         ) as usize;
+        // Data starts with max_order
+        assert!(offset > size_of::<u64>());
 
         (offset, length)
     }
@@ -194,7 +228,7 @@ mod test {
         let num_pages = 256;
         let max_order = 7;
         let mut data = vec![0; BuddyAllocator::required_space(num_pages, max_order)];
-        let allocator = BuddyAllocator::init_new(&mut data, num_pages, max_order);
+        let allocator = BuddyAllocator::init_new(&mut data, num_pages, num_pages, max_order);
         assert_eq!(allocator.count_free_pages(&data), num_pages);
 
         for page in 0..num_pages {
@@ -218,7 +252,7 @@ mod test {
         let num_pages = 256;
         let max_order = 7;
         let mut data = vec![0; BuddyAllocator::required_space(num_pages, max_order)];
-        let allocator = BuddyAllocator::init_new(&mut data, num_pages, max_order);
+        let allocator = BuddyAllocator::init_new(&mut data, num_pages, num_pages, max_order);
         assert_eq!(allocator.count_free_pages(&data), num_pages);
 
         for _ in 0..num_pages {
@@ -240,7 +274,7 @@ mod test {
         let num_pages = 256;
         let max_order = 7;
         let mut data = vec![0; BuddyAllocator::required_space(num_pages, max_order)];
-        let allocator = BuddyAllocator::init_new(&mut data, num_pages, max_order);
+        let allocator = BuddyAllocator::init_new(&mut data, num_pages, num_pages, max_order);
         assert_eq!(allocator.count_free_pages(&data), num_pages);
 
         let mut allocated = vec![];

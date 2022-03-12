@@ -146,7 +146,12 @@ fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 8 * 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe {
+        Database::builder()
+            .set_grow(false)
+            .create(tmpfile.path(), db_size)
+            .unwrap()
+    };
     let txn = db.begin_write().unwrap();
     let _table = txn.open_table(SLICE_TABLE).unwrap();
     let _table = txn.open_table(SLICE_TABLE2).unwrap();
@@ -219,6 +224,36 @@ fn large_keys() {
         }
     }
     txn.commit().unwrap();
+}
+
+#[test]
+fn dynamic_growth() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let table_definition: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+    let big_value = vec![0; 1024];
+
+    let db_size = 10 * 1024 * 1024;
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let txn = db.begin_write().unwrap();
+    let mut table = txn.open_table(table_definition).unwrap();
+    table.insert(&0, &big_value).unwrap();
+    txn.commit().unwrap();
+
+    let initial_file_size = tmpfile.as_file().metadata().unwrap().len();
+    assert!(initial_file_size < (db_size / 2) as u64);
+
+    let txn = db.begin_write().unwrap();
+    let mut table = txn.open_table(table_definition).unwrap();
+    {
+        for i in 0..2048 {
+            table.insert(&i, &big_value).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let file_size = tmpfile.as_file().metadata().unwrap().len();
+
+    assert!(file_size > initial_file_size);
 }
 
 #[test]
