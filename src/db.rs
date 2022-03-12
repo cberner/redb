@@ -102,7 +102,7 @@ impl Database {
             file
         };
 
-        let storage = Storage::new(file, db_size, None)?;
+        let storage = Storage::new(file, db_size, None, true)?;
         Ok(Database { storage })
     }
 
@@ -115,7 +115,7 @@ impl Database {
         if File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = get_db_size(path.as_ref())?;
             let file = OpenOptions::new().read(true).write(true).open(path)?;
-            let storage = Storage::new(file, existing_size, None)?;
+            let storage = Storage::new(file, existing_size, None, true)?;
             Ok(Database { storage })
         } else {
             Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
@@ -145,17 +145,29 @@ impl Database {
 
 pub struct DatabaseBuilder {
     page_size: Option<usize>,
+    dynamic_growth: bool,
 }
 
 impl DatabaseBuilder {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Self { page_size: None }
+        Self {
+            page_size: None,
+            dynamic_growth: true,
+        }
     }
 
     pub fn set_page_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
         self.page_size = Some(size);
+        self
+    }
+
+    /// Whether to grow the database file dynamically.
+    /// When set to true, the database file will start at a small size and grow as insertions are made
+    /// When set to false, the database file will be statically sized
+    pub fn set_grow(&mut self, dynamic: bool) -> &mut Self {
+        self.dynamic_growth = dynamic;
         self
     }
 
@@ -177,7 +189,7 @@ impl DatabaseBuilder {
             .create(true)
             .open(path)?;
 
-        let storage = Storage::new(file, db_size, self.page_size)?;
+        let storage = Storage::new(file, db_size, self.page_size, self.dynamic_growth)?;
         Ok(Database { storage })
     }
 }

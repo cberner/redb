@@ -214,8 +214,9 @@ impl Storage {
         file: File,
         max_capacity: usize,
         page_size: Option<usize>,
+        dynamic_growth: bool,
     ) -> Result<Storage> {
-        let mut mem = TransactionalMemory::new(file, max_capacity, page_size)?;
+        let mut mem = TransactionalMemory::new(file, max_capacity, page_size, dynamic_growth)?;
         if mem.needs_repair()? {
             let root = mem
                 .get_primary_root_page()
