@@ -1412,6 +1412,7 @@ impl TransactionalMemory {
         let regional_guard = self.regional_allocators.lock().unwrap();
         let layout = self.layout.lock().unwrap();
         let mut count = 0;
+        // TODO: with dynamic database growth, this is no longer a meaningful way to count free pages
         for i in 0..layout.num_regions() {
             let mem = metadata.get_regional_allocator(i, &layout);
             count += regional_guard.as_ref().unwrap()[i].count_free_pages(mem);
