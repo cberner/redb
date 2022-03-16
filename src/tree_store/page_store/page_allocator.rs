@@ -59,9 +59,12 @@ impl PageAllocator {
 
     pub(crate) fn init_new(data: &mut [u8], num_pages: usize) -> Self {
         assert!(data.len() >= Self::required_space(num_pages));
-        // Zero the memory, so that all pages are free
+        // TODO: change the representation, so that this is zero initialized, instead of 1 initialized.
+        // That should be faster, since mmap'ed memory is zero initialized by the OS
+
+        // Initialize the memory, so that all pages are allocated
         for value in data.iter_mut() {
-            *value = 0;
+            *value = 0xFF;
         }
 
         data[..8].copy_from_slice(&(num_pages as u64).to_be_bytes());
@@ -248,6 +251,9 @@ mod test {
         let mut data = vec![0; PageAllocator::required_space(num_pages)];
         let allocator = PageAllocator::init_new(&mut data, num_pages);
         for i in 0..num_pages {
+            allocator.free(&mut data, i as u64);
+        }
+        for i in 0..num_pages {
             assert_eq!(i as u64, allocator.alloc(&mut data).unwrap());
         }
         assert!(matches!(
@@ -260,6 +266,8 @@ mod test {
     fn record_alloc() {
         let mut data = vec![0; PageAllocator::required_space(2)];
         let allocator = PageAllocator::init_new(&mut data, 2);
+        allocator.free(&mut data, 0);
+        allocator.free(&mut data, 1);
         allocator.record_alloc(&mut data, 0);
         assert_eq!(1, allocator.alloc(&mut data).unwrap());
         assert!(matches!(
@@ -272,6 +280,7 @@ mod test {
     fn free() {
         let mut data = vec![0; PageAllocator::required_space(1)];
         let allocator = PageAllocator::init_new(&mut data, 1);
+        allocator.free(&mut data, 0);
         assert_eq!(0, allocator.alloc(&mut data).unwrap());
         assert!(matches!(
             allocator.alloc(&mut data).unwrap_err(),
@@ -286,6 +295,9 @@ mod test {
         let num_pages = 65;
         let mut data = vec![0; PageAllocator::required_space(num_pages)];
         let allocator = PageAllocator::init_new(&mut data, num_pages);
+        for i in 0..num_pages {
+            allocator.free(&mut data, i as u64);
+        }
         for i in 0..num_pages {
             assert_eq!(i as u64, allocator.alloc(&mut data).unwrap());
         }
@@ -304,6 +316,9 @@ mod test {
         let num_pages = 65;
         let mut data = vec![0; PageAllocator::required_space(num_pages)];
         let allocator = PageAllocator::init_new(&mut data, num_pages);
+        for i in 0..num_pages {
+            allocator.free(&mut data, i as u64);
+        }
         // Allocate everything
         while allocator.alloc(&mut data).is_ok() {}
         // The last u64 must be used, since the leaf layer is compact
@@ -321,6 +336,9 @@ mod test {
         let num_pages = rng.gen_range(2..10000);
         let mut data = vec![0; PageAllocator::required_space(num_pages)];
         let allocator = PageAllocator::init_new(&mut data, num_pages);
+        for i in 0..num_pages {
+            allocator.free(&mut data, i as u64);
+        }
         let mut allocated = HashSet::new();
 
         for _ in 0..(num_pages * 2) {

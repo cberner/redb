@@ -63,29 +63,24 @@ impl BuddyAllocator {
             data_offset += required;
         }
 
-        // Mark all the lower pages which exist in upper orders
-        for (order, allocator) in orders.iter().enumerate() {
-            if let Some(next_allocator) = orders.get(order + 1) {
-                let next_bytes = Self::get_order_bytes_mut(data, order + 1);
-                let next_pages = next_allocator.count_free_pages(next_bytes) as u64;
-                let bytes = Self::get_order_bytes_mut(data, order);
-                for i in 0..(2 * next_pages) {
-                    allocator.record_alloc(bytes, i);
-                }
+        // Mark the available pages, starting with the highest order
+        let mut accounted_pages = 0;
+        for (order, allocator) in orders.iter().enumerate().rev() {
+            let data = Self::get_order_bytes_mut(data, order);
+            let order_size = 2usize.pow(order as u32);
+            while accounted_pages + order_size <= num_pages {
+                let page = accounted_pages / order_size;
+                allocator.free(data, page as u64);
+                accounted_pages += order_size;
             }
         }
+        assert_eq!(accounted_pages, num_pages);
 
-        let result = Self {
+        Self {
             orders,
             num_pages,
             capacity: max_page_capacity,
-        };
-        // TODO: optimize this to avoid all these writes
-        for i in num_pages..max_page_capacity {
-            result.record_alloc(data, i as u64, 0);
         }
-
-        result
     }
 
     pub(crate) fn resize(&mut self, data: &mut [u8], new_size: usize) {
