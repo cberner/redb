@@ -5,8 +5,10 @@ const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
 fn main() -> Result<(), Error> {
     let db = unsafe { Database::create("int_keys.redb", 1024 * 1024)? };
     let write_txn = db.begin_write()?;
-    let mut table = write_txn.open_table(TABLE)?;
-    table.insert(&0, &0)?;
+    {
+        let mut table = write_txn.open_table(TABLE)?;
+        table.insert(&0, &0)?;
+    }
     write_txn.commit()?;
 
     let read_txn = db.begin_read()?;

@@ -108,7 +108,7 @@ impl<'a, 'b> BenchWriteTransaction<'b> for RedbBenchWriteTransaction<'a> {
 }
 
 pub struct RedbBenchInserter<'a> {
-    table: redb::Table<'a, [u8], [u8]>,
+    table: redb::Table<'a, 'a, [u8], [u8]>,
 }
 
 impl BenchInserter for RedbBenchInserter<'_> {

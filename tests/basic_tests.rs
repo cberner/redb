@@ -10,10 +10,12 @@ fn len() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    table.insert(b"hello", b"world").unwrap();
-    table.insert(b"hello2", b"world2").unwrap();
-    table.insert(b"hi", b"world").unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"world").unwrap();
+        table.insert(b"hello2", b"world2").unwrap();
+        table.insert(b"hi", b"world").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -26,8 +28,10 @@ fn stored_size() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    table.insert(b"hello", b"world").unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"world").unwrap();
+    }
     write_txn.commit().unwrap();
 
     assert_eq!(db.stats().unwrap().stored_bytes(), 10);
@@ -40,8 +44,10 @@ fn create_open() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(U64_TABLE).unwrap();
-    table.insert(&0, &1).unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0, &1).unwrap();
+    }
     write_txn.commit().unwrap();
     drop(db);
 
@@ -60,11 +66,13 @@ fn multiple_tables() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(definition1).unwrap();
-    let mut table2 = write_txn.open_table(definition2).unwrap();
+    {
+        let mut table = write_txn.open_table(definition1).unwrap();
+        let mut table2 = write_txn.open_table(definition2).unwrap();
 
-    table.insert(b"hello", b"world").unwrap();
-    table2.insert(b"hello", b"world2").unwrap();
+        table.insert(b"hello", b"world").unwrap();
+        table2.insert(b"hello", b"world2").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -87,10 +95,12 @@ fn list_tables() {
     let definition_my: MultimapTableDefinition<[u8], [u8]> = MultimapTableDefinition::new("my");
 
     let write_txn = db.begin_write().unwrap();
-    write_txn.open_table(definition_x).unwrap();
-    write_txn.open_table(definition_y).unwrap();
-    write_txn.open_multimap_table(definition_mx).unwrap();
-    write_txn.open_multimap_table(definition_my).unwrap();
+    {
+        write_txn.open_table(definition_x).unwrap();
+        write_txn.open_table(definition_y).unwrap();
+        write_txn.open_multimap_table(definition_mx).unwrap();
+        write_txn.open_multimap_table(definition_my).unwrap();
+    }
 
     let tables: Vec<String> = write_txn.list_tables().unwrap().collect();
     let multimap_tables: Vec<String> = write_txn.list_multimap_tables().unwrap().collect();
@@ -111,8 +121,10 @@ fn is_empty() {
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    table.insert(b"hello", b"world").unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"world").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -126,9 +138,11 @@ fn abort() {
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    table.insert(b"hello", b"aborted").unwrap();
-    assert_eq!(b"aborted", table.get(b"hello").unwrap().unwrap());
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"aborted").unwrap();
+        assert_eq!(b"aborted", table.get(b"hello").unwrap().unwrap());
+    }
     write_txn.abort().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -136,8 +150,10 @@ fn abort() {
     assert!(table.is_err());
 
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    table.insert(b"hello", b"world").unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"world").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -151,8 +167,10 @@ fn insert_overwrite() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    table.insert(b"hello", b"world").unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"world").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -160,8 +178,10 @@ fn insert_overwrite() {
     assert_eq!(b"world", table.get(b"hello").unwrap().unwrap());
 
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    table.insert(b"hello", b"replaced").unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"replaced").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -173,12 +193,13 @@ fn insert_overwrite() {
 fn insert_reserve() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
-    let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
     let value = b"world";
-    let mut reserved = table.insert_reserve(b"hello", value.len()).unwrap();
-    reserved.as_mut().copy_from_slice(value);
-    drop(reserved);
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        let mut reserved = table.insert_reserve(b"hello", value.len()).unwrap();
+        reserved.as_mut().copy_from_slice(value);
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -191,9 +212,11 @@ fn delete() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    table.insert(b"hello", b"world").unwrap();
-    table.insert(b"hello2", b"world").unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"world").unwrap();
+        table.insert(b"hello2", b"world").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -202,12 +225,14 @@ fn delete() {
     assert_eq!(table.len().unwrap(), 2);
 
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(
-        b"world",
-        table.remove(b"hello").unwrap().unwrap().to_value()
-    );
-    assert!(table.remove(b"hello").unwrap().is_none());
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        assert_eq!(
+            b"world",
+            table.remove(b"hello").unwrap().unwrap().to_value()
+        );
+        assert!(table.remove(b"hello").unwrap().is_none());
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -221,8 +246,10 @@ fn no_dirty_reads() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    table.insert(b"hello", b"world").unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"world").unwrap();
+    }
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(SLICE_TABLE);
@@ -239,8 +266,10 @@ fn read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    table.insert(b"hello", b"world").unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"world").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -248,10 +277,12 @@ fn read_isolation() {
     assert_eq!(b"world", table.get(b"hello").unwrap().unwrap());
 
     let write_txn = db.begin_write().unwrap();
-    let mut write_table = write_txn.open_table(SLICE_TABLE).unwrap();
-    write_table.remove(b"hello").unwrap();
-    write_table.insert(b"hello2", b"world2").unwrap();
-    write_table.insert(b"hello3", b"world3").unwrap();
+    {
+        let mut write_table = write_txn.open_table(SLICE_TABLE).unwrap();
+        write_table.remove(b"hello").unwrap();
+        write_table.insert(b"hello2", b"world2").unwrap();
+        write_table.insert(b"hello3", b"world3").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn2 = db.begin_read().unwrap();
@@ -268,12 +299,30 @@ fn read_isolation() {
 }
 
 #[test]
+fn reopen_table() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0, &0).unwrap();
+    }
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&1, &1).unwrap();
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
 fn u64_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(U64_TABLE).unwrap();
-    table.insert(&0, &1).unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0, &1).unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -289,9 +338,11 @@ fn i128_type() {
 
     let definition: TableDefinition<i128, i128> = TableDefinition::new("x");
 
-    let mut table = write_txn.open_table(definition).unwrap();
-    for i in -10..=10 {
-        table.insert(&i, &(i - 1)).unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in -10..=10 {
+            table.insert(&i, &(i - 1)).unwrap();
+        }
     }
     write_txn.commit().unwrap();
 
@@ -313,8 +364,10 @@ fn f32_type() {
     let definition: TableDefinition<u8, f32> = TableDefinition::new("x");
 
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(definition).unwrap();
-    table.insert(&0, &0.3).unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(&0, &0.3).unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -330,8 +383,10 @@ fn str_type() {
     let definition: TableDefinition<str, str> = TableDefinition::new("x");
 
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(definition).unwrap();
-    table.insert("hello", "world").unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -360,9 +415,11 @@ fn owned_get_signatures() {
     let definition: TableDefinition<u32, u32> = TableDefinition::new("x");
 
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(definition).unwrap();
-    for i in 0..10 {
-        table.insert(&i, &(i + 1)).unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &(i + 1)).unwrap();
+        }
     }
     write_txn.commit().unwrap();
 
@@ -394,9 +451,11 @@ fn ref_get_signatures() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    for i in 0..10 {
-        table.insert(&[i], &[i + 1]).unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&[i], &[i + 1]).unwrap();
+        }
     }
     write_txn.commit().unwrap();
 

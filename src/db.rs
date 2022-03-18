@@ -243,10 +243,10 @@ impl<'a> WriteTransaction<'a> {
     /// Open the given table
     ///
     /// The table will be created if it does not exist
-    pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
-        &self,
+    pub fn open_table<'s: 't, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+        &'s self,
         definition: TableDefinition<K, V>,
-    ) -> Result<Table<'a, K, V>> {
+    ) -> Result<Table<'a, 't, K, V>> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
         if let Some(location) = self.open_tables.borrow().get(definition.name) {
@@ -274,16 +274,22 @@ impl<'a> WriteTransaction<'a> {
             .or_insert_with(|| Rc::new(Cell::new(header.get_root())))
             .clone();
 
-        Ok(Table::new(self.transaction_id, root, self.storage))
+        Ok(Table::new(
+            definition.name,
+            self.transaction_id,
+            root,
+            self.storage,
+            self,
+        ))
     }
 
     /// Open the given table
     ///
     /// The table will be created if it does not exist
-    pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
-        &self,
+    pub fn open_multimap_table<'t, K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
+        &'t self,
         definition: MultimapTableDefinition<K, V>,
-    ) -> Result<MultimapTable<'a, K, V>> {
+    ) -> Result<MultimapTable<'a, 't, K, V>> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
         if let Some(location) = self.open_tables.borrow().get(definition.name) {
@@ -311,7 +317,17 @@ impl<'a> WriteTransaction<'a> {
             .or_insert_with(|| Rc::new(Cell::new(header.get_root())))
             .clone();
 
-        Ok(MultimapTable::new(self.transaction_id, root, self.storage))
+        Ok(MultimapTable::new(
+            definition.name,
+            self.transaction_id,
+            root,
+            self.storage,
+            self,
+        ))
+    }
+
+    pub(crate) fn close_table(&self, name: &str) {
+        self.open_tables.borrow_mut().remove(name).unwrap();
     }
 
     /// Delete the given table
@@ -514,8 +530,10 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table = write_txn.open_table(X).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            table.insert(b"hello", b"world").unwrap();
+        }
         let first_txn_id = write_txn.transaction_id;
         write_txn.commit().unwrap();
         drop(db);

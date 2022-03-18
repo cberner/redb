@@ -36,9 +36,10 @@ fn mixed_durable_commit() {
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let mut txn = db.begin_write().unwrap();
     txn.set_durability(Durability::None);
-    let mut table = txn.open_table(U64_TABLE).unwrap();
-
-    table.insert(&0, &0).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0, &0).unwrap();
+    }
     txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
@@ -53,11 +54,9 @@ fn non_durable_commit_persistence() {
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let mut txn = db.begin_write().unwrap();
     txn.set_durability(Durability::None);
-    let mut table = txn.open_table(SLICE_TABLE).unwrap();
-
     let pairs = gen_data(100, 16, 20);
-
     {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..ELEMENTS {
             let (key, value) = &pairs[i % pairs.len()];
             table.insert(key, value).unwrap();
@@ -90,11 +89,9 @@ fn test_persistence(durability: Durability) {
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let mut txn = db.begin_write().unwrap();
     txn.set_durability(durability);
-    let mut table = txn.open_table(SLICE_TABLE).unwrap();
-
     let pairs = gen_data(100, 16, 20);
-
     {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..ELEMENTS {
             let (key, value) = &pairs[i % pairs.len()];
             table.insert(key, value).unwrap();
@@ -153,14 +150,15 @@ fn free() {
             .unwrap()
     };
     let txn = db.begin_write().unwrap();
-    let _table = txn.open_table(SLICE_TABLE).unwrap();
-    let _table = txn.open_table(SLICE_TABLE2).unwrap();
+    {
+        let _table = txn.open_table(SLICE_TABLE).unwrap();
+        let _table = txn.open_table(SLICE_TABLE2).unwrap();
+    }
 
     txn.commit().unwrap();
     let free_pages = db.stats().unwrap().free_pages();
 
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(SLICE_TABLE).unwrap();
 
     let key = vec![0; 100];
     let value = vec![0; 1024];
@@ -170,6 +168,7 @@ fn free() {
     assert!(num_writes > 64);
 
     {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..num_writes {
             let mut mut_key = key.clone();
             mut_key.extend_from_slice(&i.to_be_bytes());
@@ -183,11 +182,13 @@ fn free() {
         // Delete in chunks to be sure that we don't run out of pages due to temp allocations
         for chunk in key_range.chunks(10) {
             let txn = db.begin_write().unwrap();
-            let mut table = txn.open_table(SLICE_TABLE).unwrap();
-            for i in chunk {
-                let mut mut_key = key.clone();
-                mut_key.extend_from_slice(&(*i as u64).to_be_bytes());
-                table.remove(&mut_key).unwrap();
+            {
+                let mut table = txn.open_table(SLICE_TABLE).unwrap();
+                for i in chunk {
+                    let mut mut_key = key.clone();
+                    mut_key.extend_from_slice(&(*i as u64).to_be_bytes());
+                    table.remove(&mut_key).unwrap();
+                }
             }
             txn.commit().unwrap();
         }
@@ -203,11 +204,11 @@ fn large_keys() {
     let db_size = 1024_1024;
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(SLICE_TABLE).unwrap();
 
     let mut key = vec![0; 1024];
     let value = vec![0; 1];
     {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..100 {
             key[0] = i;
             table.insert(&key, &value).unwrap();
@@ -216,8 +217,8 @@ fn large_keys() {
     txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(SLICE_TABLE).unwrap();
     {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..100 {
             key[0] = i;
             table.remove(&key).unwrap();
@@ -235,16 +236,18 @@ fn dynamic_growth() {
     let db_size = 10 * 1024 * 1024;
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(table_definition).unwrap();
-    table.insert(&0, &big_value).unwrap();
+    {
+        let mut table = txn.open_table(table_definition).unwrap();
+        table.insert(&0, &big_value).unwrap();
+    }
     txn.commit().unwrap();
 
     let initial_file_size = tmpfile.as_file().metadata().unwrap().len();
     assert!(initial_file_size < (db_size / 2) as u64);
 
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(table_definition).unwrap();
     {
+        let mut table = txn.open_table(table_definition).unwrap();
         for i in 0..2048 {
             table.insert(&i, &big_value).unwrap();
         }
@@ -270,11 +273,11 @@ fn multi_page_kv() {
             .unwrap()
     };
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(SLICE_TABLE).unwrap();
 
     let mut key = vec![0; page_size + 1];
     let mut value = vec![0; page_size + 1];
     {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..elements {
             key[0] = i;
             value[0] = i;
@@ -292,8 +295,8 @@ fn multi_page_kv() {
     }
 
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(SLICE_TABLE).unwrap();
     {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..elements {
             key[0] = i;
             table.remove(&key).unwrap();
@@ -310,39 +313,52 @@ fn regression() {
     let db_size = 1024 * 1024;
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(U64_TABLE).unwrap();
-
-    table.insert(&1, &1).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&1, &1).unwrap();
+    }
     txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(U64_TABLE).unwrap();
-    table.insert(&6, &9).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&6, &9).unwrap();
+    }
     txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(U64_TABLE).unwrap();
-    table.insert(&12, &10).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&12, &10).unwrap();
+    }
     txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(U64_TABLE).unwrap();
-    table.insert(&18, &27).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&18, &27).unwrap();
+    }
     txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(U64_TABLE).unwrap();
-    table.insert(&24, &33).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&24, &33).unwrap();
+    }
     txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(U64_TABLE).unwrap();
-    table.insert(&30, &14).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&30, &14).unwrap();
+    }
     txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(U64_TABLE).unwrap();
-    table.remove(&30).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.remove(&30).unwrap();
+    }
     txn.commit().unwrap();
 
     let txn = db.begin_read().unwrap();
@@ -380,15 +396,17 @@ fn regression3() {
     let db_size = 1024 * 1024;
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let tx = db.begin_write().unwrap();
-    let mut t = tx.open_table(SLICE_TABLE).unwrap();
-    let big_value = vec![0u8; 1000];
-    for i in 0..20 {
-        t.insert(&[i], &big_value).unwrap();
-    }
-    for i in (10..20).rev() {
-        t.remove(&[i]).unwrap();
-        for j in 0..i {
-            assert!(t.get(&[j]).unwrap().is_some());
+    {
+        let mut t = tx.open_table(SLICE_TABLE).unwrap();
+        let big_value = vec![0u8; 1000];
+        for i in 0..20 {
+            t.insert(&[i], &big_value).unwrap();
+        }
+        for i in (10..20).rev() {
+            t.remove(&[i]).unwrap();
+            for j in 0..i {
+                assert!(t.get(&[j]).unwrap().is_some());
+            }
         }
     }
     tx.commit().unwrap();
@@ -400,9 +418,10 @@ fn non_durable_read_isolation() {
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let mut write_txn = db.begin_write().unwrap();
     write_txn.set_durability(Durability::None);
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-
-    table.insert(b"hello", b"world").unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"world").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -411,10 +430,12 @@ fn non_durable_read_isolation() {
 
     let mut write_txn = db.begin_write().unwrap();
     write_txn.set_durability(Durability::None);
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    table.remove(b"hello").unwrap();
-    table.insert(b"hello2", b"world2").unwrap();
-    table.insert(b"hello3", b"world3").unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.remove(b"hello").unwrap();
+        table.insert(b"hello2", b"world2").unwrap();
+        table.insert(b"hello3", b"world3").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let read_txn2 = db.begin_read().unwrap();
@@ -435,9 +456,11 @@ fn range_query() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(U64_TABLE).unwrap();
-    for i in 0..10 {
-        table.insert(&i, &i).unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
     }
     write_txn.commit().unwrap();
 
@@ -465,9 +488,11 @@ fn range_query_reversed() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(U64_TABLE).unwrap();
-    for i in 0..10 {
-        table.insert(&i, &i).unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
     }
     write_txn.commit().unwrap();
 
@@ -522,10 +547,12 @@ fn delete_table() {
     let y_def: MultimapTableDefinition<[u8], [u8]> = MultimapTableDefinition::new("y");
 
     let write_txn = db.begin_write().unwrap();
-    let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-    table.insert(b"hello", b"world").unwrap();
-    let mut multitable = write_txn.open_multimap_table(y_def).unwrap();
-    multitable.insert(b"hello2", b"world2").unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"world").unwrap();
+        let mut multitable = write_txn.open_multimap_table(y_def).unwrap();
+        multitable.insert(b"hello2", b"world2").unwrap();
+    }
     write_txn.commit().unwrap();
 
     let write_txn = db.begin_write().unwrap();
@@ -564,11 +591,12 @@ fn non_page_size_multiple() {
     let db_size = 1024 * 1024 + 1;
     let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
-    let mut table = txn.open_table(SLICE_TABLE).unwrap();
-
     let key = vec![0; 1024];
     let value = vec![0; 1];
-    table.insert(&key, &value).unwrap();
+    {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(&key, &value).unwrap();
+    }
     txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();

@@ -1479,8 +1479,10 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table = write_txn.open_table(X).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            table.insert(b"hello", b"world").unwrap();
+        }
         write_txn.commit().unwrap();
         drop(db);
 
@@ -1520,8 +1522,10 @@ mod test {
         let max_size = 1024 * 1024;
         let db = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table = write_txn.open_table(X).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            table.insert(b"hello", b"world").unwrap();
+        }
         write_txn.commit().unwrap();
         let free_pages = db.stats().unwrap().free_pages();
         drop(db);
@@ -1546,8 +1550,10 @@ mod test {
         let db2 = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
         assert_eq!(free_pages, db2.stats().unwrap().free_pages());
         let write_txn = db2.begin_write().unwrap();
-        let mut table = write_txn.open_table(X).unwrap();
-        table.insert(b"hello2", b"world2").unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            table.insert(b"hello2", b"world2").unwrap();
+        }
         write_txn.commit().unwrap();
     }
 
