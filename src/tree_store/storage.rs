@@ -307,13 +307,13 @@ impl Storage {
 
         assert!(self.live_write_transaction.lock().unwrap().is_none());
         assert!(self.pending_freed_pages.lock().unwrap().is_empty());
-        let id = self.next_transaction_id.fetch_add(1, Ordering::SeqCst);
+        let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
         *self.live_write_transaction.lock().unwrap() = Some(id);
         Ok(id)
     }
 
     pub(crate) fn allocate_read_transaction(&self) -> TransactionId {
-        let id = self.next_transaction_id.fetch_add(1, Ordering::SeqCst);
+        let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
         self.live_read_transactions.lock().unwrap().insert(id);
         id
     }
@@ -539,7 +539,7 @@ impl Storage {
             .iter()
             .next()
             .cloned()
-            .unwrap_or_else(|| self.next_transaction_id.load(Ordering::SeqCst));
+            .unwrap_or_else(|| self.next_transaction_id.load(Ordering::Acquire));
 
         new_master_root =
             self.process_freed_pages(oldest_live_read, transaction_id, new_master_root)?;

@@ -44,8 +44,7 @@ impl Mmap {
     }
 
     pub(crate) fn len(&self) -> usize {
-        // TODO: look up the ordering types. Do we really need SeqCst?
-        self.len.load(Ordering::SeqCst)
+        self.len.load(Ordering::Acquire)
     }
 
     // Safety: if new_len < len(), caller must ensure that no references to memory in new_len..len() exist
@@ -66,7 +65,7 @@ impl Mmap {
             Err(io::Error::last_os_error().into())
         } else {
             assert_eq!(mmap as *mut u8, self.mmap);
-            self.len.store(new_len, Ordering::SeqCst);
+            self.len.store(new_len, Ordering::Release);
             Ok(())
         }
     }

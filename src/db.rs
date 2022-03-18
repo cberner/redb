@@ -428,7 +428,7 @@ impl<'a> WriteTransaction<'a> {
             }
         }
 
-        self.completed.store(true, Ordering::SeqCst);
+        self.completed.store(true, Ordering::Release);
 
         Ok(())
     }
@@ -436,14 +436,14 @@ impl<'a> WriteTransaction<'a> {
     pub fn abort(self) -> Result {
         self.storage
             .rollback_uncommited_writes(self.transaction_id)?;
-        self.completed.store(true, Ordering::SeqCst);
+        self.completed.store(true, Ordering::Release);
         Ok(())
     }
 }
 
 impl<'a> Drop for WriteTransaction<'a> {
     fn drop(&mut self) {
-        if !self.completed.load(Ordering::SeqCst) {
+        if !self.completed.load(Ordering::Acquire) {
             self.storage
                 .record_leaked_write_transaction(self.transaction_id);
         }
