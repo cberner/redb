@@ -85,10 +85,31 @@ impl BuddyAllocator {
 
     pub(crate) fn resize(&mut self, data: &mut [u8], new_size: usize) {
         assert!(new_size <= self.capacity);
-        // TODO: optimize to avoid all these writes
-        for i in self.num_pages..new_size {
-            self.free(data, i as u64, 0);
+        let mut processed_pages = self.num_pages;
+        // Align to the highest order possible
+        while processed_pages < new_size {
+            let order = processed_pages.trailing_zeros() as usize;
+            let order_size = 2usize.pow(order as u32);
+            let page = processed_pages / order_size;
+            debug_assert_eq!(processed_pages % order_size, 0);
+            if order >= self.orders.len() {
+                break;
+            }
+            let order_data = Self::get_order_bytes_mut(data, order);
+            self.orders[order].free(order_data, page as u64);
+            processed_pages += order_size;
         }
+        // Allocate the remaining space, at the highest order
+        for (order, allocator) in self.orders.iter().enumerate().rev() {
+            let order_data = Self::get_order_bytes_mut(data, order);
+            let order_size = 2usize.pow(order as u32);
+            while processed_pages + order_size <= new_size {
+                let page = processed_pages / order_size;
+                allocator.free(order_data, page as u64);
+                processed_pages += order_size;
+            }
+        }
+        assert_eq!(processed_pages, new_size);
         self.num_pages = new_size;
     }
 
