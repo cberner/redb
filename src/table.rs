@@ -1,14 +1,16 @@
 use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber, Storage, TransactionId};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
-use crate::AccessGuard;
 use crate::Result;
+use crate::{AccessGuard, WriteTransaction};
 use std::borrow::Borrow;
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::rc::Rc;
 
-pub struct Table<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub struct Table<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+    name: String,
+    transaction: &'t WriteTransaction<'s>,
     storage: &'s Storage,
     transaction_id: TransactionId,
     table_root: Rc<Cell<Option<PageNumber>>>,
@@ -16,13 +18,17 @@ pub struct Table<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     _value_type: PhantomData<V>,
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
+impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
     pub(crate) fn new(
+        name: &str,
         transaction_id: TransactionId,
         table_root: Rc<Cell<Option<PageNumber>>>,
         storage: &'s Storage,
-    ) -> Table<'s, K, V> {
+        transaction: &'t WriteTransaction<'s>,
+    ) -> Table<'s, 't, K, V> {
         Table {
+            name: name.to_string(),
+            transaction,
             storage,
             transaction_id,
             table_root,
@@ -89,7 +95,9 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, K, V> {
     }
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Table<'s, K, V> {
+impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
+    for Table<'s, 't, K, V>
+{
     fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
         self.storage
             .get::<K, V>(key.as_bytes().as_ref(), self.table_root.get())
@@ -110,6 +118,12 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V> for Tab
 
     fn is_empty(&self) -> Result<bool> {
         self.storage.len(self.table_root.get()).map(|x| x == 0)
+    }
+}
+
+impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for Table<'s, 't, K, V> {
+    fn drop(&mut self) {
+        self.transaction.close_table(&self.name);
     }
 }
 
@@ -247,10 +261,12 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
         let write_txn = db.begin_write().unwrap();
-        let mut table = write_txn.open_table(definition).unwrap();
-        for i in 0..10u8 {
-            let key = vec![i];
-            table.insert(&ReverseKey(key), b"value").unwrap();
+        {
+            let mut table = write_txn.open_table(definition).unwrap();
+            for i in 0..10u8 {
+                let key = vec![i];
+                table.insert(&ReverseKey(key), b"value").unwrap();
+            }
         }
         write_txn.commit().unwrap();
 

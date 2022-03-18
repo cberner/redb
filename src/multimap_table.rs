@@ -2,7 +2,7 @@ use crate::tree_store::{BtreeRangeIter, PageNumber, Storage, TransactionId};
 use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
 };
-use crate::Result;
+use crate::{Result, WriteTransaction};
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::Bound;
@@ -286,7 +286,9 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'
     }
 }
 
-pub struct MultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+pub struct MultimapTable<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+    name: String,
+    transaction: &'t WriteTransaction<'s>,
     storage: &'s Storage,
     transaction_id: TransactionId,
     table_root: Rc<Cell<Option<PageNumber>>>,
@@ -294,13 +296,17 @@ pub struct MultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     _value_type: PhantomData<V>,
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
+impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, V> {
     pub(crate) fn new(
+        name: &str,
         transaction_id: TransactionId,
         table_root: Rc<Cell<Option<PageNumber>>>,
         storage: &'s Storage,
-    ) -> MultimapTable<'s, K, V> {
+        transaction: &'t WriteTransaction<'s>,
+    ) -> MultimapTable<'s, 't, K, V> {
         MultimapTable {
+            name: name.to_string(),
+            transaction,
             storage,
             transaction_id,
             table_root,
@@ -383,8 +389,8 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, K, V> {
     }
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
-    for MultimapTable<'s, K, V>
+impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
+    for MultimapTable<'s, 't, K, V>
 {
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapValueIter<'a, K, V>> {
         let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
@@ -417,6 +423,12 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
 
     fn is_empty(&self) -> Result<bool> {
         self.storage.len(self.table_root.get()).map(|x| x == 0)
+    }
+}
+
+impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Drop for MultimapTable<'s, 't, K, V> {
+    fn drop(&mut self) {
+        self.transaction.close_table(&self.name);
     }
 }
 
