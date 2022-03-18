@@ -438,8 +438,7 @@ fn owned_get_signatures() {
         assert_eq!(iter.next().unwrap().1, i + 1);
     }
     assert!(iter.next().is_none());
-    // TODO: is there a way to remove the type hint on range()?
-    let mut iter: RangeIter<u32, u32> = table.range::<Range<&u32>, &u32>(&0..&10).unwrap();
+    let mut iter = table.range::<Range<&u32>, &u32>(&0..&10).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, i + 1);
     }
@@ -469,14 +468,13 @@ fn ref_get_signatures() {
 
     let start = vec![0u8];
     let end = vec![10u8];
-    // TODO: is there a way to make RangeFull queries work without the type hint?
-    let mut iter: RangeIter<[u8], [u8]> = table.range::<RangeFull, &[u8]>(..).unwrap();
+    let mut iter = table.range::<RangeFull, &[u8]>(..).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, &[i + 1]);
     }
     assert!(iter.next().is_none());
 
-    let mut iter: RangeIter<[u8], [u8]> = table.range(start.as_slice()..&end).unwrap();
+    let mut iter = table.range(start.as_slice()..&end).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, &[i + 1]);
     }
