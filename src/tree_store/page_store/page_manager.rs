@@ -1046,7 +1046,7 @@ impl TransactionalMemory {
 
         self.log_since_commit.lock().unwrap().clear();
         self.allocated_since_commit.lock().unwrap().clear();
-        self.read_from_secondary.store(false, Ordering::SeqCst);
+        self.read_from_secondary.store(false, Ordering::Release);
 
         Ok(())
     }
@@ -1068,7 +1068,7 @@ impl TransactionalMemory {
 
         self.log_since_commit.lock().unwrap().clear();
         self.allocated_since_commit.lock().unwrap().clear();
-        self.read_from_secondary.store(true, Ordering::SeqCst);
+        self.read_from_secondary.store(true, Ordering::Release);
 
         Ok(())
     }
@@ -1105,7 +1105,7 @@ impl TransactionalMemory {
         }
         self.allocated_since_commit.lock().unwrap().clear();
         // Reset the layout, in case it changed during the writes
-        if self.read_from_secondary.load(Ordering::SeqCst) {
+        if self.read_from_secondary.load(Ordering::Acquire) {
             *layout = metadata.secondary_slot().get_data_section_layout();
         } else {
             *layout = metadata.primary_slot().get_data_section_layout();
@@ -1154,7 +1154,7 @@ impl TransactionalMemory {
 
     pub(crate) fn get_primary_root_page(&self) -> Option<PageNumber> {
         let metadata = self.lock_metadata();
-        if self.read_from_secondary.load(Ordering::SeqCst) {
+        if self.read_from_secondary.load(Ordering::Acquire) {
             metadata.secondary_slot().get_root_page()
         } else {
             metadata.primary_slot().get_root_page()
@@ -1163,7 +1163,7 @@ impl TransactionalMemory {
 
     pub(crate) fn get_last_committed_transaction_id(&self) -> Result<u64> {
         let metadata = self.lock_metadata();
-        if self.read_from_secondary.load(Ordering::SeqCst) {
+        if self.read_from_secondary.load(Ordering::Acquire) {
             Ok(metadata
                 .secondary_slot()
                 .get_last_committed_transaction_id())
@@ -1429,7 +1429,7 @@ impl TransactionalMemory {
 impl Drop for TransactionalMemory {
     fn drop(&mut self) {
         // Commit any non-durable transactions that are outstanding
-        if self.read_from_secondary.load(Ordering::SeqCst) {
+        if self.read_from_secondary.load(Ordering::Acquire) {
             if let Ok(non_durable_transaction_id) = self.get_last_committed_transaction_id() {
                 if self.commit(non_durable_transaction_id, false).is_err() {
                     eprintln!(
