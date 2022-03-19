@@ -182,6 +182,34 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
     );
     results.push(("removals", duration));
 
+    let mut bigpairs = gen_data(100, 24, 2_000_000);
+    let bigelements = 1000;
+
+    let start = Instant::now();
+    let txn = db.write_transaction();
+    let mut inserter = txn.get_inserter();
+    {
+        for _ in 0..bigelements {
+            let len = bigpairs.len();
+            let (key, value) = &mut bigpairs[written % len];
+            key[16..].copy_from_slice(&(written as u64).to_be_bytes());
+            inserter.insert(key, value).unwrap();
+            written += 1;
+        }
+    }
+    drop(inserter);
+    txn.commit().unwrap();
+
+    let end = Instant::now();
+    let duration = end - start;
+    println!(
+        "{}: Bulk loaded {} 2MB items in {}ms",
+        T::db_type_name(),
+        bigelements,
+        duration.as_millis()
+    );
+    results.push(("bulk load (2MB values)", duration));
+
     results
 }
 
