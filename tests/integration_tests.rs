@@ -145,7 +145,7 @@ fn free() {
     let db_size = 8 * 1024 * 1024;
     let db = unsafe {
         Database::builder()
-            .set_grow(false)
+            .set_dynamic_growth(false)
             .create(tmpfile.path(), db_size)
             .unwrap()
     };
