@@ -166,8 +166,8 @@ impl DatabaseBuilder {
     /// Whether to grow the database file dynamically.
     /// When set to true, the database file will start at a small size and grow as insertions are made
     /// When set to false, the database file will be statically sized
-    pub fn set_grow(&mut self, dynamic: bool) -> &mut Self {
-        self.dynamic_growth = dynamic;
+    pub fn set_dynamic_growth(&mut self, enabled: bool) -> &mut Self {
+        self.dynamic_growth = enabled;
         self
     }
 
