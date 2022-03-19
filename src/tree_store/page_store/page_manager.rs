@@ -998,7 +998,11 @@ impl TransactionalMemory {
         }
 
         metadata.swap_primary();
-        self.mmap.flush()?;
+        if eventual {
+            self.mmap.eventual_flush()?;
+        } else {
+            self.mmap.flush()?;
+        }
         drop(metadata);
 
         self.log_since_commit.lock().unwrap().clear();
