@@ -200,7 +200,7 @@ impl<'a> MetadataAccessor<'a> {
         }
     }
 
-    fn get_regional_allocator(&mut self, region: usize, layout: &DataSectionLayout) -> &[u8] {
+    fn get_regional_allocator(&mut self, region: usize, layout: &DatabaseLayout) -> &[u8] {
         let base = layout.region_base_address(region);
         let relative = layout.region_layout(region).allocator_state;
         let absolute = (base + relative.start)..(base + relative.end);
@@ -215,7 +215,7 @@ impl<'a> MetadataAccessor<'a> {
     // as self, since self holds the metadata lock
     fn allocators_mut(
         &mut self,
-        layout: &DataSectionLayout,
+        layout: &DatabaseLayout,
     ) -> Result<(U64GroupedBitMapMut, RegionsAccessor)> {
         if !self.get_allocator_dirty() {
             self.set_allocator_dirty(true);
@@ -243,7 +243,7 @@ impl<'a> MetadataAccessor<'a> {
 // Safety: RegionAccessor may only access regional metadata, and no other references to it may exist
 struct RegionsAccessor<'a> {
     mmap: &'a Mmap,
-    layout: DataSectionLayout,
+    layout: DatabaseLayout,
 }
 
 impl<'a> RegionsAccessor<'a> {
@@ -357,10 +357,9 @@ impl<'a> TransactionAccessor<'a> {
         )
     }
 
-    fn get_data_section_layout(&self) -> DataSectionLayout {
-        DataSectionLayout::from_be_bytes(
-            self.mem
-                [DATA_LAYOUT_OFFSET..(DATA_LAYOUT_OFFSET + DataSectionLayout::serialized_size())]
+    fn get_data_section_layout(&self) -> DatabaseLayout {
+        DatabaseLayout::from_be_bytes(
+            self.mem[DATA_LAYOUT_OFFSET..(DATA_LAYOUT_OFFSET + DatabaseLayout::serialized_size())]
                 .try_into()
                 .unwrap(),
         )
@@ -386,8 +385,8 @@ impl<'a> TransactionMutator<'a> {
             .copy_from_slice(&transaction_id.to_be_bytes());
     }
 
-    fn set_data_section_layout(&mut self, layout: &DataSectionLayout) {
-        self.mem[DATA_LAYOUT_OFFSET..(DATA_LAYOUT_OFFSET + DataSectionLayout::serialized_size())]
+    fn set_data_section_layout(&mut self, layout: &DatabaseLayout) {
+        self.mem[DATA_LAYOUT_OFFSET..(DATA_LAYOUT_OFFSET + DatabaseLayout::serialized_size())]
             .copy_from_slice(&layout.to_be_bytes());
     }
 }
@@ -568,14 +567,14 @@ impl RegionLayout {
 }
 
 #[derive(Clone)]
-struct DataSectionLayout {
+struct DatabaseLayout {
     db_header_bytes: usize,
     full_region_layout: RegionLayout,
     num_full_regions: usize,
     trailing_partial_region: Option<RegionLayout>,
 }
 
-impl DataSectionLayout {
+impl DatabaseLayout {
     fn calculate(
         db_capacity: usize,
         mut desired_usable_bytes: usize,
@@ -592,7 +591,7 @@ impl DataSectionLayout {
                 page_size,
             )
             .ok_or(Error::OutOfSpace)?;
-            Ok(DataSectionLayout {
+            Ok(DatabaseLayout {
                 db_header_bytes: min_header_size,
                 full_region_layout,
                 num_full_regions: 0,
@@ -610,7 +609,7 @@ impl DataSectionLayout {
                 db_capacity - db_header_bytes - num_full_regions * full_region_layout.len();
             let remaining_desired =
                 desired_usable_bytes - num_full_regions * full_region_layout.len();
-            Ok(DataSectionLayout {
+            Ok(DatabaseLayout {
                 db_header_bytes,
                 full_region_layout,
                 num_full_regions,
@@ -645,7 +644,6 @@ impl DataSectionLayout {
         self.num_full_regions * self.full_region_layout.usable_bytes() + trailing
     }
 
-    // TODO: move this to a HeaderLayout structure
     fn region_allocator_address_range(&self) -> Range<usize> {
         DB_HEADER_SIZE..self.db_header_bytes
     }
@@ -749,7 +747,7 @@ pub(crate) struct TransactionalMemory {
     // It would be nice if this was a RefCell<&[u8]> on the metadata. However, that would be
     // self-referential, since we also hold the mmap object
     metadata_guard: Mutex<MetadataGuard>,
-    layout: Mutex<DataSectionLayout>,
+    layout: Mutex<DatabaseLayout>,
     // The number of PageMut which are outstanding
     #[cfg(debug_assertions)]
     open_dirty_pages: Mutex<HashSet<PageNumber>>,
@@ -793,7 +791,7 @@ impl TransactionalMemory {
             } else {
                 max_capacity
             };
-            let layout = DataSectionLayout::calculate(max_capacity, starting_size, page_size)?;
+            let layout = DatabaseLayout::calculate(max_capacity, starting_size, page_size)?;
 
             if mmap.len() < layout.len() {
                 // Safety: We're growing the mmap
@@ -1200,7 +1198,7 @@ impl TransactionalMemory {
     fn allocate_helper(
         &self,
         metadata: &mut MetadataAccessor,
-        layout: &DataSectionLayout,
+        layout: &DatabaseLayout,
         required_order: usize,
     ) -> Result<PageNumber> {
         let regional_guard = self.regional_allocators.lock().unwrap();
@@ -1238,7 +1236,7 @@ impl TransactionalMemory {
         ))
     }
 
-    fn grow(&self, metadata: &mut MetadataAccessor, layout: &mut DataSectionLayout) -> Result<()> {
+    fn grow(&self, metadata: &mut MetadataAccessor, layout: &mut DatabaseLayout) -> Result<()> {
         let next_desired_size = if layout.num_full_regions > 0 {
             // Grow by 1 region
             // TODO: prune the trailing partial region, if it exists
@@ -1246,7 +1244,7 @@ impl TransactionalMemory {
         } else {
             layout.usable_bytes() * 2
         };
-        let new_layout = DataSectionLayout::calculate(
+        let new_layout = DatabaseLayout::calculate(
             metadata.get_max_capacity(),
             next_desired_size,
             self.page_size,
