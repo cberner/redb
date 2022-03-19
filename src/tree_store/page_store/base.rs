@@ -1,7 +1,9 @@
 use crate::tree_store::page_store::page_manager::MAX_PAGE_ORDER;
+#[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::ops::Range;
+#[cfg(debug_assertions)]
 use std::sync::Mutex;
 
 // On-disk format is:
