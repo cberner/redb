@@ -906,11 +906,10 @@ impl TransactionalMemory {
         Ok(self.lock_metadata().get_allocator_dirty())
     }
 
-    // Returns true if the repair is complete. If false, this method must be called again
     pub(crate) fn repair_allocator(
         &self,
         allocated_pages: impl Iterator<Item = PageNumber>,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         let mut metadata = self.lock_metadata();
         let layout = self.layout.lock().unwrap();
         let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
@@ -949,17 +948,7 @@ impl TransactionalMemory {
 
         metadata.set_allocator_dirty(false);
         self.mmap.flush()?;
-        // Retain the metadata lock until flush is done
-        drop(metadata);
 
-        Ok(true)
-    }
-
-    // TODO: remove this method
-    pub(crate) fn finalize_repair_allocator(&mut self) -> Result {
-        assert!(!self.needs_repair()?);
-        let metadata = self.lock_metadata();
-        let layout = self.layout.lock().unwrap();
         let full_regional_allocator = BuddyAllocator::new(
             layout.full_region_layout.num_pages,
             layout.full_region_layout.num_pages,

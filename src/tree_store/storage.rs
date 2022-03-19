@@ -216,27 +216,27 @@ impl Storage {
         page_size: Option<usize>,
         dynamic_growth: bool,
     ) -> Result<Storage> {
-        let mut mem = TransactionalMemory::new(file, max_capacity, page_size, dynamic_growth)?;
+        let mem = TransactionalMemory::new(file, max_capacity, page_size, dynamic_growth)?;
         if mem.needs_repair()? {
             let root = mem
                 .get_primary_root_page()
                 .expect("Tried to repair an empty database");
             // Clear the freed table. We're about to rebuild the allocator state by walking
             // all the reachable pages, which will implicitly free them
+            {
+                // Safety: we own the mem object, and just created it, so there can't be other references.
+                let mut bytes = unsafe {
+                    get_mut_value::<str>(mem.get_page_mut(root), FREED_TABLE.as_bytes(), &mem)
+                        .unwrap()
+                };
+                // TODO: this needs to be done in a transaction. Otherwise a torn write could happen
+                let mut header = TableHeader::from_bytes(bytes.as_mut());
+                header.table_root = None;
+                assert_eq!(bytes.as_mut().len(), header.to_bytes().len());
+                bytes.as_mut().copy_from_slice(&header.to_bytes());
+            }
 
-            // Safety: we own the mem object, and just created it, so there can't be other references.
-            let mut bytes = unsafe {
-                get_mut_value::<str>(mem.get_page_mut(root), FREED_TABLE.as_bytes(), &mem).unwrap()
-            };
-            let mut header = TableHeader::from_bytes(bytes.as_mut());
-            header.table_root = None;
-            assert_eq!(bytes.as_mut().len(), header.to_bytes().len());
-            bytes.as_mut().copy_from_slice(&header.to_bytes());
-        }
-        while mem.needs_repair()? {
-            let root = mem
-                .get_primary_root_page()
-                .expect("Tried to repair an empty database");
+            // Repair the allocator state
             let root_page = mem.get_page(root);
             let start = page_numbers_iter_start_state(root_page);
 
@@ -261,7 +261,6 @@ impl Storage {
 
             mem.repair_allocator(all_pages_iter)?;
         }
-        mem.finalize_repair_allocator()?;
 
         let mut next_transaction_id = mem.get_last_committed_transaction_id()? + 1;
         if mem.get_primary_root_page().is_none() {
