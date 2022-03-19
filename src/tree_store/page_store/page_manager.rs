@@ -159,6 +159,35 @@ impl<'a> MetadataAccessor<'a> {
         ) as usize
     }
 
+    fn set_max_capacity(&mut self, max_size: usize) {
+        self.header[DB_SIZE_OFFSET..DB_SIZE_OFFSET + size_of::<u64>()]
+            .copy_from_slice(&(max_size as u64).to_be_bytes());
+    }
+
+    fn get_magic_number(&self) -> [u8; MAGICNUMBER.len()] {
+        self.header[..MAGICNUMBER.len()].try_into().unwrap()
+    }
+
+    fn set_magic_number(&mut self) {
+        self.header[..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
+    }
+
+    fn get_page_size(&self) -> usize {
+        1usize << self.header[PAGE_SIZE_OFFSET]
+    }
+
+    fn set_page_size(&mut self, page_size: usize) {
+        self.header[PAGE_SIZE_OFFSET] = page_size.trailing_zeros() as u8;
+    }
+
+    fn get_version(&self) -> u8 {
+        self.header[VERSION_OFFSET]
+    }
+
+    fn set_version(&mut self, version: u8) {
+        self.header[VERSION_OFFSET] = version;
+    }
+
     fn get_allocator_dirty(&self) -> bool {
         self.header[GOD_BYTE_OFFSET] & ALLOCATOR_STATE_DIRTY != 0
     }
@@ -227,17 +256,6 @@ impl<'a> RegionsAccessor<'a> {
         assert!(absolute.start >= self.layout.db_header_bytes);
         unsafe { self.mmap.get_memory_mut(absolute) }
     }
-}
-
-fn get_secondary(header: &mut [u8]) -> &mut [u8] {
-    let start = if header[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
-        TRANSACTION_1_OFFSET
-    } else {
-        TRANSACTION_0_OFFSET
-    };
-    let end = start + TRANSACTION_SIZE;
-
-    &mut header[start..end]
 }
 
 // On-disk format is:
@@ -764,13 +782,9 @@ impl TransactionalMemory {
         }
 
         let mutex = Mutex::new(MetadataGuard {});
-        let magic_number: [u8; 9] = {
-            // Safety: we have exclusive access to the mmap
-            let header = unsafe { mmap.get_memory_mut(0..DB_HEADER_SIZE) };
-            header[..MAGICNUMBER.len()].try_into().unwrap()
-        };
+        let mut metadata = unsafe { MetadataAccessor::new(&mmap, mutex.lock().unwrap()) };
 
-        if magic_number != MAGICNUMBER {
+        if metadata.get_magic_number() != MAGICNUMBER {
             let page_size = requested_page_size.unwrap_or_else(get_page_size);
             assert!(page_size.is_power_of_two());
 
@@ -788,81 +802,69 @@ impl TransactionalMemory {
                 }
             }
 
-            let all_memory = unsafe { mmap.get_memory_mut(0..layout.len()) };
-
             // Explicitly zero the header
-            all_memory[0..layout.db_header_bytes].fill(0);
+            metadata.header.fill(0);
+
+            let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
 
             // Initialize the region allocator
             let num_regions = layout.num_regions();
-            let mut region_allocator =
-                U64GroupedBitMapMut::new(&mut all_memory[layout.region_allocator_address_range()]);
+            for i in 0..num_regions {
+                region_allocator.clear(i);
+            }
             for i in num_regions..region_allocator.len() {
                 region_allocator.set(i);
             }
 
             // Initialize all the regional allocators
             for i in 0..num_regions {
-                let base = layout.region_base_address(i);
+                let mem = regions.get_regional_allocator_mut(i);
                 let region_layout = layout.region_layout(i);
-                let relative = &region_layout.allocator_state;
-                let absolute = (base + relative.start)..(base + relative.end);
                 BuddyAllocator::init_new(
-                    &mut all_memory[absolute],
+                    mem,
                     region_layout.num_pages,
                     layout.full_region_layout.num_pages,
                     region_layout.max_order(),
                 );
             }
+            // Set the allocator to not dirty, because the allocator initialization above will have
+            // dirtied it
+            metadata.set_allocator_dirty(false);
 
             // Store the page & db size. These are immutable
-            all_memory[PAGE_SIZE_OFFSET] = page_size.trailing_zeros() as u8;
-            all_memory[DB_SIZE_OFFSET..(DB_SIZE_OFFSET + size_of::<u64>())]
-                .copy_from_slice(&(max_capacity as u64).to_be_bytes());
+            metadata.set_page_size(page_size);
+            metadata.set_max_capacity(max_capacity);
+            metadata.set_version(1);
 
-            // Set to 1, so that we can mutate the first transaction state
-            all_memory[GOD_BYTE_OFFSET] = PRIMARY_BIT;
-            let mut mutator = TransactionMutator::new(get_secondary(all_memory));
+            let mut mutator = metadata.secondary_slot_mut();
             mutator.set_root_page(PageNumber::null());
             mutator.set_last_committed_transaction_id(0);
             mutator.set_data_section_layout(&layout);
             drop(mutator);
             // Make the state we just wrote the primary
-            all_memory[GOD_BYTE_OFFSET] &= !PRIMARY_BIT;
+            metadata.swap_primary();
 
             // Initialize the secondary allocator state
-            let mut mutator = TransactionMutator::new(get_secondary(all_memory));
+            let mut mutator = metadata.secondary_slot_mut();
             mutator.set_data_section_layout(&layout);
             drop(mutator);
-
-            all_memory[VERSION_OFFSET] = 1;
 
             mmap.flush()?;
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
-            all_memory[0..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
+            metadata.set_magic_number();
             mmap.flush()?;
         }
 
-        let all_memory = unsafe { mmap.get_memory_mut(0..mmap.len()) };
-
-        let page_size = (1 << all_memory[PAGE_SIZE_OFFSET]) as usize;
+        let page_size = metadata.get_page_size();
         if let Some(size) = requested_page_size {
             assert_eq!(page_size, size);
         }
-
-        let allocator_dirty = all_memory[GOD_BYTE_OFFSET] & (ALLOCATOR_STATE_DIRTY) != 0;
-
-        // Ensure that all_memory reference does not exist, because it must not for the safety guarantees
-        // of MetadataAccessor to hold
-        #[allow(clippy::drop_ref)]
-        drop(all_memory);
-        // Safety: we just dropped our reference to all the mmap memory
-        let metadata = unsafe { MetadataAccessor::new(&mmap, mutex.lock().unwrap()) };
+        assert_eq!(metadata.get_version(), 1);
         let layout = metadata.primary_slot().get_data_section_layout();
         let region_size = layout.full_region_layout.len();
 
-        let regional_allocators = if allocator_dirty {
+        let regional_allocators = if metadata.get_allocator_dirty() {
             None
         } else {
             let full_regional_allocator = BuddyAllocator::new(
