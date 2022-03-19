@@ -818,7 +818,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 let total_size =
                     LeafBuilder::required_bytes(accessor.num_pairs() + 1, total_pairs_size);
                 // Split the leaf if it's larger than a native page
-                let too_large = total_size > manager.native_page_size() && accessor.num_pairs() > 1;
+                let too_large = total_size > manager.get_page_size() && accessor.num_pairs() > 1;
                 if accessor.num_pairs() >= BTREE_ORDER || too_large {
                     // split
                     let division = accessor.num_pairs() / 2;

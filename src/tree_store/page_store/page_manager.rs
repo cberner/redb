@@ -1193,10 +1193,6 @@ impl TransactionalMemory {
         self.allocated_since_commit.lock().unwrap().contains(&page)
     }
 
-    pub(crate) fn native_page_size(&self) -> usize {
-        self.page_size
-    }
-
     fn allocate_helper(
         &self,
         metadata: &mut MetadataAccessor,
