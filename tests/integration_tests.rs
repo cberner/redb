@@ -198,6 +198,36 @@ fn free() {
 }
 
 #[test]
+fn large_values() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 50 * 1024 * 1024;
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let txn = db.begin_write().unwrap();
+
+    let mut key = vec![0; 1024];
+    let value = vec![0; 2_000_000];
+    {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
+        for i in 0..5 {
+            key[0] = i;
+            table.insert(&key, &value).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
+        for i in 0..5 {
+            key[0] = i;
+            table.remove(&key).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
 fn large_keys() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 

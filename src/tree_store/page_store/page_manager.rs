@@ -4,7 +4,7 @@ use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::utils::get_page_size;
 use crate::Error;
 use crate::Result;
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
@@ -528,7 +528,7 @@ impl RegionLayout {
 
     fn max_order(&self) -> usize {
         Self::calculate_usable_order(
-            self.allocator_state.start,
+            MAX_USABLE_REGION_SPACE,
             self.allocator_state.start / self.num_pages,
         )
         .unwrap()
@@ -1239,13 +1239,23 @@ impl TransactionalMemory {
         ))
     }
 
-    fn grow(&self, metadata: &mut MetadataAccessor, layout: &mut DatabaseLayout) -> Result<()> {
+    fn grow(
+        &self,
+        metadata: &mut MetadataAccessor,
+        layout: &mut DatabaseLayout,
+        required_order_allocation: usize,
+    ) -> Result<()> {
         let next_desired_size = if layout.num_full_regions > 0 {
             // Grow by 1 region
             // TODO: prune the trailing partial region, if it exists
             layout.usable_bytes() + MAX_USABLE_REGION_SPACE
         } else {
-            layout.usable_bytes() * 2
+            let required_growth =
+                2usize.pow(required_order_allocation as u32) * metadata.get_page_size();
+            max(
+                layout.usable_bytes() * 2,
+                layout.usable_bytes() + required_growth * 2,
+            )
         };
         let new_layout = DatabaseLayout::calculate(
             metadata.get_max_capacity(),
@@ -1329,7 +1339,7 @@ impl TransactionalMemory {
             Ok(page_number) => page_number,
             Err(err) => {
                 if matches!(err, Error::OutOfSpace) && layout.len() < max_capacity {
-                    self.grow(&mut metadata, &mut layout)?;
+                    self.grow(&mut metadata, &mut layout, required_order)?;
                     self.allocate_helper(&mut metadata, &layout, required_order)?
                 } else {
                     return Err(err);
