@@ -47,6 +47,9 @@ const MAX_PAGE_ORDER: usize = 20;
 const MIN_USABLE_PAGES: usize = 10;
 const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
 
+// TODO: set to 1, when version 1.0 is released
+const FILE_FORMAT_VERSION: u8 = 100;
+
 // Inspired by PNG's magic number
 const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
 const VERSION_OFFSET: usize = MAGICNUMBER.len();
@@ -832,7 +835,7 @@ impl TransactionalMemory {
             // Store the page & db size. These are immutable
             metadata.set_page_size(page_size);
             metadata.set_max_capacity(max_capacity);
-            metadata.set_version(1);
+            metadata.set_version(FILE_FORMAT_VERSION);
 
             let mut mutator = metadata.secondary_slot_mut();
             mutator.set_root_page(PageNumber::null());
@@ -858,7 +861,7 @@ impl TransactionalMemory {
         if let Some(size) = requested_page_size {
             assert_eq!(page_size, size);
         }
-        assert_eq!(metadata.get_version(), 1);
+        assert_eq!(metadata.get_version(), FILE_FORMAT_VERSION);
         let layout = metadata.primary_slot().get_data_section_layout();
         let region_size = layout.full_region_layout.len();
 
