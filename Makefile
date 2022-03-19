@@ -30,7 +30,7 @@ test: pre
 	RUST_BACKTRACE=1 cargo test
 
 bench: pre
-	cargo bench
+	cargo bench --bench lmdb_benchmark
 
 # Nightly version selected from: https://rust-lang.github.io/rustup-components-history/
 NIGHTLY := "nightly-2022-03-21"
