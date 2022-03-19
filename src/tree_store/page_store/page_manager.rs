@@ -737,7 +737,6 @@ enum AllocationOp {
     FreeUncommitted(PageNumber),
 }
 
-// TODO: maybe the TransactionalMemory should be held in a Mutex, instead of all the mutexes inside it?
 pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
     allocated_since_commit: Mutex<HashSet<PageNumber>>,
@@ -757,9 +756,9 @@ pub(crate) struct TransactionalMemory {
     // Indicates that a non-durable commit has been made, so reads should be served from the secondary meta page
     read_from_secondary: AtomicBool,
     page_size: usize,
-    // TODO: remove this? we have the layout
+    // We store these separately from the layout because they're static, and accessed on the get_page()
+    // code path where there is no locking
     region_size: usize,
-    // TODO: remove this? we have the layout
     header_size: usize,
 }
 
