@@ -92,7 +92,7 @@ impl BuddyAllocator {
             let order_size = 2usize.pow(order as u32);
             let page = processed_pages / order_size;
             debug_assert_eq!(processed_pages % order_size, 0);
-            if order >= self.orders.len() {
+            if order >= self.orders.len() || processed_pages + order_size > new_size {
                 break;
             }
             let order_data = Self::get_order_bytes_mut(data, order);
