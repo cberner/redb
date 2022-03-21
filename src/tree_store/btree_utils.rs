@@ -225,10 +225,12 @@ enum DeletionResult {
 
 // partials must be in sorted order, and be disjoint from the pairs in the leaf
 // Must return the pages in order
-fn split_leaf<K: RedbKey + ?Sized>(
+// Safety: caller must ensure that no references to uncommitted pages in this table exist
+unsafe fn split_leaf<K: RedbKey + ?Sized>(
     leaf: PageNumber,
     partial: &[(Vec<u8>, Vec<u8>)],
     manager: &TransactionalMemory,
+    free_uncommitted: bool,
     freed: &mut Vec<PageNumber>,
 ) -> Result<(PageNumber, PageNumber)> {
     assert!(!partial.is_empty());
@@ -292,18 +294,23 @@ fn split_leaf<K: RedbKey + ?Sized>(
     }
     drop(builder);
 
-    // TODO: free if uncommitted
-    freed.push(page.get_page_number());
+    drop(page);
+    if !(free_uncommitted && manager.free_if_uncommitted(leaf)?) {
+        freed.push(leaf);
+    }
+
     Ok((new_page.get_page_number(), new_page2.get_page_number()))
 }
 
 // partials must be in sorted order, and be disjoint from the pairs in the leaf
 // returns None if the merged page would be too large
-fn merge_leaf<K: RedbKey + ?Sized>(
+// Safety: caller must ensure that no references to uncommitted pages in this table exist
+unsafe fn merge_leaf<K: RedbKey + ?Sized>(
     leaf: PageNumber,
     partial: &[(Vec<u8>, Vec<u8>)],
-    freed: &mut Vec<PageNumber>,
     manager: &TransactionalMemory,
+    free_uncommitted: bool,
+    freed: &mut Vec<PageNumber>,
 ) -> Result<Option<PageNumber>> {
     if partial.is_empty() {
         return Ok(Some(leaf));
@@ -354,18 +361,22 @@ fn merge_leaf<K: RedbKey + ?Sized>(
     }
     drop(builder);
 
-    // TODO: free if uncommitted
-    freed.push(leaf);
+    drop(page);
+    if !(free_uncommitted && manager.free_if_uncommitted(leaf)?) {
+        freed.push(leaf);
+    }
 
     Ok(Some(new_page.get_page_number()))
 }
 
 // Splits the page, if necessary, to fit the additional pages in `partial`
 // Returns the pages in order
-fn split_index(
+// Safety: caller must ensure that no references to uncommitted pages in this table exist
+unsafe fn split_index(
     index: PageNumber,
     partial: &[PageNumber],
     manager: &TransactionalMemory,
+    free_uncommitted: bool,
     freed: &mut Vec<PageNumber>,
 ) -> Result<Option<(PageNumber, PageNumber)>> {
     let page = manager.get_page(index);
@@ -388,8 +399,10 @@ fn split_index(
 
     let page1 = make_index_many_pages(&pages[0..division], manager)?;
     let page2 = make_index_many_pages(&pages[division..], manager)?;
-    // TODO: free if uncommitted
-    freed.push(page.get_page_number());
+    drop(page);
+    if !(free_uncommitted && manager.free_if_uncommitted(index)?) {
+        freed.push(index);
+    }
 
     Ok(Some((page1, page2)))
 }
@@ -420,10 +433,12 @@ fn make_index_many_pages(
     Ok(page.get_page_number())
 }
 
-fn merge_index(
+// Safety: caller must ensure that no references to uncommitted pages in this table exist
+unsafe fn merge_index(
     index: PageNumber,
     partial: &[PageNumber],
     manager: &TransactionalMemory,
+    free_uncommitted: bool,
     freed: &mut Vec<PageNumber>,
 ) -> Result<PageNumber> {
     let page = manager.get_page(index);
@@ -440,8 +455,10 @@ fn merge_index(
     pages.sort_by_key(|p| max_key(manager.get_page(*p), manager));
     assert!(pages.len() <= BTREE_ORDER);
 
-    // TODO: free if uncommitted
-    freed.push(page.get_page_number());
+    drop(page);
+    if !(free_uncommitted && manager.free_if_uncommitted(index)?) {
+        freed.push(index);
+    }
 
     make_index_many_pages(&pages, manager)
 }
@@ -600,13 +617,22 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                         }
                         let page_number = accessor.child_page(i).unwrap();
                         if i == merge_with {
-                            if let Some(new_page) =
-                                merge_leaf::<K>(page_number, &partials, freed, manager)?
-                            {
+                            if let Some(new_page) = merge_leaf::<K>(
+                                page_number,
+                                &partials,
+                                manager,
+                                free_uncommitted,
+                                freed,
+                            )? {
                                 children.push(new_page);
                             } else {
-                                let (page1, page2) =
-                                    split_leaf::<K>(page_number, &partials, manager, freed)?;
+                                let (page1, page2) = split_leaf::<K>(
+                                    page_number,
+                                    &partials,
+                                    manager,
+                                    free_uncommitted,
+                                    freed,
+                                )?;
                                 children.push(page1);
                                 children.push(page2);
                             }
@@ -630,13 +656,23 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                         }
                         let page_number = accessor.child_page(i).unwrap();
                         if i == merge_with {
-                            if let Some((page1, page2)) =
-                                split_index(page_number, &partials, manager, freed)?
-                            {
+                            if let Some((page1, page2)) = split_index(
+                                page_number,
+                                &partials,
+                                manager,
+                                free_uncommitted,
+                                freed,
+                            )? {
                                 children.push(page1);
                                 children.push(page2);
                             } else {
-                                children.push(merge_index(page_number, &partials, manager, freed)?);
+                                children.push(merge_index(
+                                    page_number,
+                                    &partials,
+                                    manager,
+                                    free_uncommitted,
+                                    freed,
+                                )?);
                             }
                         } else {
                             children.push(page_number);
