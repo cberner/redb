@@ -9,6 +9,7 @@ version = "0.0.8"
 edition = "2021"
 rust-version = "1.56"
 authors = ["Christopher Berner <christopherberner@gmail.com>"]
+exclude = ["fuzz/"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
