@@ -491,7 +491,10 @@ impl RegionLayout {
         let max_order = Self::calculate_usable_order(MAX_USABLE_REGION_SPACE, page_size)?;
         let required_header_size =
             BuddyAllocator::required_space(required_page_capacity, max_order);
-        if available_space < required_header_size {
+        if desired_usable_bytes / page_size < MIN_USABLE_PAGES {
+            return None;
+        }
+        if available_space < required_header_size + MIN_USABLE_PAGES * page_size {
             return None;
         }
         let max_region_size = desired_usable_bytes + required_header_size;
@@ -611,7 +614,7 @@ impl DatabaseLayout {
             let remaining_space =
                 db_capacity - db_header_bytes - num_full_regions * full_region_layout.len();
             let remaining_desired =
-                desired_usable_bytes - num_full_regions * full_region_layout.len();
+                desired_usable_bytes - num_full_regions * MAX_USABLE_REGION_SPACE;
             Ok(DatabaseLayout {
                 db_header_bytes,
                 full_region_layout,
@@ -1283,7 +1286,7 @@ impl TransactionalMemory {
                 let old_region_base = layout.region_base_address(i);
                 let old_region = layout.region_layout(i);
                 assert_eq!(old_region_base, new_region_base);
-                if new_layout.len() == old_region.len() {
+                if new_region.len() == old_region.len() {
                     // No change
                     allocators.as_ref().unwrap()[i].clone()
                 } else {
