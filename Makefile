@@ -31,3 +31,8 @@ test: pre
 
 bench: pre
 	cargo bench
+
+fuzz: pre
+	# Nightly version selected from: https://rust-lang.github.io/rustup-components-history/
+	rustup toolchain install nightly-2022-03-21
+	cargo +nightly-2022-03-21 fuzz run fuzz_redb
