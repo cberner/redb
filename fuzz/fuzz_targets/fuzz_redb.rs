@@ -10,7 +10,7 @@ use common::*;
 
 const TABLE_DEF: TableDefinition<u64, [u8]> = TableDefinition::new("fuzz_table");
 
-fuzz_target!(|config: RedbFuzzConfig| {
+fuzz_target!(|config: FuzzConfig| {
     let redb_file: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(redb_file.path(), config.max_db_size.value) };
 
@@ -24,12 +24,14 @@ fuzz_target!(|config: RedbFuzzConfig| {
     for transaction in config.transactions.iter() {
         let mut txn = db.begin_write().unwrap();
         // We're not trying to test crash safety, so don't bother with durability
-        txn.set_durability(Durability::None);
+        if !transaction.durable {
+            txn.set_durability(Durability::None);
+        }
         {
             let mut table = txn.open_table(TABLE_DEF).unwrap();
-            for op in transaction {
+            for op in transaction.ops.iter() {
                 match op {
-                    RedbFuzzOperation::Get { key } => {
+                    FuzzOperation::Get { key } => {
                         let key = key.value;
                         match reference.get(&key) {
                             Some(reference_len) => {
@@ -41,7 +43,7 @@ fuzz_target!(|config: RedbFuzzConfig| {
                             }
                         }
                     },
-                    RedbFuzzOperation::Insert { key, value_size } => {
+                    FuzzOperation::Insert { key, value_size } => {
                         let key = key.value;
                         let value_size = value_size.value as usize;
                         let value = vec![0xFF; value_size];
@@ -52,7 +54,7 @@ fuzz_target!(|config: RedbFuzzConfig| {
                         }
                         reference.insert(key, value_size);
                     },
-                    RedbFuzzOperation::Remove { key } => {
+                    FuzzOperation::Remove { key } => {
                         let key = key.value;
                         match reference.remove(&key) {
                             Some(reference_len) => {
