@@ -1,8 +1,9 @@
 #![no_main]
+
+use std::collections::BTreeMap;
 use libfuzzer_sys::fuzz_target;
-use lmdb::{EnvironmentFlags, Transaction};
-use tempfile::{NamedTempFile, TempDir};
-use redb::{Database, Durability, ReadableTable, TableDefinition};
+use tempfile::NamedTempFile;
+use redb::{Database, Durability, Error, ReadableTable, TableDefinition};
 
 mod common;
 use common::*;
@@ -13,43 +14,35 @@ fuzz_target!(|config: RedbFuzzConfig| {
     let redb_file: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(redb_file.path(), config.max_db_size.value) };
 
-    // TODO: check that the error is sensible
-    if db.is_err() {
+    if matches!(db, Err(Error::OutOfSpace)) {
         return;
     }
     let db = db.unwrap();
-    // TODO: check against BtreeMap instead, to make the fuzzing faster
-    let lmdb_dir: TempDir = tempfile::tempdir().unwrap();
-    let env = lmdb::Environment::new().set_flags(EnvironmentFlags::NO_SYNC).open(lmdb_dir.path()).unwrap();
-    env.set_map_size(10 * 1024 * 1024 * 1024).unwrap();
-    let lmdb_db = env.open_db(None).unwrap();
+
+    let mut reference = BTreeMap::new();
 
     for transaction in config.transactions.iter() {
         let mut txn = db.begin_write().unwrap();
         // We're not trying to test crash safety, so don't bother with durability
         txn.set_durability(Durability::None);
-        let mut lmdb_txn = env.begin_rw_txn().unwrap();
         {
             let mut table = txn.open_table(TABLE_DEF).unwrap();
             for op in transaction {
                 match op {
                     RedbFuzzOperation::Get { key } => {
                         let key = key.value;
-                        match lmdb_txn.get(lmdb_db, &key.to_be_bytes()) {
-                            Ok(lmdb_value) => {
+                        match reference.get(&key) {
+                            Some(reference_len) => {
                                 let value = table.get(&key).unwrap().unwrap();
-                                assert_eq!(value, lmdb_value);
+                                assert_eq!(value.len(), *reference_len);
                             },
-                            Err(err) => {
-                                if matches!(err, lmdb::Error::NotFound) {
-                                    assert!(table.get(&key).unwrap().is_none());
-                                }
+                            None => {
+                                assert!(table.get(&key).unwrap().is_none());
                             }
                         }
                     },
                     RedbFuzzOperation::Insert { key, value_size } => {
                         let key = key.value;
-                        // Limit values to 10MiB
                         let value_size = value_size.value as usize;
                         let value = vec![0xFF; value_size];
                         if let Err(redb::Error::OutOfSpace) = table.insert(&key, &value) {
@@ -57,13 +50,19 @@ fuzz_target!(|config: RedbFuzzConfig| {
                                 return;
                             }
                         }
-                        lmdb_txn.put(lmdb_db, &key.to_be_bytes(), &value, lmdb::WriteFlags::empty()).unwrap();
+                        reference.insert(key, value_size);
                     },
                     RedbFuzzOperation::Remove { key } => {
                         let key = key.value;
-                        table.remove(&key).unwrap();
-                        // TODO: error checking
-                        let _ = lmdb_txn.del(lmdb_db, &key.to_be_bytes(), None);
+                        match reference.remove(&key) {
+                            Some(reference_len) => {
+                                let value = table.remove(&key).unwrap().unwrap();
+                                assert_eq!(value.to_value().len(), reference_len);
+                            },
+                            None => {
+                                assert!(table.remove(&key).unwrap().is_none());
+                            }
+                        }
                     }
                 }
             }
@@ -73,6 +72,5 @@ fuzz_target!(|config: RedbFuzzConfig| {
                 return;
             }
         }
-        lmdb_txn.commit().unwrap();
     }
 });

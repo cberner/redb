@@ -2,6 +2,7 @@ use std::mem::size_of;
 use arbitrary::Unstructured;
 use libfuzzer_sys::arbitrary::Arbitrary;
 
+// Limit values to 10MiB
 const MAX_VALUE_SIZE: usize = 10_000_000;
 // Limit testing to 1TB databases
 const MAX_DB_SIZE: usize = 2usize.pow(40);
