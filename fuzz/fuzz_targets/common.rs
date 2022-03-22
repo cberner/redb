@@ -46,7 +46,7 @@ impl<const N: usize> Arbitrary<'_> for BoundedUSize<N> {
 
 // TODO: expand coverage to more operations
 #[derive(Arbitrary, Debug)]
-pub(crate) enum RedbFuzzOperation {
+pub(crate) enum FuzzOperation {
     Get {
         key: BoundedU64<KEY_SPACE>,
     },
@@ -60,20 +60,26 @@ pub(crate) enum RedbFuzzOperation {
 }
 
 #[derive(Arbitrary, Debug)]
-pub(crate) struct RedbFuzzConfig {
-    pub transactions: Vec<Vec<RedbFuzzOperation>>,
+pub(crate) struct FuzzTransaction {
+    pub ops: Vec<FuzzOperation>,
+    pub durable: bool,
+}
+
+#[derive(Arbitrary, Debug)]
+pub(crate) struct FuzzConfig {
+    pub transactions: Vec<FuzzTransaction>,
     pub max_db_size: BoundedUSize<MAX_DB_SIZE>,
 }
 
-impl RedbFuzzConfig {
+impl FuzzConfig {
     pub(crate) fn oom_plausible(&self) -> bool {
         let mut total_entries = 0;
         let mut total_value_bytes = 0;
         for transaction in self.transactions.iter() {
-            for write in transaction.iter() {
+            for write in transaction.ops.iter() {
                 total_entries += 1;
                 total_value_bytes += match write {
-                    RedbFuzzOperation::Insert { value_size, .. } => value_size.value,
+                    FuzzOperation::Insert { value_size, .. } => value_size.value,
                     _ => 0
                 };
             }
