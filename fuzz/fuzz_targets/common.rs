@@ -1,27 +1,67 @@
 use std::mem::size_of;
+use arbitrary::Unstructured;
 use libfuzzer_sys::arbitrary::Arbitrary;
 
-pub const MAX_VALUE_SIZE: usize = 10_000_000;
+const MAX_VALUE_SIZE: usize = 10_000_000;
+// Limit testing to 1TB databases
+const MAX_DB_SIZE: usize = 2usize.pow(40);
+const KEY_SPACE: u64 = 1_000_000;
+
+#[derive(Debug)]
+pub(crate) struct BoundedU64<const N: u64> {
+    pub value: u64
+}
+
+impl<const N: u64> Arbitrary<'_> for BoundedU64<N> {
+    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value: u64 = u.int_in_range(0..=(N - 1))?;
+        Ok(Self {
+            value
+        })
+    }
+
+    fn size_hint(_depth: usize) -> (usize, Option<usize>) {
+        (size_of::<u64>(), Some(size_of::<u64>()))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct BoundedUSize<const N: usize> {
+    pub value: usize
+}
+
+impl<const N: usize> Arbitrary<'_> for BoundedUSize<N> {
+    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value: usize = u.int_in_range(0..=(N - 1))?;
+        Ok(Self {
+            value
+        })
+    }
+
+    fn size_hint(_depth: usize) -> (usize, Option<usize>) {
+        (size_of::<usize>(), Some(size_of::<usize>()))
+    }
+}
 
 // TODO: expand coverage to more operations
 #[derive(Arbitrary, Debug)]
 pub(crate) enum RedbFuzzOperation {
     Get {
-        key: u64,
+        key: BoundedU64<KEY_SPACE>,
     },
     Insert {
-        key: u64,
-        value_size: usize,
+        key: BoundedU64<KEY_SPACE>,
+        value_size: BoundedUSize<MAX_VALUE_SIZE>,
     },
     Remove {
-        key: u64,
+        key: BoundedU64<KEY_SPACE>,
     },
 }
 
 #[derive(Arbitrary, Debug)]
 pub(crate) struct RedbFuzzConfig {
     pub transactions: Vec<Vec<RedbFuzzOperation>>,
-    pub max_db_size: usize,
+    pub max_db_size: BoundedUSize<MAX_DB_SIZE>,
 }
 
 impl RedbFuzzConfig {
@@ -32,7 +72,7 @@ impl RedbFuzzConfig {
             for write in transaction.iter() {
                 total_entries += 1;
                 total_value_bytes += match write {
-                    RedbFuzzOperation::Insert { value_size, .. } => *value_size % MAX_VALUE_SIZE,
+                    RedbFuzzOperation::Insert { value_size, .. } => value_size.value,
                     _ => 0
                 };
             }
@@ -40,6 +80,6 @@ impl RedbFuzzConfig {
 
         let expected_size = total_value_bytes + (size_of::<u64>() * 4) * total_entries;
         // If we're within a factor of 10 of the max db size, then assume an OOM is plausible
-        expected_size * 10 > self.max_db_size
+        expected_size * 10 > self.max_db_size.value
     }
 }
