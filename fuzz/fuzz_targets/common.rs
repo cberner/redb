@@ -44,7 +44,6 @@ impl<const N: usize> Arbitrary<'_> for BoundedUSize<N> {
     }
 }
 
-// TODO: expand coverage to more operations
 #[derive(Arbitrary, Debug)]
 pub(crate) enum FuzzOperation {
     Get {
@@ -56,6 +55,13 @@ pub(crate) enum FuzzOperation {
     },
     Remove {
         key: BoundedU64<KEY_SPACE>,
+    },
+    Len {
+    },
+    Range {
+        start_key: BoundedU64<KEY_SPACE>,
+        len: BoundedU64<KEY_SPACE>,
+        reversed: bool,
     },
 }
 

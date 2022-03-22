@@ -71,7 +71,30 @@ fuzz_target!(|config: FuzzConfig| {
                                 assert!(table.remove(&key).unwrap().is_none());
                             }
                         }
+                    },
+                    FuzzOperation::Len {} => {
+                        assert_eq!(reference.len(), table.len().unwrap());
                     }
+                    FuzzOperation::Range { start_key, len, reversed } => {
+                        let start = start_key.value;
+                        let end = start + len.value;
+                        let mut reference_iter: Box<dyn Iterator<Item=(&u64, &usize)>> = if *reversed {
+                            Box::new(reference.range(start..end).rev())
+                        } else {
+                            Box::new(reference.range(start..end))
+                        };
+                        let mut iter = if *reversed {
+                            table.range(start..end).unwrap().rev()
+                        } else {
+                            table.range(start..end).unwrap()
+                        };
+                        while let Some((ref_key, ref_value_len)) = reference_iter.next() {
+                            let (key, value) = iter.next().unwrap();
+                            assert_eq!(*ref_key, key);
+                            assert_eq!(*ref_value_len, value.len());
+                        }
+                        assert!(iter.next().is_none());
+                    },
                 }
             }
         }
