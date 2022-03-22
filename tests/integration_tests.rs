@@ -443,6 +443,22 @@ fn regression3() {
 }
 
 #[test]
+// Test for bug in growth code
+fn regression4() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1507328;
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let tx = db.begin_write().unwrap();
+    {
+        let mut t = tx.open_table(SLICE_TABLE).unwrap();
+        let big_value = vec![0u8; 9134464];
+        assert!(matches!(t.insert(&[0], &big_value), Err(Error::OutOfSpace)));
+    }
+    tx.commit().unwrap();
+}
+
+#[test]
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };

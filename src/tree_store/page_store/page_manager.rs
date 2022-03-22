@@ -205,8 +205,8 @@ impl<'a> MetadataAccessor<'a> {
 
     fn get_regional_allocator(&mut self, region: usize, layout: &DatabaseLayout) -> &[u8] {
         let base = layout.region_base_address(region);
-        let relative = layout.region_layout(region).allocator_state;
-        let absolute = (base + relative.start)..(base + relative.end);
+        let len = layout.region_layout(region).allocator_state_len;
+        let absolute = base..(base + len);
 
         // Safety: We own the metadata lock, so there can't be any other references
         // and this function takes &mut self, so the returned lifetime can't overlap with any other
@@ -253,8 +253,8 @@ impl<'a> RegionsAccessor<'a> {
     fn get_regional_allocator_mut(&mut self, region: usize) -> &mut [u8] {
         // Safety: We have exclusive access to regional metadata
         let base = self.layout.region_base_address(region);
-        let relative = &self.layout.region_layout(region).allocator_state;
-        let absolute = (base + relative.start)..(base + relative.end);
+        let len = &self.layout.region_layout(region).allocator_state_len;
+        let absolute = base..(base + len);
 
         assert!(absolute.start >= self.layout.db_header_bytes);
         unsafe { self.mmap.get_memory_mut(absolute) }
@@ -314,13 +314,15 @@ impl PageNumber {
         &self,
         data_section_offset: usize,
         region_size: usize,
+        region_pages_start: usize,
         page_size: usize,
     ) -> Range<usize> {
-        let regional_start = self.page_index as usize * self.page_size_bytes(page_size);
+        let regional_start =
+            region_pages_start + self.page_index as usize * self.page_size_bytes(page_size);
         debug_assert!(regional_start < region_size);
-        let start = regional_start + self.region as usize * region_size;
+        let start = data_section_offset + self.region as usize * region_size + regional_start;
         let end = start + self.page_size_bytes(page_size);
-        (start + data_section_offset)..(end + data_section_offset)
+        start..end
     }
 
     fn page_size_bytes(&self, page_size: usize) -> usize {
@@ -457,12 +459,15 @@ impl<'a> Drop for PageMut<'a> {
     }
 }
 
-// Regions are laid out starting with the pages, and ending with the allocator state
+// Regions are laid out starting with the allocator state header, followed by the pages aligned
+// to the next page
 #[derive(Clone)]
 struct RegionLayout {
     num_pages: usize,
-    // Range of the allocator state, relative to the start of the region
-    allocator_state: Range<usize>,
+    // Offset where pages start
+    pages_start: usize,
+    allocator_state_len: usize,
+    page_size: usize,
 }
 
 impl RegionLayout {
@@ -475,11 +480,25 @@ impl RegionLayout {
         Some(min(MAX_PAGE_ORDER, max_order))
     }
 
-    fn calculate_usable_pages(space: usize, page_size: usize, max_order: usize) -> usize {
-        let required_page_capacity = MAX_USABLE_REGION_SPACE / page_size;
-        let header_size = BuddyAllocator::required_space(required_page_capacity, max_order);
+    fn calculate_usable_pages(space: usize, page_size: usize) -> Option<usize> {
+        let header_size = Self::header_with_padding(page_size)?;
         assert!(header_size < space);
-        (space - header_size) / page_size
+        Some((space - header_size) / page_size)
+    }
+
+    fn header_size(page_size: usize) -> Option<usize> {
+        let max_order = Self::calculate_usable_order(MAX_USABLE_REGION_SPACE, page_size)?;
+        let page_capacity = MAX_USABLE_REGION_SPACE / page_size;
+        Some(BuddyAllocator::required_space(page_capacity, max_order))
+    }
+
+    fn header_with_padding(page_size: usize) -> Option<usize> {
+        let header_size = Self::header_size(page_size)?;
+        Some(if header_size % page_size == 0 {
+            header_size
+        } else {
+            header_size + page_size - header_size % page_size
+        })
     }
 
     fn calculate(
@@ -487,10 +506,7 @@ impl RegionLayout {
         desired_usable_bytes: usize,
         page_size: usize,
     ) -> Option<RegionLayout> {
-        let required_page_capacity = MAX_USABLE_REGION_SPACE / page_size;
-        let max_order = Self::calculate_usable_order(MAX_USABLE_REGION_SPACE, page_size)?;
-        let required_header_size =
-            BuddyAllocator::required_space(required_page_capacity, max_order);
+        let required_header_size = Self::header_with_padding(page_size)?;
         if desired_usable_bytes / page_size < MIN_USABLE_PAGES {
             return None;
         }
@@ -500,16 +516,16 @@ impl RegionLayout {
         let max_region_size = desired_usable_bytes + required_header_size;
         let used_space = min(max_region_size, available_space);
 
-        let num_pages = Self::calculate_usable_pages(used_space, page_size, max_order);
+        let num_pages = Self::calculate_usable_pages(used_space, page_size)?;
         if num_pages < MIN_USABLE_PAGES {
             return None;
         }
-        let allocator_start = num_pages * page_size;
-        let allocator_end = allocator_start + required_header_size;
 
         Some(RegionLayout {
             num_pages,
-            allocator_state: allocator_start..allocator_end,
+            pages_start: required_header_size,
+            allocator_state_len: Self::header_size(page_size)?,
+            page_size,
         })
     }
 
@@ -522,19 +538,15 @@ impl RegionLayout {
     }
 
     fn len(&self) -> usize {
-        self.allocator_state.end
+        self.pages_start + self.usable_bytes()
     }
 
     fn usable_bytes(&self) -> usize {
-        self.allocator_state.start
+        self.page_size * self.num_pages
     }
 
     fn max_order(&self) -> usize {
-        Self::calculate_usable_order(
-            MAX_USABLE_REGION_SPACE,
-            self.allocator_state.start / self.num_pages,
-        )
-        .unwrap()
+        Self::calculate_usable_order(MAX_USABLE_REGION_SPACE, self.page_size).unwrap()
     }
 
     const fn serialized_size() -> usize {
@@ -545,29 +557,32 @@ impl RegionLayout {
         let mut result = [0; Self::serialized_size()];
         result[..size_of::<u32>()].copy_from_slice(&(self.num_pages as u32).to_be_bytes());
         result[size_of::<u32>()..size_of::<u32>() + size_of::<u64>()]
-            .copy_from_slice(&(self.allocator_state.start as u64).to_be_bytes());
+            .copy_from_slice(&(self.allocator_state_len as u64).to_be_bytes());
         result[size_of::<u32>() + size_of::<u64>()..]
-            .copy_from_slice(&(self.allocator_state.end as u64).to_be_bytes());
+            .copy_from_slice(&(self.page_size as u64).to_be_bytes());
 
         result
     }
 
     fn from_be_bytes(data: [u8; Self::serialized_size()]) -> Self {
         let num_pages = u32::from_be_bytes(data[..size_of::<u32>()].try_into().unwrap()) as usize;
-        let allocator_start = u64::from_be_bytes(
+        let allocator_state_len = u64::from_be_bytes(
             data[size_of::<u32>()..size_of::<u32>() + size_of::<u64>()]
                 .try_into()
                 .unwrap(),
         ) as usize;
-        let allocator_end = u64::from_be_bytes(
+        let page_size = u64::from_be_bytes(
             data[size_of::<u32>() + size_of::<u64>()..]
                 .try_into()
                 .unwrap(),
         ) as usize;
+        let pages_start = Self::header_with_padding(page_size).unwrap();
 
         Self {
             num_pages,
-            allocator_state: allocator_start..allocator_end,
+            pages_start,
+            allocator_state_len,
+            page_size,
         }
     }
 }
@@ -615,6 +630,7 @@ impl DatabaseLayout {
                 db_capacity - db_header_bytes - num_full_regions * full_region_layout.len();
             let remaining_desired =
                 desired_usable_bytes - num_full_regions * MAX_USABLE_REGION_SPACE;
+            // TODO: make sure db_header_bytes is page aligned
             Ok(DatabaseLayout {
                 db_header_bytes,
                 full_region_layout,
@@ -763,7 +779,8 @@ pub(crate) struct TransactionalMemory {
     // We store these separately from the layout because they're static, and accessed on the get_page()
     // code path where there is no locking
     region_size: usize,
-    header_size: usize,
+    region_header_with_padding_size: usize,
+    db_header_size: usize,
 }
 
 impl TransactionalMemory {
@@ -867,6 +884,7 @@ impl TransactionalMemory {
         assert_eq!(metadata.get_version(), FILE_FORMAT_VERSION);
         let layout = metadata.primary_slot().get_data_section_layout();
         let region_size = layout.full_region_layout.len();
+        let region_header_size = layout.full_region_layout.pages_start;
 
         let regional_allocators = if metadata.get_allocator_dirty() {
             None
@@ -902,7 +920,8 @@ impl TransactionalMemory {
             read_from_secondary: AtomicBool::new(false),
             page_size,
             region_size,
-            header_size: layout.db_header_bytes,
+            region_header_with_padding_size: region_header_size,
+            db_header_size: layout.db_header_bytes,
         })
     }
 
@@ -1091,8 +1110,9 @@ impl TransactionalMemory {
         // Safety: we asserted that no mutable references are open
         let mem = unsafe {
             self.mmap.get_memory(page_number.address_range(
-                self.header_size,
+                self.db_header_size,
                 self.region_size,
+                self.region_header_with_padding_size,
                 self.page_size,
             ))
         };
@@ -1105,8 +1125,12 @@ impl TransactionalMemory {
         #[cfg(debug_assertions)]
         self.open_dirty_pages.lock().unwrap().insert(page_number);
 
-        let address_range =
-            page_number.address_range(self.header_size, self.region_size, self.page_size);
+        let address_range = page_number.address_range(
+            self.db_header_size,
+            self.region_size,
+            self.region_header_with_padding_size,
+            self.page_size,
+        );
         let mem = self.mmap.get_memory_mut(address_range);
 
         PageMut {
@@ -1267,7 +1291,7 @@ impl TransactionalMemory {
         )?;
         assert!(new_layout.len() >= layout.len());
         assert_eq!(new_layout.db_header_bytes, layout.db_header_bytes);
-        assert_eq!(new_layout.db_header_bytes, self.header_size);
+        assert_eq!(new_layout.db_header_bytes, self.db_header_size);
         if new_layout.len() == layout.len() {
             // Can't grow
             return Err(Error::OutOfSpace);
@@ -1286,31 +1310,15 @@ impl TransactionalMemory {
                 let old_region_base = layout.region_base_address(i);
                 let old_region = layout.region_layout(i);
                 assert_eq!(old_region_base, new_region_base);
-                if new_region.len() == old_region.len() {
-                    // No change
-                    allocators.as_ref().unwrap()[i].clone()
-                } else {
-                    // Make sure the old & new allocator state doesn't overlap,
-                    // so that we don't clobber the old state when initializing the
-                    // new one
-                    assert!(new_region.allocator_state.start > old_region.allocator_state.end);
-                    assert_eq!(
-                        new_region.allocator_state.len(),
-                        old_region.allocator_state.len()
-                    );
-                    // TODO: move the regional allocator to a header instead of footer
-                    // so that this relocation isn't necessary
-                    let tmp = { metadata.get_regional_allocator(i, layout).to_vec() };
+                let mut allocator = allocators.as_ref().unwrap()[i].clone();
+                if new_region.len() != old_region.len() {
                     let (mut region_allocator, mut regions) =
                         metadata.allocators_mut(&new_layout)?;
                     region_allocator.clear(i);
                     let mem = regions.get_regional_allocator_mut(i);
-                    mem.copy_from_slice(&tmp);
-
-                    let mut allocator = allocators.as_ref().unwrap()[i].clone();
                     allocator.resize(mem, new_region.num_pages);
-                    allocator
                 }
+                allocator
             } else {
                 // brand new region
                 let (mut region_allocator, mut regions) = metadata.allocators_mut(&new_layout)?;
@@ -1361,8 +1369,12 @@ impl TransactionalMemory {
         #[cfg(debug_assertions)]
         self.open_dirty_pages.lock().unwrap().insert(page_number);
 
-        let address_range =
-            page_number.address_range(self.header_size, self.region_size, self.page_size);
+        let address_range = page_number.address_range(
+            self.db_header_size,
+            self.region_size,
+            self.region_header_with_padding_size,
+            self.page_size,
+        );
         // Safety:
         // The address range we're returning was just allocated, so no other references exist
         let mem = unsafe { self.mmap.get_memory_mut(address_range) };
