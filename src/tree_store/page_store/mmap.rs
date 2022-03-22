@@ -128,3 +128,28 @@ impl Mmap {
         slice::from_raw_parts_mut(ptr, range.len())
     }
 }
+
+impl Drop for Mmap {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(
+                self.mmap as *mut libc::c_void,
+                self.capacity as libc::size_t,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::tree_store::page_store::mmap::Mmap;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn leak() {
+        for _ in 0..100_000 {
+            let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+            Mmap::new(tmpfile.into_file(), 1024 * 1024).unwrap();
+        }
+    }
+}
