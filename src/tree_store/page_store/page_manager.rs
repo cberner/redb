@@ -793,11 +793,11 @@ impl TransactionalMemory {
         requested_page_size: Option<usize>,
         dynamic_growth: bool,
     ) -> Result<Self> {
-        let mmap = Mmap::new(file, max_capacity)?;
         if max_capacity < DB_HEADER_SIZE {
             return Err(Error::OutOfSpace);
         }
 
+        let mmap = Mmap::new(file, max_capacity)?;
         if mmap.len() < DB_HEADER_SIZE {
             // Safety: We're growing the mmap
             unsafe {
