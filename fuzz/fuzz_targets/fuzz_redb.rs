@@ -24,6 +24,7 @@ fuzz_target!(|config: RedbFuzzConfig| {
         return;
     }
     let db = db.unwrap();
+    // TODO: check against BtreeMap instead, to make the fuzzing faster
     let lmdb_dir: TempDir = tempfile::tempdir().unwrap();
     let env = lmdb::Environment::new().set_flags(EnvironmentFlags::NO_SYNC).open(lmdb_dir.path()).unwrap();
     env.set_map_size(10 * 1024 * 1024 * 1024).unwrap();
