@@ -72,25 +72,31 @@ impl Mmap {
 
     #[cfg(not(target_os = "macos"))]
     pub(crate) fn flush(&self) -> Result {
-        let result = unsafe {
-            libc::msync(
-                self.mmap as *mut libc::c_void,
-                self.len() as libc::size_t,
-                libc::MS_SYNC,
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error().into())
+        // Disable fsync when fuzzing, since it doesn't test crash consistency
+        #[cfg(not(fuzzing))]
+        {
+            let result = unsafe {
+                libc::msync(
+                    self.mmap as *mut libc::c_void,
+                    self.len() as libc::size_t,
+                    libc::MS_SYNC,
+                )
+            };
+            if result != 0 {
+                return Err(io::Error::last_os_error().into());
+            }
         }
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
     pub(crate) fn flush(&self) -> Result {
-        let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_FULLFSYNC) };
-        if code == -1 {
-            return Err(io::Error::last_os_error().into());
+        #[cfg(not(fuzzing))]
+        {
+            let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_FULLFSYNC) };
+            if code == -1 {
+                return Err(io::Error::last_os_error().into());
+            }
         }
         Ok(())
     }
@@ -104,9 +110,12 @@ impl Mmap {
     pub(crate) fn eventual_flush(&self) -> Result {
         // TODO: It may be unsafe to mix F_BARRIERFSYNC with writes to the mmap.
         //       Investigate switching to `write()`
-        let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
-        if code == -1 {
-            return Err(io::Error::last_os_error().into());
+        #[cfg(not(fuzzing))]
+        {
+            let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
+            if code == -1 {
+                return Err(io::Error::last_os_error().into());
+            }
         }
         Ok(())
     }
