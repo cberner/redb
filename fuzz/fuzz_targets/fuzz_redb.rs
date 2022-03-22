@@ -56,8 +56,14 @@ fuzz_target!(|config: RedbFuzzConfig| {
                         let key = key.value;
                         match reference.remove(&key) {
                             Some(reference_len) => {
-                                let value = table.remove(&key).unwrap().unwrap();
-                                assert_eq!(value.to_value().len(), reference_len);
+                                match table.remove(&key) {
+                                    Ok(value) => {
+                                        assert_eq!(value.unwrap().to_value().len(), reference_len);
+                                    },
+                                    Err(err) => {
+                                        assert!(matches!(err, Error::OutOfSpace) && config.oom_plausible());
+                                    }
+                                }
                             },
                             None => {
                                 assert!(table.remove(&key).unwrap().is_none());
