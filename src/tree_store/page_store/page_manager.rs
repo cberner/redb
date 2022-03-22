@@ -604,6 +604,9 @@ impl DatabaseLayout {
         desired_usable_bytes = min(desired_usable_bytes, db_capacity);
         let full_region_layout = RegionLayout::full_region_layout(page_size);
         let min_header_size = DB_HEADER_SIZE + U64GroupedBitMapMut::required_bytes(1);
+        if db_capacity < min_header_size + MIN_USABLE_PAGES * page_size {
+            return Err(Error::OutOfSpace);
+        }
         if db_capacity - min_header_size <= full_region_layout.len() {
             // Single region layout
             let region_layout = RegionLayout::calculate(

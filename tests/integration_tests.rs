@@ -459,6 +459,15 @@ fn regression4() {
 }
 
 #[test]
+fn regression5() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 387;
+    let db = unsafe { Database::create(tmpfile.path(), db_size) };
+    assert!(matches!(db, Err(Error::OutOfSpace)));
+}
+
+#[test]
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
