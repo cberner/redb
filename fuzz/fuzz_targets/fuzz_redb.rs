@@ -8,16 +8,10 @@ mod common;
 use common::*;
 
 const TABLE_DEF: TableDefinition<u64, [u8]> = TableDefinition::new("fuzz_table");
-const KEY_SPACE: u64 = 1_000_000;
 
 fuzz_target!(|config: RedbFuzzConfig| {
-    // Limit testing to 1TB databases
-    if config.max_db_size > 2usize.pow(40) {
-        return;
-    }
-
     let redb_file: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(redb_file.path(), config.max_db_size) };
+    let db = unsafe { Database::create(redb_file.path(), config.max_db_size.value) };
 
     // TODO: check that the error is sensible
     if db.is_err() {
@@ -40,7 +34,7 @@ fuzz_target!(|config: RedbFuzzConfig| {
             for op in transaction {
                 match op {
                     RedbFuzzOperation::Get { key } => {
-                        let key = key % KEY_SPACE;
+                        let key = key.value;
                         match lmdb_txn.get(lmdb_db, &key.to_be_bytes()) {
                             Ok(lmdb_value) => {
                                 let value = table.get(&key).unwrap().unwrap();
@@ -54,10 +48,9 @@ fuzz_target!(|config: RedbFuzzConfig| {
                         }
                     },
                     RedbFuzzOperation::Insert { key, value_size } => {
-                        // TODO: move these limits to the data generation
-                        let key = key % KEY_SPACE;
+                        let key = key.value;
                         // Limit values to 10MiB
-                        let value_size = value_size % MAX_VALUE_SIZE;
+                        let value_size = value_size.value as usize;
                         let value = vec![0xFF; value_size];
                         if let Err(redb::Error::OutOfSpace) = table.insert(&key, &value) {
                             if config.oom_plausible() {
@@ -67,7 +60,7 @@ fuzz_target!(|config: RedbFuzzConfig| {
                         lmdb_txn.put(lmdb_db, &key.to_be_bytes(), &value, lmdb::WriteFlags::empty()).unwrap();
                     },
                     RedbFuzzOperation::Remove { key } => {
-                        let key = key % KEY_SPACE;
+                        let key = key.value;
                         table.remove(&key).unwrap();
                         // TODO: error checking
                         let _ = lmdb_txn.del(lmdb_db, &key.to_be_bytes(), None);
