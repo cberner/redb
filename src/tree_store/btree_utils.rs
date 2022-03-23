@@ -1179,7 +1179,7 @@ mod test {
         {
             let mut table = txn.open_table(X).unwrap();
             for i in (0..elements).rev() {
-                table.insert(&i.to_be_bytes(), b"").unwrap();
+                table.insert(&i.to_le_bytes(), b"").unwrap();
             }
         }
         txn.commit().unwrap();
@@ -1199,7 +1199,7 @@ mod test {
         {
             let mut table = txn.open_table(X).unwrap();
             for i in 0..(elements - reduce_to) {
-                table.remove(&i.to_be_bytes()).unwrap();
+                table.remove(&i.to_le_bytes()).unwrap();
             }
         }
         txn.commit().unwrap();

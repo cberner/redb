@@ -20,8 +20,10 @@ use std::panic;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-// The table of freed pages by transaction. (transaction id, pagination counter) -> binary.
-// The binary blob is a length-prefixed array of big endian PageNumber
+// TODO: use a custom RedbKey type instead of big-endian encoded transaction id. Big-endian
+// is required, so that the keys sort correctly
+// The table of freed pages by transaction. (big-endian transaction id, pagination counter) -> binary.
+// The binary blob is a length-prefixed array of PageNumber
 pub(crate) const FREED_TABLE: &str = "$$internal$$freed";
 
 pub(crate) type TransactionId = u64;
@@ -119,9 +121,9 @@ impl TableHeader {
             &self
                 .table_root
                 .unwrap_or_else(PageNumber::null)
-                .to_be_bytes(),
+                .to_le_bytes(),
         );
-        result.extend_from_slice(&(self.key_type.as_bytes().len() as u32).to_be_bytes());
+        result.extend_from_slice(&(self.key_type.as_bytes().len() as u32).to_le_bytes());
         result.extend_from_slice(self.key_type.as_bytes());
         result.extend_from_slice(self.value_type.as_bytes());
 
@@ -131,13 +133,13 @@ impl TableHeader {
     fn from_bytes(value: &[u8]) -> Self {
         debug_assert!(value.len() > 14);
         let table_type = TableType::from(value[0]);
-        let table_root = PageNumber::from_be_bytes(value[1..9].try_into().unwrap());
+        let table_root = PageNumber::from_le_bytes(value[1..9].try_into().unwrap());
         let table_root = if table_root == PageNumber::null() {
             None
         } else {
             Some(table_root)
         };
-        let key_type_len = u32::from_be_bytes(value[9..13].try_into().unwrap()) as usize;
+        let key_type_len = u32::from_le_bytes(value[9..13].try_into().unwrap()) as usize;
         let key_type = std::str::from_utf8(&value[13..(13 + key_type_len)])
             .unwrap()
             .to_string();
@@ -604,8 +606,11 @@ impl Storage {
             transaction_id,
             self.live_write_transaction.lock().unwrap().unwrap()
         );
-        assert_eq!(PageNumber::null().to_be_bytes().len(), 8); // We assume below that PageNumber is length 8
-        let mut lookup_key = [0u8; size_of::<TransactionId>() + size_of::<u64>()]; // (oldest_live_read, 0)
+        // We assume below that PageNumber is length 8
+        assert_eq!(PageNumber::null().to_le_bytes().len(), 8);
+        // (oldest_live_read, 0)
+        let mut lookup_key = [0u8; size_of::<TransactionId>() + size_of::<u64>()];
+        // XXX: must be big-endian to ensure the correct sorting order
         lookup_key[0..size_of::<TransactionId>()].copy_from_slice(&oldest_live_read.to_be_bytes());
         // second element of pair is already zero
 
@@ -619,10 +624,10 @@ impl Storage {
         while let Some(entry) = iter.next() {
             to_remove.push(entry.key().to_vec());
             let value = entry.value();
-            let length = u64::from_be_bytes(value[..size_of::<u64>()].try_into().unwrap()) as usize;
+            let length = u64::from_le_bytes(value[..size_of::<u64>()].try_into().unwrap()) as usize;
             // 1..=length because the array is length prefixed
             for i in 1..=length {
-                let page = PageNumber::from_be_bytes(value[i * 8..(i + 1) * 8].try_into().unwrap());
+                let page = PageNumber::from_le_bytes(value[i * 8..(i + 1) * 8].try_into().unwrap());
                 // Safety: we free only pages that were marked to be freed before the oldest live transaction,
                 // therefore no one can have a reference to this page still
                 unsafe {
@@ -662,7 +667,7 @@ impl Storage {
             transaction_id,
             self.live_write_transaction.lock().unwrap().unwrap()
         );
-        assert_eq!(PageNumber::null().to_be_bytes().len(), 8); // We assume below that PageNumber is length 8
+        assert_eq!(PageNumber::null().to_le_bytes().len(), 8); // We assume below that PageNumber is length 8
 
         let mut pagination_counter = 0u64;
         let mut freed_table = self
@@ -672,8 +677,9 @@ impl Storage {
             let chunk_size = 100;
             let buffer_size = size_of::<u64>() + 8 * chunk_size;
             let mut key = [0u8; size_of::<TransactionId>() + size_of::<u64>()];
+            // XXX: must be big-endian to ensure the correct sorting order
             key[0..size_of::<TransactionId>()].copy_from_slice(&transaction_id.to_be_bytes());
-            key[size_of::<u64>()..].copy_from_slice(&pagination_counter.to_be_bytes());
+            key[size_of::<u64>()..].copy_from_slice(&pagination_counter.to_le_bytes());
             // Safety: The freed table is only accessed from the writer, so only this function
             // is using it. The only reference retrieved, access_guard, is dropped before the next call
             // to this method
@@ -703,7 +709,7 @@ impl Storage {
 
             let len = self.pending_freed_pages.lock().unwrap().len();
             access_guard.as_mut()[..8]
-                .copy_from_slice(&min(len as u64, chunk_size as u64).to_be_bytes());
+                .copy_from_slice(&min(len as u64, chunk_size as u64).to_le_bytes());
             for (i, page) in self
                 .pending_freed_pages
                 .lock()
@@ -712,7 +718,7 @@ impl Storage {
                 .enumerate()
             {
                 access_guard.as_mut()[(i + 1) * 8..(i + 2) * 8]
-                    .copy_from_slice(&page.to_be_bytes());
+                    .copy_from_slice(&page.to_le_bytes());
             }
             drop(access_guard);
 

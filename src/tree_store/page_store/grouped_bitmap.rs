@@ -39,24 +39,24 @@ impl<'a> U64GroupedBitMapMut<'a> {
     // Returns true iff the bit's group is all set
     pub(crate) fn set(&mut self, bit: usize) -> bool {
         let (index, bit_index) = self.data_index_of(bit);
-        let mut group = u64::from_be_bytes(self.data[index..(index + 8)].try_into().unwrap());
+        let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
         group |= Self::select_mask(bit_index);
-        self.data[index..(index + 8)].copy_from_slice(&group.to_be_bytes());
+        self.data[index..(index + 8)].copy_from_slice(&group.to_le_bytes());
 
         group == u64::MAX
     }
 
     pub(crate) fn get(&self, bit: usize) -> bool {
         let (index, bit_index) = self.data_index_of(bit);
-        let group = u64::from_be_bytes(self.data[index..(index + 8)].try_into().unwrap());
+        let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
         group & Self::select_mask(bit_index) != 0
     }
 
     pub(crate) fn clear(&mut self, bit: usize) {
         let (index, bit_index) = self.data_index_of(bit);
-        let mut group = u64::from_be_bytes(self.data[index..(index + 8)].try_into().unwrap());
+        let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
         group &= !Self::select_mask(bit_index);
-        self.data[index..(index + 8)].copy_from_slice(&group.to_be_bytes());
+        self.data[index..(index + 8)].copy_from_slice(&group.to_le_bytes());
     }
 
     pub(crate) fn first_unset(&self, start_bit: usize, end_bit: usize) -> Option<usize> {
@@ -64,7 +64,7 @@ impl<'a> U64GroupedBitMapMut<'a> {
         assert_eq!(end_bit, start_bit + 64);
 
         let (index, _) = self.data_index_of(start_bit);
-        let group = u64::from_be_bytes(self.data[index..(index + 8)].try_into().unwrap());
+        let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
         match group.trailing_ones() {
             64 => None,
             x => Some(start_bit + x as usize),

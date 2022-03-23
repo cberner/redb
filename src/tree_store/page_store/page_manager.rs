@@ -85,7 +85,7 @@ pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(DB_SIZE_OFFSET as u64))?;
     file.read_exact(&mut db_size)?;
-    Ok(u64::from_be_bytes(db_size) as usize)
+    Ok(u64::from_le_bytes(db_size) as usize)
 }
 
 // Marker struct for the mutex guarding the metadata (header & allocators)
@@ -155,7 +155,7 @@ impl<'a> MetadataAccessor<'a> {
     }
 
     fn get_max_capacity(&self) -> usize {
-        u64::from_be_bytes(
+        u64::from_le_bytes(
             self.header[DB_SIZE_OFFSET..DB_SIZE_OFFSET + size_of::<u64>()]
                 .try_into()
                 .unwrap(),
@@ -164,7 +164,7 @@ impl<'a> MetadataAccessor<'a> {
 
     fn set_max_capacity(&mut self, max_size: usize) {
         self.header[DB_SIZE_OFFSET..DB_SIZE_OFFSET + size_of::<u64>()]
-            .copy_from_slice(&(max_size as u64).to_be_bytes());
+            .copy_from_slice(&(max_size as u64).to_le_bytes());
     }
 
     fn get_magic_number(&self) -> [u8; MAGICNUMBER.len()] {
@@ -294,15 +294,15 @@ impl PageNumber {
         }
     }
 
-    pub(crate) fn to_be_bytes(self) -> [u8; 8] {
+    pub(crate) fn to_le_bytes(self) -> [u8; 8] {
         let mut temp = (0x000F_FFFF & self.page_index) as u64;
         temp |= (0x000F_FFFF & self.region as u64) << 20;
         temp |= (0b0001_1111 & self.page_order as u64) << 59;
-        temp.to_be_bytes()
+        temp.to_le_bytes()
     }
 
-    pub(crate) fn from_be_bytes(bytes: [u8; 8]) -> Self {
-        let temp = u64::from_be_bytes(bytes);
+    pub(crate) fn from_le_bytes(bytes: [u8; 8]) -> Self {
+        let temp = u64::from_le_bytes(bytes);
         let index = (temp & 0x000F_FFFF) as u32;
         let region = ((temp >> 20) & 0x000F_FFFF) as u32;
         let order = (temp >> 59) as u8;
@@ -342,7 +342,7 @@ impl<'a> TransactionAccessor<'a> {
     }
 
     fn get_root_page(&self) -> Option<PageNumber> {
-        let num = PageNumber::from_be_bytes(
+        let num = PageNumber::from_le_bytes(
             self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + 8)]
                 .try_into()
                 .unwrap(),
@@ -355,7 +355,7 @@ impl<'a> TransactionAccessor<'a> {
     }
 
     fn get_last_committed_transaction_id(&self) -> u64 {
-        u64::from_be_bytes(
+        u64::from_le_bytes(
             self.mem[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
                 .try_into()
                 .unwrap(),
@@ -363,7 +363,7 @@ impl<'a> TransactionAccessor<'a> {
     }
 
     fn get_data_section_layout(&self) -> DatabaseLayout {
-        DatabaseLayout::from_be_bytes(
+        DatabaseLayout::from_le_bytes(
             self.mem[DATA_LAYOUT_OFFSET..(DATA_LAYOUT_OFFSET + DatabaseLayout::serialized_size())]
                 .try_into()
                 .unwrap(),
@@ -382,17 +382,17 @@ impl<'a> TransactionMutator<'a> {
 
     fn set_root_page(&mut self, page_number: PageNumber) {
         self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + 8)]
-            .copy_from_slice(&page_number.to_be_bytes());
+            .copy_from_slice(&page_number.to_le_bytes());
     }
 
     fn set_last_committed_transaction_id(&mut self, transaction_id: u64) {
         self.mem[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
-            .copy_from_slice(&transaction_id.to_be_bytes());
+            .copy_from_slice(&transaction_id.to_le_bytes());
     }
 
     fn set_data_section_layout(&mut self, layout: &DatabaseLayout) {
         self.mem[DATA_LAYOUT_OFFSET..(DATA_LAYOUT_OFFSET + DatabaseLayout::serialized_size())]
-            .copy_from_slice(&layout.to_be_bytes());
+            .copy_from_slice(&layout.to_le_bytes());
     }
 }
 
@@ -553,25 +553,25 @@ impl RegionLayout {
         size_of::<u32>() + 2 * size_of::<u64>()
     }
 
-    fn to_be_bytes(&self) -> [u8; Self::serialized_size()] {
+    fn to_le_bytes(&self) -> [u8; Self::serialized_size()] {
         let mut result = [0; Self::serialized_size()];
-        result[..size_of::<u32>()].copy_from_slice(&(self.num_pages as u32).to_be_bytes());
+        result[..size_of::<u32>()].copy_from_slice(&(self.num_pages as u32).to_le_bytes());
         result[size_of::<u32>()..size_of::<u32>() + size_of::<u64>()]
-            .copy_from_slice(&(self.allocator_state_len as u64).to_be_bytes());
+            .copy_from_slice(&(self.allocator_state_len as u64).to_le_bytes());
         result[size_of::<u32>() + size_of::<u64>()..]
-            .copy_from_slice(&(self.page_size as u64).to_be_bytes());
+            .copy_from_slice(&(self.page_size as u64).to_le_bytes());
 
         result
     }
 
-    fn from_be_bytes(data: [u8; Self::serialized_size()]) -> Self {
-        let num_pages = u32::from_be_bytes(data[..size_of::<u32>()].try_into().unwrap()) as usize;
-        let allocator_state_len = u64::from_be_bytes(
+    fn from_le_bytes(data: [u8; Self::serialized_size()]) -> Self {
+        let num_pages = u32::from_le_bytes(data[..size_of::<u32>()].try_into().unwrap()) as usize;
+        let allocator_state_len = u64::from_le_bytes(
             data[size_of::<u32>()..size_of::<u32>() + size_of::<u64>()]
                 .try_into()
                 .unwrap(),
         ) as usize;
-        let page_size = u64::from_be_bytes(
+        let page_size = u64::from_le_bytes(
             data[size_of::<u32>() + size_of::<u64>()..]
                 .try_into()
                 .unwrap(),
@@ -692,22 +692,21 @@ impl DatabaseLayout {
         2 * size_of::<u64>() + 2 * RegionLayout::serialized_size() + 1
     }
 
-    // TODO: use le instead of be for everything? ARM is le by default, and x86 is always le
-    fn to_be_bytes(&self) -> [u8; Self::serialized_size()] {
+    fn to_le_bytes(&self) -> [u8; Self::serialized_size()] {
         let mut result = [0; Self::serialized_size()];
         let mut offset = 0;
         result[offset..offset + size_of::<u64>()]
-            .copy_from_slice(&(self.db_header_bytes as u64).to_be_bytes());
+            .copy_from_slice(&(self.db_header_bytes as u64).to_le_bytes());
         offset += size_of::<u64>();
         result[offset..offset + size_of::<u64>()]
-            .copy_from_slice(&(self.num_full_regions as u64).to_be_bytes());
+            .copy_from_slice(&(self.num_full_regions as u64).to_le_bytes());
         offset += size_of::<u64>();
         result[offset..offset + RegionLayout::serialized_size()]
-            .copy_from_slice(&self.full_region_layout.to_be_bytes());
+            .copy_from_slice(&self.full_region_layout.to_le_bytes());
         offset += RegionLayout::serialized_size();
         if let Some(trailing) = self.trailing_partial_region.as_ref() {
             result[offset..offset + RegionLayout::serialized_size()]
-                .copy_from_slice(&trailing.to_be_bytes());
+                .copy_from_slice(&trailing.to_le_bytes());
             offset += RegionLayout::serialized_size();
             result[offset] = 1;
         } else {
@@ -719,17 +718,17 @@ impl DatabaseLayout {
         result
     }
 
-    fn from_be_bytes(data: [u8; Self::serialized_size()]) -> Self {
+    fn from_le_bytes(data: [u8; Self::serialized_size()]) -> Self {
         let mut offset = 0;
         let db_header_bytes =
-            u64::from_be_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
+            u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
                 as usize;
         offset += size_of::<u64>();
         let num_full_regions =
-            u64::from_be_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
+            u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
                 as usize;
         offset += size_of::<u64>();
-        let full_region_layout = RegionLayout::from_be_bytes(
+        let full_region_layout = RegionLayout::from_le_bytes(
             data[offset..offset + RegionLayout::serialized_size()]
                 .try_into()
                 .unwrap(),
@@ -738,7 +737,7 @@ impl DatabaseLayout {
         let trailing_partial_region = if data[Self::serialized_size() - 1] == 0 {
             None
         } else {
-            Some(RegionLayout::from_be_bytes(
+            Some(RegionLayout::from_le_bytes(
                 data[offset..offset + RegionLayout::serialized_size()]
                     .try_into()
                     .unwrap(),

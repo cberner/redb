@@ -15,7 +15,7 @@ pub(crate) struct BuddyAllocator {
 // Pages are marked free at only a single order, and it must always be the largest order
 //
 // Data structure format:
-// max_order: big endian u64
+// max_order: u64
 // order_offsets: array of (u64, u64), with offset & length for PageAllocator structure for the given order
 // ... PageAllocator structures
 impl BuddyAllocator {
@@ -41,7 +41,7 @@ impl BuddyAllocator {
         max_order: usize,
     ) -> Self {
         assert!(data.len() >= Self::required_space(max_page_capacity, max_order));
-        data[..size_of::<u64>()].copy_from_slice(&(max_order as u64).to_be_bytes());
+        data[..size_of::<u64>()].copy_from_slice(&(max_order as u64).to_le_bytes());
 
         let mut metadata_offset = size_of::<u64>();
         let mut data_offset = size_of::<u64>() + 2 * (max_order + 1) * size_of::<u64>();
@@ -51,9 +51,9 @@ impl BuddyAllocator {
         for order in 0..=max_order {
             let required = PageAllocator::required_space(pages_for_order);
             data[metadata_offset..metadata_offset + size_of::<u64>()]
-                .copy_from_slice(&(data_offset as u64).to_be_bytes());
+                .copy_from_slice(&(data_offset as u64).to_le_bytes());
             data[metadata_offset + size_of::<u64>()..metadata_offset + 2 * size_of::<u64>()]
-                .copy_from_slice(&(required as u64).to_be_bytes());
+                .copy_from_slice(&(required as u64).to_le_bytes());
             orders.push(PageAllocator::init_new(
                 Self::get_order_bytes_mut(data, order),
                 pages_for_order,
@@ -135,12 +135,12 @@ impl BuddyAllocator {
     }
 
     fn get_order_offset_and_length(data: &[u8], order: usize) -> (usize, usize) {
-        let max_order = u64::from_be_bytes(data[..size_of::<u64>()].try_into().unwrap()) as usize;
+        let max_order = u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap()) as usize;
         assert!(order <= max_order);
         let base = size_of::<u64>() + order * 2 * size_of::<u64>();
         let offset =
-            u64::from_be_bytes(data[base..base + size_of::<u64>()].try_into().unwrap()) as usize;
-        let length = u64::from_be_bytes(
+            u64::from_le_bytes(data[base..base + size_of::<u64>()].try_into().unwrap()) as usize;
+        let length = u64::from_le_bytes(
             data[base + size_of::<u64>()..base + 2 * size_of::<u64>()]
                 .try_into()
                 .unwrap(),

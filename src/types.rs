@@ -113,11 +113,11 @@ macro_rules! be_value {
             type ToBytes = OwnedAsBytesLifetime<[u8; std::mem::size_of::<$t>()]>;
 
             fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
-                <$t>::from_be_bytes(data.try_into().unwrap())
+                <$t>::from_le_bytes(data.try_into().unwrap())
             }
 
             fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
-                self.to_be_bytes()
+                self.to_le_bytes()
             }
 
             fn redb_type_name() -> &'static str {

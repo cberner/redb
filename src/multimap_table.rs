@@ -148,7 +148,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapKVPairAcces
     }
 
     fn key_len(&self) -> usize {
-        u32::from_be_bytes(self.data[1..5].try_into().unwrap()) as usize
+        u32::from_le_bytes(self.data[1..5].try_into().unwrap()) as usize
     }
 
     fn key_bytes(&self) -> &'a [u8] {
@@ -162,7 +162,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapKVPairAcces
 
 fn make_serialized_kv<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(key: &K, value: &V) -> Vec<u8> {
     let mut result = vec![MultimapKeyCompareOp::KeyAndValue.serialize()];
-    result.extend_from_slice(&(key.as_bytes().as_ref().len() as u32).to_be_bytes());
+    result.extend_from_slice(&(key.as_bytes().as_ref().len() as u32).to_le_bytes());
     result.extend_from_slice(key.as_bytes().as_ref());
     result.extend_from_slice(value.as_bytes().as_ref());
 
@@ -171,7 +171,7 @@ fn make_serialized_kv<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(key: &K, value: 
 
 fn make_serialized_key_with_op<K: RedbKey + ?Sized>(key: &K, op: MultimapKeyCompareOp) -> Vec<u8> {
     let mut result = vec![op.serialize()];
-    result.extend_from_slice(&(key.as_bytes().as_ref().len() as u32).to_be_bytes());
+    result.extend_from_slice(&(key.as_bytes().as_ref().len() as u32).to_le_bytes());
     result.extend_from_slice(key.as_bytes().as_ref());
 
     result

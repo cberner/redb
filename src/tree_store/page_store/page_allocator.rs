@@ -14,7 +14,7 @@ pub(crate) struct PageAllocator {
 // borrowing the data array
 //
 // Data structure format:
-// num_pages: big endian u64
+// num_pages: u64
 // root: u64
 // subtree layer: 2-64 u64s
 // ...consecutive layers. Except for the last level, all sub-trees of the root must be complete
@@ -67,7 +67,7 @@ impl PageAllocator {
             *value = 0xFF;
         }
 
-        data[..8].copy_from_slice(&(num_pages as u64).to_be_bytes());
+        data[..8].copy_from_slice(&(num_pages as u64).to_le_bytes());
 
         let result = Self::new(num_pages);
 
@@ -323,7 +323,7 @@ mod test {
         while allocator.alloc(&mut data).is_ok() {}
         // The last u64 must be used, since the leaf layer is compact
         let l = data.len();
-        assert_ne!(0, u64::from_be_bytes(data[(l - 8)..].try_into().unwrap()));
+        assert_ne!(0, u64::from_le_bytes(data[(l - 8)..].try_into().unwrap()));
     }
 
     #[test]
