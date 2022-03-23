@@ -40,8 +40,6 @@ use std::sync::{Mutex, MutexGuard};
 
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
 // because the leaf node format uses 32bit offsets
-// TODO: make the region size configurable, for people who want a really small minimum db size
-// and to make the tests faster
 const MAX_USABLE_REGION_SPACE: usize = 4 * 1024 * 1024 * 1024;
 const MAX_PAGE_ORDER: usize = 20;
 const MIN_USABLE_PAGES: usize = 10;
@@ -56,8 +54,8 @@ const VERSION_OFFSET: usize = MAGICNUMBER.len();
 const PAGE_SIZE_OFFSET: usize = VERSION_OFFSET + size_of::<u8>();
 const GOD_BYTE_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u8>();
 const RESERVED: usize = 4;
-const REGION_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + RESERVED;
-const DB_SIZE_OFFSET: usize = REGION_SIZE_OFFSET + size_of::<u64>();
+const REGION_MAX_USABLE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + RESERVED;
+const DB_SIZE_OFFSET: usize = REGION_MAX_USABLE_OFFSET + size_of::<u64>();
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 128;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
@@ -189,6 +187,19 @@ impl<'a> MetadataAccessor<'a> {
 
     fn set_page_size(&mut self, page_size: usize) {
         self.header[PAGE_SIZE_OFFSET] = page_size.trailing_zeros() as u8;
+    }
+
+    fn get_region_max_usable_bytes(&self) -> usize {
+        u64::from_le_bytes(
+            self.header[REGION_MAX_USABLE_OFFSET..REGION_MAX_USABLE_OFFSET + size_of::<u64>()]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    fn set_region_max_usable_bytes(&mut self, usable_size: usize) {
+        self.header[REGION_MAX_USABLE_OFFSET..REGION_MAX_USABLE_OFFSET + size_of::<u64>()]
+            .copy_from_slice(&(usable_size as u64).to_le_bytes());
     }
 
     fn get_version(&self) -> u8 {
@@ -895,6 +906,8 @@ impl TransactionalMemory {
             // Store the page & db size. These are immutable
             metadata.set_page_size(page_size);
             metadata.set_max_capacity(max_capacity);
+            // TODO: make the region size configurable, for people who want a really small minimum db size
+            metadata.set_region_max_usable_bytes(MAX_USABLE_REGION_SPACE);
             metadata.set_version(FILE_FORMAT_VERSION);
 
             let mut mutator = metadata.secondary_slot_mut();
@@ -921,6 +934,11 @@ impl TransactionalMemory {
         if let Some(size) = requested_page_size {
             assert_eq!(page_size, size);
         }
+        // TODO: make the region size configurable, for people who want a really small minimum db size
+        assert_eq!(
+            metadata.get_region_max_usable_bytes(),
+            MAX_USABLE_REGION_SPACE
+        );
         assert_eq!(metadata.get_version(), FILE_FORMAT_VERSION);
         let layout = metadata.primary_slot().get_data_section_layout();
         let region_size = layout.full_region_layout.len();
