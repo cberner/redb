@@ -32,7 +32,24 @@ test: pre
 bench: pre
 	cargo bench
 
+# Nightly version selected from: https://rust-lang.github.io/rustup-components-history/
+NIGHTLY := "nightly-2022-03-21"
 fuzz: pre
-	# Nightly version selected from: https://rust-lang.github.io/rustup-components-history/
-	rustup toolchain install nightly-2022-03-21
-	cargo +nightly-2022-03-21 fuzz run fuzz_redb -- -max_len=1000000
+	rustup toolchain install $(NIGHTLY)
+	cargo +$(NIGHTLY) fuzz run fuzz_redb -- -max_len=1000000
+
+RUST_SYSROOT := $(shell cargo +$(NIGHTLY) rustc -- --print sysroot 2>/dev/null)
+LLVM_COV := $(shell find $(RUST_SYSROOT) -name llvm-cov)
+fuzz_coverage: pre
+	echo $(LLVM_COV)
+	rustup component add llvm-tools-preview --toolchain $(NIGHTLY)
+	cargo +$(NIGHTLY) fuzz coverage fuzz_redb
+	$(LLVM_COV) show fuzz/target/*/release/fuzz_redb \
+					--format html \
+                    -instr-profile=fuzz/coverage/fuzz_redb/coverage.profdata \
+                    -ignore-filename-regex='.*(cargo/registry|redb/fuzz|rustc).*' \
+                    > fuzz/coverage/coverage_report.html
+	$(LLVM_COV) report fuzz/target/*/release/fuzz_redb \
+                    -instr-profile=fuzz/coverage/fuzz_redb/coverage.profdata \
+                    -ignore-filename-regex='.*(cargo/registry|redb/fuzz|rustc).*'
+	firefox ./fuzz/coverage/coverage_report.html
