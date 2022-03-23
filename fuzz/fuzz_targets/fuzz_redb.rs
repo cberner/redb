@@ -64,6 +64,7 @@ fuzz_target!(|config: FuzzConfig| {
                                     },
                                     Err(err) => {
                                         assert!(matches!(err, Error::OutOfSpace) && config.oom_plausible());
+                                        return;
                                     }
                                 }
                             },
