@@ -6,7 +6,9 @@ use crate::tree_store::btree_utils::{
 };
 use crate::tree_store::page_store::{Page, PageMut, PageNumber, TransactionalMemory};
 use crate::tree_store::{btree_base, AccessGuardMut, BtreeRangeIter};
-use crate::types::{RedbKey, RedbValue, WithLifetime};
+use crate::types::{
+    AsBytesWithLifetime, OwnedAsBytesLifetime, OwnedLifetime, RedbKey, RedbValue, WithLifetime,
+};
 use crate::Error;
 use crate::Result;
 use std::borrow::Borrow;
@@ -20,14 +22,55 @@ use std::panic;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-// TODO: use a custom RedbKey type instead of big-endian encoded transaction id. Big-endian
-// is required, so that the keys sort correctly
-// The table of freed pages by transaction. (big-endian transaction id, pagination counter) -> binary.
+// The table of freed pages by transaction. FreedTableKey -> binary.
 // The binary blob is a length-prefixed array of PageNumber
 pub(crate) const FREED_TABLE: &str = "$$internal$$freed";
 
 pub(crate) type TransactionId = u64;
 type AtomicTransactionId = AtomicU64;
+
+struct FreedTableKey {
+    transaction_id: u64,
+    pagination_id: u64,
+}
+
+impl RedbValue for FreedTableKey {
+    type View = OwnedLifetime<FreedTableKey>;
+    type ToBytes = OwnedAsBytesLifetime<[u8; 2 * size_of::<u64>()]>;
+
+    fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
+        let transaction_id = u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap());
+        let pagination_id = u64::from_le_bytes(data[size_of::<u64>()..].try_into().unwrap());
+        Self {
+            transaction_id,
+            pagination_id,
+        }
+    }
+
+    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+        let mut result = [0u8; 2 * size_of::<u64>()];
+        result[..size_of::<u64>()].copy_from_slice(&self.transaction_id.to_le_bytes());
+        result[size_of::<u64>()..].copy_from_slice(&self.pagination_id.to_le_bytes());
+        result
+    }
+
+    fn redb_type_name() -> &'static str {
+        "FreedTableKey"
+    }
+}
+
+impl RedbKey for FreedTableKey {
+    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+        let value1 = Self::from_bytes(data1);
+        let value2 = Self::from_bytes(data2);
+
+        match value1.transaction_id.cmp(&value2.transaction_id) {
+            std::cmp::Ordering::Greater => std::cmp::Ordering::Greater,
+            std::cmp::Ordering::Equal => value1.pagination_id.cmp(&value2.pagination_id),
+            std::cmp::Ordering::Less => std::cmp::Ordering::Less,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct DatabaseStats {
@@ -271,7 +314,7 @@ impl Storage {
             let freed_table = TableHeader {
                 table_root: None,
                 table_type: TableType::Normal,
-                key_type: <[u8]>::redb_type_name().to_string(),
+                key_type: FreedTableKey::redb_type_name().to_string(),
                 value_type: <[u8]>::redb_type_name().to_string(),
             };
             let (new_root, _) =
@@ -608,21 +651,20 @@ impl Storage {
         );
         // We assume below that PageNumber is length 8
         assert_eq!(PageNumber::null().to_le_bytes().len(), 8);
-        // (oldest_live_read, 0)
-        let mut lookup_key = [0u8; size_of::<TransactionId>() + size_of::<u64>()];
-        // XXX: must be big-endian to ensure the correct sorting order
-        lookup_key[0..size_of::<TransactionId>()].copy_from_slice(&oldest_live_read.to_be_bytes());
-        // second element of pair is already zero
+        let lookup_key = FreedTableKey {
+            transaction_id: oldest_live_read,
+            pagination_id: 0,
+        };
 
         let mut to_remove = vec![];
         let mut freed_table = self
-            .get_table::<[u8], [u8]>(FREED_TABLE, TableType::Normal, master_root)?
+            .get_table::<FreedTableKey, [u8]>(FREED_TABLE, TableType::Normal, master_root)?
             .unwrap();
         #[allow(clippy::type_complexity)]
-        let mut iter: BtreeRangeIter<'_, [u8], [u8]> =
-            self.get_range(..lookup_key.as_ref(), freed_table.get_root())?;
+        let mut iter: BtreeRangeIter<'_, FreedTableKey, [u8]> =
+            self.get_range(..lookup_key, freed_table.get_root())?;
         while let Some(entry) = iter.next() {
-            to_remove.push(entry.key().to_vec());
+            to_remove.push(FreedTableKey::from_bytes(entry.key()));
             let value = entry.value();
             let length = u64::from_le_bytes(value[..size_of::<u64>()].try_into().unwrap()) as usize;
             // 1..=length because the array is length prefixed
@@ -641,7 +683,12 @@ impl Storage {
         for key in to_remove {
             // Safety: all references to the freed table above have already been dropped
             let (new_root, _) = unsafe {
-                self.remove::<[u8], [u8]>(&key, transaction_id, true, freed_table.table_root)?
+                self.remove::<FreedTableKey, [u8]>(
+                    key.as_bytes().as_slice(),
+                    transaction_id,
+                    true,
+                    freed_table.table_root,
+                )?
             };
             freed_table.table_root = new_root;
         }
@@ -671,21 +718,21 @@ impl Storage {
 
         let mut pagination_counter = 0u64;
         let mut freed_table = self
-            .get_table::<[u8], [u8]>(FREED_TABLE, TableType::Normal, master_root)?
+            .get_table::<FreedTableKey, [u8]>(FREED_TABLE, TableType::Normal, master_root)?
             .unwrap();
         while !self.pending_freed_pages.lock().unwrap().is_empty() {
             let chunk_size = 100;
             let buffer_size = size_of::<u64>() + 8 * chunk_size;
-            let mut key = [0u8; size_of::<TransactionId>() + size_of::<u64>()];
-            // XXX: must be big-endian to ensure the correct sorting order
-            key[0..size_of::<TransactionId>()].copy_from_slice(&transaction_id.to_be_bytes());
-            key[size_of::<u64>()..].copy_from_slice(&pagination_counter.to_le_bytes());
+            let key = FreedTableKey {
+                transaction_id,
+                pagination_id: pagination_counter,
+            };
             // Safety: The freed table is only accessed from the writer, so only this function
             // is using it. The only reference retrieved, access_guard, is dropped before the next call
             // to this method
             let (r, mut access_guard) = unsafe {
-                self.insert_reserve::<[u8]>(
-                    key.as_ref(),
+                self.insert_reserve::<FreedTableKey>(
+                    key.as_bytes().as_ref(),
                     buffer_size,
                     transaction_id,
                     freed_table.table_root,
