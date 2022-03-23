@@ -37,12 +37,12 @@ inactive copy, which is then atomically promoted to the primary via the `field_m
 * magic number (immutable, 4 bytes): 32-bit magic number
 * version (immutable, 1 byte): single byte which must be `1`
 * page_size (immutable, 1 byte): single byte, x, where `2^x` represents the size of pages
-* db_size: (immutable, 8 bytes): 64-bit unsigned big-endian integer, indicating the number of valid
+* db_size: (immutable, 8 bytes): 64-bit unsigned little-endian integer, indicating the number of valid
   bytes in the database file
-* root1 (mutable, 8 bytes): 64-bit unsigned big-endian integer, indicating the offset
+* root1 (mutable, 8 bytes): 64-bit unsigned little-endian integer, indicating the offset
   to the root page of the B-tree
 * root2 (mutable, 8 bytes): double buffer for `root1`
-* transaction_id1 (mutable, 16 bytes): 128-bit unsigned big-endian integer, monotonically
+* transaction_id1 (mutable, 16 bytes): 128-bit unsigned little-endian integer, monotonically
   increasing id indicating the currently committed transaction
 * transaction_id2 (mutable, 16 bytes): double buffer for `transaction_id1`
 * field_mutex (mutable, 1 byte): either `1` indicating that the first version of each

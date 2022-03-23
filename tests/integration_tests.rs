@@ -171,7 +171,7 @@ fn free() {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..num_writes {
             let mut mut_key = key.clone();
-            mut_key.extend_from_slice(&i.to_be_bytes());
+            mut_key.extend_from_slice(&i.to_le_bytes());
             table.insert(&mut_key, &value).unwrap();
         }
     }
@@ -186,7 +186,7 @@ fn free() {
                 let mut table = txn.open_table(SLICE_TABLE).unwrap();
                 for i in chunk {
                     let mut mut_key = key.clone();
-                    mut_key.extend_from_slice(&(*i as u64).to_be_bytes());
+                    mut_key.extend_from_slice(&(*i as u64).to_le_bytes());
                     table.remove(&mut_key).unwrap();
                 }
             }

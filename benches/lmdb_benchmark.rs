@@ -35,7 +35,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
         for _ in 0..ELEMENTS {
             let len = pairs.len();
             let (key, value) = &mut pairs[written % len];
-            key[16..].copy_from_slice(&(written as u64).to_be_bytes());
+            key[16..].copy_from_slice(&(written as u64).to_le_bytes());
             inserter.insert(key, value).unwrap();
             written += 1;
         }
@@ -61,7 +61,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
             let mut inserter = txn.get_inserter();
             let len = pairs.len();
             let (key, value) = &mut pairs[written % len];
-            key[16..].copy_from_slice(&(written as u64).to_be_bytes());
+            key[16..].copy_from_slice(&(written as u64).to_le_bytes());
             inserter.insert(key, value).unwrap();
             drop(inserter);
             txn.commit().unwrap();
@@ -88,7 +88,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
             for _ in 0..batch_size {
                 let len = pairs.len();
                 let (key, value) = &mut pairs[written % len];
-                key[16..].copy_from_slice(&(written as u64).to_be_bytes());
+                key[16..].copy_from_slice(&(written as u64).to_le_bytes());
                 inserter.insert(key, value).unwrap();
                 written += 1;
             }
@@ -120,7 +120,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
             for i in &key_order {
                 let len = pairs.len();
                 let (key, value) = &mut pairs[i % len];
-                key[16..].copy_from_slice(&(*i as u64).to_be_bytes());
+                key[16..].copy_from_slice(&(*i as u64).to_le_bytes());
                 let result = txn.get(key).unwrap();
                 checksum += result.as_ref()[0] as u64;
                 expected_checksum += value[0] as u64;
@@ -142,7 +142,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
             for i in &key_order {
                 let len = pairs.len();
                 let (key, _) = &mut pairs[i % len];
-                key[16..].copy_from_slice(&(*i as u64).to_be_bytes());
+                key[16..].copy_from_slice(&(*i as u64).to_le_bytes());
                 txn.exists_after(key);
             }
             let end = Instant::now();
@@ -165,7 +165,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
         for i in 0..deletes {
             let len = pairs.len();
             let (key, _) = &mut pairs[i % len];
-            key[16..].copy_from_slice(&(i as u64).to_be_bytes());
+            key[16..].copy_from_slice(&(i as u64).to_le_bytes());
             inserter.remove(key).unwrap();
         }
         drop(inserter);

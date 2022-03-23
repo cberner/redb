@@ -77,7 +77,7 @@ fn lmdb_zero_bench(path: &str) {
             for i in 0..ELEMENTS {
                 let (key, value) = &pairs[i % pairs.len()];
                 let mut mut_key = key.clone();
-                mut_key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+                mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
                 access
                     .put(&db, &mut_key, value, lmdb_zero::put::Flags::empty())
                     .unwrap();
@@ -102,7 +102,7 @@ fn lmdb_zero_bench(path: &str) {
                 for &i in &key_order {
                     let (key, value) = &pairs[i % pairs.len()];
                     let mut mut_key = key.clone();
-                    mut_key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+                    mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
                     let result: &[u8] = access.get(&db, &mut_key).unwrap();
                     checksum += result[0] as u64;
                     expected_checksum += value[0] as u64;
@@ -136,7 +136,7 @@ fn uring_bench(path: &Path) {
         for i in 0..ELEMENTS {
             let (key, value) = &pairs[i % pairs.len()];
             let mut mut_key = key.clone();
-            mut_key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+            mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
             file.write_all(&mut_key).unwrap();
             file.write_all(value).unwrap();
         }
@@ -163,7 +163,7 @@ fn uring_bench(path: &Path) {
             for (uring_counter, &i) in key_order.iter().enumerate() {
                 let (key, value) = &pairs[i % pairs.len()];
                 let mut mut_key = key.clone();
-                mut_key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+                mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
                 let offset = i * (mut_key.len() + value.len()) + mut_key.len();
 
                 expected_checksum += value[0] as u64;
@@ -220,7 +220,7 @@ fn readwrite_bench(path: &Path) {
         for i in 0..ELEMENTS {
             let (key, value) = &pairs[i % pairs.len()];
             let mut mut_key = key.clone();
-            mut_key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+            mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
             file.write_all(&mut_key).unwrap();
             file.write_all(value).unwrap();
         }
@@ -243,7 +243,7 @@ fn readwrite_bench(path: &Path) {
             for &i in &key_order {
                 let (key, value) = &pairs[i % pairs.len()];
                 let mut mut_key = key.clone();
-                mut_key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+                mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
                 let offset = i * (mut_key.len() + value.len()) + mut_key.len();
 
                 file.seek(SeekFrom::Start(offset as u64)).unwrap();
@@ -284,7 +284,7 @@ fn mmap_bench(path: &Path) {
         for i in 0..ELEMENTS {
             let (key, value) = &pairs[i % pairs.len()];
             let mut mut_key = key.clone();
-            mut_key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+            mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
             mmap[write_index..(write_index + mut_key.len())].copy_from_slice(&mut_key);
             write_index += mut_key.len();
             mmap[write_index..(write_index + value.len())].copy_from_slice(value);
@@ -308,7 +308,7 @@ fn mmap_bench(path: &Path) {
             for &i in &key_order {
                 let (key, value) = &pairs[i % pairs.len()];
                 let mut mut_key = key.clone();
-                mut_key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
+                mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
                 let offset = i * (mut_key.len() + value.len()) + mut_key.len();
                 let buffer = &mmap[offset..(offset + value.len())];
                 checksum += buffer[0] as u64;
