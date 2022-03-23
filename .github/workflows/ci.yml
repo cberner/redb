@@ -17,6 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
+      - name: Check for forbidden words
+        run: "! grep --include='*.rs' -RE 'to_be_bytes|from_be_bytes|dbg!' ."
+
       - name: Install packages
         if: startsWith(matrix.os, 'ubuntu')
         run: |
