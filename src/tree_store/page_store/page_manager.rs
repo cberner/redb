@@ -80,6 +80,14 @@ fn ceil_log2(x: usize) -> usize {
     }
 }
 
+fn round_up_to_multiple_of(value: usize, multiple: usize) -> usize {
+    if value % multiple == 0 {
+        value
+    } else {
+        value + multiple - value % multiple
+    }
+}
+
 pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
     let mut db_size = [0u8; size_of::<u64>()];
     let mut file = File::open(path)?;
@@ -590,6 +598,7 @@ impl RegionLayout {
 #[derive(Clone)]
 struct DatabaseLayout {
     db_header_bytes: usize,
+    region_allocator_range: Range<usize>,
     full_region_layout: RegionLayout,
     num_full_regions: usize,
     trailing_partial_region: Option<RegionLayout>,
@@ -604,10 +613,13 @@ impl DatabaseLayout {
         desired_usable_bytes = min(desired_usable_bytes, db_capacity);
         let full_region_layout = RegionLayout::full_region_layout(page_size);
         let min_header_size = DB_HEADER_SIZE + U64GroupedBitMapMut::required_bytes(1);
+        let region_allocator_range = DB_HEADER_SIZE..min_header_size;
+        // Pad to be page aligned
+        let min_header_size = round_up_to_multiple_of(min_header_size, page_size);
         if db_capacity < min_header_size + MIN_USABLE_PAGES * page_size {
             return Err(Error::OutOfSpace);
         }
-        if db_capacity - min_header_size <= full_region_layout.len() {
+        let result = if db_capacity - min_header_size <= full_region_layout.len() {
             // Single region layout
             let region_layout = RegionLayout::calculate(
                 db_capacity - min_header_size,
@@ -615,17 +627,21 @@ impl DatabaseLayout {
                 page_size,
             )
             .ok_or(Error::OutOfSpace)?;
-            Ok(DatabaseLayout {
+            DatabaseLayout {
                 db_header_bytes: min_header_size,
+                region_allocator_range,
                 full_region_layout,
                 num_full_regions: 0,
                 trailing_partial_region: Some(region_layout),
-            })
+            }
         } else {
             // Multi region layout
             let max_regions = (db_capacity - min_header_size + full_region_layout.len() - 1)
                 / full_region_layout.len();
             let db_header_bytes = DB_HEADER_SIZE + U64GroupedBitMapMut::required_bytes(max_regions);
+            let region_allocator_range = DB_HEADER_SIZE..db_header_bytes;
+            // Pad to be page aligned
+            let db_header_bytes = round_up_to_multiple_of(db_header_bytes, page_size);
             let max_full_regions = (db_capacity - db_header_bytes) / full_region_layout.len();
             let desired_full_regions = desired_usable_bytes / MAX_USABLE_REGION_SPACE;
             let num_full_regions = min(max_full_regions, desired_full_regions);
@@ -633,9 +649,9 @@ impl DatabaseLayout {
                 db_capacity - db_header_bytes - num_full_regions * full_region_layout.len();
             let remaining_desired =
                 desired_usable_bytes - num_full_regions * MAX_USABLE_REGION_SPACE;
-            // TODO: make sure db_header_bytes is page aligned
-            Ok(DatabaseLayout {
+            DatabaseLayout {
                 db_header_bytes,
+                region_allocator_range,
                 full_region_layout,
                 num_full_regions,
                 trailing_partial_region: RegionLayout::calculate(
@@ -643,8 +659,11 @@ impl DatabaseLayout {
                     remaining_desired,
                     page_size,
                 ),
-            })
-        }
+            }
+        };
+
+        assert!(result.db_header_bytes % page_size == 0);
+        Ok(result)
     }
 
     fn num_regions(&self) -> usize {
@@ -670,7 +689,7 @@ impl DatabaseLayout {
     }
 
     fn region_allocator_address_range(&self) -> Range<usize> {
-        DB_HEADER_SIZE..self.db_header_bytes
+        self.region_allocator_range.clone()
     }
 
     fn region_base_address(&self, region: usize) -> usize {
@@ -689,7 +708,7 @@ impl DatabaseLayout {
     }
 
     const fn serialized_size() -> usize {
-        2 * size_of::<u64>() + 2 * RegionLayout::serialized_size() + 1
+        4 * size_of::<u64>() + 2 * RegionLayout::serialized_size() + 1
     }
 
     fn to_le_bytes(&self) -> [u8; Self::serialized_size()] {
@@ -701,6 +720,14 @@ impl DatabaseLayout {
         result[offset..offset + size_of::<u64>()]
             .copy_from_slice(&(self.num_full_regions as u64).to_le_bytes());
         offset += size_of::<u64>();
+
+        result[offset..offset + size_of::<u64>()]
+            .copy_from_slice(&(self.region_allocator_range.start as u64).to_le_bytes());
+        offset += size_of::<u64>();
+        result[offset..offset + size_of::<u64>()]
+            .copy_from_slice(&(self.region_allocator_range.end as u64).to_le_bytes());
+        offset += size_of::<u64>();
+
         result[offset..offset + RegionLayout::serialized_size()]
             .copy_from_slice(&self.full_region_layout.to_le_bytes());
         offset += RegionLayout::serialized_size();
@@ -728,6 +755,16 @@ impl DatabaseLayout {
             u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
                 as usize;
         offset += size_of::<u64>();
+
+        let region_allocator_start =
+            u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
+                as usize;
+        offset += size_of::<u64>();
+        let region_allocator_end =
+            u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
+                as usize;
+        offset += size_of::<u64>();
+
         let full_region_layout = RegionLayout::from_le_bytes(
             data[offset..offset + RegionLayout::serialized_size()]
                 .try_into()
@@ -746,6 +783,7 @@ impl DatabaseLayout {
 
         Self {
             db_header_bytes,
+            region_allocator_range: region_allocator_start..region_allocator_end,
             full_region_layout,
             num_full_regions,
             trailing_partial_region,
