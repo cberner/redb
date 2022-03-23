@@ -91,7 +91,8 @@ impl FuzzConfig {
             }
         }
 
-        let expected_size = total_value_bytes + (size_of::<u64>() * 4) * total_entries;
+        let approximate_overhead = 256_000;
+        let expected_size = total_value_bytes + (size_of::<u64>() * 4) * total_entries + approximate_overhead;
         // If we're within a factor of 10 of the max db size, then assume an OOM is plausible
         expected_size * 10 > self.max_db_size.value
     }
