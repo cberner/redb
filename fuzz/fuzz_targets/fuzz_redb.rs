@@ -47,10 +47,9 @@ fuzz_target!(|config: FuzzConfig| {
                         let key = key.value;
                         let value_size = value_size.value as usize;
                         let value = vec![0xFF; value_size];
-                        if let Err(redb::Error::OutOfSpace) = table.insert(&key, &value) {
-                            if config.oom_plausible() {
-                                return;
-                            }
+                        if let Err(err) = table.insert(&key, &value) {
+                            assert!(matches!(err, Error::OutOfSpace) && config.oom_plausible());
+                            return;
                         }
                         reference.insert(key, value_size);
                     },
@@ -99,10 +98,9 @@ fuzz_target!(|config: FuzzConfig| {
                 }
             }
         }
-        if let Err(redb::Error::OutOfSpace) = txn.commit() {
-            if config.oom_plausible() {
-                return;
-            }
+        if let Err(err) = txn.commit() {
+            assert!(matches!(err, Error::OutOfSpace) && config.oom_plausible());
+            return;
         }
     }
 });
