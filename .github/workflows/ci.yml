@@ -16,6 +16,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
+      - name: Cache
+        id: rust-cache
+        uses: actions/cache@v3
+        with:
+            path: |
+                ~/.cargo/bin/
+            key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-cargo-deny-0-9-1
 
       - name: Check for forbidden words
         run: "! grep --include='*.rs' -RE 'to_be_bytes|from_be_bytes|dbg!' ."
@@ -37,6 +44,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install cargo-deny
+        if: steps.rust-cache.outputs.cache-hit != 'true'
         run: cargo install --force --version 0.9.1 cargo-deny --locked
 
       - name: Run tests
