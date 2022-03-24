@@ -12,6 +12,8 @@ cargo-fuzz = true
 arbitrary = { version = "1.1.0", features = ["derive"] }
 libfuzzer-sys = { version = "0.4.0", features = ["arbitrary-derive"] }
 tempfile = "3.2.0"
+rand = "0.8.5"
+rand_distr = "0.4.3"
 
 [dependencies.redb]
 path = ".."
