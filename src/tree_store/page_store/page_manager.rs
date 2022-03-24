@@ -50,10 +50,9 @@ const FILE_FORMAT_VERSION: u8 = 100;
 
 // Inspired by PNG's magic number
 const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
-const VERSION_OFFSET: usize = MAGICNUMBER.len();
-const PAGE_SIZE_OFFSET: usize = VERSION_OFFSET + size_of::<u8>();
+const PAGE_SIZE_OFFSET: usize = MAGICNUMBER.len();
 const GOD_BYTE_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u8>();
-const RESERVED: usize = 4;
+const RESERVED: usize = 5;
 const REGION_MAX_USABLE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + RESERVED;
 const DB_SIZE_OFFSET: usize = REGION_MAX_USABLE_OFFSET + size_of::<u64>();
 const TRANSACTION_SIZE: usize = 128;
@@ -66,7 +65,9 @@ const PRIMARY_BIT: u8 = 1;
 const ALLOCATOR_STATE_DIRTY: u8 = 2;
 
 // Structure of each commit slot
-const ROOT_PAGE_OFFSET: usize = 0;
+const VERSION_OFFSET: usize = 0;
+const PADDING: usize = 7;
+const ROOT_PAGE_OFFSET: usize = VERSION_OFFSET + size_of::<u8>() + PADDING;
 const TRANSACTION_ID_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
 const DATA_LAYOUT_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
 
@@ -200,14 +201,6 @@ impl<'a> MetadataAccessor<'a> {
     fn set_region_max_usable_bytes(&mut self, usable_size: usize) {
         self.header[REGION_MAX_USABLE_OFFSET..REGION_MAX_USABLE_OFFSET + size_of::<u64>()]
             .copy_from_slice(&(usable_size as u64).to_le_bytes());
-    }
-
-    fn get_version(&self) -> u8 {
-        self.header[VERSION_OFFSET]
-    }
-
-    fn set_version(&mut self, version: u8) {
-        self.header[VERSION_OFFSET] = version;
     }
 
     fn get_allocator_dirty(&self) -> bool {
@@ -388,6 +381,10 @@ impl<'a> TransactionAccessor<'a> {
                 .unwrap(),
         )
     }
+
+    fn get_version(&self) -> u8 {
+        self.mem[VERSION_OFFSET]
+    }
 }
 
 struct TransactionMutator<'a> {
@@ -412,6 +409,10 @@ impl<'a> TransactionMutator<'a> {
     fn set_data_section_layout(&mut self, layout: &DatabaseLayout) {
         self.mem[DATA_LAYOUT_OFFSET..(DATA_LAYOUT_OFFSET + DatabaseLayout::serialized_size())]
             .copy_from_slice(&layout.to_le_bytes());
+    }
+
+    fn set_version(&mut self, version: u8) {
+        self.mem[VERSION_OFFSET] = version;
     }
 }
 
@@ -908,12 +909,12 @@ impl TransactionalMemory {
             metadata.set_max_capacity(max_capacity);
             // TODO: make the region size configurable, for people who want a really small minimum db size
             metadata.set_region_max_usable_bytes(MAX_USABLE_REGION_SPACE);
-            metadata.set_version(FILE_FORMAT_VERSION);
 
             let mut mutator = metadata.secondary_slot_mut();
             mutator.set_root_page(PageNumber::null());
             mutator.set_last_committed_transaction_id(0);
             mutator.set_data_section_layout(&layout);
+            mutator.set_version(FILE_FORMAT_VERSION);
             drop(mutator);
             // Make the state we just wrote the primary
             metadata.swap_primary();
@@ -921,6 +922,7 @@ impl TransactionalMemory {
             // Initialize the secondary allocator state
             let mut mutator = metadata.secondary_slot_mut();
             mutator.set_data_section_layout(&layout);
+            mutator.set_version(FILE_FORMAT_VERSION);
             drop(mutator);
 
             mmap.flush()?;
@@ -939,7 +941,8 @@ impl TransactionalMemory {
             metadata.get_region_max_usable_bytes(),
             MAX_USABLE_REGION_SPACE
         );
-        assert_eq!(metadata.get_version(), FILE_FORMAT_VERSION);
+        assert_eq!(metadata.primary_slot().get_version(), FILE_FORMAT_VERSION);
+        assert_eq!(metadata.secondary_slot().get_version(), FILE_FORMAT_VERSION);
         let layout = metadata.primary_slot().get_data_section_layout();
         let region_size = layout.full_region_layout.len();
         let region_header_size = layout.full_region_layout.pages_start;
