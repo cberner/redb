@@ -1,6 +1,9 @@
 use std::mem::size_of;
 use arbitrary::Unstructured;
 use libfuzzer_sys::arbitrary::Arbitrary;
+use rand_distr::{Binomial, Distribution};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 // Limit values to 10MiB
 const MAX_VALUE_SIZE: usize = 10_000_000;
@@ -16,6 +19,29 @@ pub(crate) struct BoundedU64<const N: u64> {
 impl<const N: u64> Arbitrary<'_> for BoundedU64<N> {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let value: u64 = u.int_in_range(0..=(N - 1))?;
+        Ok(Self {
+            value
+        })
+    }
+
+    fn size_hint(_depth: usize) -> (usize, Option<usize>) {
+        (size_of::<u64>(), Some(size_of::<u64>()))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct BinomialDifferenceBoundedUSize<const N: usize> {
+    pub value: usize
+}
+
+impl<const N: usize> Arbitrary<'_> for BinomialDifferenceBoundedUSize<N> {
+    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let seed: u64 = u.arbitrary()?;
+        let mut rng = StdRng::seed_from_u64(seed);
+        // Distribution which is the difference from the median of B(N, 0.5)
+        let distribution = Binomial::new(N as u64, 0.5).unwrap();
+        let value = distribution.sample(&mut rng) as isize;
+        let value = (value - N as isize / 2).abs() as usize;
         Ok(Self {
             value
         })
@@ -51,7 +77,7 @@ pub(crate) enum FuzzOperation {
     },
     Insert {
         key: BoundedU64<KEY_SPACE>,
-        value_size: BoundedUSize<MAX_VALUE_SIZE>,
+        value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,
     },
     Remove {
         key: BoundedU64<KEY_SPACE>,
