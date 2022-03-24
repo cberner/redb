@@ -2,12 +2,13 @@ use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::grouped_bitmap::U64GroupedBitMapMut;
 use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::utils::get_page_size;
+use crate::tree_store::page_store::{PageImpl, PageMut};
+use crate::tree_store::PageNumber;
 use crate::Error;
 use crate::Result;
 use std::cmp::{max, min};
 use std::collections::HashSet;
 use std::convert::TryInto;
-use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
@@ -273,76 +274,6 @@ impl<'a> RegionsAccessor<'a> {
     }
 }
 
-// On-disk format is:
-// lowest 20bits: page index within the region
-// second 20bits: region number
-// 19bits: reserved
-// highest 5bits: page order exponent
-//
-// Assuming a reasonable page size, like 4kiB, this allows for 4kiB * 2^20 * 2^20 = 4PiB of usable space
-#[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub(crate) struct PageNumber {
-    region: u32,
-    page_index: u32,
-    page_order: u8,
-}
-
-impl PageNumber {
-    // TODO: remove this
-    pub(crate) fn null() -> Self {
-        Self::new(u16::MAX as u32, 0, 0)
-    }
-
-    #[inline(always)]
-    pub(crate) const fn serialized_size() -> usize {
-        8
-    }
-
-    fn new(region: u32, page_index: u32, page_order: u8) -> Self {
-        Self {
-            region,
-            page_index,
-            page_order,
-        }
-    }
-
-    pub(crate) fn to_le_bytes(self) -> [u8; 8] {
-        let mut temp = (0x000F_FFFF & self.page_index) as u64;
-        temp |= (0x000F_FFFF & self.region as u64) << 20;
-        temp |= (0b0001_1111 & self.page_order as u64) << 59;
-        temp.to_le_bytes()
-    }
-
-    pub(crate) fn from_le_bytes(bytes: [u8; 8]) -> Self {
-        let temp = u64::from_le_bytes(bytes);
-        let index = (temp & 0x000F_FFFF) as u32;
-        let region = ((temp >> 20) & 0x000F_FFFF) as u32;
-        let order = (temp >> 59) as u8;
-
-        Self::new(region, index, order)
-    }
-
-    fn address_range(
-        &self,
-        data_section_offset: usize,
-        region_size: usize,
-        region_pages_start: usize,
-        page_size: usize,
-    ) -> Range<usize> {
-        let regional_start =
-            region_pages_start + self.page_index as usize * self.page_size_bytes(page_size);
-        debug_assert!(regional_start < region_size);
-        let start = data_section_offset + self.region as usize * region_size + regional_start;
-        let end = start + self.page_size_bytes(page_size);
-        start..end
-    }
-
-    fn page_size_bytes(&self, page_size: usize) -> usize {
-        let pages = 1usize << self.page_order;
-        pages * page_size
-    }
-}
-
 struct TransactionAccessor<'a> {
     mem: &'a [u8],
     _guard: &'a MutexGuard<'a, MetadataGuard>,
@@ -413,69 +344,6 @@ impl<'a> TransactionMutator<'a> {
 
     fn set_version(&mut self, version: u8) {
         self.mem[VERSION_OFFSET] = version;
-    }
-}
-
-pub(crate) trait Page {
-    fn memory(&self) -> &[u8];
-
-    fn get_page_number(&self) -> PageNumber;
-}
-
-pub struct PageImpl<'a> {
-    mem: &'a [u8],
-    page_number: PageNumber,
-}
-
-impl<'a> Debug for PageImpl<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("PageImpl: page_number={:?}", self.page_number))
-    }
-}
-
-impl<'a> PageImpl<'a> {
-    pub(crate) fn into_memory(self) -> &'a [u8] {
-        self.mem
-    }
-}
-
-impl<'a> Page for PageImpl<'a> {
-    fn memory(&self) -> &[u8] {
-        self.mem
-    }
-
-    fn get_page_number(&self) -> PageNumber {
-        self.page_number
-    }
-}
-
-pub(crate) struct PageMut<'a> {
-    mem: &'a mut [u8],
-    page_number: PageNumber,
-    #[cfg(debug_assertions)]
-    open_pages: &'a Mutex<HashSet<PageNumber>>,
-}
-
-impl<'a> PageMut<'a> {
-    pub(crate) fn memory_mut(&mut self) -> &mut [u8] {
-        self.mem
-    }
-}
-
-impl<'a> Page for PageMut<'a> {
-    fn memory(&self) -> &[u8] {
-        self.mem
-    }
-
-    fn get_page_number(&self) -> PageNumber {
-        self.page_number
-    }
-}
-
-#[cfg(debug_assertions)]
-impl<'a> Drop for PageMut<'a> {
-    fn drop(&mut self) {
-        self.open_pages.lock().unwrap().remove(&self.page_number);
     }
 }
 
