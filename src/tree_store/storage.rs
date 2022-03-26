@@ -380,6 +380,10 @@ impl Storage {
             .unwrap()
             .unwrap();
         let mut definition = TableHeader::from_bytes(bytes);
+        // No-op if the root has not changed
+        if definition.table_root == table_root {
+            return Ok(master_root.unwrap());
+        }
         definition.table_root = table_root;
         // Safety: References into the master table are never returned to the user
         unsafe {
