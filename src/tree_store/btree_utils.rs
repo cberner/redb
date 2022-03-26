@@ -372,7 +372,7 @@ unsafe fn merge_leaf<K: RedbKey + ?Sized>(
 // Splits the page, if necessary, to fit the additional pages in `partial`
 // Returns the pages in order
 // Safety: caller must ensure that no references to uncommitted pages in this table exist
-unsafe fn split_index(
+unsafe fn split_index<K: RedbKey + ?Sized>(
     index: PageNumber,
     partial: &[PageNumber],
     manager: &TransactionalMemory,
@@ -393,7 +393,11 @@ unsafe fn split_index(
         pages.push(child);
     }
 
-    pages.sort_by_key(|p| max_key(manager.get_page(*p), manager));
+    pages.sort_by(|p1, p2| {
+        let k1 = max_key(manager.get_page(*p1), manager);
+        let k2 = max_key(manager.get_page(*p2), manager);
+        K::compare(&k1, &k2)
+    });
 
     let division = pages.len() / 2;
 
@@ -434,7 +438,7 @@ fn make_index_many_pages(
 }
 
 // Safety: caller must ensure that no references to uncommitted pages in this table exist
-unsafe fn merge_index(
+unsafe fn merge_index<K: RedbKey + ?Sized>(
     index: PageNumber,
     partial: &[PageNumber],
     manager: &TransactionalMemory,
@@ -452,7 +456,11 @@ unsafe fn merge_index(
         pages.push(child);
     }
 
-    pages.sort_by_key(|p| max_key(manager.get_page(*p), manager));
+    pages.sort_by(|p1, p2| {
+        let k1 = max_key(manager.get_page(*p1), manager);
+        let k2 = max_key(manager.get_page(*p2), manager);
+        K::compare(&k1, &k2)
+    });
     assert!(pages.len() <= BTREE_ORDER);
 
     drop(page);
@@ -656,7 +664,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                         }
                         let page_number = accessor.child_page(i).unwrap();
                         if i == merge_with {
-                            if let Some((page1, page2)) = split_index(
+                            if let Some((page1, page2)) = split_index::<K>(
                                 page_number,
                                 &partials,
                                 manager,
@@ -666,7 +674,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                                 children.push(page1);
                                 children.push(page2);
                             } else {
-                                children.push(merge_index(
+                                children.push(merge_index::<K>(
                                     page_number,
                                     &partials,
                                     manager,
@@ -1144,11 +1152,38 @@ pub(crate) fn find_key<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
 
 #[cfg(test)]
 mod test {
-    use crate::tree_store::btree_utils::BTREE_ORDER;
+    use crate::tree_store::btree_base::InternalAccessor;
+    use crate::tree_store::btree_utils::{
+        make_index_many_pages, make_mut_single_leaf, merge_index, BTREE_ORDER,
+    };
+    use crate::tree_store::page_store::TransactionalMemory;
     use crate::{Database, TableDefinition};
     use tempfile::NamedTempFile;
 
     const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
+
+    #[test]
+    // Test for regression in index merge/split code found by fuzzer, where keys were sorted
+    // in their binary order rather than by their RedbKey::compare order
+    fn merge_regression() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let file = tmpfile.into_file();
+        let mem = TransactionalMemory::new(file, 1024 * 1024, None, true).unwrap();
+        let (one, _) = make_mut_single_leaf(&1u64.to_le_bytes(), &[], &mem).unwrap();
+        let (two, _) = make_mut_single_leaf(&2u64.to_le_bytes(), &[], &mem).unwrap();
+        // a value which has the second byte set, but zero in the first byte
+        let (next_byte, _) = make_mut_single_leaf(&256u64.to_le_bytes(), &[], &mem).unwrap();
+        let index = make_index_many_pages(&[one, two], &mem).unwrap();
+        let mut freed = vec![];
+        let merged =
+            unsafe { merge_index::<u64>(index, &[next_byte], &mem, false, &mut freed) }.unwrap();
+        let merged_page = mem.get_page(merged);
+        let accessor = InternalAccessor::new(&merged_page);
+        assert_eq!(accessor.count_children(), 3);
+        assert_eq!(accessor.child_page(0).unwrap(), one);
+        assert_eq!(accessor.child_page(1).unwrap(), two);
+        assert_eq!(accessor.child_page(2).unwrap(), next_byte);
+    }
 
     #[test]
     fn tree_balance() {
