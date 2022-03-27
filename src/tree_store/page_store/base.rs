@@ -10,7 +10,7 @@ use std::sync::Mutex;
 // highest 5bits: page order exponent
 //
 // Assuming a reasonable page size, like 4kiB, this allows for 4kiB * 2^20 * 2^20 = 4PiB of usable space
-#[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub(crate) struct PageNumber {
     pub(crate) region: u32,
     pub(crate) page_index: u32,
@@ -70,6 +70,16 @@ impl PageNumber {
     pub(crate) fn page_size_bytes(&self, page_size: usize) -> usize {
         let pages = 1usize << self.page_order;
         pages * page_size
+    }
+}
+
+impl Debug for PageNumber {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "r{}.{}/{}",
+            self.region, self.page_index, self.page_order
+        )
     }
 }
 

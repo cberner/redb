@@ -98,7 +98,7 @@ pub(crate) fn fragmented_bytes<'a>(page: PageImpl<'a>, manager: &'a Transactiona
     }
 }
 
-pub(crate) fn print_node(page: &impl Page) {
+pub(crate) fn print_node<K: RedbKey + ?Sized, P: Page>(page: &P) {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -106,7 +106,7 @@ pub(crate) fn print_node(page: &impl Page) {
             eprint!("Leaf[ (page={:?})", page.get_page_number(),);
             let mut i = 0;
             while let Some(entry) = accessor.entry(i) {
-                eprint!(" key_{}={:?}", i, entry.key());
+                eprint!(" key_{}={:?}", i, K::from_bytes(entry.key()));
                 i += 1;
             }
             eprint!("]");
@@ -121,7 +121,7 @@ pub(crate) fn print_node(page: &impl Page) {
             for i in 0..(accessor.count_children() - 1) {
                 if let Some(child) = accessor.child_page(i + 1) {
                     let key = accessor.key(i).unwrap();
-                    eprint!(" key_{}={:?}", i, key);
+                    eprint!(" key_{}={:?}", i, K::from_bytes(key));
                     eprint!(" child_{}={:?}", i + 1, child);
                 }
             }
@@ -153,13 +153,16 @@ pub(crate) fn node_children<'a>(
     }
 }
 
-pub(crate) fn print_tree<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) {
+pub(crate) fn print_tree<'a, K: RedbKey + ?Sized>(
+    page: PageImpl<'a>,
+    manager: &'a TransactionalMemory,
+) {
     let mut pages = vec![page];
     while !pages.is_empty() {
         let mut next_children = vec![];
         for page in pages.drain(..) {
             next_children.extend(node_children(&page, manager));
-            print_node(&page);
+            print_node::<K, PageImpl<'a>>(&page);
             eprint!("  ");
         }
         eprintln!();

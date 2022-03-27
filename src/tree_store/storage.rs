@@ -29,6 +29,7 @@ pub(crate) const FREED_TABLE: &str = "$$internal$$freed";
 pub(crate) type TransactionId = u64;
 type AtomicTransactionId = AtomicU64;
 
+#[derive(Debug)]
 struct FreedTableKey {
     transaction_id: u64,
     pagination_id: u64,
@@ -844,7 +845,7 @@ impl Storage {
     pub(crate) fn print_debug(&self) {
         if let Some(page) = self.get_root_page_number() {
             eprintln!("Master tree:");
-            print_tree(self.mem.get_page(page), &self.mem);
+            print_tree::<str>(self.mem.get_page(page), &self.mem);
 
             let mut iter: BtreeRangeIter<[u8], [u8]> = self
                 .get_range::<RangeFull, [u8], [u8], [u8]>(.., Some(page))
@@ -854,15 +855,16 @@ impl Storage {
                 eprintln!("{} tree:", String::from_utf8_lossy(entry.key()));
                 let definition = TableHeader::from_bytes(entry.value());
                 if let Some(table_root) = definition.get_root() {
-                    self.print_dirty_tree_debug(table_root);
+                    // Print as &[u8], since we don't know the types at compile time
+                    self.print_dirty_tree_debug::<[u8]>(table_root);
                 }
             }
         }
     }
 
     #[allow(dead_code)]
-    pub(crate) fn print_dirty_tree_debug(&self, root_page: PageNumber) {
-        print_tree(self.mem.get_page(root_page), &self.mem);
+    pub(crate) fn print_dirty_tree_debug<K: RedbKey + ?Sized>(&self, root_page: PageNumber) {
+        print_tree::<K>(self.mem.get_page(root_page), &self.mem);
     }
 
     pub(crate) fn get<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
