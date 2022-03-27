@@ -479,7 +479,7 @@ impl<'a> ReadTransaction<'a> {
             .get_table::<K, V>(definition.name, TableType::Normal, self.root_page)?
             .ok_or_else(|| Error::TableDoesNotExist(definition.name.to_string()))?;
 
-        Ok(ReadOnlyTable::new(header.get_root(), self.storage))
+        Ok(ReadOnlyTable::new(header.get_root(), &self.storage.mem))
     }
 
     /// Open the given table
@@ -494,7 +494,10 @@ impl<'a> ReadTransaction<'a> {
             .get_table::<K, V>(definition.name, TableType::Multimap, self.root_page)?
             .ok_or_else(|| Error::TableDoesNotExist(definition.name.to_string()))?;
 
-        Ok(ReadOnlyMultimapTable::new(header.get_root(), self.storage))
+        Ok(ReadOnlyMultimapTable::new(
+            header.get_root(),
+            &self.storage.mem,
+        ))
     }
 
     /// List all the tables
