@@ -1,23 +1,22 @@
 use crate::tree_store::btree_base::{AccessGuard, InternalAccessor, LeafAccessor};
 use crate::tree_store::btree_iters::{page_numbers_iter_start_state, AllPageNumbersBtreeIter};
 use crate::tree_store::btree_utils::{
-    find_key, fragmented_bytes, make_mut_single_leaf, overhead_bytes, print_tree, stored_bytes,
-    tree_delete, tree_height, tree_insert,
+    fragmented_bytes, make_mut_single_leaf, overhead_bytes, print_tree, stored_bytes, tree_delete,
+    tree_height, tree_insert,
 };
 use crate::tree_store::page_store::{Page, PageMut, PageNumber, TransactionalMemory};
-use crate::tree_store::{btree_base, AccessGuardMut, BtreeRangeIter};
+use crate::tree_store::{btree_base, AccessGuardMut, Btree, BtreeRangeIter};
 use crate::types::{
     AsBytesWithLifetime, OwnedAsBytesLifetime, OwnedLifetime, RedbKey, RedbValue, WithLifetime,
 };
 use crate::Error;
 use crate::Result;
-use std::borrow::Borrow;
 use std::cmp::{max, min};
 use std::collections::BTreeSet;
 use std::convert::TryInto;
 use std::fs::File;
 use std::mem::size_of;
-use std::ops::{RangeBounds, RangeFull};
+use std::ops::RangeFull;
 use std::panic;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -247,7 +246,7 @@ unsafe fn get_mut_value<'a, K: RedbKey + ?Sized>(
 }
 
 pub(crate) struct Storage {
-    mem: TransactionalMemory,
+    pub(crate) mem: TransactionalMemory,
     next_transaction_id: AtomicTransactionId,
     live_read_transactions: Mutex<BTreeSet<TransactionId>>,
     live_write_transaction: Mutex<Option<TransactionId>>,
@@ -376,10 +375,8 @@ impl Storage {
     ) -> Result<PageNumber> {
         // Bypass .get_table() since the table types are dynamic
         // TODO: optimize way this get()
-        let bytes = self
-            .get::<str, [u8]>(name.as_bytes(), master_root)
-            .unwrap()
-            .unwrap();
+        let master_tree: Btree<str, [u8]> = Btree::new(master_root, &self.mem);
+        let bytes = master_tree.get(name).unwrap().unwrap();
         let mut definition = TableHeader::from_bytes(bytes);
         // No-op if the root has not changed
         if definition.table_root == table_root {
@@ -403,7 +400,8 @@ impl Storage {
         table_type: TableType,
         master_root_page: Option<PageNumber>,
     ) -> Result<TableNameIter> {
-        let iter = self.get_range::<RangeFull, str, str, [u8]>(.., master_root_page)?;
+        let master_tree: Btree<str, [u8]> = Btree::new(master_root_page, &self.mem);
+        let iter = master_tree.range::<RangeFull, &str>(..)?;
         Ok(TableNameIter {
             inner: iter,
             table_type,
@@ -417,7 +415,8 @@ impl Storage {
         table_type: TableType,
         root_page: Option<PageNumber>,
     ) -> Result<Option<TableHeader>> {
-        if let Some(found) = self.get::<str, [u8]>(name.as_bytes(), root_page)? {
+        let master_tree: Btree<str, [u8]> = Btree::new(root_page, &self.mem);
+        if let Some(found) = master_tree.get(name)? {
             let definition = TableHeader::from_bytes(found);
             if definition.get_type() != table_type {
                 return Err(Error::TableTypeMismatch(format!(
@@ -561,16 +560,6 @@ impl Storage {
         Ok((new_root, guard))
     }
 
-    pub(crate) fn len(&self, root_page: Option<PageNumber>) -> Result<usize> {
-        let mut iter: BtreeRangeIter<[u8], [u8]> =
-            self.get_range::<RangeFull, [u8], [u8], [u8]>(.., root_page)?;
-        let mut count = 0;
-        while iter.next().is_some() {
-            count += 1;
-        }
-        Ok(count)
-    }
-
     pub(crate) fn get_root_page_number(&self) -> Option<PageNumber> {
         self.mem.get_primary_root_page()
     }
@@ -665,9 +654,8 @@ impl Storage {
         let mut freed_table = self
             .get_table::<FreedTableKey, [u8]>(FREED_TABLE, TableType::Normal, master_root)?
             .unwrap();
-        #[allow(clippy::type_complexity)]
-        let mut iter: BtreeRangeIter<'_, FreedTableKey, [u8]> =
-            self.get_range(..lookup_key, freed_table.get_root())?;
+        let freed_tree: Btree<FreedTableKey, [u8]> = Btree::new(freed_table.get_root(), &self.mem);
+        let mut iter = freed_tree.range(..lookup_key)?;
         while let Some(entry) = iter.next() {
             to_remove.push(FreedTableKey::from_bytes(entry.key()));
             let value = entry.value();
@@ -810,8 +798,8 @@ impl Storage {
             .get_root_page_number()
             .map(|p| fragmented_bytes(self.mem.get_page(p), &self.mem))
             .unwrap_or(0);
-        let mut iter: BtreeRangeIter<[u8], [u8]> =
-            self.get_range::<RangeFull, [u8], [u8], [u8]>(.., self.get_root_page_number())?;
+        let master_tree: Btree<str, [u8]> = Btree::new(self.get_root_page_number(), &self.mem);
+        let mut iter = master_tree.range::<RangeFull, &str>(..)?;
         while let Some(entry) = iter.next() {
             let definition = TableHeader::from_bytes(entry.value());
             if let Some(table_root) = definition.get_root() {
@@ -847,9 +835,8 @@ impl Storage {
             eprintln!("Master tree:");
             print_tree::<str>(self.mem.get_page(page), &self.mem);
 
-            let mut iter: BtreeRangeIter<[u8], [u8]> = self
-                .get_range::<RangeFull, [u8], [u8], [u8]>(.., Some(page))
-                .unwrap();
+            let master_tree: Btree<str, [u8]> = Btree::new(Some(page), &self.mem);
+            let mut iter = master_tree.range::<RangeFull, &str>(..).unwrap();
 
             while let Some(entry) = iter.next() {
                 eprintln!("{} tree:", String::from_utf8_lossy(entry.key()));
@@ -865,32 +852,6 @@ impl Storage {
     #[allow(dead_code)]
     pub(crate) fn print_dirty_tree_debug<K: RedbKey + ?Sized>(&self, root_page: PageNumber) {
         print_tree::<K>(self.mem.get_page(root_page), &self.mem);
-    }
-
-    pub(crate) fn get<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
-        &self,
-        key: &[u8],
-        root_page_handle: Option<PageNumber>,
-    ) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
-        if let Some(handle) = root_page_handle {
-            let root_page = self.mem.get_page(handle);
-            return Ok(find_key::<K, V>(root_page, key, &self.mem));
-        }
-        Ok(None)
-    }
-
-    pub(crate) fn get_range<
-        'a,
-        T: RangeBounds<KR>,
-        KR: Borrow<K> + ?Sized + 'a,
-        K: RedbKey + ?Sized + 'a,
-        V: RedbValue + ?Sized + 'a,
-    >(
-        &'a self,
-        range: T,
-        root_page: Option<PageNumber>,
-    ) -> Result<BtreeRangeIter<K, V>> {
-        Ok(BtreeRangeIter::new(range, root_page, &self.mem))
     }
 
     // Returns the new root page, and a bool indicating whether the entry existed

@@ -1,4 +1,6 @@
-use crate::tree_store::{BtreeRangeIter, PageNumber, Storage, TransactionId};
+use crate::tree_store::{
+    Btree, BtreeRangeIter, PageNumber, Storage, TransactionId, TransactionalMemory,
+};
 use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
 };
@@ -323,6 +325,10 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
         }
     }
 
+    fn read_tree(&self) -> Btree<MultimapKVPair<K, V>, [u8]> {
+        Btree::new(self.table_root.get(), &self.storage.mem)
+    }
+
     pub fn insert(&mut self, key: &K, value: &V) -> Result {
         let kv = make_serialized_kv(key, value);
         // Safety: No other references to this table can exist.
@@ -360,7 +366,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
     pub fn remove_all(&mut self, key: &K) -> Result<MultimapValueIter<K, V>> {
         // Match only on the key, so that we can remove all the associated values
         let key_only = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyOnly);
-        let original_root = self.table_root.get();
+        let original_tree = self.read_tree();
         loop {
             // Safety: No other references to this table can exist.
             // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
@@ -384,8 +390,8 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
         let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
         let lower = MultimapKVPair::<K, V>::new(lower_bytes);
         let upper = MultimapKVPair::<K, V>::new(upper_bytes);
-        self.storage
-            .get_range(lower..=upper, original_root)
+        original_tree
+            .range(lower..=upper)
             .map(MultimapValueIter::new)
     }
 }
@@ -398,8 +404,8 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, 
         let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
         let lower = MultimapKVPair::<K, V>::new(lower_bytes);
         let upper = MultimapKVPair::<K, V>::new(upper_bytes);
-        self.storage
-            .get_range(lower..=upper, self.table_root.get())
+        self.read_tree()
+            .range(lower..=upper)
             .map(MultimapValueIter::new)
     }
 
@@ -413,17 +419,17 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, 
         let start = make_bound(start_kv);
         let end = make_bound(end_kv);
 
-        self.storage
-            .get_range((start, end), self.table_root.get())
+        self.read_tree()
+            .range((start, end))
             .map(MultimapRangeIter::new)
     }
 
     fn len(&self) -> Result<usize> {
-        self.storage.len(self.table_root.get())
+        self.read_tree().len()
     }
 
     fn is_empty(&self) -> Result<bool> {
-        self.storage.len(self.table_root.get()).map(|x| x == 0)
+        self.len().map(|x| x == 0)
     }
 }
 
@@ -447,22 +453,16 @@ pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
 }
 
 pub struct ReadOnlyMultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
-    storage: &'s Storage,
-    table_root: Option<PageNumber>,
-    _key_type: PhantomData<K>,
-    _value_type: PhantomData<V>,
+    tree: Btree<'s, MultimapKVPair<K, V>, [u8]>,
 }
 
 impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, V> {
     pub(crate) fn new(
         root_page: Option<PageNumber>,
-        storage: &'s Storage,
+        mem: &'s TransactionalMemory,
     ) -> ReadOnlyMultimapTable<'s, K, V> {
         ReadOnlyMultimapTable {
-            storage,
-            table_root: root_page,
-            _key_type: Default::default(),
-            _value_type: Default::default(),
+            tree: Btree::new(root_page, mem),
         }
     }
 }
@@ -475,9 +475,7 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
         let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
         let lower = MultimapKVPair::<K, V>::new(lower_bytes);
         let upper = MultimapKVPair::<K, V>::new(upper_bytes);
-        self.storage
-            .get_range(lower..=upper, self.table_root)
-            .map(MultimapValueIter::new)
+        self.tree.range(lower..=upper).map(MultimapValueIter::new)
     }
 
     fn range<'a, T: RangeBounds<&'a K> + 'a>(
@@ -490,16 +488,14 @@ impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
         let start = make_bound(start_kv);
         let end = make_bound(end_kv);
 
-        self.storage
-            .get_range((start, end), self.table_root)
-            .map(MultimapRangeIter::new)
+        self.tree.range((start, end)).map(MultimapRangeIter::new)
     }
 
     fn len(&self) -> Result<usize> {
-        self.storage.len(self.table_root)
+        self.tree.len()
     }
 
     fn is_empty(&self) -> Result<bool> {
-        self.storage.len(self.table_root).map(|x| x == 0)
+        self.len().map(|x| x == 0)
     }
 }

@@ -1,4 +1,6 @@
-use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber, Storage, TransactionId};
+use crate::tree_store::{
+    AccessGuardMut, Btree, BtreeRangeIter, PageNumber, Storage, TransactionId, TransactionalMemory,
+};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Result;
 use crate::{AccessGuard, WriteTransaction};
@@ -35,6 +37,10 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
+    }
+
+    fn read_tree(&self) -> Btree<K, V> {
+        Btree::new(self.table_root.get(), &self.storage.mem)
     }
 
     #[allow(dead_code)]
@@ -99,25 +105,22 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     for Table<'s, 't, K, V>
 {
     fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
-        self.storage
-            .get::<K, V>(key.as_bytes().as_ref(), self.table_root.get())
+        self.read_tree().get(key)
     }
 
     fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<K, V>> {
-        self.storage
-            .get_range(range, self.table_root.get())
-            .map(RangeIter::new)
+        self.read_tree().range(range).map(RangeIter::new)
     }
 
     fn len(&self) -> Result<usize> {
-        self.storage.len(self.table_root.get())
+        self.read_tree().len()
     }
 
     fn is_empty(&self) -> Result<bool> {
-        self.storage.len(self.table_root.get()).map(|x| x == 0)
+        self.len().map(|x| x == 0)
     }
 }
 
@@ -141,22 +144,16 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 }
 
 pub struct ReadOnlyTable<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
-    storage: &'s Storage,
-    table_root: Option<PageNumber>,
-    _key_type: PhantomData<K>,
-    _value_type: PhantomData<V>,
+    tree: Btree<'s, K, V>,
 }
 
 impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
     pub(crate) fn new(
         root_page: Option<PageNumber>,
-        storage: &'s Storage,
+        mem: &'s TransactionalMemory,
     ) -> ReadOnlyTable<'s, K, V> {
         ReadOnlyTable {
-            storage,
-            table_root: root_page,
-            _key_type: Default::default(),
-            _value_type: Default::default(),
+            tree: Btree::new(root_page, mem),
         }
     }
 }
@@ -165,25 +162,22 @@ impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     for ReadOnlyTable<'s, K, V>
 {
     fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
-        self.storage
-            .get::<K, V>(key.as_bytes().as_ref(), self.table_root)
+        self.tree.get(key)
     }
 
     fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<K, V>> {
-        self.storage
-            .get_range(range, self.table_root)
-            .map(RangeIter::new)
+        self.tree.range(range).map(RangeIter::new)
     }
 
     fn len(&self) -> Result<usize> {
-        self.storage.len(self.table_root)
+        self.tree.len()
     }
 
     fn is_empty(&self) -> Result<bool> {
-        self.storage.len(self.table_root).map(|x| x == 0)
+        self.len().map(|x| x == 0)
     }
 }
 
