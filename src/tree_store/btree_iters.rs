@@ -279,8 +279,8 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
         ) = (&self.left, &self.right)
         {
             if left_page.get_page_number() == right_page.get_page_number()
-                && left_entry >= right_entry
-                && !(self.include_left && self.include_right)
+                && (left_entry > right_entry
+                    || (left_entry == right_entry && (!self.include_left || !self.include_right)))
             {
                 return None;
             }
@@ -308,8 +308,8 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                 ) = (&self.left, &self.right)
                 {
                     if left_page.get_page_number() == right_page.get_page_number()
-                        && left_entry >= right_entry
-                        && !self.include_right
+                        && (left_entry > right_entry
+                            || (left_entry == right_entry && !self.include_right))
                     {
                         return None;
                     }
@@ -340,8 +340,8 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                 ) = (&self.left, &self.right)
                 {
                     if left_page.get_page_number() == right_page.get_page_number()
-                        && left_entry >= right_entry
-                        && !self.include_left
+                        && (left_entry > right_entry
+                            || (left_entry == right_entry && !self.include_left))
                     {
                         return None;
                     }
@@ -430,8 +430,15 @@ fn find_iter_left<'a, K: RedbKey + ?Sized>(
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
-            let (position, found) = accessor.position::<K>(query);
-            let include = position < accessor.num_pairs() && (include_query || !found);
+            let (mut position, found) = accessor.position::<K>(query);
+            let include = if position < accessor.num_pairs() {
+                include_query || !found
+            } else {
+                // Back up to the last valid position
+                position -= 1;
+                // and exclude it
+                false
+            };
             let result = Leaf {
                 page,
                 entry: position,
@@ -467,13 +474,21 @@ fn find_iter_right<'a, K: RedbKey + ?Sized>(
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
-            let (position, found) = accessor.position::<K>(query);
+            let (mut position, found) = accessor.position::<K>(query);
+            let include = if position < accessor.num_pairs() {
+                include_query && found
+            } else {
+                // Back up to the last valid position
+                position -= 1;
+                // and include it
+                true
+            };
             let result = Leaf {
                 page,
                 entry: position,
                 parent,
             };
-            (include_query && found, Some(result))
+            (include, Some(result))
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
