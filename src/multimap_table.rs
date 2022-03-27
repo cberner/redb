@@ -318,7 +318,8 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self) {
         if let Some(page) = self.table_root.get() {
-            self.storage.print_dirty_tree_debug(page);
+            self.storage
+                .print_dirty_tree_debug::<MultimapKVPair<K, V>>(page);
         }
     }
 

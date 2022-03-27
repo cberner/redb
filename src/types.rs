@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::convert::TryInto;
+use std::fmt::Debug;
 use std::marker::PhantomData;
 
 pub trait AsBytesWithLifetime<'a> {
@@ -17,16 +18,16 @@ impl<'a, T: AsRef<[u8]> + 'a> AsBytesWithLifetime<'a> for OwnedAsBytesLifetime<T
 }
 
 pub trait WithLifetime<'a> {
-    type Out;
+    type Out: Debug;
 }
 
 pub struct RefLifetime<T: ?Sized>(PhantomData<T>);
-impl<'a, T: 'a + ?Sized> WithLifetime<'a> for RefLifetime<T> {
+impl<'a, T: 'a + Debug + ?Sized> WithLifetime<'a> for RefLifetime<T> {
     type Out = &'a T;
 }
 
 pub struct OwnedLifetime<T>(PhantomData<T>);
-impl<'a, T: 'a> WithLifetime<'a> for OwnedLifetime<T> {
+impl<'a, T: 'a + Debug> WithLifetime<'a> for OwnedLifetime<T> {
     type Out = T;
 }
 
