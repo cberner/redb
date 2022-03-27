@@ -417,6 +417,8 @@ fn find_iter_unbounded_right<'a>(
     }
 }
 
+// Returns a bool indicating whether the first entry pointed to by the state is included in the
+// queried range
 fn find_iter_left<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
@@ -429,12 +431,13 @@ fn find_iter_left<'a, K: RedbKey + ?Sized>(
         LEAF => {
             let accessor = LeafAccessor::new(&page);
             let (position, found) = accessor.position::<K>(query);
+            let include = position < accessor.num_pairs() && (include_query || !found);
             let result = Leaf {
                 page,
                 entry: position,
                 parent,
             };
-            (include_query || !found, Some(result))
+            (include, Some(result))
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
