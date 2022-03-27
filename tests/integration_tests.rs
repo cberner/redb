@@ -521,6 +521,56 @@ fn regression7() {
 }
 
 #[test]
+fn regression8() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 321033;
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+
+    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+
+    let mut tx = db.begin_write().unwrap();
+    tx.set_durability(Durability::None);
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let v = vec![0u8; 1186];
+        t.insert(&145227, &v).unwrap();
+        let v = vec![0u8; 1585];
+        t.insert(&565922, &v).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let v = vec![0u8; 2040];
+        t.insert(&94937, &v).unwrap();
+        let v = vec![0u8; 2058];
+        t.insert(&130571, &v).unwrap();
+        t.remove(&145227).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let v = vec![0u8; 947];
+        t.insert(&118749, &v).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    {
+        let t = tx.open_table(table_def).unwrap();
+        let mut iter = t.range(118749..142650).unwrap();
+        assert_eq!(iter.next().unwrap().0, 118749);
+        assert_eq!(iter.next().unwrap().0, 130571);
+        assert!(iter.next().is_none());
+    }
+    tx.commit().unwrap();
+}
+
+#[test]
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
