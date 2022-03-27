@@ -8,7 +8,7 @@ use crate::tree_store::AccessGuardMut;
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
 use crate::Result;
-use std::cmp::max;
+use std::cmp::{max, min};
 
 pub(crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
     let node_mem = page.memory();
@@ -205,8 +205,9 @@ pub(crate) unsafe fn tree_delete<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>
                 Some(page.get_page_number())
             }
         }
-        DeletionResult::PartialInternal(pages) => {
+        DeletionResult::PartialInternal(pages, keys) => {
             assert_eq!(pages.len(), 1);
+            assert!(keys.is_empty());
             Some(pages[0])
         }
     };
@@ -220,7 +221,7 @@ enum DeletionResult {
     // A leaf subtree with too few entries
     PartialLeaf(Vec<(Vec<u8>, Vec<u8>)>),
     // A index page subtree with too few children
-    PartialInternal(Vec<PageNumber>),
+    PartialInternal(Vec<PageNumber>, Vec<Vec<u8>>),
 }
 
 // partials must be in sorted order, and be disjoint from the pairs in the leaf
@@ -370,121 +371,135 @@ unsafe fn merge_leaf<K: RedbKey + ?Sized>(
 }
 
 // Splits the page, if necessary, to fit the additional pages in `partial`
-// Returns the pages in order
+// Returns the pages in order along with the key that separates them
 // Safety: caller must ensure that no references to uncommitted pages in this table exist
-unsafe fn split_index<K: RedbKey + ?Sized>(
+#[allow(clippy::too_many_arguments)]
+unsafe fn split_index(
     index: PageNumber,
-    partial: &[PageNumber],
+    partial_children: &[PageNumber],
+    partial_keys: &[Vec<u8>],
+    separator_key: &[u8],
+    partial_last: bool,
     manager: &TransactionalMemory,
     free_uncommitted: bool,
     freed: &mut Vec<PageNumber>,
-) -> Result<Option<(PageNumber, PageNumber)>> {
+) -> Result<Option<(PageNumber, Vec<u8>, PageNumber)>> {
     let page = manager.get_page(index);
     let accessor = InternalAccessor::new(&page);
 
-    if accessor.child_page(BTREE_ORDER - partial.len()).is_none() {
+    if accessor
+        .child_page(BTREE_ORDER - partial_children.len())
+        .is_none()
+    {
         return Ok(None);
     }
 
     let mut pages = vec![];
-    pages.extend_from_slice(partial);
+    let mut keys = vec![];
+    if !partial_last {
+        pages.extend_from_slice(partial_children);
+        for k in partial_keys {
+            keys.push(k.as_slice());
+        }
+        keys.push(separator_key);
+    }
     for i in 0..accessor.count_children() {
         let child = accessor.child_page(i).unwrap();
         pages.push(child);
+        if i < accessor.count_children() - 1 {
+            keys.push(accessor.key(i).unwrap());
+        }
     }
-
-    pages.sort_by(|p1, p2| {
-        let k1 = max_key(manager.get_page(*p1), manager);
-        let k2 = max_key(manager.get_page(*p2), manager);
-        K::compare(&k1, &k2)
-    });
+    if partial_last {
+        pages.extend_from_slice(partial_children);
+        keys.push(separator_key);
+        for k in partial_keys {
+            keys.push(k.as_slice());
+        }
+    }
 
     let division = pages.len() / 2;
 
-    let page1 = make_index_many_pages(&pages[0..division], manager)?;
-    let page2 = make_index_many_pages(&pages[division..], manager)?;
+    let page1 = make_index(&pages[0..division], &keys[0..division - 1], manager)?;
+    let separator = keys[division - 1].to_vec();
+    let page2 = make_index(&pages[division..], &keys[division..], manager)?;
     drop(page);
     if !(free_uncommitted && manager.free_if_uncommitted(index)?) {
         freed.push(index);
     }
 
-    Ok(Some((page1, page2)))
+    Ok(Some((page1, separator, page2)))
 }
 
 // Pages must be in sorted order
-fn make_index_many_pages(
+fn make_index(
     children: &[PageNumber],
+    keys: &[impl AsRef<[u8]>],
     manager: &TransactionalMemory,
 ) -> Result<PageNumber> {
-    let mut keys = vec![];
-    let mut key_size = 0;
-    for i in 1..children.len() {
-        let key = max_key(manager.get_page(children[i - 1]), manager);
-        key_size += key.len();
-        keys.push(key);
-    }
-    let mut page = manager.allocate(InternalBuilder::required_bytes(
-        children.len() - 1,
-        key_size,
-    ))?;
-    let mut builder = InternalBuilder::new(&mut page, children.len() - 1);
+    assert_eq!(children.len() - 1, keys.len());
+    let key_size = keys.iter().map(|x| x.as_ref().len()).sum();
+    let mut page = manager.allocate(InternalBuilder::required_bytes(keys.len(), key_size))?;
+    let mut builder = InternalBuilder::new(&mut page, keys.len());
     builder.write_first_page(children[0]);
     for i in 1..children.len() {
         let key = &keys[i - 1];
-        builder.write_nth_key(key, children[i], i - 1);
+        builder.write_nth_key(key.as_ref(), children[i], i - 1);
     }
     drop(builder);
     Ok(page.get_page_number())
 }
 
 // Safety: caller must ensure that no references to uncommitted pages in this table exist
-unsafe fn merge_index<K: RedbKey + ?Sized>(
+#[allow(clippy::too_many_arguments)]
+unsafe fn merge_index(
     index: PageNumber,
-    partial: &[PageNumber],
+    partial_children: &[PageNumber],
+    partial_keys: &[Vec<u8>],
+    separator_key: &[u8],
+    partial_last: bool,
     manager: &TransactionalMemory,
     free_uncommitted: bool,
     freed: &mut Vec<PageNumber>,
 ) -> Result<PageNumber> {
     let page = manager.get_page(index);
     let accessor = InternalAccessor::new(&page);
-    assert!(accessor.child_page(BTREE_ORDER - partial.len()).is_none());
+    assert!(accessor
+        .child_page(BTREE_ORDER - partial_children.len())
+        .is_none());
 
     let mut pages = vec![];
-    pages.extend_from_slice(partial);
+    let mut keys = vec![];
+    if !partial_last {
+        pages.extend_from_slice(partial_children);
+        for k in partial_keys.iter() {
+            keys.push(k.as_slice());
+        }
+        keys.push(separator_key);
+    }
     for i in 0..accessor.count_children() {
         let child = accessor.child_page(i).unwrap();
         pages.push(child);
+        if i < accessor.count_children() - 1 {
+            keys.push(accessor.key(i).unwrap());
+        }
     }
-
-    pages.sort_by(|p1, p2| {
-        let k1 = max_key(manager.get_page(*p1), manager);
-        let k2 = max_key(manager.get_page(*p2), manager);
-        K::compare(&k1, &k2)
-    });
+    if partial_last {
+        keys.push(separator_key);
+        for k in partial_keys.iter() {
+            keys.push(k.as_slice());
+        }
+        pages.extend_from_slice(partial_children);
+    }
     assert!(pages.len() <= BTREE_ORDER);
 
+    let result = make_index(&pages, &keys, manager);
     drop(page);
     if !(free_uncommitted && manager.free_if_uncommitted(index)?) {
         freed.push(index);
     }
 
-    make_index_many_pages(&pages, manager)
-}
-
-fn max_key(page: PageImpl, manager: &TransactionalMemory) -> Vec<u8> {
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => {
-            let accessor = LeafAccessor::new(&page);
-            accessor.last_entry().key().to_vec()
-        }
-        INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
-            let last_child = accessor.child_page(accessor.count_children() - 1).unwrap();
-            max_key(manager.get_page(last_child), manager)
-        }
-        _ => unreachable!(),
-    }
+    result
 }
 
 // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
@@ -619,6 +634,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                     let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                     debug_assert!(merge_with < accessor.count_children());
                     let mut children = vec![];
+                    let mut keys = vec![];
                     for i in 0..accessor.count_children() {
                         if i == child_index {
                             continue;
@@ -642,54 +658,86 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                                     freed,
                                 )?;
                                 children.push(page1);
+                                let leaf1 = manager.get_page(page1);
+                                let leaf_accessor = LeafAccessor::new(&leaf1);
+                                keys.push(leaf_accessor.last_entry().key().to_vec());
                                 children.push(page2);
+                            }
+                            let merged_key_index = max(child_index, merge_with);
+                            if merged_key_index < accessor.count_children() - 1 {
+                                // TODO: find a way to optimize way this to_vec()?
+                                keys.push(accessor.key(merged_key_index).unwrap().to_vec());
                             }
                         } else {
                             children.push(page_number);
+                            if i < accessor.count_children() - 1 {
+                                // TODO: find a way to optimize way this to_vec()?
+                                keys.push(accessor.key(i).unwrap().to_vec());
+                            }
                         }
                     }
                     if children.len() == 1 {
-                        PartialInternal(children)
+                        PartialInternal(children, vec![])
                     } else {
-                        Subtree(make_index_many_pages(&children, manager)?)
+                        Subtree(make_index(&children, &keys, manager)?)
                     }
                 }
-                PartialInternal(partials) => {
+                PartialInternal(partial_children, partial_keys) => {
                     let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                    // Whether the partial sorts after the child it is merging with
+                    let partial_last = child_index > 0;
+                    let separator_key = accessor.key(min(child_index, merge_with)).unwrap();
                     debug_assert!(merge_with < accessor.count_children());
                     let mut children = vec![];
+                    let mut keys = vec![];
                     for i in 0..accessor.count_children() {
                         if i == child_index {
                             continue;
                         }
                         let page_number = accessor.child_page(i).unwrap();
                         if i == merge_with {
-                            if let Some((page1, page2)) = split_index::<K>(
+                            if let Some((page1, separator, page2)) = split_index(
                                 page_number,
-                                &partials,
+                                &partial_children,
+                                &partial_keys,
+                                separator_key,
+                                partial_last,
                                 manager,
                                 free_uncommitted,
                                 freed,
                             )? {
                                 children.push(page1);
+                                keys.push(separator);
                                 children.push(page2);
                             } else {
-                                children.push(merge_index::<K>(
+                                children.push(merge_index(
                                     page_number,
-                                    &partials,
+                                    &partial_children,
+                                    &partial_keys,
+                                    separator_key,
+                                    partial_last,
                                     manager,
                                     free_uncommitted,
                                     freed,
                                 )?);
                             }
+                            let merged_key_index = max(child_index, merge_with);
+                            if merged_key_index < accessor.count_children() - 1 {
+                                // TODO: find a way to optimize way this to_vec()?
+                                keys.push(accessor.key(merged_key_index).unwrap().to_vec());
+                            }
                         } else {
                             children.push(page_number);
+                            if i < accessor.count_children() - 1 {
+                                // TODO: find a way to optimize way this to_vec()?
+                                keys.push(accessor.key(i).unwrap().to_vec());
+                            }
                         }
                     }
                     if children.len() == 1 {
-                        PartialInternal(children)
+                        PartialInternal(children, vec![])
                     } else {
-                        Subtree(make_index_many_pages(&children, manager)?)
+                        Subtree(make_index(&children, &keys, manager)?)
                     }
                 }
             };
@@ -723,20 +771,6 @@ pub(crate) fn make_mut_single_leaf<'a>(
     Ok((page_num, guard))
 }
 
-pub(crate) fn make_index(
-    key: &[u8],
-    lte_page: PageNumber,
-    gt_page: PageNumber,
-    manager: &TransactionalMemory,
-) -> Result<PageNumber> {
-    let mut page = manager.allocate(InternalBuilder::required_bytes(1, key.len()))?;
-    let mut builder = InternalBuilder::new(&mut page, 1);
-    builder.write_first_page(lte_page);
-    builder.write_nth_key(key, gt_page, 0);
-    drop(builder);
-    Ok(page.get_page_number())
-}
-
 // Returns the page number of the sub-tree into which the key was inserted,
 // and the guard which can be used to access the value, and a list of freed pages
 // Safety: see tree_insert_helper
@@ -750,7 +784,7 @@ pub(crate) unsafe fn tree_insert<'a, K: RedbKey + ?Sized>(
     let (page1, more, guard) = tree_insert_helper::<K>(page, key, value, &mut freed, manager)?;
 
     if let Some((key, page2)) = more {
-        let index_page = make_index(&key, page1, page2, manager)?;
+        let index_page = make_index(&[page1, page2], &[&key], manager)?;
         Ok((index_page, guard, freed))
     } else {
         Ok((page1, guard, freed))
@@ -1154,7 +1188,7 @@ pub(crate) fn find_key<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
 mod test {
     use crate::tree_store::btree_base::InternalAccessor;
     use crate::tree_store::btree_utils::{
-        make_index_many_pages, make_mut_single_leaf, merge_index, BTREE_ORDER,
+        make_index, make_mut_single_leaf, merge_index, BTREE_ORDER,
     };
     use crate::tree_store::page_store::TransactionalMemory;
     use crate::{Database, TableDefinition};
@@ -1173,10 +1207,21 @@ mod test {
         let (two, _) = make_mut_single_leaf(&2u64.to_le_bytes(), &[], &mem).unwrap();
         // a value which has the second byte set, but zero in the first byte
         let (next_byte, _) = make_mut_single_leaf(&256u64.to_le_bytes(), &[], &mem).unwrap();
-        let index = make_index_many_pages(&[one, two], &mem).unwrap();
+        let index = make_index(&[one, two], &[&1u64.to_le_bytes()], &mem).unwrap();
         let mut freed = vec![];
-        let merged =
-            unsafe { merge_index::<u64>(index, &[next_byte], &mem, false, &mut freed) }.unwrap();
+        let merged = unsafe {
+            merge_index(
+                index,
+                &[next_byte],
+                &[],
+                &2u64.to_le_bytes(),
+                true,
+                &mem,
+                false,
+                &mut freed,
+            )
+        }
+        .unwrap();
         let merged_page = mem.get_page(merged);
         let accessor = InternalAccessor::new(&merged_page);
         assert_eq!(accessor.count_children(), 3);
