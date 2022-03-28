@@ -25,7 +25,23 @@ pub struct TableDefinition<'a, K: ?Sized, V: ?Sized> {
 
 impl<'a, K: ?Sized, V: ?Sized> TableDefinition<'a, K, V> {
     pub const fn new(name: &'a str) -> Self {
-        // TODO: enable once const_panic is stable
+        assert!(!name.is_empty());
+        // assert_ne! isn't stable, so we have to do it manually
+        let name_bytes = name.as_bytes();
+        let freed_name_bytes = FREED_TABLE.as_bytes();
+        if name_bytes.len() == freed_name_bytes.len() {
+            let mut equal = true;
+            let mut i = 0;
+            while i < name.len() {
+                if name_bytes[i] != freed_name_bytes[i] {
+                    equal = false;
+                }
+                i += 1;
+            }
+            if equal {
+                panic!("Table name may not be equal to the internal free page table");
+            }
+        }
         Self {
             name,
             _key_type: PhantomData,
@@ -248,8 +264,6 @@ impl<'a> WriteTransaction<'a> {
         &'s self,
         definition: TableDefinition<K, V>,
     ) -> Result<Table<'a, 't, K, V>> {
-        assert!(!definition.name.is_empty());
-        assert_ne!(definition.name, FREED_TABLE);
         if let Some(location) = self.open_tables.borrow().get(definition.name) {
             return Err(Error::TableAlreadyOpen(
                 definition.name.to_string(),
@@ -283,8 +297,6 @@ impl<'a> WriteTransaction<'a> {
         &'t self,
         definition: MultimapTableDefinition<K, V>,
     ) -> Result<MultimapTable<'a, 't, K, V>> {
-        assert!(!definition.name.is_empty());
-        assert_ne!(definition.name, FREED_TABLE);
         if let Some(location) = self.open_tables.borrow().get(definition.name) {
             return Err(Error::TableAlreadyOpen(
                 definition.name.to_string(),
@@ -337,8 +349,6 @@ impl<'a> WriteTransaction<'a> {
         &self,
         definition: TableDefinition<K, V>,
     ) -> Result<bool> {
-        assert!(!definition.name.is_empty());
-        assert_ne!(definition.name, FREED_TABLE);
         let original_root = self.root_page.get();
         let (root, found) =
             self.storage
@@ -356,7 +366,6 @@ impl<'a> WriteTransaction<'a> {
         &self,
         definition: MultimapTableDefinition<K, V>,
     ) -> Result<bool> {
-        assert!(!definition.name.is_empty());
         let original_root = self.root_page.get();
         let (root, found) = self.storage.delete_table::<K, V>(
             definition.name,
@@ -472,8 +481,6 @@ impl<'a> ReadTransaction<'a> {
         &self,
         definition: TableDefinition<K, V>,
     ) -> Result<ReadOnlyTable<'a, K, V>> {
-        assert!(!definition.name.is_empty());
-        assert_ne!(definition.name, FREED_TABLE);
         let header = self
             .storage
             .get_table::<K, V>(definition.name, TableType::Normal, self.root_page)?
@@ -487,8 +494,6 @@ impl<'a> ReadTransaction<'a> {
         &self,
         definition: MultimapTableDefinition<K, V>,
     ) -> Result<ReadOnlyMultimapTable<'a, K, V>> {
-        assert!(!definition.name.is_empty());
-        assert_ne!(definition.name, FREED_TABLE);
         let header = self
             .storage
             .get_table::<K, V>(definition.name, TableType::Multimap, self.root_page)?
