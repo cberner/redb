@@ -1,11 +1,10 @@
-use crate::tree_store::btree_base::{AccessGuard, InternalAccessor, LeafAccessor};
+use crate::tree_store::btree_base::{InternalAccessor, LeafAccessor};
 use crate::tree_store::btree_iters::{page_numbers_iter_start_state, AllPageNumbersBtreeIter};
 use crate::tree_store::btree_utils::{
-    fragmented_bytes, make_mut_single_leaf, overhead_bytes, print_tree, stored_bytes, tree_delete,
-    tree_height, tree_insert,
+    fragmented_bytes, make_mut_single_leaf, overhead_bytes, print_tree, stored_bytes, tree_height,
 };
 use crate::tree_store::page_store::{Page, PageMut, PageNumber, TransactionalMemory};
-use crate::tree_store::{btree_base, AccessGuardMut, Btree, BtreeRangeIter};
+use crate::tree_store::{btree_base, AccessGuardMut, Btree, BtreeMut, BtreeRangeIter};
 use crate::types::{
     AsBytesWithLifetime, OwnedAsBytesLifetime, OwnedLifetime, RedbKey, RedbValue, WithLifetime,
 };
@@ -370,12 +369,11 @@ impl Storage {
         &self,
         name: &str,
         table_root: Option<PageNumber>,
-        transaction_id: TransactionId,
         master_root: Option<PageNumber>,
     ) -> Result<PageNumber> {
         // Bypass .get_table() since the table types are dynamic
         // TODO: optimize way this get()
-        let master_tree: Btree<str, [u8]> = Btree::new(master_root, &self.mem);
+        let mut master_tree: BtreeMut<str, [u8]> = BtreeMut::new(master_root, &self.mem);
         let bytes = master_tree.get(name).unwrap().unwrap();
         let mut definition = TableHeader::from_bytes(bytes);
         // No-op if the root has not changed
@@ -385,13 +383,13 @@ impl Storage {
         definition.table_root = table_root;
         // Safety: References into the master table are never returned to the user
         unsafe {
-            self.insert::<str>(
-                name.as_bytes(),
-                &definition.to_bytes(),
-                transaction_id,
-                master_root,
-            )
+            master_tree.insert(name, &definition.to_bytes())?;
         }
+        self.pending_freed_pages
+            .lock()
+            .unwrap()
+            .extend(master_tree.freed_pages.drain(..));
+        Ok(master_tree.root.unwrap())
     }
 
     // root_page: the root of the master table
@@ -448,7 +446,6 @@ impl Storage {
         &self,
         name: &str,
         table_type: TableType,
-        transaction_id: TransactionId,
         root_page: Option<PageNumber>,
     ) -> Result<(Option<PageNumber>, bool)> {
         if let Some(definition) = self.get_table::<K, V>(name, table_type, root_page)? {
@@ -463,10 +460,13 @@ impl Storage {
             }
 
             // Safety: References into the master table are never returned to the user
-            let (new_root, found) = unsafe {
-                self.remove::<str, [u8]>(name.as_bytes(), transaction_id, true, root_page)?
-            };
-            return Ok((new_root, found.is_some()));
+            let mut master_tree: BtreeMut<str, [u8]> = BtreeMut::new(root_page, &self.mem);
+            let found = unsafe { master_tree.remove(name)?.is_some() };
+            self.pending_freed_pages
+                .lock()
+                .unwrap()
+                .extend(master_tree.freed_pages.drain(..));
+            return Ok((master_tree.root, found));
         }
 
         Ok((root_page, false))
@@ -478,7 +478,6 @@ impl Storage {
         &self,
         name: &str,
         table_type: TableType,
-        transaction_id: TransactionId,
         root_page: Option<PageNumber>,
     ) -> Result<(TableHeader, PageNumber)> {
         if let Some(found) = self.get_table::<K, V>(name, table_type, root_page)? {
@@ -492,72 +491,13 @@ impl Storage {
             value_type: V::redb_type_name().to_string(),
         };
         // Safety: References into the master table are never returned to the user
-        let new_root = unsafe {
-            self.insert::<str>(
-                name.as_bytes(),
-                &header.to_bytes(),
-                transaction_id,
-                root_page,
-            )?
-        };
-        Ok((header, new_root))
-    }
-
-    // Returns the new root page number
-    // Safety: caller must ensure that no references to uncommitted data in this transaction exist
-    // TODO: this method could be made safe, if the transaction_id was not copy and was borrowed mut
-    pub(crate) unsafe fn insert<K: RedbKey + ?Sized>(
-        &self,
-        key: &[u8],
-        value: &[u8],
-        transaction_id: TransactionId,
-        root_page: Option<PageNumber>,
-    ) -> Result<PageNumber> {
-        assert_eq!(
-            transaction_id,
-            self.live_write_transaction.lock().unwrap().unwrap()
-        );
-        if let Some(handle) = root_page {
-            let root = self.mem.get_page(handle);
-            let (new_root, _, freed) = tree_insert::<K>(root, key, value, &self.mem)?;
-            self.pending_freed_pages
-                .lock()
-                .unwrap()
-                .extend_from_slice(&freed);
-            Ok(new_root)
-        } else {
-            let (new_root, _) = make_mut_single_leaf(key, value, &self.mem)?;
-            Ok(new_root)
-        }
-    }
-
-    // Returns the new root page number, and accessor for writing the value
-    // Safety: caller must ensure that no references to uncommitted data in this transaction exist
-    // TODO: this method could be made safe, if the transaction_id was not copy and was borrowed mut
-    pub(crate) unsafe fn insert_reserve<K: RedbKey + ?Sized>(
-        &self,
-        key: &[u8],
-        value_len: usize,
-        transaction_id: TransactionId,
-        root_page: Option<PageNumber>,
-    ) -> Result<(PageNumber, AccessGuardMut)> {
-        assert_eq!(
-            transaction_id,
-            self.live_write_transaction.lock().unwrap().unwrap()
-        );
-        let value = vec![0u8; value_len];
-        let (new_root, guard) = if let Some(handle) = root_page {
-            let root = self.mem.get_page(handle);
-            let (new_root, guard, freed) = tree_insert::<K>(root, key, &value, &self.mem)?;
-            self.pending_freed_pages
-                .lock()
-                .unwrap()
-                .extend_from_slice(&freed);
-            (new_root, guard)
-        } else {
-            make_mut_single_leaf(key, &value, &self.mem)?
-        };
-        Ok((new_root, guard))
+        let mut master_tree: BtreeMut<str, [u8]> = BtreeMut::new(root_page, &self.mem);
+        unsafe { master_tree.insert(name, &header.to_bytes())? };
+        self.pending_freed_pages
+            .lock()
+            .unwrap()
+            .extend(master_tree.freed_pages.drain(..));
+        Ok((header, master_tree.root.unwrap()))
     }
 
     pub(crate) fn get_root_page_number(&self) -> Option<PageNumber> {
@@ -569,7 +509,9 @@ impl Storage {
         mut new_master_root: Option<PageNumber>,
         transaction_id: TransactionId,
         eventual: bool,
+        freed_pages: impl Iterator<Item = PageNumber>,
     ) -> Result {
+        self.pending_freed_pages.lock().unwrap().extend(freed_pages);
         let oldest_live_read = self
             .live_read_transactions
             .lock()
@@ -612,9 +554,11 @@ impl Storage {
         &self,
         mut new_master_root: Option<PageNumber>,
         transaction_id: TransactionId,
+        freed_pages: impl Iterator<Item = PageNumber>,
     ) -> Result {
         // Store all freed pages for a future commit(), since we can't free pages during a
         // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
+        self.pending_freed_pages.lock().unwrap().extend(freed_pages);
         new_master_root = self.store_freed_pages(transaction_id, new_master_root)?;
 
         if let Some(root) = new_master_root {
@@ -637,7 +581,7 @@ impl Storage {
         &self,
         oldest_live_read: TransactionId,
         transaction_id: TransactionId,
-        mut master_root: Option<PageNumber>,
+        master_root: Option<PageNumber>,
     ) -> Result<Option<PageNumber>> {
         assert_eq!(
             transaction_id,
@@ -654,7 +598,8 @@ impl Storage {
         let mut freed_table = self
             .get_table::<FreedTableKey, [u8]>(FREED_TABLE, TableType::Normal, master_root)?
             .unwrap();
-        let freed_tree: Btree<FreedTableKey, [u8]> = Btree::new(freed_table.get_root(), &self.mem);
+        let mut freed_tree: BtreeMut<FreedTableKey, [u8]> =
+            BtreeMut::new(freed_table.get_root(), &self.mem);
         let mut iter = freed_tree.range(..lookup_key)?;
         while let Some(entry) = iter.next() {
             to_remove.push(FreedTableKey::from_bytes(entry.key()));
@@ -675,33 +620,32 @@ impl Storage {
         // Remove all the old transactions. Note: this may create new pages that need to be freed
         for key in to_remove {
             // Safety: all references to the freed table above have already been dropped
-            let (new_root, _) = unsafe {
-                self.remove::<FreedTableKey, [u8]>(
-                    key.as_bytes().as_slice(),
-                    transaction_id,
-                    true,
-                    freed_table.table_root,
-                )?
-            };
-            freed_table.table_root = new_root;
+            unsafe {
+                freed_tree.remove(&key)?;
+            }
         }
+        freed_table.table_root = freed_tree.root;
+        self.pending_freed_pages
+            .lock()
+            .unwrap()
+            .extend(freed_tree.freed_pages.drain(..));
+        let mut master_tree: BtreeMut<str, [u8]> = BtreeMut::new(master_root, &self.mem);
         // Safety: References into the master table are never returned to the user
         unsafe {
-            master_root = Some(self.insert::<str>(
-                FREED_TABLE.as_bytes(),
-                &freed_table.to_bytes(),
-                transaction_id,
-                master_root,
-            )?);
+            master_tree.insert(FREED_TABLE, &freed_table.to_bytes())?;
         }
+        self.pending_freed_pages
+            .lock()
+            .unwrap()
+            .extend(master_tree.freed_pages.drain(..));
 
-        Ok(master_root)
+        Ok(master_tree.root)
     }
 
     fn store_freed_pages(
         &self,
         transaction_id: TransactionId,
-        mut master_root: Option<PageNumber>,
+        master_root: Option<PageNumber>,
     ) -> Result<Option<PageNumber>> {
         assert_eq!(
             transaction_id,
@@ -713,7 +657,12 @@ impl Storage {
         let mut freed_table = self
             .get_table::<FreedTableKey, [u8]>(FREED_TABLE, TableType::Normal, master_root)?
             .unwrap();
-        while !self.pending_freed_pages.lock().unwrap().is_empty() {
+        let mut freed_tree: BtreeMut<FreedTableKey, [u8]> =
+            BtreeMut::new(freed_table.get_root(), &self.mem);
+        // TODO: change all master_tree usages to have TableHeader as their value type
+        let mut master_tree: BtreeMut<str, [u8]> = BtreeMut::new(master_root, &self.mem);
+        let mut pending_freed_pages = self.pending_freed_pages.lock().unwrap();
+        while !pending_freed_pages.is_empty() {
             let chunk_size = 100;
             let buffer_size = size_of::<u64>() + 8 * chunk_size;
             let key = FreedTableKey {
@@ -723,37 +672,25 @@ impl Storage {
             // Safety: The freed table is only accessed from the writer, so only this function
             // is using it. The only reference retrieved, access_guard, is dropped before the next call
             // to this method
-            let (r, mut access_guard) = unsafe {
-                self.insert_reserve::<FreedTableKey>(
-                    key.as_bytes().as_ref(),
-                    buffer_size,
-                    transaction_id,
-                    freed_table.table_root,
-                )?
-            };
-            freed_table.table_root = Some(r);
+            let (mut access_guard, new_root, mut freed_pages) =
+                unsafe { freed_tree.insert_reserve_special(&key, buffer_size)? };
+            freed_table.table_root = new_root;
+            pending_freed_pages.extend(freed_pages.drain(..));
 
-            if self.pending_freed_pages.lock().unwrap().len() <= chunk_size {
+            if pending_freed_pages.len() <= chunk_size {
                 // Update the master root, only on the last loop iteration (this may cause another
                 // iteration, but that's ok since it would have very few pages to process)
                 // Safety: References into the master table are never returned to the user
                 unsafe {
-                    master_root = Some(self.insert::<str>(
-                        FREED_TABLE.as_bytes(),
-                        &freed_table.to_bytes(),
-                        transaction_id,
-                        master_root,
-                    )?);
+                    master_tree.insert(FREED_TABLE, &freed_table.to_bytes())?;
                 }
+                pending_freed_pages.extend(master_tree.freed_pages.drain(..));
             }
 
-            let len = self.pending_freed_pages.lock().unwrap().len();
+            let len = pending_freed_pages.len();
             access_guard.as_mut()[..8]
                 .copy_from_slice(&min(len as u64, chunk_size as u64).to_le_bytes());
-            for (i, page) in self
-                .pending_freed_pages
-                .lock()
-                .unwrap()
+            for (i, page) in pending_freed_pages
                 .drain(len - min(len, chunk_size)..)
                 .enumerate()
             {
@@ -765,7 +702,7 @@ impl Storage {
             pagination_counter += 1;
         }
 
-        Ok(master_root)
+        Ok(master_tree.root)
     }
 
     pub(crate) fn rollback_uncommited_writes(&self, transaction_id: TransactionId) -> Result {
@@ -852,33 +789,5 @@ impl Storage {
     #[allow(dead_code)]
     pub(crate) fn print_dirty_tree_debug<K: RedbKey + ?Sized>(&self, root_page: PageNumber) {
         print_tree::<K>(self.mem.get_page(root_page), &self.mem);
-    }
-
-    // Returns the new root page, and a bool indicating whether the entry existed
-    // Safety: caller must ensure that no references to uncommitted data in this transaction exist,
-    // if free_uncommitted = true
-    // TODO: this method could be made safe, if the transaction_id was not copy and was borrowed mut
-    pub(crate) unsafe fn remove<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
-        &self,
-        key: &[u8],
-        transaction_id: TransactionId,
-        free_uncommitted: bool,
-        root_handle: Option<PageNumber>,
-    ) -> Result<(Option<PageNumber>, Option<AccessGuard<V>>)> {
-        assert_eq!(
-            transaction_id,
-            self.live_write_transaction.lock().unwrap().unwrap()
-        );
-        if let Some(handle) = root_handle {
-            let root_page = self.mem.get_page(handle);
-            let (new_root, found, freed) =
-                tree_delete::<K, V>(root_page, key, free_uncommitted, &self.mem)?;
-            self.pending_freed_pages
-                .lock()
-                .unwrap()
-                .extend_from_slice(&freed);
-            return Ok((new_root, found));
-        }
-        Ok((root_handle, None))
     }
 }

@@ -1,69 +1,42 @@
 use crate::tree_store::{
-    AccessGuardMut, Btree, BtreeRangeIter, PageNumber, Storage, TransactionId, TransactionalMemory,
+    AccessGuardMut, Btree, BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Result;
 use crate::{AccessGuard, WriteTransaction};
 use std::borrow::Borrow;
-use std::cell::Cell;
-use std::marker::PhantomData;
 use std::ops::RangeBounds;
-use std::rc::Rc;
 
 pub struct Table<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     name: String,
     transaction: &'t WriteTransaction<'s>,
-    storage: &'s Storage,
-    transaction_id: TransactionId,
-    table_root: Rc<Cell<Option<PageNumber>>>,
-    _key_type: PhantomData<K>,
-    _value_type: PhantomData<V>,
+    tree: BtreeMut<'t, K, V>,
 }
 
 impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
     pub(crate) fn new(
         name: &str,
-        transaction_id: TransactionId,
-        table_root: Rc<Cell<Option<PageNumber>>>,
-        storage: &'s Storage,
+        table_root: Option<PageNumber>,
+        mem: &'s TransactionalMemory,
         transaction: &'t WriteTransaction<'s>,
     ) -> Table<'s, 't, K, V> {
         Table {
             name: name.to_string(),
             transaction,
-            storage,
-            transaction_id,
-            table_root,
-            _key_type: Default::default(),
-            _value_type: Default::default(),
+            tree: BtreeMut::new(table_root, mem),
         }
-    }
-
-    fn read_tree(&self) -> Btree<K, V> {
-        Btree::new(self.table_root.get(), &self.storage.mem)
     }
 
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self) {
-        if let Some(page) = self.table_root.get() {
-            self.storage.print_dirty_tree_debug::<K>(page);
-        }
+        self.tree.print_debug();
     }
 
     pub fn insert(&mut self, key: &K, value: &V) -> Result {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
-        let root_page = unsafe {
-            self.storage.insert::<K>(
-                key.as_bytes().as_ref(),
-                value.as_bytes().as_ref(),
-                self.transaction_id,
-                self.table_root.get(),
-            )
-        }?;
-        self.table_root.set(Some(root_page));
-        Ok(())
+        unsafe { self.tree.insert(key, value) }
     }
 
     /// Reserve space to insert a key-value pair
@@ -72,32 +45,14 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
-        let (root_page, guard) = unsafe {
-            self.storage.insert_reserve::<K>(
-                key.as_bytes().as_ref(),
-                value_length,
-                self.transaction_id,
-                self.table_root.get(),
-            )
-        }?;
-        self.table_root.set(Some(root_page));
-        Ok(guard)
+        unsafe { self.tree.insert_reserve(key, value_length) }
     }
 
     pub fn remove(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
-        let (root_page, found) = unsafe {
-            self.storage.remove::<K, V>(
-                key.as_bytes().as_ref(),
-                self.transaction_id,
-                true,
-                self.table_root.get(),
-            )
-        }?;
-        self.table_root.set(root_page);
-        Ok(found)
+        unsafe { self.tree.remove(key) }
     }
 }
 
@@ -105,18 +60,18 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     for Table<'s, 't, K, V>
 {
     fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
-        self.read_tree().get(key)
+        self.tree.get(key)
     }
 
     fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<K, V>> {
-        self.read_tree().range(range).map(RangeIter::new)
+        self.tree.range(range).map(RangeIter::new)
     }
 
     fn len(&self) -> Result<usize> {
-        self.read_tree().len()
+        self.tree.len()
     }
 
     fn is_empty(&self) -> Result<bool> {
@@ -126,7 +81,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
 
 impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for Table<'s, 't, K, V> {
     fn drop(&mut self) {
-        self.transaction.close_table(&self.name);
+        self.transaction.close_table(&self.name, &mut self.tree);
     }
 }
 

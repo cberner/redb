@@ -1,7 +1,8 @@
 use crate::multimap_table::MultimapTable;
 use crate::table::{ReadOnlyTable, Table};
 use crate::tree_store::{
-    get_db_size, DatabaseStats, PageNumber, Storage, TableType, TransactionId, FREED_TABLE,
+    get_db_size, BtreeMut, DatabaseStats, PageNumber, Storage, TableType, TransactionId,
+    FREED_TABLE,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Result;
@@ -12,7 +13,6 @@ use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::path::Path;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{io, panic};
 
@@ -210,12 +210,12 @@ pub enum Durability {
     Immediate,
 }
 
-#[allow(clippy::type_complexity)]
 pub struct WriteTransaction<'a> {
     storage: &'a Storage,
     transaction_id: TransactionId,
     root_page: Cell<Option<PageNumber>>,
-    pending_table_root_changes: RefCell<HashMap<String, Rc<Cell<Option<PageNumber>>>>>,
+    pending_table_root_changes: RefCell<HashMap<String, Option<PageNumber>>>,
+    freed_pages: RefCell<Vec<PageNumber>>,
     open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
     completed: AtomicBool,
     durability: Durability,
@@ -230,6 +230,7 @@ impl<'a> WriteTransaction<'a> {
             transaction_id,
             root_page: Cell::new(root_page),
             pending_table_root_changes: RefCell::new(Default::default()),
+            freed_pages: RefCell::new(vec![]),
             open_tables: RefCell::new(Default::default()),
             completed: Default::default(),
             durability: Durability::Immediate,
@@ -262,25 +263,17 @@ impl<'a> WriteTransaction<'a> {
         let (header, root) = self.storage.get_or_create_table::<K, V>(
             definition.name,
             TableType::Normal,
-            self.transaction_id,
             self.root_page.get(),
         )?;
         self.root_page.set(Some(root));
 
-        let root = self
+        let root = *self
             .pending_table_root_changes
             .borrow_mut()
             .entry(definition.name.to_string())
-            .or_insert_with(|| Rc::new(Cell::new(header.get_root())))
-            .clone();
+            .or_insert_with(|| header.get_root());
 
-        Ok(Table::new(
-            definition.name,
-            self.transaction_id,
-            root,
-            self.storage,
-            self,
-        ))
+        Ok(Table::new(definition.name, root, &self.storage.mem, self))
     }
 
     /// Open the given table
@@ -305,29 +298,36 @@ impl<'a> WriteTransaction<'a> {
         let (header, root) = self.storage.get_or_create_table::<K, V>(
             definition.name,
             TableType::Multimap,
-            self.transaction_id,
             self.root_page.get(),
         )?;
         self.root_page.set(Some(root));
 
-        let root = self
+        let root = *self
             .pending_table_root_changes
             .borrow_mut()
             .entry(definition.name.to_string())
-            .or_insert_with(|| Rc::new(Cell::new(header.get_root())))
-            .clone();
+            .or_insert_with(|| header.get_root());
 
         Ok(MultimapTable::new(
             definition.name,
-            self.transaction_id,
             root,
-            self.storage,
+            &self.storage.mem,
             self,
         ))
     }
 
-    pub(crate) fn close_table(&self, name: &str) {
+    pub(crate) fn close_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+        &self,
+        name: &str,
+        table_tree: &mut BtreeMut<K, V>,
+    ) {
         self.open_tables.borrow_mut().remove(name).unwrap();
+        self.freed_pages
+            .borrow_mut()
+            .extend(table_tree.freed_pages.drain(..));
+        self.pending_table_root_changes
+            .borrow_mut()
+            .insert(name.to_string(), table_tree.root);
     }
 
     /// Delete the given table
@@ -340,12 +340,9 @@ impl<'a> WriteTransaction<'a> {
         assert!(!definition.name.is_empty());
         assert_ne!(definition.name, FREED_TABLE);
         let original_root = self.root_page.get();
-        let (root, found) = self.storage.delete_table::<K, V>(
-            definition.name,
-            TableType::Normal,
-            self.transaction_id,
-            original_root,
-        )?;
+        let (root, found) =
+            self.storage
+                .delete_table::<K, V>(definition.name, TableType::Normal, original_root)?;
 
         self.root_page.set(root);
 
@@ -364,7 +361,6 @@ impl<'a> WriteTransaction<'a> {
         let (root, found) = self.storage.delete_table::<K, V>(
             definition.name,
             TableType::Multimap,
-            self.transaction_id,
             original_root,
         )?;
 
@@ -405,27 +401,31 @@ impl<'a> WriteTransaction<'a> {
     fn commit_inner(&self) -> Result {
         // Update all the table roots in the master table, before committing
         for (name, update) in self.pending_table_root_changes.borrow_mut().drain() {
-            let new_root = self.storage.update_table_root(
-                &name,
-                update.get(),
-                self.transaction_id,
-                self.root_page.get(),
-            )?;
+            let new_root = self
+                .storage
+                .update_table_root(&name, update, self.root_page.get())?;
             self.root_page.set(Some(new_root));
         }
 
+        let mut freed_pages = self.freed_pages.borrow_mut();
+        let freed = freed_pages.drain(..);
         match self.durability {
-            Durability::None => self
-                .storage
-                .non_durable_commit(self.root_page.get(), self.transaction_id)?,
-            Durability::Eventual => {
+            Durability::None => {
                 self.storage
-                    .durable_commit(self.root_page.get(), self.transaction_id, true)?
+                    .non_durable_commit(self.root_page.get(), self.transaction_id, freed)?
             }
-            Durability::Immediate => {
-                self.storage
-                    .durable_commit(self.root_page.get(), self.transaction_id, false)?
-            }
+            Durability::Eventual => self.storage.durable_commit(
+                self.root_page.get(),
+                self.transaction_id,
+                true,
+                freed,
+            )?,
+            Durability::Immediate => self.storage.durable_commit(
+                self.root_page.get(),
+                self.transaction_id,
+                false,
+                freed,
+            )?,
         }
 
         self.completed.store(true, Ordering::Release);

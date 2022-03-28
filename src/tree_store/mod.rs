@@ -5,7 +5,7 @@ mod btree_utils;
 mod page_store;
 mod storage;
 
-pub(crate) use btree::Btree;
+pub(crate) use btree::{Btree, BtreeMut};
 pub use btree_base::AccessGuard;
 pub(crate) use btree_base::AccessGuardMut;
 pub(crate) use btree_iters::BtreeRangeIter;
