@@ -1,17 +1,13 @@
-use crate::tree_store::{
-    Btree, BtreeRangeIter, PageNumber, Storage, TransactionId, TransactionalMemory,
-};
+use crate::tree_store::{Btree, BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
 use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
 };
 use crate::{Result, WriteTransaction};
-use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::Bound;
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
-use std::rc::Rc;
 
 #[derive(Eq, PartialEq)]
 #[allow(clippy::enum_variant_names)]
@@ -162,13 +158,16 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapKVPairAcces
     }
 }
 
-fn make_serialized_kv<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(key: &K, value: &V) -> Vec<u8> {
+fn make_serialized_kv<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
+    key: &K,
+    value: &V,
+) -> MultimapKVPair<K, V> {
     let mut result = vec![MultimapKeyCompareOp::KeyAndValue.serialize()];
     result.extend_from_slice(&(key.as_bytes().as_ref().len() as u32).to_le_bytes());
     result.extend_from_slice(key.as_bytes().as_ref());
     result.extend_from_slice(value.as_bytes().as_ref());
 
-    result
+    MultimapKVPair::new(result)
 }
 
 fn make_serialized_key_with_op<K: RedbKey + ?Sized>(key: &K, op: MultimapKeyCompareOp) -> Vec<u8> {
@@ -291,42 +290,26 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'
 pub struct MultimapTable<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     name: String,
     transaction: &'t WriteTransaction<'s>,
-    storage: &'s Storage,
-    transaction_id: TransactionId,
-    table_root: Rc<Cell<Option<PageNumber>>>,
-    _key_type: PhantomData<K>,
-    _value_type: PhantomData<V>,
+    tree: BtreeMut<'t, MultimapKVPair<K, V>, [u8]>,
 }
 
 impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, V> {
     pub(crate) fn new(
         name: &str,
-        transaction_id: TransactionId,
-        table_root: Rc<Cell<Option<PageNumber>>>,
-        storage: &'s Storage,
+        table_root: Option<PageNumber>,
+        mem: &'s TransactionalMemory,
         transaction: &'t WriteTransaction<'s>,
     ) -> MultimapTable<'s, 't, K, V> {
         MultimapTable {
             name: name.to_string(),
             transaction,
-            storage,
-            transaction_id,
-            table_root,
-            _key_type: Default::default(),
-            _value_type: Default::default(),
+            tree: BtreeMut::new(table_root, mem),
         }
     }
 
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self) {
-        if let Some(page) = self.table_root.get() {
-            self.storage
-                .print_dirty_tree_debug::<MultimapKVPair<K, V>>(page);
-        }
-    }
-
-    fn read_tree(&self) -> Btree<MultimapKVPair<K, V>, [u8]> {
-        Btree::new(self.table_root.get(), &self.storage.mem)
+        self.tree.print_debug();
     }
 
     pub fn insert(&mut self, key: &K, value: &V) -> Result {
@@ -334,16 +317,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
-        let root_page = unsafe {
-            self.storage.insert::<MultimapKVPair<K, V>>(
-                &kv,
-                b"",
-                self.transaction_id,
-                self.table_root.get(),
-            )
-        }?;
-        self.table_root.set(Some(root_page));
-        Ok(())
+        unsafe { self.tree.insert(&kv, b"") }
     }
 
     pub fn remove(&mut self, key: &K, value: &V) -> Result<bool> {
@@ -351,39 +325,21 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
-        let (root_page, found) = unsafe {
-            self.storage.remove::<MultimapKVPair<K, V>, [u8]>(
-                &kv,
-                self.transaction_id,
-                true,
-                self.table_root.get(),
-            )?
-        };
-        self.table_root.set(root_page);
-        Ok(found.is_some())
+        unsafe { self.tree.remove(&kv).map(|x| x.is_some()) }
     }
 
     pub fn remove_all(&mut self, key: &K) -> Result<MultimapValueIter<K, V>> {
         // Match only on the key, so that we can remove all the associated values
         let key_only = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyOnly);
-        let original_tree = self.read_tree();
+        let key_only = MultimapKVPair::new(key_only);
+        // Save a snapshot of the btree. This is safe since we call remove_retain_uncommitted()
+        // instead of remove()
+        let original_tree = Btree::new(self.tree.root, self.tree.mem);
         loop {
-            // Safety: No other references to this table can exist.
-            // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-            // and we borrow &mut self.
-            let (new_root, found) = unsafe {
-                self.storage.remove::<MultimapKVPair<K, V>, [u8]>(
-                    &key_only,
-                    self.transaction_id,
-                    // TODO: we should return an iterator that frees these pages even if they are uncommitted
-                    false,
-                    self.table_root.get(),
-                )?
-            };
+            let found = self.tree.remove_retain_uncommitted(&key_only)?;
             if found.is_none() {
                 break;
             }
-            self.table_root.set(new_root);
         }
 
         let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
@@ -404,9 +360,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, 
         let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
         let lower = MultimapKVPair::<K, V>::new(lower_bytes);
         let upper = MultimapKVPair::<K, V>::new(upper_bytes);
-        self.read_tree()
-            .range(lower..=upper)
-            .map(MultimapValueIter::new)
+        self.tree.range(lower..=upper).map(MultimapValueIter::new)
     }
 
     fn range<'a, T: RangeBounds<&'a K> + 'a>(
@@ -419,13 +373,11 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, 
         let start = make_bound(start_kv);
         let end = make_bound(end_kv);
 
-        self.read_tree()
-            .range((start, end))
-            .map(MultimapRangeIter::new)
+        self.tree.range((start, end)).map(MultimapRangeIter::new)
     }
 
     fn len(&self) -> Result<usize> {
-        self.read_tree().len()
+        self.tree.len()
     }
 
     fn is_empty(&self) -> Result<bool> {
@@ -435,7 +387,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, 
 
 impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Drop for MultimapTable<'s, 't, K, V> {
     fn drop(&mut self) {
-        self.transaction.close_table(&self.name);
+        self.transaction.close_table(&self.name, &mut self.tree);
     }
 }
 
