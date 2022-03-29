@@ -1,3 +1,4 @@
+use std::cmp::max;
 use std::mem::size_of;
 use arbitrary::Unstructured;
 use libfuzzer_sys::arbitrary::Arbitrary;
@@ -107,6 +108,8 @@ impl FuzzConfig {
     pub(crate) fn oom_plausible(&self) -> bool {
         let mut total_entries = 0;
         let mut total_value_bytes = 0;
+        let mut consecutive_nondurable_commits = 0;
+        let mut max_consecutive_nondurable_commits = 0;
         for transaction in self.transactions.iter() {
             for write in transaction.ops.iter() {
                 total_entries += 1;
@@ -115,10 +118,16 @@ impl FuzzConfig {
                     _ => 0
                 };
             }
+            if !transaction.durable {
+                consecutive_nondurable_commits += 1;
+            } else {
+                consecutive_nondurable_commits = 0;
+            }
+            max_consecutive_nondurable_commits = max(max_consecutive_nondurable_commits, consecutive_nondurable_commits);
         }
 
         let approximate_overhead = 256_000;
-        let expected_size = total_value_bytes + (size_of::<u64>() * 4) * total_entries + approximate_overhead;
+        let expected_size = (total_value_bytes + (size_of::<u64>() * 4) * total_entries) * max_consecutive_nondurable_commits + approximate_overhead;
         // If we're within a factor of 10 of the max db size, then assume an OOM is plausible
         expected_size * 10 > self.max_db_size.value
     }
