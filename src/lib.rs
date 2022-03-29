@@ -1,13 +1,11 @@
-pub use db::{
-    Database, DatabaseBuilder, Durability, MultimapTableDefinition, ReadTransaction,
-    TableDefinition, WriteTransaction,
-};
+pub use db::{Database, DatabaseBuilder, MultimapTableDefinition, TableDefinition};
 pub use error::Error;
 pub use multimap_table::{
     MultimapRangeIter, MultimapTable, MultimapValueIter, ReadOnlyMultimapTable,
     ReadableMultimapTable,
 };
 pub use table::{RangeIter, ReadOnlyTable, ReadableTable, Table};
+pub use transactions::{Durability, ReadTransaction, WriteTransaction};
 pub use tree_store::{AccessGuard, DatabaseStats};
 
 type Result<T = (), E = Error> = std::result::Result<T, E>;
@@ -21,5 +19,6 @@ mod multimap_table;
 #[cfg(feature = "python")]
 mod python;
 mod table;
+mod transactions;
 mod tree_store;
 mod types;
