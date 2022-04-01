@@ -34,9 +34,11 @@ fn stored_size() {
     }
     write_txn.commit().unwrap();
 
-    assert_eq!(db.stats().unwrap().stored_bytes(), 10);
-    assert!(db.stats().unwrap().fragmented_bytes() > 0);
-    assert!(db.stats().unwrap().metadata_bytes() > 0);
+    let write_txn = db.begin_write().unwrap();
+    assert_eq!(write_txn.stats().unwrap().stored_bytes(), 10);
+    assert!(write_txn.stats().unwrap().fragmented_bytes() > 0);
+    assert!(write_txn.stats().unwrap().metadata_bytes() > 0);
+    write_txn.abort().unwrap();
 }
 
 #[test]

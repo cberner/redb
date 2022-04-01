@@ -1395,7 +1395,9 @@ mod test {
             table.insert(b"hello", b"world").unwrap();
         }
         write_txn.commit().unwrap();
-        let free_pages = db.stats().unwrap().free_pages();
+        let write_txn = db.begin_write().unwrap();
+        let free_pages = write_txn.stats().unwrap().free_pages();
+        write_txn.abort().unwrap();
         drop(db);
 
         let file = OpenOptions::new()
@@ -1416,8 +1418,8 @@ mod test {
             .unwrap());
 
         let db2 = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
-        assert_eq!(free_pages, db2.stats().unwrap().free_pages());
         let write_txn = db2.begin_write().unwrap();
+        assert_eq!(free_pages, write_txn.stats().unwrap().free_pages());
         {
             let mut table = write_txn.open_table(X).unwrap();
             table.insert(b"hello2", b"world2").unwrap();

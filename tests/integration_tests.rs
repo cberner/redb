@@ -156,9 +156,9 @@ fn free() {
     }
 
     txn.commit().unwrap();
-    let free_pages = db.stats().unwrap().free_pages();
 
     let txn = db.begin_write().unwrap();
+    let free_pages = txn.stats().unwrap().free_pages();
 
     let key = vec![0; 100];
     let value = vec![0; 1024];
@@ -194,7 +194,9 @@ fn free() {
         }
     }
 
-    assert_eq!(free_pages, db.stats().unwrap().free_pages());
+    let txn = db.begin_write().unwrap();
+    assert_eq!(free_pages, txn.stats().unwrap().free_pages());
+    txn.abort().unwrap();
 }
 
 #[test]
