@@ -5,6 +5,7 @@ use common::*;
 
 use rand::prelude::SliceRandom;
 use rand::Rng;
+use redb::{ReadableTable, TableDefinition};
 use std::time::{Duration, Instant};
 
 const ITERATIONS: usize = 3;
@@ -21,6 +22,172 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
     }
 
     pairs
+}
+
+// TODO: merge back into benchmark()
+fn benchmark_redb(db: redb::Database) -> Vec<(&'static str, Duration)> {
+    let mut results = Vec::new();
+    let mut pairs = gen_data(1_000_000, 24, 150);
+    let mut written = 0;
+
+    let table_def: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
+
+    let start = Instant::now();
+    let txn = db.begin_write().unwrap();
+    let mut inserter = txn.open_table(table_def).unwrap();
+    {
+        for _ in 0..ELEMENTS {
+            let len = pairs.len();
+            let (key, value) = &mut pairs[written % len];
+            key[16..].copy_from_slice(&(written as u64).to_le_bytes());
+            inserter.insert(key, value).unwrap();
+            written += 1;
+        }
+    }
+    drop(inserter);
+    txn.commit().unwrap();
+
+    let end = Instant::now();
+    let duration = end - start;
+    println!(
+        "{}: Bulk loaded {} items in {}ms",
+        RedbBenchDatabase::db_type_name(),
+        ELEMENTS,
+        duration.as_millis()
+    );
+    results.push(("bulk load", duration));
+
+    let start = Instant::now();
+    let writes = 100;
+    {
+        for _ in 0..writes {
+            let txn = db.begin_write().unwrap();
+            let mut inserter = txn.open_table(table_def).unwrap();
+            let len = pairs.len();
+            let (key, value) = &mut pairs[written % len];
+            key[16..].copy_from_slice(&(written as u64).to_le_bytes());
+            inserter.insert(key, value).unwrap();
+            drop(inserter);
+            txn.commit().unwrap();
+            written += 1;
+        }
+    }
+
+    let end = Instant::now();
+    let duration = end - start;
+    println!(
+        "{}: Wrote {} individual items in {}ms",
+        RedbBenchDatabase::db_type_name(),
+        writes,
+        duration.as_millis()
+    );
+    results.push(("individual writes", duration));
+
+    let start = Instant::now();
+    let batch_size = 1000;
+    {
+        for _ in 0..writes {
+            let txn = db.begin_write().unwrap();
+            let mut inserter = txn.open_table(table_def).unwrap();
+            for _ in 0..batch_size {
+                let len = pairs.len();
+                let (key, value) = &mut pairs[written % len];
+                key[16..].copy_from_slice(&(written as u64).to_le_bytes());
+                inserter.insert(key, value).unwrap();
+                written += 1;
+            }
+            drop(inserter);
+            txn.commit().unwrap();
+        }
+    }
+
+    let end = Instant::now();
+    let duration = end - start;
+    println!(
+        "{}: Wrote {} x {} items in {}ms",
+        RedbBenchDatabase::db_type_name(),
+        writes,
+        batch_size,
+        duration.as_millis()
+    );
+    results.push(("batch writes", duration));
+
+    let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
+    key_order.shuffle(&mut rand::thread_rng());
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(table_def).unwrap();
+    {
+        for _ in 0..ITERATIONS {
+            let start = Instant::now();
+            let mut checksum = 0u64;
+            let mut expected_checksum = 0u64;
+            for i in &key_order {
+                let len = pairs.len();
+                let (key, value) = &mut pairs[i % len];
+                key[16..].copy_from_slice(&(*i as u64).to_le_bytes());
+                let result = table.get(key).unwrap().unwrap();
+                checksum += result[0] as u64;
+                expected_checksum += value[0] as u64;
+            }
+            assert_eq!(checksum, expected_checksum);
+            let end = Instant::now();
+            let duration = end - start;
+            println!(
+                "{}: Random read {} items in {}ms",
+                RedbBenchDatabase::db_type_name(),
+                ELEMENTS,
+                duration.as_millis()
+            );
+            results.push(("random reads", duration));
+        }
+
+        for _ in 0..ITERATIONS {
+            let start = Instant::now();
+            for i in &key_order {
+                let len = pairs.len();
+                let (key, _) = &mut pairs[i % len];
+                key[16..].copy_from_slice(&(*i as u64).to_le_bytes());
+                table.range(key.as_slice()..).unwrap();
+            }
+            let end = Instant::now();
+            let duration = end - start;
+            println!(
+                "{}: Random range read {} starts in {}ms",
+                RedbBenchDatabase::db_type_name(),
+                ELEMENTS,
+                duration.as_millis()
+            );
+            results.push(("random range reads", duration));
+        }
+    }
+
+    let start = Instant::now();
+    let deletes = key_order.len() / 2;
+    {
+        let txn = db.begin_write().unwrap();
+        let mut inserter = txn.open_table(table_def).unwrap();
+        for i in 0..deletes {
+            let len = pairs.len();
+            let (key, _) = &mut pairs[i % len];
+            key[16..].copy_from_slice(&(i as u64).to_le_bytes());
+            inserter.remove(key).unwrap();
+        }
+        drop(inserter);
+        txn.commit().unwrap();
+    }
+
+    let end = Instant::now();
+    let duration = end - start;
+    println!(
+        "{}: Removed {} items in {}ms",
+        RedbBenchDatabase::db_type_name(),
+        deletes,
+        duration.as_millis()
+    );
+    results.push(("removals", duration));
+
+    results
 }
 
 fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
@@ -189,8 +356,8 @@ fn main() {
     let redb_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { redb::Database::create(tmpfile.path(), 4096 * 1024 * 1024).unwrap() };
-        let table = RedbBenchDatabase::new(&db);
-        benchmark(table)
+        // let table = RedbBenchDatabase::new(&db);
+        benchmark_redb(db)
     };
 
     let lmdb_results = {

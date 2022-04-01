@@ -64,7 +64,7 @@ pub struct AccessGuardMut<'a> {
 }
 
 impl<'a> AccessGuardMut<'a> {
-    pub(in crate::tree_store) fn new(page: PageMut<'a>, offset: usize, len: usize) -> Self {
+    pub(crate) fn new(page: PageMut<'a>, offset: usize, len: usize) -> Self {
         AccessGuardMut { page, offset, len }
     }
 }

@@ -1,8 +1,10 @@
-use redb::{ReadableTable, TableDefinition};
+use redb::ReadableTable;
+use redb::TableDefinition;
 use std::fs;
 use std::fs::File;
 use std::path::Path;
 
+#[allow(dead_code)]
 const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
 
 pub trait BenchDatabase {
@@ -47,6 +49,7 @@ pub struct RedbBenchDatabase<'a> {
 }
 
 impl<'a> RedbBenchDatabase<'a> {
+    #[allow(dead_code)]
     pub fn new(db: &'a redb::Database) -> Self {
         RedbBenchDatabase { db }
     }
@@ -66,9 +69,10 @@ impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
     }
 
     fn read_transaction(&self) -> Self::R {
-        let txn = self.db.begin_read().unwrap();
-        let table = txn.open_table(X).unwrap();
-        RedbBenchReadTransaction { _txn: txn, table }
+        // let txn = self.db.begin_read().unwrap();
+        // let table = txn.open_table(X).unwrap();
+        // RedbBenchReadTransaction { _txn: txn, table }
+        todo!()
     }
 }
 
@@ -97,9 +101,9 @@ impl<'a, 'b> BenchWriteTransaction<'b> for RedbBenchWriteTransaction<'a> {
     type T = RedbBenchInserter<'b>;
 
     fn get_inserter(&'b self) -> Self::T {
-        RedbBenchInserter {
-            table: self.txn.open_table(X).unwrap(),
-        }
+        // let table = self.txn.open_table(X).unwrap();
+        // return RedbBenchInserter { table };
+        todo!()
     }
 
     fn commit(self) -> Result<(), ()> {

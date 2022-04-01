@@ -3,7 +3,7 @@ use crate::tree_store::btree_base::{
     BTREE_ORDER, INTERNAL, LEAF,
 };
 use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
-use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMemory};
+use crate::tree_store::page_store::{Page, PageImpl, PageMut, PageNumber, TransactionalMemory};
 use crate::tree_store::AccessGuardMut;
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Error;
@@ -1187,6 +1187,31 @@ pub(crate) fn find_key<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     }
 }
 
+// Returns the mutable value for the queried key, if present
+// Safety: caller must ensure that not other references to the page storing the queried key exist
+pub(crate) unsafe fn get_mut_value<'a, K: RedbKey + ?Sized>(
+    page: PageMut<'a>,
+    query: &[u8],
+    manager: &'a TransactionalMemory,
+) -> Option<AccessGuardMut<'a>> {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(&page);
+            let entry_index = accessor.find_key::<K>(query)?;
+            let (start, end) = accessor.value_range(entry_index).unwrap();
+            let guard = AccessGuardMut::new(page, start, end - start);
+            Some(guard)
+        }
+        INTERNAL => {
+            let accessor = InternalAccessor::new(&page);
+            let (_, child_page) = accessor.child_for_key::<K>(query);
+            return get_mut_value::<K>(manager.get_page_mut(child_page), query, manager);
+        }
+        _ => unreachable!(),
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::tree_store::btree_base::InternalAccessor;
@@ -1268,7 +1293,8 @@ mod test {
         txn.commit().unwrap();
 
         let expected = expected_height(elements + num_internal_entries);
-        let height = db.stats().unwrap().tree_height();
+        let txn = db.begin_write().unwrap();
+        let height = txn.stats().unwrap().tree_height();
         assert!(
             height <= expected,
             "height={} expected={}",
@@ -1277,8 +1303,6 @@ mod test {
         );
 
         let reduce_to = BTREE_ORDER / 2 - num_internal_entries;
-
-        let txn = db.begin_write().unwrap();
         {
             let mut table = txn.open_table(X).unwrap();
             for i in 0..(elements - reduce_to) {
@@ -1288,7 +1312,9 @@ mod test {
         txn.commit().unwrap();
 
         let expected = expected_height(reduce_to + num_internal_entries);
-        let height = db.stats().unwrap().tree_height();
+        let txn = db.begin_write().unwrap();
+        let height = txn.stats().unwrap().tree_height();
+        txn.abort().unwrap();
         assert!(
             height <= expected,
             "height={} expected={}",

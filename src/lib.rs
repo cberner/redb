@@ -5,8 +5,8 @@ pub use multimap_table::{
     ReadableMultimapTable,
 };
 pub use table::{RangeIter, ReadOnlyTable, ReadableTable, Table};
-pub use transactions::{Durability, ReadTransaction, WriteTransaction};
-pub use tree_store::{AccessGuard, DatabaseStats};
+pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
+pub use tree_store::AccessGuard;
 
 type Result<T = (), E = Error> = std::result::Result<T, E>;
 

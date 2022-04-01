@@ -1,14 +1,17 @@
 mod btree;
 mod btree_base;
 mod btree_iters;
-mod btree_utils;
+pub(crate) mod btree_utils;
 mod page_store;
-mod storage;
+mod table_tree;
 
 pub(crate) use btree::{Btree, BtreeMut};
 pub use btree_base::AccessGuard;
 pub(crate) use btree_base::AccessGuardMut;
-pub(crate) use btree_iters::BtreeRangeIter;
+pub(crate) use btree_iters::{
+    page_numbers_iter_start_state, AllPageNumbersBtreeIter, BtreeRangeIter,
+};
 pub(crate) use page_store::{get_db_size, PageNumber, TransactionalMemory};
-pub use storage::DatabaseStats;
-pub(crate) use storage::{Storage, TableType, TransactionId, FREED_TABLE};
+pub(crate) use table_tree::{
+    FreedTableKey, InternalTableDefinition, TableTree, TableType, FREED_TABLE,
+};

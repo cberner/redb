@@ -160,12 +160,9 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
 
 impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for BtreeMut<'a, K, V> {
     fn drop(&mut self) {
+        debug_assert!(self.freed_pages.is_empty());
         if !self.freed_pages.is_empty() {
-            eprintln!("Pages leaked by BtreeMut");
-            #[cfg(test)]
-            {
-                panic!();
-            }
+            eprintln!("{} pages leaked by BtreeMut", self.freed_pages.len());
         }
     }
 }
@@ -217,5 +214,12 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
             count += 1;
         }
         Ok(count)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn print_debug(&self) {
+        if let Some(p) = self.root {
+            print_tree::<K>(self.mem.get_page(p), self.mem);
+        }
     }
 }
