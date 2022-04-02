@@ -1,7 +1,7 @@
 use crate::tree_store::btree_base::{FreePolicy, InternalAccessor, LeafAccessor, INTERNAL, LEAF};
 use crate::tree_store::btree_mutator::MutateHelper;
-use crate::tree_store::btree_utils::{find_key, node_children, print_node};
-use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
+use crate::tree_store::btree_utils::find_key;
+use crate::tree_store::page_store::{Page, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::{AccessGuard, Result};
@@ -224,8 +224,21 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
             while !pages.is_empty() {
                 let mut next_children = vec![];
                 for page in pages.drain(..) {
-                    next_children.extend(node_children(&page, self.mem));
-                    print_node::<K, PageImpl<'a>>(&page);
+                    let node_mem = page.memory();
+                    match node_mem[0] {
+                        LEAF => {
+                            LeafAccessor::new(&page).print_node::<K>();
+                        }
+                        INTERNAL => {
+                            let accessor = InternalAccessor::new(&page);
+                            for i in 0..accessor.count_children() {
+                                let child = accessor.child_page(i).unwrap();
+                                next_children.push(self.mem.get_page(child));
+                            }
+                            accessor.print_node::<K>();
+                        }
+                        _ => unreachable!(),
+                    }
                     eprint!("  ");
                 }
                 eprintln!();

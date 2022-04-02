@@ -1,5 +1,8 @@
-use crate::tree_store::btree_base::FreePolicy;
-use crate::tree_store::btree_utils::{tree_delete, tree_insert};
+use crate::tree_store::btree_base::{FreePolicy, LeafBuilder};
+use crate::tree_store::btree_utils::{
+    make_index, tree_delete_helper, tree_insert_helper, DeletionResult,
+};
+use crate::tree_store::page_store::Page;
 use crate::tree_store::{make_mut_single_leaf, AccessGuardMut, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
 use crate::{AccessGuard, Result};
@@ -37,15 +40,41 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
         unsafe { self.delete(key) }
     }
 
+    // Safety: caller must ensure that no references to uncommitted pages in this table exist
     pub(crate) unsafe fn delete(&mut self, key: &K) -> Result<Option<AccessGuard<'a, V>>> {
         if let Some(p) = self.root {
-            let (new_root, found, mut freed) = tree_delete::<K, V>(
+            let (deletion_result, found) = tree_delete_helper::<K, V>(
                 self.mem.get_page(*p),
                 key.as_bytes().as_ref(),
                 self.free_policy,
+                self.freed,
                 self.mem,
             )?;
-            self.freed.append(&mut freed);
+            let new_root = match deletion_result {
+                DeletionResult::Subtree(page) => Some(page),
+                DeletionResult::PartialLeaf(entries) => {
+                    if entries.is_empty() {
+                        None
+                    } else {
+                        let size: usize = entries.iter().map(|(k, v)| k.len() + v.len()).sum();
+                        let key_size: usize = entries.iter().map(|(k, _)| k.len()).sum();
+                        let mut page = self
+                            .mem
+                            .allocate(LeafBuilder::required_bytes(entries.len(), size))?;
+                        let mut builder = LeafBuilder::new(&mut page, entries.len(), key_size);
+                        for (key, value) in entries {
+                            builder.append(&key, &value);
+                        }
+                        drop(builder);
+                        Some(page.get_page_number())
+                    }
+                }
+                DeletionResult::PartialInternal(pages, keys) => {
+                    assert_eq!(pages.len(), 1);
+                    assert!(keys.is_empty());
+                    Some(pages[0])
+                }
+            };
             *self.root = new_root;
             Ok(found)
         } else {
@@ -53,16 +82,23 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
         }
     }
 
+    // Safety: caller must ensure that no references to uncommitted pages in this tree exist
     pub(crate) unsafe fn insert(&mut self, key: &K, value: &V) -> Result<AccessGuardMut<'a>> {
         let (new_root, guard) = if let Some(p) = self.root {
-            let (new_root, guard, mut freed) = tree_insert::<K>(
+            let (page1, more, guard) = tree_insert_helper::<K>(
                 self.mem.get_page(*p),
                 key.as_bytes().as_ref(),
                 value.as_bytes().as_ref(),
+                self.freed,
                 self.free_policy,
                 self.mem,
             )?;
-            self.freed.append(&mut freed);
+
+            let new_root = if let Some((key, page2)) = more {
+                make_index(&[page1, page2], &[&key], self.mem)?
+            } else {
+                page1
+            };
             (new_root, guard)
         } else {
             make_mut_single_leaf(key.as_bytes().as_ref(), value.as_bytes().as_ref(), self.mem)?
