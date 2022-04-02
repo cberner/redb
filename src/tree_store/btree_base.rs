@@ -1,6 +1,7 @@
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::PageNumber;
 use crate::types::{RedbKey, RedbValue, WithLifetime};
+use crate::Result;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
@@ -10,11 +11,47 @@ pub(in crate::tree_store) const BTREE_ORDER: usize = 40;
 pub(in crate::tree_store) const LEAF: u8 = 1;
 pub(in crate::tree_store) const INTERNAL: u8 = 2;
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub(crate) enum FreePolicy {
+    // Never free the page during the transaction. Defer it until commit
+    Never,
+    // Free uncommitted pages immediately
+    Uncommitted,
+    // Always free the page immediately
+    Always,
+}
+
+impl FreePolicy {
+    // Safety: Caller must ensure there are no references to page, unless self is FreePolicy::Never
+    pub(crate) unsafe fn conditional_free(
+        &self,
+        page: PageNumber,
+        freed: &mut Vec<PageNumber>,
+        mem: &TransactionalMemory,
+    ) -> Result {
+        match self {
+            FreePolicy::Never => {
+                freed.push(page);
+            }
+            FreePolicy::Uncommitted => {
+                if !mem.free_if_uncommitted(page)? {
+                    freed.push(page);
+                }
+            }
+            FreePolicy::Always => {
+                mem.free(page)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
     page: PageImpl<'a>,
     offset: usize,
     len: usize,
-    free_uncommitted_on_drop: bool,
+    free_on_drop: bool,
     mem: &'a TransactionalMemory,
     _value_type: PhantomData<V>,
 }
@@ -33,7 +70,7 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
             page,
             offset,
             len,
-            free_uncommitted_on_drop: free_on_drop,
+            free_on_drop,
             mem,
             _value_type: Default::default(),
         }
@@ -47,11 +84,11 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
 
 impl<'a, V: RedbValue + ?Sized> Drop for AccessGuard<'a, V> {
     fn drop(&mut self) {
-        if self.free_uncommitted_on_drop {
+        if self.free_on_drop {
             let page_number = self.page.get_page_number();
             // Safety: caller to new() guaranteed that no other references to this page exist
             unsafe {
-                assert!(self.mem.free_if_uncommitted(page_number).unwrap());
+                self.mem.free(page_number).unwrap();
             }
         }
     }

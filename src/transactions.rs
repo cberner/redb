@@ -361,19 +361,23 @@ impl<'db> WriteTransaction<'db> {
         }
         drop(iter);
 
-        // Remove all the old transactions. Note: this may create new pages that need to be freed
+        // Remove all the old transactions
         for key in to_remove {
-            // Safety: all references to the freed table above have already been dropped
-            unsafe {
-                freed_tree.remove(&key)?;
+            // Safety: all references to the freed table above have already been dropped.
+            // using immediate free is safe, because read transactions are not allowed to read
+            // the freed table
+            if let Err(err) = unsafe { freed_tree.remove_immediate_free(&key) } {
+                // No-op. Just to avoid triggering the leak detection
+                freed_tree.freed_pages.clear();
+                return Err(err);
             }
         }
-        self.table_tree
-            .borrow_mut()
-            .update_table_root(FREED_TABLE, freed_tree.root)?;
         self.freed_pages
             .borrow_mut()
             .append(&mut freed_tree.freed_pages);
+        self.table_tree
+            .borrow_mut()
+            .update_table_root(FREED_TABLE, freed_tree.root)?;
 
         Ok(())
     }
@@ -401,9 +405,8 @@ impl<'db> WriteTransaction<'db> {
             // Safety: The freed table is only accessed from the writer, so only this function
             // is using it. The only reference retrieved, access_guard, is dropped before the next call
             // to this method
-            let (mut access_guard, new_root, mut freed_pages2) =
+            let (mut access_guard, new_root) =
                 unsafe { freed_tree.insert_reserve_special(&key, buffer_size)? };
-            freed_pages.append(&mut freed_pages2);
 
             if freed_pages.len() <= chunk_size {
                 // Update the master root, only on the last loop iteration (this may cause another

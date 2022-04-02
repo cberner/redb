@@ -10,6 +10,7 @@ use std::ops::RangeFull;
 // The table of freed pages by transaction. FreedTableKey -> binary.
 // The binary blob is a length-prefixed array of PageNumber
 // TODO: create a separate root in the metapage for this
+// Safety: The freed table tree must only be accessed from a write transaction
 pub(crate) const FREED_TABLE: &str = "$$internal$$freed";
 
 #[derive(Debug)]
