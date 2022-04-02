@@ -1,7 +1,6 @@
-use crate::tree_store::btree_base::{InternalAccessor, LeafAccessor, INTERNAL, LEAF};
-use crate::tree_store::btree_utils::{
-    find_key, make_mut_single_leaf, node_children, print_node, tree_delete, tree_insert,
-};
+use crate::tree_store::btree_base::{FreePolicy, InternalAccessor, LeafAccessor, INTERNAL, LEAF};
+use crate::tree_store::btree_mutator::MutateHelper;
+use crate::tree_store::btree_utils::{find_key, node_children, print_node};
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
@@ -35,22 +34,13 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
 
     // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
     pub(crate) unsafe fn insert(&mut self, key: &K, value: &V) -> Result {
-        if let Some(p) = self.root {
-            let root = self.mem.get_page(p);
-            // Safety: Caller guaranteed that no uncommitted data will be used
-            let (new_root, _, freed) = tree_insert::<K>(
-                root,
-                key.as_bytes().as_ref(),
-                value.as_bytes().as_ref(),
-                self.mem,
-            )?;
-            self.freed_pages.extend_from_slice(&freed);
-            self.root = Some(new_root);
-        } else {
-            let (new_root, _) =
-                make_mut_single_leaf(key.as_bytes().as_ref(), value.as_bytes().as_ref(), self.mem)?;
-            self.root = Some(new_root);
-        }
+        let mut operation = MutateHelper::new(
+            &mut self.root,
+            FreePolicy::Uncommitted,
+            self.mem,
+            &mut self.freed_pages,
+        );
+        operation.insert(key, value)?;
         Ok(())
     }
 
@@ -63,71 +53,66 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
         value_length: usize,
     ) -> Result<AccessGuardMut> {
         let value = vec![0u8; value_length];
-        let (new_root, guard) = if let Some(p) = self.root {
-            let root = self.mem.get_page(p);
-            // Safety: Caller guaranteed that no uncommitted data will be used
-            let (new_root, guard, freed) =
-                tree_insert::<K>(root, key.as_bytes().as_ref(), &value, self.mem)?;
-            self.freed_pages.extend_from_slice(&freed);
-            (new_root, guard)
-        } else {
-            make_mut_single_leaf(key.as_bytes().as_ref(), &value, self.mem)?
-        };
-        self.root = Some(new_root);
+        let mut operation = MutateHelper::new(
+            &mut self.root,
+            FreePolicy::Uncommitted,
+            self.mem,
+            &mut self.freed_pages,
+        );
+        let guard = operation.insert(key, value.as_slice())?;
         Ok(guard)
     }
 
     // Special version of insert_reserve for usage in the freed table
-    // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
+    // Safety: caller must ensure that no data in this tree is reachable from other references (including other transactions)
     pub(crate) unsafe fn insert_reserve_special(
         &mut self,
         key: &K,
         value_length: usize,
-    ) -> Result<(AccessGuardMut, Option<PageNumber>, Vec<PageNumber>)> {
+    ) -> Result<(AccessGuardMut, Option<PageNumber>)> {
         let value = vec![0u8; value_length];
-        let (new_root, guard) = if let Some(p) = self.root {
-            let root = self.mem.get_page(p);
-            // Safety: Caller guaranteed that no uncommitted data will be used
-            let (new_root, guard, freed) =
-                tree_insert::<K>(root, key.as_bytes().as_ref(), &value, self.mem)?;
-            self.freed_pages.extend_from_slice(&freed);
-            (new_root, guard)
-        } else {
-            make_mut_single_leaf(key.as_bytes().as_ref(), &value, self.mem)?
-        };
-        self.root = Some(new_root);
-        Ok((guard, self.root, std::mem::take(&mut self.freed_pages)))
+        let mut freed = vec![];
+        let mut operation =
+            MutateHelper::new(&mut self.root, FreePolicy::Always, self.mem, &mut freed);
+        let guard = operation.insert(key, value.as_slice())?;
+        assert!(freed.is_empty());
+        Ok((guard, self.root))
     }
 
     // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
     pub(crate) unsafe fn remove(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
-        if let Some(p) = self.root {
-            let root_page = self.mem.get_page(p);
-            // Safety: Caller guaranteed that no uncommitted data will be used
-            let (new_root, found, freed) =
-                tree_delete::<K, V>(root_page, key.as_bytes().as_ref(), true, self.mem)?;
-            self.freed_pages.extend_from_slice(&freed);
-            self.root = new_root;
-            Ok(found)
-        } else {
-            Ok(None)
-        }
+        let mut operation = MutateHelper::new(
+            &mut self.root,
+            FreePolicy::Uncommitted,
+            self.mem,
+            &mut self.freed_pages,
+        );
+        let result = operation.delete(key)?;
+        Ok(result)
+    }
+
+    // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
+    pub(crate) unsafe fn remove_immediate_free(&mut self, key: &K) -> Result<bool> {
+        let mut operation: MutateHelper<K, V> = MutateHelper::new(
+            &mut self.root,
+            FreePolicy::Always,
+            self.mem,
+            &mut self.freed_pages,
+        );
+        let result = operation.delete(key)?;
+        Ok(result.is_some())
     }
 
     // Like remove(), but does not free uncommitted data
     pub(crate) fn remove_retain_uncommitted(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
-        if let Some(p) = self.root {
-            let root_page = self.mem.get_page(p);
-            // Safety: free_uncommitted is false
-            let (new_root, found, freed) = unsafe {
-                tree_delete::<K, V>(root_page, key.as_bytes().as_ref(), false, self.mem)?
-            };
-            self.freed_pages.extend_from_slice(&freed);
-            self.root = new_root;
-            Ok(found)
-        } else {
-            Ok(None)
-        }
+        let mut operation = MutateHelper::new(
+            &mut self.root,
+            FreePolicy::Never,
+            self.mem,
+            &mut self.freed_pages,
+        );
+        let result = operation.safe_delete(key)?;
+        Ok(result)
     }
 
     #[allow(dead_code)]

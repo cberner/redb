@@ -1,6 +1,7 @@
 mod btree;
 mod btree_base;
 mod btree_iters;
+mod btree_mutator;
 mod btree_utils;
 mod page_store;
 mod table_tree;

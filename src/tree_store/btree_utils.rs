@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
-    AccessGuard, InternalAccessor, InternalBuilder, InternalMutator, LeafAccessor, LeafBuilder,
-    BTREE_ORDER, INTERNAL, LEAF,
+    AccessGuard, FreePolicy, InternalAccessor, InternalBuilder, InternalMutator, LeafAccessor,
+    LeafBuilder, BTREE_ORDER, INTERNAL, LEAF,
 };
 use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, PageNumber, TransactionalMemory};
@@ -71,7 +71,7 @@ pub(crate) fn node_children<'a>(
 pub(crate) unsafe fn tree_delete<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
-    free_uncommitted: bool,
+    free_policy: FreePolicy,
     manager: &'a TransactionalMemory,
 ) -> Result<
     (
@@ -83,7 +83,7 @@ pub(crate) unsafe fn tree_delete<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>
 > {
     let mut freed = vec![];
     let (deletion_result, found) =
-        tree_delete_helper::<K, V>(page, key, free_uncommitted, &mut freed, manager)?;
+        tree_delete_helper::<K, V>(page, key, free_policy, &mut freed, manager)?;
     let result = match deletion_result {
         DeletionResult::Subtree(page) => Some(page),
         DeletionResult::PartialLeaf(entries) => {
@@ -128,7 +128,7 @@ unsafe fn split_leaf<K: RedbKey + ?Sized>(
     leaf: PageNumber,
     partial: &[(Vec<u8>, Vec<u8>)],
     manager: &TransactionalMemory,
-    free_uncommitted: bool,
+    free_policy: FreePolicy,
     freed: &mut Vec<PageNumber>,
 ) -> Result<(PageNumber, PageNumber)> {
     assert!(!partial.is_empty());
@@ -193,9 +193,7 @@ unsafe fn split_leaf<K: RedbKey + ?Sized>(
     drop(builder);
 
     drop(page);
-    if !(free_uncommitted && manager.free_if_uncommitted(leaf)?) {
-        freed.push(leaf);
-    }
+    free_policy.conditional_free(leaf, freed, manager)?;
 
     Ok((new_page.get_page_number(), new_page2.get_page_number()))
 }
@@ -207,7 +205,7 @@ unsafe fn merge_leaf<K: RedbKey + ?Sized>(
     leaf: PageNumber,
     partial: &[(Vec<u8>, Vec<u8>)],
     manager: &TransactionalMemory,
-    free_uncommitted: bool,
+    free_policy: FreePolicy,
     freed: &mut Vec<PageNumber>,
 ) -> Result<Option<PageNumber>> {
     if partial.is_empty() {
@@ -260,9 +258,7 @@ unsafe fn merge_leaf<K: RedbKey + ?Sized>(
     drop(builder);
 
     drop(page);
-    if !(free_uncommitted && manager.free_if_uncommitted(leaf)?) {
-        freed.push(leaf);
-    }
+    free_policy.conditional_free(leaf, freed, manager)?;
 
     Ok(Some(new_page.get_page_number()))
 }
@@ -278,7 +274,7 @@ unsafe fn split_index(
     separator_key: &[u8],
     partial_last: bool,
     manager: &TransactionalMemory,
-    free_uncommitted: bool,
+    free_policy: FreePolicy,
     freed: &mut Vec<PageNumber>,
 ) -> Result<Option<(PageNumber, Vec<u8>, PageNumber)>> {
     let page = manager.get_page(index);
@@ -321,9 +317,7 @@ unsafe fn split_index(
     let separator = keys[division - 1].to_vec();
     let page2 = make_index(&pages[division..], &keys[division..], manager)?;
     drop(page);
-    if !(free_uncommitted && manager.free_if_uncommitted(index)?) {
-        freed.push(index);
-    }
+    free_policy.conditional_free(index, freed, manager)?;
 
     Ok(Some((page1, separator, page2)))
 }
@@ -356,7 +350,7 @@ unsafe fn merge_index(
     separator_key: &[u8],
     partial_last: bool,
     manager: &TransactionalMemory,
-    free_uncommitted: bool,
+    free_policy: FreePolicy,
     freed: &mut Vec<PageNumber>,
 ) -> Result<PageNumber> {
     let page = manager.get_page(index);
@@ -392,9 +386,7 @@ unsafe fn merge_index(
 
     let result = make_index(&pages, &keys, manager);
     drop(page);
-    if !(free_uncommitted && manager.free_if_uncommitted(index)?) {
-        freed.push(index);
-    }
+    free_policy.conditional_free(index, freed, manager)?;
 
     result
 }
@@ -406,7 +398,7 @@ unsafe fn merge_index(
 unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
-    free_uncommitted: bool,
+    free_policy: FreePolicy,
     freed: &mut Vec<PageNumber>,
     manager: &'a TransactionalMemory,
 ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
@@ -429,19 +421,16 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                     partial.push((entry.key().to_vec(), entry.value().to_vec()));
                 }
                 let uncommitted = manager.uncommitted(page.get_page_number());
-                if !(uncommitted && free_uncommitted) {
+                let free_on_drop = if !uncommitted || matches!(free_policy, FreePolicy::Never) {
                     // Won't be freed until the end of the transaction, so returning the page
                     // in the AccessGuard below is still safe
                     freed.push(page.get_page_number());
-                }
+                    false
+                } else {
+                    true
+                };
                 let (start, end) = accessor.value_range(position).unwrap();
-                let guard = AccessGuard::new(
-                    page,
-                    start,
-                    end - start,
-                    uncommitted && free_uncommitted,
-                    manager,
-                );
+                let guard = AccessGuard::new(page, start, end - start, free_on_drop, manager);
                 Ok((PartialLeaf(partial), Some(guard)))
             } else {
                 let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
@@ -463,19 +452,16 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                 }
                 drop(builder);
                 let uncommitted = manager.uncommitted(page.get_page_number());
-                if !(uncommitted && free_uncommitted) {
+                let free_on_drop = if !uncommitted || matches!(free_policy, FreePolicy::Never) {
                     // Won't be freed until the end of the transaction, so returning the page
                     // in the AccessGuard below is still safe
                     freed.push(page.get_page_number());
-                }
+                    false
+                } else {
+                    true
+                };
                 let (start, end) = accessor.value_range(position).unwrap();
-                let guard = AccessGuard::new(
-                    page,
-                    start,
-                    end - start,
-                    uncommitted && free_uncommitted,
-                    manager,
-                );
+                let guard = AccessGuard::new(page, start, end - start, free_on_drop, manager);
                 Ok((Subtree(new_page.get_page_number()), Some(guard)))
             }
         }
@@ -486,7 +472,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
             let (result, found) = tree_delete_helper::<K, V>(
                 manager.get_page(child_page_number),
                 key,
-                free_uncommitted,
+                free_policy,
                 freed,
                 manager,
             )?;
@@ -542,7 +528,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                                 page_number,
                                 &partials,
                                 manager,
-                                free_uncommitted,
+                                free_policy,
                                 freed,
                             )? {
                                 children.push(new_page);
@@ -551,7 +537,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                                     page_number,
                                     &partials,
                                     manager,
-                                    free_uncommitted,
+                                    free_policy,
                                     freed,
                                 )?;
                                 children.push(page1);
@@ -600,7 +586,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                                 separator_key,
                                 partial_last,
                                 manager,
-                                free_uncommitted,
+                                free_policy,
                                 freed,
                             )? {
                                 children.push(page1);
@@ -614,7 +600,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                                     separator_key,
                                     partial_last,
                                     manager,
-                                    free_uncommitted,
+                                    free_policy,
                                     freed,
                                 )?);
                             }
@@ -639,9 +625,7 @@ unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                 }
             };
 
-            if !(free_uncommitted && manager.free_if_uncommitted(original_page_number)?) {
-                freed.push(original_page_number);
-            }
+            free_policy.conditional_free(original_page_number, freed, manager)?;
 
             Ok((final_result, found))
         }
@@ -675,10 +659,12 @@ pub(crate) unsafe fn tree_insert<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
     value: &[u8],
+    free_policy: FreePolicy,
     manager: &'a TransactionalMemory,
 ) -> Result<(PageNumber, AccessGuardMut<'a>, Vec<PageNumber>)> {
     let mut freed = vec![];
-    let (page1, more, guard) = tree_insert_helper::<K>(page, key, value, &mut freed, manager)?;
+    let (page1, more, guard) =
+        tree_insert_helper::<K>(page, key, value, &mut freed, free_policy, manager)?;
 
     if let Some((key, page2)) = more {
         let index_page = make_index(&[page1, page2], &[&key], manager)?;
@@ -739,6 +725,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
     key: &[u8],
     value: &[u8],
     freed: &mut Vec<PageNumber>,
+    free_policy: FreePolicy,
     manager: &'a TransactionalMemory,
 ) -> Result<
     (
@@ -777,9 +764,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                 let page_number = page.get_page_number();
                 drop(page);
-                if !manager.free_if_uncommitted(page_number)? {
-                    freed.push(page_number);
-                }
+                free_policy.conditional_free(page_number, freed, manager)?;
 
                 let new_page_number = new_page.get_page_number();
                 let accessor = LeafAccessor::new(&new_page);
@@ -842,9 +827,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                     let page_number = page.get_page_number();
                     drop(page);
-                    if !manager.free_if_uncommitted(page_number)? {
-                        freed.push(page_number);
-                    }
+                    free_policy.conditional_free(page_number, freed, manager)?;
 
                     let new_page_number = new_page1.get_page_number();
                     let new_page_number2 = new_page2.get_page_number();
@@ -887,9 +870,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                     let page_number = page.get_page_number();
                     drop(page);
-                    if !manager.free_if_uncommitted(page_number)? {
-                        freed.push(page_number);
-                    }
+                    free_policy.conditional_free(page_number, freed, manager)?;
 
                     let new_page_number = new_page.get_page_number();
                     let accessor = LeafAccessor::new(&new_page);
@@ -903,8 +884,14 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);
             let (child_index, child_page) = accessor.child_for_key::<K>(key);
-            let (page1, more, guard) =
-                tree_insert_helper::<K>(manager.get_page(child_page), key, value, freed, manager)?;
+            let (page1, more, guard) = tree_insert_helper::<K>(
+                manager.get_page(child_page),
+                key,
+                value,
+                freed,
+                free_policy,
+                manager,
+            )?;
 
             if let Some((index_key2, page2)) = more {
                 let new_children_count = 1 + accessor.count_children();
@@ -933,9 +920,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     drop(page);
                     // Safety: If the page is uncommitted, no other transactions can have references to it,
                     // and we just dropped ours on the line above
-                    if !manager.free_if_uncommitted(page_number)? {
-                        freed.push(page_number);
-                    }
+                    free_policy.conditional_free(page_number, freed, manager)?;
                     (new_page.get_page_number(), None, guard)
                 } else {
                     // TODO: optimize to remove these Vecs
@@ -1003,9 +988,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     drop(page);
                     // Safety: If the page is uncommitted, no other transactions can have references to it,
                     // and we just dropped ours on the line above
-                    if !manager.free_if_uncommitted(page_number)? {
-                        freed.push(page_number);
-                    }
+                    free_policy.conditional_free(page_number, freed, manager)?;
                     (
                         new_page.get_page_number(),
                         Some((index_key_vec, new_page2.get_page_number())),
@@ -1047,9 +1030,7 @@ unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     // Free the original page, since we've replaced it
                     let page_number = page.get_page_number();
                     drop(page);
-                    if !manager.free_if_uncommitted(page_number)? {
-                        freed.push(page_number);
-                    }
+                    free_policy.conditional_free(page_number, freed, manager)?;
                     (new_page.get_page_number(), None, guard)
                 }
             }
@@ -1108,7 +1089,7 @@ pub(crate) unsafe fn get_mut_value<'a, K: RedbKey + ?Sized>(
 
 #[cfg(test)]
 mod test {
-    use crate::tree_store::btree_base::InternalAccessor;
+    use crate::tree_store::btree_base::{FreePolicy, InternalAccessor};
     use crate::tree_store::btree_utils::{
         make_index, make_mut_single_leaf, merge_index, BTREE_ORDER,
     };
@@ -1139,7 +1120,7 @@ mod test {
                 &2u64.to_le_bytes(),
                 true,
                 &mem,
-                false,
+                FreePolicy::Never,
                 &mut freed,
             )
         }
