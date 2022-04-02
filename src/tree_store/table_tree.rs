@@ -1,4 +1,4 @@
-use crate::tree_store::btree_iters::{page_numbers_iter_start_state, AllPageNumbersBtreeIter};
+use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
 use crate::types::{
     AsBytesWithLifetime, OwnedAsBytesLifetime, OwnedLifetime, RedbKey, RedbValue, WithLifetime,
@@ -258,9 +258,7 @@ impl<'txn> TableTree<'txn> {
     ) -> Result<bool> {
         if let Some(definition) = self.get_table::<K, V>(name, table_type)? {
             if let Some(table_root) = definition.get_root() {
-                let page = self.mem.get_page(table_root);
-                let start = page_numbers_iter_start_state(page);
-                let iter = AllPageNumbersBtreeIter::new(start, self.mem);
+                let iter = AllPageNumbersBtreeIter::new(table_root, self.mem);
                 for page_number in iter {
                     self.extra_freed_pages.push(page_number);
                 }

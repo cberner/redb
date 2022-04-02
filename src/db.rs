@@ -1,8 +1,7 @@
 use crate::tree_store::btree_utils::{get_mut_value, make_mut_single_leaf};
 use crate::tree_store::{
-    get_db_size, page_numbers_iter_start_state, AllPageNumbersBtreeIter, BtreeRangeIter,
-    FreedTableKey, InternalTableDefinition, PageNumber, TableType, TransactionalMemory,
-    FREED_TABLE,
+    get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition,
+    PageNumber, TableType, TransactionalMemory, FREED_TABLE,
 };
 use crate::types::RedbValue;
 use crate::Error;
@@ -142,13 +141,11 @@ impl Database {
             }
             OpenOptions::new().read(true).write(true).open(path)?
         } else {
-            let file = OpenOptions::new()
+            OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
-                .open(path)?;
-
-            file
+                .open(path)?
         };
 
         Database::new(file, db_size, None, true)
@@ -200,12 +197,9 @@ impl Database {
             }
 
             // Repair the allocator state
-            let root_page = mem.get_page(root);
-            let start = page_numbers_iter_start_state(root_page);
-
             // All pages in the master table
             let mut all_pages_iter: Box<dyn Iterator<Item = PageNumber>> =
-                Box::new(AllPageNumbersBtreeIter::new(start, &mem));
+                Box::new(AllPageNumbersBtreeIter::new(root, &mem));
 
             // Iterate over all other tables
             let mut iter: BtreeRangeIter<[u8], [u8]> =
@@ -215,9 +209,7 @@ impl Database {
             while let Some(entry) = iter.next() {
                 let definition = InternalTableDefinition::from_bytes(entry.value());
                 if let Some(table_root) = definition.get_root() {
-                    let page = mem.get_page(table_root);
-                    let table_start = page_numbers_iter_start_state(page);
-                    let table_pages_iter = AllPageNumbersBtreeIter::new(table_start, &mem);
+                    let table_pages_iter = AllPageNumbersBtreeIter::new(table_root, &mem);
                     all_pages_iter = Box::new(all_pages_iter.chain(table_pages_iter));
                 }
             }
@@ -259,25 +251,6 @@ impl Database {
         *self.leaked_write_transaction.lock().unwrap() = Some(panic::Location::caller());
     }
 
-    pub(crate) fn allocate_write_transaction(&self) -> Result<TransactionId> {
-        let guard = self.leaked_write_transaction.lock().unwrap();
-        if let Some(leaked) = *guard {
-            return Err(Error::LeakedWriteTransaction(leaked));
-        }
-        drop(guard);
-
-        assert!(self.live_write_transaction.lock().unwrap().is_none());
-        let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
-        *self.live_write_transaction.lock().unwrap() = Some(id);
-        Ok(id)
-    }
-
-    pub(crate) fn allocate_read_transaction(&self) -> TransactionId {
-        let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
-        self.live_read_transactions.lock().unwrap().insert(id);
-        id
-    }
-
     pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) {
         self.live_read_transactions.lock().unwrap().remove(&id);
     }
@@ -302,13 +275,23 @@ impl Database {
     }
 
     pub fn begin_write(&self) -> Result<WriteTransaction> {
-        let transaction_id = self.allocate_write_transaction()?;
-        // Safety: Allocating the transaction asserts that there is no live write transaction in progress
-        unsafe { WriteTransaction::new(self, transaction_id) }
+        let guard = self.leaked_write_transaction.lock().unwrap();
+        if let Some(leaked) = *guard {
+            return Err(Error::LeakedWriteTransaction(leaked));
+        }
+        drop(guard);
+
+        assert!(self.live_write_transaction.lock().unwrap().is_none());
+        let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
+        *self.live_write_transaction.lock().unwrap() = Some(id);
+        // Safety: We just asserted there was no previous write in progress
+        unsafe { WriteTransaction::new(self, id) }
     }
 
     pub fn begin_read(&self) -> Result<ReadTransaction> {
-        Ok(ReadTransaction::new(self))
+        let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
+        self.live_read_transactions.lock().unwrap().insert(id);
+        Ok(ReadTransaction::new(self, id))
     }
 }
 

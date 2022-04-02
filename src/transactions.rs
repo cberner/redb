@@ -19,12 +19,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub struct DatabaseStats {
-    pub(crate) tree_height: usize,
-    pub(crate) free_pages: usize,
-    pub(crate) stored_leaf_bytes: usize,
-    pub(crate) metadata_bytes: usize,
-    pub(crate) fragmented_bytes: usize,
-    pub(crate) page_size: usize,
+    tree_height: usize,
+    free_pages: usize,
+    stored_leaf_bytes: usize,
+    metadata_bytes: usize,
+    fragmented_bytes: usize,
+    page_size: usize,
 }
 
 impl DatabaseStats {
@@ -176,15 +176,13 @@ impl<'db> WriteTransaction<'db> {
     pub(crate) fn close_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         name: &str,
-        table_tree: &mut BtreeMut<K, V>,
+        table: &mut BtreeMut<K, V>,
     ) {
         self.open_tables.borrow_mut().remove(name).unwrap();
-        self.freed_pages
-            .borrow_mut()
-            .append(&mut table_tree.freed_pages);
+        self.freed_pages.borrow_mut().append(&mut table.freed_pages);
         self.pending_table_updates
             .borrow_mut()
-            .insert(name.to_string(), table_tree.root);
+            .insert(name.to_string(), table.root);
     }
 
     /// Delete the given table
@@ -524,8 +522,7 @@ pub struct ReadTransaction<'a> {
 }
 
 impl<'db> ReadTransaction<'db> {
-    pub(crate) fn new(db: &'db Database) -> Self {
-        let transaction_id = db.allocate_read_transaction();
+    pub(crate) fn new(db: &'db Database, transaction_id: TransactionId) -> Self {
         let root_page = db.get_memory().get_primary_root_page();
         Self {
             db,

@@ -115,7 +115,9 @@ pub(crate) struct AllPageNumbersBtreeIter<'a> {
 }
 
 impl<'a> AllPageNumbersBtreeIter<'a> {
-    pub(crate) fn new(start: RangeIterState<'a>, manager: &'a TransactionalMemory) -> Self {
+    pub(crate) fn new(root: PageNumber, manager: &'a TransactionalMemory) -> Self {
+        let root_page = manager.get_page(root);
+        let start = page_numbers_iter_start_state(root_page);
         match start {
             Leaf { entry, .. } => {
                 assert_eq!(entry, 0)
@@ -151,7 +153,7 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
     }
 }
 
-pub(crate) fn page_numbers_iter_start_state(page: PageImpl) -> RangeIterState {
+fn page_numbers_iter_start_state(page: PageImpl) -> RangeIterState {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => Leaf {
