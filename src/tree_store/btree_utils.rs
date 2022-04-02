@@ -10,94 +10,6 @@ use crate::Error;
 use crate::Result;
 use std::cmp::{max, min};
 
-pub(crate) fn tree_height<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => 1,
-        INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
-            let mut max_child_height = 0;
-            for i in 0..accessor.count_children() {
-                if let Some(child) = accessor.child_page(i) {
-                    let height = tree_height(manager.get_page(child), manager);
-                    max_child_height = max(max_child_height, height);
-                }
-            }
-
-            max_child_height + 1
-        }
-        _ => unreachable!(),
-    }
-}
-
-pub(crate) fn stored_bytes<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => {
-            let accessor = LeafAccessor::new(&page);
-            accessor.length_of_pairs(0, accessor.num_pairs())
-        }
-        INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
-            let mut bytes = 0;
-            for i in 0..accessor.count_children() {
-                if let Some(child) = accessor.child_page(i) {
-                    bytes += stored_bytes(manager.get_page(child), manager);
-                }
-            }
-
-            bytes
-        }
-        _ => unreachable!(),
-    }
-}
-
-pub(crate) fn overhead_bytes<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => {
-            let accessor = LeafAccessor::new(&page);
-            accessor.total_length() - accessor.length_of_pairs(0, accessor.num_pairs())
-        }
-        INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
-            // Internal pages are all "overhead"
-            let mut bytes = accessor.total_length();
-            for i in 0..accessor.count_children() {
-                if let Some(child) = accessor.child_page(i) {
-                    bytes += overhead_bytes(manager.get_page(child), manager);
-                }
-            }
-
-            bytes
-        }
-        _ => unreachable!(),
-    }
-}
-
-pub(crate) fn fragmented_bytes<'a>(page: PageImpl<'a>, manager: &'a TransactionalMemory) -> usize {
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => {
-            let accessor = LeafAccessor::new(&page);
-            page.memory().len() - accessor.total_length()
-        }
-        INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
-            // Internal pages are all "overhead"
-            let mut bytes = page.memory().len() - accessor.total_length();
-            for i in 0..accessor.count_children() {
-                if let Some(child) = accessor.child_page(i) {
-                    bytes += fragmented_bytes(manager.get_page(child), manager);
-                }
-            }
-
-            bytes
-        }
-        _ => unreachable!(),
-    }
-}
-
 pub(crate) fn print_node<K: RedbKey + ?Sized, P: Page>(page: &P) {
     let node_mem = page.memory();
     match node_mem[0] {
@@ -150,24 +62,6 @@ pub(crate) fn node_children<'a>(
             children
         }
         _ => unreachable!(),
-    }
-}
-
-pub(crate) fn print_tree<'a, K: RedbKey + ?Sized>(
-    page: PageImpl<'a>,
-    manager: &'a TransactionalMemory,
-) {
-    let mut pages = vec![page];
-    while !pages.is_empty() {
-        let mut next_children = vec![];
-        for page in pages.drain(..) {
-            next_children.extend(node_children(&page, manager));
-            print_node::<K, PageImpl<'a>>(&page);
-            eprint!("  ");
-        }
-        eprintln!();
-
-        pages = next_children;
     }
 }
 

@@ -1,5 +1,4 @@
 use crate::db::TransactionId;
-use crate::tree_store::btree_utils::{fragmented_bytes, overhead_bytes, stored_bytes, tree_height};
 use crate::tree_store::{
     Btree, BtreeMut, FreedTableKey, InternalTableDefinition, PageNumber, TableTree, TableType,
     TransactionalMemory, FREED_TABLE,
@@ -433,44 +432,28 @@ impl<'db> WriteTransaction<'db> {
 
     pub fn stats(&self) -> Result<DatabaseStats> {
         let table_tree = self.table_tree.borrow();
-        let master_tree_height = table_tree
-            .tree
-            .root
-            .map(|p| tree_height(self.mem.get_page(p), self.mem))
-            .unwrap_or(0);
+        let master_tree_height = table_tree.tree.height();
         let mut max_subtree_height = 0;
         let mut total_stored_bytes = 0;
         // Include the master table in the overhead
-        let mut total_metadata_bytes = table_tree
-            .tree
-            .root
-            .map(|p| {
-                overhead_bytes(self.mem.get_page(p), self.mem)
-                    + stored_bytes(self.mem.get_page(p), self.mem)
-            })
-            .unwrap_or(0);
-        // TODO: move these stats methods into Btree?
-        let mut total_fragmented = table_tree
-            .tree
-            .root
-            .map(|p| fragmented_bytes(self.mem.get_page(p), self.mem))
-            .unwrap_or(0);
+        let mut total_metadata_bytes =
+            table_tree.tree.overhead_bytes() + table_tree.tree.stored_leaf_bytes();
+        let mut total_fragmented = table_tree.tree.fragmented_bytes();
+
         let mut iter = table_tree.tree.range::<RangeFull, &str>(..)?;
         while let Some(entry) = iter.next() {
             let definition = InternalTableDefinition::from_bytes(entry.value());
-            if let Some(table_root) = definition.get_root() {
-                if std::str::from_utf8(entry.key()).unwrap() == FREED_TABLE {
-                    // Count the stored bytes of the freed table as metadata overhead
-                    total_metadata_bytes += stored_bytes(self.mem.get_page(table_root), self.mem);
-                    total_metadata_bytes += overhead_bytes(self.mem.get_page(table_root), self.mem);
-                    total_fragmented += fragmented_bytes(self.mem.get_page(table_root), self.mem);
-                } else {
-                    let height = tree_height(self.mem.get_page(table_root), self.mem);
-                    max_subtree_height = max(max_subtree_height, height);
-                    total_stored_bytes += stored_bytes(self.mem.get_page(table_root), self.mem);
-                    total_metadata_bytes += overhead_bytes(self.mem.get_page(table_root), self.mem);
-                    total_fragmented += fragmented_bytes(self.mem.get_page(table_root), self.mem);
-                }
+            let subtree: Btree<[u8], [u8]> = Btree::new(definition.get_root(), self.mem);
+            if std::str::from_utf8(entry.key()).unwrap() == FREED_TABLE {
+                // Count the stored bytes of the freed table as metadata overhead
+                total_metadata_bytes += subtree.stored_leaf_bytes();
+                total_metadata_bytes += subtree.overhead_bytes();
+                total_fragmented += subtree.fragmented_bytes();
+            } else {
+                max_subtree_height = max(max_subtree_height, subtree.height());
+                total_stored_bytes += subtree.stored_leaf_bytes();
+                total_metadata_bytes += subtree.overhead_bytes();
+                total_fragmented += subtree.fragmented_bytes();
             }
         }
         Ok(DatabaseStats {
