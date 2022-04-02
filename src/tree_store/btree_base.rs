@@ -150,6 +150,16 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         }
     }
 
+    pub(in crate::tree_store) fn print_node<K: RedbKey + ?Sized>(&self) {
+        eprint!("Leaf[ (page={:?})", self.page.get_page_number());
+        let mut i = 0;
+        while let Some(entry) = self.entry(i) {
+            eprint!(" key_{}={:?}", i, K::from_bytes(entry.key()));
+            i += 1;
+        }
+        eprint!("]");
+    }
+
     pub(in crate::tree_store) fn position<K: RedbKey + ?Sized>(
         &self,
         query: &[u8],
@@ -420,6 +430,22 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
             page,
             _page_lifetime: Default::default(),
         }
+    }
+
+    pub(in crate::tree_store) fn print_node<K: RedbKey + ?Sized>(&self) {
+        eprint!(
+            "Internal[ (page={:?}), child_0={:?}",
+            self.page.get_page_number(),
+            self.child_page(0).unwrap()
+        );
+        for i in 0..(self.count_children() - 1) {
+            if let Some(child) = self.child_page(i + 1) {
+                let key = self.key(i).unwrap();
+                eprint!(" key_{}={:?}", i, K::from_bytes(key));
+                eprint!(" child_{}={:?}", i + 1, child);
+            }
+        }
+        eprint!("]");
     }
 
     pub(crate) fn total_length(&self) -> usize {

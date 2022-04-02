@@ -6,113 +6,11 @@ use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLea
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, PageNumber, TransactionalMemory};
 use crate::tree_store::AccessGuardMut;
 use crate::types::{RedbKey, RedbValue, WithLifetime};
-use crate::Error;
 use crate::Result;
 use std::cmp::{max, min};
 
-pub(crate) fn print_node<K: RedbKey + ?Sized, P: Page>(page: &P) {
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => {
-            let accessor = LeafAccessor::new(page);
-            eprint!("Leaf[ (page={:?})", page.get_page_number(),);
-            let mut i = 0;
-            while let Some(entry) = accessor.entry(i) {
-                eprint!(" key_{}={:?}", i, K::from_bytes(entry.key()));
-                i += 1;
-            }
-            eprint!("]");
-        }
-        INTERNAL => {
-            let accessor = InternalAccessor::new(page);
-            eprint!(
-                "Internal[ (page={:?}), child_0={:?}",
-                page.get_page_number(),
-                accessor.child_page(0).unwrap()
-            );
-            for i in 0..(accessor.count_children() - 1) {
-                if let Some(child) = accessor.child_page(i + 1) {
-                    let key = accessor.key(i).unwrap();
-                    eprint!(" key_{}={:?}", i, K::from_bytes(key));
-                    eprint!(" child_{}={:?}", i + 1, child);
-                }
-            }
-            eprint!("]");
-        }
-        _ => unreachable!(),
-    }
-}
-
-pub(crate) fn node_children<'a>(
-    page: &PageImpl<'a>,
-    manager: &'a TransactionalMemory,
-) -> Vec<PageImpl<'a>> {
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => {
-            vec![]
-        }
-        INTERNAL => {
-            let mut children = vec![];
-            let accessor = InternalAccessor::new(page);
-            for i in 0..accessor.count_children() {
-                let child = accessor.child_page(i).unwrap();
-                children.push(manager.get_page(child));
-            }
-            children
-        }
-        _ => unreachable!(),
-    }
-}
-
-// Returns the new root, bool indicating if the key existed, and a list of freed pages
-// Safety: see tree_delete_helper()
-#[allow(clippy::type_complexity)]
-pub(crate) unsafe fn tree_delete<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
-    page: PageImpl<'a>,
-    key: &[u8],
-    free_policy: FreePolicy,
-    manager: &'a TransactionalMemory,
-) -> Result<
-    (
-        Option<PageNumber>,
-        Option<AccessGuard<'a, V>>,
-        Vec<PageNumber>,
-    ),
-    Error,
-> {
-    let mut freed = vec![];
-    let (deletion_result, found) =
-        tree_delete_helper::<K, V>(page, key, free_policy, &mut freed, manager)?;
-    let result = match deletion_result {
-        DeletionResult::Subtree(page) => Some(page),
-        DeletionResult::PartialLeaf(entries) => {
-            if entries.is_empty() {
-                None
-            } else {
-                let size: usize = entries.iter().map(|(k, v)| k.len() + v.len()).sum();
-                let key_size: usize = entries.iter().map(|(k, _)| k.len()).sum();
-                let mut page =
-                    manager.allocate(LeafBuilder::required_bytes(entries.len(), size))?;
-                let mut builder = LeafBuilder::new(&mut page, entries.len(), key_size);
-                for (key, value) in entries {
-                    builder.append(&key, &value);
-                }
-                drop(builder);
-                Some(page.get_page_number())
-            }
-        }
-        DeletionResult::PartialInternal(pages, keys) => {
-            assert_eq!(pages.len(), 1);
-            assert!(keys.is_empty());
-            Some(pages[0])
-        }
-    };
-    Ok((result, found, freed))
-}
-
 #[derive(Debug)]
-enum DeletionResult {
+pub(crate) enum DeletionResult {
     // A proper subtree
     Subtree(PageNumber),
     // A leaf subtree with too few entries
@@ -323,7 +221,7 @@ unsafe fn split_index(
 }
 
 // Pages must be in sorted order
-fn make_index(
+pub(crate) fn make_index(
     children: &[PageNumber],
     keys: &[impl AsRef<[u8]>],
     manager: &TransactionalMemory,
@@ -395,7 +293,7 @@ unsafe fn merge_index(
 // If key is not found, guaranteed not to modify the tree
 //
 // Safety: caller must ensure that no references to uncommitted pages in this table exist
-unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
     free_policy: FreePolicy,
@@ -652,28 +550,6 @@ pub(crate) fn make_mut_single_leaf<'a>(
     Ok((page_num, guard))
 }
 
-// Returns the page number of the sub-tree into which the key was inserted,
-// and the guard which can be used to access the value, and a list of freed pages
-// Safety: see tree_insert_helper
-pub(crate) unsafe fn tree_insert<'a, K: RedbKey + ?Sized>(
-    page: PageImpl<'a>,
-    key: &[u8],
-    value: &[u8],
-    free_policy: FreePolicy,
-    manager: &'a TransactionalMemory,
-) -> Result<(PageNumber, AccessGuardMut<'a>, Vec<PageNumber>)> {
-    let mut freed = vec![];
-    let (page1, more, guard) =
-        tree_insert_helper::<K>(page, key, value, &mut freed, free_policy, manager)?;
-
-    if let Some((key, page2)) = more {
-        let index_page = make_index(&[page1, page2], &[&key], manager)?;
-        Ok((index_page, guard, freed))
-    } else {
-        Ok((page1, guard, freed))
-    }
-}
-
 // Patch is applied at patch_index of the accessor children, using patch_handle to replace the child,
 // and inserting patch_extension after it
 // copies [start_child, end_child)
@@ -720,21 +596,18 @@ fn copy_to_builder_and_patch<'a>(
 
 #[allow(clippy::type_complexity)]
 // Safety: caller must ensure that no references to uncommitted pages in this table exist
-unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
+pub(crate) unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
     page: PageImpl<'a>,
     key: &[u8],
     value: &[u8],
     freed: &mut Vec<PageNumber>,
     free_policy: FreePolicy,
     manager: &'a TransactionalMemory,
-) -> Result<
-    (
-        PageNumber,
-        Option<(Vec<u8>, PageNumber)>,
-        AccessGuardMut<'a>,
-    ),
-    Error,
-> {
+) -> Result<(
+    PageNumber,
+    Option<(Vec<u8>, PageNumber)>,
+    AccessGuardMut<'a>,
+)> {
     let node_mem = page.memory();
     Ok(match node_mem[0] {
         LEAF => {
