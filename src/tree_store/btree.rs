@@ -1,11 +1,13 @@
+use crate::tree_store::btree_base::{InternalAccessor, LeafAccessor, INTERNAL, LEAF};
 use crate::tree_store::btree_utils::{
-    find_key, make_mut_single_leaf, print_tree, tree_delete, tree_insert,
+    find_key, make_mut_single_leaf, node_children, print_node, tree_delete, tree_insert,
 };
-use crate::tree_store::page_store::TransactionalMemory;
+use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::{AccessGuard, Result};
 use std::borrow::Borrow;
+use std::cmp::max;
 use std::marker::PhantomData;
 use std::ops::{RangeBounds, RangeFull};
 
@@ -130,9 +132,23 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
 
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self) {
-        if let Some(p) = self.root {
-            print_tree::<K>(self.mem.get_page(p), self.mem);
-        }
+        self.read_tree().print_debug()
+    }
+
+    pub(crate) fn stored_leaf_bytes(&self) -> usize {
+        self.read_tree().stored_leaf_bytes()
+    }
+
+    pub(crate) fn overhead_bytes(&self) -> usize {
+        self.read_tree().overhead_bytes()
+    }
+
+    pub(crate) fn fragmented_bytes(&self) -> usize {
+        self.read_tree().fragmented_bytes()
+    }
+
+    pub(crate) fn height(&self) -> usize {
+        self.read_tree().height()
     }
 
     fn read_tree(&self) -> Btree<K, V> {
@@ -219,7 +235,142 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self) {
         if let Some(p) = self.root {
-            print_tree::<K>(self.mem.get_page(p), self.mem);
+            let mut pages = vec![self.mem.get_page(p)];
+            while !pages.is_empty() {
+                let mut next_children = vec![];
+                for page in pages.drain(..) {
+                    next_children.extend(node_children(&page, self.mem));
+                    print_node::<K, PageImpl<'a>>(&page);
+                    eprint!("  ");
+                }
+                eprintln!();
+
+                pages = next_children;
+            }
+        }
+    }
+
+    pub(crate) fn stored_leaf_bytes(&self) -> usize {
+        if let Some(root) = self.root {
+            self.stored_bytes_helper(root)
+        } else {
+            0
+        }
+    }
+
+    fn stored_bytes_helper(&self, page_number: PageNumber) -> usize {
+        let page = self.mem.get_page(page_number);
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(&page);
+                accessor.length_of_pairs(0, accessor.num_pairs())
+            }
+            INTERNAL => {
+                let accessor = InternalAccessor::new(&page);
+                let mut bytes = 0;
+                for i in 0..accessor.count_children() {
+                    if let Some(child) = accessor.child_page(i) {
+                        bytes += self.stored_bytes_helper(child);
+                    }
+                }
+
+                bytes
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn overhead_bytes(&self) -> usize {
+        if let Some(root) = self.root {
+            self.overhead_bytes_helper(root)
+        } else {
+            0
+        }
+    }
+
+    fn overhead_bytes_helper(&self, page_number: PageNumber) -> usize {
+        let page = self.mem.get_page(page_number);
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(&page);
+                accessor.total_length() - accessor.length_of_pairs(0, accessor.num_pairs())
+            }
+            INTERNAL => {
+                let accessor = InternalAccessor::new(&page);
+                // Internal pages are all "overhead"
+                let mut bytes = accessor.total_length();
+                for i in 0..accessor.count_children() {
+                    if let Some(child) = accessor.child_page(i) {
+                        bytes += self.overhead_bytes_helper(child);
+                    }
+                }
+
+                bytes
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn fragmented_bytes(&self) -> usize {
+        if let Some(root) = self.root {
+            self.fragmented_bytes_helper(root)
+        } else {
+            0
+        }
+    }
+
+    fn fragmented_bytes_helper(&self, page_number: PageNumber) -> usize {
+        let page = self.mem.get_page(page_number);
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(&page);
+                page.memory().len() - accessor.total_length()
+            }
+            INTERNAL => {
+                let accessor = InternalAccessor::new(&page);
+                // Internal pages are all "overhead"
+                let mut bytes = page.memory().len() - accessor.total_length();
+                for i in 0..accessor.count_children() {
+                    if let Some(child) = accessor.child_page(i) {
+                        bytes += self.fragmented_bytes_helper(child);
+                    }
+                }
+
+                bytes
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn height(&self) -> usize {
+        if let Some(root) = self.root {
+            self.height_helper(root)
+        } else {
+            0
+        }
+    }
+
+    fn height_helper(&self, page_number: PageNumber) -> usize {
+        let page = self.mem.get_page(page_number);
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => 1,
+            INTERNAL => {
+                let accessor = InternalAccessor::new(&page);
+                let mut max_child_height = 0;
+                for i in 0..accessor.count_children() {
+                    if let Some(child) = accessor.child_page(i) {
+                        let height = self.height_helper(child);
+                        max_child_height = max(max_child_height, height);
+                    }
+                }
+
+                max_child_height + 1
+            }
+            _ => unreachable!(),
         }
     }
 }

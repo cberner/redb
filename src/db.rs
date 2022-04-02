@@ -1,8 +1,8 @@
-use crate::tree_store::btree_utils::{get_mut_value, make_mut_single_leaf};
 use crate::tree_store::{
     get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition,
     PageNumber, TableType, TransactionalMemory, FREED_TABLE,
 };
+use crate::tree_store::{get_mut_value, make_mut_single_leaf};
 use crate::types::RedbValue;
 use crate::Error;
 use crate::{ReadTransaction, Result, WriteTransaction};

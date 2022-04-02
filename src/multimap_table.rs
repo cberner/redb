@@ -118,6 +118,18 @@ impl<K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapKVPair<K, V> {
             _value_type: Default::default(),
         }
     }
+
+    fn new_pair(key: &K, value: &V) -> Self {
+        let mut data = vec![MultimapKeyCompareOp::KeyAndValue.serialize()];
+        data.extend_from_slice(&(key.as_bytes().as_ref().len() as u32).to_le_bytes());
+        data.extend_from_slice(key.as_bytes().as_ref());
+        data.extend_from_slice(value.as_bytes().as_ref());
+        Self {
+            data,
+            _key_type: Default::default(),
+            _value_type: Default::default(),
+        }
+    }
 }
 
 pub struct MultimapKVPairAccessor<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
@@ -156,18 +168,6 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapKVPairAcces
     fn value_bytes(&self) -> &'a [u8] {
         &self.data[(5 + self.key_len())..]
     }
-}
-
-fn make_serialized_kv<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
-    key: &K,
-    value: &V,
-) -> MultimapKVPair<K, V> {
-    let mut result = vec![MultimapKeyCompareOp::KeyAndValue.serialize()];
-    result.extend_from_slice(&(key.as_bytes().as_ref().len() as u32).to_le_bytes());
-    result.extend_from_slice(key.as_bytes().as_ref());
-    result.extend_from_slice(value.as_bytes().as_ref());
-
-    MultimapKVPair::new(result)
 }
 
 fn make_serialized_key_with_op<K: RedbKey + ?Sized>(key: &K, op: MultimapKeyCompareOp) -> Vec<u8> {
@@ -313,7 +313,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
     }
 
     pub fn insert(&mut self, key: &K, value: &V) -> Result {
-        let kv = make_serialized_kv(key, value);
+        let kv = MultimapKVPair::new_pair(key, value);
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
@@ -321,7 +321,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
     }
 
     pub fn remove(&mut self, key: &K, value: &V) -> Result<bool> {
-        let kv = make_serialized_kv(key, value);
+        let kv = MultimapKVPair::new_pair(key, value);
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
