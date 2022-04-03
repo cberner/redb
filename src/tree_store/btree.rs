@@ -1,7 +1,6 @@
 use crate::tree_store::btree_base::{FreePolicy, InternalAccessor, LeafAccessor, INTERNAL, LEAF};
 use crate::tree_store::btree_mutator::MutateHelper;
-use crate::tree_store::btree_utils::find_key;
-use crate::tree_store::page_store::{Page, TransactionalMemory};
+use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::{AccessGuard, Result};
@@ -165,13 +164,33 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
     ) -> Result<Option<<<V as RedbValue>::View as WithLifetime<'a>>::Out>> {
         if let Some(p) = self.root {
             let root_page = self.mem.get_page(p);
-            return Ok(find_key::<K, V>(
-                root_page,
-                key.as_bytes().as_ref(),
-                self.mem,
-            ));
+            return Ok(self.get_helper(root_page, key.as_bytes().as_ref()));
+        } else {
+            Ok(None)
         }
-        Ok(None)
+    }
+
+    // Returns the value for the queried key, if present
+    fn get_helper(
+        &self,
+        page: PageImpl<'a>,
+        query: &[u8],
+    ) -> Option<<<V as RedbValue>::View as WithLifetime<'a>>::Out> {
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(&page);
+                let entry_index = accessor.find_key::<K>(query)?;
+                let (start, end) = accessor.value_range(entry_index).unwrap();
+                Some(V::from_bytes(&page.into_memory()[start..end]))
+            }
+            INTERNAL => {
+                let accessor = InternalAccessor::new(&page);
+                let (_, child_page) = accessor.child_for_key::<K>(query);
+                self.get_helper(self.mem.get_page(child_page), query)
+            }
+            _ => unreachable!(),
+        }
     }
 
     pub(crate) fn range<T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
