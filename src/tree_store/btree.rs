@@ -6,27 +6,31 @@ use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::{AccessGuard, Result};
 use std::borrow::Borrow;
+use std::cell::RefCell;
 use std::cmp::max;
 use std::marker::PhantomData;
 use std::ops::{RangeBounds, RangeFull};
+use std::rc::Rc;
 
 pub(crate) struct BtreeMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     // TODO: make these private?
     pub(crate) mem: &'a TransactionalMemory,
     pub(crate) root: Option<PageNumber>,
-    // TODO: storing these freed_pages is very error prone, because they need to be copied out into
-    // the Storage object before the BtreeMut is destroyed
-    pub(crate) freed_pages: Vec<PageNumber>,
+    freed_pages: Rc<RefCell<Vec<PageNumber>>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
 impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
-    pub(crate) fn new(root: Option<PageNumber>, mem: &'a TransactionalMemory) -> Self {
+    pub(crate) fn new(
+        root: Option<PageNumber>,
+        mem: &'a TransactionalMemory,
+        freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+    ) -> Self {
         Self {
             mem,
             root,
-            freed_pages: vec![],
+            freed_pages,
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -34,11 +38,12 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
 
     // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
     pub(crate) unsafe fn insert(&mut self, key: &K, value: &V) -> Result {
+        let mut freed_pages = self.freed_pages.borrow_mut();
         let mut operation = MutateHelper::new(
             &mut self.root,
             FreePolicy::Uncommitted,
             self.mem,
-            &mut self.freed_pages,
+            freed_pages.as_mut(),
         );
         operation.insert(key, value)?;
         Ok(())
@@ -52,12 +57,13 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
         key: &K,
         value_length: usize,
     ) -> Result<AccessGuardMut> {
+        let mut freed_pages = self.freed_pages.borrow_mut();
         let value = vec![0u8; value_length];
         let mut operation = MutateHelper::new(
             &mut self.root,
             FreePolicy::Uncommitted,
             self.mem,
-            &mut self.freed_pages,
+            freed_pages.as_mut(),
         );
         let guard = operation.insert(key, value.as_slice())?;
         Ok(guard)
@@ -71,45 +77,38 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
         value_length: usize,
     ) -> Result<(AccessGuardMut, Option<PageNumber>)> {
         let value = vec![0u8; value_length];
-        let mut freed = vec![];
-        let mut operation =
-            MutateHelper::new(&mut self.root, FreePolicy::Always, self.mem, &mut freed);
+        let mut freed_pages = self.freed_pages.borrow_mut();
+        let mut operation = MutateHelper::new(
+            &mut self.root,
+            FreePolicy::Uncommitted,
+            self.mem,
+            freed_pages.as_mut(),
+        );
         let guard = operation.insert(key, value.as_slice())?;
-        assert!(freed.is_empty());
         Ok((guard, self.root))
     }
 
     // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
     pub(crate) unsafe fn remove(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
+        let mut freed_pages = self.freed_pages.borrow_mut();
         let mut operation = MutateHelper::new(
             &mut self.root,
             FreePolicy::Uncommitted,
             self.mem,
-            &mut self.freed_pages,
+            freed_pages.as_mut(),
         );
         let result = operation.delete(key)?;
         Ok(result)
     }
 
-    // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
-    pub(crate) unsafe fn remove_immediate_free(&mut self, key: &K) -> Result<bool> {
-        let mut operation: MutateHelper<K, V> = MutateHelper::new(
-            &mut self.root,
-            FreePolicy::Always,
-            self.mem,
-            &mut self.freed_pages,
-        );
-        let result = operation.delete(key)?;
-        Ok(result.is_some())
-    }
-
     // Like remove(), but does not free uncommitted data
     pub(crate) fn remove_retain_uncommitted(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
+        let mut freed_pages = self.freed_pages.borrow_mut();
         let mut operation = MutateHelper::new(
             &mut self.root,
             FreePolicy::Never,
             self.mem,
-            &mut self.freed_pages,
+            freed_pages.as_mut(),
         );
         let result = operation.safe_delete(key)?;
         Ok(result)
@@ -156,15 +155,6 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
 
     pub(crate) fn len(&self) -> Result<usize> {
         self.read_tree().len()
-    }
-}
-
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for BtreeMut<'a, K, V> {
-    fn drop(&mut self) {
-        debug_assert!(self.freed_pages.is_empty());
-        if !self.freed_pages.is_empty() {
-            eprintln!("{} pages leaked by BtreeMut", self.freed_pages.len());
-        }
     }
 }
 

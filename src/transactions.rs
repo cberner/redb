@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::ops::RangeFull;
 use std::panic;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
@@ -81,7 +82,7 @@ pub struct WriteTransaction<'db> {
     transaction_id: TransactionId,
     root_page: Cell<Option<PageNumber>>,
     table_tree: RefCell<TableTree<'db>>,
-    freed_pages: RefCell<Vec<PageNumber>>,
+    freed_pages: Rc<RefCell<Vec<PageNumber>>>,
     open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
     pending_table_updates: RefCell<HashMap<String, Option<PageNumber>>>,
     completed: AtomicBool,
@@ -93,13 +94,18 @@ impl<'db> WriteTransaction<'db> {
     // at a time
     pub(crate) unsafe fn new(db: &'db Database, transaction_id: TransactionId) -> Result<Self> {
         let root_page = db.get_memory().get_primary_root_page();
+        let freed_pages = Rc::new(RefCell::new(vec![]));
         Ok(Self {
             db,
             mem: db.get_memory(),
             transaction_id,
             root_page: Cell::new(root_page),
-            table_tree: RefCell::new(TableTree::new(root_page, db.get_memory())),
-            freed_pages: RefCell::new(vec![]),
+            table_tree: RefCell::new(TableTree::new(
+                root_page,
+                db.get_memory(),
+                freed_pages.clone(),
+            )),
+            freed_pages,
             open_tables: RefCell::new(Default::default()),
             pending_table_updates: RefCell::new(Default::default()),
             completed: Default::default(),
@@ -137,6 +143,7 @@ impl<'db> WriteTransaction<'db> {
         Ok(Table::new(
             definition.name(),
             internal_table.get_root(),
+            self.freed_pages.clone(),
             self.mem,
             self,
         ))
@@ -167,6 +174,7 @@ impl<'db> WriteTransaction<'db> {
         Ok(MultimapTable::new(
             definition.name(),
             internal_table.get_root(),
+            self.freed_pages.clone(),
             self.mem,
             self,
         ))
@@ -178,7 +186,6 @@ impl<'db> WriteTransaction<'db> {
         table: &mut BtreeMut<K, V>,
     ) {
         self.open_tables.borrow_mut().remove(name).unwrap();
-        self.freed_pages.borrow_mut().append(&mut table.freed_pages);
         self.pending_table_updates
             .borrow_mut()
             .insert(name.to_string(), table.root);
@@ -264,21 +271,10 @@ impl<'db> WriteTransaction<'db> {
     }
 
     pub fn abort(self) -> Result {
-        // No-op, just to avoid triggering the leak detection in BtreeMut
-        self.take_all_freed_pages();
         self.mem.rollback_uncommited_writes()?;
         self.db.deallocate_write_transaction(self.transaction_id);
         self.completed.store(true, Ordering::Release);
         Ok(())
-    }
-
-    // TODO: this method is kind of a hack
-    fn take_all_freed_pages(&self) -> Vec<PageNumber> {
-        let mut result = vec![];
-        result.append(self.freed_pages.borrow_mut().as_mut());
-        result.append(&mut self.table_tree.borrow_mut().extra_freed_pages);
-        result.append(&mut self.table_tree.borrow_mut().tree.freed_pages);
-        result
     }
 
     pub(crate) fn durable_commit(&self, eventual: bool) -> Result {
@@ -291,7 +287,7 @@ impl<'db> WriteTransaction<'db> {
         if oldest_live_read < self.transaction_id {
             self.store_freed_pages()?;
         } else {
-            for page in self.take_all_freed_pages() {
+            for page in self.freed_pages.borrow_mut().drain(..) {
                 // Safety: The oldest live read started after this transactions, so it can't
                 // have a references to this page, since we freed it in this transaction
                 unsafe {
@@ -343,7 +339,7 @@ impl<'db> WriteTransaction<'db> {
             .get_table::<FreedTableKey, [u8]>(FREED_TABLE, TableType::Normal)?
             .unwrap();
         let mut freed_tree: BtreeMut<FreedTableKey, [u8]> =
-            BtreeMut::new(freed_table.get_root(), self.mem);
+            BtreeMut::new(freed_table.get_root(), self.mem, self.freed_pages.clone());
         let mut iter = freed_tree.range(..lookup_key)?;
         while let Some(entry) = iter.next() {
             to_remove.push(FreedTableKey::from_bytes(entry.key()));
@@ -364,17 +360,8 @@ impl<'db> WriteTransaction<'db> {
         // Remove all the old transactions
         for key in to_remove {
             // Safety: all references to the freed table above have already been dropped.
-            // using immediate free is safe, because read transactions are not allowed to read
-            // the freed table
-            if let Err(err) = unsafe { freed_tree.remove_immediate_free(&key) } {
-                // No-op. Just to avoid triggering the leak detection
-                freed_tree.freed_pages.clear();
-                return Err(err);
-            }
+            unsafe { freed_tree.remove(&key)? };
         }
-        self.freed_pages
-            .borrow_mut()
-            .append(&mut freed_tree.freed_pages);
         self.table_tree
             .borrow_mut()
             .update_table_root(FREED_TABLE, freed_tree.root)?;
@@ -392,10 +379,9 @@ impl<'db> WriteTransaction<'db> {
             .get_table::<FreedTableKey, [u8]>(FREED_TABLE, TableType::Normal)?
             .unwrap();
         let mut freed_tree: BtreeMut<FreedTableKey, [u8]> =
-            BtreeMut::new(freed_table.get_root(), self.mem);
+            BtreeMut::new(freed_table.get_root(), self.mem, self.freed_pages.clone());
         // TODO: change all master_tree usages to have TableHeader as their value type
-        let mut freed_pages = self.take_all_freed_pages();
-        while !freed_pages.is_empty() {
+        while !self.freed_pages.borrow().is_empty() {
             let chunk_size = 100;
             let buffer_size = size_of::<u64>() + 8 * chunk_size;
             let key = FreedTableKey {
@@ -408,20 +394,23 @@ impl<'db> WriteTransaction<'db> {
             let (mut access_guard, new_root) =
                 unsafe { freed_tree.insert_reserve_special(&key, buffer_size)? };
 
-            if freed_pages.len() <= chunk_size {
+            if self.freed_pages.borrow().len() <= chunk_size {
                 // Update the master root, only on the last loop iteration (this may cause another
                 // iteration, but that's ok since it would have very few pages to process)
                 self.table_tree
                     .borrow_mut()
                     .update_table_root(FREED_TABLE, new_root)?;
-                freed_pages.append(&mut self.table_tree.borrow_mut().tree.freed_pages);
-                freed_pages.append(&mut self.table_tree.borrow_mut().extra_freed_pages);
             }
 
-            let len = freed_pages.len();
+            let len = self.freed_pages.borrow().len();
             access_guard.as_mut()[..8]
                 .copy_from_slice(&min(len as u64, chunk_size as u64).to_le_bytes());
-            for (i, page) in freed_pages.drain(len - min(len, chunk_size)..).enumerate() {
+            for (i, page) in self
+                .freed_pages
+                .borrow_mut()
+                .drain(len - min(len, chunk_size)..)
+                .enumerate()
+            {
                 access_guard.as_mut()[(i + 1) * 8..(i + 2) * 8]
                     .copy_from_slice(&page.to_le_bytes());
             }
@@ -495,8 +484,6 @@ impl<'a> Drop for WriteTransaction<'a> {
     fn drop(&mut self) {
         if !self.completed.load(Ordering::Acquire) {
             self.db.record_leaked_write_transaction(self.transaction_id);
-            // No-op, just to avoid triggering the leak detection in BtreeMut
-            self.take_all_freed_pages();
         }
     }
 }
@@ -512,7 +499,7 @@ impl<'db> ReadTransaction<'db> {
         let root_page = db.get_memory().get_primary_root_page();
         Self {
             db,
-            tree: TableTree::new(root_page, db.get_memory()),
+            tree: TableTree::new(root_page, db.get_memory(), Default::default()),
             transaction_id,
         }
     }

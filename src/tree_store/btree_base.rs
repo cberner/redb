@@ -13,12 +13,10 @@ pub(in crate::tree_store) const INTERNAL: u8 = 2;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub(crate) enum FreePolicy {
-    // Never free the page during the transaction. Defer it until commit
+    // Never free pages during the operation. Defer until commit
     Never,
     // Free uncommitted pages immediately
     Uncommitted,
-    // Always free the page immediately
-    Always,
 }
 
 impl FreePolicy {
@@ -37,9 +35,6 @@ impl FreePolicy {
                 if !mem.free_if_uncommitted(page)? {
                     freed.push(page);
                 }
-            }
-            FreePolicy::Always => {
-                mem.free(page)?;
             }
         }
 
