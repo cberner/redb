@@ -188,7 +188,7 @@ impl<'db> WriteTransaction<'db> {
         self.open_tables.borrow_mut().remove(name).unwrap();
         self.pending_table_updates
             .borrow_mut()
-            .insert(name.to_string(), table.root);
+            .insert(name.to_string(), table.get_root());
     }
 
     /// Delete the given table
@@ -257,7 +257,7 @@ impl<'db> WriteTransaction<'db> {
     }
 
     fn commit_inner(&self) -> Result {
-        self.root_page.set(self.table_tree.borrow().tree.root);
+        self.root_page.set(self.table_tree.borrow().get_root());
 
         match self.durability {
             Durability::None => self.non_durable_commit()?,
@@ -296,7 +296,7 @@ impl<'db> WriteTransaction<'db> {
             }
         }
 
-        if let Some(root) = self.table_tree.borrow().tree.root {
+        if let Some(root) = self.table_tree.borrow().get_root() {
             self.mem.set_secondary_root_page(root)?;
         } else {
             self.mem.set_secondary_root_page(PageNumber::null())?;
@@ -312,7 +312,7 @@ impl<'db> WriteTransaction<'db> {
         // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
         self.store_freed_pages()?;
 
-        if let Some(root) = self.table_tree.borrow().tree.root {
+        if let Some(root) = self.table_tree.borrow().get_root() {
             self.mem.set_secondary_root_page(root)?;
         } else {
             self.mem.set_secondary_root_page(PageNumber::null())?;
@@ -364,7 +364,7 @@ impl<'db> WriteTransaction<'db> {
         }
         self.table_tree
             .borrow_mut()
-            .update_table_root(FREED_TABLE, freed_tree.root)?;
+            .update_table_root(FREED_TABLE, freed_tree.get_root())?;
 
         Ok(())
     }
@@ -380,7 +380,6 @@ impl<'db> WriteTransaction<'db> {
             .unwrap();
         let mut freed_tree: BtreeMut<FreedTableKey, [u8]> =
             BtreeMut::new(freed_table.get_root(), self.mem, self.freed_pages.clone());
-        // TODO: change all master_tree usages to have TableHeader as their value type
         while !self.freed_pages.borrow().is_empty() {
             let chunk_size = 100;
             let buffer_size = size_of::<u64>() + 8 * chunk_size;
