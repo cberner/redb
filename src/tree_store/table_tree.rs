@@ -81,11 +81,10 @@ impl From<u8> for TableType {
 
 #[derive(Clone, Debug)]
 pub(crate) struct InternalTableDefinition {
-    // TODO: make private
-    pub(crate) table_root: Option<PageNumber>,
-    pub(crate) table_type: TableType,
-    pub(crate) key_type: String,
-    pub(crate) value_type: String,
+    table_root: Option<PageNumber>,
+    table_type: TableType,
+    key_type: String,
+    value_type: String,
 }
 
 impl InternalTableDefinition {

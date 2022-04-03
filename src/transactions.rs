@@ -427,7 +427,7 @@ impl<'db> WriteTransaction<'db> {
 
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self) {
-        if let Some(page) = self.table_tree.borrow().tree.get_root() {
+        if let Some(page) = self.table_tree.borrow().get_root() {
             eprintln!("Master tree:");
 
             let master_tree: Btree<str, InternalTableDefinition> = Btree::new(Some(page), self.mem);
