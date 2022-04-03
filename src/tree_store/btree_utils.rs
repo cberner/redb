@@ -309,7 +309,7 @@ pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + 
                 return Ok((Subtree(page.get_page_number()), None));
             }
             // TODO: also check if page is large enough
-            if accessor.num_pairs() < BTREE_ORDER / 2 {
+            let result = if accessor.num_pairs() < BTREE_ORDER / 2 {
                 let mut partial = Vec::with_capacity(accessor.num_pairs());
                 for i in 0..accessor.num_pairs() {
                     if i == position {
@@ -318,18 +318,7 @@ pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + 
                     let entry = accessor.entry(i).unwrap();
                     partial.push((entry.key().to_vec(), entry.value().to_vec()));
                 }
-                let uncommitted = manager.uncommitted(page.get_page_number());
-                let free_on_drop = if !uncommitted || matches!(free_policy, FreePolicy::Never) {
-                    // Won't be freed until the end of the transaction, so returning the page
-                    // in the AccessGuard below is still safe
-                    freed.push(page.get_page_number());
-                    false
-                } else {
-                    true
-                };
-                let (start, end) = accessor.value_range(position).unwrap();
-                let guard = AccessGuard::new(page, start, end - start, free_on_drop, manager);
-                Ok((PartialLeaf(partial), Some(guard)))
+                PartialLeaf(partial)
             } else {
                 let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
                 let new_size =
@@ -349,19 +338,26 @@ pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + 
                     builder.append(entry.key(), entry.value());
                 }
                 drop(builder);
-                let uncommitted = manager.uncommitted(page.get_page_number());
-                let free_on_drop = if !uncommitted || matches!(free_policy, FreePolicy::Never) {
-                    // Won't be freed until the end of the transaction, so returning the page
-                    // in the AccessGuard below is still safe
-                    freed.push(page.get_page_number());
-                    false
-                } else {
-                    true
-                };
-                let (start, end) = accessor.value_range(position).unwrap();
-                let guard = AccessGuard::new(page, start, end - start, free_on_drop, manager);
-                Ok((Subtree(new_page.get_page_number()), Some(guard)))
-            }
+                Subtree(new_page.get_page_number())
+            };
+            let uncommitted = manager.uncommitted(page.get_page_number());
+            let free_on_drop = if !uncommitted || matches!(free_policy, FreePolicy::Never) {
+                // Won't be freed until the end of the transaction, so returning the page
+                // in the AccessGuard below is still safe
+                freed.push(page.get_page_number());
+                false
+            } else {
+                true
+            };
+            let (start, end) = accessor.value_range(position).unwrap();
+            let guard = Some(AccessGuard::new(
+                page,
+                start,
+                end - start,
+                free_on_drop,
+                manager,
+            ));
+            Ok((result, guard))
         }
         INTERNAL => {
             let accessor = InternalAccessor::new(&page);

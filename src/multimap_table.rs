@@ -3,11 +3,13 @@ use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
 };
 use crate::{Result, WriteTransaction};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::Bound;
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
+use std::rc::Rc;
 
 #[derive(Eq, PartialEq)]
 #[allow(clippy::enum_variant_names)]
@@ -297,13 +299,14 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
     pub(crate) fn new(
         name: &str,
         table_root: Option<PageNumber>,
+        freed_pages: Rc<RefCell<Vec<PageNumber>>>,
         mem: &'s TransactionalMemory,
         transaction: &'t WriteTransaction<'s>,
     ) -> MultimapTable<'s, 't, K, V> {
         MultimapTable {
             name: name.to_string(),
             transaction,
-            tree: BtreeMut::new(table_root, mem),
+            tree: BtreeMut::new(table_root, mem, freed_pages),
         }
     }
 

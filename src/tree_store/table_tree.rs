@@ -4,8 +4,10 @@ use crate::types::{
     AsBytesWithLifetime, OwnedAsBytesLifetime, OwnedLifetime, RedbKey, RedbValue, WithLifetime,
 };
 use crate::{Error, Result};
+use std::cell::RefCell;
 use std::mem::size_of;
 use std::ops::RangeFull;
+use std::rc::Rc;
 
 // The table of freed pages by transaction. FreedTableKey -> binary.
 // The binary blob is a length-prefixed array of PageNumber
@@ -176,16 +178,19 @@ pub(crate) struct TableTree<'txn> {
     // TODO: make private?
     pub(crate) tree: BtreeMut<'txn, str, InternalTableDefinition>,
     mem: &'txn TransactionalMemory,
-    // TODO: unify with the freed pages in self.tree
-    pub(crate) extra_freed_pages: Vec<PageNumber>,
+    freed_pages: Rc<RefCell<Vec<PageNumber>>>,
 }
 
 impl<'txn> TableTree<'txn> {
-    pub(crate) fn new(master_root: Option<PageNumber>, mem: &'txn TransactionalMemory) -> Self {
+    pub(crate) fn new(
+        master_root: Option<PageNumber>,
+        mem: &'txn TransactionalMemory,
+        freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+    ) -> Self {
         Self {
-            tree: BtreeMut::new(master_root, mem),
+            tree: BtreeMut::new(master_root, mem, freed_pages.clone()),
             mem,
-            extra_freed_pages: vec![],
+            freed_pages,
         }
     }
 
@@ -260,8 +265,9 @@ impl<'txn> TableTree<'txn> {
         if let Some(definition) = self.get_table::<K, V>(name, table_type)? {
             if let Some(table_root) = definition.get_root() {
                 let iter = AllPageNumbersBtreeIter::new(table_root, self.mem);
+                let mut freed_pages = self.freed_pages.borrow_mut();
                 for page_number in iter {
-                    self.extra_freed_pages.push(page_number);
+                    freed_pages.push(page_number);
                 }
             }
 

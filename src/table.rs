@@ -5,7 +5,9 @@ use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Result;
 use crate::{AccessGuard, WriteTransaction};
 use std::borrow::Borrow;
+use std::cell::RefCell;
 use std::ops::RangeBounds;
+use std::rc::Rc;
 
 pub struct Table<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     name: String,
@@ -17,13 +19,14 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
     pub(crate) fn new(
         name: &str,
         table_root: Option<PageNumber>,
+        freed_pages: Rc<RefCell<Vec<PageNumber>>>,
         mem: &'s TransactionalMemory,
         transaction: &'t WriteTransaction<'s>,
     ) -> Table<'s, 't, K, V> {
         Table {
             name: name.to_string(),
             transaction,
-            tree: BtreeMut::new(table_root, mem),
+            tree: BtreeMut::new(table_root, mem, freed_pages),
         }
     }
 
