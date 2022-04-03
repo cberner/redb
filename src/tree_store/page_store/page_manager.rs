@@ -30,19 +30,22 @@ use std::sync::{Mutex, MutexGuard};
 // 8 bytes: upgrade log length
 //
 // Commit slot 0 (next 128 bytes):
+// 1 byte: version
+// 1 byte: != 0 if root page is non-null
+// 1 byte: != 0 if freed table root page is non-null
+// 5 bytes: padding
 // 8 bytes: root page
+// 8 bytes: freed table root page
 // 8 bytes: last committed transaction id
 // (db layout size) bytes: active database layout
 //
 // Commit slot 1 (next 128 bytes):
-// 8 bytes: root page
-// 8 bytes: last committed transaction id
-// (db layout size) bytes: active database layout
+// Same layout as slot 0
 
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
 // because the leaf node format uses 32bit offsets
 const MAX_USABLE_REGION_SPACE: usize = 4 * 1024 * 1024 * 1024;
-const MAX_PAGE_ORDER: usize = 20;
+pub(crate) const MAX_PAGE_ORDER: usize = 20;
 const MIN_USABLE_PAGES: usize = 10;
 const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
 
@@ -67,9 +70,12 @@ const ALLOCATOR_STATE_DIRTY: u8 = 2;
 
 // Structure of each commit slot
 const VERSION_OFFSET: usize = 0;
-const PADDING: usize = 7;
-const ROOT_PAGE_OFFSET: usize = VERSION_OFFSET + size_of::<u8>() + PADDING;
-const TRANSACTION_ID_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
+const ROOT_NON_NULL_OFFSET: usize = size_of::<u8>();
+const FREED_ROOT_NON_NULL_OFFSET: usize = ROOT_NON_NULL_OFFSET + size_of::<u8>();
+const PADDING: usize = 5;
+const ROOT_PAGE_OFFSET: usize = FREED_ROOT_NON_NULL_OFFSET + size_of::<u8>() + PADDING;
+const FREED_ROOT_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
+const TRANSACTION_ID_OFFSET: usize = FREED_ROOT_OFFSET + size_of::<u64>();
 const DATA_LAYOUT_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
 
 fn ceil_log2(x: usize) -> usize {
@@ -285,14 +291,27 @@ impl<'a> TransactionAccessor<'a> {
     }
 
     fn get_root_page(&self) -> Option<PageNumber> {
-        let num = PageNumber::from_le_bytes(
-            self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + 8)]
-                .try_into()
-                .unwrap(),
-        );
-        if num == PageNumber::null() {
+        if self.mem[ROOT_NON_NULL_OFFSET] == 0 {
             None
         } else {
+            let num = PageNumber::from_le_bytes(
+                self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + PageNumber::serialized_size())]
+                    .try_into()
+                    .unwrap(),
+            );
+            Some(num)
+        }
+    }
+
+    fn get_freed_root_page(&self) -> Option<PageNumber> {
+        if self.mem[FREED_ROOT_NON_NULL_OFFSET] == 0 {
+            None
+        } else {
+            let num = PageNumber::from_le_bytes(
+                self.mem[FREED_ROOT_OFFSET..(FREED_ROOT_OFFSET + PageNumber::serialized_size())]
+                    .try_into()
+                    .unwrap(),
+            );
             Some(num)
         }
     }
@@ -327,9 +346,24 @@ impl<'a> TransactionMutator<'a> {
         TransactionMutator { mem }
     }
 
-    fn set_root_page(&mut self, page_number: PageNumber) {
-        self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + 8)]
-            .copy_from_slice(&page_number.to_le_bytes());
+    fn set_root_page(&mut self, page_number: Option<PageNumber>) {
+        if let Some(num) = page_number {
+            self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + PageNumber::serialized_size())]
+                .copy_from_slice(&num.to_le_bytes());
+            self.mem[ROOT_NON_NULL_OFFSET] = 1;
+        } else {
+            self.mem[ROOT_NON_NULL_OFFSET] = 0;
+        }
+    }
+
+    fn set_freed_root(&mut self, page_number: Option<PageNumber>) {
+        if let Some(num) = page_number {
+            self.mem[FREED_ROOT_OFFSET..(FREED_ROOT_OFFSET + PageNumber::serialized_size())]
+                .copy_from_slice(&num.to_le_bytes());
+            self.mem[FREED_ROOT_NON_NULL_OFFSET] = 1;
+        } else {
+            self.mem[FREED_ROOT_NON_NULL_OFFSET] = 0;
+        }
     }
 
     fn set_last_committed_transaction_id(&mut self, transaction_id: u64) {
@@ -779,7 +813,8 @@ impl TransactionalMemory {
             metadata.set_region_max_usable_bytes(MAX_USABLE_REGION_SPACE);
 
             let mut mutator = metadata.secondary_slot_mut();
-            mutator.set_root_page(PageNumber::null());
+            mutator.set_root_page(None);
+            mutator.set_freed_root(None);
             mutator.set_last_committed_transaction_id(0);
             mutator.set_data_section_layout(&layout);
             mutator.set_version(FILE_FORMAT_VERSION);
@@ -929,7 +964,13 @@ impl TransactionalMemory {
     }
 
     // Commit all outstanding changes and make them visible as the primary
-    pub(crate) fn commit(&self, transaction_id: u64, eventual: bool) -> Result {
+    pub(crate) fn commit(
+        &self,
+        data_root: Option<PageNumber>,
+        freed_root: Option<PageNumber>,
+        transaction_id: u64,
+        eventual: bool,
+    ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
@@ -941,6 +982,8 @@ impl TransactionalMemory {
         let layout = self.layout.lock().unwrap();
         let mut secondary = metadata.secondary_slot_mut();
         secondary.set_last_committed_transaction_id(transaction_id);
+        secondary.set_root_page(data_root);
+        secondary.set_freed_root(freed_root);
         secondary.set_data_section_layout(&layout);
 
         if eventual {
@@ -965,7 +1008,12 @@ impl TransactionalMemory {
     }
 
     // Make changes visible, without a durability guarantee
-    pub(crate) fn non_durable_commit(&self, transaction_id: u64) -> Result {
+    pub(crate) fn non_durable_commit(
+        &self,
+        data_root: Option<PageNumber>,
+        freed_root: Option<PageNumber>,
+        transaction_id: u64,
+    ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
@@ -977,6 +1025,8 @@ impl TransactionalMemory {
         let layout = self.layout.lock().unwrap();
         let mut secondary = metadata.secondary_slot_mut();
         secondary.set_last_committed_transaction_id(transaction_id);
+        secondary.set_root_page(data_root);
+        secondary.set_freed_root(freed_root);
         secondary.set_data_section_layout(&layout);
 
         self.log_since_commit.lock().unwrap().clear();
@@ -1070,12 +1120,21 @@ impl TransactionalMemory {
         }
     }
 
-    pub(crate) fn get_primary_root_page(&self) -> Option<PageNumber> {
+    pub(crate) fn get_data_root(&self) -> Option<PageNumber> {
         let metadata = self.lock_metadata();
         if self.read_from_secondary.load(Ordering::Acquire) {
             metadata.secondary_slot().get_root_page()
         } else {
             metadata.primary_slot().get_root_page()
+        }
+    }
+
+    pub(crate) fn get_freed_root(&self) -> Option<PageNumber> {
+        let metadata = self.lock_metadata();
+        if self.read_from_secondary.load(Ordering::Acquire) {
+            metadata.secondary_slot().get_freed_root_page()
+        } else {
+            metadata.primary_slot().get_freed_root_page()
         }
     }
 
@@ -1088,14 +1147,6 @@ impl TransactionalMemory {
         } else {
             Ok(metadata.primary_slot().get_last_committed_transaction_id())
         }
-    }
-
-    pub(crate) fn set_secondary_root_page(&self, root_page: PageNumber) -> Result {
-        self.lock_metadata()
-            .secondary_slot_mut()
-            .set_root_page(root_page);
-
-        Ok(())
     }
 
     // Safety: the caller must ensure that no references to the memory in `page` exist
@@ -1343,7 +1394,12 @@ impl Drop for TransactionalMemory {
         // Commit any non-durable transactions that are outstanding
         if self.read_from_secondary.load(Ordering::Acquire) {
             if let Ok(non_durable_transaction_id) = self.get_last_committed_transaction_id() {
-                if self.commit(non_durable_transaction_id, false).is_err() {
+                let root = self.get_data_root();
+                let freed_root = self.get_freed_root();
+                if self
+                    .commit(root, freed_root, non_durable_transaction_id, false)
+                    .is_err()
+                {
                     eprintln!(
                         "Failure while finalizing non-durable commit. Database may have rolled back"
                     );

@@ -1,14 +1,14 @@
 use crate::db::TransactionId;
 use crate::tree_store::{
     Btree, BtreeMut, FreedTableKey, InternalTableDefinition, PageNumber, TableTree, TableType,
-    TransactionalMemory, FREED_TABLE,
+    TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{
     Database, Error, MultimapTable, MultimapTableDefinition, ReadOnlyMultimapTable, ReadOnlyTable,
     Result, Table, TableDefinition,
 };
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -80,8 +80,11 @@ pub struct WriteTransaction<'db> {
     db: &'db Database,
     mem: &'db TransactionalMemory,
     transaction_id: TransactionId,
-    root_page: Cell<Option<PageNumber>>,
     table_tree: RefCell<TableTree<'db>>,
+    // TODO: change the value type to Vec<PageNumber>
+    // The table of freed pages by transaction. FreedTableKey -> binary.
+    // The binary blob is a length-prefixed array of PageNumber
+    freed_tree: BtreeMut<'db, FreedTableKey, [u8]>,
     freed_pages: Rc<RefCell<Vec<PageNumber>>>,
     open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
     pending_table_updates: RefCell<HashMap<String, Option<PageNumber>>>,
@@ -93,18 +96,19 @@ impl<'db> WriteTransaction<'db> {
     // Safety: caller must guarantee that there is only a single WriteTransaction in existence
     // at a time
     pub(crate) unsafe fn new(db: &'db Database, transaction_id: TransactionId) -> Result<Self> {
-        let root_page = db.get_memory().get_primary_root_page();
+        let root_page = db.get_memory().get_data_root();
+        let freed_root = db.get_memory().get_freed_root();
         let freed_pages = Rc::new(RefCell::new(vec![]));
         Ok(Self {
             db,
             mem: db.get_memory(),
             transaction_id,
-            root_page: Cell::new(root_page),
             table_tree: RefCell::new(TableTree::new(
                 root_page,
                 db.get_memory(),
                 freed_pages.clone(),
             )),
+            freed_tree: BtreeMut::new(freed_root, db.get_memory(), freed_pages.clone()),
             freed_pages,
             open_tables: RefCell::new(Default::default()),
             pending_table_updates: RefCell::new(Default::default()),
@@ -233,7 +237,7 @@ impl<'db> WriteTransaction<'db> {
             .map(|x| x.into_iter())
     }
 
-    pub fn commit(self) -> Result {
+    pub fn commit(mut self) -> Result {
         for (name, root) in self.pending_table_updates.borrow_mut().drain() {
             self.table_tree
                 .borrow_mut()
@@ -256,9 +260,7 @@ impl<'db> WriteTransaction<'db> {
         }
     }
 
-    fn commit_inner(&self) -> Result {
-        self.root_page.set(self.table_tree.borrow().get_root());
-
+    fn commit_inner(&mut self) -> Result {
         match self.durability {
             Durability::None => self.non_durable_commit()?,
             Durability::Eventual => self.durable_commit(true)?,
@@ -277,7 +279,7 @@ impl<'db> WriteTransaction<'db> {
         Ok(())
     }
 
-    pub(crate) fn durable_commit(&self, eventual: bool) -> Result {
+    pub(crate) fn durable_commit(&mut self, eventual: bool) -> Result {
         let oldest_live_read = self
             .db
             .oldest_live_read_transaction()
@@ -296,51 +298,40 @@ impl<'db> WriteTransaction<'db> {
             }
         }
 
-        if let Some(root) = self.table_tree.borrow().get_root() {
-            self.mem.set_secondary_root_page(root)?;
-        } else {
-            self.mem.set_secondary_root_page(PageNumber::null())?;
-        }
+        let root = self.table_tree.borrow().get_root();
+        let freed_root = self.freed_tree.get_root();
 
-        self.mem.commit(self.transaction_id, eventual)?;
+        self.mem
+            .commit(root, freed_root, self.transaction_id, eventual)?;
         Ok(())
     }
 
     // Commit without a durability guarantee
-    pub(crate) fn non_durable_commit(&self) -> Result {
+    pub(crate) fn non_durable_commit(&mut self) -> Result {
         // Store all freed pages for a future commit(), since we can't free pages during a
         // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
         self.store_freed_pages()?;
 
-        if let Some(root) = self.table_tree.borrow().get_root() {
-            self.mem.set_secondary_root_page(root)?;
-        } else {
-            self.mem.set_secondary_root_page(PageNumber::null())?;
-        }
+        let root = self.table_tree.borrow().get_root();
+        let freed_root = self.freed_tree.get_root();
 
-        self.mem.non_durable_commit(self.transaction_id)?;
+        self.mem
+            .non_durable_commit(root, freed_root, self.transaction_id)?;
         Ok(())
     }
 
     // NOTE: must be called before store_freed_pages() during commit, since this can create
     // more pages freed by the current transaction
-    fn process_freed_pages(&self, oldest_live_read: TransactionId) -> Result {
+    fn process_freed_pages(&mut self, oldest_live_read: TransactionId) -> Result {
         // We assume below that PageNumber is length 8
-        assert_eq!(PageNumber::null().to_le_bytes().len(), 8);
+        assert_eq!(PageNumber::serialized_size(), 8);
         let lookup_key = FreedTableKey {
             transaction_id: oldest_live_read,
             pagination_id: 0,
         };
 
         let mut to_remove = vec![];
-        let freed_table = self
-            .table_tree
-            .borrow()
-            .get_table::<FreedTableKey, [u8]>(FREED_TABLE, TableType::Normal)?
-            .unwrap();
-        let mut freed_tree: BtreeMut<FreedTableKey, [u8]> =
-            BtreeMut::new(freed_table.get_root(), self.mem, self.freed_pages.clone());
-        let mut iter = freed_tree.range(..lookup_key)?;
+        let mut iter = self.freed_tree.range(..lookup_key)?;
         while let Some(entry) = iter.next() {
             to_remove.push(FreedTableKey::from_bytes(entry.key()));
             let value = entry.value();
@@ -360,26 +351,16 @@ impl<'db> WriteTransaction<'db> {
         // Remove all the old transactions
         for key in to_remove {
             // Safety: all references to the freed table above have already been dropped.
-            unsafe { freed_tree.remove(&key)? };
+            unsafe { self.freed_tree.remove(&key)? };
         }
-        self.table_tree
-            .borrow_mut()
-            .update_table_root(FREED_TABLE, freed_tree.get_root())?;
 
         Ok(())
     }
 
-    fn store_freed_pages(&self) -> Result {
-        assert_eq!(PageNumber::null().to_le_bytes().len(), 8); // We assume below that PageNumber is length 8
+    fn store_freed_pages(&mut self) -> Result {
+        assert_eq!(PageNumber::serialized_size(), 8); // We assume below that PageNumber is length 8
 
         let mut pagination_counter = 0u64;
-        let freed_table = self
-            .table_tree
-            .borrow()
-            .get_table::<FreedTableKey, [u8]>(FREED_TABLE, TableType::Normal)?
-            .unwrap();
-        let mut freed_tree: BtreeMut<FreedTableKey, [u8]> =
-            BtreeMut::new(freed_table.get_root(), self.mem, self.freed_pages.clone());
         while !self.freed_pages.borrow().is_empty() {
             let chunk_size = 100;
             let buffer_size = size_of::<u64>() + 8 * chunk_size;
@@ -390,16 +371,7 @@ impl<'db> WriteTransaction<'db> {
             // Safety: The freed table is only accessed from the writer, so only this function
             // is using it. The only reference retrieved, access_guard, is dropped before the next call
             // to this method
-            let (mut access_guard, new_root) =
-                unsafe { freed_tree.insert_reserve_special(&key, buffer_size)? };
-
-            if self.freed_pages.borrow().len() <= chunk_size {
-                // Update the master root, only on the last loop iteration (this may cause another
-                // iteration, but that's ok since it would have very few pages to process)
-                self.table_tree
-                    .borrow_mut()
-                    .update_table_root(FREED_TABLE, new_root)?;
-            }
+            let mut access_guard = unsafe { self.freed_tree.insert_reserve(&key, buffer_size)? };
 
             let len = self.freed_pages.borrow().len();
             access_guard.as_mut()[..8]
@@ -427,25 +399,21 @@ impl<'db> WriteTransaction<'db> {
         let mut max_subtree_height = 0;
         let mut total_stored_bytes = 0;
         // Include the master table in the overhead
-        let mut total_metadata_bytes =
-            table_tree.tree.overhead_bytes() + table_tree.tree.stored_leaf_bytes();
-        let mut total_fragmented = table_tree.tree.fragmented_bytes();
+        let mut total_metadata_bytes = table_tree.tree.overhead_bytes()
+            + table_tree.tree.stored_leaf_bytes()
+            + self.freed_tree.overhead_bytes()
+            + self.freed_tree.stored_leaf_bytes();
+        let mut total_fragmented =
+            table_tree.tree.fragmented_bytes() + self.freed_tree.fragmented_bytes();
 
         let mut iter = table_tree.tree.range::<RangeFull, &str>(..)?;
         while let Some(entry) = iter.next() {
             let definition = InternalTableDefinition::from_bytes(entry.value());
             let subtree: Btree<[u8], [u8]> = Btree::new(definition.get_root(), self.mem);
-            if std::str::from_utf8(entry.key()).unwrap() == FREED_TABLE {
-                // Count the stored bytes of the freed table as metadata overhead
-                total_metadata_bytes += subtree.stored_leaf_bytes();
-                total_metadata_bytes += subtree.overhead_bytes();
-                total_fragmented += subtree.fragmented_bytes();
-            } else {
-                max_subtree_height = max(max_subtree_height, subtree.height());
-                total_stored_bytes += subtree.stored_leaf_bytes();
-                total_metadata_bytes += subtree.overhead_bytes();
-                total_fragmented += subtree.fragmented_bytes();
-            }
+            max_subtree_height = max(max_subtree_height, subtree.height());
+            total_stored_bytes += subtree.stored_leaf_bytes();
+            total_metadata_bytes += subtree.overhead_bytes();
+            total_fragmented += subtree.fragmented_bytes();
         }
         Ok(DatabaseStats {
             tree_height: master_tree_height + max_subtree_height,
@@ -459,11 +427,11 @@ impl<'db> WriteTransaction<'db> {
 
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self) {
-        if let Some(page) = self.root_page.get() {
+        if let Some(page) = self.table_tree.borrow().tree.get_root() {
             eprintln!("Master tree:");
 
-            let master_tree: Btree<str, [u8]> = Btree::new(Some(page), self.mem);
-            master_tree.print_debug();
+            let master_tree: Btree<str, InternalTableDefinition> = Btree::new(Some(page), self.mem);
+            master_tree.print_debug(true);
             let mut iter = master_tree.range::<RangeFull, &str>(..).unwrap();
 
             while let Some(entry) = iter.next() {
@@ -472,7 +440,7 @@ impl<'db> WriteTransaction<'db> {
                 if let Some(table_root) = definition.get_root() {
                     // Print as &[u8], since we don't know the types at compile time
                     let tree: Btree<[u8], [u8]> = Btree::new(Some(table_root), self.mem);
-                    tree.print_debug();
+                    tree.print_debug(false);
                 }
             }
         }
@@ -495,7 +463,7 @@ pub struct ReadTransaction<'a> {
 
 impl<'db> ReadTransaction<'db> {
     pub(crate) fn new(db: &'db Database, transaction_id: TransactionId) -> Self {
-        let root_page = db.get_memory().get_primary_root_page();
+        let root_page = db.get_memory().get_data_root();
         Self {
             db,
             tree: TableTree::new(root_page, db.get_memory(), Default::default()),
