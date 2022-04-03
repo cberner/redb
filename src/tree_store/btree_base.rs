@@ -145,11 +145,17 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         }
     }
 
-    pub(in crate::tree_store) fn print_node<K: RedbKey + ?Sized>(&self) {
+    pub(in crate::tree_store) fn print_node<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+        &self,
+        include_value: bool,
+    ) {
         eprint!("Leaf[ (page={:?})", self.page.get_page_number());
         let mut i = 0;
         while let Some(entry) = self.entry(i) {
             eprint!(" key_{}={:?}", i, K::from_bytes(entry.key()));
+            if include_value {
+                eprint!(" value_{}={:?}", i, V::from_bytes(entry.value()));
+            }
             i += 1;
         }
         eprint!("]");

@@ -1,3 +1,4 @@
+use crate::tree_store::page_store::page_manager::MAX_PAGE_ORDER;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::ops::Range;
@@ -18,17 +19,15 @@ pub(crate) struct PageNumber {
 }
 
 impl PageNumber {
-    // TODO: remove this
-    pub(crate) fn null() -> Self {
-        Self::new(u16::MAX as u32, 0, 0)
-    }
-
     #[inline(always)]
     pub(crate) const fn serialized_size() -> usize {
         8
     }
 
     pub(crate) fn new(region: u32, page_index: u32, page_order: u8) -> Self {
+        debug_assert!(region <= 0x000F_FFFF);
+        debug_assert!(page_index <= 0x000F_FFFF);
+        debug_assert!(page_order <= MAX_PAGE_ORDER as u8);
         Self {
             region,
             page_index,
@@ -49,7 +48,11 @@ impl PageNumber {
         let region = ((temp >> 20) & 0x000F_FFFF) as u32;
         let order = (temp >> 59) as u8;
 
-        Self::new(region, index, order)
+        Self {
+            region,
+            page_index: index,
+            page_order: order,
+        }
     }
 
     pub(crate) fn address_range(

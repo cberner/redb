@@ -1,9 +1,9 @@
 use crate::tree_store::btree_base::{FreePolicy, LeafBuilder};
 use crate::tree_store::btree_utils::{
-    make_index, tree_delete_helper, tree_insert_helper, DeletionResult,
+    make_index, make_mut_single_leaf, tree_delete_helper, tree_insert_helper, DeletionResult,
 };
 use crate::tree_store::page_store::Page;
-use crate::tree_store::{make_mut_single_leaf, AccessGuardMut, PageNumber, TransactionalMemory};
+use crate::tree_store::{AccessGuardMut, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
 use crate::{AccessGuard, Result};
 use std::marker::PhantomData;

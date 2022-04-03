@@ -1,8 +1,7 @@
 use crate::tree_store::{
-    get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition,
-    PageNumber, TableType, TransactionalMemory, FREED_TABLE,
+    get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, InternalTableDefinition, PageNumber,
+    TransactionalMemory,
 };
-use crate::tree_store::{get_mut_value, make_mut_single_leaf};
 use crate::types::RedbValue;
 use crate::Error;
 use crate::{ReadTransaction, Result, WriteTransaction};
@@ -29,22 +28,6 @@ pub struct TableDefinition<'a, K: ?Sized, V: ?Sized> {
 impl<'a, K: ?Sized, V: ?Sized> TableDefinition<'a, K, V> {
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
-        // assert_ne! isn't stable, so we have to do it manually
-        let name_bytes = name.as_bytes();
-        let freed_name_bytes = FREED_TABLE.as_bytes();
-        if name_bytes.len() == freed_name_bytes.len() {
-            let mut equal = true;
-            let mut i = 0;
-            while i < name.len() {
-                if name_bytes[i] != freed_name_bytes[i] {
-                    equal = false;
-                }
-                i += 1;
-            }
-            if equal {
-                panic!("Table name may not be equal to the internal free page table");
-            }
-        }
         Self {
             name,
             _key_type: PhantomData,
@@ -74,22 +57,6 @@ pub struct MultimapTableDefinition<'a, K: ?Sized, V: ?Sized> {
 impl<'a, K: ?Sized, V: ?Sized> MultimapTableDefinition<'a, K, V> {
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
-        // assert_ne! isn't stable, so we have to do it manually
-        let name_bytes = name.as_bytes();
-        let freed_name_bytes = FREED_TABLE.as_bytes();
-        if name_bytes.len() == freed_name_bytes.len() {
-            let mut equal = true;
-            let mut i = 0;
-            while i < name.len() {
-                if name_bytes[i] != freed_name_bytes[i] {
-                    equal = false;
-                }
-                i += 1;
-            }
-            if equal {
-                panic!("Table name may not be equal to the internal free page table");
-            }
-        }
         Self {
             name,
             _key_type: PhantomData,
@@ -179,22 +146,8 @@ impl Database {
         let mem = TransactionalMemory::new(file, max_capacity, page_size, dynamic_growth)?;
         if mem.needs_repair()? {
             let root = mem
-                .get_primary_root_page()
+                .get_data_root()
                 .expect("Tried to repair an empty database");
-            // Clear the freed table. We're about to rebuild the allocator state by walking
-            // all the reachable pages, which will implicitly free them
-            {
-                // Safety: we own the mem object, and just created it, so there can't be other references.
-                let mut bytes = unsafe {
-                    get_mut_value::<str>(mem.get_page_mut(root), FREED_TABLE.as_bytes(), &mem)
-                        .unwrap()
-                };
-                // TODO: this needs to be done in a transaction. Otherwise a torn write could happen
-                let mut header = InternalTableDefinition::from_bytes(bytes.as_mut());
-                header.table_root = None;
-                assert_eq!(bytes.as_mut().len(), header.as_bytes().len());
-                bytes.as_mut().copy_from_slice(&header.as_bytes());
-            }
 
             // Repair the allocator state
             // All pages in the master table
@@ -215,24 +168,14 @@ impl Database {
             }
 
             mem.repair_allocator(all_pages_iter)?;
+
+            // Clear the freed table. We just rebuilt the allocator state by walking all the
+            // reachable data pages, which implicitly frees the pages for the freed table
+            let transaction_id = mem.get_last_committed_transaction_id()? + 1;
+            mem.commit(Some(root), None, transaction_id, false)?;
         }
 
-        let mut next_transaction_id = mem.get_last_committed_transaction_id()? + 1;
-        if mem.get_primary_root_page().is_none() {
-            assert_eq!(next_transaction_id, 1);
-            // Empty database, so insert the freed table.
-            let freed_table = InternalTableDefinition {
-                table_root: None,
-                table_type: TableType::Normal,
-                key_type: FreedTableKey::redb_type_name().to_string(),
-                value_type: <[u8]>::redb_type_name().to_string(),
-            };
-            let (new_root, _) =
-                make_mut_single_leaf(FREED_TABLE.as_bytes(), &freed_table.as_bytes(), &mem)?;
-            mem.set_secondary_root_page(new_root)?;
-            mem.commit(next_transaction_id, false)?;
-            next_transaction_id += 1;
-        }
+        let next_transaction_id = mem.get_last_committed_transaction_id()? + 1;
 
         Ok(Database {
             mem,

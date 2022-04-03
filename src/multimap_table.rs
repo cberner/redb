@@ -313,8 +313,8 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
     }
 
     #[allow(dead_code)]
-    pub(crate) fn print_debug(&self) {
-        self.tree.print_debug();
+    pub(crate) fn print_debug(&self, include_values: bool) {
+        self.tree.print_debug(include_values);
     }
 
     pub fn insert(&mut self, key: &K, value: &V) -> Result {

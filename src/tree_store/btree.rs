@@ -72,25 +72,6 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
         Ok(guard)
     }
 
-    // Special version of insert_reserve for usage in the freed table
-    // Safety: caller must ensure that no data in this tree is reachable from other references (including other transactions)
-    pub(crate) unsafe fn insert_reserve_special(
-        &mut self,
-        key: &K,
-        value_length: usize,
-    ) -> Result<(AccessGuardMut, Option<PageNumber>)> {
-        let value = vec![0u8; value_length];
-        let mut freed_pages = self.freed_pages.borrow_mut();
-        let mut operation = MutateHelper::new(
-            &mut self.root,
-            FreePolicy::Uncommitted,
-            self.mem,
-            freed_pages.as_mut(),
-        );
-        let guard = operation.insert(key, value.as_slice())?;
-        Ok((guard, self.root))
-    }
-
     // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
     pub(crate) unsafe fn remove(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
         let mut freed_pages = self.freed_pages.borrow_mut();
@@ -118,8 +99,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn print_debug(&self) {
-        self.read_tree().print_debug()
+    pub(crate) fn print_debug(&self, include_values: bool) {
+        self.read_tree().print_debug(include_values)
     }
 
     pub(crate) fn stored_leaf_bytes(&self) -> usize {
@@ -211,7 +192,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn print_debug(&self) {
+    pub(crate) fn print_debug(&self, include_values: bool) {
         if let Some(p) = self.root {
             let mut pages = vec![self.mem.get_page(p)];
             while !pages.is_empty() {
@@ -220,7 +201,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                     let node_mem = page.memory();
                     match node_mem[0] {
                         LEAF => {
-                            LeafAccessor::new(&page).print_node::<K>();
+                            LeafAccessor::new(&page).print_node::<K, V>(include_values);
                         }
                         INTERNAL => {
                             let accessor = InternalAccessor::new(&page);

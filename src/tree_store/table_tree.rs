@@ -9,12 +9,6 @@ use std::mem::size_of;
 use std::ops::RangeFull;
 use std::rc::Rc;
 
-// The table of freed pages by transaction. FreedTableKey -> binary.
-// The binary blob is a length-prefixed array of PageNumber
-// TODO: create a separate root in the metapage for this
-// Safety: The freed table tree must only be accessed from a write transaction
-pub(crate) const FREED_TABLE: &str = "$$internal$$freed";
-
 #[derive(Debug)]
 pub(crate) struct FreedTableKey {
     pub(crate) transaction_id: u64,
@@ -110,20 +104,33 @@ impl RedbValue for InternalTableDefinition {
 
     fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
         debug_assert!(data.len() > 14);
-        let table_type = TableType::from(data[0]);
-        let table_root = PageNumber::from_le_bytes(data[1..9].try_into().unwrap());
-        let table_root = if table_root == PageNumber::null() {
-            None
-        } else {
+        let mut offset = 0;
+        let table_type = TableType::from(data[offset]);
+        offset += 1;
+        let non_null = data[offset] != 0;
+        offset += 1;
+        let table_root = if non_null {
+            let table_root = PageNumber::from_le_bytes(
+                data[offset..(offset + PageNumber::serialized_size())]
+                    .try_into()
+                    .unwrap(),
+            );
             Some(table_root)
+        } else {
+            None
         };
-        let key_type_len = u32::from_le_bytes(data[9..13].try_into().unwrap()) as usize;
-        let key_type = std::str::from_utf8(&data[13..(13 + key_type_len)])
+        offset += PageNumber::serialized_size();
+        let key_type_len = u32::from_le_bytes(
+            data[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        offset += size_of::<u32>();
+        let key_type = std::str::from_utf8(&data[offset..(offset + key_type_len)])
             .unwrap()
             .to_string();
-        let value_type = std::str::from_utf8(&data[(13 + key_type_len)..])
-            .unwrap()
-            .to_string();
+        offset += key_type_len;
+        let value_type = std::str::from_utf8(&data[offset..]).unwrap().to_string();
 
         InternalTableDefinition {
             table_root,
@@ -135,12 +142,13 @@ impl RedbValue for InternalTableDefinition {
 
     fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
         let mut result = vec![self.table_type.into()];
-        result.extend_from_slice(
-            &self
-                .table_root
-                .unwrap_or_else(PageNumber::null)
-                .to_le_bytes(),
-        );
+        if let Some(root) = self.table_root {
+            result.push(1);
+            result.extend_from_slice(&root.to_le_bytes());
+        } else {
+            result.push(0);
+            result.extend_from_slice(&[0; PageNumber::serialized_size()])
+        }
         result.extend_from_slice(&(self.key_type.as_bytes().len() as u32).to_le_bytes());
         result.extend_from_slice(self.key_type.as_bytes());
         result.extend_from_slice(self.value_type.as_bytes());
@@ -163,9 +171,6 @@ impl<'a> Iterator for TableNameIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(entry) = self.inner.next() {
-            if str::from_bytes(entry.key()) == FREED_TABLE {
-                continue;
-            }
             if InternalTableDefinition::from_bytes(entry.value()).table_type == self.table_type {
                 return Some(str::from_bytes(entry.key()).to_string());
             }
