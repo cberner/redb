@@ -13,9 +13,8 @@ use std::ops::{RangeBounds, RangeFull};
 use std::rc::Rc;
 
 pub(crate) struct BtreeMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
-    // TODO: make these private?
-    pub(crate) mem: &'a TransactionalMemory,
-    pub(crate) root: Option<PageNumber>,
+    mem: &'a TransactionalMemory,
+    root: Option<PageNumber>,
     freed_pages: Rc<RefCell<Vec<PageNumber>>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -34,6 +33,10 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
+    }
+
+    pub(crate) fn get_root(&self) -> Option<PageNumber> {
+        self.root
     }
 
     // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references

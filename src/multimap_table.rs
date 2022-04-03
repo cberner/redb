@@ -293,6 +293,7 @@ pub struct MultimapTable<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     name: String,
     transaction: &'t WriteTransaction<'s>,
     tree: BtreeMut<'t, MultimapKVPair<K, V>, [u8]>,
+    mem: &'s TransactionalMemory,
 }
 
 impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, V> {
@@ -307,6 +308,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
             name: name.to_string(),
             transaction,
             tree: BtreeMut::new(table_root, mem, freed_pages),
+            mem,
         }
     }
 
@@ -337,7 +339,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
         let key_only = MultimapKVPair::new(key_only);
         // Save a snapshot of the btree. This is safe since we call remove_retain_uncommitted()
         // instead of remove()
-        let original_tree = Btree::new(self.tree.root, self.tree.mem);
+        let original_tree = Btree::new(self.tree.get_root(), self.mem);
         loop {
             let found = self.tree.remove_retain_uncommitted(&key_only)?;
             if found.is_none() {

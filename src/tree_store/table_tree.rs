@@ -194,6 +194,10 @@ impl<'txn> TableTree<'txn> {
         }
     }
 
+    pub(crate) fn get_root(&self) -> Option<PageNumber> {
+        self.tree.get_root()
+    }
+
     pub(crate) fn update_table_root(
         &mut self,
         name: &str,
