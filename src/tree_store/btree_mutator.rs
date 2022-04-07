@@ -1,4 +1,4 @@
-use crate::tree_store::btree_base::{FreePolicy, LeafBuilder};
+use crate::tree_store::btree_base::{FreePolicy, LeafBuilder2};
 use crate::tree_store::btree_utils::{
     make_index, make_mut_single_leaf, tree_delete_helper, tree_insert_helper, DeletionResult,
 };
@@ -56,17 +56,11 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     if entries.is_empty() {
                         None
                     } else {
-                        let size: usize = entries.iter().map(|(k, v)| k.len() + v.len()).sum();
-                        let key_size: usize = entries.iter().map(|(k, _)| k.len()).sum();
-                        let mut page = self
-                            .mem
-                            .allocate(LeafBuilder::required_bytes(entries.len(), size))?;
-                        let mut builder = LeafBuilder::new(&mut page, entries.len(), key_size);
-                        for (key, value) in entries {
-                            builder.append(&key, &value);
+                        let mut builder = LeafBuilder2::new(self.mem);
+                        for (key, value) in entries.iter() {
+                            builder.push(key, value);
                         }
-                        drop(builder);
-                        Some(page.get_page_number())
+                        Some(builder.build()?.get_page_number())
                     }
                 }
                 DeletionResult::PartialInternal(pages, keys) => {

@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
     AccessGuard, FreePolicy, InternalAccessor, InternalBuilder, InternalMutator, LeafAccessor,
-    LeafBuilder, BTREE_ORDER, INTERNAL, LEAF,
+    LeafBuilder, LeafBuilder2, BTREE_ORDER, INTERNAL, LEAF,
 };
 use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
 use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMemory};
@@ -32,63 +32,25 @@ unsafe fn split_leaf<K: RedbKey + ?Sized>(
     assert!(!partial.is_empty());
     let page = manager.get_page(leaf);
     let accessor = LeafAccessor::new(&page);
-    assert!(partial.len() <= accessor.num_pairs());
     let partials_last = K::compare(&partial[0].0, accessor.last_entry().key()).is_gt();
+
+    let mut builder = LeafBuilder2::new(manager);
     if !partials_last {
         assert!(K::compare(&partial.last().unwrap().0, accessor.first_entry().key()).is_lt());
-    }
-
-    let division = if partials_last {
-        (accessor.num_pairs() + partial.len()) / 2
-    } else {
-        (accessor.num_pairs() + partial.len()) / 2 - partial.len()
-    };
-
-    let mut new_size1 = accessor.length_of_pairs(0, division);
-    let mut new_key_size1 = accessor.length_of_keys(0, division);
-    let mut new_size2 = accessor.length_of_pairs(division, accessor.num_pairs());
-    let mut new_key_size2 = accessor.length_of_keys(division, accessor.num_pairs());
-    let partial_size = partial
-        .iter()
-        .map(|(k, v)| k.len() + v.len())
-        .sum::<usize>();
-    let partial_key_size = partial.iter().map(|(k, _)| k.len()).sum::<usize>();
-    let (num_pairs1, num_pairs2) = if partials_last {
-        new_size2 += partial_size;
-        new_key_size2 += partial_key_size;
-        (division, accessor.num_pairs() - division + partial.len())
-    } else {
-        new_size1 += partial_size;
-        new_key_size1 += partial_key_size;
-        (partial.len() + division, accessor.num_pairs() - division)
-    };
-
-    let mut new_page = manager.allocate(LeafBuilder::required_bytes(num_pairs1, new_size1))?;
-    let mut builder = LeafBuilder::new(&mut new_page, num_pairs1, new_key_size1);
-
-    if !partials_last {
         for (key, value) in partial {
-            builder.append(key, value);
+            builder.push(key, value);
         }
     }
-    for i in 0..division {
+    for i in 0..accessor.num_pairs() {
         let entry = accessor.entry(i).unwrap();
-        builder.append(entry.key(), entry.value());
-    }
-    drop(builder);
-
-    let mut new_page2 = manager.allocate(LeafBuilder::required_bytes(num_pairs2, new_size2))?;
-    let mut builder = LeafBuilder::new(&mut new_page2, num_pairs2, new_key_size2);
-    for i in division..accessor.num_pairs() {
-        let entry = accessor.entry(i).unwrap();
-        builder.append(entry.key(), entry.value());
+        builder.push(entry.key(), entry.value());
     }
     if partials_last {
         for (key, value) in partial {
-            builder.append(key, value);
+            builder.push(key, value);
         }
     }
-    drop(builder);
+    let (new_page, new_page2) = builder.build_split()?;
 
     drop(page);
     free_policy.conditional_free(leaf, freed, manager)?;
@@ -117,23 +79,7 @@ unsafe fn merge_leaf<K: RedbKey + ?Sized>(
         return Ok(None);
     }
 
-    let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
-    let new_size = old_size
-        + partial
-            .iter()
-            .map(|(k, v)| k.len() + v.len())
-            .sum::<usize>();
-    let new_key_size = accessor.length_of_keys(0, accessor.num_pairs())
-        + partial.iter().map(|(k, _)| k.len()).sum::<usize>();
-    let mut new_page = manager.allocate(LeafBuilder::required_bytes(
-        accessor.num_pairs() + partial.len(),
-        new_size,
-    ))?;
-    let mut builder = LeafBuilder::new(
-        &mut new_page,
-        accessor.num_pairs() + partial.len(),
-        new_key_size,
-    );
+    let mut builder = LeafBuilder2::new(manager);
 
     // partials are all strictly lesser or all greater than the entries in the page, since they're
     // being merged from a neighboring leaf
@@ -141,19 +87,19 @@ unsafe fn merge_leaf<K: RedbKey + ?Sized>(
     if !partial_after {
         assert!(K::compare(&partial.last().unwrap().0, accessor.first_entry().key()).is_lt());
         for (key, value) in partial {
-            builder.append(key, value);
+            builder.push(key, value);
         }
     }
     for i in 0..accessor.num_pairs() {
         let entry = accessor.entry(i).unwrap();
-        builder.append(entry.key(), entry.value());
+        builder.push(entry.key(), entry.value());
     }
     if partial_after {
         for (key, value) in partial {
-            builder.append(key, value);
+            builder.push(key, value);
         }
     }
-    drop(builder);
+    let new_page = builder.build()?;
 
     drop(page);
     free_policy.conditional_free(leaf, freed, manager)?;
@@ -320,25 +266,15 @@ pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + 
                 }
                 PartialLeaf(partial)
             } else {
-                let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
-                let new_size =
-                    old_size - key.len() - accessor.entry(position).unwrap().value().len();
-                let new_key_size = accessor.length_of_keys(0, accessor.num_pairs()) - key.len();
-                let mut new_page = manager.allocate(LeafBuilder::required_bytes(
-                    accessor.num_pairs() - 1,
-                    new_size,
-                ))?;
-                let mut builder =
-                    LeafBuilder::new(&mut new_page, accessor.num_pairs() - 1, new_key_size);
+                let mut builder = LeafBuilder2::new(manager);
                 for i in 0..accessor.num_pairs() {
                     if i == position {
                         continue;
                     }
                     let entry = accessor.entry(i).unwrap();
-                    builder.append(entry.key(), entry.value());
+                    builder.push(entry.key(), entry.value());
                 }
-                drop(builder);
-                Subtree(new_page.get_page_number())
+                Subtree(builder.build()?.get_page_number())
             };
             let uncommitted = manager.uncommitted(page.get_page_number());
             let free_on_drop = if !uncommitted || matches!(free_policy, FreePolicy::Never) {
@@ -539,7 +475,6 @@ pub(crate) fn make_mut_single_leaf<'a>(
 
     let accessor = LeafAccessor::new(&page);
     let offset = accessor.offset_of_first_value();
-
     let page_num = page.get_page_number();
     let guard = AccessGuardMut::new(page, offset, value.len());
 
@@ -609,27 +544,21 @@ pub(crate) unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
         LEAF => {
             let accessor = LeafAccessor::new(&page);
             let (position, found) = accessor.position::<K>(key);
-            if found {
-                // Overwrite existing key
-                let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
-                let new_size =
-                    old_size + value.len() - accessor.entry(position).unwrap().value().len();
-                let mut new_page = manager
-                    .allocate(LeafBuilder::required_bytes(accessor.num_pairs(), new_size))?;
-                let mut builder = LeafBuilder::new(
-                    &mut new_page,
-                    accessor.num_pairs(),
-                    accessor.length_of_keys(0, accessor.num_pairs()),
-                );
-                for i in 0..accessor.num_pairs() {
-                    if i == position {
-                        builder.append(key, value);
-                    } else {
-                        let entry = accessor.entry(i).unwrap();
-                        builder.append(entry.key(), entry.value());
-                    }
+            let mut builder = LeafBuilder2::new(manager);
+            for i in 0..accessor.num_pairs() {
+                if i == position {
+                    builder.push(key, value);
                 }
-                drop(builder);
+                if !found || i != position {
+                    let entry = accessor.entry(i).unwrap();
+                    builder.push(entry.key(), entry.value());
+                }
+            }
+            if accessor.num_pairs() == position {
+                builder.push(key, value);
+            }
+            if !builder.should_split() {
+                let new_page = builder.build()?;
 
                 let page_number = page.get_page_number();
                 drop(page);
@@ -642,112 +571,27 @@ pub(crate) unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
                 (new_page_number, None, guard)
             } else {
-                let total_pairs_size =
-                    accessor.length_of_pairs(0, accessor.num_pairs()) + key.len() + value.len();
-                let total_size =
-                    LeafBuilder::required_bytes(accessor.num_pairs() + 1, total_pairs_size);
-                // Split the leaf if it's larger than a native page
-                let too_large = total_size > manager.get_page_size() && accessor.num_pairs() > 1;
-                if accessor.num_pairs() >= BTREE_ORDER || too_large {
-                    // split
-                    let division = accessor.num_pairs() / 2;
-                    let mut new_size1 = accessor.length_of_pairs(0, division);
-                    let mut new_key_size1 = accessor.length_of_keys(0, division);
-                    let mut new_count1 = division;
-                    let mut new_size2 = accessor.length_of_pairs(division, accessor.num_pairs());
-                    let mut new_key_size2 = accessor.length_of_keys(division, accessor.num_pairs());
-                    let mut new_count2 = accessor.num_pairs() - division;
-                    if position < division {
-                        new_size1 += key.len() + value.len();
-                        new_key_size1 += key.len();
-                        new_count1 += 1;
-                    } else {
-                        new_size2 += key.len() + value.len();
-                        new_key_size2 += key.len();
-                        new_count2 += 1;
-                    }
+                let (new_page1, new_page2) = builder.build_split()?;
+                let page_number = page.get_page_number();
+                drop(page);
+                free_policy.conditional_free(page_number, freed, manager)?;
 
-                    let mut new_page1 =
-                        manager.allocate(LeafBuilder::required_bytes(new_count1, new_size1))?;
-                    let mut builder = LeafBuilder::new(&mut new_page1, new_count1, new_key_size1);
-                    for i in 0..division {
-                        if i == position {
-                            builder.append(key, value);
-                        }
-                        let entry = accessor.entry(i).unwrap();
-                        builder.append(entry.key(), entry.value());
-                    }
-                    drop(builder);
-
-                    let mut new_page2 =
-                        manager.allocate(LeafBuilder::required_bytes(new_count2, new_size2))?;
-                    let mut builder = LeafBuilder::new(&mut new_page2, new_count2, new_key_size2);
-                    for i in division..accessor.num_pairs() {
-                        if i == position {
-                            builder.append(key, value);
-                        }
-                        let entry = accessor.entry(i).unwrap();
-                        builder.append(entry.key(), entry.value());
-                    }
-                    if accessor.num_pairs() == position {
-                        builder.append(key, value);
-                    }
-                    drop(builder);
-
-                    let page_number = page.get_page_number();
-                    drop(page);
-                    free_policy.conditional_free(page_number, freed, manager)?;
-
-                    let new_page_number = new_page1.get_page_number();
-                    let new_page_number2 = new_page2.get_page_number();
+                let new_page_number = new_page1.get_page_number();
+                let new_page_number2 = new_page2.get_page_number();
+                let accessor = LeafAccessor::new(&new_page1);
+                let division = accessor.num_pairs();
+                let split_key = accessor.last_entry().key().to_vec();
+                let guard = if position < division {
                     let accessor = LeafAccessor::new(&new_page1);
-                    let split_key = accessor.last_entry().key().to_vec();
-                    let guard = if position < division {
-                        let accessor = LeafAccessor::new(&new_page1);
-                        let offset = accessor.offset_of_value(position).unwrap();
-                        AccessGuardMut::new(new_page1, offset, value.len())
-                    } else {
-                        let accessor = LeafAccessor::new(&new_page2);
-                        let offset = accessor.offset_of_value(position - division).unwrap();
-                        AccessGuardMut::new(new_page2, offset, value.len())
-                    };
-
-                    (new_page_number, Some((split_key, new_page_number2)), guard)
-                } else {
-                    // insert. leaf is not full
-
-                    let old_size = accessor.length_of_pairs(0, accessor.num_pairs());
-                    let new_size = old_size + key.len() + value.len();
-                    let new_key_size = accessor.length_of_keys(0, accessor.num_pairs()) + key.len();
-                    let mut new_page = manager.allocate(LeafBuilder::required_bytes(
-                        accessor.num_pairs() + 1,
-                        new_size,
-                    ))?;
-                    let mut builder =
-                        LeafBuilder::new(&mut new_page, accessor.num_pairs() + 1, new_key_size);
-                    for i in 0..accessor.num_pairs() {
-                        if i == position {
-                            builder.append(key, value);
-                        }
-                        let entry = accessor.entry(i).unwrap();
-                        builder.append(entry.key(), entry.value());
-                    }
-                    if accessor.num_pairs() == position {
-                        builder.append(key, value);
-                    }
-                    drop(builder);
-
-                    let page_number = page.get_page_number();
-                    drop(page);
-                    free_policy.conditional_free(page_number, freed, manager)?;
-
-                    let new_page_number = new_page.get_page_number();
-                    let accessor = LeafAccessor::new(&new_page);
                     let offset = accessor.offset_of_value(position).unwrap();
-                    let guard = AccessGuardMut::new(new_page, offset, value.len());
+                    AccessGuardMut::new(new_page1, offset, value.len())
+                } else {
+                    let accessor = LeafAccessor::new(&new_page2);
+                    let offset = accessor.offset_of_value(position - division).unwrap();
+                    AccessGuardMut::new(new_page2, offset, value.len())
+                };
 
-                    (new_page_number, None, guard)
-                }
+                (new_page_number, Some((split_key, new_page_number2)), guard)
             }
         }
         INTERNAL => {
