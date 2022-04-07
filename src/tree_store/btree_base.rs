@@ -308,6 +308,96 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
     }
 }
 
+// TODO: replace LeafBuilder with LeafBuilder2
+pub(in crate::tree_store) struct LeafBuilder2<'a, 'b> {
+    pairs: Vec<(&'a [u8], &'a [u8])>,
+    total_key_bytes: usize,
+    total_value_bytes: usize,
+    mem: &'b TransactionalMemory,
+}
+
+impl<'a, 'b> LeafBuilder2<'a, 'b> {
+    pub(in crate::tree_store) fn new(mem: &'b TransactionalMemory) -> Self {
+        Self {
+            pairs: vec![],
+            total_key_bytes: 0,
+            total_value_bytes: 0,
+            mem,
+        }
+    }
+
+    pub(in crate::tree_store) fn push(&mut self, key: &'a [u8], value: &'a [u8]) {
+        self.total_key_bytes += key.len();
+        self.total_value_bytes += value.len();
+        self.pairs.push((key, value))
+    }
+
+    pub(in crate::tree_store) fn should_split(&self) -> bool {
+        let required_size = LeafBuilder::required_bytes(
+            self.pairs.len(),
+            self.total_key_bytes + self.total_value_bytes,
+        );
+        required_size > self.mem.get_page_size() && self.pairs.len() > 1
+    }
+
+    pub(in crate::tree_store) fn build_split(self) -> Result<(PageMut<'b>, PageMut<'b>)> {
+        let total_size = self.total_key_bytes + self.total_value_bytes;
+        let mut division = 0;
+        let mut first_split_key_bytes = 0;
+        let mut first_split_value_bytes = 0;
+        for (key, value) in self.pairs.iter().take(self.pairs.len() - 1) {
+            first_split_key_bytes += key.len();
+            first_split_value_bytes += value.len();
+            division += 1;
+            if first_split_key_bytes + first_split_value_bytes >= total_size / 2 {
+                break;
+            }
+        }
+
+        let required_size =
+            LeafBuilder::required_bytes(division, first_split_key_bytes + first_split_value_bytes);
+        let mut page1 = self.mem.allocate(required_size)?;
+        let mut builder = LeafBuilder::new(&mut page1, division, first_split_key_bytes);
+        for (key, value) in self.pairs.iter().take(division) {
+            builder.append(key, value);
+        }
+        drop(builder);
+
+        let required_size = LeafBuilder::required_bytes(
+            self.pairs.len() - division,
+            self.total_key_bytes + self.total_value_bytes
+                - first_split_key_bytes
+                - first_split_value_bytes,
+        );
+        let mut page2 = self.mem.allocate(required_size)?;
+        let mut builder = LeafBuilder::new(
+            &mut page2,
+            self.pairs.len() - division,
+            self.total_key_bytes - first_split_key_bytes,
+        );
+        for (key, value) in self.pairs[division..].iter() {
+            builder.append(key, value);
+        }
+        drop(builder);
+
+        Ok((page1, page2))
+    }
+
+    pub(in crate::tree_store) fn build(self) -> Result<PageMut<'b>> {
+        let required_size = LeafBuilder::required_bytes(
+            self.pairs.len(),
+            self.total_key_bytes + self.total_value_bytes,
+        );
+        let mut page = self.mem.allocate(required_size)?;
+        let mut builder = LeafBuilder::new(&mut page, self.pairs.len(), self.total_key_bytes);
+        for (key, value) in self.pairs {
+            builder.append(key, value);
+        }
+        drop(builder);
+        Ok(page)
+    }
+}
+
 // Note the caller is responsible for ensuring that the buffer is large enough
 // and rewriting all fields if any dynamically sized fields are written
 // Layout is:
