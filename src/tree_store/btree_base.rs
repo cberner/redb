@@ -625,6 +625,86 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
     }
 }
 
+pub(in crate::tree_store) struct IndexBuilder<'a, 'b> {
+    children: Vec<PageNumber>,
+    keys: Vec<&'a [u8]>,
+    total_key_bytes: usize,
+    mem: &'b TransactionalMemory,
+}
+
+impl<'a, 'b> IndexBuilder<'a, 'b> {
+    pub(in crate::tree_store) fn new(mem: &'b TransactionalMemory) -> Self {
+        Self {
+            children: vec![],
+            keys: vec![],
+            total_key_bytes: 0,
+            mem,
+        }
+    }
+
+    pub(in crate::tree_store) fn push_child(&mut self, child: PageNumber) {
+        self.children.push(child);
+    }
+
+    pub(in crate::tree_store) fn push_key(&mut self, key: &'a [u8]) {
+        self.keys.push(key);
+        self.total_key_bytes += key.len();
+    }
+
+    pub(in crate::tree_store) fn build(self) -> Result<PageMut<'b>> {
+        assert_eq!(self.children.len(), self.keys.len() + 1);
+        assert!(self.children.len() <= BTREE_ORDER);
+        let size = InternalBuilder::required_bytes(self.keys.len(), self.total_key_bytes);
+        let mut page = self.mem.allocate(size)?;
+        let mut builder = InternalBuilder::new(&mut page, self.keys.len());
+        builder.write_first_page(self.children[0]);
+        for i in 1..self.children.len() {
+            let key = &self.keys[i - 1];
+            builder.write_nth_key(key.as_ref(), self.children[i], i - 1);
+        }
+        drop(builder);
+
+        Ok(page)
+    }
+
+    pub(in crate::tree_store) fn should_split(&self) -> bool {
+        // TODO: also check if page is too big
+        self.children.len() > BTREE_ORDER
+    }
+
+    pub(in crate::tree_store) fn build_split(self) -> Result<(PageMut<'b>, Vec<u8>, PageMut<'b>)> {
+        assert_eq!(self.children.len(), self.keys.len() + 1);
+        assert!(self.keys.len() >= 3);
+        let division = self.keys.len() / 2;
+        let first_split_key_len: usize = self.keys.iter().take(division).map(|k| k.len()).sum();
+        let division_key = self.keys[division].to_vec();
+        let second_split_key_len = self.total_key_bytes - first_split_key_len - division_key.len();
+
+        let size = InternalBuilder::required_bytes(division, first_split_key_len);
+        let mut page1 = self.mem.allocate(size)?;
+        let mut builder = InternalBuilder::new(&mut page1, division);
+        builder.write_first_page(self.children[0]);
+        for i in 0..division {
+            let key = &self.keys[i];
+            builder.write_nth_key(key.as_ref(), self.children[i + 1], i);
+        }
+        drop(builder);
+
+        let size =
+            InternalBuilder::required_bytes(self.keys.len() - division - 1, second_split_key_len);
+        let mut page2 = self.mem.allocate(size)?;
+        let mut builder = InternalBuilder::new(&mut page2, self.keys.len() - division - 1);
+        builder.write_first_page(self.children[division + 1]);
+        for i in (division + 1)..self.keys.len() {
+            let key = &self.keys[i];
+            builder.write_nth_key(key.as_ref(), self.children[i + 1], i - division - 1);
+        }
+        drop(builder);
+
+        Ok((page1, division_key, page2))
+    }
+}
+
 // Note the caller is responsible for ensuring that the buffer is large enough
 // and rewriting all fields if any dynamically sized fields are written
 // Layout is:

@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
-    AccessGuard, FreePolicy, InternalAccessor, InternalBuilder, InternalMutator, LeafAccessor,
-    LeafBuilder, LeafBuilder2, BTREE_ORDER, INTERNAL, LEAF,
+    AccessGuard, FreePolicy, IndexBuilder, InternalAccessor, InternalBuilder, InternalMutator,
+    LeafAccessor, LeafBuilder2, BTREE_ORDER, INTERNAL, LEAF,
 };
 use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
 use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMemory};
@@ -203,32 +203,34 @@ unsafe fn merge_index(
         .child_page(BTREE_ORDER - partial_children.len())
         .is_none());
 
-    let mut pages = vec![];
-    let mut keys = vec![];
+    let mut builder = IndexBuilder::new(manager);
     if !partial_last {
-        pages.extend_from_slice(partial_children);
-        for k in partial_keys.iter() {
-            keys.push(k.as_slice());
+        for child in partial_children {
+            builder.push_child(*child);
         }
-        keys.push(separator_key);
+        for k in partial_keys.iter() {
+            builder.push_key(k);
+        }
+        builder.push_key(separator_key);
     }
     for i in 0..accessor.count_children() {
         let child = accessor.child_page(i).unwrap();
-        pages.push(child);
+        builder.push_child(child);
         if i < accessor.count_children() - 1 {
-            keys.push(accessor.key(i).unwrap());
+            builder.push_key(accessor.key(i).unwrap());
         }
     }
     if partial_last {
-        keys.push(separator_key);
+        builder.push_key(separator_key);
         for k in partial_keys.iter() {
-            keys.push(k.as_slice());
+            builder.push_key(k);
         }
-        pages.extend_from_slice(partial_children);
+        for child in partial_children {
+            builder.push_child(*child);
+        }
     }
-    assert!(pages.len() <= BTREE_ORDER);
 
-    let result = make_index(&pages, &keys, manager);
+    let result = builder.build().map(|p| p.get_page_number());
     drop(page);
     free_policy.conditional_free(index, freed, manager)?;
 
@@ -329,15 +331,24 @@ pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + 
                         ))?;
                         let mut builder =
                             InternalBuilder::new(&mut new_page, accessor.count_children() - 1);
-                        copy_to_builder_and_patch(
-                            &accessor,
-                            0,
-                            accessor.count_children(),
-                            &mut builder,
-                            child_index,
-                            new_child,
-                            None,
-                        );
+                        if child_index == 0 {
+                            builder.write_first_page(new_child);
+                        } else {
+                            builder.write_first_page(accessor.child_page(0).unwrap());
+                        }
+
+                        for i in 1..accessor.count_children() {
+                            if let Some(key) = accessor.key(i - 1) {
+                                let page_number = if i == child_index {
+                                    new_child
+                                } else {
+                                    accessor.child_page(i).unwrap()
+                                };
+                                builder.write_nth_key(key, page_number, i - 1);
+                            } else {
+                                unreachable!();
+                            }
+                        }
 
                         drop(builder);
                         Subtree(new_page.get_page_number())
@@ -463,68 +474,6 @@ pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + 
     }
 }
 
-pub(crate) fn make_mut_single_leaf<'a>(
-    key: &[u8],
-    value: &[u8],
-    manager: &'a TransactionalMemory,
-) -> Result<(PageNumber, AccessGuardMut<'a>)> {
-    let mut page = manager.allocate(LeafBuilder::required_bytes(1, key.len() + value.len()))?;
-    let mut builder = LeafBuilder::new(&mut page, 1, key.len());
-    builder.append(key, value);
-    drop(builder);
-
-    let accessor = LeafAccessor::new(&page);
-    let offset = accessor.offset_of_first_value();
-    let page_num = page.get_page_number();
-    let guard = AccessGuardMut::new(page, offset, value.len());
-
-    Ok((page_num, guard))
-}
-
-// Patch is applied at patch_index of the accessor children, using patch_handle to replace the child,
-// and inserting patch_extension after it
-// copies [start_child, end_child)
-fn copy_to_builder_and_patch<'a>(
-    accessor: &InternalAccessor<PageImpl<'a>>,
-    start_child: usize,
-    end_child: usize,
-    builder: &mut InternalBuilder,
-    patch_index: usize,
-    patch_handle: PageNumber,
-    patch_extension: Option<(&[u8], PageNumber)>,
-) {
-    let mut dest = 0;
-    if patch_index == start_child {
-        builder.write_first_page(patch_handle);
-        if let Some((extra_key, extra_handle)) = patch_extension {
-            builder.write_nth_key(extra_key, extra_handle, dest);
-            dest += 1;
-        }
-    } else {
-        builder.write_first_page(accessor.child_page(start_child).unwrap());
-    }
-
-    for i in (start_child + 1)..end_child {
-        if let Some(key) = accessor.key(i - 1) {
-            let handle = if i == patch_index {
-                patch_handle
-            } else {
-                accessor.child_page(i).unwrap()
-            };
-            builder.write_nth_key(key, handle, dest);
-            dest += 1;
-            if i == patch_index as usize {
-                if let Some((extra_key, extra_handle)) = patch_extension {
-                    builder.write_nth_key(extra_key, extra_handle, dest);
-                    dest += 1;
-                };
-            }
-        } else {
-            break;
-        }
-    }
-}
-
 #[allow(clippy::type_complexity)]
 // Safety: caller must ensure that no references to uncommitted pages in this table exist
 pub(crate) unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
@@ -606,113 +555,11 @@ pub(crate) unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                 manager,
             )?;
 
-            if let Some((index_key2, page2)) = more {
-                let new_children_count = 1 + accessor.count_children();
-
-                // TODO: also check if page is large enough
-                if new_children_count <= BTREE_ORDER {
-                    // Rewrite page since we're splitting a child
-                    let mut new_page = manager.allocate(InternalBuilder::required_bytes(
-                        new_children_count - 1,
-                        accessor.total_key_length() + index_key2.len(),
-                    ))?;
-                    let mut builder = InternalBuilder::new(&mut new_page, new_children_count - 1);
-
-                    copy_to_builder_and_patch(
-                        &accessor,
-                        0,
-                        accessor.count_children(),
-                        &mut builder,
-                        child_index,
-                        page1,
-                        Some((&index_key2, page2)),
-                    );
-                    drop(builder);
-                    // Free the original page, since we've replaced it
-                    let page_number = page.get_page_number();
-                    drop(page);
-                    // Safety: If the page is uncommitted, no other transactions can have references to it,
-                    // and we just dropped ours on the line above
-                    free_policy.conditional_free(page_number, freed, manager)?;
-                    (new_page.get_page_number(), None, guard)
-                } else {
-                    // TODO: optimize to remove these Vecs
-                    let mut children = vec![];
-                    let mut index_keys: Vec<&[u8]> = vec![];
-
-                    if child_index == 0 {
-                        children.push(page1);
-                        index_keys.push(&index_key2);
-                        children.push(page2);
-                    } else {
-                        children.push(accessor.child_page(0).unwrap());
-                    };
-                    for i in 1..accessor.count_children() {
-                        if let Some(temp_key) = accessor.key(i - 1) {
-                            index_keys.push(temp_key);
-                            if i == child_index as usize {
-                                children.push(page1);
-                                index_keys.push(&index_key2);
-                                children.push(page2);
-                            } else {
-                                children.push(accessor.child_page(i).unwrap());
-                            };
-                        } else {
-                            break;
-                        }
-                    }
-
-                    // TODO: split based on size, if page is going to be too large
-                    let division = BTREE_ORDER / 2;
-
-                    // Rewrite page since we're splitting a child
-                    let key_size = index_keys[0..division].iter().map(|k| k.len()).sum();
-                    let mut new_page =
-                        manager.allocate(InternalBuilder::required_bytes(division, key_size))?;
-                    let mut builder = InternalBuilder::new(&mut new_page, division);
-
-                    builder.write_first_page(children[0]);
-                    for i in 0..division {
-                        let key = &index_keys[i];
-                        builder.write_nth_key(key, children[i + 1], i);
-                    }
-                    drop(builder);
-
-                    let index_key = &index_keys[division];
-
-                    let key_size = index_keys[(division + 1)..].iter().map(|k| k.len()).sum();
-                    let mut new_page2 = manager.allocate(InternalBuilder::required_bytes(
-                        index_keys.len() - division - 1,
-                        key_size,
-                    ))?;
-                    let mut builder2 =
-                        InternalBuilder::new(&mut new_page2, index_keys.len() - division - 1);
-                    builder2.write_first_page(children[division + 1]);
-                    for i in (division + 1)..index_keys.len() {
-                        let key = &index_keys[i];
-                        builder2.write_nth_key(key, children[i + 1], i - (division + 1));
-                    }
-                    drop(builder2);
-
-                    let index_key_vec = index_key.to_vec();
-
-                    // Free the original page, since we've replaced it
-                    let page_number = page.get_page_number();
-                    drop(page);
-                    // Safety: If the page is uncommitted, no other transactions can have references to it,
-                    // and we just dropped ours on the line above
-                    free_policy.conditional_free(page_number, freed, manager)?;
-                    (
-                        new_page.get_page_number(),
-                        Some((index_key_vec, new_page2.get_page_number())),
-                        guard,
-                    )
-                }
-            } else {
-                #[allow(clippy::collapsible_else_if)]
+            if more.is_none() {
+                // Check fast-path if no children were added
                 if page1 == child_page {
                     // NO-OP. One of our descendants is uncommitted, so there was no change
-                    (page.get_page_number(), None, guard)
+                    return Ok((page.get_page_number(), None, guard));
                 } else if manager.uncommitted(page.get_page_number()) {
                     let page_number = page.get_page_number();
                     drop(page);
@@ -721,31 +568,60 @@ pub(crate) unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
                     let mut mutpage = manager.get_page_mut(page_number);
                     let mut mutator = InternalMutator::new(&mut mutpage);
                     mutator.write_child_page(child_index, page1);
-                    (mutpage.get_page_number(), None, guard)
-                } else {
-                    let mut new_page = manager.allocate(InternalBuilder::required_bytes(
-                        accessor.count_children() - 1,
-                        accessor.total_key_length(),
-                    ))?;
-                    let mut builder =
-                        InternalBuilder::new(&mut new_page, accessor.count_children() - 1);
-                    copy_to_builder_and_patch(
-                        &accessor,
-                        0,
-                        accessor.count_children(),
-                        &mut builder,
-                        child_index,
-                        page1,
-                        None,
-                    );
-                    drop(builder);
-
-                    // Free the original page, since we've replaced it
-                    let page_number = page.get_page_number();
-                    drop(page);
-                    free_policy.conditional_free(page_number, freed, manager)?;
-                    (new_page.get_page_number(), None, guard)
+                    return Ok((mutpage.get_page_number(), None, guard));
                 }
+            }
+
+            // A child was added, or we couldn't use the fast-path above
+            let mut builder = IndexBuilder::new(manager);
+            if child_index == 0 {
+                builder.push_child(page1);
+                if let Some((ref index_key2, page2)) = more {
+                    builder.push_key(index_key2);
+                    builder.push_child(page2);
+                }
+            } else {
+                builder.push_child(accessor.child_page(0).unwrap());
+            }
+            for i in 1..accessor.count_children() {
+                if let Some(key) = accessor.key(i - 1) {
+                    builder.push_key(key);
+                    if i == child_index {
+                        builder.push_child(page1);
+                        if let Some((ref index_key2, page2)) = more {
+                            builder.push_key(index_key2);
+                            builder.push_child(page2);
+                        }
+                    } else {
+                        builder.push_child(accessor.child_page(i).unwrap());
+                    }
+                } else {
+                    unreachable!();
+                }
+            }
+
+            if builder.should_split() {
+                let (new_page1, split_key, new_page2) = builder.build_split()?;
+                // Free the original page, since we've replaced it
+                let page_number = page.get_page_number();
+                drop(page);
+                // Safety: If the page is uncommitted, no other transactions can have references to it,
+                // and we just dropped ours on the line above
+                free_policy.conditional_free(page_number, freed, manager)?;
+                (
+                    new_page1.get_page_number(),
+                    Some((split_key, new_page2.get_page_number())),
+                    guard,
+                )
+            } else {
+                let new_page = builder.build()?;
+                // Free the original page, since we've replaced it
+                let page_number = page.get_page_number();
+                drop(page);
+                // Safety: If the page is uncommitted, no other transactions can have references to it,
+                // and we just dropped ours on the line above
+                free_policy.conditional_free(page_number, freed, manager)?;
+                (new_page.get_page_number(), None, guard)
             }
         }
         _ => unreachable!(),
@@ -754,15 +630,28 @@ pub(crate) unsafe fn tree_insert_helper<'a, K: RedbKey + ?Sized>(
 
 #[cfg(test)]
 mod test {
-    use crate::tree_store::btree_base::{FreePolicy, InternalAccessor};
-    use crate::tree_store::btree_utils::{
-        make_index, make_mut_single_leaf, merge_index, BTREE_ORDER,
-    };
-    use crate::tree_store::page_store::TransactionalMemory;
+    use crate::tree_store::btree_base::{FreePolicy, IndexBuilder, InternalAccessor, LeafBuilder};
+    use crate::tree_store::btree_utils::{merge_index, BTREE_ORDER};
+    use crate::tree_store::page_store::{Page, TransactionalMemory};
+    use crate::tree_store::PageNumber;
+    use crate::Result;
     use crate::{Database, TableDefinition};
     use tempfile::NamedTempFile;
 
     const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
+
+    fn make_leaf<'a>(
+        key: &[u8],
+        value: &[u8],
+        manager: &'a TransactionalMemory,
+    ) -> Result<PageNumber> {
+        let mut page = manager.allocate(LeafBuilder::required_bytes(1, key.len() + value.len()))?;
+        let mut builder = LeafBuilder::new(&mut page, 1, key.len());
+        builder.append(key, value);
+        drop(builder);
+
+        Ok(page.get_page_number())
+    }
 
     #[test]
     // Test for regression in index merge/split code found by fuzzer, where keys were sorted
@@ -771,11 +660,18 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let file = tmpfile.into_file();
         let mem = TransactionalMemory::new(file, 1024 * 1024, None, true).unwrap();
-        let (one, _) = make_mut_single_leaf(&1u64.to_le_bytes(), &[], &mem).unwrap();
-        let (two, _) = make_mut_single_leaf(&2u64.to_le_bytes(), &[], &mem).unwrap();
+        let one = make_leaf(&1u64.to_le_bytes(), &[], &mem).unwrap();
+        let two = make_leaf(&2u64.to_le_bytes(), &[], &mem).unwrap();
         // a value which has the second byte set, but zero in the first byte
-        let (next_byte, _) = make_mut_single_leaf(&256u64.to_le_bytes(), &[], &mem).unwrap();
-        let index = make_index(&[one, two], &[&1u64.to_le_bytes()], &mem).unwrap();
+        let next_byte = make_leaf(&256u64.to_le_bytes(), &[], &mem).unwrap();
+
+        let mut builder = IndexBuilder::new(&mem);
+        builder.push_child(one);
+        builder.push_child(two);
+        let key = 1u64.to_le_bytes();
+        builder.push_key(&key);
+        let index = builder.build().unwrap().get_page_number();
+
         let mut freed = vec![];
         let merged = unsafe {
             merge_index(
