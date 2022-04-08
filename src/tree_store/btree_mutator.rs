@@ -1,7 +1,7 @@
-use crate::tree_store::btree_base::{FreePolicy, LeafBuilder2};
-use crate::tree_store::btree_utils::{
-    make_index, make_mut_single_leaf, tree_delete_helper, tree_insert_helper, DeletionResult,
+use crate::tree_store::btree_base::{
+    FreePolicy, IndexBuilder, LeafAccessor, LeafBuilder, LeafBuilder2,
 };
+use crate::tree_store::btree_utils::{tree_delete_helper, tree_insert_helper, DeletionResult};
 use crate::tree_store::page_store::Page;
 use crate::tree_store::{AccessGuardMut, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
@@ -89,13 +89,34 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             )?;
 
             let new_root = if let Some((key, page2)) = more {
-                make_index(&[page1, page2], &[&key], self.mem)?
+                let mut builder = IndexBuilder::new(self.mem);
+                builder.push_child(page1);
+                builder.push_key(&key);
+                builder.push_child(page2);
+                builder.build()?.get_page_number()
             } else {
                 page1
             };
             (new_root, guard)
         } else {
-            make_mut_single_leaf(key.as_bytes().as_ref(), value.as_bytes().as_ref(), self.mem)?
+            let key_bytes = key.as_bytes();
+            let value_bytes = value.as_bytes();
+            let key_bytes = key_bytes.as_ref();
+            let value_bytes = value_bytes.as_ref();
+            let mut page = self.mem.allocate(LeafBuilder::required_bytes(
+                1,
+                key_bytes.len() + value_bytes.len(),
+            ))?;
+            let mut builder = LeafBuilder::new(&mut page, 1, key_bytes.len());
+            builder.append(key_bytes, value_bytes);
+            drop(builder);
+
+            let accessor = LeafAccessor::new(&page);
+            let offset = accessor.offset_of_first_value();
+            let page_num = page.get_page_number();
+            let guard = AccessGuardMut::new(page, offset, value_bytes.len());
+
+            (page_num, guard)
         };
         *self.root = Some(new_root);
         Ok(guard)
