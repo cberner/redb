@@ -1149,6 +1149,10 @@ impl TransactionalMemory {
 
     // Safety: the caller must ensure that no references to the memory in `page` exist
     pub(crate) unsafe fn free(&self, page: PageNumber) -> Result {
+        // Zero fill the page to ensure that deleted data is not stored in the file
+        let mut mut_page = self.get_page_mut(page);
+        mut_page.memory_mut().fill(0);
+
         let mut metadata = self.lock_metadata();
         let layout = self.layout.lock().unwrap();
         let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
@@ -1173,6 +1177,10 @@ impl TransactionalMemory {
     // Frees the page if it was allocated since the last commit. Returns true, if the page was freed
     // Safety: the caller must ensure that no references to the memory in `page` exist
     pub(crate) unsafe fn free_if_uncommitted(&self, page: PageNumber) -> Result<bool> {
+        // Zero fill the page to ensure that deleted data is not stored in the file
+        let mut mut_page = self.get_page_mut(page);
+        mut_page.memory_mut().fill(0);
+
         if self.allocated_since_commit.lock().unwrap().remove(&page) {
             let mut metadata = self.lock_metadata();
             let layout = self.layout.lock().unwrap();
@@ -1356,8 +1364,6 @@ impl TransactionalMemory {
         // Safety:
         // The address range we're returning was just allocated, so no other references exist
         let mem = unsafe { self.mmap.get_memory_mut(address_range) };
-        // Zero the memory
-        mem.copy_from_slice(&vec![0u8; page_number.page_size_bytes(self.page_size)]);
         debug_assert!(mem.len() >= allocation_size);
 
         Ok(PageMut {
