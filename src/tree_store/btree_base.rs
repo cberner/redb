@@ -131,14 +131,17 @@ impl<'a: 'b, 'b> EntryAccessor<'a> {
 // Provides a simple zero-copy way to access a leaf page
 pub(in crate::tree_store) struct LeafAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
+    num_pairs: usize,
     _page_lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
     pub(in crate::tree_store) fn new(page: &'b T) -> Self {
         debug_assert_eq!(page.memory()[0], LEAF);
+        let num_pairs = u16::from_le_bytes(page.memory()[2..4].try_into().unwrap()) as usize;
         LeafAccessor {
             page,
+            num_pairs,
             _page_lifetime: Default::default(),
         }
     }
@@ -243,7 +246,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
     }
 
     pub(in crate::tree_store) fn num_pairs(&self) -> usize {
-        u16::from_le_bytes(self.page.memory()[2..4].try_into().unwrap()) as usize
+        self.num_pairs
     }
 
     pub(in crate::tree_store) fn offset_of_first_value(&self) -> usize {
@@ -505,14 +508,17 @@ impl<'a: 'b, 'b> Drop for LeafBuilder<'a, 'b> {
 // Provides a simple zero-copy way to access an index page
 pub(in crate::tree_store) struct InternalAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
+    num_keys: usize,
     _page_lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
     pub(in crate::tree_store) fn new(page: &'b T) -> Self {
         debug_assert_eq!(page.memory()[0], INTERNAL);
+        let num_keys = u16::from_le_bytes(page.memory()[2..4].try_into().unwrap()) as usize;
         InternalAccessor {
             page,
+            num_keys,
             _page_lifetime: Default::default(),
         }
     }
@@ -613,7 +619,7 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
     }
 
     fn num_keys(&self) -> usize {
-        u16::from_le_bytes(self.page.memory()[2..4].try_into().unwrap()) as usize
+        self.num_keys
     }
 }
 
