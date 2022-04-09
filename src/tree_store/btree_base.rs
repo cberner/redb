@@ -723,6 +723,7 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
 
     // Caller MUST write num_keys values
     pub(in crate::tree_store) fn new(page: &'b mut PageMut<'a>, num_keys: usize) -> Self {
+        assert!(num_keys > 0);
         page.memory_mut()[0] = INTERNAL;
         page.memory_mut()[2..4].copy_from_slice(&(num_keys as u16).to_le_bytes());
         #[cfg(debug_assertions)]
