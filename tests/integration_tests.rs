@@ -811,3 +811,81 @@ fn wrong_types() {
         Err(Error::TableTypeMismatch(_))
     ));
 }
+
+#[test]
+fn tree_balance() {
+    const EXPECTED_ORDER: usize = 9;
+    fn expected_height(mut elements: usize) -> usize {
+        // Root may have only 2 entries
+        let mut height = 1;
+        elements /= 2;
+
+        // Leaves may have only a single entry
+        height += 1;
+
+        // Each internal node half-full, plus 1 to round up
+        height += (elements as f32).log((EXPECTED_ORDER / 2) as f32) as usize + 1;
+
+        height
+    }
+
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    // One for the last table id counter, and one for the "x" -> TableDefinition entry
+    let num_internal_entries = 2;
+
+    let key_size = 100;
+    // Set the page size so that exactly 9 keys will fit
+    let page_size = 1024;
+    let db = unsafe {
+        Database::builder()
+            .set_page_size(page_size)
+            .create(tmpfile.path(), 16 * 1024 * 1024)
+            .unwrap()
+    };
+    let txn = db.begin_write().unwrap();
+
+    let elements = (EXPECTED_ORDER / 2).pow(2) as usize - num_internal_entries;
+
+    {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
+        for i in (0..elements).rev() {
+            let mut key = vec![0u8; key_size];
+            key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+            table.insert(&key, b"").unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let expected = expected_height(elements + num_internal_entries);
+    let txn = db.begin_write().unwrap();
+    let height = txn.stats().unwrap().tree_height();
+    assert!(
+        height <= expected,
+        "height={} expected={}",
+        height,
+        expected
+    );
+
+    let reduce_to = EXPECTED_ORDER / 2 - num_internal_entries;
+    {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
+        for i in 0..(elements - reduce_to) {
+            let mut key = vec![0u8; key_size];
+            key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+            table.remove(&key).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let expected = expected_height(reduce_to + num_internal_entries);
+    let txn = db.begin_write().unwrap();
+    let height = txn.stats().unwrap().tree_height();
+    txn.abort().unwrap();
+    assert!(
+        height <= expected,
+        "height={} expected={}",
+        height,
+        expected
+    );
+}

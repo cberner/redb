@@ -6,8 +6,6 @@ use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
 
-// TODO: make configurable, or remove this constant and just rely on page size
-pub(in crate::tree_store) const BTREE_ORDER: usize = 40;
 pub(in crate::tree_store) const LEAF: u8 = 1;
 pub(in crate::tree_store) const INTERNAL: u8 = 2;
 
@@ -585,7 +583,6 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
     }
 
     pub(in crate::tree_store) fn key(&self, n: usize) -> Option<&[u8]> {
-        debug_assert!(n < BTREE_ORDER - 1);
         if n >= self.num_keys() {
             return None;
         }
@@ -599,7 +596,6 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
     }
 
     pub(in crate::tree_store) fn child_page(&self, n: usize) -> Option<PageNumber> {
-        debug_assert!(n < BTREE_ORDER);
         if n >= self.count_children() {
             return None;
         }
@@ -649,7 +645,6 @@ impl<'a, 'b> IndexBuilder<'a, 'b> {
 
     pub(in crate::tree_store) fn build(self) -> Result<PageMut<'b>> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
-        assert!(self.children.len() <= BTREE_ORDER);
         let size = InternalBuilder::required_bytes(self.keys.len(), self.total_key_bytes);
         let mut page = self.mem.allocate(size)?;
         let mut builder = InternalBuilder::new(&mut page, self.keys.len());
@@ -664,8 +659,8 @@ impl<'a, 'b> IndexBuilder<'a, 'b> {
     }
 
     pub(in crate::tree_store) fn should_split(&self) -> bool {
-        // TODO: also check if page is too big
-        self.children.len() > BTREE_ORDER
+        let size = InternalBuilder::required_bytes(self.keys.len(), self.total_key_bytes);
+        size > self.mem.get_page_size() && self.keys.len() >= 3
     }
 
     pub(in crate::tree_store) fn build_split(self) -> Result<(PageMut<'b>, Vec<u8>, PageMut<'b>)> {
