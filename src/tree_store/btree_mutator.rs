@@ -2,7 +2,7 @@ use crate::tree_store::btree_base::{
     FreePolicy, IndexBuilder, InternalAccessor, InternalMutator, LeafAccessor, LeafBuilder,
     LeafBuilder2, INTERNAL, LEAF,
 };
-use crate::tree_store::btree_utils::{tree_delete_helper, DeletionResult};
+use crate::tree_store::btree_utils::{make_index, tree_delete_helper, DeletionResult};
 use crate::tree_store::page_store::{Page, PageImpl};
 use crate::tree_store::{AccessGuardMut, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
@@ -65,9 +65,11 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     }
                 }
                 DeletionResult::PartialInternal(pages, keys) => {
-                    assert_eq!(pages.len(), 1);
-                    assert!(keys.is_empty());
-                    Some(pages[0])
+                    if keys.is_empty() {
+                        Some(pages[0])
+                    } else {
+                        Some(make_index(&pages, &keys, self.mem)?)
+                    }
                 }
             };
             *self.root = new_root;

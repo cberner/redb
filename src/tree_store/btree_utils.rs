@@ -211,8 +211,10 @@ pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + 
                             }
                         }
                     }
-                    if children.len() == 1 {
-                        PartialInternal(children, vec![])
+                    let total_key_bytes: usize = keys.iter().map(|x| x.len()).sum();
+                    let required = InternalBuilder::required_bytes(keys.len(), total_key_bytes);
+                    if required < manager.get_page_size() / 2 {
+                        PartialInternal(children, keys)
                     } else {
                         Subtree(make_index(&children, &keys, manager)?)
                     }
@@ -283,8 +285,10 @@ pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + 
                             }
                         }
                     }
-                    if children.len() == 1 {
-                        PartialInternal(children, vec![])
+                    let total_key_bytes: usize = keys.iter().map(|x| x.len()).sum();
+                    let required = InternalBuilder::required_bytes(keys.len(), total_key_bytes);
+                    if required < manager.get_page_size() / 2 {
+                        PartialInternal(children, keys)
                     } else {
                         Subtree(make_index(&children, &keys, manager)?)
                     }
