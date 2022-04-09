@@ -71,7 +71,7 @@ pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + 
                 }
                 PartialLeaf(partial)
             } else {
-                let mut builder = LeafBuilder2::new(manager);
+                let mut builder = LeafBuilder2::new(manager, accessor.num_pairs() - 1);
                 for i in 0..accessor.num_pairs() {
                     if i == position {
                         continue;
@@ -168,14 +168,17 @@ pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + 
                         }
                         let page_number = accessor.child_page(i).unwrap();
                         if i == merge_with {
-                            let mut child_builder = LeafBuilder2::new(manager);
+                            let merge_with_page = manager.get_page(page_number);
+                            let merge_with_accessor = LeafAccessor::new(&merge_with_page);
+                            let mut child_builder = LeafBuilder2::new(
+                                manager,
+                                partials.len() + merge_with_accessor.num_pairs(),
+                            );
                             if child_index < merge_with {
                                 for (key, value) in partials.iter() {
                                     child_builder.push(key, value);
                                 }
                             }
-                            let merge_with_page = manager.get_page(page_number);
-                            let merge_with_accessor = LeafAccessor::new(&merge_with_page);
                             for j in 0..merge_with_accessor.num_pairs() {
                                 let entry = merge_with_accessor.entry(j).unwrap();
                                 child_builder.push(entry.key(), entry.value());

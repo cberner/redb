@@ -311,9 +311,9 @@ pub(in crate::tree_store) struct LeafBuilder2<'a, 'b> {
 }
 
 impl<'a, 'b> LeafBuilder2<'a, 'b> {
-    pub(in crate::tree_store) fn new(mem: &'b TransactionalMemory) -> Self {
+    pub(in crate::tree_store) fn new(mem: &'b TransactionalMemory, capacity: usize) -> Self {
         Self {
-            pairs: vec![],
+            pairs: Vec::with_capacity(capacity),
             total_key_bytes: 0,
             total_value_bytes: 0,
             mem,
