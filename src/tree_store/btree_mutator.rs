@@ -1,13 +1,43 @@
 use crate::tree_store::btree_base::{
-    FreePolicy, IndexBuilder, InternalAccessor, InternalMutator, LeafAccessor, LeafBuilder,
-    LeafBuilder2, INTERNAL, LEAF,
+    FreePolicy, IndexBuilder, InternalAccessor, InternalBuilder, InternalMutator, LeafAccessor,
+    LeafBuilder, LeafBuilder2, INTERNAL, LEAF,
 };
-use crate::tree_store::btree_utils::{make_index, tree_delete_helper, DeletionResult};
+use crate::tree_store::btree_mutator::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
 use crate::tree_store::page_store::{Page, PageImpl};
 use crate::tree_store::{AccessGuardMut, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
 use crate::{AccessGuard, Result};
+use std::cmp::{max, min};
 use std::marker::PhantomData;
+
+#[derive(Debug)]
+enum DeletionResult {
+    // A proper subtree
+    Subtree(PageNumber),
+    // A leaf subtree with too few entries
+    PartialLeaf(Vec<(Vec<u8>, Vec<u8>)>),
+    // A index page subtree with too few children
+    PartialInternal(Vec<PageNumber>, Vec<Vec<u8>>),
+}
+
+// Pages must be in sorted order
+fn make_index(
+    children: &[PageNumber],
+    keys: &[impl AsRef<[u8]>],
+    mem: &TransactionalMemory,
+) -> Result<PageNumber> {
+    assert_eq!(children.len() - 1, keys.len());
+    let key_size = keys.iter().map(|x| x.as_ref().len()).sum();
+    let mut page = mem.allocate(InternalBuilder::required_bytes(keys.len(), key_size))?;
+    let mut builder = InternalBuilder::new(&mut page, keys.len());
+    builder.write_first_page(children[0]);
+    for i in 1..children.len() {
+        let key = &keys[i - 1];
+        builder.write_nth_key(key.as_ref(), children[i], i - 1);
+    }
+    drop(builder);
+    Ok(page.get_page_number())
+}
 
 pub(crate) struct MutateHelper<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     root: &'b mut Option<PageNumber>,
@@ -43,14 +73,9 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
 
     // Safety: caller must ensure that no references to uncommitted pages in this table exist
     pub(crate) unsafe fn delete(&mut self, key: &K) -> Result<Option<AccessGuard<'a, V>>> {
-        if let Some(p) = self.root {
-            let (deletion_result, found) = tree_delete_helper::<K, V>(
-                self.mem.get_page(*p),
-                key.as_bytes().as_ref(),
-                self.free_policy,
-                self.freed,
-                self.mem,
-            )?;
+        if let Some(p) = *self.root {
+            let (deletion_result, found) =
+                self.delete_helper(self.mem.get_page(p), key.as_bytes().as_ref())?;
             let new_root = match deletion_result {
                 DeletionResult::Subtree(page) => Some(page),
                 DeletionResult::PartialLeaf(entries) => {
@@ -265,5 +290,279 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             }
             _ => unreachable!(),
         })
+    }
+
+    // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
+    // If key is not found, guaranteed not to modify the tree
+    //
+    // Safety: caller must ensure that no references to uncommitted pages in this table exist
+    unsafe fn delete_helper(
+        &mut self,
+        page: PageImpl<'a>,
+        key: &[u8],
+    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(&page);
+                let (position, found) = accessor.position::<K>(key);
+                if !found {
+                    return Ok((Subtree(page.get_page_number()), None));
+                }
+                let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
+                    - accessor.length_of_pairs(position, position + 1);
+                let new_required_bytes =
+                    LeafBuilder::required_bytes(accessor.num_pairs() - 1, new_kv_bytes);
+                let result = if new_required_bytes < self.mem.get_page_size() / 2 {
+                    let mut partial = Vec::with_capacity(accessor.num_pairs());
+                    for i in 0..accessor.num_pairs() {
+                        if i == position {
+                            continue;
+                        }
+                        let entry = accessor.entry(i).unwrap();
+                        partial.push((entry.key().to_vec(), entry.value().to_vec()));
+                    }
+                    PartialLeaf(partial)
+                } else {
+                    let mut builder = LeafBuilder2::new(self.mem, accessor.num_pairs() - 1);
+                    for i in 0..accessor.num_pairs() {
+                        if i == position {
+                            continue;
+                        }
+                        let entry = accessor.entry(i).unwrap();
+                        builder.push(entry.key(), entry.value());
+                    }
+                    Subtree(builder.build()?.get_page_number())
+                };
+                let uncommitted = self.mem.uncommitted(page.get_page_number());
+                let free_on_drop = if !uncommitted || matches!(self.free_policy, FreePolicy::Never)
+                {
+                    // Won't be freed until the end of the transaction, so returning the page
+                    // in the AccessGuard below is still safe
+                    self.freed.push(page.get_page_number());
+                    false
+                } else {
+                    true
+                };
+                let (start, end) = accessor.value_range(position).unwrap();
+                let guard = Some(AccessGuard::new(
+                    page,
+                    start,
+                    end - start,
+                    free_on_drop,
+                    self.mem,
+                ));
+                Ok((result, guard))
+            }
+            INTERNAL => {
+                let accessor = InternalAccessor::new(&page);
+                let original_page_number = page.get_page_number();
+                let (child_index, child_page_number) = accessor.child_for_key::<K>(key);
+                let (result, found) =
+                    self.delete_helper(self.mem.get_page(child_page_number), key)?;
+                if found.is_none() {
+                    return Ok((Subtree(original_page_number), None));
+                }
+                let final_result = match result {
+                    Subtree(new_child) => {
+                        if new_child == child_page_number {
+                            // NO-OP. One of our descendants is uncommitted, so there was no change
+                            return Ok((Subtree(original_page_number), found));
+                        } else if self.mem.uncommitted(original_page_number) {
+                            drop(page);
+                            // Safety: Caller guarantees there are no references to uncommitted pages,
+                            // and we just dropped our reference to it on the line above
+                            let mut mutpage = self.mem.get_page_mut(original_page_number);
+                            let mut mutator = InternalMutator::new(&mut mutpage);
+                            mutator.write_child_page(child_index, new_child);
+                            return Ok((Subtree(original_page_number), found));
+                        } else {
+                            let mut new_page =
+                                self.mem.allocate(InternalBuilder::required_bytes(
+                                    accessor.count_children() - 1,
+                                    accessor.total_key_length(),
+                                ))?;
+                            let mut builder =
+                                InternalBuilder::new(&mut new_page, accessor.count_children() - 1);
+                            if child_index == 0 {
+                                builder.write_first_page(new_child);
+                            } else {
+                                builder.write_first_page(accessor.child_page(0).unwrap());
+                            }
+
+                            for i in 1..accessor.count_children() {
+                                if let Some(key) = accessor.key(i - 1) {
+                                    let page_number = if i == child_index {
+                                        new_child
+                                    } else {
+                                        accessor.child_page(i).unwrap()
+                                    };
+                                    builder.write_nth_key(key, page_number, i - 1);
+                                } else {
+                                    unreachable!();
+                                }
+                            }
+
+                            drop(builder);
+                            Subtree(new_page.get_page_number())
+                        }
+                    }
+                    PartialLeaf(partials) => {
+                        let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                        debug_assert!(merge_with < accessor.count_children());
+                        let mut children = vec![];
+                        let mut keys = vec![];
+                        for i in 0..accessor.count_children() {
+                            if i == child_index {
+                                continue;
+                            }
+                            let page_number = accessor.child_page(i).unwrap();
+                            if i == merge_with {
+                                let merge_with_page = self.mem.get_page(page_number);
+                                let merge_with_accessor = LeafAccessor::new(&merge_with_page);
+                                let mut child_builder = LeafBuilder2::new(
+                                    self.mem,
+                                    partials.len() + merge_with_accessor.num_pairs(),
+                                );
+                                if child_index < merge_with {
+                                    for (key, value) in partials.iter() {
+                                        child_builder.push(key, value);
+                                    }
+                                }
+                                for j in 0..merge_with_accessor.num_pairs() {
+                                    let entry = merge_with_accessor.entry(j).unwrap();
+                                    child_builder.push(entry.key(), entry.value());
+                                }
+                                if child_index > merge_with {
+                                    for (key, value) in partials.iter() {
+                                        child_builder.push(key, value);
+                                    }
+                                }
+                                if child_builder.should_split() {
+                                    let (new_page1, new_page2) = child_builder.build_split()?;
+                                    let leaf_accessor = LeafAccessor::new(&new_page1);
+                                    keys.push(leaf_accessor.last_entry().key().to_vec());
+                                    children.push(new_page1.get_page_number());
+                                    children.push(new_page2.get_page_number());
+                                } else {
+                                    let new_page = child_builder.build()?;
+                                    children.push(new_page.get_page_number());
+                                }
+                                drop(merge_with_page);
+                                self.free_policy.conditional_free(
+                                    page_number,
+                                    self.freed,
+                                    self.mem,
+                                )?;
+
+                                let merged_key_index = max(child_index, merge_with);
+                                if merged_key_index < accessor.count_children() - 1 {
+                                    // TODO: find a way to optimize way this to_vec()?
+                                    keys.push(accessor.key(merged_key_index).unwrap().to_vec());
+                                }
+                            } else {
+                                children.push(page_number);
+                                if i < accessor.count_children() - 1 {
+                                    // TODO: find a way to optimize way this to_vec()?
+                                    keys.push(accessor.key(i).unwrap().to_vec());
+                                }
+                            }
+                        }
+                        let total_key_bytes: usize = keys.iter().map(|x| x.len()).sum();
+                        let required = InternalBuilder::required_bytes(keys.len(), total_key_bytes);
+                        if required < self.mem.get_page_size() / 2 {
+                            PartialInternal(children, keys)
+                        } else {
+                            Subtree(make_index(&children, &keys, self.mem)?)
+                        }
+                    }
+                    PartialInternal(partial_children, partial_keys) => {
+                        let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                        debug_assert!(merge_with < accessor.count_children());
+                        let mut children = vec![];
+                        let mut keys = vec![];
+                        for i in 0..accessor.count_children() {
+                            if i == child_index {
+                                continue;
+                            }
+                            let page_number = accessor.child_page(i).unwrap();
+                            if i == merge_with {
+                                let mut child_builder = IndexBuilder::new(self.mem);
+                                let separator_key =
+                                    accessor.key(min(child_index, merge_with)).unwrap();
+                                let merge_with_page = self.mem.get_page(page_number);
+                                let merge_with_accessor = InternalAccessor::new(&merge_with_page);
+                                if child_index < merge_with {
+                                    for child in &partial_children {
+                                        child_builder.push_child(*child);
+                                    }
+                                    for key in partial_keys.iter() {
+                                        child_builder.push_key(key)
+                                    }
+                                    child_builder.push_key(separator_key);
+                                }
+                                for j in 0..merge_with_accessor.count_children() {
+                                    child_builder
+                                        .push_child(merge_with_accessor.child_page(j).unwrap());
+                                    if j < merge_with_accessor.count_children() - 1 {
+                                        child_builder.push_key(merge_with_accessor.key(j).unwrap());
+                                    }
+                                }
+                                if child_index > merge_with {
+                                    child_builder.push_key(separator_key);
+                                    for child in &partial_children {
+                                        child_builder.push_child(*child);
+                                    }
+                                    for key in partial_keys.iter() {
+                                        child_builder.push_key(key)
+                                    }
+                                }
+                                if child_builder.should_split() {
+                                    let (new_page1, separator, new_page2) =
+                                        child_builder.build_split()?;
+                                    children.push(new_page1.get_page_number());
+                                    keys.push(separator);
+                                    children.push(new_page2.get_page_number());
+                                } else {
+                                    let new_page = child_builder.build()?;
+                                    children.push(new_page.get_page_number());
+                                }
+                                drop(merge_with_page);
+                                self.free_policy.conditional_free(
+                                    page_number,
+                                    self.freed,
+                                    self.mem,
+                                )?;
+
+                                let merged_key_index = max(child_index, merge_with);
+                                if merged_key_index < accessor.count_children() - 1 {
+                                    // TODO: find a way to optimize way this to_vec()?
+                                    keys.push(accessor.key(merged_key_index).unwrap().to_vec());
+                                }
+                            } else {
+                                children.push(page_number);
+                                if i < accessor.count_children() - 1 {
+                                    // TODO: find a way to optimize way this to_vec()?
+                                    keys.push(accessor.key(i).unwrap().to_vec());
+                                }
+                            }
+                        }
+                        let total_key_bytes: usize = keys.iter().map(|x| x.len()).sum();
+                        let required = InternalBuilder::required_bytes(keys.len(), total_key_bytes);
+                        if required < self.mem.get_page_size() / 2 {
+                            PartialInternal(children, keys)
+                        } else {
+                            Subtree(make_index(&children, &keys, self.mem)?)
+                        }
+                    }
+                };
+
+                self.free_policy
+                    .conditional_free(original_page_number, self.freed, self.mem)?;
+
+                Ok((final_result, found))
+            }
+            _ => unreachable!(),
+        }
     }
 }
