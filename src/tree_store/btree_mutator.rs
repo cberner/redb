@@ -15,7 +15,7 @@ enum DeletionResult {
     // A proper subtree
     Subtree(PageNumber),
     // A leaf subtree with too few entries
-    PartialLeaf(Vec<(Vec<u8>, Vec<u8>)>),
+    PartialLeaf { deleted_pair: usize },
     // A index page subtree with too few children
     PartialInternal(Vec<PageNumber>, Vec<Vec<u8>>),
 }
@@ -78,13 +78,19 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 self.delete_helper(self.mem.get_page(p), key.as_bytes().as_ref())?;
             let new_root = match deletion_result {
                 DeletionResult::Subtree(page) => Some(page),
-                DeletionResult::PartialLeaf(entries) => {
-                    if entries.is_empty() {
+                DeletionResult::PartialLeaf { deleted_pair } => {
+                    let page = self.mem.get_page(p);
+                    let accessor = LeafAccessor::new(&page);
+                    if accessor.num_pairs() == 1 {
                         None
                     } else {
-                        let mut builder = LeafBuilder2::new(self.mem, entries.len());
-                        for (key, value) in entries.iter() {
-                            builder.push(key, value);
+                        let mut builder = LeafBuilder2::new(self.mem, accessor.num_pairs() - 1);
+                        for i in 0..accessor.num_pairs() {
+                            if i == deleted_pair {
+                                continue;
+                            }
+                            let entry = accessor.entry(i).unwrap();
+                            builder.push(entry.key(), entry.value());
                         }
                         Some(builder.build()?.get_page_number())
                     }
@@ -343,15 +349,9 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 let new_required_bytes =
                     LeafBuilder::required_bytes(accessor.num_pairs() - 1, new_kv_bytes);
                 let result = if new_required_bytes < self.mem.get_page_size() / 2 {
-                    let mut partial = Vec::with_capacity(accessor.num_pairs());
-                    for i in 0..accessor.num_pairs() {
-                        if i == position {
-                            continue;
-                        }
-                        let entry = accessor.entry(i).unwrap();
-                        partial.push((entry.key().to_vec(), entry.value().to_vec()));
+                    PartialLeaf {
+                        deleted_pair: position,
                     }
-                    PartialLeaf(partial)
                 } else {
                     let mut builder = LeafBuilder2::new(self.mem, accessor.num_pairs() - 1);
                     for i in 0..accessor.num_pairs() {
@@ -436,7 +436,10 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             Subtree(new_page.get_page_number())
                         }
                     }
-                    PartialLeaf(partials) => {
+                    PartialLeaf { deleted_pair } => {
+                        let partial_child_page = self.mem.get_page(child_page_number);
+                        let partial_child_accessor = LeafAccessor::new(&partial_child_page);
+
                         let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                         debug_assert!(merge_with < accessor.count_children());
                         let mut children = vec![];
@@ -451,11 +454,16 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                                 let merge_with_accessor = LeafAccessor::new(&merge_with_page);
                                 let mut child_builder = LeafBuilder2::new(
                                     self.mem,
-                                    partials.len() + merge_with_accessor.num_pairs(),
+                                    partial_child_accessor.num_pairs() - 1
+                                        + merge_with_accessor.num_pairs(),
                                 );
                                 if child_index < merge_with {
-                                    for (key, value) in partials.iter() {
-                                        child_builder.push(key, value);
+                                    for i in 0..partial_child_accessor.num_pairs() {
+                                        if i == deleted_pair {
+                                            continue;
+                                        }
+                                        let entry = partial_child_accessor.entry(i).unwrap();
+                                        child_builder.push(entry.key(), entry.value());
                                     }
                                 }
                                 for j in 0..merge_with_accessor.num_pairs() {
@@ -463,8 +471,12 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                                     child_builder.push(entry.key(), entry.value());
                                 }
                                 if child_index > merge_with {
-                                    for (key, value) in partials.iter() {
-                                        child_builder.push(key, value);
+                                    for i in 0..partial_child_accessor.num_pairs() {
+                                        if i == deleted_pair {
+                                            continue;
+                                        }
+                                        let entry = partial_child_accessor.entry(i).unwrap();
+                                        child_builder.push(entry.key(), entry.value());
                                     }
                                 }
                                 if child_builder.should_split() {
