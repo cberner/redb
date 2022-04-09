@@ -164,6 +164,35 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             LEAF => {
                 let accessor = LeafAccessor::new(&page);
                 let (position, found) = accessor.position::<K>(key);
+
+                // Fast-path to avoid re-building and splitting pages with a single large value
+                let single_large_value = accessor.num_pairs() == 1
+                    && accessor.total_length() >= self.mem.get_page_size();
+                if !found && single_large_value {
+                    let mut builder = LeafBuilder2::new(self.mem, 1);
+                    builder.push(key, value);
+                    let new_page = builder.build()?;
+                    let new_page_number = new_page.get_page_number();
+                    let new_page_accessor = LeafAccessor::new(&new_page);
+                    let offset = new_page_accessor.offset_of_value(position).unwrap();
+                    drop(new_page_accessor);
+                    let guard = AccessGuardMut::new(new_page, offset, value.len());
+                    return if position == 0 {
+                        Ok((
+                            new_page_number,
+                            Some((key.to_vec(), page.get_page_number())),
+                            guard,
+                        ))
+                    } else {
+                        let split_key = accessor.last_entry().key().to_vec();
+                        Ok((
+                            page.get_page_number(),
+                            Some((split_key, new_page_number)),
+                            guard,
+                        ))
+                    };
+                }
+
                 let mut builder = LeafBuilder2::new(self.mem, accessor.num_pairs() + 1);
                 for i in 0..accessor.num_pairs() {
                     if i == position {
