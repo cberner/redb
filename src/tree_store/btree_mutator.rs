@@ -457,13 +457,13 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
 
                                 let merged_key_index = max(child_index, merge_with);
                                 if merged_key_index < accessor.count_children() - 1 {
-                                    // TODO: find a way to optimize way this to_vec()?
+                                    // TODO: find a way to optimize away this to_vec()?
                                     keys.push(accessor.key(merged_key_index).unwrap().to_vec());
                                 }
                             } else {
                                 children.push(page_number);
                                 if i < accessor.count_children() - 1 {
-                                    // TODO: find a way to optimize way this to_vec()?
+                                    // TODO: find a way to optimize away this to_vec()?
                                     keys.push(accessor.key(i).unwrap().to_vec());
                                 }
                             }
@@ -536,13 +536,13 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
 
                                 let merged_key_index = max(child_index, merge_with);
                                 if merged_key_index < accessor.count_children() - 1 {
-                                    // TODO: find a way to optimize way this to_vec()?
+                                    // TODO: find a way to optimize away this to_vec()?
                                     keys.push(accessor.key(merged_key_index).unwrap().to_vec());
                                 }
                             } else {
                                 children.push(page_number);
                                 if i < accessor.count_children() - 1 {
-                                    // TODO: find a way to optimize way this to_vec()?
+                                    // TODO: find a way to optimize away this to_vec()?
                                     keys.push(accessor.key(i).unwrap().to_vec());
                                 }
                             }
