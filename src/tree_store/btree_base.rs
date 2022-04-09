@@ -299,10 +299,6 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         Some(EntryAccessor::new(key, value))
     }
 
-    pub(in crate::tree_store) fn first_entry(&self) -> EntryAccessor<'b> {
-        self.entry(0).unwrap()
-    }
-
     pub(in crate::tree_store) fn last_entry(&self) -> EntryAccessor<'b> {
         self.entry(self.num_pairs() - 1).unwrap()
     }
