@@ -124,9 +124,8 @@ impl<'db> WriteTransaction<'db> {
     /// Open the given table
     ///
     /// The table will be created if it does not exist
-    // TODO: simplify the number of lifetimes here. Also why is it different from multimap_table?
-    pub fn open_table<'s: 't, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
-        &'s self,
+    pub fn open_table<'t, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+        &'t self,
         definition: TableDefinition<K, V>,
     ) -> Result<Table<'db, 't, K, V>> {
         if let Some(location) = self.open_tables.borrow().get(definition.name()) {
