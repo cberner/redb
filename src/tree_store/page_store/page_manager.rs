@@ -21,13 +21,11 @@ use std::sync::{Mutex, MutexGuard};
 // Database layout:
 // Header (first 128 bytes):
 // 9 bytes: magic number
-// 1 byte: version number
 // 1 byte: page size exponent
 // 1 byte: god byte
-// 4 bytes: padding to 64-bit aligned
+// 5 bytes: padding to 64-bit aligned
+// 8 bytes: region max usable bytes
 // 8 bytes: database max size
-// 8 bytes: upgrade log offset
-// 8 bytes: upgrade log length
 //
 // Commit slot 0 (next 128 bytes):
 // 1 byte: version
