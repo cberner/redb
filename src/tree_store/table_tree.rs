@@ -1,10 +1,11 @@
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
-use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
+use crate::tree_store::{Btree, BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
 use crate::types::{
     AsBytesWithLifetime, OwnedAsBytesLifetime, OwnedLifetime, RedbKey, RedbValue, WithLifetime,
 };
-use crate::{Error, Result};
+use crate::{DatabaseStats, Error, Result};
 use std::cell::RefCell;
+use std::cmp::max;
 use std::mem::size_of;
 use std::ops::RangeFull;
 use std::rc::Rc;
@@ -179,8 +180,7 @@ impl<'a> Iterator for TableNameIter<'a> {
 }
 
 pub(crate) struct TableTree<'txn> {
-    // TODO: make private?
-    pub(crate) tree: BtreeMut<'txn, str, InternalTableDefinition>,
+    tree: BtreeMut<'txn, str, InternalTableDefinition>,
     mem: &'txn TransactionalMemory,
     freed_pages: Rc<RefCell<Vec<PageNumber>>>,
 }
@@ -307,5 +307,32 @@ impl<'txn> TableTree<'txn> {
         // Safety: References into the master table are never returned to the user
         unsafe { self.tree.insert(name, &table)? };
         Ok(table)
+    }
+
+    pub fn stats(&self) -> Result<DatabaseStats> {
+        let master_tree_height = self.tree.height();
+        let mut max_subtree_height = 0;
+        let mut total_stored_bytes = 0;
+        // Include the master table in the overhead
+        let mut total_metadata_bytes = self.tree.overhead_bytes() + self.tree.stored_leaf_bytes();
+        let mut total_fragmented = self.tree.fragmented_bytes();
+
+        let mut iter = self.tree.range::<RangeFull, &str>(..)?;
+        while let Some(entry) = iter.next() {
+            let definition = InternalTableDefinition::from_bytes(entry.value());
+            let subtree: Btree<[u8], [u8]> = Btree::new(definition.get_root(), self.mem);
+            max_subtree_height = max(max_subtree_height, subtree.height());
+            total_stored_bytes += subtree.stored_leaf_bytes();
+            total_metadata_bytes += subtree.overhead_bytes();
+            total_fragmented += subtree.fragmented_bytes();
+        }
+        Ok(DatabaseStats {
+            tree_height: master_tree_height + max_subtree_height,
+            free_pages: self.mem.count_free_pages()?,
+            stored_leaf_bytes: total_stored_bytes,
+            metadata_bytes: total_metadata_bytes,
+            fragmented_bytes: total_fragmented,
+            page_size: self.mem.get_page_size(),
+        })
     }
 }
