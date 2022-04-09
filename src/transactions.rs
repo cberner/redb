@@ -9,7 +9,7 @@ use crate::{
     Result, Table, TableDefinition,
 };
 use std::cell::RefCell;
-use std::cmp::{max, min};
+use std::cmp::min;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::ops::RangeFull;
@@ -19,12 +19,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub struct DatabaseStats {
-    tree_height: usize,
-    free_pages: usize,
-    stored_leaf_bytes: usize,
-    metadata_bytes: usize,
-    fragmented_bytes: usize,
-    page_size: usize,
+    pub(crate) tree_height: usize,
+    pub(crate) free_pages: usize,
+    pub(crate) stored_leaf_bytes: usize,
+    pub(crate) metadata_bytes: usize,
+    pub(crate) fragmented_bytes: usize,
+    pub(crate) page_size: usize,
 }
 
 impl DatabaseStats {
@@ -394,30 +394,17 @@ impl<'db> WriteTransaction<'db> {
 
     pub fn stats(&self) -> Result<DatabaseStats> {
         let table_tree = self.table_tree.borrow();
-        let master_tree_height = table_tree.tree.height();
-        let mut max_subtree_height = 0;
-        let mut total_stored_bytes = 0;
-        // Include the master table in the overhead
-        let mut total_metadata_bytes = table_tree.tree.overhead_bytes()
-            + table_tree.tree.stored_leaf_bytes()
+        let data_tree_stats = table_tree.stats()?;
+        let total_metadata_bytes = data_tree_stats.metadata_bytes()
             + self.freed_tree.overhead_bytes()
             + self.freed_tree.stored_leaf_bytes();
-        let mut total_fragmented =
-            table_tree.tree.fragmented_bytes() + self.freed_tree.fragmented_bytes();
+        let total_fragmented =
+            data_tree_stats.fragmented_bytes() + self.freed_tree.fragmented_bytes();
 
-        let mut iter = table_tree.tree.range::<RangeFull, &str>(..)?;
-        while let Some(entry) = iter.next() {
-            let definition = InternalTableDefinition::from_bytes(entry.value());
-            let subtree: Btree<[u8], [u8]> = Btree::new(definition.get_root(), self.mem);
-            max_subtree_height = max(max_subtree_height, subtree.height());
-            total_stored_bytes += subtree.stored_leaf_bytes();
-            total_metadata_bytes += subtree.overhead_bytes();
-            total_fragmented += subtree.fragmented_bytes();
-        }
         Ok(DatabaseStats {
-            tree_height: master_tree_height + max_subtree_height,
+            tree_height: data_tree_stats.tree_height(),
             free_pages: self.mem.count_free_pages()?,
-            stored_leaf_bytes: total_stored_bytes,
+            stored_leaf_bytes: data_tree_stats.stored_bytes(),
             metadata_bytes: total_metadata_bytes,
             fragmented_bytes: total_fragmented,
             page_size: self.mem.get_page_size(),
