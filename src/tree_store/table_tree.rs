@@ -208,7 +208,7 @@ impl<'txn> TableTree<'txn> {
         table_root: Option<PageNumber>,
     ) -> Result {
         // Bypass .get_table() since the table types are dynamic
-        // TODO: optimize way this get()
+        // TODO: optimize away this get()
         let mut definition = self.tree.get(name).unwrap().unwrap();
         // No-op if the root has not changed
         if definition.table_root == table_root {
