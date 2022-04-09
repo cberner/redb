@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
     AccessGuard, FreePolicy, IndexBuilder, InternalAccessor, InternalBuilder, InternalMutator,
-    LeafAccessor, LeafBuilder2, BTREE_ORDER, INTERNAL, LEAF,
+    LeafAccessor, LeafBuilder, LeafBuilder2, INTERNAL, LEAF,
 };
 use crate::tree_store::btree_utils::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
 use crate::tree_store::page_store::{Page, PageImpl, PageNumber, TransactionalMemory};
@@ -56,8 +56,11 @@ pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + 
             if !found {
                 return Ok((Subtree(page.get_page_number()), None));
             }
-            // TODO: also check if page is large enough
-            let result = if accessor.num_pairs() < BTREE_ORDER / 2 {
+            let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
+                - accessor.length_of_pairs(position, position + 1);
+            let new_required_bytes =
+                LeafBuilder::required_bytes(accessor.num_pairs() - 1, new_kv_bytes);
+            let result = if new_required_bytes < manager.get_page_size() / 2 {
                 let mut partial = Vec::with_capacity(accessor.num_pairs());
                 for i in 0..accessor.num_pairs() {
                     if i == position {
@@ -293,79 +296,5 @@ pub(crate) unsafe fn tree_delete_helper<'a, K: RedbKey + ?Sized, V: RedbValue + 
             Ok((final_result, found))
         }
         _ => unreachable!(),
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::tree_store::btree_utils::BTREE_ORDER;
-    use crate::{Database, TableDefinition};
-    use tempfile::NamedTempFile;
-
-    const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
-
-    #[test]
-    fn tree_balance() {
-        fn expected_height(mut elements: usize) -> usize {
-            // Root may have only 2 entries
-            let mut height = 1;
-            elements /= 2;
-
-            // Leaves may have only a single entry
-            height += 1;
-
-            // Each internal node half-full, plus 1 to round up
-            height += (elements as f32).log((BTREE_ORDER / 2) as f32) as usize + 1;
-
-            height
-        }
-
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-
-        // One for the last table id counter, and one for the "x" -> TableDefinition entry
-        let num_internal_entries = 2;
-
-        let db = unsafe { Database::create(tmpfile.path(), 16 * 1024 * 1024).unwrap() };
-        let txn = db.begin_write().unwrap();
-
-        let elements = (BTREE_ORDER / 2).pow(2) as usize - num_internal_entries;
-
-        {
-            let mut table = txn.open_table(X).unwrap();
-            for i in (0..elements).rev() {
-                table.insert(&i.to_le_bytes(), b"").unwrap();
-            }
-        }
-        txn.commit().unwrap();
-
-        let expected = expected_height(elements + num_internal_entries);
-        let txn = db.begin_write().unwrap();
-        let height = txn.stats().unwrap().tree_height();
-        assert!(
-            height <= expected,
-            "height={} expected={}",
-            height,
-            expected
-        );
-
-        let reduce_to = BTREE_ORDER / 2 - num_internal_entries;
-        {
-            let mut table = txn.open_table(X).unwrap();
-            for i in 0..(elements - reduce_to) {
-                table.remove(&i.to_le_bytes()).unwrap();
-            }
-        }
-        txn.commit().unwrap();
-
-        let expected = expected_height(reduce_to + num_internal_entries);
-        let txn = db.begin_write().unwrap();
-        let height = txn.stats().unwrap().tree_height();
-        txn.abort().unwrap();
-        assert!(
-            height <= expected,
-            "height={} expected={}",
-            height,
-            expected
-        );
     }
 }
