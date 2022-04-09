@@ -57,7 +57,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     if entries.is_empty() {
                         None
                     } else {
-                        let mut builder = LeafBuilder2::new(self.mem);
+                        let mut builder = LeafBuilder2::new(self.mem, entries.len());
                         for (key, value) in entries.iter() {
                             builder.push(key, value);
                         }
@@ -139,7 +139,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             LEAF => {
                 let accessor = LeafAccessor::new(&page);
                 let (position, found) = accessor.position::<K>(key);
-                let mut builder = LeafBuilder2::new(self.mem);
+                let mut builder = LeafBuilder2::new(self.mem, accessor.num_pairs() + 1);
                 for i in 0..accessor.num_pairs() {
                     if i == position {
                         builder.push(key, value);
