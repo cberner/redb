@@ -21,6 +21,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct DatabaseStats {
     pub(crate) tree_height: usize,
     pub(crate) free_pages: usize,
+    pub(crate) leaf_pages: usize,
+    pub(crate) branch_pages: usize,
     pub(crate) stored_leaf_bytes: usize,
     pub(crate) metadata_bytes: usize,
     pub(crate) fragmented_bytes: usize,
@@ -36,6 +38,17 @@ impl DatabaseStats {
     /// Number of free pages remaining
     pub fn free_pages(&self) -> usize {
         self.free_pages
+    }
+
+    /// Number of leaf pages that store user data
+    pub fn leaf_pages(&self) -> usize {
+        self.leaf_pages
+    }
+
+    /// Number of branch pages in btrees that store user data
+    // TODO: rename all internal references to "index" or "internal" pages to "branch"
+    pub fn branch_pages(&self) -> usize {
+        self.branch_pages
     }
 
     /// Number of bytes consumed by keys and values that have been inserted.
@@ -404,6 +417,8 @@ impl<'db> WriteTransaction<'db> {
         Ok(DatabaseStats {
             tree_height: data_tree_stats.tree_height(),
             free_pages: self.mem.count_free_pages()?,
+            leaf_pages: data_tree_stats.leaf_pages(),
+            branch_pages: data_tree_stats.branch_pages(),
             stored_leaf_bytes: data_tree_stats.stored_bytes(),
             metadata_bytes: total_metadata_bytes,
             fragmented_bytes: total_fragmented,

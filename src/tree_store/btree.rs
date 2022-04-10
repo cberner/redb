@@ -118,6 +118,14 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
         self.read_tree().height()
     }
 
+    pub(crate) fn branch_pages(&self) -> usize {
+        self.read_tree().branch_pages()
+    }
+
+    pub(crate) fn leaf_pages(&self) -> usize {
+        self.read_tree().leaf_pages()
+    }
+
     fn read_tree(&self) -> Btree<K, V> {
         Btree::new(self.root, self.mem)
     }
@@ -267,6 +275,63 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                 }
 
                 bytes
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn branch_pages(&self) -> usize {
+        if let Some(root) = self.root {
+            self.branch_pages_helper(root)
+        } else {
+            0
+        }
+    }
+
+    // TODO: merge all these stats helpers together
+    fn branch_pages_helper(&self, page_number: PageNumber) -> usize {
+        let page = self.mem.get_page(page_number);
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => 0,
+            INTERNAL => {
+                let accessor = InternalAccessor::new(&page);
+                let mut count = 1;
+                for i in 0..accessor.count_children() {
+                    if let Some(child) = accessor.child_page(i) {
+                        count += self.branch_pages_helper(child);
+                    }
+                }
+
+                count
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn leaf_pages(&self) -> usize {
+        if let Some(root) = self.root {
+            self.leaf_pages_helper(root)
+        } else {
+            0
+        }
+    }
+
+    fn leaf_pages_helper(&self, page_number: PageNumber) -> usize {
+        let page = self.mem.get_page(page_number);
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => 1,
+            INTERNAL => {
+                let accessor = InternalAccessor::new(&page);
+                let mut count = 0;
+                for i in 0..accessor.count_children() {
+                    if let Some(child) = accessor.child_page(i) {
+                        count += self.leaf_pages_helper(child);
+                    }
+                }
+
+                count
             }
             _ => unreachable!(),
         }
