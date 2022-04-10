@@ -337,7 +337,7 @@ impl<'a, 'b> LeafBuilder2<'a, 'b> {
         required_size > self.mem.get_page_size() && self.pairs.len() > 1
     }
 
-    pub(in crate::tree_store) fn build_split(self) -> Result<(PageMut<'b>, PageMut<'b>)> {
+    pub(in crate::tree_store) fn build_split(self) -> Result<(PageMut<'b>, &'a [u8], PageMut<'b>)> {
         let total_size = self.total_key_bytes + self.total_value_bytes;
         let mut division = 0;
         let mut first_split_key_bytes = 0;
@@ -377,7 +377,7 @@ impl<'a, 'b> LeafBuilder2<'a, 'b> {
         }
         drop(builder);
 
-        Ok((page1, page2))
+        Ok((page1, self.pairs[division - 1].0, page2))
     }
 
     pub(in crate::tree_store) fn build(self) -> Result<PageMut<'b>> {
@@ -649,6 +649,14 @@ impl<'a, 'b> IndexBuilder<'a, 'b> {
         self.total_key_bytes += key.len();
     }
 
+    pub(in crate::tree_store) fn to_single_child(&self) -> Option<PageNumber> {
+        if self.children.len() > 1 {
+            None
+        } else {
+            Some(self.children[0])
+        }
+    }
+
     pub(in crate::tree_store) fn build(self) -> Result<PageMut<'b>> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
         let size = InternalBuilder::required_bytes(self.keys.len(), self.total_key_bytes);
@@ -669,12 +677,12 @@ impl<'a, 'b> IndexBuilder<'a, 'b> {
         size > self.mem.get_page_size() && self.keys.len() >= 3
     }
 
-    pub(in crate::tree_store) fn build_split(self) -> Result<(PageMut<'b>, Vec<u8>, PageMut<'b>)> {
+    pub(in crate::tree_store) fn build_split(self) -> Result<(PageMut<'b>, &'a [u8], PageMut<'b>)> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
         assert!(self.keys.len() >= 3);
         let division = self.keys.len() / 2;
         let first_split_key_len: usize = self.keys.iter().take(division).map(|k| k.len()).sum();
-        let division_key = self.keys[division].to_vec();
+        let division_key = self.keys[division];
         let second_split_key_len = self.total_key_bytes - first_split_key_len - division_key.len();
 
         let size = InternalBuilder::required_bytes(division, first_split_key_len);

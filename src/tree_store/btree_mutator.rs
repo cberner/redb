@@ -2,7 +2,9 @@ use crate::tree_store::btree_base::{
     FreePolicy, IndexBuilder, InternalAccessor, InternalBuilder, InternalMutator, LeafAccessor,
     LeafBuilder, LeafBuilder2, INTERNAL, LEAF,
 };
-use crate::tree_store::btree_mutator::DeletionResult::{PartialInternal, PartialLeaf, Subtree};
+use crate::tree_store::btree_mutator::DeletionResult::{
+    DeletedInternal, PartialInternal, PartialLeaf, Subtree,
+};
 use crate::tree_store::page_store::{Page, PageImpl};
 use crate::tree_store::{AccessGuardMut, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
@@ -16,27 +18,10 @@ enum DeletionResult {
     Subtree(PageNumber),
     // A leaf subtree with too few entries
     PartialLeaf { deleted_pair: usize },
-    // A index page subtree with too few children
-    PartialInternal(Vec<PageNumber>, Vec<Vec<u8>>),
-}
-
-// Pages must be in sorted order
-fn make_index(
-    children: &[PageNumber],
-    keys: &[impl AsRef<[u8]>],
-    mem: &TransactionalMemory,
-) -> Result<PageNumber> {
-    assert_eq!(children.len() - 1, keys.len());
-    let key_size = keys.iter().map(|x| x.as_ref().len()).sum();
-    let mut page = mem.allocate(InternalBuilder::required_bytes(keys.len(), key_size))?;
-    let mut builder = InternalBuilder::new(&mut page, keys.len());
-    builder.write_first_page(children[0]);
-    for i in 1..children.len() {
-        let key = &keys[i - 1];
-        builder.write_nth_key(key.as_ref(), children[i], i - 1);
-    }
-    drop(builder);
-    Ok(page.get_page_number())
+    // A index page subtree with fewer children than desired
+    PartialInternal(PageNumber),
+    // Indicates that the index node was deleted, and includes the only remaining child
+    DeletedInternal(PageNumber),
 }
 
 pub(crate) struct MutateHelper<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
@@ -95,13 +80,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         Some(builder.build()?.get_page_number())
                     }
                 }
-                DeletionResult::PartialInternal(pages, keys) => {
-                    if keys.is_empty() {
-                        Some(pages[0])
-                    } else {
-                        Some(make_index(&pages, &keys, self.mem)?)
-                    }
-                }
+                DeletionResult::PartialInternal(page_number) => Some(page_number),
+                DeletionResult::DeletedInternal(remaining_child) => Some(remaining_child),
             };
             *self.root = new_root;
             Ok(found)
@@ -227,8 +207,9 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
 
                     (new_page_number, None, guard)
                 } else {
-                    let (new_page1, new_page2) = builder.build_split()?;
+                    let (new_page1, split_key, new_page2) = builder.build_split()?;
                     let page_number = page.get_page_number();
+                    let split_key = split_key.to_vec();
                     drop(page);
                     self.free_policy
                         .conditional_free(page_number, self.freed, self.mem)?;
@@ -237,7 +218,6 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     let new_page_number2 = new_page2.get_page_number();
                     let accessor = LeafAccessor::new(&new_page1);
                     let division = accessor.num_pairs();
-                    let split_key = accessor.last_entry().key().to_vec();
                     let guard = if position < division {
                         let accessor = LeafAccessor::new(&new_page1);
                         let offset = accessor.offset_of_value(position).unwrap();
@@ -306,7 +286,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     let (new_page1, split_key, new_page2) = builder.build_split()?;
                     (
                         new_page1.get_page_number(),
-                        Some((split_key, new_page2.get_page_number())),
+                        Some((split_key.to_vec(), new_page2.get_page_number())),
                         guard,
                     )
                 } else {
@@ -383,6 +363,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 ));
                 Ok((result, guard))
             }
+            // TODO: cleanup the handling of internal index nodes. This function is insanely long
             INTERNAL => {
                 let accessor = InternalAccessor::new(&page);
                 let original_page_number = page.get_page_number();
@@ -441,17 +422,17 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         let partial_child_accessor = LeafAccessor::new(&partial_child_page);
 
                         let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                        let merge_with_page =
+                            self.mem.get_page(accessor.child_page(merge_with).unwrap());
+                        let merge_with_accessor = LeafAccessor::new(&merge_with_page);
                         debug_assert!(merge_with < accessor.count_children());
-                        let mut children = vec![];
-                        let mut keys = vec![];
+                        let mut builder = IndexBuilder::new(&self.mem);
                         for i in 0..accessor.count_children() {
                             if i == child_index {
                                 continue;
                             }
                             let page_number = accessor.child_page(i).unwrap();
                             if i == merge_with {
-                                let merge_with_page = self.mem.get_page(page_number);
-                                let merge_with_accessor = LeafAccessor::new(&merge_with_page);
                                 let mut child_builder = LeafBuilder2::new(
                                     self.mem,
                                     partial_child_accessor.num_pairs() - 1
@@ -480,48 +461,55 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                                     }
                                 }
                                 if child_builder.should_split() {
-                                    let (new_page1, new_page2) = child_builder.build_split()?;
-                                    let leaf_accessor = LeafAccessor::new(&new_page1);
-                                    keys.push(leaf_accessor.last_entry().key().to_vec());
-                                    children.push(new_page1.get_page_number());
-                                    children.push(new_page2.get_page_number());
+                                    let (new_page1, split_key, new_page2) =
+                                        child_builder.build_split()?;
+                                    builder.push_key(split_key);
+                                    builder.push_child(new_page1.get_page_number());
+                                    builder.push_child(new_page2.get_page_number());
                                 } else {
                                     let new_page = child_builder.build()?;
-                                    children.push(new_page.get_page_number());
+                                    builder.push_child(new_page.get_page_number());
                                 }
-                                drop(merge_with_page);
-                                self.free_policy.conditional_free(
-                                    page_number,
-                                    self.freed,
-                                    self.mem,
-                                )?;
 
                                 let merged_key_index = max(child_index, merge_with);
                                 if merged_key_index < accessor.count_children() - 1 {
-                                    // TODO: find a way to optimize away this to_vec()?
-                                    keys.push(accessor.key(merged_key_index).unwrap().to_vec());
+                                    builder.push_key(accessor.key(merged_key_index).unwrap());
                                 }
                             } else {
-                                children.push(page_number);
+                                builder.push_child(page_number);
                                 if i < accessor.count_children() - 1 {
-                                    // TODO: find a way to optimize away this to_vec()?
-                                    keys.push(accessor.key(i).unwrap().to_vec());
+                                    builder.push_key(accessor.key(i).unwrap());
                                 }
                             }
                         }
-                        let total_key_bytes: usize = keys.iter().map(|x| x.len()).sum();
-                        let required = InternalBuilder::required_bytes(keys.len(), total_key_bytes);
-                        if required < self.mem.get_page_size() / 2 {
-                            PartialInternal(children, keys)
+                        let result = if let Some(only_child) = builder.to_single_child() {
+                            DeletedInternal(only_child)
                         } else {
-                            Subtree(make_index(&children, &keys, self.mem)?)
-                        }
+                            // TODO: can we optimize away this page allocation?
+                            // The PartialInternal gets returned, and then the caller has to merge it immediately
+                            let new_page = builder.build()?;
+                            let accessor = InternalAccessor::new(&new_page);
+                            if accessor.total_length() < self.mem.get_page_size() / 2 {
+                                PartialInternal(new_page.get_page_number())
+                            } else {
+                                Subtree(new_page.get_page_number())
+                            }
+                        };
+
+                        let page_number = merge_with_page.get_page_number();
+                        drop(merge_with_page);
+                        self.free_policy
+                            .conditional_free(page_number, self.freed, self.mem)?;
+
+                        result
                     }
-                    PartialInternal(partial_children, partial_keys) => {
+                    DeletionResult::DeletedInternal(only_grandchild) => {
                         let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                        let merge_with_page =
+                            self.mem.get_page(accessor.child_page(merge_with).unwrap());
+                        let merge_with_accessor = InternalAccessor::new(&merge_with_page);
                         debug_assert!(merge_with < accessor.count_children());
-                        let mut children = vec![];
-                        let mut keys = vec![];
+                        let mut builder = IndexBuilder::new(self.mem);
                         for i in 0..accessor.count_children() {
                             if i == child_index {
                                 continue;
@@ -531,17 +519,11 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                                 let mut child_builder = IndexBuilder::new(self.mem);
                                 let separator_key =
                                     accessor.key(min(child_index, merge_with)).unwrap();
-                                let merge_with_page = self.mem.get_page(page_number);
-                                let merge_with_accessor = InternalAccessor::new(&merge_with_page);
                                 if child_index < merge_with {
-                                    for child in &partial_children {
-                                        child_builder.push_child(*child);
-                                    }
-                                    for key in partial_keys.iter() {
-                                        child_builder.push_key(key)
-                                    }
+                                    child_builder.push_child(only_grandchild);
                                     child_builder.push_key(separator_key);
                                 }
+                                // TODO: add a method to IndexBuilder to push all children & keys from an InternalAccessor
                                 for j in 0..merge_with_accessor.count_children() {
                                     child_builder
                                         .push_child(merge_with_accessor.child_page(j).unwrap());
@@ -551,50 +533,142 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                                 }
                                 if child_index > merge_with {
                                     child_builder.push_key(separator_key);
-                                    for child in &partial_children {
-                                        child_builder.push_child(*child);
+                                    child_builder.push_child(only_grandchild);
+                                }
+                                if child_builder.should_split() {
+                                    let (new_page1, separator, new_page2) =
+                                        child_builder.build_split()?;
+                                    builder.push_child(new_page1.get_page_number());
+                                    builder.push_key(&separator);
+                                    builder.push_child(new_page2.get_page_number());
+                                } else {
+                                    let new_page = child_builder.build()?;
+                                    builder.push_child(new_page.get_page_number());
+                                }
+
+                                let merged_key_index = max(child_index, merge_with);
+                                if merged_key_index < accessor.count_children() - 1 {
+                                    builder.push_key(accessor.key(merged_key_index).unwrap());
+                                }
+                            } else {
+                                builder.push_child(page_number);
+                                if i < accessor.count_children() - 1 {
+                                    builder.push_key(accessor.key(i).unwrap());
+                                }
+                            }
+                        }
+                        let result = if let Some(only_child) = builder.to_single_child() {
+                            DeletedInternal(only_child)
+                        } else {
+                            let new_page = builder.build()?;
+                            let accessor = InternalAccessor::new(&new_page);
+                            if accessor.total_length() < self.mem.get_page_size() / 2 {
+                                PartialInternal(new_page.get_page_number())
+                            } else {
+                                Subtree(new_page.get_page_number())
+                            }
+                        };
+
+                        let page_number = merge_with_page.get_page_number();
+                        drop(merge_with_page);
+                        self.free_policy
+                            .conditional_free(page_number, self.freed, self.mem)?;
+
+                        result
+                    }
+                    PartialInternal(partial_child) => {
+                        let partial_child_page = self.mem.get_page(partial_child);
+                        let partial_child_accessor = InternalAccessor::new(&partial_child_page);
+                        let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                        let merge_with_page =
+                            self.mem.get_page(accessor.child_page(merge_with).unwrap());
+                        let merge_with_accessor = InternalAccessor::new(&merge_with_page);
+                        debug_assert!(merge_with < accessor.count_children());
+                        let mut builder = IndexBuilder::new(self.mem);
+                        for i in 0..accessor.count_children() {
+                            if i == child_index {
+                                continue;
+                            }
+                            let page_number = accessor.child_page(i).unwrap();
+                            if i == merge_with {
+                                let mut child_builder = IndexBuilder::new(self.mem);
+                                let separator_key =
+                                    accessor.key(min(child_index, merge_with)).unwrap();
+                                if child_index < merge_with {
+                                    for j in 0..partial_child_accessor.count_children() {
+                                        child_builder.push_child(
+                                            partial_child_accessor.child_page(j).unwrap(),
+                                        );
+                                        if j < partial_child_accessor.count_children() - 1 {
+                                            child_builder
+                                                .push_key(partial_child_accessor.key(j).unwrap());
+                                        }
                                     }
-                                    for key in partial_keys.iter() {
-                                        child_builder.push_key(key)
+                                    child_builder.push_key(separator_key);
+                                }
+                                // TODO: add a method to IndexBuilder to push all children & keys from an InternalAccessor
+                                for j in 0..merge_with_accessor.count_children() {
+                                    child_builder
+                                        .push_child(merge_with_accessor.child_page(j).unwrap());
+                                    if j < merge_with_accessor.count_children() - 1 {
+                                        child_builder.push_key(merge_with_accessor.key(j).unwrap());
+                                    }
+                                }
+                                if child_index > merge_with {
+                                    child_builder.push_key(separator_key);
+                                    for j in 0..partial_child_accessor.count_children() {
+                                        child_builder.push_child(
+                                            partial_child_accessor.child_page(j).unwrap(),
+                                        );
+                                        if j < partial_child_accessor.count_children() - 1 {
+                                            child_builder
+                                                .push_key(partial_child_accessor.key(j).unwrap());
+                                        }
                                     }
                                 }
                                 if child_builder.should_split() {
                                     let (new_page1, separator, new_page2) =
                                         child_builder.build_split()?;
-                                    children.push(new_page1.get_page_number());
-                                    keys.push(separator);
-                                    children.push(new_page2.get_page_number());
+                                    builder.push_child(new_page1.get_page_number());
+                                    builder.push_key(&separator);
+                                    builder.push_child(new_page2.get_page_number());
                                 } else {
                                     let new_page = child_builder.build()?;
-                                    children.push(new_page.get_page_number());
+                                    builder.push_child(new_page.get_page_number());
                                 }
-                                drop(merge_with_page);
-                                self.free_policy.conditional_free(
-                                    page_number,
-                                    self.freed,
-                                    self.mem,
-                                )?;
 
                                 let merged_key_index = max(child_index, merge_with);
                                 if merged_key_index < accessor.count_children() - 1 {
-                                    // TODO: find a way to optimize away this to_vec()?
-                                    keys.push(accessor.key(merged_key_index).unwrap().to_vec());
+                                    builder.push_key(accessor.key(merged_key_index).unwrap());
                                 }
                             } else {
-                                children.push(page_number);
+                                builder.push_child(page_number);
                                 if i < accessor.count_children() - 1 {
-                                    // TODO: find a way to optimize away this to_vec()?
-                                    keys.push(accessor.key(i).unwrap().to_vec());
+                                    builder.push_key(accessor.key(i).unwrap());
                                 }
                             }
                         }
-                        let total_key_bytes: usize = keys.iter().map(|x| x.len()).sum();
-                        let required = InternalBuilder::required_bytes(keys.len(), total_key_bytes);
-                        if required < self.mem.get_page_size() / 2 {
-                            PartialInternal(children, keys)
+                        let result = if let Some(only_child) = builder.to_single_child() {
+                            DeletedInternal(only_child)
                         } else {
-                            Subtree(make_index(&children, &keys, self.mem)?)
-                        }
+                            let new_page = builder.build()?;
+                            let accessor = InternalAccessor::new(&new_page);
+                            if accessor.total_length() < self.mem.get_page_size() / 2 {
+                                PartialInternal(new_page.get_page_number())
+                            } else {
+                                Subtree(new_page.get_page_number())
+                            }
+                        };
+
+                        let page_number = merge_with_page.get_page_number();
+                        drop(merge_with_page);
+                        self.free_policy
+                            .conditional_free(page_number, self.freed, self.mem)?;
+                        drop(partial_child_page);
+                        self.free_policy
+                            .conditional_free(partial_child, self.freed, self.mem)?;
+
+                        result
                     }
                 };
 
