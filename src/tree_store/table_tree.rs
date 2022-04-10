@@ -313,6 +313,9 @@ impl<'txn> TableTree<'txn> {
         let master_tree_height = self.tree.height();
         let mut max_subtree_height = 0;
         let mut total_stored_bytes = 0;
+        // Count the master tree leaf pages as branches, since they point to the data trees
+        let mut branch_pages = self.tree.branch_pages() + self.tree.leaf_pages();
+        let mut leaf_pages = 0;
         // Include the master table in the overhead
         let mut total_metadata_bytes = self.tree.overhead_bytes() + self.tree.stored_leaf_bytes();
         let mut total_fragmented = self.tree.fragmented_bytes();
@@ -325,10 +328,14 @@ impl<'txn> TableTree<'txn> {
             total_stored_bytes += subtree.stored_leaf_bytes();
             total_metadata_bytes += subtree.overhead_bytes();
             total_fragmented += subtree.fragmented_bytes();
+            branch_pages += subtree.branch_pages();
+            leaf_pages += subtree.leaf_pages();
         }
         Ok(DatabaseStats {
             tree_height: master_tree_height + max_subtree_height,
             free_pages: self.mem.count_free_pages()?,
+            leaf_pages,
+            branch_pages,
             stored_leaf_bytes: total_stored_bytes,
             metadata_bytes: total_metadata_bytes,
             fragmented_bytes: total_fragmented,
