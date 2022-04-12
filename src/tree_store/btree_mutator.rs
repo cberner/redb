@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
     FreePolicy, IndexBuilder, InternalAccessor, InternalBuilder, InternalMutator, LeafAccessor,
-    LeafBuilder, LeafBuilder2, INTERNAL, LEAF,
+    LeafBuilder, LeafBuilder2, LeafMutator, INTERNAL, LEAF,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedInternal, PartialInternal, PartialLeaf, Subtree,
@@ -179,6 +179,24 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     };
                 }
 
+                // Fast-path for uncommitted pages, that can be modified in-place
+                if self.mem.uncommitted(page.get_page_number())
+                    && LeafMutator::sufficient_insert_inplace_space(
+                        &page, position, found, key, value,
+                    )
+                {
+                    let page_number = page.get_page_number();
+                    drop(page);
+                    let mut page_mut = self.mem.get_page_mut(page_number);
+                    let mut mutator = LeafMutator::new(&mut page_mut);
+                    mutator.insert(position, found, key, value);
+                    let new_page_accessor = LeafAccessor::new(&page_mut);
+                    let offset = new_page_accessor.offset_of_value(position).unwrap();
+                    drop(new_page_accessor);
+                    let guard = AccessGuardMut::new(page_mut, offset, value.len());
+                    return Ok((page_number, None, guard));
+                }
+
                 let mut builder = LeafBuilder2::new(self.mem, accessor.num_pairs() + 1);
                 for i in 0..accessor.num_pairs() {
                     if i == position {
@@ -328,6 +346,29 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     - accessor.length_of_pairs(position, position + 1);
                 let new_required_bytes =
                     LeafBuilder::required_bytes(accessor.num_pairs() - 1, new_kv_bytes);
+                let uncommitted = self.mem.uncommitted(page.get_page_number());
+
+                // Fast-path for dirty pages
+                if uncommitted
+                    && new_required_bytes >= self.mem.get_page_size() / 2
+                    && accessor.num_pairs() > 1
+                {
+                    let (start, end) = accessor.value_range(position).unwrap();
+                    let page_number = page.get_page_number();
+                    drop(page);
+                    // Safety: caller guaranteed that no other references to uncommitted data exist,
+                    // and we just dropped the reference to page
+                    let page_mut = self.mem.get_page_mut(page_number);
+                    let guard = AccessGuard::remove_on_drop(
+                        page_mut,
+                        start,
+                        end - start,
+                        position,
+                        self.mem,
+                    );
+                    return Ok((Subtree(page_number), Some(guard)));
+                }
+
                 let result = if new_required_bytes < self.mem.get_page_size() / 2 {
                     PartialLeaf {
                         deleted_pair: position,
@@ -343,7 +384,6 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     }
                     Subtree(builder.build()?.get_page_number())
                 };
-                let uncommitted = self.mem.uncommitted(page.get_page_number());
                 let free_on_drop = if !uncommitted || matches!(self.free_policy, FreePolicy::Never)
                 {
                     // Won't be freed until the end of the transaction, so returning the page
@@ -421,12 +461,13 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         let partial_child_page = self.mem.get_page(child_page_number);
                         let partial_child_accessor = LeafAccessor::new(&partial_child_page);
 
+                        // TODO: avoid trying to merge with a page that as a single large value
                         let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                         let merge_with_page =
                             self.mem.get_page(accessor.child_page(merge_with).unwrap());
                         let merge_with_accessor = LeafAccessor::new(&merge_with_page);
                         debug_assert!(merge_with < accessor.count_children());
-                        let mut builder = IndexBuilder::new(&self.mem);
+                        let mut builder = IndexBuilder::new(self.mem);
                         for i in 0..accessor.count_children() {
                             if i == child_index {
                                 continue;
@@ -539,7 +580,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                                     let (new_page1, separator, new_page2) =
                                         child_builder.build_split()?;
                                     builder.push_child(new_page1.get_page_number());
-                                    builder.push_key(&separator);
+                                    builder.push_key(separator);
                                     builder.push_child(new_page2.get_page_number());
                                 } else {
                                     let new_page = child_builder.build()?;
@@ -630,7 +671,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                                     let (new_page1, separator, new_page2) =
                                         child_builder.build_split()?;
                                     builder.push_child(new_page1.get_page_number());
-                                    builder.push_key(&separator);
+                                    builder.push_key(separator);
                                     builder.push_child(new_page2.get_page_number());
                                 } else {
                                     let new_page = child_builder.build()?;
