@@ -928,10 +928,10 @@ pub(in crate::tree_store) struct IndexBuilder<'a, 'b> {
 }
 
 impl<'a, 'b> IndexBuilder<'a, 'b> {
-    pub(in crate::tree_store) fn new(mem: &'b TransactionalMemory) -> Self {
+    pub(in crate::tree_store) fn new(mem: &'b TransactionalMemory, child_capacity: usize) -> Self {
         Self {
-            children: vec![],
-            keys: vec![],
+            children: Vec::with_capacity(child_capacity),
+            keys: Vec::with_capacity(child_capacity - 1),
             total_key_bytes: 0,
             mem,
         }

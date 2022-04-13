@@ -100,7 +100,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             )?;
 
             let new_root = if let Some((key, page2)) = more {
-                let mut builder = IndexBuilder::new(self.mem);
+                let mut builder = IndexBuilder::new(self.mem, 2);
                 builder.push_child(page1);
                 builder.push_key(&key);
                 builder.push_child(page2);
@@ -273,7 +273,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 }
 
                 // A child was added, or we couldn't use the fast-path above
-                let mut builder = IndexBuilder::new(self.mem);
+                let mut builder = IndexBuilder::new(self.mem, accessor.count_children() + 1);
                 if child_index == 0 {
                     builder.push_child(page1);
                     if let Some((ref index_key2, page2)) = more {
@@ -467,7 +467,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             self.mem.get_page(accessor.child_page(merge_with).unwrap());
                         let merge_with_accessor = LeafAccessor::new(&merge_with_page);
                         debug_assert!(merge_with < accessor.count_children());
-                        let mut builder = IndexBuilder::new(self.mem);
+                        let mut builder = IndexBuilder::new(self.mem, accessor.count_children());
                         for i in 0..accessor.count_children() {
                             if i == child_index {
                                 continue;
@@ -550,14 +550,17 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             self.mem.get_page(accessor.child_page(merge_with).unwrap());
                         let merge_with_accessor = InternalAccessor::new(&merge_with_page);
                         debug_assert!(merge_with < accessor.count_children());
-                        let mut builder = IndexBuilder::new(self.mem);
+                        let mut builder = IndexBuilder::new(self.mem, accessor.count_children());
                         for i in 0..accessor.count_children() {
                             if i == child_index {
                                 continue;
                             }
                             let page_number = accessor.child_page(i).unwrap();
                             if i == merge_with {
-                                let mut child_builder = IndexBuilder::new(self.mem);
+                                let mut child_builder = IndexBuilder::new(
+                                    self.mem,
+                                    merge_with_accessor.count_children() + 1,
+                                );
                                 let separator_key =
                                     accessor.key(min(child_index, merge_with)).unwrap();
                                 if child_index < merge_with {
@@ -620,19 +623,25 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     PartialInternal(partial_child) => {
                         let partial_child_page = self.mem.get_page(partial_child);
                         let partial_child_accessor = InternalAccessor::new(&partial_child_page);
+                        // TODO: optimize selection of sibling to merge with. Pick the least full one,
+                        // or don't merge if neither page is small enough
                         let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                         let merge_with_page =
                             self.mem.get_page(accessor.child_page(merge_with).unwrap());
                         let merge_with_accessor = InternalAccessor::new(&merge_with_page);
                         debug_assert!(merge_with < accessor.count_children());
-                        let mut builder = IndexBuilder::new(self.mem);
+                        let mut builder = IndexBuilder::new(self.mem, accessor.count_children());
                         for i in 0..accessor.count_children() {
                             if i == child_index {
                                 continue;
                             }
                             let page_number = accessor.child_page(i).unwrap();
                             if i == merge_with {
-                                let mut child_builder = IndexBuilder::new(self.mem);
+                                let mut child_builder = IndexBuilder::new(
+                                    self.mem,
+                                    merge_with_accessor.count_children()
+                                        + partial_child_accessor.count_children(),
+                                );
                                 let separator_key =
                                     accessor.key(min(child_index, merge_with)).unwrap();
                                 if child_index < merge_with {
