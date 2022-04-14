@@ -567,14 +567,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                                     child_builder.push_child(only_grandchild);
                                     child_builder.push_key(separator_key);
                                 }
-                                // TODO: add a method to IndexBuilder to push all children & keys from an InternalAccessor
-                                for j in 0..merge_with_accessor.count_children() {
-                                    child_builder
-                                        .push_child(merge_with_accessor.child_page(j).unwrap());
-                                    if j < merge_with_accessor.count_children() - 1 {
-                                        child_builder.push_key(merge_with_accessor.key(j).unwrap());
-                                    }
-                                }
+                                child_builder.push_all(&merge_with_accessor);
                                 if child_index > merge_with {
                                     child_builder.push_key(separator_key);
                                     child_builder.push_child(only_grandchild);
@@ -645,36 +638,13 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                                 let separator_key =
                                     accessor.key(min(child_index, merge_with)).unwrap();
                                 if child_index < merge_with {
-                                    for j in 0..partial_child_accessor.count_children() {
-                                        child_builder.push_child(
-                                            partial_child_accessor.child_page(j).unwrap(),
-                                        );
-                                        if j < partial_child_accessor.count_children() - 1 {
-                                            child_builder
-                                                .push_key(partial_child_accessor.key(j).unwrap());
-                                        }
-                                    }
+                                    child_builder.push_all(&partial_child_accessor);
                                     child_builder.push_key(separator_key);
                                 }
-                                // TODO: add a method to IndexBuilder to push all children & keys from an InternalAccessor
-                                for j in 0..merge_with_accessor.count_children() {
-                                    child_builder
-                                        .push_child(merge_with_accessor.child_page(j).unwrap());
-                                    if j < merge_with_accessor.count_children() - 1 {
-                                        child_builder.push_key(merge_with_accessor.key(j).unwrap());
-                                    }
-                                }
+                                child_builder.push_all(&merge_with_accessor);
                                 if child_index > merge_with {
                                     child_builder.push_key(separator_key);
-                                    for j in 0..partial_child_accessor.count_children() {
-                                        child_builder.push_child(
-                                            partial_child_accessor.child_page(j).unwrap(),
-                                        );
-                                        if j < partial_child_accessor.count_children() - 1 {
-                                            child_builder
-                                                .push_key(partial_child_accessor.key(j).unwrap());
-                                        }
-                                    }
+                                    child_builder.push_all(&partial_child_accessor);
                                 }
                                 if child_builder.should_split() {
                                     let (new_page1, separator, new_page2) =
