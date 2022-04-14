@@ -946,6 +946,18 @@ impl<'a, 'b> IndexBuilder<'a, 'b> {
         self.total_key_bytes += key.len();
     }
 
+    pub(in crate::tree_store) fn push_all<T: Page>(
+        &mut self,
+        accessor: &'a InternalAccessor<'_, '_, T>,
+    ) {
+        for i in 0..accessor.count_children() {
+            self.push_child(accessor.child_page(i).unwrap());
+        }
+        for i in 0..(accessor.count_children() - 1) {
+            self.push_key(accessor.key(i).unwrap());
+        }
+    }
+
     pub(in crate::tree_store) fn to_single_child(&self) -> Option<PageNumber> {
         if self.children.len() > 1 {
             None
