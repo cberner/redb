@@ -911,10 +911,6 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
         ))
     }
 
-    pub(in crate::tree_store) fn total_key_length(&self) -> usize {
-        self.key_end(self.num_keys() - 1) - self.key_offset(0)
-    }
-
     fn num_keys(&self) -> usize {
         self.num_keys
     }
@@ -935,6 +931,10 @@ impl<'a, 'b> IndexBuilder<'a, 'b> {
             total_key_bytes: 0,
             mem,
         }
+    }
+
+    pub(in crate::tree_store) fn replace_child(&mut self, index: usize, child: PageNumber) {
+        self.children[index] = child;
     }
 
     pub(in crate::tree_store) fn push_child(&mut self, child: PageNumber) {
