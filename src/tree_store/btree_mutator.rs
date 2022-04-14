@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
-    FreePolicy, IndexBuilder, InternalAccessor, InternalBuilder, InternalMutator, LeafAccessor,
-    LeafBuilder, LeafBuilder2, LeafMutator, INTERNAL, LEAF,
+    FreePolicy, IndexBuilder, InternalAccessor, InternalMutator, LeafAccessor, LeafBuilder,
+    LeafBuilder2, LeafMutator, INTERNAL, LEAF,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedInternal, PartialInternal, PartialLeaf, Subtree,
@@ -413,49 +413,40 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 if found.is_none() {
                     return Ok((Subtree(original_page_number), None));
                 }
+                if let Subtree(new_child) = result {
+                    let result_page_number = if new_child == child_page_number {
+                        // NO-OP. One of our descendants is uncommitted, so there was no change
+                        original_page_number
+                    } else if self.mem.uncommitted(original_page_number) {
+                        drop(page);
+                        // Safety: Caller guarantees there are no references to uncommitted pages,
+                        // and we just dropped our reference to it on the line above
+                        let mut mutpage = self.mem.get_page_mut(original_page_number);
+                        let mut mutator = InternalMutator::new(&mut mutpage);
+                        mutator.write_child_page(child_index, new_child);
+                        original_page_number
+                    } else {
+                        let mut builder = IndexBuilder::new(self.mem, accessor.count_children());
+                        builder.push_all(&accessor);
+                        builder.replace_child(child_index, new_child);
+                        let new_page = builder.build()?;
+                        self.free_policy.conditional_free(
+                            original_page_number,
+                            self.freed,
+                            self.mem,
+                        )?;
+                        new_page.get_page_number()
+                    };
+                    return Ok((Subtree(result_page_number), found));
+                }
+
+                // Child is requesting to be merged with a sibling
+                let mut builder = IndexBuilder::new(self.mem, accessor.count_children());
+
                 let final_result = match result {
-                    Subtree(new_child) => {
-                        if new_child == child_page_number {
-                            // NO-OP. One of our descendants is uncommitted, so there was no change
-                            return Ok((Subtree(original_page_number), found));
-                        } else if self.mem.uncommitted(original_page_number) {
-                            drop(page);
-                            // Safety: Caller guarantees there are no references to uncommitted pages,
-                            // and we just dropped our reference to it on the line above
-                            let mut mutpage = self.mem.get_page_mut(original_page_number);
-                            let mut mutator = InternalMutator::new(&mut mutpage);
-                            mutator.write_child_page(child_index, new_child);
-                            return Ok((Subtree(original_page_number), found));
-                        } else {
-                            let mut new_page =
-                                self.mem.allocate(InternalBuilder::required_bytes(
-                                    accessor.count_children() - 1,
-                                    accessor.total_key_length(),
-                                ))?;
-                            let mut builder =
-                                InternalBuilder::new(&mut new_page, accessor.count_children() - 1);
-                            if child_index == 0 {
-                                builder.write_first_page(new_child);
-                            } else {
-                                builder.write_first_page(accessor.child_page(0).unwrap());
-                            }
-
-                            for i in 1..accessor.count_children() {
-                                if let Some(key) = accessor.key(i - 1) {
-                                    let page_number = if i == child_index {
-                                        new_child
-                                    } else {
-                                        accessor.child_page(i).unwrap()
-                                    };
-                                    builder.write_nth_key(key, page_number, i - 1);
-                                } else {
-                                    unreachable!();
-                                }
-                            }
-
-                            drop(builder);
-                            Subtree(new_page.get_page_number())
-                        }
+                    Subtree(_) => {
+                        // Handled in the if above
+                        unreachable!();
                     }
                     PartialLeaf { deleted_pair } => {
                         let partial_child_page = self.mem.get_page(child_page_number);
@@ -467,7 +458,6 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             self.mem.get_page(accessor.child_page(merge_with).unwrap());
                         let merge_with_accessor = LeafAccessor::new(&merge_with_page);
                         debug_assert!(merge_with < accessor.count_children());
-                        let mut builder = IndexBuilder::new(self.mem, accessor.count_children());
                         for i in 0..accessor.count_children() {
                             if i == child_index {
                                 continue;
@@ -550,7 +540,6 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             self.mem.get_page(accessor.child_page(merge_with).unwrap());
                         let merge_with_accessor = InternalAccessor::new(&merge_with_page);
                         debug_assert!(merge_with < accessor.count_children());
-                        let mut builder = IndexBuilder::new(self.mem, accessor.count_children());
                         for i in 0..accessor.count_children() {
                             if i == child_index {
                                 continue;
@@ -623,7 +612,6 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             self.mem.get_page(accessor.child_page(merge_with).unwrap());
                         let merge_with_accessor = InternalAccessor::new(&merge_with_page);
                         debug_assert!(merge_with < accessor.count_children());
-                        let mut builder = IndexBuilder::new(self.mem, accessor.count_children());
                         for i in 0..accessor.count_children() {
                             if i == child_index {
                                 continue;
