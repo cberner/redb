@@ -11,6 +11,15 @@ use std::marker::PhantomData;
 use std::ops::{RangeBounds, RangeFull};
 use std::rc::Rc;
 
+pub(crate) struct BtreeStats {
+    pub(crate) tree_height: usize,
+    pub(crate) leaf_pages: usize,
+    pub(crate) branch_pages: usize,
+    pub(crate) stored_leaf_bytes: usize,
+    pub(crate) metadata_bytes: usize,
+    pub(crate) fragmented_bytes: usize,
+}
+
 pub(crate) struct BtreeMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     mem: &'a TransactionalMemory,
     root: Option<PageNumber>,
@@ -102,28 +111,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
         self.read_tree().print_debug(include_values)
     }
 
-    pub(crate) fn stored_leaf_bytes(&self) -> usize {
-        self.read_tree().stored_leaf_bytes()
-    }
-
-    pub(crate) fn overhead_bytes(&self) -> usize {
-        self.read_tree().overhead_bytes()
-    }
-
-    pub(crate) fn fragmented_bytes(&self) -> usize {
-        self.read_tree().fragmented_bytes()
-    }
-
-    pub(crate) fn height(&self) -> usize {
-        self.read_tree().height()
-    }
-
-    pub(crate) fn branch_pages(&self) -> usize {
-        self.read_tree().branch_pages()
-    }
-
-    pub(crate) fn leaf_pages(&self) -> usize {
-        self.read_tree().leaf_pages()
+    pub(crate) fn stats(&self) -> BtreeStats {
+        self.read_tree().stats()
     }
 
     fn read_tree(&self) -> Btree<K, V> {
@@ -249,182 +238,67 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         }
     }
 
-    pub(crate) fn stored_leaf_bytes(&self) -> usize {
+    pub(crate) fn stats(&self) -> BtreeStats {
         if let Some(root) = self.root {
-            self.stored_bytes_helper(root)
+            self.stats_helper(root)
         } else {
-            0
+            BtreeStats {
+                tree_height: 0,
+                leaf_pages: 0,
+                branch_pages: 0,
+                stored_leaf_bytes: 0,
+                metadata_bytes: 0,
+                fragmented_bytes: 0,
+            }
         }
     }
 
-    fn stored_bytes_helper(&self, page_number: PageNumber) -> usize {
+    fn stats_helper(&self, page_number: PageNumber) -> BtreeStats {
         let page = self.mem.get_page(page_number);
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
                 let accessor = LeafAccessor::new(&page);
-                accessor.length_of_pairs(0, accessor.num_pairs())
-            }
-            BRANCH => {
-                let accessor = BranchAccessor::new(&page);
-                let mut bytes = 0;
-                for i in 0..accessor.count_children() {
-                    if let Some(child) = accessor.child_page(i) {
-                        bytes += self.stored_bytes_helper(child);
-                    }
+                let leaf_bytes = accessor.length_of_pairs(0, accessor.num_pairs());
+                let overhead_bytes = accessor.total_length() - leaf_bytes;
+                let fragmented_bytes = page.memory().len() - accessor.total_length();
+                BtreeStats {
+                    tree_height: 1,
+                    leaf_pages: 1,
+                    branch_pages: 0,
+                    stored_leaf_bytes: leaf_bytes,
+                    metadata_bytes: overhead_bytes,
+                    fragmented_bytes,
                 }
-
-                bytes
             }
-            _ => unreachable!(),
-        }
-    }
-
-    pub(crate) fn branch_pages(&self) -> usize {
-        if let Some(root) = self.root {
-            self.branch_pages_helper(root)
-        } else {
-            0
-        }
-    }
-
-    // TODO: merge all these stats helpers together
-    fn branch_pages_helper(&self, page_number: PageNumber) -> usize {
-        let page = self.mem.get_page(page_number);
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => 0,
-            BRANCH => {
-                let accessor = BranchAccessor::new(&page);
-                let mut count = 1;
-                for i in 0..accessor.count_children() {
-                    if let Some(child) = accessor.child_page(i) {
-                        count += self.branch_pages_helper(child);
-                    }
-                }
-
-                count
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub(crate) fn leaf_pages(&self) -> usize {
-        if let Some(root) = self.root {
-            self.leaf_pages_helper(root)
-        } else {
-            0
-        }
-    }
-
-    fn leaf_pages_helper(&self, page_number: PageNumber) -> usize {
-        let page = self.mem.get_page(page_number);
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => 1,
-            BRANCH => {
-                let accessor = BranchAccessor::new(&page);
-                let mut count = 0;
-                for i in 0..accessor.count_children() {
-                    if let Some(child) = accessor.child_page(i) {
-                        count += self.leaf_pages_helper(child);
-                    }
-                }
-
-                count
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub(crate) fn overhead_bytes(&self) -> usize {
-        if let Some(root) = self.root {
-            self.overhead_bytes_helper(root)
-        } else {
-            0
-        }
-    }
-
-    fn overhead_bytes_helper(&self, page_number: PageNumber) -> usize {
-        let page = self.mem.get_page(page_number);
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => {
-                let accessor = LeafAccessor::new(&page);
-                accessor.total_length() - accessor.length_of_pairs(0, accessor.num_pairs())
-            }
-            BRANCH => {
-                let accessor = BranchAccessor::new(&page);
-                // Internal pages are all "overhead"
-                let mut bytes = accessor.total_length();
-                for i in 0..accessor.count_children() {
-                    if let Some(child) = accessor.child_page(i) {
-                        bytes += self.overhead_bytes_helper(child);
-                    }
-                }
-
-                bytes
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub(crate) fn fragmented_bytes(&self) -> usize {
-        if let Some(root) = self.root {
-            self.fragmented_bytes_helper(root)
-        } else {
-            0
-        }
-    }
-
-    fn fragmented_bytes_helper(&self, page_number: PageNumber) -> usize {
-        let page = self.mem.get_page(page_number);
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => {
-                let accessor = LeafAccessor::new(&page);
-                page.memory().len() - accessor.total_length()
-            }
-            BRANCH => {
-                let accessor = BranchAccessor::new(&page);
-                // Internal pages are all "overhead"
-                let mut bytes = page.memory().len() - accessor.total_length();
-                for i in 0..accessor.count_children() {
-                    if let Some(child) = accessor.child_page(i) {
-                        bytes += self.fragmented_bytes_helper(child);
-                    }
-                }
-
-                bytes
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub(crate) fn height(&self) -> usize {
-        if let Some(root) = self.root {
-            self.height_helper(root)
-        } else {
-            0
-        }
-    }
-
-    fn height_helper(&self, page_number: PageNumber) -> usize {
-        let page = self.mem.get_page(page_number);
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => 1,
             BRANCH => {
                 let accessor = BranchAccessor::new(&page);
                 let mut max_child_height = 0;
+                let mut leaf_pages = 0;
+                let mut branch_pages = 1;
+                let mut stored_leaf_bytes = 0;
+                let mut metadata_bytes = accessor.total_length();
+                let mut fragmented_bytes = page.memory().len() - accessor.total_length();
                 for i in 0..accessor.count_children() {
                     if let Some(child) = accessor.child_page(i) {
-                        let height = self.height_helper(child);
-                        max_child_height = max(max_child_height, height);
+                        let stats = self.stats_helper(child);
+                        max_child_height = max(max_child_height, stats.tree_height);
+                        leaf_pages += stats.leaf_pages;
+                        branch_pages += stats.branch_pages;
+                        stored_leaf_bytes += stats.stored_leaf_bytes;
+                        metadata_bytes += stats.metadata_bytes;
+                        fragmented_bytes += stats.fragmented_bytes;
                     }
                 }
 
-                max_child_height + 1
+                BtreeStats {
+                    tree_height: max_child_height + 1,
+                    leaf_pages,
+                    branch_pages,
+                    stored_leaf_bytes,
+                    metadata_bytes,
+                    fragmented_bytes,
+                }
             }
             _ => unreachable!(),
         }

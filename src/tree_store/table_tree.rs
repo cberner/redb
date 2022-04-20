@@ -310,29 +310,31 @@ impl<'txn> TableTree<'txn> {
     }
 
     pub fn stats(&self) -> Result<DatabaseStats> {
-        let master_tree_height = self.tree.height();
+        let master_tree_stats = self.tree.stats();
         let mut max_subtree_height = 0;
         let mut total_stored_bytes = 0;
         // Count the master tree leaf pages as branches, since they point to the data trees
-        let mut branch_pages = self.tree.branch_pages() + self.tree.leaf_pages();
+        let mut branch_pages = master_tree_stats.branch_pages + master_tree_stats.leaf_pages;
         let mut leaf_pages = 0;
         // Include the master table in the overhead
-        let mut total_metadata_bytes = self.tree.overhead_bytes() + self.tree.stored_leaf_bytes();
-        let mut total_fragmented = self.tree.fragmented_bytes();
+        let mut total_metadata_bytes =
+            master_tree_stats.metadata_bytes + master_tree_stats.stored_leaf_bytes;
+        let mut total_fragmented = master_tree_stats.fragmented_bytes;
 
         let mut iter = self.tree.range::<RangeFull, &str>(..)?;
         while let Some(entry) = iter.next() {
             let definition = InternalTableDefinition::from_bytes(entry.value());
             let subtree: Btree<[u8], [u8]> = Btree::new(definition.get_root(), self.mem);
-            max_subtree_height = max(max_subtree_height, subtree.height());
-            total_stored_bytes += subtree.stored_leaf_bytes();
-            total_metadata_bytes += subtree.overhead_bytes();
-            total_fragmented += subtree.fragmented_bytes();
-            branch_pages += subtree.branch_pages();
-            leaf_pages += subtree.leaf_pages();
+            let subtree_stats = subtree.stats();
+            max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
+            total_stored_bytes += subtree_stats.stored_leaf_bytes;
+            total_metadata_bytes += subtree_stats.metadata_bytes;
+            total_fragmented += subtree_stats.fragmented_bytes;
+            branch_pages += subtree_stats.branch_pages;
+            leaf_pages += subtree_stats.leaf_pages;
         }
         Ok(DatabaseStats {
-            tree_height: master_tree_height + max_subtree_height,
+            tree_height: master_tree_stats.tree_height + max_subtree_height,
             free_pages: self.mem.count_free_pages()?,
             leaf_pages,
             branch_pages,

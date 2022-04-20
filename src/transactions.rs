@@ -407,11 +407,12 @@ impl<'db> WriteTransaction<'db> {
     pub fn stats(&self) -> Result<DatabaseStats> {
         let table_tree = self.table_tree.borrow();
         let data_tree_stats = table_tree.stats()?;
+        let freed_tree_stats = self.freed_tree.stats();
         let total_metadata_bytes = data_tree_stats.metadata_bytes()
-            + self.freed_tree.overhead_bytes()
-            + self.freed_tree.stored_leaf_bytes();
+            + freed_tree_stats.metadata_bytes
+            + freed_tree_stats.stored_leaf_bytes;
         let total_fragmented =
-            data_tree_stats.fragmented_bytes() + self.freed_tree.fragmented_bytes();
+            data_tree_stats.fragmented_bytes() + freed_tree_stats.fragmented_bytes;
 
         Ok(DatabaseStats {
             tree_height: data_tree_stats.tree_height(),
