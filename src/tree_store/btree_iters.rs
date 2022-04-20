@@ -1,5 +1,5 @@
-use crate::tree_store::btree_base::{EntryAccessor, InternalAccessor, LeafAccessor};
-use crate::tree_store::btree_base::{INTERNAL, LEAF};
+use crate::tree_store::btree_base::{BranchAccessor, EntryAccessor, LeafAccessor};
+use crate::tree_store::btree_base::{BRANCH, LEAF};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::PageNumber;
@@ -56,7 +56,7 @@ impl<'a> RangeIterState<'a> {
                 child,
                 mut parent,
             } => {
-                let accessor = InternalAccessor::new(&page);
+                let accessor = BranchAccessor::new(&page);
                 let child_page = accessor.child_page(child).unwrap();
                 let child_page = manager.get_page(child_page);
                 let direction = if reverse { -1 } else { 1 };
@@ -82,8 +82,8 @@ impl<'a> RangeIterState<'a> {
                             parent,
                         })
                     }
-                    INTERNAL => {
-                        let child_accessor = InternalAccessor::new(&child_page);
+                    BRANCH => {
+                        let child_accessor = BranchAccessor::new(&child_page);
                         let child = if reverse {
                             child_accessor.count_children() - 1
                         } else {
@@ -161,7 +161,7 @@ fn page_numbers_iter_start_state(page: PageImpl) -> RangeIterState {
             entry: 0,
             parent: None,
         },
-        INTERNAL => Internal {
+        BRANCH => Internal {
             page,
             child: 0,
             parent: None,
@@ -370,8 +370,8 @@ fn find_iter_unbounded_left<'a>(
             entry: 0,
             parent,
         }),
-        INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
+        BRANCH => {
+            let accessor = BranchAccessor::new(&page);
             let child_page_number = accessor.child_page(0).unwrap();
             let child_page = manager.get_page(child_page_number);
             parent = Some(Box::new(Internal {
@@ -401,8 +401,8 @@ fn find_iter_unbounded_right<'a>(
                 parent,
             })
         }
-        INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
+        BRANCH => {
+            let accessor = BranchAccessor::new(&page);
             let child_index = accessor.count_children() - 1;
             let child_page_number = accessor.child_page(child_index).unwrap();
             let child_page = manager.get_page(child_page_number);
@@ -448,8 +448,8 @@ fn find_iter_left<'a, K: RedbKey + ?Sized>(
             };
             (include, Some(result))
         }
-        INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
+        BRANCH => {
+            let accessor = BranchAccessor::new(&page);
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
             let child_page = manager.get_page(child_page_number);
             if child_index < accessor.count_children() - 1 {
@@ -492,8 +492,8 @@ fn find_iter_right<'a, K: RedbKey + ?Sized>(
             };
             (include, Some(result))
         }
-        INTERNAL => {
-            let accessor = InternalAccessor::new(&page);
+        BRANCH => {
+            let accessor = BranchAccessor::new(&page);
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
             let child_page = manager.get_page(child_page_number);
             if child_index > 0 && accessor.child_page(child_index - 1).is_some() {

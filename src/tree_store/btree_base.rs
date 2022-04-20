@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 
 pub(in crate::tree_store) const LEAF: u8 = 1;
-pub(in crate::tree_store) const INTERNAL: u8 = 2;
+pub(in crate::tree_store) const BRANCH: u8 = 2;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub(crate) enum FreePolicy {
@@ -802,18 +802,18 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
     }
 }
 
-// Provides a simple zero-copy way to access an index page
-pub(in crate::tree_store) struct InternalAccessor<'a: 'b, 'b, T: Page + 'a> {
+// Provides a simple zero-copy way to access a branch page
+pub(in crate::tree_store) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
     num_keys: usize,
     _page_lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
+impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
     pub(in crate::tree_store) fn new(page: &'b T) -> Self {
-        debug_assert_eq!(page.memory()[0], INTERNAL);
+        debug_assert_eq!(page.memory()[0], BRANCH);
         let num_keys = u16::from_le_bytes(page.memory()[2..4].try_into().unwrap()) as usize;
-        InternalAccessor {
+        BranchAccessor {
             page,
             num_keys,
             _page_lifetime: Default::default(),
@@ -916,14 +916,14 @@ impl<'a: 'b, 'b, T: Page + 'a> InternalAccessor<'a, 'b, T> {
     }
 }
 
-pub(in crate::tree_store) struct IndexBuilder<'a, 'b> {
+pub(in crate::tree_store) struct BranchBuilder<'a, 'b> {
     children: Vec<PageNumber>,
     keys: Vec<&'a [u8]>,
     total_key_bytes: usize,
     mem: &'b TransactionalMemory,
 }
 
-impl<'a, 'b> IndexBuilder<'a, 'b> {
+impl<'a, 'b> BranchBuilder<'a, 'b> {
     pub(in crate::tree_store) fn new(mem: &'b TransactionalMemory, child_capacity: usize) -> Self {
         Self {
             children: Vec::with_capacity(child_capacity),
@@ -948,7 +948,7 @@ impl<'a, 'b> IndexBuilder<'a, 'b> {
 
     pub(in crate::tree_store) fn push_all<T: Page>(
         &mut self,
-        accessor: &'a InternalAccessor<'_, '_, T>,
+        accessor: &'a BranchAccessor<'_, '_, T>,
     ) {
         for i in 0..accessor.count_children() {
             self.push_child(accessor.child_page(i).unwrap());
@@ -968,9 +968,9 @@ impl<'a, 'b> IndexBuilder<'a, 'b> {
 
     pub(in crate::tree_store) fn build(self) -> Result<PageMut<'b>> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
-        let size = InternalBuilder::required_bytes(self.keys.len(), self.total_key_bytes);
+        let size = RawBranchBuilder::required_bytes(self.keys.len(), self.total_key_bytes);
         let mut page = self.mem.allocate(size)?;
-        let mut builder = InternalBuilder::new(&mut page, self.keys.len());
+        let mut builder = RawBranchBuilder::new(&mut page, self.keys.len());
         builder.write_first_page(self.children[0]);
         for i in 1..self.children.len() {
             let key = &self.keys[i - 1];
@@ -982,7 +982,7 @@ impl<'a, 'b> IndexBuilder<'a, 'b> {
     }
 
     pub(in crate::tree_store) fn should_split(&self) -> bool {
-        let size = InternalBuilder::required_bytes(self.keys.len(), self.total_key_bytes);
+        let size = RawBranchBuilder::required_bytes(self.keys.len(), self.total_key_bytes);
         size > self.mem.get_page_size() && self.keys.len() >= 3
     }
 
@@ -994,9 +994,9 @@ impl<'a, 'b> IndexBuilder<'a, 'b> {
         let division_key = self.keys[division];
         let second_split_key_len = self.total_key_bytes - first_split_key_len - division_key.len();
 
-        let size = InternalBuilder::required_bytes(division, first_split_key_len);
+        let size = RawBranchBuilder::required_bytes(division, first_split_key_len);
         let mut page1 = self.mem.allocate(size)?;
-        let mut builder = InternalBuilder::new(&mut page1, division);
+        let mut builder = RawBranchBuilder::new(&mut page1, division);
         builder.write_first_page(self.children[0]);
         for i in 0..division {
             let key = &self.keys[i];
@@ -1005,9 +1005,9 @@ impl<'a, 'b> IndexBuilder<'a, 'b> {
         drop(builder);
 
         let size =
-            InternalBuilder::required_bytes(self.keys.len() - division - 1, second_split_key_len);
+            RawBranchBuilder::required_bytes(self.keys.len() - division - 1, second_split_key_len);
         let mut page2 = self.mem.allocate(size)?;
-        let mut builder = InternalBuilder::new(&mut page2, self.keys.len() - division - 1);
+        let mut builder = RawBranchBuilder::new(&mut page2, self.keys.len() - division - 1);
         builder.write_first_page(self.children[division + 1]);
         for i in (division + 1)..self.keys.len() {
             let key = &self.keys[i];
@@ -1031,13 +1031,13 @@ impl<'a, 'b> IndexBuilder<'a, 'b> {
 // * 4 bytes: key end. Ending offset of the key, exclusive
 // repeating (num_keys times):
 // * n bytes: key data
-pub(in crate::tree_store) struct InternalBuilder<'a: 'b, 'b> {
+pub(in crate::tree_store) struct RawBranchBuilder<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
     num_keys: usize,
     keys_written: usize, // used for debugging
 }
 
-impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
+impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
     pub(in crate::tree_store) fn required_bytes(num_keys: usize, size_of_keys: usize) -> usize {
         let fixed_size =
             4 + PageNumber::serialized_size() * (num_keys + 1) + size_of::<u32>() * num_keys;
@@ -1047,7 +1047,7 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
     // Caller MUST write num_keys values
     pub(in crate::tree_store) fn new(page: &'b mut PageMut<'a>, num_keys: usize) -> Self {
         assert!(num_keys > 0);
-        page.memory_mut()[0] = INTERNAL;
+        page.memory_mut()[0] = BRANCH;
         page.memory_mut()[2..4].copy_from_slice(&(num_keys as u16).to_le_bytes());
         #[cfg(debug_assertions)]
         {
@@ -1058,7 +1058,7 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
                 *x = 0xFF;
             }
         }
-        InternalBuilder {
+        RawBranchBuilder {
             page,
             num_keys,
             keys_written: 0,
@@ -1110,19 +1110,19 @@ impl<'a: 'b, 'b> InternalBuilder<'a, 'b> {
     }
 }
 
-impl<'a: 'b, 'b> Drop for InternalBuilder<'a, 'b> {
+impl<'a: 'b, 'b> Drop for RawBranchBuilder<'a, 'b> {
     fn drop(&mut self) {
         assert_eq!(self.keys_written, self.num_keys);
     }
 }
 
-pub(in crate::tree_store) struct InternalMutator<'a: 'b, 'b> {
+pub(in crate::tree_store) struct BranchMutator<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
 }
 
-impl<'a: 'b, 'b> InternalMutator<'a, 'b> {
+impl<'a: 'b, 'b> BranchMutator<'a, 'b> {
     pub(in crate::tree_store) fn new(page: &'b mut PageMut<'a>) -> Self {
-        assert_eq!(page.memory()[0], INTERNAL);
+        assert_eq!(page.memory()[0], BRANCH);
         Self { page }
     }
 

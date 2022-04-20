@@ -46,7 +46,6 @@ impl DatabaseStats {
     }
 
     /// Number of branch pages in btrees that store user data
-    // TODO: rename all internal references to "index" or "internal" pages to "branch"
     pub fn branch_pages(&self) -> usize {
         self.branch_pages
     }
@@ -57,7 +56,7 @@ impl DatabaseStats {
         self.stored_leaf_bytes
     }
 
-    /// Number of bytes consumed by keys in internal index pages, plus other metadata
+    /// Number of bytes consumed by keys in internal branch pages, plus other metadata
     pub fn metadata_bytes(&self) -> usize {
         self.metadata_bytes
     }
