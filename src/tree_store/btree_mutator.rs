@@ -392,7 +392,22 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
         Ok((result, guard))
     }
 
-    // TODO: cleanup the handling of internal branch nodes. This function is insanely long
+    fn finalize_branch_builder(&self, builder: BranchBuilder<'_, '_>) -> Result<DeletionResult> {
+        Ok(if let Some(only_child) = builder.to_single_child() {
+            DeletedBranch(only_child)
+        } else {
+            // TODO: can we optimize away this page allocation?
+            // The PartialInternal gets returned, and then the caller has to merge it immediately
+            let new_page = builder.build()?;
+            let accessor = BranchAccessor::new(&new_page);
+            if accessor.total_length() < self.mem.get_page_size() / 2 {
+                PartialBranch(new_page.get_page_number())
+            } else {
+                Subtree(new_page.get_page_number())
+            }
+        })
+    }
+
     // Safety: caller must ensure that no references to uncommitted pages in this table exist
     unsafe fn delete_branch_helper(
         &mut self,
@@ -501,19 +516,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         }
                     }
                 }
-                let result = if let Some(only_child) = builder.to_single_child() {
-                    DeletedBranch(only_child)
-                } else {
-                    // TODO: can we optimize away this page allocation?
-                    // The PartialInternal gets returned, and then the caller has to merge it immediately
-                    let new_page = builder.build()?;
-                    let accessor = BranchAccessor::new(&new_page);
-                    if accessor.total_length() < self.mem.get_page_size() / 2 {
-                        PartialBranch(new_page.get_page_number())
-                    } else {
-                        Subtree(new_page.get_page_number())
-                    }
-                };
+                let result = self.finalize_branch_builder(builder)?;
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
@@ -566,17 +569,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         }
                     }
                 }
-                let result = if let Some(only_child) = builder.to_single_child() {
-                    DeletedBranch(only_child)
-                } else {
-                    let new_page = builder.build()?;
-                    let accessor = BranchAccessor::new(&new_page);
-                    if accessor.total_length() < self.mem.get_page_size() / 2 {
-                        PartialBranch(new_page.get_page_number())
-                    } else {
-                        Subtree(new_page.get_page_number())
-                    }
-                };
+                let result = self.finalize_branch_builder(builder)?;
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
@@ -636,17 +629,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         }
                     }
                 }
-                let result = if let Some(only_child) = builder.to_single_child() {
-                    DeletedBranch(only_child)
-                } else {
-                    let new_page = builder.build()?;
-                    let accessor = BranchAccessor::new(&new_page);
-                    if accessor.total_length() < self.mem.get_page_size() / 2 {
-                        PartialBranch(new_page.get_page_number())
-                    } else {
-                        Subtree(new_page.get_page_number())
-                    }
-                };
+                let result = self.finalize_branch_builder(builder)?;
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
