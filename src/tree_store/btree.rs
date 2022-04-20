@@ -1,4 +1,4 @@
-use crate::tree_store::btree_base::{FreePolicy, InternalAccessor, LeafAccessor, INTERNAL, LEAF};
+use crate::tree_store::btree_base::{BranchAccessor, FreePolicy, LeafAccessor, BRANCH, LEAF};
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber};
@@ -192,8 +192,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                 let (start, end) = accessor.value_range(entry_index).unwrap();
                 Some(V::from_bytes(&page.into_memory()[start..end]))
             }
-            INTERNAL => {
-                let accessor = InternalAccessor::new(&page);
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page);
                 let (_, child_page) = accessor.child_for_key::<K>(query);
                 self.get_helper(self.mem.get_page(child_page), query)
             }
@@ -230,8 +230,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                         LEAF => {
                             LeafAccessor::new(&page).print_node::<K, V>(include_values);
                         }
-                        INTERNAL => {
-                            let accessor = InternalAccessor::new(&page);
+                        BRANCH => {
+                            let accessor = BranchAccessor::new(&page);
                             for i in 0..accessor.count_children() {
                                 let child = accessor.child_page(i).unwrap();
                                 next_children.push(self.mem.get_page(child));
@@ -265,8 +265,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                 let accessor = LeafAccessor::new(&page);
                 accessor.length_of_pairs(0, accessor.num_pairs())
             }
-            INTERNAL => {
-                let accessor = InternalAccessor::new(&page);
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page);
                 let mut bytes = 0;
                 for i in 0..accessor.count_children() {
                     if let Some(child) = accessor.child_page(i) {
@@ -294,8 +294,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => 0,
-            INTERNAL => {
-                let accessor = InternalAccessor::new(&page);
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page);
                 let mut count = 1;
                 for i in 0..accessor.count_children() {
                     if let Some(child) = accessor.child_page(i) {
@@ -322,8 +322,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => 1,
-            INTERNAL => {
-                let accessor = InternalAccessor::new(&page);
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page);
                 let mut count = 0;
                 for i in 0..accessor.count_children() {
                     if let Some(child) = accessor.child_page(i) {
@@ -353,8 +353,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                 let accessor = LeafAccessor::new(&page);
                 accessor.total_length() - accessor.length_of_pairs(0, accessor.num_pairs())
             }
-            INTERNAL => {
-                let accessor = InternalAccessor::new(&page);
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page);
                 // Internal pages are all "overhead"
                 let mut bytes = accessor.total_length();
                 for i in 0..accessor.count_children() {
@@ -385,8 +385,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                 let accessor = LeafAccessor::new(&page);
                 page.memory().len() - accessor.total_length()
             }
-            INTERNAL => {
-                let accessor = InternalAccessor::new(&page);
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page);
                 // Internal pages are all "overhead"
                 let mut bytes = page.memory().len() - accessor.total_length();
                 for i in 0..accessor.count_children() {
@@ -414,8 +414,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => 1,
-            INTERNAL => {
-                let accessor = InternalAccessor::new(&page);
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page);
                 let mut max_child_height = 0;
                 for i in 0..accessor.count_children() {
                     if let Some(child) = accessor.child_page(i) {

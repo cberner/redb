@@ -1,9 +1,9 @@
 use crate::tree_store::btree_base::{
-    FreePolicy, IndexBuilder, InternalAccessor, InternalMutator, LeafAccessor, LeafBuilder,
-    LeafBuilder2, LeafMutator, INTERNAL, LEAF,
+    BranchAccessor, BranchBuilder, BranchMutator, FreePolicy, LeafAccessor, LeafBuilder,
+    LeafBuilder2, LeafMutator, BRANCH, LEAF,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
-    DeletedInternal, PartialInternal, PartialLeaf, Subtree,
+    DeletedBranch, PartialBranch, PartialLeaf, Subtree,
 };
 use crate::tree_store::page_store::{Page, PageImpl};
 use crate::tree_store::{AccessGuardMut, PageNumber, TransactionalMemory};
@@ -18,10 +18,10 @@ enum DeletionResult {
     Subtree(PageNumber),
     // A leaf subtree with too few entries
     PartialLeaf { deleted_pair: usize },
-    // A index page subtree with fewer children than desired
-    PartialInternal(PageNumber),
-    // Indicates that the index node was deleted, and includes the only remaining child
-    DeletedInternal(PageNumber),
+    // A branch page subtree with fewer children than desired
+    PartialBranch(PageNumber),
+    // Indicates that the branch node was deleted, and includes the only remaining child
+    DeletedBranch(PageNumber),
 }
 
 pub(crate) struct MutateHelper<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
@@ -80,8 +80,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         Some(builder.build()?.get_page_number())
                     }
                 }
-                DeletionResult::PartialInternal(page_number) => Some(page_number),
-                DeletionResult::DeletedInternal(remaining_child) => Some(remaining_child),
+                DeletionResult::PartialBranch(page_number) => Some(page_number),
+                DeletionResult::DeletedBranch(remaining_child) => Some(remaining_child),
             };
             *self.root = new_root;
             Ok(found)
@@ -100,7 +100,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             )?;
 
             let new_root = if let Some((key, page2)) = more {
-                let mut builder = IndexBuilder::new(self.mem, 2);
+                let mut builder = BranchBuilder::new(self.mem, 2);
                 builder.push_child(page1);
                 builder.push_key(&key);
                 builder.push_child(page2);
@@ -249,8 +249,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     (new_page_number, Some((split_key, new_page_number2)), guard)
                 }
             }
-            INTERNAL => {
-                let accessor = InternalAccessor::new(&page);
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page);
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
                 let (page1, more, guard) =
                     self.insert_helper(self.mem.get_page(child_page), key, value)?;
@@ -266,14 +266,14 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         // Safety: Since the page is uncommitted, no other transactions could have it open
                         // and we just dropped our reference to it, on the line above
                         let mut mutpage = self.mem.get_page_mut(page_number);
-                        let mut mutator = InternalMutator::new(&mut mutpage);
+                        let mut mutator = BranchMutator::new(&mut mutpage);
                         mutator.write_child_page(child_index, page1);
                         return Ok((mutpage.get_page_number(), None, guard));
                     }
                 }
 
                 // A child was added, or we couldn't use the fast-path above
-                let mut builder = IndexBuilder::new(self.mem, accessor.count_children() + 1);
+                let mut builder = BranchBuilder::new(self.mem, accessor.count_children() + 1);
                 if child_index == 0 {
                     builder.push_child(page1);
                     if let Some((ref index_key2, page2)) = more {
@@ -403,9 +403,9 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 ));
                 Ok((result, guard))
             }
-            // TODO: cleanup the handling of internal index nodes. This function is insanely long
-            INTERNAL => {
-                let accessor = InternalAccessor::new(&page);
+            // TODO: cleanup the handling of internal branch nodes. This function is insanely long
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page);
                 let original_page_number = page.get_page_number();
                 let (child_index, child_page_number) = accessor.child_for_key::<K>(key);
                 let (result, found) =
@@ -422,11 +422,11 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         // Safety: Caller guarantees there are no references to uncommitted pages,
                         // and we just dropped our reference to it on the line above
                         let mut mutpage = self.mem.get_page_mut(original_page_number);
-                        let mut mutator = InternalMutator::new(&mut mutpage);
+                        let mut mutator = BranchMutator::new(&mut mutpage);
                         mutator.write_child_page(child_index, new_child);
                         original_page_number
                     } else {
-                        let mut builder = IndexBuilder::new(self.mem, accessor.count_children());
+                        let mut builder = BranchBuilder::new(self.mem, accessor.count_children());
                         builder.push_all(&accessor);
                         builder.replace_child(child_index, new_child);
                         let new_page = builder.build()?;
@@ -441,7 +441,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 }
 
                 // Child is requesting to be merged with a sibling
-                let mut builder = IndexBuilder::new(self.mem, accessor.count_children());
+                let mut builder = BranchBuilder::new(self.mem, accessor.count_children());
 
                 let final_result = match result {
                     Subtree(_) => {
@@ -514,14 +514,14 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             }
                         }
                         let result = if let Some(only_child) = builder.to_single_child() {
-                            DeletedInternal(only_child)
+                            DeletedBranch(only_child)
                         } else {
                             // TODO: can we optimize away this page allocation?
                             // The PartialInternal gets returned, and then the caller has to merge it immediately
                             let new_page = builder.build()?;
-                            let accessor = InternalAccessor::new(&new_page);
+                            let accessor = BranchAccessor::new(&new_page);
                             if accessor.total_length() < self.mem.get_page_size() / 2 {
-                                PartialInternal(new_page.get_page_number())
+                                PartialBranch(new_page.get_page_number())
                             } else {
                                 Subtree(new_page.get_page_number())
                             }
@@ -534,11 +534,11 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
 
                         result
                     }
-                    DeletionResult::DeletedInternal(only_grandchild) => {
+                    DeletionResult::DeletedBranch(only_grandchild) => {
                         let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                         let merge_with_page =
                             self.mem.get_page(accessor.child_page(merge_with).unwrap());
-                        let merge_with_accessor = InternalAccessor::new(&merge_with_page);
+                        let merge_with_accessor = BranchAccessor::new(&merge_with_page);
                         debug_assert!(merge_with < accessor.count_children());
                         for i in 0..accessor.count_children() {
                             if i == child_index {
@@ -546,7 +546,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             }
                             let page_number = accessor.child_page(i).unwrap();
                             if i == merge_with {
-                                let mut child_builder = IndexBuilder::new(
+                                let mut child_builder = BranchBuilder::new(
                                     self.mem,
                                     merge_with_accessor.count_children() + 1,
                                 );
@@ -584,12 +584,12 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             }
                         }
                         let result = if let Some(only_child) = builder.to_single_child() {
-                            DeletedInternal(only_child)
+                            DeletedBranch(only_child)
                         } else {
                             let new_page = builder.build()?;
-                            let accessor = InternalAccessor::new(&new_page);
+                            let accessor = BranchAccessor::new(&new_page);
                             if accessor.total_length() < self.mem.get_page_size() / 2 {
-                                PartialInternal(new_page.get_page_number())
+                                PartialBranch(new_page.get_page_number())
                             } else {
                                 Subtree(new_page.get_page_number())
                             }
@@ -602,15 +602,15 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
 
                         result
                     }
-                    PartialInternal(partial_child) => {
+                    PartialBranch(partial_child) => {
                         let partial_child_page = self.mem.get_page(partial_child);
-                        let partial_child_accessor = InternalAccessor::new(&partial_child_page);
+                        let partial_child_accessor = BranchAccessor::new(&partial_child_page);
                         // TODO: optimize selection of sibling to merge with. Pick the least full one,
                         // or don't merge if neither page is small enough
                         let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                         let merge_with_page =
                             self.mem.get_page(accessor.child_page(merge_with).unwrap());
-                        let merge_with_accessor = InternalAccessor::new(&merge_with_page);
+                        let merge_with_accessor = BranchAccessor::new(&merge_with_page);
                         debug_assert!(merge_with < accessor.count_children());
                         for i in 0..accessor.count_children() {
                             if i == child_index {
@@ -618,7 +618,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             }
                             let page_number = accessor.child_page(i).unwrap();
                             if i == merge_with {
-                                let mut child_builder = IndexBuilder::new(
+                                let mut child_builder = BranchBuilder::new(
                                     self.mem,
                                     merge_with_accessor.count_children()
                                         + partial_child_accessor.count_children(),
@@ -657,12 +657,12 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             }
                         }
                         let result = if let Some(only_child) = builder.to_single_child() {
-                            DeletedInternal(only_child)
+                            DeletedBranch(only_child)
                         } else {
                             let new_page = builder.build()?;
-                            let accessor = InternalAccessor::new(&new_page);
+                            let accessor = BranchAccessor::new(&new_page);
                             if accessor.total_length() < self.mem.get_page_size() / 2 {
-                                PartialInternal(new_page.get_page_number())
+                                PartialBranch(new_page.get_page_number())
                             } else {
                                 Subtree(new_page.get_page_number())
                             }
