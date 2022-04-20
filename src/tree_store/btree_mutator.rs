@@ -325,6 +325,347 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
         })
     }
 
+    // Safety: caller must ensure that no references to uncommitted pages in this table exist
+    unsafe fn delete_leaf_helper(
+        &mut self,
+        page: PageImpl<'a>,
+        key: &[u8],
+    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+        let accessor = LeafAccessor::new(&page);
+        let (position, found) = accessor.position::<K>(key);
+        if !found {
+            return Ok((Subtree(page.get_page_number()), None));
+        }
+        let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
+            - accessor.length_of_pairs(position, position + 1);
+        let new_required_bytes =
+            LeafBuilder::required_bytes(accessor.num_pairs() - 1, new_kv_bytes);
+        let uncommitted = self.mem.uncommitted(page.get_page_number());
+
+        // Fast-path for dirty pages
+        if uncommitted
+            && new_required_bytes >= self.mem.get_page_size() / 2
+            && accessor.num_pairs() > 1
+        {
+            let (start, end) = accessor.value_range(position).unwrap();
+            let page_number = page.get_page_number();
+            drop(page);
+            // Safety: caller guaranteed that no other references to uncommitted data exist,
+            // and we just dropped the reference to page
+            let page_mut = self.mem.get_page_mut(page_number);
+            let guard =
+                AccessGuard::remove_on_drop(page_mut, start, end - start, position, self.mem);
+            return Ok((Subtree(page_number), Some(guard)));
+        }
+
+        let result = if new_required_bytes < self.mem.get_page_size() / 2 {
+            PartialLeaf {
+                deleted_pair: position,
+            }
+        } else {
+            let mut builder = LeafBuilder2::new(self.mem, accessor.num_pairs() - 1);
+            for i in 0..accessor.num_pairs() {
+                if i == position {
+                    continue;
+                }
+                let entry = accessor.entry(i).unwrap();
+                builder.push(entry.key(), entry.value());
+            }
+            Subtree(builder.build()?.get_page_number())
+        };
+        let free_on_drop = if !uncommitted || matches!(self.free_policy, FreePolicy::Never) {
+            // Won't be freed until the end of the transaction, so returning the page
+            // in the AccessGuard below is still safe
+            self.freed.push(page.get_page_number());
+            false
+        } else {
+            true
+        };
+        let (start, end) = accessor.value_range(position).unwrap();
+        let guard = Some(AccessGuard::new(
+            page,
+            start,
+            end - start,
+            free_on_drop,
+            self.mem,
+        ));
+        Ok((result, guard))
+    }
+
+    // TODO: cleanup the handling of internal branch nodes. This function is insanely long
+    // Safety: caller must ensure that no references to uncommitted pages in this table exist
+    unsafe fn delete_branch_helper(
+        &mut self,
+        page: PageImpl<'a>,
+        key: &[u8],
+    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+        let accessor = BranchAccessor::new(&page);
+        let original_page_number = page.get_page_number();
+        let (child_index, child_page_number) = accessor.child_for_key::<K>(key);
+        let (result, found) = self.delete_helper(self.mem.get_page(child_page_number), key)?;
+        if found.is_none() {
+            return Ok((Subtree(original_page_number), None));
+        }
+        if let Subtree(new_child) = result {
+            let result_page_number = if new_child == child_page_number {
+                // NO-OP. One of our descendants is uncommitted, so there was no change
+                original_page_number
+            } else if self.mem.uncommitted(original_page_number) {
+                drop(page);
+                // Safety: Caller guarantees there are no references to uncommitted pages,
+                // and we just dropped our reference to it on the line above
+                let mut mutpage = self.mem.get_page_mut(original_page_number);
+                let mut mutator = BranchMutator::new(&mut mutpage);
+                mutator.write_child_page(child_index, new_child);
+                original_page_number
+            } else {
+                let mut builder = BranchBuilder::new(self.mem, accessor.count_children());
+                builder.push_all(&accessor);
+                builder.replace_child(child_index, new_child);
+                let new_page = builder.build()?;
+                self.free_policy
+                    .conditional_free(original_page_number, self.freed, self.mem)?;
+                new_page.get_page_number()
+            };
+            return Ok((Subtree(result_page_number), found));
+        }
+
+        // Child is requesting to be merged with a sibling
+        let mut builder = BranchBuilder::new(self.mem, accessor.count_children());
+
+        let final_result = match result {
+            Subtree(_) => {
+                // Handled in the if above
+                unreachable!();
+            }
+            PartialLeaf { deleted_pair } => {
+                let partial_child_page = self.mem.get_page(child_page_number);
+                let partial_child_accessor = LeafAccessor::new(&partial_child_page);
+
+                // TODO: avoid trying to merge with a page that as a single large value
+                let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                let merge_with_page = self.mem.get_page(accessor.child_page(merge_with).unwrap());
+                let merge_with_accessor = LeafAccessor::new(&merge_with_page);
+                debug_assert!(merge_with < accessor.count_children());
+                for i in 0..accessor.count_children() {
+                    if i == child_index {
+                        continue;
+                    }
+                    let page_number = accessor.child_page(i).unwrap();
+                    if i == merge_with {
+                        let mut child_builder = LeafBuilder2::new(
+                            self.mem,
+                            partial_child_accessor.num_pairs() - 1
+                                + merge_with_accessor.num_pairs(),
+                        );
+                        if child_index < merge_with {
+                            for i in 0..partial_child_accessor.num_pairs() {
+                                if i == deleted_pair {
+                                    continue;
+                                }
+                                let entry = partial_child_accessor.entry(i).unwrap();
+                                child_builder.push(entry.key(), entry.value());
+                            }
+                        }
+                        for j in 0..merge_with_accessor.num_pairs() {
+                            let entry = merge_with_accessor.entry(j).unwrap();
+                            child_builder.push(entry.key(), entry.value());
+                        }
+                        if child_index > merge_with {
+                            for i in 0..partial_child_accessor.num_pairs() {
+                                if i == deleted_pair {
+                                    continue;
+                                }
+                                let entry = partial_child_accessor.entry(i).unwrap();
+                                child_builder.push(entry.key(), entry.value());
+                            }
+                        }
+                        if child_builder.should_split() {
+                            let (new_page1, split_key, new_page2) = child_builder.build_split()?;
+                            builder.push_key(split_key);
+                            builder.push_child(new_page1.get_page_number());
+                            builder.push_child(new_page2.get_page_number());
+                        } else {
+                            let new_page = child_builder.build()?;
+                            builder.push_child(new_page.get_page_number());
+                        }
+
+                        let merged_key_index = max(child_index, merge_with);
+                        if merged_key_index < accessor.count_children() - 1 {
+                            builder.push_key(accessor.key(merged_key_index).unwrap());
+                        }
+                    } else {
+                        builder.push_child(page_number);
+                        if i < accessor.count_children() - 1 {
+                            builder.push_key(accessor.key(i).unwrap());
+                        }
+                    }
+                }
+                let result = if let Some(only_child) = builder.to_single_child() {
+                    DeletedBranch(only_child)
+                } else {
+                    // TODO: can we optimize away this page allocation?
+                    // The PartialInternal gets returned, and then the caller has to merge it immediately
+                    let new_page = builder.build()?;
+                    let accessor = BranchAccessor::new(&new_page);
+                    if accessor.total_length() < self.mem.get_page_size() / 2 {
+                        PartialBranch(new_page.get_page_number())
+                    } else {
+                        Subtree(new_page.get_page_number())
+                    }
+                };
+
+                let page_number = merge_with_page.get_page_number();
+                drop(merge_with_page);
+                self.free_policy
+                    .conditional_free(page_number, self.freed, self.mem)?;
+
+                result
+            }
+            DeletionResult::DeletedBranch(only_grandchild) => {
+                let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                let merge_with_page = self.mem.get_page(accessor.child_page(merge_with).unwrap());
+                let merge_with_accessor = BranchAccessor::new(&merge_with_page);
+                debug_assert!(merge_with < accessor.count_children());
+                for i in 0..accessor.count_children() {
+                    if i == child_index {
+                        continue;
+                    }
+                    let page_number = accessor.child_page(i).unwrap();
+                    if i == merge_with {
+                        let mut child_builder =
+                            BranchBuilder::new(self.mem, merge_with_accessor.count_children() + 1);
+                        let separator_key = accessor.key(min(child_index, merge_with)).unwrap();
+                        if child_index < merge_with {
+                            child_builder.push_child(only_grandchild);
+                            child_builder.push_key(separator_key);
+                        }
+                        child_builder.push_all(&merge_with_accessor);
+                        if child_index > merge_with {
+                            child_builder.push_key(separator_key);
+                            child_builder.push_child(only_grandchild);
+                        }
+                        if child_builder.should_split() {
+                            let (new_page1, separator, new_page2) = child_builder.build_split()?;
+                            builder.push_child(new_page1.get_page_number());
+                            builder.push_key(separator);
+                            builder.push_child(new_page2.get_page_number());
+                        } else {
+                            let new_page = child_builder.build()?;
+                            builder.push_child(new_page.get_page_number());
+                        }
+
+                        let merged_key_index = max(child_index, merge_with);
+                        if merged_key_index < accessor.count_children() - 1 {
+                            builder.push_key(accessor.key(merged_key_index).unwrap());
+                        }
+                    } else {
+                        builder.push_child(page_number);
+                        if i < accessor.count_children() - 1 {
+                            builder.push_key(accessor.key(i).unwrap());
+                        }
+                    }
+                }
+                let result = if let Some(only_child) = builder.to_single_child() {
+                    DeletedBranch(only_child)
+                } else {
+                    let new_page = builder.build()?;
+                    let accessor = BranchAccessor::new(&new_page);
+                    if accessor.total_length() < self.mem.get_page_size() / 2 {
+                        PartialBranch(new_page.get_page_number())
+                    } else {
+                        Subtree(new_page.get_page_number())
+                    }
+                };
+
+                let page_number = merge_with_page.get_page_number();
+                drop(merge_with_page);
+                self.free_policy
+                    .conditional_free(page_number, self.freed, self.mem)?;
+
+                result
+            }
+            PartialBranch(partial_child) => {
+                let partial_child_page = self.mem.get_page(partial_child);
+                let partial_child_accessor = BranchAccessor::new(&partial_child_page);
+                // TODO: optimize selection of sibling to merge with. Pick the least full one,
+                // or don't merge if neither page is small enough
+                let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                let merge_with_page = self.mem.get_page(accessor.child_page(merge_with).unwrap());
+                let merge_with_accessor = BranchAccessor::new(&merge_with_page);
+                debug_assert!(merge_with < accessor.count_children());
+                for i in 0..accessor.count_children() {
+                    if i == child_index {
+                        continue;
+                    }
+                    let page_number = accessor.child_page(i).unwrap();
+                    if i == merge_with {
+                        let mut child_builder = BranchBuilder::new(
+                            self.mem,
+                            merge_with_accessor.count_children()
+                                + partial_child_accessor.count_children(),
+                        );
+                        let separator_key = accessor.key(min(child_index, merge_with)).unwrap();
+                        if child_index < merge_with {
+                            child_builder.push_all(&partial_child_accessor);
+                            child_builder.push_key(separator_key);
+                        }
+                        child_builder.push_all(&merge_with_accessor);
+                        if child_index > merge_with {
+                            child_builder.push_key(separator_key);
+                            child_builder.push_all(&partial_child_accessor);
+                        }
+                        if child_builder.should_split() {
+                            let (new_page1, separator, new_page2) = child_builder.build_split()?;
+                            builder.push_child(new_page1.get_page_number());
+                            builder.push_key(separator);
+                            builder.push_child(new_page2.get_page_number());
+                        } else {
+                            let new_page = child_builder.build()?;
+                            builder.push_child(new_page.get_page_number());
+                        }
+
+                        let merged_key_index = max(child_index, merge_with);
+                        if merged_key_index < accessor.count_children() - 1 {
+                            builder.push_key(accessor.key(merged_key_index).unwrap());
+                        }
+                    } else {
+                        builder.push_child(page_number);
+                        if i < accessor.count_children() - 1 {
+                            builder.push_key(accessor.key(i).unwrap());
+                        }
+                    }
+                }
+                let result = if let Some(only_child) = builder.to_single_child() {
+                    DeletedBranch(only_child)
+                } else {
+                    let new_page = builder.build()?;
+                    let accessor = BranchAccessor::new(&new_page);
+                    if accessor.total_length() < self.mem.get_page_size() / 2 {
+                        PartialBranch(new_page.get_page_number())
+                    } else {
+                        Subtree(new_page.get_page_number())
+                    }
+                };
+
+                let page_number = merge_with_page.get_page_number();
+                drop(merge_with_page);
+                self.free_policy
+                    .conditional_free(page_number, self.freed, self.mem)?;
+                drop(partial_child_page);
+                self.free_policy
+                    .conditional_free(partial_child, self.freed, self.mem)?;
+
+                result
+            }
+        };
+
+        self.free_policy
+            .conditional_free(original_page_number, self.freed, self.mem)?;
+
+        Ok((final_result, found))
+    }
+
     // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
     // If key is not found, guaranteed not to modify the tree
     //
@@ -336,355 +677,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
         let node_mem = page.memory();
         match node_mem[0] {
-            LEAF => {
-                let accessor = LeafAccessor::new(&page);
-                let (position, found) = accessor.position::<K>(key);
-                if !found {
-                    return Ok((Subtree(page.get_page_number()), None));
-                }
-                let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
-                    - accessor.length_of_pairs(position, position + 1);
-                let new_required_bytes =
-                    LeafBuilder::required_bytes(accessor.num_pairs() - 1, new_kv_bytes);
-                let uncommitted = self.mem.uncommitted(page.get_page_number());
-
-                // Fast-path for dirty pages
-                if uncommitted
-                    && new_required_bytes >= self.mem.get_page_size() / 2
-                    && accessor.num_pairs() > 1
-                {
-                    let (start, end) = accessor.value_range(position).unwrap();
-                    let page_number = page.get_page_number();
-                    drop(page);
-                    // Safety: caller guaranteed that no other references to uncommitted data exist,
-                    // and we just dropped the reference to page
-                    let page_mut = self.mem.get_page_mut(page_number);
-                    let guard = AccessGuard::remove_on_drop(
-                        page_mut,
-                        start,
-                        end - start,
-                        position,
-                        self.mem,
-                    );
-                    return Ok((Subtree(page_number), Some(guard)));
-                }
-
-                let result = if new_required_bytes < self.mem.get_page_size() / 2 {
-                    PartialLeaf {
-                        deleted_pair: position,
-                    }
-                } else {
-                    let mut builder = LeafBuilder2::new(self.mem, accessor.num_pairs() - 1);
-                    for i in 0..accessor.num_pairs() {
-                        if i == position {
-                            continue;
-                        }
-                        let entry = accessor.entry(i).unwrap();
-                        builder.push(entry.key(), entry.value());
-                    }
-                    Subtree(builder.build()?.get_page_number())
-                };
-                let free_on_drop = if !uncommitted || matches!(self.free_policy, FreePolicy::Never)
-                {
-                    // Won't be freed until the end of the transaction, so returning the page
-                    // in the AccessGuard below is still safe
-                    self.freed.push(page.get_page_number());
-                    false
-                } else {
-                    true
-                };
-                let (start, end) = accessor.value_range(position).unwrap();
-                let guard = Some(AccessGuard::new(
-                    page,
-                    start,
-                    end - start,
-                    free_on_drop,
-                    self.mem,
-                ));
-                Ok((result, guard))
-            }
-            // TODO: cleanup the handling of internal branch nodes. This function is insanely long
-            BRANCH => {
-                let accessor = BranchAccessor::new(&page);
-                let original_page_number = page.get_page_number();
-                let (child_index, child_page_number) = accessor.child_for_key::<K>(key);
-                let (result, found) =
-                    self.delete_helper(self.mem.get_page(child_page_number), key)?;
-                if found.is_none() {
-                    return Ok((Subtree(original_page_number), None));
-                }
-                if let Subtree(new_child) = result {
-                    let result_page_number = if new_child == child_page_number {
-                        // NO-OP. One of our descendants is uncommitted, so there was no change
-                        original_page_number
-                    } else if self.mem.uncommitted(original_page_number) {
-                        drop(page);
-                        // Safety: Caller guarantees there are no references to uncommitted pages,
-                        // and we just dropped our reference to it on the line above
-                        let mut mutpage = self.mem.get_page_mut(original_page_number);
-                        let mut mutator = BranchMutator::new(&mut mutpage);
-                        mutator.write_child_page(child_index, new_child);
-                        original_page_number
-                    } else {
-                        let mut builder = BranchBuilder::new(self.mem, accessor.count_children());
-                        builder.push_all(&accessor);
-                        builder.replace_child(child_index, new_child);
-                        let new_page = builder.build()?;
-                        self.free_policy.conditional_free(
-                            original_page_number,
-                            self.freed,
-                            self.mem,
-                        )?;
-                        new_page.get_page_number()
-                    };
-                    return Ok((Subtree(result_page_number), found));
-                }
-
-                // Child is requesting to be merged with a sibling
-                let mut builder = BranchBuilder::new(self.mem, accessor.count_children());
-
-                let final_result = match result {
-                    Subtree(_) => {
-                        // Handled in the if above
-                        unreachable!();
-                    }
-                    PartialLeaf { deleted_pair } => {
-                        let partial_child_page = self.mem.get_page(child_page_number);
-                        let partial_child_accessor = LeafAccessor::new(&partial_child_page);
-
-                        // TODO: avoid trying to merge with a page that as a single large value
-                        let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
-                        let merge_with_page =
-                            self.mem.get_page(accessor.child_page(merge_with).unwrap());
-                        let merge_with_accessor = LeafAccessor::new(&merge_with_page);
-                        debug_assert!(merge_with < accessor.count_children());
-                        for i in 0..accessor.count_children() {
-                            if i == child_index {
-                                continue;
-                            }
-                            let page_number = accessor.child_page(i).unwrap();
-                            if i == merge_with {
-                                let mut child_builder = LeafBuilder2::new(
-                                    self.mem,
-                                    partial_child_accessor.num_pairs() - 1
-                                        + merge_with_accessor.num_pairs(),
-                                );
-                                if child_index < merge_with {
-                                    for i in 0..partial_child_accessor.num_pairs() {
-                                        if i == deleted_pair {
-                                            continue;
-                                        }
-                                        let entry = partial_child_accessor.entry(i).unwrap();
-                                        child_builder.push(entry.key(), entry.value());
-                                    }
-                                }
-                                for j in 0..merge_with_accessor.num_pairs() {
-                                    let entry = merge_with_accessor.entry(j).unwrap();
-                                    child_builder.push(entry.key(), entry.value());
-                                }
-                                if child_index > merge_with {
-                                    for i in 0..partial_child_accessor.num_pairs() {
-                                        if i == deleted_pair {
-                                            continue;
-                                        }
-                                        let entry = partial_child_accessor.entry(i).unwrap();
-                                        child_builder.push(entry.key(), entry.value());
-                                    }
-                                }
-                                if child_builder.should_split() {
-                                    let (new_page1, split_key, new_page2) =
-                                        child_builder.build_split()?;
-                                    builder.push_key(split_key);
-                                    builder.push_child(new_page1.get_page_number());
-                                    builder.push_child(new_page2.get_page_number());
-                                } else {
-                                    let new_page = child_builder.build()?;
-                                    builder.push_child(new_page.get_page_number());
-                                }
-
-                                let merged_key_index = max(child_index, merge_with);
-                                if merged_key_index < accessor.count_children() - 1 {
-                                    builder.push_key(accessor.key(merged_key_index).unwrap());
-                                }
-                            } else {
-                                builder.push_child(page_number);
-                                if i < accessor.count_children() - 1 {
-                                    builder.push_key(accessor.key(i).unwrap());
-                                }
-                            }
-                        }
-                        let result = if let Some(only_child) = builder.to_single_child() {
-                            DeletedBranch(only_child)
-                        } else {
-                            // TODO: can we optimize away this page allocation?
-                            // The PartialInternal gets returned, and then the caller has to merge it immediately
-                            let new_page = builder.build()?;
-                            let accessor = BranchAccessor::new(&new_page);
-                            if accessor.total_length() < self.mem.get_page_size() / 2 {
-                                PartialBranch(new_page.get_page_number())
-                            } else {
-                                Subtree(new_page.get_page_number())
-                            }
-                        };
-
-                        let page_number = merge_with_page.get_page_number();
-                        drop(merge_with_page);
-                        self.free_policy
-                            .conditional_free(page_number, self.freed, self.mem)?;
-
-                        result
-                    }
-                    DeletionResult::DeletedBranch(only_grandchild) => {
-                        let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
-                        let merge_with_page =
-                            self.mem.get_page(accessor.child_page(merge_with).unwrap());
-                        let merge_with_accessor = BranchAccessor::new(&merge_with_page);
-                        debug_assert!(merge_with < accessor.count_children());
-                        for i in 0..accessor.count_children() {
-                            if i == child_index {
-                                continue;
-                            }
-                            let page_number = accessor.child_page(i).unwrap();
-                            if i == merge_with {
-                                let mut child_builder = BranchBuilder::new(
-                                    self.mem,
-                                    merge_with_accessor.count_children() + 1,
-                                );
-                                let separator_key =
-                                    accessor.key(min(child_index, merge_with)).unwrap();
-                                if child_index < merge_with {
-                                    child_builder.push_child(only_grandchild);
-                                    child_builder.push_key(separator_key);
-                                }
-                                child_builder.push_all(&merge_with_accessor);
-                                if child_index > merge_with {
-                                    child_builder.push_key(separator_key);
-                                    child_builder.push_child(only_grandchild);
-                                }
-                                if child_builder.should_split() {
-                                    let (new_page1, separator, new_page2) =
-                                        child_builder.build_split()?;
-                                    builder.push_child(new_page1.get_page_number());
-                                    builder.push_key(separator);
-                                    builder.push_child(new_page2.get_page_number());
-                                } else {
-                                    let new_page = child_builder.build()?;
-                                    builder.push_child(new_page.get_page_number());
-                                }
-
-                                let merged_key_index = max(child_index, merge_with);
-                                if merged_key_index < accessor.count_children() - 1 {
-                                    builder.push_key(accessor.key(merged_key_index).unwrap());
-                                }
-                            } else {
-                                builder.push_child(page_number);
-                                if i < accessor.count_children() - 1 {
-                                    builder.push_key(accessor.key(i).unwrap());
-                                }
-                            }
-                        }
-                        let result = if let Some(only_child) = builder.to_single_child() {
-                            DeletedBranch(only_child)
-                        } else {
-                            let new_page = builder.build()?;
-                            let accessor = BranchAccessor::new(&new_page);
-                            if accessor.total_length() < self.mem.get_page_size() / 2 {
-                                PartialBranch(new_page.get_page_number())
-                            } else {
-                                Subtree(new_page.get_page_number())
-                            }
-                        };
-
-                        let page_number = merge_with_page.get_page_number();
-                        drop(merge_with_page);
-                        self.free_policy
-                            .conditional_free(page_number, self.freed, self.mem)?;
-
-                        result
-                    }
-                    PartialBranch(partial_child) => {
-                        let partial_child_page = self.mem.get_page(partial_child);
-                        let partial_child_accessor = BranchAccessor::new(&partial_child_page);
-                        // TODO: optimize selection of sibling to merge with. Pick the least full one,
-                        // or don't merge if neither page is small enough
-                        let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
-                        let merge_with_page =
-                            self.mem.get_page(accessor.child_page(merge_with).unwrap());
-                        let merge_with_accessor = BranchAccessor::new(&merge_with_page);
-                        debug_assert!(merge_with < accessor.count_children());
-                        for i in 0..accessor.count_children() {
-                            if i == child_index {
-                                continue;
-                            }
-                            let page_number = accessor.child_page(i).unwrap();
-                            if i == merge_with {
-                                let mut child_builder = BranchBuilder::new(
-                                    self.mem,
-                                    merge_with_accessor.count_children()
-                                        + partial_child_accessor.count_children(),
-                                );
-                                let separator_key =
-                                    accessor.key(min(child_index, merge_with)).unwrap();
-                                if child_index < merge_with {
-                                    child_builder.push_all(&partial_child_accessor);
-                                    child_builder.push_key(separator_key);
-                                }
-                                child_builder.push_all(&merge_with_accessor);
-                                if child_index > merge_with {
-                                    child_builder.push_key(separator_key);
-                                    child_builder.push_all(&partial_child_accessor);
-                                }
-                                if child_builder.should_split() {
-                                    let (new_page1, separator, new_page2) =
-                                        child_builder.build_split()?;
-                                    builder.push_child(new_page1.get_page_number());
-                                    builder.push_key(separator);
-                                    builder.push_child(new_page2.get_page_number());
-                                } else {
-                                    let new_page = child_builder.build()?;
-                                    builder.push_child(new_page.get_page_number());
-                                }
-
-                                let merged_key_index = max(child_index, merge_with);
-                                if merged_key_index < accessor.count_children() - 1 {
-                                    builder.push_key(accessor.key(merged_key_index).unwrap());
-                                }
-                            } else {
-                                builder.push_child(page_number);
-                                if i < accessor.count_children() - 1 {
-                                    builder.push_key(accessor.key(i).unwrap());
-                                }
-                            }
-                        }
-                        let result = if let Some(only_child) = builder.to_single_child() {
-                            DeletedBranch(only_child)
-                        } else {
-                            let new_page = builder.build()?;
-                            let accessor = BranchAccessor::new(&new_page);
-                            if accessor.total_length() < self.mem.get_page_size() / 2 {
-                                PartialBranch(new_page.get_page_number())
-                            } else {
-                                Subtree(new_page.get_page_number())
-                            }
-                        };
-
-                        let page_number = merge_with_page.get_page_number();
-                        drop(merge_with_page);
-                        self.free_policy
-                            .conditional_free(page_number, self.freed, self.mem)?;
-                        drop(partial_child_page);
-                        self.free_policy
-                            .conditional_free(partial_child, self.freed, self.mem)?;
-
-                        result
-                    }
-                };
-
-                self.free_policy
-                    .conditional_free(original_page_number, self.freed, self.mem)?;
-
-                Ok((final_result, found))
-            }
+            LEAF => self.delete_leaf_helper(page, key),
+            BRANCH => self.delete_branch_helper(page, key),
             _ => unreachable!(),
         }
     }
