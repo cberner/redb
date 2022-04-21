@@ -46,7 +46,6 @@ enum OnDrop {
     RemoveEntry(usize),
 }
 
-// TODO: maybe this could be replaced with a Box?
 enum EitherPage<'a> {
     Immutable(PageImpl<'a>),
     Mutable(PageMut<'a>),
