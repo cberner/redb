@@ -495,15 +495,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                                 child_builder.push(entry.key(), entry.value());
                             }
                         }
-                        if child_builder.should_split() {
-                            let (new_page1, split_key, new_page2) = child_builder.build_split()?;
-                            builder.push_key(split_key);
-                            builder.push_child(new_page1.get_page_number());
-                            builder.push_child(new_page2.get_page_number());
-                        } else {
-                            let new_page = child_builder.build()?;
-                            builder.push_child(new_page.get_page_number());
-                        }
+                        let new_page = child_builder.build()?;
+                        builder.push_child(new_page.get_page_number());
 
                         let merged_key_index = max(child_index, merge_with);
                         if merged_key_index < accessor.count_children() - 1 {
@@ -548,15 +541,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             child_builder.push_key(separator_key);
                             child_builder.push_child(only_grandchild);
                         }
-                        if child_builder.should_split() {
-                            let (new_page1, separator, new_page2) = child_builder.build_split()?;
-                            builder.push_child(new_page1.get_page_number());
-                            builder.push_key(separator);
-                            builder.push_child(new_page2.get_page_number());
-                        } else {
-                            let new_page = child_builder.build()?;
-                            builder.push_child(new_page.get_page_number());
-                        }
+                        let new_page = child_builder.build()?;
+                        builder.push_child(new_page.get_page_number());
 
                         let merged_key_index = max(child_index, merge_with);
                         if merged_key_index < accessor.count_children() - 1 {
@@ -581,8 +567,6 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             PartialBranch(partial_child) => {
                 let partial_child_page = self.mem.get_page(partial_child);
                 let partial_child_accessor = BranchAccessor::new(&partial_child_page);
-                // TODO: optimize selection of sibling to merge with. Pick the least full one,
-                // or don't merge if neither page is small enough
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 let merge_with_page = self.mem.get_page(accessor.child_page(merge_with).unwrap());
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page);
@@ -608,15 +592,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                             child_builder.push_key(separator_key);
                             child_builder.push_all(&partial_child_accessor);
                         }
-                        if child_builder.should_split() {
-                            let (new_page1, separator, new_page2) = child_builder.build_split()?;
-                            builder.push_child(new_page1.get_page_number());
-                            builder.push_key(separator);
-                            builder.push_child(new_page2.get_page_number());
-                        } else {
-                            let new_page = child_builder.build()?;
-                            builder.push_child(new_page.get_page_number());
-                        }
+                        let new_page = child_builder.build()?;
+                        builder.push_child(new_page.get_page_number());
 
                         let merged_key_index = max(child_index, merge_with);
                         if merged_key_index < accessor.count_children() - 1 {
