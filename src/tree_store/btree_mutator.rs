@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
     BranchAccessor, BranchBuilder, BranchMutator, FreePolicy, LeafAccessor, LeafBuilder,
-    LeafBuilder2, LeafMutator, BRANCH, LEAF,
+    LeafMutator, BRANCH, LEAF,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, PartialBranch, PartialLeaf, Subtree,
@@ -69,7 +69,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     if accessor.num_pairs() == 1 {
                         None
                     } else {
-                        let mut builder = LeafBuilder2::new(self.mem, accessor.num_pairs() - 1);
+                        let mut builder = LeafBuilder::new(self.mem, accessor.num_pairs() - 1);
                         for i in 0..accessor.num_pairs() {
                             if i == deleted_pair {
                                 continue;
@@ -114,13 +114,9 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             let value_bytes = value.as_bytes();
             let key_bytes = key_bytes.as_ref();
             let value_bytes = value_bytes.as_ref();
-            let mut page = self.mem.allocate(LeafBuilder::required_bytes(
-                1,
-                key_bytes.len() + value_bytes.len(),
-            ))?;
-            let mut builder = LeafBuilder::new(&mut page, 1, key_bytes.len());
-            builder.append(key_bytes, value_bytes);
-            drop(builder);
+            let mut builder = LeafBuilder::new(self.mem, 1);
+            builder.push(key_bytes, value_bytes);
+            let page = builder.build()?;
 
             let accessor = LeafAccessor::new(&page);
             let offset = accessor.offset_of_first_value();
@@ -155,7 +151,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 let single_large_value = accessor.num_pairs() == 1
                     && accessor.total_length() >= self.mem.get_page_size();
                 if !found && single_large_value {
-                    let mut builder = LeafBuilder2::new(self.mem, 1);
+                    let mut builder = LeafBuilder::new(self.mem, 1);
                     builder.push(key, value);
                     let new_page = builder.build()?;
                     let new_page_number = new_page.get_page_number();
@@ -197,7 +193,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     return Ok((page_number, None, guard));
                 }
 
-                let mut builder = LeafBuilder2::new(self.mem, accessor.num_pairs() + 1);
+                let mut builder = LeafBuilder::new(self.mem, accessor.num_pairs() + 1);
                 for i in 0..accessor.num_pairs() {
                     if i == position {
                         builder.push(key, value);
@@ -365,7 +361,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 deleted_pair: position,
             }
         } else {
-            let mut builder = LeafBuilder2::new(self.mem, accessor.num_pairs() - 1);
+            let mut builder = LeafBuilder::new(self.mem, accessor.num_pairs() - 1);
             for i in 0..accessor.num_pairs() {
                 if i == position {
                     continue;
@@ -472,7 +468,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     }
                     let page_number = accessor.child_page(i).unwrap();
                     if i == merge_with {
-                        let mut child_builder = LeafBuilder2::new(
+                        let mut child_builder = LeafBuilder::new(
                             self.mem,
                             partial_child_accessor.num_pairs() - 1
                                 + merge_with_accessor.num_pairs(),
