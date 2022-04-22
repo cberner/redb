@@ -359,15 +359,27 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
     }
 }
 
-// TODO: replace LeafBuilder with LeafBuilder2
-pub(in crate::tree_store) struct LeafBuilder2<'a, 'b> {
+pub(in crate::tree_store) struct LeafBuilder<'a, 'b> {
     pairs: Vec<(&'a [u8], &'a [u8])>,
     total_key_bytes: usize,
     total_value_bytes: usize,
     mem: &'b TransactionalMemory,
 }
 
-impl<'a, 'b> LeafBuilder2<'a, 'b> {
+impl<'a, 'b> LeafBuilder<'a, 'b> {
+    pub(in crate::tree_store) fn required_bytes(
+        num_pairs: usize,
+        keys_values_bytes: usize,
+    ) -> usize {
+        // Page id & header;
+        let mut result = 4;
+        // key & value lengths
+        result += num_pairs * 2 * size_of::<u32>();
+        result += keys_values_bytes;
+
+        result
+    }
+
     pub(in crate::tree_store) fn new(mem: &'b TransactionalMemory, capacity: usize) -> Self {
         Self {
             pairs: Vec::with_capacity(capacity),
@@ -384,7 +396,7 @@ impl<'a, 'b> LeafBuilder2<'a, 'b> {
     }
 
     pub(in crate::tree_store) fn should_split(&self) -> bool {
-        let required_size = LeafBuilder::required_bytes(
+        let required_size = Self::required_bytes(
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
         );
@@ -406,22 +418,22 @@ impl<'a, 'b> LeafBuilder2<'a, 'b> {
         }
 
         let required_size =
-            LeafBuilder::required_bytes(division, first_split_key_bytes + first_split_value_bytes);
+            Self::required_bytes(division, first_split_key_bytes + first_split_value_bytes);
         let mut page1 = self.mem.allocate(required_size)?;
-        let mut builder = LeafBuilder::new(&mut page1, division, first_split_key_bytes);
+        let mut builder = RawLeafBuilder::new(&mut page1, division, first_split_key_bytes);
         for (key, value) in self.pairs.iter().take(division) {
             builder.append(key, value);
         }
         drop(builder);
 
-        let required_size = LeafBuilder::required_bytes(
+        let required_size = Self::required_bytes(
             self.pairs.len() - division,
             self.total_key_bytes + self.total_value_bytes
                 - first_split_key_bytes
                 - first_split_value_bytes,
         );
         let mut page2 = self.mem.allocate(required_size)?;
-        let mut builder = LeafBuilder::new(
+        let mut builder = RawLeafBuilder::new(
             &mut page2,
             self.pairs.len() - division,
             self.total_key_bytes - first_split_key_bytes,
@@ -435,12 +447,12 @@ impl<'a, 'b> LeafBuilder2<'a, 'b> {
     }
 
     pub(in crate::tree_store) fn build(self) -> Result<PageMut<'b>> {
-        let required_size = LeafBuilder::required_bytes(
+        let required_size = Self::required_bytes(
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
         );
         let mut page = self.mem.allocate(required_size)?;
-        let mut builder = LeafBuilder::new(&mut page, self.pairs.len(), self.total_key_bytes);
+        let mut builder = RawLeafBuilder::new(&mut page, self.pairs.len(), self.total_key_bytes);
         for (key, value) in self.pairs {
             builder.append(key, value);
         }
@@ -463,32 +475,15 @@ impl<'a, 'b> LeafBuilder2<'a, 'b> {
 // * n bytes: key data
 // repeating (num_entries times):
 // * n bytes: value data
-pub(in crate::tree_store) struct LeafBuilder<'a: 'b, 'b> {
+struct RawLeafBuilder<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
     num_pairs: usize,
     provisioned_key_bytes: usize,
     pairs_written: usize, // used for debugging
 }
 
-impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
-    pub(in crate::tree_store) fn required_bytes(
-        num_pairs: usize,
-        keys_values_bytes: usize,
-    ) -> usize {
-        // Page id & header;
-        let mut result = 4;
-        // key & value lengths
-        result += num_pairs * 2 * size_of::<u32>();
-        result += keys_values_bytes;
-
-        result
-    }
-
-    pub(in crate::tree_store) fn new(
-        page: &'b mut PageMut<'a>,
-        num_pairs: usize,
-        key_bytes: usize,
-    ) -> Self {
+impl<'a: 'b, 'b> RawLeafBuilder<'a, 'b> {
+    fn new(page: &'b mut PageMut<'a>, num_pairs: usize, key_bytes: usize) -> Self {
         page.memory_mut()[0] = LEAF;
         page.memory_mut()[2..4].copy_from_slice(&(num_pairs as u16).to_le_bytes());
         #[cfg(debug_assertions)]
@@ -499,7 +494,7 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
                 *x = 0xFF;
             }
         }
-        LeafBuilder {
+        RawLeafBuilder {
             page,
             num_pairs,
             provisioned_key_bytes: key_bytes,
@@ -525,7 +520,7 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
         ) as usize
     }
 
-    pub(in crate::tree_store) fn append(&mut self, key: &[u8], value: &[u8]) {
+    fn append(&mut self, key: &[u8], value: &[u8]) {
         let key_offset = if self.pairs_written == 0 {
             4 + 2 * size_of::<u32>() * self.num_pairs
         } else {
@@ -553,7 +548,7 @@ impl<'a: 'b, 'b> LeafBuilder<'a, 'b> {
     }
 }
 
-impl<'a: 'b, 'b> Drop for LeafBuilder<'a, 'b> {
+impl<'a: 'b, 'b> Drop for RawLeafBuilder<'a, 'b> {
     fn drop(&mut self) {
         assert_eq!(self.pairs_written, self.num_pairs);
     }
