@@ -358,7 +358,9 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             return Ok((Subtree(page_number), Some(guard)));
         }
 
-        let result = if new_required_bytes < self.mem.get_page_size() / 2 {
+        // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
+        // full pages, so we use 33% instead of 50% to avoid oscillating
+        let result = if new_required_bytes < self.mem.get_page_size() / 3 {
             PartialLeaf {
                 deleted_pair: position,
             }
@@ -400,7 +402,9 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             // The PartialInternal gets returned, and then the caller has to merge it immediately
             let new_page = builder.build()?;
             let accessor = BranchAccessor::new(&new_page);
-            if accessor.total_length() < self.mem.get_page_size() / 2 {
+            // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
+            // full pages, so we use 33% instead of 50% to avoid oscillating
+            if accessor.total_length() < self.mem.get_page_size() / 3 {
                 PartialBranch(new_page.get_page_number())
             } else {
                 Subtree(new_page.get_page_number())
@@ -581,8 +585,6 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             PartialBranch(partial_child) => {
                 let partial_child_page = self.mem.get_page(partial_child);
                 let partial_child_accessor = BranchAccessor::new(&partial_child_page);
-                // TODO: optimize selection of sibling to merge with. Pick the least full one,
-                // or don't merge if neither page is small enough
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 let merge_with_page = self.mem.get_page(accessor.child_page(merge_with).unwrap());
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page);
