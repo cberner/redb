@@ -1379,13 +1379,22 @@ impl TransactionalMemory {
         let regional_guard = self.regional_allocators.lock().unwrap();
         let layout = self.layout.lock().unwrap();
         let mut count = 0;
-        // TODO: with dynamic database growth, this is no longer a meaningful way to count free pages
         for i in 0..layout.num_regions() {
             let mem = metadata.get_regional_allocator(i, &layout);
             count += regional_guard.as_ref().unwrap()[i].count_free_pages(mem);
         }
 
-        Ok(count)
+        // Calculate the number of pages worth of expansion space left, if database grows to max size
+        let max_layout = DatabaseLayout::calculate(
+            metadata.get_max_capacity(),
+            metadata.get_max_capacity(),
+            self.page_size,
+        )
+        .unwrap();
+        let potential_growth_pages =
+            (max_layout.usable_bytes() - layout.usable_bytes()) / self.page_size;
+
+        Ok(count + potential_growth_pages)
     }
 
     pub(crate) fn get_page_size(&self) -> usize {
