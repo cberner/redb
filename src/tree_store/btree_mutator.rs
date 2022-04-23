@@ -18,7 +18,7 @@ enum DeletionResult {
     Subtree(PageNumber),
     // A leaf with zero children
     DeletedLeaf,
-    // A leaf subtree with too few entries
+    // A leaf with fewer entries than desired
     PartialLeaf { deleted_pair: usize },
     // A branch page subtree with fewer children than desired
     PartialBranch(PageNumber),
