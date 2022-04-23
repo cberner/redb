@@ -387,6 +387,7 @@ struct RegionLayout {
     // Offset where pages start
     pages_start: usize,
     allocator_state_len: usize,
+    max_order: usize,
     page_size: usize,
 }
 
@@ -400,20 +401,24 @@ impl RegionLayout {
         Some(min(MAX_PAGE_ORDER, max_order))
     }
 
-    fn calculate_usable_pages(space: usize, page_size: usize) -> Option<usize> {
-        let header_size = Self::header_with_padding(page_size)?;
+    fn calculate_usable_pages(
+        space: usize,
+        max_usable_region_bytes: usize,
+        page_size: usize,
+    ) -> Option<usize> {
+        let header_size = Self::header_with_padding(max_usable_region_bytes, page_size)?;
         assert!(header_size < space);
         Some((space - header_size) / page_size)
     }
 
-    fn header_size(page_size: usize) -> Option<usize> {
-        let max_order = Self::calculate_usable_order(MAX_USABLE_REGION_SPACE, page_size)?;
-        let page_capacity = MAX_USABLE_REGION_SPACE / page_size;
+    fn header_size(max_usable_region_bytes: usize, page_size: usize) -> Option<usize> {
+        let max_order = Self::calculate_usable_order(max_usable_region_bytes, page_size)?;
+        let page_capacity = max_usable_region_bytes / page_size;
         Some(BuddyAllocator::required_space(page_capacity, max_order))
     }
 
-    fn header_with_padding(page_size: usize) -> Option<usize> {
-        let header_size = Self::header_size(page_size)?;
+    fn header_with_padding(max_usable_region_bytes: usize, page_size: usize) -> Option<usize> {
+        let header_size = Self::header_size(max_usable_region_bytes, page_size)?;
         Some(if header_size % page_size == 0 {
             header_size
         } else {
@@ -424,9 +429,11 @@ impl RegionLayout {
     fn calculate(
         available_space: usize,
         desired_usable_bytes: usize,
+        max_usable_region_bytes: usize,
         page_size: usize,
     ) -> Option<RegionLayout> {
-        let required_header_size = Self::header_with_padding(page_size)?;
+        let max_order = Self::calculate_usable_order(max_usable_region_bytes, page_size)?;
+        let required_header_size = Self::header_with_padding(max_usable_region_bytes, page_size)?;
         if desired_usable_bytes / page_size < MIN_USABLE_PAGES {
             return None;
         }
@@ -436,7 +443,8 @@ impl RegionLayout {
         let max_region_size = desired_usable_bytes + required_header_size;
         let used_space = min(max_region_size, available_space);
 
-        let num_pages = Self::calculate_usable_pages(used_space, page_size)?;
+        let num_pages =
+            Self::calculate_usable_pages(used_space, max_usable_region_bytes, page_size)?;
         if num_pages < MIN_USABLE_PAGES {
             return None;
         }
@@ -444,17 +452,24 @@ impl RegionLayout {
         Some(RegionLayout {
             num_pages,
             pages_start: required_header_size,
-            allocator_state_len: Self::header_size(page_size)?,
+            allocator_state_len: Self::header_size(max_usable_region_bytes, page_size)?,
+            max_order,
             page_size,
         })
     }
 
-    fn full_region_layout(page_size: usize) -> RegionLayout {
-        let max_order = Self::calculate_usable_order(MAX_USABLE_REGION_SPACE, page_size).unwrap();
-        let max_region_size = MAX_USABLE_REGION_SPACE
-            + BuddyAllocator::required_space(MAX_USABLE_REGION_SPACE / page_size, max_order);
+    fn full_region_layout(max_usable_region_bytes: usize, page_size: usize) -> RegionLayout {
+        let max_order = Self::calculate_usable_order(max_usable_region_bytes, page_size).unwrap();
+        let max_region_size = max_usable_region_bytes
+            + BuddyAllocator::required_space(max_usable_region_bytes / page_size, max_order);
 
-        Self::calculate(max_region_size, MAX_USABLE_REGION_SPACE, page_size).unwrap()
+        Self::calculate(
+            max_region_size,
+            max_usable_region_bytes,
+            max_usable_region_bytes,
+            page_size,
+        )
+        .unwrap()
     }
 
     fn len(&self) -> usize {
@@ -466,42 +481,71 @@ impl RegionLayout {
     }
 
     fn max_order(&self) -> usize {
-        Self::calculate_usable_order(MAX_USABLE_REGION_SPACE, self.page_size).unwrap()
+        self.max_order
     }
 
     const fn serialized_size() -> usize {
-        size_of::<u32>() + 2 * size_of::<u64>()
+        5 * size_of::<u32>()
     }
 
     fn to_le_bytes(&self) -> [u8; Self::serialized_size()] {
         let mut result = [0; Self::serialized_size()];
-        result[..size_of::<u32>()].copy_from_slice(&(self.num_pages as u32).to_le_bytes());
-        result[size_of::<u32>()..size_of::<u32>() + size_of::<u64>()]
-            .copy_from_slice(&(self.allocator_state_len as u64).to_le_bytes());
-        result[size_of::<u32>() + size_of::<u64>()..]
-            .copy_from_slice(&(self.page_size as u64).to_le_bytes());
+        let mut offset = 0;
+        result[offset..(offset + size_of::<u32>())]
+            .copy_from_slice(&(self.page_size as u32).to_le_bytes());
+        offset += size_of::<u32>();
+        result[offset..(offset + size_of::<u32>())]
+            .copy_from_slice(&(self.pages_start as u32).to_le_bytes());
+        offset += size_of::<u32>();
+        result[offset..(offset + size_of::<u32>())]
+            .copy_from_slice(&(self.num_pages as u32).to_le_bytes());
+        offset += size_of::<u32>();
+        result[offset..(offset + size_of::<u32>())]
+            .copy_from_slice(&(self.allocator_state_len as u32).to_le_bytes());
+        offset += size_of::<u32>();
+        result[offset..(offset + size_of::<u32>())]
+            .copy_from_slice(&(self.max_order as u32).to_le_bytes());
 
         result
     }
 
     fn from_le_bytes(data: [u8; Self::serialized_size()]) -> Self {
-        let num_pages = u32::from_le_bytes(data[..size_of::<u32>()].try_into().unwrap()) as usize;
-        let allocator_state_len = u64::from_le_bytes(
-            data[size_of::<u32>()..size_of::<u32>() + size_of::<u64>()]
+        let mut offset = 0;
+        let page_size = u32::from_le_bytes(
+            data[offset..(offset + size_of::<u32>())]
                 .try_into()
                 .unwrap(),
         ) as usize;
-        let page_size = u64::from_le_bytes(
-            data[size_of::<u32>() + size_of::<u64>()..]
+        offset += size_of::<u32>();
+        let pages_start = u32::from_le_bytes(
+            data[offset..(offset + size_of::<u32>())]
                 .try_into()
                 .unwrap(),
         ) as usize;
-        let pages_start = Self::header_with_padding(page_size).unwrap();
+        offset += size_of::<u32>();
+        let num_pages = u32::from_le_bytes(
+            data[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        offset += size_of::<u32>();
+        let allocator_state_len = u32::from_le_bytes(
+            data[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        offset += size_of::<u32>();
+        let max_order = u32::from_le_bytes(
+            data[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize;
 
         Self {
             num_pages,
             pages_start,
             allocator_state_len,
+            max_order,
             page_size,
         }
     }
@@ -520,10 +564,12 @@ impl DatabaseLayout {
     fn calculate(
         db_capacity: usize,
         mut desired_usable_bytes: usize,
+        max_usable_region_bytes: usize,
         page_size: usize,
     ) -> Result<Self> {
         desired_usable_bytes = min(desired_usable_bytes, db_capacity);
-        let full_region_layout = RegionLayout::full_region_layout(page_size);
+        let full_region_layout =
+            RegionLayout::full_region_layout(max_usable_region_bytes, page_size);
         let min_header_size = DB_HEADER_SIZE + U64GroupedBitMapMut::required_bytes(1);
         let region_allocator_range = DB_HEADER_SIZE..min_header_size;
         // Pad to be page aligned
@@ -536,6 +582,7 @@ impl DatabaseLayout {
             let region_layout = RegionLayout::calculate(
                 db_capacity - min_header_size,
                 desired_usable_bytes,
+                max_usable_region_bytes,
                 page_size,
             )
             .ok_or(Error::OutOfSpace)?;
@@ -555,12 +602,12 @@ impl DatabaseLayout {
             // Pad to be page aligned
             let db_header_bytes = round_up_to_multiple_of(db_header_bytes, page_size);
             let max_full_regions = (db_capacity - db_header_bytes) / full_region_layout.len();
-            let desired_full_regions = desired_usable_bytes / MAX_USABLE_REGION_SPACE;
+            let desired_full_regions = desired_usable_bytes / max_usable_region_bytes;
             let num_full_regions = min(max_full_regions, desired_full_regions);
             let remaining_space =
                 db_capacity - db_header_bytes - num_full_regions * full_region_layout.len();
             let remaining_desired =
-                desired_usable_bytes - num_full_regions * MAX_USABLE_REGION_SPACE;
+                desired_usable_bytes - num_full_regions * max_usable_region_bytes;
             DatabaseLayout {
                 db_header_bytes,
                 region_allocator_range,
@@ -569,6 +616,7 @@ impl DatabaseLayout {
                 trailing_partial_region: RegionLayout::calculate(
                     remaining_space,
                     remaining_desired,
+                    max_usable_region_bytes,
                     page_size,
                 ),
             }
@@ -742,7 +790,9 @@ impl TransactionalMemory {
         requested_page_size: Option<usize>,
         dynamic_growth: bool,
     ) -> Result<Self> {
-        if max_capacity < DB_HEADER_SIZE {
+        let page_size = requested_page_size.unwrap_or_else(get_page_size);
+        assert!(page_size.is_power_of_two());
+        if max_capacity < DB_HEADER_SIZE + page_size * MIN_USABLE_PAGES {
             return Err(Error::OutOfSpace);
         }
 
@@ -758,15 +808,20 @@ impl TransactionalMemory {
         let mut metadata = unsafe { MetadataAccessor::new(&mmap, mutex.lock().unwrap()) };
 
         if metadata.get_magic_number() != MAGICNUMBER {
-            let page_size = requested_page_size.unwrap_or_else(get_page_size);
-            assert!(page_size.is_power_of_two());
+            let max_usable_region_bytes =
+                min(MAX_USABLE_REGION_SPACE, max_capacity.next_power_of_two());
 
             let starting_size = if dynamic_growth {
                 MIN_DESIRED_USABLE_BYTES
             } else {
                 max_capacity
             };
-            let layout = DatabaseLayout::calculate(max_capacity, starting_size, page_size)?;
+            let layout = DatabaseLayout::calculate(
+                max_capacity,
+                starting_size,
+                max_usable_region_bytes,
+                page_size,
+            )?;
 
             if mmap.len() < layout.len() {
                 // Safety: We're growing the mmap
@@ -807,8 +862,7 @@ impl TransactionalMemory {
             // Store the page & db size. These are immutable
             metadata.set_page_size(page_size);
             metadata.set_max_capacity(max_capacity);
-            // TODO: make the region size configurable, for people who want a really small minimum db size
-            metadata.set_region_max_usable_bytes(MAX_USABLE_REGION_SPACE);
+            metadata.set_region_max_usable_bytes(max_usable_region_bytes);
 
             let mut mutator = metadata.secondary_slot_mut();
             mutator.set_root_page(None);
@@ -837,11 +891,6 @@ impl TransactionalMemory {
         if let Some(size) = requested_page_size {
             assert_eq!(page_size, size);
         }
-        // TODO: make the region size configurable, for people who want a really small minimum db size
-        assert_eq!(
-            metadata.get_region_max_usable_bytes(),
-            MAX_USABLE_REGION_SPACE
-        );
         assert_eq!(metadata.primary_slot().get_version(), FILE_FORMAT_VERSION);
         assert_eq!(metadata.secondary_slot().get_version(), FILE_FORMAT_VERSION);
         let layout = metadata.primary_slot().get_data_section_layout();
@@ -1260,18 +1309,19 @@ impl TransactionalMemory {
     ) -> Result<()> {
         let required_growth =
             2usize.pow(required_order_allocation as u32) * metadata.get_page_size();
+        let max_region_size = metadata.get_region_max_usable_bytes();
         let next_desired_size = if layout.num_full_regions > 0 {
             if let Some(ref trailing) = layout.trailing_partial_region {
-                if 2 * required_growth < MAX_USABLE_REGION_SPACE - trailing.usable_bytes() {
+                if 2 * required_growth < max_region_size - trailing.usable_bytes() {
                     // Fill out the trailing region
-                    layout.usable_bytes() + (MAX_USABLE_REGION_SPACE - trailing.usable_bytes())
+                    layout.usable_bytes() + (max_region_size - trailing.usable_bytes())
                 } else {
                     // Grow by 1 region
-                    layout.usable_bytes() + MAX_USABLE_REGION_SPACE
+                    layout.usable_bytes() + max_region_size
                 }
             } else {
                 // Grow by 1 region
-                layout.usable_bytes() + MAX_USABLE_REGION_SPACE
+                layout.usable_bytes() + max_region_size
             }
         } else {
             max(
@@ -1282,6 +1332,7 @@ impl TransactionalMemory {
         let new_layout = DatabaseLayout::calculate(
             metadata.get_max_capacity(),
             next_desired_size,
+            metadata.get_region_max_usable_bytes(),
             self.page_size,
         )?;
         assert!(new_layout.len() >= layout.len());
@@ -1397,6 +1448,7 @@ impl TransactionalMemory {
         let max_layout = DatabaseLayout::calculate(
             metadata.get_max_capacity(),
             metadata.get_max_capacity(),
+            metadata.get_region_max_usable_bytes(),
             self.page_size,
         )
         .unwrap();
@@ -1451,7 +1503,7 @@ impl Drop for TransactionalMemory {
 mod test {
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::page_manager::{
-        ALLOCATOR_STATE_DIRTY, GOD_BYTE_OFFSET, MAGICNUMBER, MIN_USABLE_PAGES,
+        ALLOCATOR_STATE_DIRTY, DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, MIN_USABLE_PAGES,
     };
     use crate::tree_store::page_store::utils::get_page_size;
     use crate::tree_store::page_store::TransactionalMemory;
@@ -1519,6 +1571,18 @@ mod test {
         let result =
             unsafe { Database::create(tmpfile.path(), MIN_USABLE_PAGES * get_page_size() - 1) };
         assert!(matches!(result, Err(Error::OutOfSpace)));
+    }
+
+    #[test]
+    fn smallest_db() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        unsafe {
+            Database::create(
+                tmpfile.path(),
+                DB_HEADER_SIZE + (MIN_USABLE_PAGES + 2) * get_page_size(),
+            )
+            .unwrap();
+        }
     }
 
     #[test]

@@ -126,7 +126,7 @@ impl FuzzConfig {
             max_consecutive_nondurable_commits = max(max_consecutive_nondurable_commits, consecutive_nondurable_commits);
         }
 
-        let approximate_overhead = 256_000;
+        let approximate_overhead = 4 * 4096;
         let expected_size = (total_value_bytes + (size_of::<u64>() * 4) * total_entries) * max_consecutive_nondurable_commits + approximate_overhead;
         // If we're within a factor of 10 of the max db size, then assume an OOM is plausible
         expected_size * 10 > self.max_db_size.value
