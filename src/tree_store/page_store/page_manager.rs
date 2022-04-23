@@ -1258,13 +1258,22 @@ impl TransactionalMemory {
         layout: &mut DatabaseLayout,
         required_order_allocation: usize,
     ) -> Result<()> {
+        let required_growth =
+            2usize.pow(required_order_allocation as u32) * metadata.get_page_size();
         let next_desired_size = if layout.num_full_regions > 0 {
-            // Grow by 1 region
-            // TODO: prune the trailing partial region, if it exists
-            layout.usable_bytes() + MAX_USABLE_REGION_SPACE
+            if let Some(ref trailing) = layout.trailing_partial_region {
+                if 2 * required_growth < MAX_USABLE_REGION_SPACE - trailing.usable_bytes() {
+                    // Fill out the trailing region
+                    layout.usable_bytes() + (MAX_USABLE_REGION_SPACE - trailing.usable_bytes())
+                } else {
+                    // Grow by 1 region
+                    layout.usable_bytes() + MAX_USABLE_REGION_SPACE
+                }
+            } else {
+                // Grow by 1 region
+                layout.usable_bytes() + MAX_USABLE_REGION_SPACE
+            }
         } else {
-            let required_growth =
-                2usize.pow(required_order_allocation as u32) * metadata.get_page_size();
             max(
                 layout.usable_bytes() * 2,
                 layout.usable_bytes() + required_growth * 2,
