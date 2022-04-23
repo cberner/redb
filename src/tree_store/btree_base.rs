@@ -395,6 +395,22 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         self.pairs.push((key, value))
     }
 
+    pub(in crate::tree_store) fn push_all_except<T: Page>(
+        &mut self,
+        accessor: &'a LeafAccessor<'_, '_, T>,
+        except: Option<usize>,
+    ) {
+        for i in 0..accessor.num_pairs() {
+            if let Some(except) = except {
+                if except == i {
+                    continue;
+                }
+            }
+            let entry = accessor.entry(i).unwrap();
+            self.push(entry.key(), entry.value());
+        }
+    }
+
     pub(in crate::tree_store) fn should_split(&self) -> bool {
         let required_size = Self::required_bytes(
             self.pairs.len(),
