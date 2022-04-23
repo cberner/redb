@@ -622,7 +622,7 @@ impl DatabaseLayout {
             }
         };
 
-        assert!(result.db_header_bytes % page_size == 0);
+        assert_eq!(result.db_header_bytes % page_size, 0);
         Ok(result)
     }
 
