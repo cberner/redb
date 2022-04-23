@@ -1,5 +1,6 @@
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::grouped_bitmap::U64GroupedBitMapMut;
+use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::utils::get_page_size;
 use crate::tree_store::page_store::{PageImpl, PageMut};
@@ -13,7 +14,6 @@ use std::fs::File;
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
 use std::mem::size_of;
-use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -44,7 +44,7 @@ use std::sync::{Mutex, MutexGuard};
 // because the leaf node format uses 32bit offsets
 const MAX_USABLE_REGION_SPACE: usize = 4 * 1024 * 1024 * 1024;
 pub(crate) const MAX_PAGE_ORDER: usize = 20;
-const MIN_USABLE_PAGES: usize = 10;
+pub(super) const MIN_USABLE_PAGES: usize = 10;
 const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
 
 // TODO: set to 1, when version 1.0 is released
@@ -60,7 +60,7 @@ const DB_SIZE_OFFSET: usize = REGION_MAX_USABLE_OFFSET + size_of::<u64>();
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 128;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
-const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
+pub(super) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
 
 // God byte flags
 const PRIMARY_BIT: u8 = 1;
@@ -81,14 +81,6 @@ fn ceil_log2(x: usize) -> usize {
         x.trailing_zeros() as usize
     } else {
         x.next_power_of_two().trailing_zeros() as usize
-    }
-}
-
-fn round_up_to_multiple_of(value: usize, multiple: usize) -> usize {
-    if value % multiple == 0 {
-        value
-    } else {
-        value + multiple - value % multiple
     }
 }
 
@@ -222,7 +214,7 @@ impl<'a> MetadataAccessor<'a> {
 
     fn get_regional_allocator(&mut self, region: usize, layout: &DatabaseLayout) -> &[u8] {
         let base = layout.region_base_address(region);
-        let len = layout.region_layout(region).allocator_state_len;
+        let len = layout.region_layout(region).header_len();
         let absolute = base..(base + len);
 
         // Safety: We own the metadata lock, so there can't be any other references
@@ -270,10 +262,10 @@ impl<'a> RegionsAccessor<'a> {
     fn get_regional_allocator_mut(&mut self, region: usize) -> &mut [u8] {
         // Safety: We have exclusive access to regional metadata
         let base = self.layout.region_base_address(region);
-        let len = &self.layout.region_layout(region).allocator_state_len;
+        let len = &self.layout.region_layout(region).header_len();
         let absolute = base..(base + len);
 
-        assert!(absolute.start >= self.layout.db_header_bytes);
+        assert!(absolute.start >= self.layout.header_bytes());
         unsafe { self.mmap.get_memory_mut(absolute) }
     }
 }
@@ -379,378 +371,6 @@ impl<'a> TransactionMutator<'a> {
     }
 }
 
-// Regions are laid out starting with the allocator state header, followed by the pages aligned
-// to the next page
-#[derive(Clone)]
-struct RegionLayout {
-    num_pages: usize,
-    // Offset where pages start
-    pages_start: usize,
-    allocator_state_len: usize,
-    max_order: usize,
-    page_size: usize,
-}
-
-impl RegionLayout {
-    fn calculate_usable_order(space: usize, page_size: usize) -> Option<usize> {
-        if space < page_size {
-            return None;
-        }
-        let total_pages = space / page_size;
-        let max_order = (64 - total_pages.leading_zeros() - 1) as usize;
-        Some(min(MAX_PAGE_ORDER, max_order))
-    }
-
-    fn calculate_usable_pages(
-        space: usize,
-        max_usable_region_bytes: usize,
-        page_size: usize,
-    ) -> Option<usize> {
-        let header_size = Self::header_with_padding(max_usable_region_bytes, page_size)?;
-        assert!(header_size < space);
-        Some((space - header_size) / page_size)
-    }
-
-    fn header_size(max_usable_region_bytes: usize, page_size: usize) -> Option<usize> {
-        let max_order = Self::calculate_usable_order(max_usable_region_bytes, page_size)?;
-        let page_capacity = max_usable_region_bytes / page_size;
-        Some(BuddyAllocator::required_space(page_capacity, max_order))
-    }
-
-    fn header_with_padding(max_usable_region_bytes: usize, page_size: usize) -> Option<usize> {
-        let header_size = Self::header_size(max_usable_region_bytes, page_size)?;
-        Some(if header_size % page_size == 0 {
-            header_size
-        } else {
-            header_size + page_size - header_size % page_size
-        })
-    }
-
-    fn calculate(
-        available_space: usize,
-        desired_usable_bytes: usize,
-        max_usable_region_bytes: usize,
-        page_size: usize,
-    ) -> Option<RegionLayout> {
-        let max_order = Self::calculate_usable_order(max_usable_region_bytes, page_size)?;
-        let required_header_size = Self::header_with_padding(max_usable_region_bytes, page_size)?;
-        if desired_usable_bytes / page_size < MIN_USABLE_PAGES {
-            return None;
-        }
-        if available_space < required_header_size + MIN_USABLE_PAGES * page_size {
-            return None;
-        }
-        let max_region_size = desired_usable_bytes + required_header_size;
-        let used_space = min(max_region_size, available_space);
-
-        let num_pages =
-            Self::calculate_usable_pages(used_space, max_usable_region_bytes, page_size)?;
-        if num_pages < MIN_USABLE_PAGES {
-            return None;
-        }
-
-        Some(RegionLayout {
-            num_pages,
-            pages_start: required_header_size,
-            allocator_state_len: Self::header_size(max_usable_region_bytes, page_size)?,
-            max_order,
-            page_size,
-        })
-    }
-
-    fn full_region_layout(max_usable_region_bytes: usize, page_size: usize) -> RegionLayout {
-        let max_order = Self::calculate_usable_order(max_usable_region_bytes, page_size).unwrap();
-        let max_region_size = max_usable_region_bytes
-            + BuddyAllocator::required_space(max_usable_region_bytes / page_size, max_order);
-
-        Self::calculate(
-            max_region_size,
-            max_usable_region_bytes,
-            max_usable_region_bytes,
-            page_size,
-        )
-        .unwrap()
-    }
-
-    fn len(&self) -> usize {
-        self.pages_start + self.usable_bytes()
-    }
-
-    fn usable_bytes(&self) -> usize {
-        self.page_size * self.num_pages
-    }
-
-    fn max_order(&self) -> usize {
-        self.max_order
-    }
-
-    const fn serialized_size() -> usize {
-        5 * size_of::<u32>()
-    }
-
-    fn to_le_bytes(&self) -> [u8; Self::serialized_size()] {
-        let mut result = [0; Self::serialized_size()];
-        let mut offset = 0;
-        result[offset..(offset + size_of::<u32>())]
-            .copy_from_slice(&(self.page_size as u32).to_le_bytes());
-        offset += size_of::<u32>();
-        result[offset..(offset + size_of::<u32>())]
-            .copy_from_slice(&(self.pages_start as u32).to_le_bytes());
-        offset += size_of::<u32>();
-        result[offset..(offset + size_of::<u32>())]
-            .copy_from_slice(&(self.num_pages as u32).to_le_bytes());
-        offset += size_of::<u32>();
-        result[offset..(offset + size_of::<u32>())]
-            .copy_from_slice(&(self.allocator_state_len as u32).to_le_bytes());
-        offset += size_of::<u32>();
-        result[offset..(offset + size_of::<u32>())]
-            .copy_from_slice(&(self.max_order as u32).to_le_bytes());
-
-        result
-    }
-
-    fn from_le_bytes(data: [u8; Self::serialized_size()]) -> Self {
-        let mut offset = 0;
-        let page_size = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-        let pages_start = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-        let num_pages = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-        let allocator_state_len = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-        let max_order = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-
-        Self {
-            num_pages,
-            pages_start,
-            allocator_state_len,
-            max_order,
-            page_size,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct DatabaseLayout {
-    db_header_bytes: usize,
-    region_allocator_range: Range<usize>,
-    full_region_layout: RegionLayout,
-    num_full_regions: usize,
-    trailing_partial_region: Option<RegionLayout>,
-}
-
-impl DatabaseLayout {
-    fn calculate(
-        db_capacity: usize,
-        mut desired_usable_bytes: usize,
-        max_usable_region_bytes: usize,
-        page_size: usize,
-    ) -> Result<Self> {
-        desired_usable_bytes = min(desired_usable_bytes, db_capacity);
-        let full_region_layout =
-            RegionLayout::full_region_layout(max_usable_region_bytes, page_size);
-        let min_header_size = DB_HEADER_SIZE + U64GroupedBitMapMut::required_bytes(1);
-        let region_allocator_range = DB_HEADER_SIZE..min_header_size;
-        // Pad to be page aligned
-        let min_header_size = round_up_to_multiple_of(min_header_size, page_size);
-        if db_capacity < min_header_size + MIN_USABLE_PAGES * page_size {
-            return Err(Error::OutOfSpace);
-        }
-        let result = if db_capacity - min_header_size <= full_region_layout.len() {
-            // Single region layout
-            let region_layout = RegionLayout::calculate(
-                db_capacity - min_header_size,
-                desired_usable_bytes,
-                max_usable_region_bytes,
-                page_size,
-            )
-            .ok_or(Error::OutOfSpace)?;
-            DatabaseLayout {
-                db_header_bytes: min_header_size,
-                region_allocator_range,
-                full_region_layout,
-                num_full_regions: 0,
-                trailing_partial_region: Some(region_layout),
-            }
-        } else {
-            // Multi region layout
-            let max_regions = (db_capacity - min_header_size + full_region_layout.len() - 1)
-                / full_region_layout.len();
-            let db_header_bytes = DB_HEADER_SIZE + U64GroupedBitMapMut::required_bytes(max_regions);
-            let region_allocator_range = DB_HEADER_SIZE..db_header_bytes;
-            // Pad to be page aligned
-            let db_header_bytes = round_up_to_multiple_of(db_header_bytes, page_size);
-            let max_full_regions = (db_capacity - db_header_bytes) / full_region_layout.len();
-            let desired_full_regions = desired_usable_bytes / max_usable_region_bytes;
-            let num_full_regions = min(max_full_regions, desired_full_regions);
-            let remaining_space =
-                db_capacity - db_header_bytes - num_full_regions * full_region_layout.len();
-            let remaining_desired =
-                desired_usable_bytes - num_full_regions * max_usable_region_bytes;
-            DatabaseLayout {
-                db_header_bytes,
-                region_allocator_range,
-                full_region_layout,
-                num_full_regions,
-                trailing_partial_region: RegionLayout::calculate(
-                    remaining_space,
-                    remaining_desired,
-                    max_usable_region_bytes,
-                    page_size,
-                ),
-            }
-        };
-
-        assert_eq!(result.db_header_bytes % page_size, 0);
-        Ok(result)
-    }
-
-    fn num_regions(&self) -> usize {
-        if self.trailing_partial_region.is_some() {
-            self.num_full_regions + 1
-        } else {
-            self.num_full_regions
-        }
-    }
-
-    fn len(&self) -> usize {
-        let last = self.num_regions() - 1;
-        self.region_base_address(last) + self.region_layout(last).len()
-    }
-
-    fn usable_bytes(&self) -> usize {
-        let trailing = self
-            .trailing_partial_region
-            .as_ref()
-            .map(RegionLayout::usable_bytes)
-            .unwrap_or_default();
-        self.num_full_regions * self.full_region_layout.usable_bytes() + trailing
-    }
-
-    fn region_allocator_address_range(&self) -> Range<usize> {
-        self.region_allocator_range.clone()
-    }
-
-    fn region_base_address(&self, region: usize) -> usize {
-        assert!(region < self.num_regions());
-
-        self.db_header_bytes + region * self.full_region_layout.len()
-    }
-
-    fn region_layout(&self, region: usize) -> RegionLayout {
-        assert!(region < self.num_regions());
-        if region == self.num_full_regions {
-            self.trailing_partial_region.as_ref().unwrap().clone()
-        } else {
-            self.full_region_layout.clone()
-        }
-    }
-
-    const fn serialized_size() -> usize {
-        4 * size_of::<u64>() + 2 * RegionLayout::serialized_size() + 1
-    }
-
-    fn to_le_bytes(&self) -> [u8; Self::serialized_size()] {
-        let mut result = [0; Self::serialized_size()];
-        let mut offset = 0;
-        result[offset..offset + size_of::<u64>()]
-            .copy_from_slice(&(self.db_header_bytes as u64).to_le_bytes());
-        offset += size_of::<u64>();
-        result[offset..offset + size_of::<u64>()]
-            .copy_from_slice(&(self.num_full_regions as u64).to_le_bytes());
-        offset += size_of::<u64>();
-
-        result[offset..offset + size_of::<u64>()]
-            .copy_from_slice(&(self.region_allocator_range.start as u64).to_le_bytes());
-        offset += size_of::<u64>();
-        result[offset..offset + size_of::<u64>()]
-            .copy_from_slice(&(self.region_allocator_range.end as u64).to_le_bytes());
-        offset += size_of::<u64>();
-
-        result[offset..offset + RegionLayout::serialized_size()]
-            .copy_from_slice(&self.full_region_layout.to_le_bytes());
-        offset += RegionLayout::serialized_size();
-        if let Some(trailing) = self.trailing_partial_region.as_ref() {
-            result[offset..offset + RegionLayout::serialized_size()]
-                .copy_from_slice(&trailing.to_le_bytes());
-            offset += RegionLayout::serialized_size();
-            result[offset] = 1;
-        } else {
-            result[offset..offset + RegionLayout::serialized_size()].fill(0);
-            offset += RegionLayout::serialized_size();
-            result[offset] = 0;
-        }
-
-        result
-    }
-
-    fn from_le_bytes(data: [u8; Self::serialized_size()]) -> Self {
-        let mut offset = 0;
-        let db_header_bytes =
-            u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
-                as usize;
-        offset += size_of::<u64>();
-        let num_full_regions =
-            u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
-                as usize;
-        offset += size_of::<u64>();
-
-        let region_allocator_start =
-            u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
-                as usize;
-        offset += size_of::<u64>();
-        let region_allocator_end =
-            u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
-                as usize;
-        offset += size_of::<u64>();
-
-        let full_region_layout = RegionLayout::from_le_bytes(
-            data[offset..offset + RegionLayout::serialized_size()]
-                .try_into()
-                .unwrap(),
-        );
-        offset += RegionLayout::serialized_size();
-        let trailing_partial_region = if data[Self::serialized_size() - 1] == 0 {
-            None
-        } else {
-            Some(RegionLayout::from_le_bytes(
-                data[offset..offset + RegionLayout::serialized_size()]
-                    .try_into()
-                    .unwrap(),
-            ))
-        };
-
-        Self {
-            db_header_bytes,
-            region_allocator_range: region_allocator_start..region_allocator_end,
-            full_region_layout,
-            num_full_regions,
-            trailing_partial_region,
-        }
-    }
-}
-
 enum AllocationOp {
     Allocate(PageNumber),
     Free(PageNumber),
@@ -850,8 +470,8 @@ impl TransactionalMemory {
                 let region_layout = layout.region_layout(i);
                 BuddyAllocator::init_new(
                     mem,
-                    region_layout.num_pages,
-                    layout.full_region_layout.num_pages,
+                    region_layout.num_pages(),
+                    layout.full_region_layout().num_pages(),
                     region_layout.max_order(),
                 );
             }
@@ -894,22 +514,22 @@ impl TransactionalMemory {
         assert_eq!(metadata.primary_slot().get_version(), FILE_FORMAT_VERSION);
         assert_eq!(metadata.secondary_slot().get_version(), FILE_FORMAT_VERSION);
         let layout = metadata.primary_slot().get_data_section_layout();
-        let region_size = layout.full_region_layout.len();
-        let region_header_size = layout.full_region_layout.pages_start;
+        let region_size = layout.full_region_layout().len();
+        let region_header_size = layout.full_region_layout().data_section().start;
 
         let regional_allocators = if metadata.get_allocator_dirty() {
             None
         } else {
             let full_regional_allocator = BuddyAllocator::new(
-                layout.full_region_layout.num_pages,
-                layout.full_region_layout.num_pages,
-                layout.full_region_layout.max_order(),
+                layout.full_region_layout().num_pages(),
+                layout.full_region_layout().num_pages(),
+                layout.full_region_layout().max_order(),
             );
-            let mut allocators = vec![full_regional_allocator; layout.num_full_regions];
-            if let Some(ref region_layout) = layout.trailing_partial_region {
+            let mut allocators = vec![full_regional_allocator; layout.num_full_regions()];
+            if let Some(region_layout) = layout.trailing_region_layout() {
                 let trailing = BuddyAllocator::new(
-                    region_layout.num_pages,
-                    layout.full_region_layout.num_pages,
+                    region_layout.num_pages(),
+                    layout.full_region_layout().num_pages(),
                     region_layout.max_order(),
                 );
                 allocators.push(trailing);
@@ -932,7 +552,7 @@ impl TransactionalMemory {
             page_size,
             region_size,
             region_header_with_padding_size: region_header_size,
-            db_header_size: layout.db_header_bytes,
+            db_header_size: layout.header_bytes(),
         })
     }
 
@@ -963,8 +583,8 @@ impl TransactionalMemory {
             let region_layout = layout.region_layout(i);
             regional_allocators.push(BuddyAllocator::init_new(
                 mem,
-                region_layout.num_pages,
-                layout.full_region_layout.num_pages,
+                region_layout.num_pages(),
+                layout.full_region_layout().num_pages(),
                 region_layout.max_order(),
             ));
         }
@@ -984,15 +604,15 @@ impl TransactionalMemory {
         self.mmap.flush()?;
 
         let full_regional_allocator = BuddyAllocator::new(
-            layout.full_region_layout.num_pages,
-            layout.full_region_layout.num_pages,
-            layout.full_region_layout.max_order(),
+            layout.full_region_layout().num_pages(),
+            layout.full_region_layout().num_pages(),
+            layout.full_region_layout().max_order(),
         );
-        let mut allocators = vec![full_regional_allocator; layout.num_full_regions];
-        if let Some(ref region_layout) = layout.trailing_partial_region {
+        let mut allocators = vec![full_regional_allocator; layout.num_full_regions()];
+        if let Some(region_layout) = layout.trailing_region_layout() {
             let trailing = BuddyAllocator::new(
-                region_layout.num_pages,
-                layout.full_region_layout.num_pages,
+                region_layout.num_pages(),
+                layout.full_region_layout().num_pages(),
                 region_layout.max_order(),
             );
             allocators.push(trailing);
@@ -1310,8 +930,8 @@ impl TransactionalMemory {
         let required_growth =
             2usize.pow(required_order_allocation as u32) * metadata.get_page_size();
         let max_region_size = metadata.get_region_max_usable_bytes();
-        let next_desired_size = if layout.num_full_regions > 0 {
-            if let Some(ref trailing) = layout.trailing_partial_region {
+        let next_desired_size = if layout.num_full_regions() > 0 {
+            if let Some(trailing) = layout.trailing_region_layout() {
                 if 2 * required_growth < max_region_size - trailing.usable_bytes() {
                     // Fill out the trailing region
                     layout.usable_bytes() + (max_region_size - trailing.usable_bytes())
@@ -1336,8 +956,8 @@ impl TransactionalMemory {
             self.page_size,
         )?;
         assert!(new_layout.len() >= layout.len());
-        assert_eq!(new_layout.db_header_bytes, layout.db_header_bytes);
-        assert_eq!(new_layout.db_header_bytes, self.db_header_size);
+        assert_eq!(new_layout.header_bytes(), layout.header_bytes());
+        assert_eq!(new_layout.header_bytes(), self.db_header_size);
         if new_layout.len() == layout.len() {
             // Can't grow
             return Err(Error::OutOfSpace);
@@ -1362,7 +982,7 @@ impl TransactionalMemory {
                         metadata.allocators_mut(&new_layout)?;
                     region_allocator.clear(i);
                     let mem = regions.get_regional_allocator_mut(i);
-                    allocator.resize(mem, new_region.num_pages);
+                    allocator.resize(mem, new_region.num_pages());
                 }
                 allocator
             } else {
@@ -1372,8 +992,8 @@ impl TransactionalMemory {
                 let mem = regions.get_regional_allocator_mut(i);
                 BuddyAllocator::init_new(
                     mem,
-                    new_region.num_pages,
-                    new_layout.full_region_layout.num_pages,
+                    new_region.num_pages(),
+                    new_layout.full_region_layout().num_pages(),
                     new_region.max_order(),
                 )
             };

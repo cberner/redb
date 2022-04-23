@@ -1,6 +1,7 @@
 mod base;
 mod buddy_allocator;
 mod grouped_bitmap;
+mod layout;
 mod mmap;
 mod page_allocator;
 mod page_manager;
