@@ -9,20 +9,20 @@ use std::cell::RefCell;
 use std::ops::RangeBounds;
 use std::rc::Rc;
 
-pub struct Table<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub struct Table<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     name: String,
-    transaction: &'t WriteTransaction<'s>,
-    tree: BtreeMut<'t, K, V>,
+    transaction: &'txn WriteTransaction<'db>,
+    tree: BtreeMut<'txn, K, V>,
 }
 
-impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
+impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'db, 'txn, K, V> {
     pub(crate) fn new(
         name: &str,
         table_root: Option<PageNumber>,
         freed_pages: Rc<RefCell<Vec<PageNumber>>>,
-        mem: &'s TransactionalMemory,
-        transaction: &'t WriteTransaction<'s>,
-    ) -> Table<'s, 't, K, V> {
+        mem: &'db TransactionalMemory,
+        transaction: &'txn WriteTransaction<'db>,
+    ) -> Table<'db, 'txn, K, V> {
         Table {
             name: name.to_string(),
             transaction,
@@ -59,8 +59,8 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'s, 't, K, V> {
     }
 }
 
-impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
-    for Table<'s, 't, K, V>
+impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
+    for Table<'db, 'txn, K, V>
 {
     fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
         self.tree.get(key)
@@ -82,7 +82,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     }
 }
 
-impl<'s, 't, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for Table<'s, 't, K, V> {
+impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for Table<'db, 'txn, K, V> {
     fn drop(&mut self) {
         self.transaction.close_table(&self.name, &mut self.tree);
     }
@@ -101,23 +101,23 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     fn is_empty(&self) -> Result<bool>;
 }
 
-pub struct ReadOnlyTable<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
-    tree: Btree<'s, K, V>,
+pub struct ReadOnlyTable<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+    tree: Btree<'txn, K, V>,
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'s, K, V> {
+impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'txn, K, V> {
     pub(crate) fn new(
         root_page: Option<PageNumber>,
-        mem: &'s TransactionalMemory,
-    ) -> ReadOnlyTable<'s, K, V> {
+        mem: &'txn TransactionalMemory,
+    ) -> ReadOnlyTable<'txn, K, V> {
         ReadOnlyTable {
             tree: Btree::new(root_page, mem),
         }
     }
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
-    for ReadOnlyTable<'s, K, V>
+impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
+    for ReadOnlyTable<'txn, K, V>
 {
     fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
         self.tree.get(key)

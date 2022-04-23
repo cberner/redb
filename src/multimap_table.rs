@@ -289,21 +289,21 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'
     }
 }
 
-pub struct MultimapTable<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+pub struct MultimapTable<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     name: String,
-    transaction: &'t WriteTransaction<'s>,
-    tree: BtreeMut<'t, MultimapKVPair<K, V>, [u8]>,
-    mem: &'s TransactionalMemory,
+    transaction: &'txn WriteTransaction<'db>,
+    tree: BtreeMut<'txn, MultimapKVPair<K, V>, [u8]>,
+    mem: &'db TransactionalMemory,
 }
 
-impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, V> {
+impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'txn, K, V> {
     pub(crate) fn new(
         name: &str,
         table_root: Option<PageNumber>,
         freed_pages: Rc<RefCell<Vec<PageNumber>>>,
-        mem: &'s TransactionalMemory,
-        transaction: &'t WriteTransaction<'s>,
-    ) -> MultimapTable<'s, 't, K, V> {
+        mem: &'db TransactionalMemory,
+        transaction: &'txn WriteTransaction<'db>,
+    ) -> MultimapTable<'db, 'txn, K, V> {
         MultimapTable {
             name: name.to_string(),
             transaction,
@@ -357,8 +357,8 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'s, 't, K, 
     }
 }
 
-impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
-    for MultimapTable<'s, 't, K, V>
+impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
+    for MultimapTable<'db, 'txn, K, V>
 {
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapValueIter<'a, K, V>> {
         let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
@@ -390,7 +390,7 @@ impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, 
     }
 }
 
-impl<'s, 't, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Drop for MultimapTable<'s, 't, K, V> {
+impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Drop for MultimapTable<'db, 'txn, K, V> {
     fn drop(&mut self) {
         self.transaction.close_table(&self.name, &mut self.tree);
     }
@@ -409,23 +409,23 @@ pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     fn is_empty(&self) -> Result<bool>;
 }
 
-pub struct ReadOnlyMultimapTable<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
-    tree: Btree<'s, MultimapKVPair<K, V>, [u8]>,
+pub struct ReadOnlyMultimapTable<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+    tree: Btree<'txn, MultimapKVPair<K, V>, [u8]>,
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'s, K, V> {
+impl<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'txn, K, V> {
     pub(crate) fn new(
         root_page: Option<PageNumber>,
-        mem: &'s TransactionalMemory,
-    ) -> ReadOnlyMultimapTable<'s, K, V> {
+        mem: &'txn TransactionalMemory,
+    ) -> ReadOnlyMultimapTable<'txn, K, V> {
         ReadOnlyMultimapTable {
             tree: Btree::new(root_page, mem),
         }
     }
 }
 
-impl<'s, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
-    for ReadOnlyMultimapTable<'s, K, V>
+impl<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
+    for ReadOnlyMultimapTable<'txn, K, V>
 {
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapValueIter<'a, K, V>> {
         let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);

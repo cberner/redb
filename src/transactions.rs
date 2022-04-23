@@ -136,10 +136,10 @@ impl<'db> WriteTransaction<'db> {
     /// Open the given table
     ///
     /// The table will be created if it does not exist
-    pub fn open_table<'t, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
-        &'t self,
+    pub fn open_table<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+        &'txn self,
         definition: TableDefinition<K, V>,
-    ) -> Result<Table<'db, 't, K, V>> {
+    ) -> Result<Table<'db, 'txn, K, V>> {
         if let Some(location) = self.open_tables.borrow().get(definition.name()) {
             return Err(Error::TableAlreadyOpen(
                 definition.name().to_string(),
@@ -167,10 +167,10 @@ impl<'db> WriteTransaction<'db> {
     /// Open the given table
     ///
     /// The table will be created if it does not exist
-    pub fn open_multimap_table<'t, K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
-        &'t self,
+    pub fn open_multimap_table<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
+        &'txn self,
         definition: MultimapTableDefinition<K, V>,
-    ) -> Result<MultimapTable<'db, 't, K, V>> {
+    ) -> Result<MultimapTable<'db, 'txn, K, V>> {
         if let Some(location) = self.open_tables.borrow().get(definition.name()) {
             return Err(Error::TableAlreadyOpen(
                 definition.name().to_string(),
