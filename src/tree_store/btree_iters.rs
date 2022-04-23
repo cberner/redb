@@ -117,15 +117,20 @@ pub(crate) struct AllPageNumbersBtreeIter<'a> {
 impl<'a> AllPageNumbersBtreeIter<'a> {
     pub(crate) fn new(root: PageNumber, manager: &'a TransactionalMemory) -> Self {
         let root_page = manager.get_page(root);
-        let start = page_numbers_iter_start_state(root_page);
-        match start {
-            Leaf { entry, .. } => {
-                assert_eq!(entry, 0)
-            }
-            Internal { child, .. } => {
-                assert_eq!(child, 0)
-            }
-        }
+        let node_mem = root_page.memory();
+        let start = match node_mem[0] {
+            LEAF => Leaf {
+                page: root_page,
+                entry: 0,
+                parent: None,
+            },
+            BRANCH => Internal {
+                page: root_page,
+                child: 0,
+                parent: None,
+            },
+            _ => unreachable!(),
+        };
         Self {
             next: Some(start),
             manager,
@@ -150,23 +155,6 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
                 return Some(value);
             }
         }
-    }
-}
-
-fn page_numbers_iter_start_state(page: PageImpl) -> RangeIterState {
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => Leaf {
-            page,
-            entry: 0,
-            parent: None,
-        },
-        BRANCH => Internal {
-            page,
-            child: 0,
-            parent: None,
-        },
-        _ => unreachable!(),
     }
 }
 
@@ -204,7 +192,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                     manager,
                 ),
                 Bound::Unbounded => {
-                    let state = find_iter_unbounded_left(manager.get_page(root), None, manager);
+                    let state = find_iter_unbounded(manager.get_page(root), None, false, manager);
                     (true, state)
                 }
             };
@@ -224,7 +212,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                     manager,
                 ),
                 Bound::Unbounded => {
-                    let state = find_iter_unbounded_right(manager.get_page(root), None, manager);
+                    let state = find_iter_unbounded(manager.get_page(root), None, true, manager);
                     (true, state)
                 }
             };
@@ -358,43 +346,17 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
     }
 }
 
-fn find_iter_unbounded_left<'a>(
+fn find_iter_unbounded<'a>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
-    manager: &'a TransactionalMemory,
-) -> Option<RangeIterState<'a>> {
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => Some(Leaf {
-            page,
-            entry: 0,
-            parent,
-        }),
-        BRANCH => {
-            let accessor = BranchAccessor::new(&page);
-            let child_page_number = accessor.child_page(0).unwrap();
-            let child_page = manager.get_page(child_page_number);
-            parent = Some(Box::new(Internal {
-                page,
-                child: 1,
-                parent,
-            }));
-            find_iter_unbounded_left(child_page, parent, manager)
-        }
-        _ => unreachable!(),
-    }
-}
-
-fn find_iter_unbounded_right<'a>(
-    page: PageImpl<'a>,
-    mut parent: Option<Box<RangeIterState<'a>>>,
+    reverse: bool,
     manager: &'a TransactionalMemory,
 ) -> Option<RangeIterState<'a>> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(&page);
-            let entry = accessor.num_pairs() - 1;
+            let entry = if reverse { accessor.num_pairs() - 1 } else { 0 };
             Some(Leaf {
                 page,
                 entry,
@@ -403,17 +365,20 @@ fn find_iter_unbounded_right<'a>(
         }
         BRANCH => {
             let accessor = BranchAccessor::new(&page);
-            let child_index = accessor.count_children() - 1;
+            let child_index = if reverse {
+                accessor.count_children() - 1
+            } else {
+                0
+            };
             let child_page_number = accessor.child_page(child_index).unwrap();
             let child_page = manager.get_page(child_page_number);
-            if child_index > 0 && accessor.child_page(child_index - 1).is_some() {
-                parent = Some(Box::new(Internal {
-                    page,
-                    child: child_index - 1,
-                    parent,
-                }));
-            }
-            find_iter_unbounded_right(child_page, parent, manager)
+            let direction = if reverse { -1isize } else { 1 };
+            parent = Some(Box::new(Internal {
+                page,
+                child: (child_index as isize + direction) as usize,
+                parent,
+            }));
+            find_iter_unbounded(child_page, parent, reverse, manager)
         }
         _ => unreachable!(),
     }
