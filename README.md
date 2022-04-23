@@ -6,24 +6,68 @@
 [![License](https://img.shields.io/crates/l/redb)](https://crates.io/crates/redb)
 [![dependency status](https://deps.rs/repo/github/cberner/redb/status.svg)](https://deps.rs/repo/github/cberner/redb)
 
-## Python bindings
+A simple, portable, high-performance, ACID, embedded key-value store.
 
-The Python bindings are generated using [pyo3](https://github.com/PyO3/pyo3).
+redb is written in pure Rust and is loosely inspired by [lmdb](http://www.lmdb.tech/doc/). Data is stored in a collection
+of mmap'ed, copy-on-write, B-trees. For more details, see the [design doc](docs/design.md)
 
-Some operating systems require additional packages to be installed.
-```
-$ sudo apt install python3-dev
+```rust
+use redb::{Database, Error, ReadableTable, TableDefinition};
+
+const TABLE: TableDefinition<str, u64> = TableDefinition::new("my_data");
+
+fn main() -> Result<(), Error> {
+    let db = unsafe { Database::create("my_db.redb", 1024 * 1024)? };
+    let write_txn = db.begin_write()?;
+    {
+        let mut table = write_txn.open_table(TABLE)?;
+        table.insert("my_key", &123)?;
+    }
+    write_txn.commit()?;
+
+    let read_txn = db.begin_read()?;
+    let table = read_txn.open_table(TABLE)?;
+    assert_eq!(table.get("my_key")?.unwrap(), 123);
+
+    Ok(())
+}
 ```
 
-[maturin](https://github.com/PyO3/maturin) is recommended for building the Python bindings in this crate.
-```
-$ pip install maturin
-$ maturin build --cargo-extra-args="--features python"
-```
+## Status
+redb is undergoing active development, and should be considered beta quality. It may eat your data, and does not
+have any guarantees of file format stability :)
 
-Alternatively, refer to the [Building and Distribution section](https://pyo3.rs/v0.8.5/building_and_distribution.html) in the [pyo3 user guide](https://pyo3.rs/v0.8.5/).
-Note, you must pass the `--cargo-extra-args="--features python"` argument to Maturin when building this crate
-to enable the Python binding features.
+## Features
+* Zero-copy, thread-safe, `BTreeMap` based API
+* Fully ACID-compliant transactions
+* MVCC support for concurrent readers & writer, without blocking
+* Crash-safe by default
+
+## Roadmap
+The following features are planned before the 1.0 release
+* Stable file format
+* User-defined zero-copy types
+* Further performance optimizations
+
+## Benchmarks
+redb is nearly as fast as lmdb, and faster than sled, on many benchmarks
+```
++--------------------+--------+--------+--------+
+|                    | redb   | lmdb   | sled   |
++===============================================+
+| bulk load          | 1605ms | 1294ms | 4642ms |
+|--------------------+--------+--------+--------|
+| individual writes  | 516ms  | 411ms  | 527ms  |
+|--------------------+--------+--------+--------|
+| batch writes       | 7444ms | 3938ms | 1465ms |
+|--------------------+--------+--------+--------|
+| large writes       |  12s   |  11s   |  315s  |
+|--------------------+--------+--------+--------|
+| random reads       | 716ms  | 649ms  | 1552ms |
+|--------------------+--------+--------+--------|
+| removals           | 1282ms | 1012ms | 1911ms |
++--------------------+--------+--------+--------+
+```
 
 ## License
 
