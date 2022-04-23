@@ -3,7 +3,7 @@ use crate::tree_store::btree_base::{
     LeafMutator, BRANCH, LEAF,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
-    DeletedBranch, PartialBranch, PartialLeaf, Subtree,
+    DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,
 };
 use crate::tree_store::page_store::{Page, PageImpl};
 use crate::tree_store::{AccessGuardMut, PageNumber, TransactionalMemory};
@@ -16,6 +16,8 @@ use std::marker::PhantomData;
 enum DeletionResult {
     // A proper subtree
     Subtree(PageNumber),
+    // A leaf with zero children
+    DeletedLeaf,
     // A leaf subtree with too few entries
     PartialLeaf { deleted_pair: usize },
     // A branch page subtree with fewer children than desired
@@ -63,22 +65,13 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 self.delete_helper(self.mem.get_page(p), key.as_bytes().as_ref())?;
             let new_root = match deletion_result {
                 DeletionResult::Subtree(page) => Some(page),
+                DeletionResult::DeletedLeaf => None,
                 DeletionResult::PartialLeaf { deleted_pair } => {
                     let page = self.mem.get_page(p);
                     let accessor = LeafAccessor::new(&page);
-                    if accessor.num_pairs() == 1 {
-                        None
-                    } else {
-                        let mut builder = LeafBuilder::new(self.mem, accessor.num_pairs() - 1);
-                        for i in 0..accessor.num_pairs() {
-                            if i == deleted_pair {
-                                continue;
-                            }
-                            let entry = accessor.entry(i).unwrap();
-                            builder.push(entry.key(), entry.value());
-                        }
-                        Some(builder.build()?.get_page_number())
-                    }
+                    let mut builder = LeafBuilder::new(self.mem, accessor.num_pairs() - 1);
+                    builder.push_all_except(&accessor, Some(deleted_pair));
+                    Some(builder.build()?.get_page_number())
                 }
                 DeletionResult::PartialBranch(page_number) => Some(page_number),
                 DeletionResult::DeletedBranch(remaining_child) => Some(remaining_child),
@@ -354,9 +347,11 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             return Ok((Subtree(page_number), Some(guard)));
         }
 
-        // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
-        // full pages, so we use 33% instead of 50% to avoid oscillating
-        let result = if new_required_bytes < self.mem.get_page_size() / 3 {
+        let result = if accessor.num_pairs() == 1 {
+            DeletedLeaf
+        } else if new_required_bytes < self.mem.get_page_size() / 3 {
+            // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
+            // full pages, so we use 33% instead of 50% to avoid oscillating
             PartialLeaf {
                 deleted_pair: position,
             }
@@ -453,10 +448,31 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 // Handled in the if above
                 unreachable!();
             }
-            // TODO: optimize case where the entire child was deleted to avoid rebuilding the merge_with sibling
+            DeletedLeaf => {
+                for i in 0..accessor.count_children() {
+                    if i == child_index {
+                        continue;
+                    }
+                    builder.push_child(accessor.child_page(i).unwrap());
+                }
+                let end = if child_index == accessor.count_children() - 1 {
+                    // Skip the last key, which precedes the child
+                    accessor.count_children() - 2
+                } else {
+                    accessor.count_children() - 1
+                };
+                for i in 0..end {
+                    if i == child_index {
+                        continue;
+                    }
+                    builder.push_key(accessor.key(i).unwrap());
+                }
+                self.finalize_branch_builder(builder)?
+            }
             PartialLeaf { deleted_pair } => {
                 let partial_child_page = self.mem.get_page(child_page_number);
                 let partial_child_accessor = LeafAccessor::new(&partial_child_page);
+                debug_assert!(partial_child_accessor.num_pairs() > 1);
 
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 debug_assert!(merge_with < accessor.count_children());
@@ -466,7 +482,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 let single_large_value = merge_with_accessor.num_pairs() == 1
                     && merge_with_accessor.total_length() >= self.mem.get_page_size();
                 // Don't try to merge or rebalance, if the sibling contains a single large value
-                if single_large_value && partial_child_accessor.num_pairs() > 1 {
+                if single_large_value {
                     let mut child_builder =
                         LeafBuilder::new(self.mem, partial_child_accessor.num_pairs() - 1);
                     child_builder.push_all_except(&partial_child_accessor, Some(deleted_pair));
