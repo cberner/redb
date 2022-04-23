@@ -1,7 +1,7 @@
 [package]
 name = "redb"
 description = "Rust Embedded DataBase"
-homepage = "https://github.com/cberner/redb"
+homepage = "https://www.redb.org"
 repository = "https://github.com/cberner/redb"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
