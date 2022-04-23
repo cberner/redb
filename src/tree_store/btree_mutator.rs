@@ -453,15 +453,41 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 // Handled in the if above
                 unreachable!();
             }
+            // TODO: optimize case where the entire child was deleted to avoid rebuilding the merge_with sibling
             PartialLeaf { deleted_pair } => {
                 let partial_child_page = self.mem.get_page(child_page_number);
                 let partial_child_accessor = LeafAccessor::new(&partial_child_page);
 
-                // TODO: avoid trying to merge with a page that as a single large value
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                debug_assert!(merge_with < accessor.count_children());
                 let merge_with_page = self.mem.get_page(accessor.child_page(merge_with).unwrap());
                 let merge_with_accessor = LeafAccessor::new(&merge_with_page);
-                debug_assert!(merge_with < accessor.count_children());
+
+                let single_large_value = merge_with_accessor.num_pairs() == 1
+                    && merge_with_accessor.total_length() >= self.mem.get_page_size();
+                // Don't try to merge or rebalance, if the sibling contains a single large value
+                if single_large_value && partial_child_accessor.num_pairs() > 1 {
+                    let mut child_builder =
+                        LeafBuilder::new(self.mem, partial_child_accessor.num_pairs() - 1);
+                    child_builder.push_all_except(&partial_child_accessor, Some(deleted_pair));
+                    let new_page = child_builder.build()?;
+                    builder.push_all(&accessor);
+                    builder.replace_child(child_index, new_page.get_page_number());
+
+                    let result = self.finalize_branch_builder(builder)?;
+
+                    drop(page);
+                    self.free_policy.conditional_free(
+                        original_page_number,
+                        self.freed,
+                        self.mem,
+                    )?;
+                    // child_page_number does not need to be freed, because it's a leaf and the
+                    // MutAccessGuard will free it
+
+                    return Ok((result, found));
+                }
+
                 for i in 0..accessor.count_children() {
                     if i == child_index {
                         continue;
@@ -474,26 +500,13 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                                 + merge_with_accessor.num_pairs(),
                         );
                         if child_index < merge_with {
-                            for i in 0..partial_child_accessor.num_pairs() {
-                                if i == deleted_pair {
-                                    continue;
-                                }
-                                let entry = partial_child_accessor.entry(i).unwrap();
-                                child_builder.push(entry.key(), entry.value());
-                            }
+                            child_builder
+                                .push_all_except(&partial_child_accessor, Some(deleted_pair));
                         }
-                        for j in 0..merge_with_accessor.num_pairs() {
-                            let entry = merge_with_accessor.entry(j).unwrap();
-                            child_builder.push(entry.key(), entry.value());
-                        }
+                        child_builder.push_all_except(&merge_with_accessor, None);
                         if child_index > merge_with {
-                            for i in 0..partial_child_accessor.num_pairs() {
-                                if i == deleted_pair {
-                                    continue;
-                                }
-                                let entry = partial_child_accessor.entry(i).unwrap();
-                                child_builder.push(entry.key(), entry.value());
-                            }
+                            child_builder
+                                .push_all_except(&partial_child_accessor, Some(deleted_pair));
                         }
                         if child_builder.should_split() {
                             let (new_page1, split_key, new_page2) = child_builder.build_split()?;
@@ -516,12 +529,15 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         }
                     }
                 }
+
                 let result = self.finalize_branch_builder(builder)?;
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
                 self.free_policy
                     .conditional_free(page_number, self.freed, self.mem)?;
+                // child_page_number does not need to be freed, because it's a leaf and the
+                // MutAccessGuard will free it
 
                 result
             }
