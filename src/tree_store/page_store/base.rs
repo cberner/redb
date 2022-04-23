@@ -95,8 +95,8 @@ pub(crate) trait Page {
 }
 
 pub struct PageImpl<'a> {
-    pub(in crate::tree_store::page_store) mem: &'a [u8],
-    pub(in crate::tree_store::page_store) page_number: PageNumber,
+    pub(super) mem: &'a [u8],
+    pub(super) page_number: PageNumber,
 }
 
 impl<'a> Debug for PageImpl<'a> {
@@ -122,10 +122,10 @@ impl<'a> Page for PageImpl<'a> {
 }
 
 pub(crate) struct PageMut<'a> {
-    pub(in crate::tree_store::page_store) mem: &'a mut [u8],
-    pub(in crate::tree_store::page_store) page_number: PageNumber,
+    pub(super) mem: &'a mut [u8],
+    pub(super) page_number: PageNumber,
     #[cfg(debug_assertions)]
-    pub(in crate::tree_store::page_store) open_pages: &'a Mutex<HashSet<PageNumber>>,
+    pub(super) open_pages: &'a Mutex<HashSet<PageNumber>>,
 }
 
 impl<'a> PageMut<'a> {
