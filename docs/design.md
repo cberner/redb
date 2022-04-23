@@ -6,8 +6,7 @@ Each redb database contains a collection of tables, and supports a single writer
 concurrent readers. redb uses MVCC to provide isolation, and provides a single isolation level:
 serializable, in which all writes are applied sequentially.
 
-Each table is a key-value mapping. The keys & values can be either fixed size or dynamically
-sized byte arrays, as specified at the time of table creation.
+Each table is a key-value mapping, providing an interface similar to `BTreeMap`.
 
 ## Assumptions about underlying media
 redb is designed to be safe even in the event of power failure or on poorly behaved media,
@@ -21,35 +20,21 @@ therefore we make only a few assumptions about the guarantees provided by the un
    assumption, by default, in all modern versions.
 
 ## File format
-
 A redb database file consists of a header, and several B-trees:
-* free space tree: mapping from transaction ids to the list of pages they freed
+* pending free tree: mapping from transaction ids to the list of pages they freed
 * table tree: name -> table definition mapping of table names to their definitions
 * data tree(s) (per one table): key -> value mapping for table
-While logically separate, all the B-trees are stored in a single structure
 
-Except for the database header, all other data structures are copy-on-write or append-only and
-may not be mutated in-place
+Except for the database header, all other data structures are copy-on-write.
+
+The database file begins with the database header, and is followed by one or more regions. Each region contains a
+header, and a data section which is split into many pages. These regions allow for efficient, dynamic, growth of the
+database file.
 
 ### Database header
-Mutable fields in the database header are all double buffered, so that writes occur on the
-inactive copy, which is then atomically promoted to the primary via the `field_mutex` field
-* magic number (immutable, 9 bytes): magic number
-* page_size (immutable, 1 byte): single byte, x, where `2^x` represents the size of pages
-* region_size: (immutable, 8 bytes): 64-bit unsigned little-endian integer, indicating the maximum number of usable
-  bytes in a region
-* db_size: (immutable, 8 bytes): 64-bit unsigned little-endian integer, indicating the number of valid
-  bytes in the database file
-* root1 (mutable, 8 bytes): 64-bit unsigned little-endian integer, indicating the offset
-  to the root page of the B-tree
-* root2 (mutable, 8 bytes): double buffer for `root1`
-* transaction_id1 (mutable, 8 bytes): 64-bit unsigned little-endian integer, monotonically
-  increasing id indicating the currently committed transaction
-* transaction_id2 (mutable, 8 bytes): double buffer for `transaction_id1`
-* version1 (mutable, 1 byte): single byte which must be `1`
-* version2 (mutable, 1 byte): double buffer for `version1`
-* field_mutex (mutable, 1 byte): either `1` indicating that the first version of each
-  versioned field is valid, or `2` indicating that the second version of each versioned field is valid.
+The database header contains several immutable fields, such the database page size, region size, and a magic number.
+Transaction data is stored in a double buffered field, and the primary copy is managed by updating a single byte that
+controls which transaction pointer is the primary.
 
 ### Page allocator state
 The page allocator uses a two level allocator approach. The top level, the "region allocator", allocates regions of memory
