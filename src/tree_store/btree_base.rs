@@ -6,8 +6,8 @@ use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
 
-pub(in crate::tree_store) const LEAF: u8 = 1;
-pub(in crate::tree_store) const BRANCH: u8 = 2;
+pub(super) const LEAF: u8 = 1;
+pub(super) const BRANCH: u8 = 2;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub(crate) enum FreePolicy {
@@ -72,7 +72,7 @@ pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
 impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
     // Safety: if free_on_drop is true, caller must guarantee that no other references to page exist,
     // and that no references will be created until this AccessGuard is dropped
-    pub(in crate::tree_store) unsafe fn new(
+    pub(super) unsafe fn new(
         page: PageImpl<'a>,
         offset: usize,
         len: usize,
@@ -96,7 +96,7 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
 
     // Safety: if free_on_drop is true, caller must guarantee that no other references to page exist,
     // and that no references will be created until this AccessGuard is dropped
-    pub(in crate::tree_store) unsafe fn remove_on_drop(
+    pub(super) unsafe fn remove_on_drop(
         page: PageMut<'a>,
         offset: usize,
         len: usize,
@@ -183,14 +183,14 @@ impl<'a: 'b, 'b> EntryAccessor<'a> {
 }
 
 // Provides a simple zero-copy way to access a leaf page
-pub(in crate::tree_store) struct LeafAccessor<'a: 'b, 'b, T: Page + 'a> {
+pub(super) struct LeafAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
     num_pairs: usize,
     _page_lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
-    pub(in crate::tree_store) fn new(page: &'b T) -> Self {
+    pub(super) fn new(page: &'b T) -> Self {
         debug_assert_eq!(page.memory()[0], LEAF);
         let num_pairs = u16::from_le_bytes(page.memory()[2..4].try_into().unwrap()) as usize;
         LeafAccessor {
@@ -200,7 +200,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         }
     }
 
-    pub(in crate::tree_store) fn print_node<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub(super) fn print_node<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
         &self,
         include_value: bool,
     ) {
@@ -216,10 +216,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         eprint!("]");
     }
 
-    pub(in crate::tree_store) fn position<K: RedbKey + ?Sized>(
-        &self,
-        query: &[u8],
-    ) -> (usize, bool) {
+    pub(super) fn position<K: RedbKey + ?Sized>(&self, query: &[u8]) -> (usize, bool) {
         // inclusive
         let mut min_entry = 0;
         // inclusive. Start past end, since it might be positioned beyond the end of the leaf
@@ -243,10 +240,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         (min_entry, false)
     }
 
-    pub(in crate::tree_store) fn find_key<K: RedbKey + ?Sized>(
-        &self,
-        query: &[u8],
-    ) -> Option<usize> {
+    pub(super) fn find_key<K: RedbKey + ?Sized>(&self, query: &[u8]) -> Option<usize> {
         let (entry, found) = self.position::<K>(query);
         if found {
             Some(entry)
@@ -299,24 +293,24 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         }
     }
 
-    pub(in crate::tree_store) fn num_pairs(&self) -> usize {
+    pub(super) fn num_pairs(&self) -> usize {
         self.num_pairs
     }
 
-    pub(in crate::tree_store) fn offset_of_first_value(&self) -> usize {
+    pub(super) fn offset_of_first_value(&self) -> usize {
         self.offset_of_value(0).unwrap()
     }
 
-    pub(in crate::tree_store) fn offset_of_value(&self, n: usize) -> Option<usize> {
+    pub(super) fn offset_of_value(&self, n: usize) -> Option<usize> {
         self.value_start(n)
     }
 
-    pub(in crate::tree_store) fn value_range(&self, n: usize) -> Option<(usize, usize)> {
+    pub(super) fn value_range(&self, n: usize) -> Option<(usize, usize)> {
         Some((self.value_start(n)?, self.value_end(n)?))
     }
 
     // Returns the length of all keys and values between [start, end)
-    pub(in crate::tree_store) fn length_of_pairs(&self, start: usize, end: usize) -> usize {
+    pub(super) fn length_of_pairs(&self, start: usize, end: usize) -> usize {
         self.length_of_values(start, end) + self.length_of_keys(start, end)
     }
 
@@ -330,7 +324,7 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
     }
 
     // Returns the length of all keys between [start, end)
-    pub(in crate::tree_store) fn length_of_keys(&self, start: usize, end: usize) -> usize {
+    pub(super) fn length_of_keys(&self, start: usize, end: usize) -> usize {
         if end == 0 {
             return 0;
         }
@@ -348,18 +342,18 @@ impl<'a: 'b, 'b, T: Page + 'a> LeafAccessor<'a, 'b, T> {
         &self.page.memory()[self.key_start(n).unwrap()..self.key_end(n).unwrap()]
     }
 
-    pub(in crate::tree_store) fn entry(&self, n: usize) -> Option<EntryAccessor<'b>> {
+    pub(super) fn entry(&self, n: usize) -> Option<EntryAccessor<'b>> {
         let key = &self.page.memory()[self.key_start(n)?..self.key_end(n)?];
         let value = &self.page.memory()[self.value_start(n)?..self.value_end(n)?];
         Some(EntryAccessor::new(key, value))
     }
 
-    pub(in crate::tree_store) fn last_entry(&self) -> EntryAccessor<'b> {
+    pub(super) fn last_entry(&self) -> EntryAccessor<'b> {
         self.entry(self.num_pairs() - 1).unwrap()
     }
 }
 
-pub(in crate::tree_store) struct LeafBuilder<'a, 'b> {
+pub(super) struct LeafBuilder<'a, 'b> {
     pairs: Vec<(&'a [u8], &'a [u8])>,
     total_key_bytes: usize,
     total_value_bytes: usize,
@@ -367,10 +361,7 @@ pub(in crate::tree_store) struct LeafBuilder<'a, 'b> {
 }
 
 impl<'a, 'b> LeafBuilder<'a, 'b> {
-    pub(in crate::tree_store) fn required_bytes(
-        num_pairs: usize,
-        keys_values_bytes: usize,
-    ) -> usize {
+    pub(super) fn required_bytes(num_pairs: usize, keys_values_bytes: usize) -> usize {
         // Page id & header;
         let mut result = 4;
         // key & value lengths
@@ -380,7 +371,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         result
     }
 
-    pub(in crate::tree_store) fn new(mem: &'b TransactionalMemory, capacity: usize) -> Self {
+    pub(super) fn new(mem: &'b TransactionalMemory, capacity: usize) -> Self {
         Self {
             pairs: Vec::with_capacity(capacity),
             total_key_bytes: 0,
@@ -389,13 +380,13 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         }
     }
 
-    pub(in crate::tree_store) fn push(&mut self, key: &'a [u8], value: &'a [u8]) {
+    pub(super) fn push(&mut self, key: &'a [u8], value: &'a [u8]) {
         self.total_key_bytes += key.len();
         self.total_value_bytes += value.len();
         self.pairs.push((key, value))
     }
 
-    pub(in crate::tree_store) fn push_all_except<T: Page>(
+    pub(super) fn push_all_except<T: Page>(
         &mut self,
         accessor: &'a LeafAccessor<'_, '_, T>,
         except: Option<usize>,
@@ -411,7 +402,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         }
     }
 
-    pub(in crate::tree_store) fn should_split(&self) -> bool {
+    pub(super) fn should_split(&self) -> bool {
         let required_size = Self::required_bytes(
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
@@ -419,7 +410,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         required_size > self.mem.get_page_size() && self.pairs.len() > 1
     }
 
-    pub(in crate::tree_store) fn build_split(self) -> Result<(PageMut<'b>, &'a [u8], PageMut<'b>)> {
+    pub(super) fn build_split(self) -> Result<(PageMut<'b>, &'a [u8], PageMut<'b>)> {
         let total_size = self.total_key_bytes + self.total_value_bytes;
         let mut division = 0;
         let mut first_split_key_bytes = 0;
@@ -462,7 +453,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         Ok((page1, self.pairs[division - 1].0, page2))
     }
 
-    pub(in crate::tree_store) fn build(self) -> Result<PageMut<'b>> {
+    pub(super) fn build(self) -> Result<PageMut<'b>> {
         let required_size = Self::required_bytes(
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
@@ -570,17 +561,17 @@ impl<'a: 'b, 'b> Drop for RawLeafBuilder<'a, 'b> {
     }
 }
 
-pub(in crate::tree_store) struct LeafMutator<'a: 'b, 'b> {
+pub(super) struct LeafMutator<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
 }
 
 impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
-    pub(in crate::tree_store) fn new(page: &'b mut PageMut<'a>) -> Self {
+    pub(super) fn new(page: &'b mut PageMut<'a>) -> Self {
         assert_eq!(page.memory_mut()[0], LEAF);
         Self { page }
     }
 
-    pub(in crate::tree_store) fn sufficient_insert_inplace_space(
+    pub(super) fn sufficient_insert_inplace_space(
         page: &'_ PageImpl<'_>,
         position: usize,
         overwrite: bool,
@@ -601,13 +592,7 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
     }
 
     // Insert the given key, value pair at index i and shift all following pairs to the right
-    pub(in crate::tree_store) fn insert(
-        &mut self,
-        i: usize,
-        overwrite: bool,
-        key: &[u8],
-        value: &[u8],
-    ) {
+    pub(super) fn insert(&mut self, i: usize, overwrite: bool, key: &[u8], value: &[u8]) {
         let accessor = LeafAccessor::new(self.page);
         let required_delta = if overwrite {
             (key.len() + value.len()) as isize - accessor.length_of_pairs(i, i + 1) as isize
@@ -712,7 +697,7 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
         }
     }
 
-    pub(in crate::tree_store) fn remove(&mut self, i: usize) {
+    pub(super) fn remove(&mut self, i: usize) {
         let accessor = LeafAccessor::new(self.page);
         let num_pairs = accessor.num_pairs();
         assert!(i < num_pairs);
@@ -813,14 +798,14 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
 }
 
 // Provides a simple zero-copy way to access a branch page
-pub(in crate::tree_store) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
+pub(super) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
     num_keys: usize,
     _page_lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
-    pub(in crate::tree_store) fn new(page: &'b T) -> Self {
+    pub(super) fn new(page: &'b T) -> Self {
         debug_assert_eq!(page.memory()[0], BRANCH);
         let num_keys = u16::from_le_bytes(page.memory()[2..4].try_into().unwrap()) as usize;
         BranchAccessor {
@@ -830,7 +815,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         }
     }
 
-    pub(in crate::tree_store) fn print_node<K: RedbKey + ?Sized>(&self) {
+    pub(super) fn print_node<K: RedbKey + ?Sized>(&self) {
         eprint!(
             "Internal[ (page={:?}), child_0={:?}",
             self.page.get_page_number(),
@@ -851,10 +836,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         self.key_end(self.num_keys() - 1)
     }
 
-    pub(in crate::tree_store) fn child_for_key<K: RedbKey + ?Sized>(
-        &self,
-        query: &[u8],
-    ) -> (usize, PageNumber) {
+    pub(super) fn child_for_key<K: RedbKey + ?Sized>(&self, query: &[u8]) -> (usize, PageNumber) {
         let mut min_child = 0; // inclusive
         let mut max_child = self.num_keys(); // inclusive
         while min_child < max_child {
@@ -895,7 +877,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         ) as usize
     }
 
-    pub(in crate::tree_store) fn key(&self, n: usize) -> Option<&[u8]> {
+    pub(super) fn key(&self, n: usize) -> Option<&[u8]> {
         if n >= self.num_keys() {
             return None;
         }
@@ -904,11 +886,11 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         Some(&self.page.memory()[offset..end])
     }
 
-    pub(in crate::tree_store) fn count_children(&self) -> usize {
+    pub(super) fn count_children(&self) -> usize {
         self.num_keys() + 1
     }
 
-    pub(in crate::tree_store) fn child_page(&self, n: usize) -> Option<PageNumber> {
+    pub(super) fn child_page(&self, n: usize) -> Option<PageNumber> {
         if n >= self.count_children() {
             return None;
         }
@@ -926,7 +908,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
     }
 }
 
-pub(in crate::tree_store) struct BranchBuilder<'a, 'b> {
+pub(super) struct BranchBuilder<'a, 'b> {
     children: Vec<PageNumber>,
     keys: Vec<&'a [u8]>,
     total_key_bytes: usize,
@@ -934,7 +916,7 @@ pub(in crate::tree_store) struct BranchBuilder<'a, 'b> {
 }
 
 impl<'a, 'b> BranchBuilder<'a, 'b> {
-    pub(in crate::tree_store) fn new(mem: &'b TransactionalMemory, child_capacity: usize) -> Self {
+    pub(super) fn new(mem: &'b TransactionalMemory, child_capacity: usize) -> Self {
         Self {
             children: Vec::with_capacity(child_capacity),
             keys: Vec::with_capacity(child_capacity - 1),
@@ -943,23 +925,20 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         }
     }
 
-    pub(in crate::tree_store) fn replace_child(&mut self, index: usize, child: PageNumber) {
+    pub(super) fn replace_child(&mut self, index: usize, child: PageNumber) {
         self.children[index] = child;
     }
 
-    pub(in crate::tree_store) fn push_child(&mut self, child: PageNumber) {
+    pub(super) fn push_child(&mut self, child: PageNumber) {
         self.children.push(child);
     }
 
-    pub(in crate::tree_store) fn push_key(&mut self, key: &'a [u8]) {
+    pub(super) fn push_key(&mut self, key: &'a [u8]) {
         self.keys.push(key);
         self.total_key_bytes += key.len();
     }
 
-    pub(in crate::tree_store) fn push_all<T: Page>(
-        &mut self,
-        accessor: &'a BranchAccessor<'_, '_, T>,
-    ) {
+    pub(super) fn push_all<T: Page>(&mut self, accessor: &'a BranchAccessor<'_, '_, T>) {
         for i in 0..accessor.count_children() {
             self.push_child(accessor.child_page(i).unwrap());
         }
@@ -968,7 +947,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         }
     }
 
-    pub(in crate::tree_store) fn to_single_child(&self) -> Option<PageNumber> {
+    pub(super) fn to_single_child(&self) -> Option<PageNumber> {
         if self.children.len() > 1 {
             None
         } else {
@@ -976,7 +955,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         }
     }
 
-    pub(in crate::tree_store) fn build(self) -> Result<PageMut<'b>> {
+    pub(super) fn build(self) -> Result<PageMut<'b>> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
         let size = RawBranchBuilder::required_bytes(self.keys.len(), self.total_key_bytes);
         let mut page = self.mem.allocate(size)?;
@@ -991,12 +970,12 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         Ok(page)
     }
 
-    pub(in crate::tree_store) fn should_split(&self) -> bool {
+    pub(super) fn should_split(&self) -> bool {
         let size = RawBranchBuilder::required_bytes(self.keys.len(), self.total_key_bytes);
         size > self.mem.get_page_size() && self.keys.len() >= 3
     }
 
-    pub(in crate::tree_store) fn build_split(self) -> Result<(PageMut<'b>, &'a [u8], PageMut<'b>)> {
+    pub(super) fn build_split(self) -> Result<(PageMut<'b>, &'a [u8], PageMut<'b>)> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
         assert!(self.keys.len() >= 3);
         let division = self.keys.len() / 2;
@@ -1041,21 +1020,21 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
 // * 4 bytes: key end. Ending offset of the key, exclusive
 // repeating (num_keys times):
 // * n bytes: key data
-pub(in crate::tree_store) struct RawBranchBuilder<'a: 'b, 'b> {
+pub(super) struct RawBranchBuilder<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
     num_keys: usize,
     keys_written: usize, // used for debugging
 }
 
 impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
-    pub(in crate::tree_store) fn required_bytes(num_keys: usize, size_of_keys: usize) -> usize {
+    pub(super) fn required_bytes(num_keys: usize, size_of_keys: usize) -> usize {
         let fixed_size =
             4 + PageNumber::serialized_size() * (num_keys + 1) + size_of::<u32>() * num_keys;
         size_of_keys + fixed_size
     }
 
     // Caller MUST write num_keys values
-    pub(in crate::tree_store) fn new(page: &'b mut PageMut<'a>, num_keys: usize) -> Self {
+    pub(super) fn new(page: &'b mut PageMut<'a>, num_keys: usize) -> Self {
         assert!(num_keys > 0);
         page.memory_mut()[0] = BRANCH;
         page.memory_mut()[2..4].copy_from_slice(&(num_keys as u16).to_le_bytes());
@@ -1075,7 +1054,7 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
         }
     }
 
-    pub(in crate::tree_store) fn write_first_page(&mut self, page_number: PageNumber) {
+    pub(super) fn write_first_page(&mut self, page_number: PageNumber) {
         let offset = 4;
         self.page.memory_mut()[offset..(offset + PageNumber::serialized_size())]
             .copy_from_slice(&page_number.to_le_bytes());
@@ -1092,12 +1071,7 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
 
     // Write the nth key and page of values greater than this key, but less than or equal to the next
     // Caller must write keys & pages in increasing order
-    pub(in crate::tree_store) fn write_nth_key(
-        &mut self,
-        key: &[u8],
-        page_number: PageNumber,
-        n: usize,
-    ) {
+    pub(super) fn write_nth_key(&mut self, key: &[u8], page_number: PageNumber, n: usize) {
         assert!(n < self.num_keys as usize);
         assert_eq!(n, self.keys_written);
         self.keys_written += 1;
@@ -1126,12 +1100,12 @@ impl<'a: 'b, 'b> Drop for RawBranchBuilder<'a, 'b> {
     }
 }
 
-pub(in crate::tree_store) struct BranchMutator<'a: 'b, 'b> {
+pub(super) struct BranchMutator<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
 }
 
 impl<'a: 'b, 'b> BranchMutator<'a, 'b> {
-    pub(in crate::tree_store) fn new(page: &'b mut PageMut<'a>) -> Self {
+    pub(super) fn new(page: &'b mut PageMut<'a>) -> Self {
         assert_eq!(page.memory()[0], BRANCH);
         Self { page }
     }
@@ -1140,7 +1114,7 @@ impl<'a: 'b, 'b> BranchMutator<'a, 'b> {
         u16::from_le_bytes(self.page.memory()[2..4].try_into().unwrap()) as usize
     }
 
-    pub(in crate::tree_store) fn write_child_page(&mut self, i: usize, page_number: PageNumber) {
+    pub(super) fn write_child_page(&mut self, i: usize, page_number: PageNumber) {
         debug_assert!(i <= self.num_keys());
         let offset = 4 + PageNumber::serialized_size() * i;
         self.page.memory_mut()[offset..(offset + PageNumber::serialized_size())]
