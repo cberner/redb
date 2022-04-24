@@ -275,8 +275,7 @@ impl DatabaseBuilder {
     ///
     /// # Safety
     ///
-    /// The file referenced by `path` must only be concurrently modified by compatible versions
-    /// of redb
+    /// The file referenced by `path` must not be concurrently modified by any other process
     pub unsafe fn create(&self, path: impl AsRef<Path>, db_size: usize) -> Result<Database> {
         let file = OpenOptions::new()
             .read(true)
