@@ -222,6 +222,7 @@ fn make_bound<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a>(
     }
 }
 
+#[doc(hidden)]
 pub struct MultimapValueIter<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> {
     inner: BtreeRangeIter<'a, MultimapKVPair<K, V>, [u8]>,
 }
@@ -251,6 +252,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'
     }
 }
 
+#[doc(hidden)]
 pub struct MultimapRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> {
     inner: BtreeRangeIter<'a, MultimapKVPair<K, V>, [u8]>,
 }
@@ -289,6 +291,9 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'
     }
 }
 
+/// A multimap table
+///
+/// [Multimap tables](https://en.wikipedia.org/wiki/Multimap) may have multiple values associated with each key
 pub struct MultimapTable<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     name: String,
     transaction: &'txn WriteTransaction<'db>,
@@ -317,6 +322,8 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'tx
         self.tree.print_debug(include_values);
     }
 
+    /// Add the given value to the mapping of the key
+    // TODO: return bool indicating if the value already existed
     pub fn insert(&mut self, key: &K, value: &V) -> Result {
         let kv = MultimapKVPair::new_pair(key, value);
         // Safety: No other references to this table can exist.
@@ -325,6 +332,9 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'tx
         unsafe { self.tree.insert(&kv, b"") }
     }
 
+    /// Removes the given key-value pair
+    ///
+    /// Returns `true` if the key-value pair was present
     pub fn remove(&mut self, key: &K, value: &V) -> Result<bool> {
         let kv = MultimapKVPair::new_pair(key, value);
         // Safety: No other references to this table can exist.
@@ -333,6 +343,9 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'tx
         unsafe { self.tree.remove(&kv).map(|x| x.is_some()) }
     }
 
+    /// Removes all values for the given key
+    ///
+    /// Returns an iterator over the removed values
     pub fn remove_all(&mut self, key: &K) -> Result<MultimapValueIter<K, V>> {
         // Match only on the key, so that we can remove all the associated values
         let key_only = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyOnly);
@@ -360,6 +373,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'tx
 impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     for MultimapTable<'db, 'txn, K, V>
 {
+    /// Returns an iterator over all values for the given key
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapValueIter<'a, K, V>> {
         let lower_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyMinusEpsilon);
         let upper_bytes = make_serialized_key_with_op(key, MultimapKeyCompareOp::KeyPlusEpsilon);
@@ -368,6 +382,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<
         self.tree.range(lower..=upper).map(MultimapValueIter::new)
     }
 
+    /// Returns a double-ended iterator over a range of elements in the table
     fn range<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
@@ -381,10 +396,12 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<
         self.tree.range((start, end)).map(MultimapRangeIter::new)
     }
 
+    /// Returns the number of key-value pairs in the table
     fn len(&self) -> Result<usize> {
         self.tree.len()
     }
 
+    /// Returns `true` if the table is empty
     fn is_empty(&self) -> Result<bool> {
         self.len().map(|x| x == 0)
     }
@@ -409,6 +426,7 @@ pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     fn is_empty(&self) -> Result<bool>;
 }
 
+/// A read-only multimap table
 pub struct ReadOnlyMultimapTable<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     tree: Btree<'txn, MultimapKVPair<K, V>, [u8]>,
 }

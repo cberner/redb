@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::ops::RangeBounds;
 use std::rc::Rc;
 
+/// A table containing key-value mappings
 pub struct Table<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     name: String,
     transaction: &'txn WriteTransaction<'db>,
@@ -35,6 +36,8 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'db, 'txn, K, 
         self.tree.print_debug(include_values);
     }
 
+    /// Insert mapping of the given key to the given value
+    // TODO: return the old value, if it exists
     pub fn insert(&mut self, key: &K, value: &V) -> Result {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
@@ -51,6 +54,9 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'db, 'txn, K, 
         unsafe { self.tree.insert_reserve(key, value_length) }
     }
 
+    /// Removes the given key
+    ///
+    /// Returns the old value, if the key was present in the table
     pub fn remove(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
@@ -89,18 +95,53 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for Table<'db, 
 }
 
 pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+    /// Returns the value corresponding to the given key
     fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>>;
 
+    /// Returns a double-ended iterator over a range of elements in the table
+    ///
+    /// # Examples
+    ///
+    /// Usage:
+    /// ```rust
+    /// use redb::*;
+    /// # use tempfile::NamedTempFile;
+    /// const TABLE: TableDefinition<str, u64> = TableDefinition::new("my_data");
+    ///
+    /// # fn main() -> Result<(), Error> {
+    /// # let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    /// # let filename = tmpfile.path();
+    /// # let db_max_size = 1024 * 1024;
+    /// let db = unsafe { Database::create(filename, db_max_size)? };
+    /// let write_txn = db.begin_write()?;
+    /// {
+    ///     let mut table = write_txn.open_table(TABLE)?;
+    ///     table.insert("a", &0)?;
+    ///     table.insert("b", &1)?;
+    ///     table.insert("c", &2)?;
+    /// }
+    /// write_txn.commit()?;
+    ///
+    /// let read_txn = db.begin_read()?;
+    /// let table = read_txn.open_table(TABLE)?;
+    /// let mut iter = table.range("a".."c")?;
+    /// assert_eq!(Some(("a", 0)), iter.next());
+    /// # Ok(())
+    /// # }
+    /// ```
     fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
         &'a self,
         range: T,
     ) -> Result<RangeIter<K, V>>;
 
+    /// Returns the number of entries in the table
     fn len(&self) -> Result<usize>;
 
+    /// Returns `true` if the table is empty
     fn is_empty(&self) -> Result<bool>;
 }
 
+/// A read-only table
 pub struct ReadOnlyTable<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     tree: Btree<'txn, K, V>,
 }
@@ -139,6 +180,7 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     }
 }
 
+#[doc(hidden)]
 pub struct RangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> {
     inner: BtreeRangeIter<'a, K, V>,
 }

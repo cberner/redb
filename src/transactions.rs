@@ -17,6 +17,7 @@ use std::panic;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Informational storage stats about the database
 #[derive(Debug)]
 pub struct DatabaseStats {
     pub(crate) tree_height: usize,
@@ -88,6 +89,9 @@ pub enum Durability {
     Immediate,
 }
 
+/// A read/write transaction
+///
+/// Only a single [`WriteTransaction`] may exist at a time
 pub struct WriteTransaction<'db> {
     db: &'db Database,
     mem: &'db TransactionalMemory,
@@ -129,6 +133,8 @@ impl<'db> WriteTransaction<'db> {
         })
     }
 
+    /// Set the desired durability level for writes made in this transaction
+    /// Defaults to [`Durability::Immediate`]
     pub fn set_durability(&mut self, durability: Durability) {
         self.durability = durability;
     }
@@ -248,6 +254,10 @@ impl<'db> WriteTransaction<'db> {
             .map(|x| x.into_iter())
     }
 
+    /// Commit the transaction
+    ///
+    /// All writes performed in this transaction will be visible to future transactions, and are
+    /// durable as consistent with the [`Durability`] level set by [`Self::set_durability`]
     pub fn commit(mut self) -> Result {
         for (name, root) in self.pending_table_updates.borrow_mut().drain() {
             self.table_tree
@@ -283,6 +293,9 @@ impl<'db> WriteTransaction<'db> {
         Ok(())
     }
 
+    /// Abort the transaction
+    ///
+    /// All writes performed in this transaction will be rolled back
     pub fn abort(self) -> Result {
         self.mem.rollback_uncommited_writes()?;
         self.db.deallocate_write_transaction(self.transaction_id);
@@ -404,6 +417,7 @@ impl<'db> WriteTransaction<'db> {
         Ok(())
     }
 
+    /// Retrieves information about storage usage in the database
     pub fn stats(&self) -> Result<DatabaseStats> {
         let table_tree = self.table_tree.borrow();
         let data_tree_stats = table_tree.stats()?;
@@ -456,6 +470,9 @@ impl<'a> Drop for WriteTransaction<'a> {
     }
 }
 
+/// A read-only transaction
+///
+/// Read-only transactions may exist concurrently with writes
 pub struct ReadTransaction<'a> {
     db: &'a Database,
     tree: TableTree<'a>,

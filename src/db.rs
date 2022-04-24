@@ -18,6 +18,9 @@ use std::{io, panic};
 pub(crate) type TransactionId = u64;
 type AtomicTransactionId = AtomicU64;
 
+/// Defines the name and types of a table
+///
+/// A [`TableDefinition`] should be opened for use by calling [`ReadTransaction::open_table`] or [`WriteTransaction::open_table`]
 // TODO: add trait bounds once const_fn_trait_bound is stable
 pub struct TableDefinition<'a, K: ?Sized, V: ?Sized> {
     name: &'a str,
@@ -48,6 +51,12 @@ impl<'a, K: ?Sized, V: ?Sized> Clone for TableDefinition<'a, K, V> {
 
 impl<'a, K: ?Sized, V: ?Sized> Copy for TableDefinition<'a, K, V> {}
 
+/// Defines the name and types of a multimap table
+///
+/// A [`MultimapTableDefinition`] should be opened for use by calling [`ReadTransaction::open_multimap_table`] or [`WriteTransaction::open_multimap_table`]
+///
+/// [Multimap tables](https://en.wikipedia.org/wiki/Multimap) may have multiple values associated with each key
+///
 pub struct MultimapTableDefinition<'a, K: ?Sized, V: ?Sized> {
     name: &'a str,
     _key_type: PhantomData<K>,
@@ -77,6 +86,37 @@ impl<'a, K: ?Sized, V: ?Sized> Clone for MultimapTableDefinition<'a, K, V> {
 
 impl<'a, K: ?Sized, V: ?Sized> Copy for MultimapTableDefinition<'a, K, V> {}
 
+/// Opened redb database file
+///
+/// Use [`Self::begin_read`] to get a [`ReadTransaction`] object that can be used to read from the database
+/// Use [`Self::begin_write`] to get a [`WriteTransaction`] object that can be used to read or write to the database
+///
+/// Multiple reads may be performed concurrently, with each other, and with writes. Only a single write
+/// may be in progress at a time.
+///
+/// # Examples
+///
+/// Basic usage:
+///
+/// ```rust
+/// use redb::*;
+/// # use tempfile::NamedTempFile;
+/// const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
+///
+/// # fn main() -> Result<(), Error> {
+/// # let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+/// # let filename = tmpfile.path();
+/// # let db_max_size = 1024 * 1024;
+/// let db = unsafe { Database::create(filename, db_max_size)? };
+/// let write_txn = db.begin_write()?;
+/// {
+///     let mut table = write_txn.open_table(TABLE)?;
+///     table.insert(&0, &0)?;
+/// }
+/// write_txn.commit()?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct Database {
     mem: TransactionalMemory,
     next_transaction_id: AtomicTransactionId,
@@ -213,10 +253,15 @@ impl Database {
             .cloned()
     }
 
+    /// Convenience method for [`DatabaseBuilder::new`]
     pub fn builder() -> DatabaseBuilder {
         DatabaseBuilder::new()
     }
 
+    /// Begins a write transaction
+    ///
+    /// Returns a [`WriteTransaction`] which may be used to read/write to the database. Only a single
+    /// write may be in progress at a time
     pub fn begin_write(&self) -> Result<WriteTransaction> {
         let guard = self.leaked_write_transaction.lock().unwrap();
         if let Some(leaked) = *guard {
@@ -231,6 +276,13 @@ impl Database {
         unsafe { WriteTransaction::new(self, id) }
     }
 
+    /// Begins a read transaction
+    ///
+    /// Captures a snapshot of the database, so that only data committed before calling this method
+    /// is visible in the transaction
+    ///
+    /// Returns a [`ReadTransaction`] which may be used to read from the database. Read transactions
+    /// may exist concurrently with writes
     pub fn begin_read(&self) -> Result<ReadTransaction> {
         let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
         self.live_read_transactions.lock().unwrap().insert(id);
@@ -252,6 +304,9 @@ impl DatabaseBuilder {
         }
     }
 
+    /// Set the internal page size of the database
+    /// Larger page sizes will reduce the database file's overhead, but may decrease write performance
+    /// Defaults to the native OS page size
     pub fn set_page_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
         self.page_size = Some(size);
