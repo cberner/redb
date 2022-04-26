@@ -5,7 +5,7 @@ use tempfile::{NamedTempFile, TempDir};
 mod common;
 use common::*;
 
-use redb::{ReadableTable, TableDefinition, WriteStrategy};
+use redb::WriteStrategy;
 use std::time::{Duration, Instant};
 
 const ITERATIONS: usize = 3;
@@ -55,162 +55,12 @@ fn make_rng() -> fastrand::Rng {
     fastrand::Rng::with_seed(RNG_SEED)
 }
 
-// TODO: merge back into benchmark()
-fn benchmark_redb(db: redb::Database) -> Vec<(&'static str, Duration)> {
-    let mut rng = make_rng();
-    let mut results = Vec::new();
-
-    let table_def: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
-
-    let start = Instant::now();
-    let txn = db.begin_write().unwrap();
-    let mut inserter = txn.open_table(table_def).unwrap();
-    {
-        for _ in 0..ELEMENTS {
-            let (key, value) = gen_pair(&mut rng);
-            inserter.insert(&key, &value).unwrap();
-        }
-    }
-    drop(inserter);
-    txn.commit().unwrap();
-
-    let end = Instant::now();
-    let duration = end - start;
-    println!(
-        "{}: Bulk loaded {} items in {}ms",
-        RedbBenchDatabase::db_type_name(),
-        ELEMENTS,
-        duration.as_millis()
-    );
-    results.push(("bulk load", duration));
-
-    let start = Instant::now();
-    let writes = 100;
-    {
-        for _ in 0..writes {
-            let txn = db.begin_write().unwrap();
-            let mut inserter = txn.open_table(table_def).unwrap();
-            let (key, value) = gen_pair(&mut rng);
-            inserter.insert(&key, &value).unwrap();
-            drop(inserter);
-            txn.commit().unwrap();
-        }
-    }
-
-    let end = Instant::now();
-    let duration = end - start;
-    println!(
-        "{}: Wrote {} individual items in {}ms",
-        RedbBenchDatabase::db_type_name(),
-        writes,
-        duration.as_millis()
-    );
-    results.push(("individual writes", duration));
-
-    let start = Instant::now();
-    let batch_size = 1000;
-    {
-        for _ in 0..writes {
-            let txn = db.begin_write().unwrap();
-            let mut inserter = txn.open_table(table_def).unwrap();
-            for _ in 0..batch_size {
-                let (key, value) = gen_pair(&mut rng);
-                inserter.insert(&key, &value).unwrap();
-            }
-            drop(inserter);
-            txn.commit().unwrap();
-        }
-    }
-
-    let end = Instant::now();
-    let duration = end - start;
-    println!(
-        "{}: Wrote {} x {} items in {}ms",
-        RedbBenchDatabase::db_type_name(),
-        writes,
-        batch_size,
-        duration.as_millis()
-    );
-    results.push(("batch writes", duration));
-
-    let txn = db.begin_read().unwrap();
-    let table = txn.open_table(table_def).unwrap();
-    {
-        for _ in 0..ITERATIONS {
-            let mut rng = make_rng();
-            let start = Instant::now();
-            let mut checksum = 0u64;
-            let mut expected_checksum = 0u64;
-            for _ in 0..ELEMENTS {
-                let (key, value) = gen_pair(&mut rng);
-                let result = table.get(&key).unwrap().unwrap();
-                checksum += result[0] as u64;
-                expected_checksum += value[0] as u64;
-            }
-            assert_eq!(checksum, expected_checksum);
-            let end = Instant::now();
-            let duration = end - start;
-            println!(
-                "{}: Random read {} items in {}ms",
-                RedbBenchDatabase::db_type_name(),
-                ELEMENTS,
-                duration.as_millis()
-            );
-            results.push(("random reads", duration));
-        }
-
-        for _ in 0..ITERATIONS {
-            let mut rng = make_rng();
-            let start = Instant::now();
-            for _ in 0..ELEMENTS {
-                let (key, _value) = gen_pair(&mut rng);
-                table.range(key.as_slice()..).unwrap();
-            }
-            let end = Instant::now();
-            let duration = end - start;
-            println!(
-                "{}: Random range read {} starts in {}ms",
-                RedbBenchDatabase::db_type_name(),
-                ELEMENTS,
-                duration.as_millis()
-            );
-            results.push(("random range reads", duration));
-        }
-    }
-
-    let mut rng = make_rng();
-    let start = Instant::now();
-    let deletes = ELEMENTS / 2;
-    {
-        let txn = db.begin_write().unwrap();
-        let mut inserter = txn.open_table(table_def).unwrap();
-        for _ in 0..deletes {
-            let (key, _value) = gen_pair(&mut rng);
-            inserter.remove(&key).unwrap();
-        }
-        drop(inserter);
-        txn.commit().unwrap();
-    }
-
-    let end = Instant::now();
-    let duration = end - start;
-    println!(
-        "{}: Removed {} items in {}ms",
-        RedbBenchDatabase::db_type_name(),
-        deletes,
-        duration.as_millis()
-    );
-    results.push(("removals", duration));
-
-    results
-}
-
 fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
     let mut rng = make_rng();
     let mut results = Vec::new();
 
     let start = Instant::now();
-    let txn = db.write_transaction();
+    let mut txn = db.write_transaction();
     let mut inserter = txn.get_inserter();
     {
         for _ in 0..ELEMENTS {
@@ -235,7 +85,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
     let writes = 100;
     {
         for _ in 0..writes {
-            let txn = db.write_transaction();
+            let mut txn = db.write_transaction();
             let mut inserter = txn.get_inserter();
             let (key, value) = gen_pair(&mut rng);
             inserter.insert(&key, &value).unwrap();
@@ -258,7 +108,7 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
     let batch_size = 1000;
     {
         for _ in 0..writes {
-            let txn = db.write_transaction();
+            let mut txn = db.write_transaction();
             let mut inserter = txn.get_inserter();
             for _ in 0..batch_size {
                 let (key, value) = gen_pair(&mut rng);
@@ -287,9 +137,10 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
             let start = Instant::now();
             let mut checksum = 0u64;
             let mut expected_checksum = 0u64;
+            let reader = txn.get_reader();
             for _ in 0..ELEMENTS {
                 let (key, value) = gen_pair(&mut rng);
-                let result = txn.get(&key).unwrap();
+                let result = reader.get(&key).unwrap();
                 checksum += result.as_ref()[0] as u64;
                 expected_checksum += value[0] as u64;
             }
@@ -308,27 +159,39 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
         for _ in 0..ITERATIONS {
             let mut rng = make_rng();
             let start = Instant::now();
+            let reader = txn.get_reader();
+            let mut value_sum = 0;
+            let num_scan = 10;
             for _ in 0..ELEMENTS {
                 let (key, _value) = gen_pair(&mut rng);
-                txn.exists_after(&key);
+                let mut iter = reader.range_from(&key);
+                for _ in 0..num_scan {
+                    if let Some((_, value)) = iter.next() {
+                        value_sum += value.as_ref()[0];
+                    } else {
+                        break;
+                    }
+                }
             }
+            assert!(value_sum > 0);
             let end = Instant::now();
             let duration = end - start;
             println!(
-                "{}: Random range read {} starts in {}ms",
+                "{}: Random range read {} elements in {}ms",
                 T::db_type_name(),
-                ELEMENTS,
+                ELEMENTS * num_scan,
                 duration.as_millis()
             );
             results.push(("random range reads", duration));
         }
     }
+    drop(txn);
 
     let start = Instant::now();
     let deletes = ELEMENTS / 2;
     {
         let mut rng = make_rng();
-        let txn = db.write_transaction();
+        let mut txn = db.write_transaction();
         let mut inserter = txn.get_inserter();
         for _ in 0..deletes {
             let (key, _value) = gen_pair(&mut rng);
@@ -360,8 +223,8 @@ fn main() {
                 .create(tmpfile.path(), 4096 * 1024 * 1024)
                 .unwrap()
         };
-        // let table = RedbBenchDatabase::new(&db);
-        benchmark_redb(db)
+        let table = RedbBenchDatabase::new(&db);
+        benchmark(table)
     };
 
     let redb_throughput_results = {
@@ -372,8 +235,8 @@ fn main() {
                 .create(tmpfile.path(), 4096 * 1024 * 1024)
                 .unwrap()
         };
-        // let table = RedbBenchDatabase::new(&db);
-        benchmark_redb(db)
+        let table = RedbBenchDatabase::new(&db);
+        benchmark(table)
     };
 
     let lmdb_results = {
