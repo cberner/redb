@@ -48,7 +48,7 @@ name = "syscall_benchmark"
 harness = false
 
 [package.metadata.maturin]
-requires-python = ">= 3.6"
+requires-python = ">= 3.7"
 classifier = ["Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
     "License :: OSI Approved :: Apache Software License",
