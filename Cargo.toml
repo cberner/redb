@@ -20,7 +20,6 @@ pyo3 = {version = "0.16", features=["extension-module", "abi3-py37"], optional =
 
 [dev-dependencies]
 rand = "0.8"
-lmdb-zero = "0.4.4"
 lmdb-rkv = "0.14.0"
 tempfile = "3.2.0"
 sled = "0.34.6"
