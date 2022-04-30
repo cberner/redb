@@ -1128,8 +1128,8 @@ mod test {
     use crate::tree_store::page_store::utils::get_page_size;
     use crate::tree_store::page_store::TransactionalMemory;
     use crate::{Database, Error};
-    use memmap2::MmapMut;
     use std::fs::OpenOptions;
+    use std::io::{Read, Seek, SeekFrom, Write};
     use tempfile::NamedTempFile;
 
     const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
@@ -1150,17 +1150,18 @@ mod test {
         write_txn.abort().unwrap();
         drop(db);
 
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(tmpfile.path())
             .unwrap();
 
-        let mut mmap = unsafe { MmapMut::map_mut(&file) }.unwrap();
-        mmap[GOD_BYTE_OFFSET] |= ALLOCATOR_STATE_DIRTY;
-
-        mmap.flush().unwrap();
-        drop(mmap);
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        let mut buffer = [0u8; 1];
+        file.read_exact(&mut buffer).unwrap();
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        buffer[0] |= ALLOCATOR_STATE_DIRTY;
+        file.write_all(&buffer).unwrap();
 
         assert!(TransactionalMemory::new(file, max_size, None, true)
             .unwrap()
