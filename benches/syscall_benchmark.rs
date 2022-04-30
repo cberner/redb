@@ -1,5 +1,6 @@
 use tempfile::{NamedTempFile, TempDir};
 
+use lmdb::Transaction;
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use std::fs::OpenOptions;
@@ -53,32 +54,22 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
     pairs
 }
 
-fn lmdb_zero_bench(path: &str) {
-    let env = unsafe {
-        lmdb_zero::EnvBuilder::new()
-            .unwrap()
-            .open(path, lmdb_zero::open::Flags::empty(), 0o600)
-            .unwrap()
-    };
-    unsafe {
-        env.set_mapsize(4096 * 1024 * 1024).unwrap();
-    }
+fn lmdb_bench(path: &Path) {
+    let env = lmdb::Environment::new().open(path).unwrap();
+    env.set_map_size(4096 * 1024 * 1024).unwrap();
 
     let pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
 
-    let db =
-        lmdb_zero::Database::open(&env, None, &lmdb_zero::DatabaseOptions::defaults()).unwrap();
+    let db = env.open_db(None).unwrap();
     {
         let start = SystemTime::now();
-        let txn = lmdb_zero::WriteTransaction::new(&env).unwrap();
+        let mut txn = env.begin_rw_txn().unwrap();
         {
-            let mut access = txn.access();
             for i in 0..ELEMENTS {
                 let (key, value) = &pairs[i % pairs.len()];
                 let mut mut_key = key.clone();
                 mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-                access
-                    .put(&db, &mut_key, value, lmdb_zero::put::Flags::empty())
+                txn.put(db, &mut_key, &value, lmdb::WriteFlags::empty())
                     .unwrap();
             }
         }
@@ -91,18 +82,17 @@ fn lmdb_zero_bench(path: &str) {
         let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
         key_order.shuffle(&mut rand::thread_rng());
 
-        let txn = lmdb_zero::ReadTransaction::new(&env).unwrap();
+        let txn = env.begin_ro_txn().unwrap();
         {
             for _ in 0..ITERATIONS {
                 let start = SystemTime::now();
-                let access = txn.access();
                 let mut checksum = 0u64;
                 let mut expected_checksum = 0u64;
                 for &i in &key_order {
                     let (key, value) = &pairs[i % pairs.len()];
                     let mut mut_key = key.clone();
                     mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-                    let result: &[u8] = access.get(&db, &mut_key).unwrap();
+                    let result: &[u8] = txn.get(db, &mut_key).unwrap();
                     checksum += result[0] as u64;
                     expected_checksum += value[0] as u64;
                 }
@@ -110,7 +100,7 @@ fn lmdb_zero_bench(path: &str) {
                 let end = SystemTime::now();
                 let duration = end.duration_since(start).unwrap();
                 println!(
-                    "lmdb-zero: Random read {} items in {}ms",
+                    "lmdb: Random read {} items in {}ms",
                     ELEMENTS,
                     duration.as_millis()
                 );
@@ -341,8 +331,7 @@ fn main() {
     // Benchmark lmdb against raw read()/write() performance
     {
         let tmpfile: TempDir = tempfile::tempdir().unwrap();
-        let path = tmpfile.path().to_str().unwrap();
-        lmdb_zero_bench(path);
+        lmdb_bench(tmpfile.path());
     }
     {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
