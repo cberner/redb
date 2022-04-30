@@ -1,14 +1,13 @@
 use tempfile::{NamedTempFile, TempDir};
 
-use memmap2::MmapMut;
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
-#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
+use std::{ptr, slice};
 
 const ITERATIONS: usize = 3;
 const KEY_SIZE: usize = 24;
@@ -271,10 +270,21 @@ fn mmap_bench(path: &Path) {
         .open(path)
         .unwrap();
 
-    file.set_len(4 * 1024 * 1024 * 1024).unwrap();
+    let len = 4 * 1024 * 1024 * 1024;
+    file.set_len(len).unwrap();
 
-    let mut mmap = unsafe { MmapMut::map_mut(&file).unwrap() };
-    drop(file);
+    let mmap_raw = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            len as libc::size_t,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    assert_ne!(mmap_raw, libc::MAP_FAILED);
+    let mmap = unsafe { slice::from_raw_parts_mut(mmap_raw as *mut u8, len as usize) };
 
     let pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
 
@@ -291,7 +301,8 @@ fn mmap_bench(path: &Path) {
             write_index += value.len();
         }
     }
-    mmap.flush().unwrap();
+    let result = unsafe { libc::msync(mmap_raw, len as libc::size_t, libc::MS_SYNC) };
+    assert_eq!(result, 0);
 
     let end = SystemTime::now();
     let duration = end.duration_since(start).unwrap();
