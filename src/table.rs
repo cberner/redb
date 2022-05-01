@@ -37,8 +37,9 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'db, 'txn, K, 
     }
 
     /// Insert mapping of the given key to the given value
-    // TODO: return the old value, if it exists
-    pub fn insert(&mut self, key: &K, value: &V) -> Result {
+    ///
+    /// Returns the old value, if the key was present in the table
+    pub fn insert(&mut self, key: &K, value: &V) -> Result<Option<AccessGuard<V>>> {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.

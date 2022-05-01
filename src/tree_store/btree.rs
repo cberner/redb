@@ -48,7 +48,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
     }
 
     // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
-    pub(crate) unsafe fn insert(&mut self, key: &K, value: &V) -> Result {
+    pub(crate) unsafe fn insert(&mut self, key: &K, value: &V) -> Result<Option<AccessGuard<V>>> {
         let mut freed_pages = self.freed_pages.borrow_mut();
         let mut operation = MutateHelper::new(
             &mut self.root,
@@ -56,8 +56,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
             self.mem,
             freed_pages.as_mut(),
         );
-        operation.insert(key, value)?;
-        Ok(())
+        let (old_value, _) = operation.insert(key, value)?;
+        Ok(old_value)
     }
 
     /// Reserve space to insert a key-value pair
@@ -76,7 +76,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
             self.mem,
             freed_pages.as_mut(),
         );
-        let guard = operation.insert(key, value.as_slice())?;
+        let (_, guard) = operation.insert(key, value.as_slice())?;
         Ok(guard)
     }
 

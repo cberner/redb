@@ -117,7 +117,7 @@ pub struct RedbBenchInserter<'a> {
 
 impl BenchInserter for RedbBenchInserter<'_> {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
-        self.table.insert(key, value).map_err(|_| ())
+        self.table.insert(key, value).map(|_| ()).map_err(|_| ())
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {

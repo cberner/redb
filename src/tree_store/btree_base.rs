@@ -38,6 +38,13 @@ impl FreePolicy {
 
         Ok(())
     }
+
+    pub(crate) fn free_on_drop(&self, page: PageNumber, mem: &TransactionalMemory) -> bool {
+        match self {
+            FreePolicy::Never => false,
+            FreePolicy::Uncommitted => mem.uncommitted(page),
+        }
+    }
 }
 
 enum OnDrop {
@@ -49,6 +56,7 @@ enum OnDrop {
 enum EitherPage<'a> {
     Immutable(PageImpl<'a>),
     Mutable(PageMut<'a>),
+    OwnedMemory(Vec<u8>),
 }
 
 impl<'a> EitherPage<'a> {
@@ -56,6 +64,7 @@ impl<'a> EitherPage<'a> {
         match self {
             EitherPage::Immutable(page) => page.memory(),
             EitherPage::Mutable(page) => page.memory(),
+            EitherPage::OwnedMemory(mem) => mem.as_slice(),
         }
     }
 }
@@ -89,6 +98,18 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
             } else {
                 OnDrop::None
             },
+            mem,
+            _value_type: Default::default(),
+        }
+    }
+
+    pub(super) fn with_owned_value(value: Vec<u8>, mem: &'a TransactionalMemory) -> Self {
+        let len = value.len();
+        Self {
+            page: EitherPage::OwnedMemory(value),
+            offset: 0,
+            len,
+            on_drop: OnDrop::None,
             mem,
             _value_type: Default::default(),
         }

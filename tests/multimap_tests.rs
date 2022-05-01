@@ -59,8 +59,9 @@ fn insert() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
-        table.insert(b"hello", b"world2").unwrap();
+        assert!(!table.insert(b"hello", b"world").unwrap());
+        assert!(!table.insert(b"hello", b"world2").unwrap());
+        assert!(table.insert(b"hello", b"world2").unwrap());
     }
     write_txn.commit().unwrap();
 
