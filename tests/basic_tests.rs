@@ -171,7 +171,7 @@ fn insert_overwrite() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        assert!(table.insert(b"hello", b"world").unwrap().is_none());
     }
     write_txn.commit().unwrap();
 
@@ -182,7 +182,8 @@ fn insert_overwrite() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"replaced").unwrap();
+        let old_value = table.insert(b"hello", b"replaced").unwrap();
+        assert_eq!(old_value.unwrap().to_value(), b"world");
     }
     write_txn.commit().unwrap();
 

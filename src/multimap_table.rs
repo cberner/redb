@@ -323,13 +323,14 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'tx
     }
 
     /// Add the given value to the mapping of the key
-    // TODO: return bool indicating if the value already existed
-    pub fn insert(&mut self, key: &K, value: &V) -> Result {
+    ///
+    /// Returns `true` if the key-value pair was present
+    pub fn insert(&mut self, key: &K, value: &V) -> Result<bool> {
         let kv = MultimapKVPair::new_pair(key, value);
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
-        unsafe { self.tree.insert(&kv, b"") }
+        unsafe { self.tree.insert(&kv, b"").map(|x| x.is_some()) }
     }
 
     /// Removes the given key-value pair

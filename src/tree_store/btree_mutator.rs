@@ -26,6 +26,17 @@ enum DeletionResult {
     DeletedBranch(PageNumber),
 }
 
+struct InsertionResult<'a, V: RedbValue + ?Sized> {
+    // The new root page
+    new_root: PageNumber,
+    // Following sibling, if the root had to be split
+    additional_sibling: Option<(Vec<u8>, PageNumber)>,
+    // The inserted value for .insert_reserve() to use
+    inserted_value: AccessGuardMut<'a>,
+    // The previous value, if any
+    old_value: Option<AccessGuard<'a, V>>,
+}
+
 pub(crate) struct MutateHelper<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     root: &'b mut Option<PageNumber>,
     free_policy: FreePolicy,
@@ -84,24 +95,28 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
     }
 
     // Safety: caller must ensure that no references to uncommitted pages in this tree exist
-    pub(crate) unsafe fn insert(&mut self, key: &K, value: &V) -> Result<AccessGuardMut<'a>> {
-        let (new_root, guard) = if let Some(p) = *self.root {
-            let (page1, more, guard) = self.insert_helper(
+    pub(crate) unsafe fn insert(
+        &mut self,
+        key: &K,
+        value: &V,
+    ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMut<'a>)> {
+        let (new_root, old_value, guard) = if let Some(p) = *self.root {
+            let result = self.insert_helper(
                 self.mem.get_page(p),
                 key.as_bytes().as_ref(),
                 value.as_bytes().as_ref(),
             )?;
 
-            let new_root = if let Some((key, page2)) = more {
+            let new_root = if let Some((key, page2)) = result.additional_sibling {
                 let mut builder = BranchBuilder::new(self.mem, 2);
-                builder.push_child(page1);
+                builder.push_child(result.new_root);
                 builder.push_key(&key);
                 builder.push_child(page2);
                 builder.build()?.get_page_number()
             } else {
-                page1
+                result.new_root
             };
-            (new_root, guard)
+            (new_root, result.old_value, result.inserted_value)
         } else {
             let key_bytes = key.as_bytes();
             let value_bytes = value.as_bytes();
@@ -116,24 +131,19 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             let page_num = page.get_page_number();
             let guard = AccessGuardMut::new(page, offset, value_bytes.len());
 
-            (page_num, guard)
+            (page_num, None, guard)
         };
         *self.root = Some(new_root);
-        Ok(guard)
+        Ok((old_value, guard))
     }
 
-    #[allow(clippy::type_complexity)]
     // Safety: caller must ensure that no references to uncommitted pages in this table exist
     unsafe fn insert_helper(
         &mut self,
         page: PageImpl<'a>,
         key: &[u8],
         value: &[u8],
-    ) -> Result<(
-        PageNumber,
-        Option<(Vec<u8>, PageNumber)>,
-        AccessGuardMut<'a>,
-    )> {
+    ) -> Result<InsertionResult<'a, V>> {
         let node_mem = page.memory();
         Ok(match node_mem[0] {
             LEAF => {
@@ -153,18 +163,20 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     drop(new_page_accessor);
                     let guard = AccessGuardMut::new(new_page, offset, value.len());
                     return if position == 0 {
-                        Ok((
-                            new_page_number,
-                            Some((key.to_vec(), page.get_page_number())),
-                            guard,
-                        ))
+                        Ok(InsertionResult {
+                            new_root: new_page_number,
+                            additional_sibling: Some((key.to_vec(), page.get_page_number())),
+                            inserted_value: guard,
+                            old_value: None,
+                        })
                     } else {
                         let split_key = accessor.last_entry().key().to_vec();
-                        Ok((
-                            page.get_page_number(),
-                            Some((split_key, new_page_number)),
-                            guard,
-                        ))
+                        Ok(InsertionResult {
+                            new_root: page.get_page_number(),
+                            additional_sibling: Some((split_key, new_page_number)),
+                            inserted_value: guard,
+                            old_value: None,
+                        })
                     };
                 }
 
@@ -175,6 +187,12 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     )
                 {
                     let page_number = page.get_page_number();
+                    let existing_value = if found {
+                        let copied_value = accessor.entry(position).unwrap().value().to_vec();
+                        Some(AccessGuard::with_owned_value(copied_value, self.mem))
+                    } else {
+                        None
+                    };
                     drop(page);
                     let mut page_mut = self.mem.get_page_mut(page_number);
                     let mut mutator = LeafMutator::new(&mut page_mut);
@@ -183,7 +201,12 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     let offset = new_page_accessor.offset_of_value(position).unwrap();
                     drop(new_page_accessor);
                     let guard = AccessGuardMut::new(page_mut, offset, value.len());
-                    return Ok((page_number, None, guard));
+                    return Ok(InsertionResult {
+                        new_root: page_number,
+                        additional_sibling: None,
+                        inserted_value: guard,
+                        old_value: existing_value,
+                    });
                 }
 
                 let mut builder = LeafBuilder::new(self.mem, accessor.num_pairs() + 1);
@@ -203,23 +226,60 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     let new_page = builder.build()?;
 
                     let page_number = page.get_page_number();
-                    drop(page);
-                    self.free_policy
-                        .conditional_free(page_number, self.freed, self.mem)?;
+                    let existing_value = if found {
+                        let (start, end) = accessor.value_range(position).unwrap();
+                        let free_on_drop = self.free_policy.free_on_drop(page_number, self.mem);
+                        if !free_on_drop {
+                            self.freed.push(page_number);
+                        }
+                        Some(AccessGuard::new(
+                            page,
+                            start,
+                            end - start,
+                            free_on_drop,
+                            self.mem,
+                        ))
+                    } else {
+                        drop(page);
+                        self.free_policy
+                            .conditional_free(page_number, self.freed, self.mem)?;
+                        None
+                    };
 
                     let new_page_number = new_page.get_page_number();
                     let accessor = LeafAccessor::new(&new_page);
                     let offset = accessor.offset_of_value(position).unwrap();
                     let guard = AccessGuardMut::new(new_page, offset, value.len());
 
-                    (new_page_number, None, guard)
+                    InsertionResult {
+                        new_root: new_page_number,
+                        additional_sibling: None,
+                        inserted_value: guard,
+                        old_value: existing_value,
+                    }
                 } else {
                     let (new_page1, split_key, new_page2) = builder.build_split()?;
-                    let page_number = page.get_page_number();
                     let split_key = split_key.to_vec();
-                    drop(page);
-                    self.free_policy
-                        .conditional_free(page_number, self.freed, self.mem)?;
+                    let page_number = page.get_page_number();
+                    let existing_value = if found {
+                        let (start, end) = accessor.value_range(position).unwrap();
+                        let free_on_drop = self.free_policy.free_on_drop(page_number, self.mem);
+                        if !free_on_drop {
+                            self.freed.push(page_number);
+                        }
+                        Some(AccessGuard::new(
+                            page,
+                            start,
+                            end - start,
+                            free_on_drop,
+                            self.mem,
+                        ))
+                    } else {
+                        drop(page);
+                        self.free_policy
+                            .conditional_free(page_number, self.freed, self.mem)?;
+                        None
+                    };
 
                     let new_page_number = new_page1.get_page_number();
                     let new_page_number2 = new_page2.get_page_number();
@@ -235,20 +295,29 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         AccessGuardMut::new(new_page2, offset, value.len())
                     };
 
-                    (new_page_number, Some((split_key, new_page_number2)), guard)
+                    InsertionResult {
+                        new_root: new_page_number,
+                        additional_sibling: Some((split_key, new_page_number2)),
+                        inserted_value: guard,
+                        old_value: existing_value,
+                    }
                 }
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page);
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
-                let (page1, more, guard) =
-                    self.insert_helper(self.mem.get_page(child_page), key, value)?;
+                let sub_result = self.insert_helper(self.mem.get_page(child_page), key, value)?;
 
-                if more.is_none() {
+                if sub_result.additional_sibling.is_none() {
                     // Check fast-path if no children were added
-                    if page1 == child_page {
+                    if sub_result.new_root == child_page {
                         // NO-OP. One of our descendants is uncommitted, so there was no change
-                        return Ok((page.get_page_number(), None, guard));
+                        return Ok(InsertionResult {
+                            new_root: page.get_page_number(),
+                            additional_sibling: None,
+                            inserted_value: sub_result.inserted_value,
+                            old_value: sub_result.old_value,
+                        });
                     } else if self.mem.uncommitted(page.get_page_number()) {
                         let page_number = page.get_page_number();
                         drop(page);
@@ -256,16 +325,21 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         // and we just dropped our reference to it, on the line above
                         let mut mutpage = self.mem.get_page_mut(page_number);
                         let mut mutator = BranchMutator::new(&mut mutpage);
-                        mutator.write_child_page(child_index, page1);
-                        return Ok((mutpage.get_page_number(), None, guard));
+                        mutator.write_child_page(child_index, sub_result.new_root);
+                        return Ok(InsertionResult {
+                            new_root: mutpage.get_page_number(),
+                            additional_sibling: None,
+                            inserted_value: sub_result.inserted_value,
+                            old_value: sub_result.old_value,
+                        });
                     }
                 }
 
                 // A child was added, or we couldn't use the fast-path above
                 let mut builder = BranchBuilder::new(self.mem, accessor.count_children() + 1);
                 if child_index == 0 {
-                    builder.push_child(page1);
-                    if let Some((ref index_key2, page2)) = more {
+                    builder.push_child(sub_result.new_root);
+                    if let Some((ref index_key2, page2)) = sub_result.additional_sibling {
                         builder.push_key(index_key2);
                         builder.push_child(page2);
                     }
@@ -276,8 +350,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     if let Some(key) = accessor.key(i - 1) {
                         builder.push_key(key);
                         if i == child_index {
-                            builder.push_child(page1);
-                            if let Some((ref index_key2, page2)) = more {
+                            builder.push_child(sub_result.new_root);
+                            if let Some((ref index_key2, page2)) = sub_result.additional_sibling {
                                 builder.push_key(index_key2);
                                 builder.push_child(page2);
                             }
@@ -291,14 +365,20 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
 
                 let result = if builder.should_split() {
                     let (new_page1, split_key, new_page2) = builder.build_split()?;
-                    (
-                        new_page1.get_page_number(),
-                        Some((split_key.to_vec(), new_page2.get_page_number())),
-                        guard,
-                    )
+                    InsertionResult {
+                        new_root: new_page1.get_page_number(),
+                        additional_sibling: Some((split_key.to_vec(), new_page2.get_page_number())),
+                        inserted_value: sub_result.inserted_value,
+                        old_value: sub_result.old_value,
+                    }
                 } else {
                     let new_page = builder.build()?;
-                    (new_page.get_page_number(), None, guard)
+                    InsertionResult {
+                        new_root: new_page.get_page_number(),
+                        additional_sibling: None,
+                        inserted_value: sub_result.inserted_value,
+                        old_value: sub_result.old_value,
+                    }
                 };
                 // Free the original page, since we've replaced it
                 let page_number = page.get_page_number();
