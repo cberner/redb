@@ -66,7 +66,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> RedbValue for Multi
         &self.data
     }
 
-    fn redb_type_name() -> &'static str {
+    fn redb_type_name() -> String {
         unreachable!()
     }
 }

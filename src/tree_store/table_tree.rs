@@ -36,8 +36,8 @@ impl RedbValue for FreedTableKey {
         result
     }
 
-    fn redb_type_name() -> &'static str {
-        "FreedTableKey"
+    fn redb_type_name() -> String {
+        "FreedTableKey".to_string()
     }
 }
 
@@ -156,8 +156,8 @@ impl RedbValue for InternalTableDefinition {
         result
     }
 
-    fn redb_type_name() -> &'static str {
-        "InternalTableDefinition"
+    fn redb_type_name() -> String {
+        "InternalTableDefinition".to_string()
     }
 }
 
@@ -301,8 +301,8 @@ impl<'txn> TableTree<'txn> {
         let table = InternalTableDefinition {
             table_root: None,
             table_type,
-            key_type: K::redb_type_name().to_string(),
-            value_type: V::redb_type_name().to_string(),
+            key_type: K::redb_type_name(),
+            value_type: V::redb_type_name(),
         };
         // Safety: References into the master table are never returned to the user
         unsafe { self.tree.insert(name, &table)? };

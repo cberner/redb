@@ -51,7 +51,7 @@ pub trait RedbValue {
     fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out;
 
     /// Globally unique identifier for this type
-    fn redb_type_name() -> &'static str;
+    fn redb_type_name() -> String;
 }
 
 pub trait RedbKey: RedbValue {
@@ -71,8 +71,8 @@ impl RedbValue for [u8] {
         self
     }
 
-    fn redb_type_name() -> &'static str {
-        "[u8]"
+    fn redb_type_name() -> String {
+        "[u8]".to_string()
     }
 }
 
@@ -94,8 +94,8 @@ impl RedbValue for str {
         self
     }
 
-    fn redb_type_name() -> &'static str {
-        "str"
+    fn redb_type_name() -> String {
+        "str".to_string()
     }
 }
 
@@ -121,8 +121,8 @@ macro_rules! be_value {
                 self.to_le_bytes()
             }
 
-            fn redb_type_name() -> &'static str {
-                stringify!($t)
+            fn redb_type_name() -> String {
+                stringify!($t).to_string()
             }
         }
     };
