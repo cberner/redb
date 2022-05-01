@@ -239,8 +239,8 @@ mod test {
                 &self.0
             }
 
-            fn redb_type_name() -> &'static str {
-                "ReverseKey"
+            fn redb_type_name() -> String {
+                "ReverseKey".to_string()
             }
         }
 
