@@ -4,7 +4,7 @@ use lmdb::Transaction;
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{IoSlice, Read, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -126,8 +126,12 @@ fn uring_bench(path: &Path) {
             let (key, value) = &pairs[i % pairs.len()];
             let mut mut_key = key.clone();
             mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-            file.write_all(&mut_key).unwrap();
-            file.write_all(value).unwrap();
+            let s1 = IoSlice::new(&mut_key);
+            let s2 = IoSlice::new(value);
+            assert_eq!(
+                file.write_vectored(&[s1, s2]).unwrap(),
+                key.len() + value.len()
+            );
         }
     }
     file.sync_all().unwrap();
@@ -210,8 +214,12 @@ fn readwrite_bench(path: &Path) {
             let (key, value) = &pairs[i % pairs.len()];
             let mut mut_key = key.clone();
             mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-            file.write_all(&mut_key).unwrap();
-            file.write_all(value).unwrap();
+            let s1 = IoSlice::new(&mut_key);
+            let s2 = IoSlice::new(value);
+            assert_eq!(
+                file.write_vectored(&[s1, s2]).unwrap(),
+                key.len() + value.len()
+            );
         }
     }
     file.sync_all().unwrap();
