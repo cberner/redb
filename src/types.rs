@@ -38,13 +38,6 @@ pub trait RedbValue {
 
     /// Deserializes data
     /// Implementations may return a view over data, or an owned type
-    ///
-    /// Note to implementors: redb guarantees that `data` is the same byte array as that returned
-    /// from as_bytes() for a value written to a specific table, but does not guarantee that
-    /// the type is the same. In particular, if you create a table "x" with types K & V, write some
-    /// data and then re-open it with the types K & V2, V2::from_bytes will be called on a byte
-    /// array written from V::as_bytes(). Therefore, you must validate the `data` parameter to
-    /// ensure this method is safe, and not assume it contains the bytes returned by as_bytes()
     fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out;
 
     /// Serialize the key to a slice
