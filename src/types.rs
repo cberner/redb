@@ -31,7 +31,7 @@ impl<'a, T: 'a + Debug> WithLifetime<'a> for OwnedLifetime<T> {
     type Out = T;
 }
 
-pub trait RedbValue {
+pub trait RedbValue: Debug {
     // TODO: need GATs, so that we can replace all this HRTB stuff
     type View: for<'a> WithLifetime<'a>;
     type ToBytes: for<'a> AsBytesWithLifetime<'a>;

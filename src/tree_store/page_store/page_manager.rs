@@ -962,6 +962,8 @@ impl TransactionalMemory {
             // Can't grow
             return Err(Error::OutOfSpace);
         }
+        #[cfg(feature = "logging")]
+        trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
 
         // Safety: We're growing the mmap
         unsafe {

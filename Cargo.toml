@@ -16,6 +16,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 libc = "0.2.104"
+log = {version = "0.4.17", optional = true }
 pyo3 = {version = "0.16", features=["extension-module", "abi3-py37"], optional = true }
 
 [dev-dependencies]
@@ -31,6 +32,8 @@ io-uring = "0.5.1"
 
 [features]
 python = ["pyo3"]
+# Enables log messages
+logging = ["log"]
 
 [profile.bench]
 debug = true

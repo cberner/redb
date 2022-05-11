@@ -8,6 +8,8 @@ use crate::{
     Database, Error, MultimapTable, MultimapTableDefinition, ReadOnlyMultimapTable, ReadOnlyTable,
     Result, Table, TableDefinition,
 };
+#[cfg(feature = "logging")]
+use log::info;
 use std::cell::RefCell;
 use std::cmp::min;
 use std::collections::HashMap;
@@ -73,7 +75,7 @@ impl DatabaseStats {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum Durability {
     /// Commits with this durability level will not be persisted to disk unless followed by a
     /// commit with a higher durability level.
@@ -146,6 +148,8 @@ impl<'db> WriteTransaction<'db> {
         &'txn self,
         definition: TableDefinition<K, V>,
     ) -> Result<Table<'db, 'txn, K, V>> {
+        #[cfg(feature = "logging")]
+        info!("Opening table: {}", definition);
         if let Some(location) = self.open_tables.borrow().get(definition.name()) {
             return Err(Error::TableAlreadyOpen(
                 definition.name().to_string(),
@@ -177,6 +181,8 @@ impl<'db> WriteTransaction<'db> {
         &'txn self,
         definition: MultimapTableDefinition<K, V>,
     ) -> Result<MultimapTable<'db, 'txn, K, V>> {
+        #[cfg(feature = "logging")]
+        info!("Opening multimap table: {}", definition);
         if let Some(location) = self.open_tables.borrow().get(definition.name()) {
             return Err(Error::TableAlreadyOpen(
                 definition.name().to_string(),
@@ -219,6 +225,8 @@ impl<'db> WriteTransaction<'db> {
         &self,
         definition: TableDefinition<K, V>,
     ) -> Result<bool> {
+        #[cfg(feature = "logging")]
+        info!("Deleting table: {}", definition);
         self.table_tree
             .borrow_mut()
             .delete_table::<K, V>(definition.name(), TableType::Normal)
@@ -231,6 +239,8 @@ impl<'db> WriteTransaction<'db> {
         &self,
         definition: MultimapTableDefinition<K, V>,
     ) -> Result<bool> {
+        #[cfg(feature = "logging")]
+        info!("Deleting multimap table: {}", definition);
         self.table_tree
             .borrow_mut()
             .delete_table::<K, V>(definition.name(), TableType::Multimap)
@@ -282,6 +292,11 @@ impl<'db> WriteTransaction<'db> {
     }
 
     fn commit_inner(&mut self) -> Result {
+        #[cfg(feature = "logging")]
+        info!(
+            "Committing transaction id={} with durability={:?}",
+            self.transaction_id, self.durability
+        );
         match self.durability {
             Durability::None => self.non_durable_commit()?,
             Durability::Eventual => self.durable_commit(true)?,
@@ -289,6 +304,8 @@ impl<'db> WriteTransaction<'db> {
         }
 
         self.completed.store(true, Ordering::Release);
+        #[cfg(feature = "logging")]
+        info!("Finished commit of transaction id={}", self.transaction_id);
 
         Ok(())
     }
@@ -297,9 +314,13 @@ impl<'db> WriteTransaction<'db> {
     ///
     /// All writes performed in this transaction will be rolled back
     pub fn abort(self) -> Result {
+        #[cfg(feature = "logging")]
+        info!("Aborting transaction id={}", self.transaction_id);
         self.mem.rollback_uncommited_writes()?;
         self.db.deallocate_write_transaction(self.transaction_id);
         self.completed.store(true, Ordering::Release);
+        #[cfg(feature = "logging")]
+        info!("Finished abort of transaction id={}", self.transaction_id);
         Ok(())
     }
 
