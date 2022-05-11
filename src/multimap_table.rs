@@ -40,6 +40,7 @@ impl MultimapKeyCompareOp {
 /// key_len: u32
 /// key_data: length of key_len
 /// value_data:
+#[derive(Debug)]
 pub struct MultimapKVPair<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     data: Vec<u8>,
     _key_type: PhantomData<K>,

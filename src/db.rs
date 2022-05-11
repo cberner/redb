@@ -2,10 +2,11 @@ use crate::tree_store::{
     get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, InternalTableDefinition, PageNumber,
     TransactionalMemory,
 };
-use crate::types::RedbValue;
+use crate::types::{RedbKey, RedbValue};
 use crate::Error;
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::collections::btree_set::BTreeSet;
+use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
 use std::marker::PhantomData;
@@ -14,6 +15,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::{io, panic};
+
+#[cfg(feature = "logging")]
+use log::{error, info};
 
 pub(crate) type TransactionId = u64;
 type AtomicTransactionId = AtomicU64;
@@ -51,6 +55,18 @@ impl<'a, K: ?Sized, V: ?Sized> Clone for TableDefinition<'a, K, V> {
 
 impl<'a, K: ?Sized, V: ?Sized> Copy for TableDefinition<'a, K, V> {}
 
+impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Display for TableDefinition<'a, K, V> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}<{}, {}>",
+            self.name,
+            K::redb_type_name(),
+            V::redb_type_name()
+        )
+    }
+}
+
 /// Defines the name and types of a multimap table
 ///
 /// A [`MultimapTableDefinition`] should be opened for use by calling [`ReadTransaction::open_multimap_table`] or [`WriteTransaction::open_multimap_table`]
@@ -85,6 +101,18 @@ impl<'a, K: ?Sized, V: ?Sized> Clone for MultimapTableDefinition<'a, K, V> {
 }
 
 impl<'a, K: ?Sized, V: ?Sized> Copy for MultimapTableDefinition<'a, K, V> {}
+
+impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Display for MultimapTableDefinition<'a, K, V> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}<{}, {}>",
+            self.name,
+            K::redb_type_name(),
+            V::redb_type_name()
+        )
+    }
+}
 
 /// Opened redb database file
 ///
@@ -183,6 +211,11 @@ impl Database {
         page_size: Option<usize>,
         dynamic_growth: bool,
     ) -> Result<Self> {
+        #[cfg(feature = "logging")]
+        info!(
+            "Opening database {:?} with max size {}",
+            &file, max_capacity
+        );
         let mem = TransactionalMemory::new(file, max_capacity, page_size, dynamic_growth)?;
         if mem.needs_repair()? {
             let root = mem
@@ -232,6 +265,11 @@ impl Database {
             self.live_write_transaction.lock().unwrap().unwrap()
         );
         *self.leaked_write_transaction.lock().unwrap() = Some(panic::Location::caller());
+        #[cfg(feature = "logging")]
+        error!(
+            "Leaked write transaction from {}",
+            panic::Location::caller()
+        );
     }
 
     pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) {
@@ -273,6 +311,8 @@ impl Database {
         let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
         *self.live_write_transaction.lock().unwrap() = Some(id);
         // Safety: We just asserted there was no previous write in progress
+        #[cfg(feature = "logging")]
+        info!("Beginning write transaction id={}", id);
         unsafe { WriteTransaction::new(self, id) }
     }
 
@@ -286,6 +326,8 @@ impl Database {
     pub fn begin_read(&self) -> Result<ReadTransaction> {
         let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
         self.live_read_transactions.lock().unwrap().insert(id);
+        #[cfg(feature = "logging")]
+        info!("Beginning read transaction id={}", id);
         Ok(ReadTransaction::new(self, id))
     }
 }

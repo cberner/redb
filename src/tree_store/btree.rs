@@ -4,6 +4,8 @@ use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::{AccessGuard, Result};
+#[cfg(feature = "logging")]
+use log::trace;
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::cmp::max;
@@ -49,6 +51,13 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
 
     // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
     pub(crate) unsafe fn insert(&mut self, key: &K, value: &V) -> Result<Option<AccessGuard<V>>> {
+        #[cfg(feature = "logging")]
+        trace!(
+            "Btree(root={:?}): Inserting {:?} with value of length {}",
+            &self.root,
+            key,
+            value.as_bytes().as_ref().len()
+        );
         let mut freed_pages = self.freed_pages.borrow_mut();
         let mut operation = MutateHelper::new(
             &mut self.root,
@@ -68,6 +77,13 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
         key: &K,
         value_length: usize,
     ) -> Result<AccessGuardMut> {
+        #[cfg(feature = "logging")]
+        trace!(
+            "Btree(root={:?}): Inserting {:?} with {} reserved bytes for the value",
+            &self.root,
+            key,
+            value.as_bytes().as_ref().len()
+        );
         let mut freed_pages = self.freed_pages.borrow_mut();
         let value = vec![0u8; value_length];
         let mut operation = MutateHelper::new(
@@ -82,6 +98,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
 
     // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
     pub(crate) unsafe fn remove(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
+        #[cfg(feature = "logging")]
+        trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
         let mut freed_pages = self.freed_pages.borrow_mut();
         let mut operation = MutateHelper::new(
             &mut self.root,

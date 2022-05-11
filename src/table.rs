@@ -226,6 +226,7 @@ mod test {
 
     #[test]
     fn custom_ordering() {
+        #[derive(Debug)]
         struct ReverseKey(Vec<u8>);
 
         impl RedbValue for ReverseKey {
