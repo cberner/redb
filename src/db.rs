@@ -25,14 +25,13 @@ type AtomicTransactionId = AtomicU64;
 /// Defines the name and types of a table
 ///
 /// A [`TableDefinition`] should be opened for use by calling [`ReadTransaction::open_table`] or [`WriteTransaction::open_table`]
-// TODO: add trait bounds once const_fn_trait_bound is stable
-pub struct TableDefinition<'a, K: ?Sized, V: ?Sized> {
+pub struct TableDefinition<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     name: &'a str,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: ?Sized, V: ?Sized> TableDefinition<'a, K, V> {
+impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> TableDefinition<'a, K, V> {
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
         Self {
@@ -47,13 +46,13 @@ impl<'a, K: ?Sized, V: ?Sized> TableDefinition<'a, K, V> {
     }
 }
 
-impl<'a, K: ?Sized, V: ?Sized> Clone for TableDefinition<'a, K, V> {
+impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Clone for TableDefinition<'a, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: ?Sized, V: ?Sized> Copy for TableDefinition<'a, K, V> {}
+impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Copy for TableDefinition<'a, K, V> {}
 
 impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Display for TableDefinition<'a, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -73,13 +72,13 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Display for TableDefinition
 ///
 /// [Multimap tables](https://en.wikipedia.org/wiki/Multimap) may have multiple values associated with each key
 ///
-pub struct MultimapTableDefinition<'a, K: ?Sized, V: ?Sized> {
+pub struct MultimapTableDefinition<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     name: &'a str,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: ?Sized, V: ?Sized> MultimapTableDefinition<'a, K, V> {
+impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTableDefinition<'a, K, V> {
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
         Self {
@@ -94,15 +93,15 @@ impl<'a, K: ?Sized, V: ?Sized> MultimapTableDefinition<'a, K, V> {
     }
 }
 
-impl<'a, K: ?Sized, V: ?Sized> Clone for MultimapTableDefinition<'a, K, V> {
+impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Clone for MultimapTableDefinition<'a, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: ?Sized, V: ?Sized> Copy for MultimapTableDefinition<'a, K, V> {}
+impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Copy for MultimapTableDefinition<'a, K, V> {}
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Display for MultimapTableDefinition<'a, K, V> {
+impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Display for MultimapTableDefinition<'a, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,

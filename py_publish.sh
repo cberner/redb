@@ -2,7 +2,7 @@
 
 cd /redb
 yum install -y python3-pip
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain=1.46.0
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain=1.61.0
 source $HOME/.cargo/env
 
 pip3 install toml
