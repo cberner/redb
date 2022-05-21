@@ -1,4 +1,6 @@
-use crate::tree_store::{Btree, BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
+use crate::tree_store::{
+    Btree, BtreeMut, BtreeRangeIter, Checksum, PageNumber, TransactionalMemory,
+};
 use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
 };
@@ -309,7 +311,7 @@ pub struct MultimapTable<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
 impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'txn, K, V> {
     pub(crate) fn new(
         name: &str,
-        table_root: Option<PageNumber>,
+        table_root: Option<(PageNumber, Checksum)>,
         freed_pages: Rc<RefCell<Vec<PageNumber>>>,
         mem: &'db TransactionalMemory,
         transaction: &'txn WriteTransaction<'db>,
@@ -439,7 +441,7 @@ pub struct ReadOnlyMultimapTable<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized>
 
 impl<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'txn, K, V> {
     pub(crate) fn new(
-        root_page: Option<PageNumber>,
+        root_page: Option<(PageNumber, Checksum)>,
         mem: &'txn TransactionalMemory,
     ) -> ReadOnlyMultimapTable<'txn, K, V> {
         ReadOnlyMultimapTable {

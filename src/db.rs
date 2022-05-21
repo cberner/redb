@@ -1,6 +1,6 @@
 use crate::tree_store::{
-    get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, InternalTableDefinition, PageNumber,
-    TransactionalMemory,
+    get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition,
+    PageNumber, RawBtree, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
@@ -182,7 +182,7 @@ impl Database {
                 .open(path)?
         };
 
-        Database::new(file, db_size, None, None, true)
+        Database::new(file, db_size, None, None, true, None)
     }
 
     /// Opens an existing redb database.
@@ -194,7 +194,7 @@ impl Database {
         if File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = get_db_size(path.as_ref())?;
             let file = OpenOptions::new().read(true).write(true).open(path)?;
-            Database::new(file, existing_size, None, None, true)
+            Database::new(file, existing_size, None, None, true, None)
         } else {
             Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
         }
@@ -204,22 +204,84 @@ impl Database {
         &self.mem
     }
 
+    fn verify_primary_checksums(mem: &TransactionalMemory) -> bool {
+        let (root, root_checksum) = mem
+            .get_data_root()
+            .expect("Tried to repair an empty database");
+        if !RawBtree::new(
+            Some((root, root_checksum)),
+            str::fixed_width(),
+            InternalTableDefinition::fixed_width(),
+            mem,
+        )
+        .verify_checksum()
+        {
+            return false;
+        }
+
+        if let Some((freed_root, freed_checksum)) = mem.get_freed_root() {
+            if !RawBtree::new(
+                Some((freed_root, freed_checksum)),
+                FreedTableKey::fixed_width(),
+                None,
+                mem,
+            )
+            .verify_checksum()
+            {
+                return false;
+            }
+        }
+
+        // Iterate over all other tables
+        let mut iter: BtreeRangeIter<str, InternalTableDefinition> =
+            BtreeRangeIter::new::<RangeFull, str>(.., Some(root), mem);
+        while let Some(entry) = iter.next() {
+            let definition = InternalTableDefinition::from_bytes(entry.value());
+            if let Some((table_root, table_checksum)) = definition.get_root() {
+                if !RawBtree::new(
+                    Some((table_root, table_checksum)),
+                    definition.get_fixed_key_size(),
+                    definition.get_fixed_value_size(),
+                    mem,
+                )
+                .verify_checksum()
+                {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
     fn new(
         file: File,
         max_capacity: usize,
         page_size: Option<usize>,
         region_size: Option<usize>,
         dynamic_growth: bool,
+        use_checksums: Option<bool>,
     ) -> Result<Self> {
         #[cfg(feature = "logging")]
         info!(
             "Opening database {:?} with max size {}",
             &file, max_capacity
         );
-        let mem =
-            TransactionalMemory::new(file, max_capacity, page_size, region_size, dynamic_growth)?;
+        let mem = TransactionalMemory::new(
+            file,
+            max_capacity,
+            page_size,
+            region_size,
+            dynamic_growth,
+            use_checksums,
+        )?;
         if mem.needs_repair()? {
-            let root = mem
+            if mem.needs_checksum_verification()? && !Self::verify_primary_checksums(&mem) {
+                mem.repair_primary_corrupted();
+                assert!(Self::verify_primary_checksums(&mem));
+            }
+
+            let (root, root_checksum) = mem
                 .get_data_root()
                 .expect("Tried to repair an empty database");
 
@@ -235,7 +297,7 @@ impl Database {
             // Chain all the other tables to the master table iter
             while let Some(entry) = iter.next() {
                 let definition = InternalTableDefinition::from_bytes(entry.value());
-                if let Some(table_root) = definition.get_root() {
+                if let Some((table_root, _)) = definition.get_root() {
                     let table_pages_iter = AllPageNumbersBtreeIter::new(
                         table_root,
                         definition.get_fixed_key_size(),
@@ -251,7 +313,7 @@ impl Database {
             // Clear the freed table. We just rebuilt the allocator state by walking all the
             // reachable data pages, which implicitly frees the pages for the freed table
             let transaction_id = mem.get_last_committed_transaction_id()? + 1;
-            mem.commit(Some(root), None, transaction_id, false)?;
+            mem.commit(Some((root, root_checksum)), None, transaction_id, false)?;
         }
 
         let next_transaction_id = mem.get_last_committed_transaction_id()? + 1;
@@ -338,10 +400,18 @@ impl Database {
     }
 }
 
+pub enum WriteStrategy {
+    /// Use a storage format that optimizes for minimum [`WriteTransaction::commit`] latency
+    CommitLatency,
+    /// Use a storage format that optimizes for maximum write throughput
+    Throughput,
+}
+
 pub struct DatabaseBuilder {
     page_size: Option<usize>,
     region_size: Option<usize>,
     dynamic_growth: bool,
+    use_checksums: Option<bool>,
 }
 
 impl DatabaseBuilder {
@@ -351,6 +421,7 @@ impl DatabaseBuilder {
             page_size: None,
             region_size: None,
             dynamic_growth: true,
+            use_checksums: None,
         }
     }
 
@@ -360,6 +431,11 @@ impl DatabaseBuilder {
     pub fn set_page_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
         self.page_size = Some(size);
+        self
+    }
+
+    pub fn set_write_strategy(&mut self, strategy: WriteStrategy) -> &mut Self {
+        self.use_checksums = Some(matches!(strategy, WriteStrategy::CommitLatency));
         self
     }
 
@@ -404,6 +480,7 @@ impl DatabaseBuilder {
             self.page_size,
             self.region_size,
             self.dynamic_growth,
+            self.use_checksums,
         )
     }
 }

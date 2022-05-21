@@ -1,4 +1,5 @@
 use crate::tree_store::btree::btree_stats;
+use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
 use crate::types::{
@@ -88,7 +89,7 @@ impl From<u8> for TableType {
 
 #[derive(Clone, Debug)]
 pub(crate) struct InternalTableDefinition {
-    table_root: Option<PageNumber>,
+    table_root: Option<(PageNumber, Checksum)>,
     table_type: TableType,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
@@ -97,7 +98,7 @@ pub(crate) struct InternalTableDefinition {
 }
 
 impl InternalTableDefinition {
-    pub(crate) fn get_root(&self) -> Option<PageNumber> {
+    pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
         self.table_root
     }
 
@@ -136,11 +137,19 @@ impl RedbValue for InternalTableDefinition {
                     .try_into()
                     .unwrap(),
             );
-            Some(table_root)
+            offset += PageNumber::serialized_size();
+            let checksum = Checksum::from_le_bytes(
+                data[offset..(offset + size_of::<Checksum>())]
+                    .try_into()
+                    .unwrap(),
+            );
+            offset += size_of::<Checksum>();
+            Some((table_root, checksum))
         } else {
+            offset += PageNumber::serialized_size();
+            offset += size_of::<Checksum>();
             None
         };
-        offset += PageNumber::serialized_size();
 
         let non_null = data[offset] != 0;
         offset += 1;
@@ -194,12 +203,14 @@ impl RedbValue for InternalTableDefinition {
 
     fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
         let mut result = vec![self.table_type.into()];
-        if let Some(root) = self.table_root {
+        if let Some((root, checksum)) = self.table_root {
             result.push(1);
             result.extend_from_slice(&root.to_le_bytes());
+            result.extend_from_slice(&checksum.to_le_bytes());
         } else {
             result.push(0);
-            result.extend_from_slice(&[0; PageNumber::serialized_size()])
+            result.extend_from_slice(&[0; PageNumber::serialized_size()]);
+            result.extend_from_slice(&[0; size_of::<Checksum>()]);
         }
         if let Some(fixed) = self.fixed_key_size {
             result.push(1);
@@ -249,13 +260,13 @@ pub(crate) struct TableTree<'txn> {
     tree: BtreeMut<'txn, str, InternalTableDefinition>,
     mem: &'txn TransactionalMemory,
     // Cached updates from tables that have been closed. These must be flushed to the btree
-    pending_table_updates: HashMap<String, Option<PageNumber>>,
+    pending_table_updates: HashMap<String, Option<(PageNumber, Checksum)>>,
     freed_pages: Rc<RefCell<Vec<PageNumber>>>,
 }
 
 impl<'txn> TableTree<'txn> {
     pub(crate) fn new(
-        master_root: Option<PageNumber>,
+        master_root: Option<(PageNumber, Checksum)>,
         mem: &'txn TransactionalMemory,
         freed_pages: Rc<RefCell<Vec<PageNumber>>>,
     ) -> Self {
@@ -268,7 +279,11 @@ impl<'txn> TableTree<'txn> {
     }
 
     // Queues an update to the table root
-    pub(crate) fn stage_update_table_root(&mut self, name: &str, table_root: Option<PageNumber>) {
+    pub(crate) fn stage_update_table_root(
+        &mut self,
+        name: &str,
+        table_root: Option<(PageNumber, Checksum)>,
+    ) {
         self.pending_table_updates
             .insert(name.to_string(), table_root);
     }
@@ -277,7 +292,7 @@ impl<'txn> TableTree<'txn> {
         self.pending_table_updates.clear();
     }
 
-    pub(crate) fn flush_table_root_updates(&mut self) -> Result<Option<PageNumber>> {
+    pub(crate) fn flush_table_root_updates(&mut self) -> Result<Option<(PageNumber, Checksum)>> {
         for (name, table_root) in self.pending_table_updates.drain() {
             // Bypass .get_table() since the table types are dynamic
             // TODO: optimize away this get()
@@ -348,7 +363,7 @@ impl<'txn> TableTree<'txn> {
         table_type: TableType,
     ) -> Result<bool> {
         if let Some(definition) = self.get_table::<K, V>(name, table_type)? {
-            if let Some(table_root) = definition.get_root() {
+            if let Some((table_root, _)) = definition.get_root() {
                 let iter = AllPageNumbersBtreeIter::new(
                     table_root,
                     K::fixed_width(),
@@ -415,7 +430,7 @@ impl<'txn> TableTree<'txn> {
                 definition.table_root = *updated_root;
             }
             let subtree_stats = btree_stats(
-                definition.table_root,
+                definition.table_root.map(|(p, _)| p),
                 self.mem,
                 definition.fixed_key_size,
                 definition.fixed_value_size,
