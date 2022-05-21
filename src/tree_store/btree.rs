@@ -1,4 +1,7 @@
-use crate::tree_store::btree_base::{BranchAccessor, FreePolicy, LeafAccessor, BRANCH, LEAF};
+use crate::tree_store::btree_base::{
+    branch_checksum, leaf_checksum, BranchAccessor, Checksum, FreePolicy, LeafAccessor, BRANCH,
+    LEAF,
+};
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber};
@@ -24,7 +27,7 @@ pub(crate) struct BtreeStats {
 
 pub(crate) struct BtreeMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     mem: &'a TransactionalMemory,
-    root: Option<PageNumber>,
+    root: Option<(PageNumber, Checksum)>,
     freed_pages: Rc<RefCell<Vec<PageNumber>>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -32,7 +35,7 @@ pub(crate) struct BtreeMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 
 impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
     pub(crate) fn new(
-        root: Option<PageNumber>,
+        root: Option<(PageNumber, Checksum)>,
         mem: &'a TransactionalMemory,
         freed_pages: Rc<RefCell<Vec<PageNumber>>>,
     ) -> Self {
@@ -45,7 +48,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
         }
     }
 
-    pub(crate) fn get_root(&self) -> Option<PageNumber> {
+    pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
         self.root
     }
 
@@ -130,7 +133,12 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
     }
 
     pub(crate) fn stats(&self) -> BtreeStats {
-        btree_stats(self.root, self.mem, K::fixed_width(), V::fixed_width())
+        btree_stats(
+            self.root.map(|(p, _)| p),
+            self.mem,
+            K::fixed_width(),
+            V::fixed_width(),
+        )
     }
 
     fn read_tree(&self) -> Btree<K, V> {
@@ -156,15 +164,80 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
     }
 }
 
+pub(crate) struct RawBtree<'a> {
+    mem: &'a TransactionalMemory,
+    root: Option<(PageNumber, Checksum)>,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+}
+
+impl<'a> RawBtree<'a> {
+    pub(crate) fn new(
+        root: Option<(PageNumber, Checksum)>,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+        mem: &'a TransactionalMemory,
+    ) -> Self {
+        Self {
+            mem,
+            root,
+            fixed_key_size,
+            fixed_value_size,
+        }
+    }
+
+    pub(crate) fn verify_checksum(&self) -> bool {
+        if let Some((root, checksum)) = self.root {
+            self.verify_checksum_helper(root, checksum)
+        } else {
+            true
+        }
+    }
+
+    fn verify_checksum_helper(&self, page_number: PageNumber, expected_checksum: Checksum) -> bool {
+        let page = self.mem.get_page(page_number);
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => {
+                expected_checksum
+                    == leaf_checksum(
+                        &page,
+                        self.fixed_key_size,
+                        self.fixed_value_size,
+                        self.mem.checksum_type(),
+                    )
+            }
+            BRANCH => {
+                if expected_checksum
+                    != branch_checksum(&page, self.fixed_key_size, self.mem.checksum_type())
+                {
+                    return false;
+                }
+                let accessor = BranchAccessor::new(&page, self.fixed_key_size);
+                for i in 0..accessor.count_children() {
+                    if !self.verify_checksum_helper(
+                        accessor.child_page(i).unwrap(),
+                        accessor.child_checksum(i).unwrap(),
+                    ) {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 pub(crate) struct Btree<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     mem: &'a TransactionalMemory,
-    root: Option<PageNumber>,
+    root: Option<(PageNumber, Checksum)>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
 impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
-    pub(crate) fn new(root: Option<PageNumber>, mem: &'a TransactionalMemory) -> Self {
+    pub(crate) fn new(root: Option<(PageNumber, Checksum)>, mem: &'a TransactionalMemory) -> Self {
         Self {
             mem,
             root,
@@ -177,7 +250,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         &self,
         key: &K,
     ) -> Result<Option<<<V as RedbValue>::View as WithLifetime<'a>>::Out>> {
-        if let Some(p) = self.root {
+        if let Some((p, _)) = self.root {
             let root_page = self.mem.get_page(p);
             return Ok(self.get_helper(root_page, key.as_bytes().as_ref()));
         } else {
@@ -212,12 +285,16 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         &self,
         range: T,
     ) -> Result<BtreeRangeIter<'a, K, V>> {
-        Ok(BtreeRangeIter::new(range, self.root, self.mem))
+        Ok(BtreeRangeIter::new(
+            range,
+            self.root.map(|(p, _)| p),
+            self.mem,
+        ))
     }
 
     pub(crate) fn len(&self) -> Result<usize> {
         let mut iter: BtreeRangeIter<K, V> =
-            BtreeRangeIter::new::<RangeFull, K>(.., self.root, self.mem);
+            BtreeRangeIter::new::<RangeFull, K>(.., self.root.map(|(p, _)| p), self.mem);
         let mut count = 0;
         while iter.next().is_some() {
             count += 1;
@@ -227,7 +304,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
 
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self, include_values: bool) {
-        if let Some(p) = self.root {
+        if let Some((p, _)) = self.root {
             let mut pages = vec![self.mem.get_page(p)];
             while !pages.is_empty() {
                 let mut next_children = vec![];

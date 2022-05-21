@@ -1,9 +1,10 @@
+use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::grouped_bitmap::U64GroupedBitMapMut;
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::utils::get_page_size;
-use crate::tree_store::page_store::{PageImpl, PageMut};
+use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
 use crate::tree_store::PageNumber;
 use crate::Error;
 use crate::Result;
@@ -27,17 +28,20 @@ use std::sync::{Mutex, MutexGuard};
 // 8 bytes: region max usable bytes
 // 8 bytes: database max size
 //
-// Commit slot 0 (next 128 bytes):
+// Commit slot 0 (next 192 bytes):
 // 1 byte: version
 // 1 byte: != 0 if root page is non-null
 // 1 byte: != 0 if freed table root page is non-null
 // 5 bytes: padding
 // 8 bytes: root page
+// 16 bytes: root checksum
 // 8 bytes: freed table root page
+// 16 bytes: freed table root checksum
 // 8 bytes: last committed transaction id
 // (db layout size) bytes: active database layout
+// 16 bytes: slot checksum
 //
-// Commit slot 1 (next 128 bytes):
+// Commit slot 1 (next 192 bytes):
 // Same layout as slot 0
 
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
@@ -48,7 +52,7 @@ pub(super) const MIN_USABLE_PAGES: usize = 10;
 const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
 
 // TODO: set to 1, when version 1.0 is released
-const FILE_FORMAT_VERSION: u8 = 101;
+const FILE_FORMAT_VERSION: u8 = 102;
 
 // Inspired by PNG's magic number
 const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
@@ -58,7 +62,7 @@ const CHECKSUM_TYPE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>();
 const RESERVED: usize = 4;
 const REGION_MAX_USABLE_OFFSET: usize = CHECKSUM_TYPE_OFFSET + size_of::<u8>() + RESERVED;
 const DB_SIZE_OFFSET: usize = REGION_MAX_USABLE_OFFSET + size_of::<u64>();
-const TRANSACTION_SIZE: usize = 128;
+const TRANSACTION_SIZE: usize = 192;
 const TRANSACTION_0_OFFSET: usize = 128;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
 pub(super) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
@@ -73,9 +77,12 @@ const ROOT_NON_NULL_OFFSET: usize = size_of::<u8>();
 const FREED_ROOT_NON_NULL_OFFSET: usize = ROOT_NON_NULL_OFFSET + size_of::<u8>();
 const PADDING: usize = 5;
 const ROOT_PAGE_OFFSET: usize = FREED_ROOT_NON_NULL_OFFSET + size_of::<u8>() + PADDING;
-const FREED_ROOT_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
-const TRANSACTION_ID_OFFSET: usize = FREED_ROOT_OFFSET + size_of::<u64>();
+const ROOT_CHECKSUM_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
+const FREED_ROOT_OFFSET: usize = ROOT_CHECKSUM_OFFSET + size_of::<u128>();
+const FREED_ROOT_CHECKSUM_OFFSET: usize = FREED_ROOT_OFFSET + size_of::<u64>();
+const TRANSACTION_ID_OFFSET: usize = FREED_ROOT_CHECKSUM_OFFSET + size_of::<u128>();
 const DATA_LAYOUT_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
+const SLOT_CHECKSUM_OFFSET: usize = DATA_LAYOUT_OFFSET + DatabaseLayout::serialized_size();
 
 fn ceil_log2(x: usize) -> usize {
     if x.is_power_of_two() {
@@ -93,15 +100,26 @@ pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
     Ok(u64::from_le_bytes(db_size) as usize)
 }
 
-#[derive(Debug, PartialEq)]
-enum ChecksumType {
-    None,
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub(crate) enum ChecksumType {
+    Zero, // No checksum is calculated. Just stores zero
+    XXH3_128,
+}
+
+impl ChecksumType {
+    pub(crate) fn checksum(&self, data: &[u8]) -> Checksum {
+        match self {
+            ChecksumType::Zero => 0,
+            ChecksumType::XXH3_128 => hash128_with_seed(data, 0),
+        }
+    }
 }
 
 impl From<u8> for ChecksumType {
     fn from(x: u8) -> Self {
         match x {
-            0 => ChecksumType::None,
+            1 => ChecksumType::Zero,
+            2 => ChecksumType::XXH3_128,
             _ => unimplemented!(),
         }
     }
@@ -111,7 +129,8 @@ impl From<u8> for ChecksumType {
 impl Into<u8> for ChecksumType {
     fn into(self) -> u8 {
         match self {
-            ChecksumType::None => 0,
+            ChecksumType::Zero => 1,
+            ChecksumType::XXH3_128 => 2,
         }
     }
 }
@@ -184,6 +203,10 @@ impl<'a> MetadataAccessor<'a> {
 
     fn get_checksum_type(&self) -> ChecksumType {
         ChecksumType::from(self.header[CHECKSUM_TYPE_OFFSET])
+    }
+
+    fn set_checksum_type(&mut self, checksum: ChecksumType) {
+        self.header[CHECKSUM_TYPE_OFFSET] = checksum.into();
     }
 
     fn get_max_capacity(&self) -> usize {
@@ -308,7 +331,16 @@ impl<'a> TransactionAccessor<'a> {
         TransactionAccessor { mem, _guard: guard }
     }
 
-    fn get_root_page(&self) -> Option<PageNumber> {
+    fn verify_checksum(&self, checksum_type: ChecksumType) -> bool {
+        let checksum = Checksum::from_le_bytes(
+            self.mem[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
+                .try_into()
+                .unwrap(),
+        );
+        checksum_type.checksum(&self.mem[..SLOT_CHECKSUM_OFFSET]) == checksum
+    }
+
+    fn get_root_page(&self) -> Option<(PageNumber, Checksum)> {
         if self.mem[ROOT_NON_NULL_OFFSET] == 0 {
             None
         } else {
@@ -317,11 +349,16 @@ impl<'a> TransactionAccessor<'a> {
                     .try_into()
                     .unwrap(),
             );
-            Some(num)
+            let checksum = Checksum::from_le_bytes(
+                self.mem[ROOT_CHECKSUM_OFFSET..(ROOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
+                    .try_into()
+                    .unwrap(),
+            );
+            Some((num, checksum))
         }
     }
 
-    fn get_freed_root_page(&self) -> Option<PageNumber> {
+    fn get_freed_root_page(&self) -> Option<(PageNumber, Checksum)> {
         if self.mem[FREED_ROOT_NON_NULL_OFFSET] == 0 {
             None
         } else {
@@ -330,7 +367,13 @@ impl<'a> TransactionAccessor<'a> {
                     .try_into()
                     .unwrap(),
             );
-            Some(num)
+            let checksum = Checksum::from_le_bytes(
+                self.mem[FREED_ROOT_CHECKSUM_OFFSET
+                    ..(FREED_ROOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
+                    .try_into()
+                    .unwrap(),
+            );
+            Some((num, checksum))
         }
     }
 
@@ -364,20 +407,25 @@ impl<'a> TransactionMutator<'a> {
         TransactionMutator { mem }
     }
 
-    fn set_root_page(&mut self, page_number: Option<PageNumber>) {
-        if let Some(num) = page_number {
+    fn set_root_page(&mut self, page_number: Option<(PageNumber, Checksum)>) {
+        if let Some((num, checksum)) = page_number {
             self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + PageNumber::serialized_size())]
                 .copy_from_slice(&num.to_le_bytes());
+            self.mem[ROOT_CHECKSUM_OFFSET..(ROOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
+                .copy_from_slice(&checksum.to_le_bytes());
             self.mem[ROOT_NON_NULL_OFFSET] = 1;
         } else {
             self.mem[ROOT_NON_NULL_OFFSET] = 0;
         }
     }
 
-    fn set_freed_root(&mut self, page_number: Option<PageNumber>) {
-        if let Some(num) = page_number {
+    fn set_freed_root(&mut self, page_number: Option<(PageNumber, Checksum)>) {
+        if let Some((num, checksum)) = page_number {
             self.mem[FREED_ROOT_OFFSET..(FREED_ROOT_OFFSET + PageNumber::serialized_size())]
                 .copy_from_slice(&num.to_le_bytes());
+            self.mem
+                [FREED_ROOT_CHECKSUM_OFFSET..(FREED_ROOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
+                .copy_from_slice(&checksum.to_le_bytes());
             self.mem[FREED_ROOT_NON_NULL_OFFSET] = 1;
         } else {
             self.mem[FREED_ROOT_NON_NULL_OFFSET] = 0;
@@ -392,6 +440,12 @@ impl<'a> TransactionMutator<'a> {
     fn set_data_section_layout(&mut self, layout: &DatabaseLayout) {
         self.mem[DATA_LAYOUT_OFFSET..(DATA_LAYOUT_OFFSET + DatabaseLayout::serialized_size())]
             .copy_from_slice(&layout.to_le_bytes());
+    }
+
+    fn update_checksum(&mut self, checksum_type: ChecksumType) {
+        let checksum = checksum_type.checksum(&self.mem[..SLOT_CHECKSUM_OFFSET]);
+        self.mem[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
+            .copy_from_slice(&checksum.to_le_bytes());
     }
 
     fn set_version(&mut self, version: u8) {
@@ -430,6 +484,7 @@ pub(crate) struct TransactionalMemory {
     region_header_with_padding_size: usize,
     db_header_size: usize,
     dynamic_growth: bool,
+    checksum_type: ChecksumType,
 }
 
 impl TransactionalMemory {
@@ -439,7 +494,10 @@ impl TransactionalMemory {
         requested_page_size: Option<usize>,
         requested_region_size: Option<usize>,
         dynamic_growth: bool,
+        use_checksums: Option<bool>,
     ) -> Result<Self> {
+        assert!(DATA_LAYOUT_OFFSET + DatabaseLayout::serialized_size() <= TRANSACTION_SIZE);
+
         let page_size = requested_page_size.unwrap_or_else(get_page_size);
         assert!(page_size.is_power_of_two());
         if max_capacity < DB_HEADER_SIZE + page_size * MIN_USABLE_PAGES {
@@ -514,6 +572,12 @@ impl TransactionalMemory {
             metadata.set_page_size(page_size);
             metadata.set_max_capacity(max_capacity);
             metadata.set_region_max_usable_bytes(max_usable_region_bytes);
+            let checksum_type = if use_checksums.unwrap_or(true) {
+                ChecksumType::XXH3_128
+            } else {
+                ChecksumType::Zero
+            };
+            metadata.set_checksum_type(checksum_type);
 
             let mut mutator = metadata.secondary_slot_mut();
             mutator.set_root_page(None);
@@ -542,12 +606,12 @@ impl TransactionalMemory {
         if let Some(size) = requested_page_size {
             assert_eq!(page_size, size);
         }
-        assert_eq!(metadata.get_checksum_type(), ChecksumType::None);
         assert_eq!(metadata.primary_slot().get_version(), FILE_FORMAT_VERSION);
         assert_eq!(metadata.secondary_slot().get_version(), FILE_FORMAT_VERSION);
         let layout = metadata.primary_slot().get_data_section_layout();
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
+        let checksum_type = metadata.get_checksum_type();
 
         let regional_allocators = if metadata.get_allocator_dirty() {
             None
@@ -571,6 +635,7 @@ impl TransactionalMemory {
             region_header_with_padding_size: region_header_size,
             db_header_size: layout.header_bytes(),
             dynamic_growth,
+            checksum_type,
         })
     }
 
@@ -578,11 +643,37 @@ impl TransactionalMemory {
         Ok(self.lock_metadata().get_allocator_dirty())
     }
 
+    pub(crate) fn needs_checksum_verification(&self) -> Result<bool> {
+        Ok(self.lock_metadata().get_checksum_type() == ChecksumType::XXH3_128)
+    }
+
+    pub(crate) fn checksum_type(&self) -> ChecksumType {
+        self.lock_metadata().get_checksum_type()
+    }
+
+    pub(crate) fn repair_primary_corrupted(&self) {
+        let mut metadata = self.lock_metadata();
+        metadata.swap_primary();
+        *self.layout.lock().unwrap() = metadata.primary_slot().get_data_section_layout();
+    }
+
     pub(crate) fn repair_allocator(
         &self,
         allocated_pages: impl Iterator<Item = PageNumber>,
     ) -> Result<()> {
         let mut metadata = self.lock_metadata();
+
+        if !metadata
+            .primary_slot()
+            .verify_checksum(metadata.get_checksum_type())
+        {
+            metadata.swap_primary();
+            *self.layout.lock().unwrap() = metadata.primary_slot().get_data_section_layout();
+            assert!(metadata
+                .primary_slot()
+                .verify_checksum(metadata.get_checksum_type()));
+        }
+
         let layout = self.layout.lock().unwrap();
         let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
 
@@ -636,8 +727,8 @@ impl TransactionalMemory {
     // Commit all outstanding changes and make them visible as the primary
     pub(crate) fn commit(
         &self,
-        data_root: Option<PageNumber>,
-        freed_root: Option<PageNumber>,
+        data_root: Option<(PageNumber, Checksum)>,
+        freed_root: Option<(PageNumber, Checksum)>,
         transaction_id: u64,
         eventual: bool,
     ) -> Result {
@@ -649,6 +740,7 @@ impl TransactionalMemory {
         assert!(self.regional_allocators.lock().unwrap().is_some());
 
         let mut metadata = self.lock_metadata();
+        let checksum_type = metadata.get_checksum_type();
         let mut layout = self.layout.lock().unwrap();
 
         // Trim surplus file space, before finalizing the commit
@@ -662,11 +754,15 @@ impl TransactionalMemory {
         secondary.set_root_page(data_root);
         secondary.set_freed_root(freed_root);
         secondary.set_data_section_layout(&layout);
+        secondary.update_checksum(checksum_type);
 
-        if eventual {
-            self.mmap.eventual_flush()?;
-        } else {
-            self.mmap.flush()?;
+        // Use 2-phase commit, if checksums are disabled
+        if matches!(self.checksum_type, ChecksumType::Zero) {
+            if eventual {
+                self.mmap.eventual_flush()?;
+            } else {
+                self.mmap.flush()?;
+            }
         }
 
         metadata.swap_primary();
@@ -696,8 +792,8 @@ impl TransactionalMemory {
     // Make changes visible, without a durability guarantee
     pub(crate) fn non_durable_commit(
         &self,
-        data_root: Option<PageNumber>,
-        freed_root: Option<PageNumber>,
+        data_root: Option<(PageNumber, Checksum)>,
+        freed_root: Option<(PageNumber, Checksum)>,
         transaction_id: u64,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
@@ -708,12 +804,14 @@ impl TransactionalMemory {
         assert!(self.regional_allocators.lock().unwrap().is_some());
 
         let mut metadata = self.lock_metadata();
+        let checksum_type = metadata.get_checksum_type();
         let layout = self.layout.lock().unwrap();
         let mut secondary = metadata.secondary_slot_mut();
         secondary.set_last_committed_transaction_id(transaction_id);
         secondary.set_root_page(data_root);
         secondary.set_freed_root(freed_root);
         secondary.set_data_section_layout(&layout);
+        secondary.update_checksum(checksum_type);
 
         self.log_since_commit.lock().unwrap().clear();
         self.allocated_since_commit.lock().unwrap().clear();
@@ -831,7 +929,7 @@ impl TransactionalMemory {
         }
     }
 
-    pub(crate) fn get_data_root(&self) -> Option<PageNumber> {
+    pub(crate) fn get_data_root(&self) -> Option<(PageNumber, Checksum)> {
         let metadata = self.lock_metadata();
         if self.read_from_secondary.load(Ordering::Acquire) {
             metadata.secondary_slot().get_root_page()
@@ -840,7 +938,7 @@ impl TransactionalMemory {
         }
     }
 
-    pub(crate) fn get_freed_root(&self) -> Option<PageNumber> {
+    pub(crate) fn get_freed_root(&self) -> Option<(PageNumber, Checksum)> {
         let metadata = self.lock_metadata();
         if self.read_from_secondary.load(Ordering::Acquire) {
             metadata.secondary_slot().get_freed_root_page()
@@ -1224,21 +1322,28 @@ mod test {
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::page_manager::{
         ALLOCATOR_STATE_DIRTY, DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, MIN_USABLE_PAGES,
+        PRIMARY_BIT, ROOT_CHECKSUM_OFFSET, TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET,
     };
     use crate::tree_store::page_store::utils::get_page_size;
     use crate::tree_store::page_store::TransactionalMemory;
-    use crate::{Database, Error};
+    use crate::{Database, Error, ReadableTable, WriteStrategy};
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
+    use std::mem::size_of;
     use tempfile::NamedTempFile;
 
     const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
 
     #[test]
-    fn repair_allocator() {
+    fn repair_allocator_no_checksums() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let max_size = 1024 * 1024;
-        let db = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
+        let db = unsafe {
+            Database::builder()
+                .set_write_strategy(WriteStrategy::Throughput)
+                .create(tmpfile.path(), max_size)
+                .unwrap()
+        };
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
@@ -1263,16 +1368,84 @@ mod test {
         buffer[0] |= ALLOCATOR_STATE_DIRTY;
         file.write_all(&buffer).unwrap();
 
-        assert!(TransactionalMemory::new(file, max_size, None, None, true)
-            .unwrap()
-            .needs_repair()
-            .unwrap());
+        assert!(
+            TransactionalMemory::new(file, max_size, None, None, true, Some(false))
+                .unwrap()
+                .needs_repair()
+                .unwrap()
+        );
 
         let db2 = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
         let write_txn = db2.begin_write().unwrap();
         assert_eq!(free_pages, write_txn.stats().unwrap().free_pages());
         {
             let mut table = write_txn.open_table(X).unwrap();
+            table.insert(b"hello2", b"world2").unwrap();
+        }
+        write_txn.commit().unwrap();
+    }
+
+    #[test]
+    fn repair_allocator_checksums() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let max_size = 1024 * 1024;
+        let db = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            table.insert(b"hello", b"world").unwrap();
+        }
+        write_txn.commit().unwrap();
+
+        // Start a read to be sure the previous write isn't garbage collected
+        let read_txn = db.begin_read().unwrap();
+
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            table.insert(b"hello", b"world2").unwrap();
+        }
+        write_txn.commit().unwrap();
+        drop(read_txn);
+        drop(db);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        let mut buffer = [0u8; 1];
+        file.read_exact(&mut buffer).unwrap();
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        buffer[0] |= ALLOCATOR_STATE_DIRTY;
+        file.write_all(&buffer).unwrap();
+
+        // Overwrite the primary checksum to simulate a failure during commit
+        let primary_slot_offset = if buffer[0] & PRIMARY_BIT == 0 {
+            TRANSACTION_0_OFFSET
+        } else {
+            TRANSACTION_1_OFFSET
+        };
+        file.seek(SeekFrom::Start(
+            (primary_slot_offset + ROOT_CHECKSUM_OFFSET) as u64,
+        ))
+        .unwrap();
+        file.write_all(&[0; size_of::<u128>()]).unwrap();
+
+        assert!(
+            TransactionalMemory::new(file, max_size, None, None, true, Some(true))
+                .unwrap()
+                .needs_repair()
+                .unwrap()
+        );
+
+        let db2 = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
+        let write_txn = db2.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            assert_eq!(table.get(b"hello").unwrap().unwrap(), b"world");
             table.insert(b"hello2", b"world2").unwrap();
         }
         write_txn.commit().unwrap();

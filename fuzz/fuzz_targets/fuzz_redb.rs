@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use libfuzzer_sys::fuzz_target;
 use tempfile::NamedTempFile;
-use redb::{Database, Durability, Error, ReadableTable, TableDefinition};
+use redb::{Database, Durability, Error, ReadableTable, TableDefinition, WriteStrategy};
 
 mod common;
 use common::*;
@@ -12,7 +12,12 @@ const TABLE_DEF: TableDefinition<u64, [u8]> = TableDefinition::new("fuzz_table")
 
 fuzz_target!(|config: FuzzConfig| {
     let redb_file: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(redb_file.path(), config.max_db_size.value) };
+    let write_strategy = if config.use_checksums {
+        WriteStrategy::CommitLatency
+    } else {
+        WriteStrategy::Throughput
+    };
+    let db = unsafe { Database::builder().set_write_strategy(write_strategy).create(redb_file.path(), config.max_db_size.value) };
 
     if matches!(db, Err(Error::OutOfSpace)) {
         return;

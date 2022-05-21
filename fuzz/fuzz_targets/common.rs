@@ -103,6 +103,7 @@ pub(crate) struct FuzzTransaction {
 pub(crate) struct FuzzConfig {
     pub transactions: Vec<FuzzTransaction>,
     pub max_db_size: BoundedUSize<MAX_DB_SIZE>,
+    pub use_checksums: bool,
 }
 
 impl FuzzConfig {

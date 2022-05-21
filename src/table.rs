@@ -1,5 +1,5 @@
 use crate::tree_store::{
-    AccessGuardMut, Btree, BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory,
+    AccessGuardMut, Btree, BtreeMut, BtreeRangeIter, Checksum, PageNumber, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Result;
@@ -19,7 +19,7 @@ pub struct Table<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'db, 'txn, K, V> {
     pub(crate) fn new(
         name: &str,
-        table_root: Option<PageNumber>,
+        table_root: Option<(PageNumber, Checksum)>,
         freed_pages: Rc<RefCell<Vec<PageNumber>>>,
         mem: &'db TransactionalMemory,
         transaction: &'txn WriteTransaction<'db>,
@@ -149,7 +149,7 @@ pub struct ReadOnlyTable<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 
 impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'txn, K, V> {
     pub(crate) fn new(
-        root_page: Option<PageNumber>,
+        root_page: Option<(PageNumber, Checksum)>,
         mem: &'txn TransactionalMemory,
     ) -> ReadOnlyTable<'txn, K, V> {
         ReadOnlyTable {
