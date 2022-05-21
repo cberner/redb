@@ -411,6 +411,30 @@ fn str_type() {
 }
 
 #[test]
+fn array_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+
+    let definition: TableDefinition<[u8; 5], [u8; 9]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(b"hello", b"world_123").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    let hello = b"hello";
+    assert_eq!(b"world_123", table.get(hello).unwrap().unwrap());
+
+    let mut iter: RangeIter<[u8; 5], [u8; 9]> = table.range::<RangeFull, &[u8; 5]>(..).unwrap();
+    assert_eq!(iter.next().unwrap().1, b"world_123");
+    assert!(iter.next().is_none());
+}
+
+#[test]
 fn owned_get_signatures() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };

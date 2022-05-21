@@ -75,6 +75,29 @@ impl RedbKey for [u8] {
     }
 }
 
+impl<const N: usize> RedbValue for [u8; N] {
+    type View = RefLifetime<[u8; N]>;
+    type ToBytes = RefAsBytesLifetime<[u8; N]>;
+
+    fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
+        data.try_into().unwrap()
+    }
+
+    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+        self
+    }
+
+    fn redb_type_name() -> String {
+        format!("[u8;{}]", N)
+    }
+}
+
+impl<const N: usize> RedbKey for [u8; N] {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        data1.cmp(data2)
+    }
+}
+
 impl RedbValue for str {
     type View = RefLifetime<str>;
     type ToBytes = RefAsBytesLifetime<str>;
