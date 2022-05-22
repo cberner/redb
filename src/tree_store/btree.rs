@@ -200,7 +200,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                 Some(V::from_bytes(&page.into_memory()[start..end]))
             }
             BRANCH => {
-                let accessor = BranchAccessor::new(&page);
+                let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let (_, child_page) = accessor.child_for_key::<K>(query);
                 self.get_helper(self.mem.get_page(child_page), query)
             }
@@ -239,7 +239,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                                 .print_node::<K, V>(include_values);
                         }
                         BRANCH => {
-                            let accessor = BranchAccessor::new(&page);
+                            let accessor = BranchAccessor::new(&page, K::fixed_width());
                             for i in 0..accessor.count_children() {
                                 let child = accessor.child_page(i).unwrap();
                                 next_children.push(self.mem.get_page(child));
@@ -291,7 +291,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                 }
             }
             BRANCH => {
-                let accessor = BranchAccessor::new(&page);
+                let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let mut max_child_height = 0;
                 let mut leaf_pages = 0;
                 let mut branch_pages = 1;
