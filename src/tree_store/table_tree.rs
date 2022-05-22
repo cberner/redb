@@ -20,6 +20,10 @@ impl RedbValue for FreedTableKey {
     type View = OwnedLifetime<FreedTableKey>;
     type ToBytes = OwnedAsBytesLifetime<[u8; 2 * size_of::<u64>()]>;
 
+    fn fixed_width() -> Option<usize> {
+        Some(2 * size_of::<u64>())
+    }
+
     fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
         let transaction_id = u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap());
         let pagination_id = u64::from_le_bytes(data[size_of::<u64>()..].try_into().unwrap());
@@ -84,6 +88,8 @@ impl From<u8> for TableType {
 pub(crate) struct InternalTableDefinition {
     table_root: Option<PageNumber>,
     table_type: TableType,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
     key_type: String,
     value_type: String,
 }
@@ -91,6 +97,14 @@ pub(crate) struct InternalTableDefinition {
 impl InternalTableDefinition {
     pub(crate) fn get_root(&self) -> Option<PageNumber> {
         self.table_root
+    }
+
+    pub(crate) fn get_fixed_key_size(&self) -> Option<usize> {
+        self.fixed_key_size
+    }
+
+    pub(crate) fn get_fixed_value_size(&self) -> Option<usize> {
+        self.fixed_value_size
     }
 
     pub(crate) fn get_type(&self) -> TableType {
@@ -102,11 +116,16 @@ impl RedbValue for InternalTableDefinition {
     type View = OwnedLifetime<InternalTableDefinition>;
     type ToBytes = OwnedAsBytesLifetime<Vec<u8>>;
 
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+
     fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
-        debug_assert!(data.len() > 14);
+        debug_assert!(data.len() > 22);
         let mut offset = 0;
         let table_type = TableType::from(data[offset]);
         offset += 1;
+
         let non_null = data[offset] != 0;
         offset += 1;
         let table_root = if non_null {
@@ -120,6 +139,35 @@ impl RedbValue for InternalTableDefinition {
             None
         };
         offset += PageNumber::serialized_size();
+
+        let non_null = data[offset] != 0;
+        offset += 1;
+        let fixed_key_size = if non_null {
+            let fixed = u32::from_le_bytes(
+                data[offset..(offset + size_of::<u32>())]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            Some(fixed)
+        } else {
+            None
+        };
+        offset += size_of::<u32>();
+
+        let non_null = data[offset] != 0;
+        offset += 1;
+        let fixed_value_size = if non_null {
+            let fixed = u32::from_le_bytes(
+                data[offset..(offset + size_of::<u32>())]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            Some(fixed)
+        } else {
+            None
+        };
+        offset += size_of::<u32>();
+
         let key_type_len = u32::from_le_bytes(
             data[offset..(offset + size_of::<u32>())]
                 .try_into()
@@ -135,6 +183,8 @@ impl RedbValue for InternalTableDefinition {
         InternalTableDefinition {
             table_root,
             table_type,
+            fixed_key_size,
+            fixed_value_size,
             key_type,
             value_type,
         }
@@ -148,6 +198,20 @@ impl RedbValue for InternalTableDefinition {
         } else {
             result.push(0);
             result.extend_from_slice(&[0; PageNumber::serialized_size()])
+        }
+        if let Some(fixed) = self.fixed_key_size {
+            result.push(1);
+            result.extend_from_slice(&(fixed as u32).to_le_bytes());
+        } else {
+            result.push(0);
+            result.extend_from_slice(&[0; size_of::<u32>()])
+        }
+        if let Some(fixed) = self.fixed_value_size {
+            result.push(1);
+            result.extend_from_slice(&(fixed as u32).to_le_bytes());
+        } else {
+            result.push(0);
+            result.extend_from_slice(&[0; size_of::<u32>()])
         }
         result.extend_from_slice(&(self.key_type.as_bytes().len() as u32).to_le_bytes());
         result.extend_from_slice(self.key_type.as_bytes());
@@ -272,7 +336,12 @@ impl<'txn> TableTree<'txn> {
     ) -> Result<bool> {
         if let Some(definition) = self.get_table::<K, V>(name, table_type)? {
             if let Some(table_root) = definition.get_root() {
-                let iter = AllPageNumbersBtreeIter::new(table_root, self.mem);
+                let iter = AllPageNumbersBtreeIter::new(
+                    table_root,
+                    K::fixed_width(),
+                    V::fixed_width(),
+                    self.mem,
+                );
                 let mut freed_pages = self.freed_pages.borrow_mut();
                 for page_number in iter {
                     freed_pages.push(page_number);
@@ -301,6 +370,8 @@ impl<'txn> TableTree<'txn> {
         let table = InternalTableDefinition {
             table_root: None,
             table_type,
+            fixed_key_size: K::fixed_width(),
+            fixed_value_size: V::fixed_width(),
             key_type: K::redb_type_name(),
             value_type: V::redb_type_name(),
         };

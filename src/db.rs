@@ -224,7 +224,7 @@ impl Database {
             // Repair the allocator state
             // All pages in the master table
             let mut all_pages_iter: Box<dyn Iterator<Item = PageNumber>> =
-                Box::new(AllPageNumbersBtreeIter::new(root, &mem));
+                Box::new(AllPageNumbersBtreeIter::new(root, None, None, &mem));
 
             // Iterate over all other tables
             let mut iter: BtreeRangeIter<[u8], [u8]> =
@@ -234,7 +234,12 @@ impl Database {
             while let Some(entry) = iter.next() {
                 let definition = InternalTableDefinition::from_bytes(entry.value());
                 if let Some(table_root) = definition.get_root() {
-                    let table_pages_iter = AllPageNumbersBtreeIter::new(table_root, &mem);
+                    let table_pages_iter = AllPageNumbersBtreeIter::new(
+                        table_root,
+                        definition.get_fixed_key_size(),
+                        definition.get_fixed_value_size(),
+                        &mem,
+                    );
                     all_pages_iter = Box::new(all_pages_iter.chain(table_pages_iter));
                 }
             }

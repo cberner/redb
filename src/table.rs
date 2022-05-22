@@ -233,6 +233,10 @@ mod test {
             type View = RefLifetime<[u8]>;
             type ToBytes = RefAsBytesLifetime<[u8]>;
 
+            fn fixed_width() -> Option<usize> {
+                None
+            }
+
             fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
                 data
             }
