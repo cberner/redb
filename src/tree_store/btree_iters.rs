@@ -13,11 +13,15 @@ use std::ops::RangeBounds;
 pub enum RangeIterState<'a> {
     Leaf {
         page: PageImpl<'a>,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
         entry: usize,
         parent: Option<Box<RangeIterState<'a>>>,
     },
     Internal {
         page: PageImpl<'a>,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
         child: usize,
         parent: Option<Box<RangeIterState<'a>>>,
     },
@@ -35,15 +39,19 @@ impl<'a> RangeIterState<'a> {
         match self {
             Leaf {
                 page,
+                fixed_key_size,
+                fixed_value_size,
                 entry,
                 parent,
             } => {
-                let accessor = LeafAccessor::new(&page);
+                let accessor = LeafAccessor::new(&page, fixed_key_size, fixed_value_size);
                 let direction = if reverse { -1 } else { 1 };
                 let next_entry = entry as isize + direction;
                 if 0 <= next_entry && next_entry < accessor.num_pairs() as isize {
                     Some(Leaf {
                         page,
+                        fixed_key_size,
+                        fixed_value_size,
                         entry: next_entry as usize,
                         parent,
                     })
@@ -53,6 +61,8 @@ impl<'a> RangeIterState<'a> {
             }
             Internal {
                 page,
+                fixed_key_size,
+                fixed_value_size,
                 child,
                 mut parent,
             } => {
@@ -64,13 +74,16 @@ impl<'a> RangeIterState<'a> {
                 if 0 <= next_child && next_child < accessor.count_children() as isize {
                     parent = Some(Box::new(Internal {
                         page,
+                        fixed_key_size,
+                        fixed_value_size,
                         child: next_child as usize,
                         parent,
                     }));
                 }
                 match child_page.memory()[0] {
                     LEAF => {
-                        let child_accessor = LeafAccessor::new(&child_page);
+                        let child_accessor =
+                            LeafAccessor::new(&child_page, fixed_key_size, fixed_value_size);
                         let entry = if reverse {
                             child_accessor.num_pairs() - 1
                         } else {
@@ -78,6 +91,8 @@ impl<'a> RangeIterState<'a> {
                         };
                         Some(Leaf {
                             page: child_page,
+                            fixed_key_size,
+                            fixed_value_size,
                             entry,
                             parent,
                         })
@@ -91,6 +106,8 @@ impl<'a> RangeIterState<'a> {
                         };
                         Some(Internal {
                             page: child_page,
+                            fixed_key_size,
+                            fixed_value_size,
                             child,
                             parent,
                         })
@@ -103,7 +120,13 @@ impl<'a> RangeIterState<'a> {
 
     fn get_entry(&self) -> Option<EntryAccessor> {
         match self {
-            Leaf { page, entry, .. } => LeafAccessor::new(page).entry(*entry),
+            Leaf {
+                page,
+                fixed_key_size,
+                fixed_value_size,
+                entry,
+                ..
+            } => LeafAccessor::new(page, *fixed_key_size, *fixed_value_size).entry(*entry),
             _ => None,
         }
     }
@@ -115,17 +138,26 @@ pub(crate) struct AllPageNumbersBtreeIter<'a> {
 }
 
 impl<'a> AllPageNumbersBtreeIter<'a> {
-    pub(crate) fn new(root: PageNumber, manager: &'a TransactionalMemory) -> Self {
+    pub(crate) fn new(
+        root: PageNumber,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+        manager: &'a TransactionalMemory,
+    ) -> Self {
         let root_page = manager.get_page(root);
         let node_mem = root_page.memory();
         let start = match node_mem[0] {
             LEAF => Leaf {
                 page: root_page,
+                fixed_key_size,
+                fixed_value_size,
                 entry: 0,
                 parent: None,
             },
             BRANCH => Internal {
                 page: root_page,
+                fixed_key_size,
+                fixed_value_size,
                 child: 0,
                 parent: None,
             },
@@ -177,14 +209,14 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
     ) -> Self {
         if let Some(root) = table_root {
             let (include_left, left) = match query_range.start_bound() {
-                Bound::Included(k) => find_iter_left::<K>(
+                Bound::Included(k) => find_iter_left::<K, V>(
                     manager.get_page(root),
                     None,
                     k.borrow().as_bytes().as_ref(),
                     true,
                     manager,
                 ),
-                Bound::Excluded(k) => find_iter_left::<K>(
+                Bound::Excluded(k) => find_iter_left::<K, V>(
                     manager.get_page(root),
                     None,
                     k.borrow().as_bytes().as_ref(),
@@ -192,19 +224,20 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                     manager,
                 ),
                 Bound::Unbounded => {
-                    let state = find_iter_unbounded(manager.get_page(root), None, false, manager);
+                    let state =
+                        find_iter_unbounded::<K, V>(manager.get_page(root), None, false, manager);
                     (true, state)
                 }
             };
             let (include_right, right) = match query_range.end_bound() {
-                Bound::Included(k) => find_iter_right::<K>(
+                Bound::Included(k) => find_iter_right::<K, V>(
                     manager.get_page(root),
                     None,
                     k.borrow().as_bytes().as_ref(),
                     true,
                     manager,
                 ),
-                Bound::Excluded(k) => find_iter_right::<K>(
+                Bound::Excluded(k) => find_iter_right::<K, V>(
                     manager.get_page(root),
                     None,
                     k.borrow().as_bytes().as_ref(),
@@ -212,7 +245,8 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                     manager,
                 ),
                 Bound::Unbounded => {
-                    let state = find_iter_unbounded(manager.get_page(root), None, true, manager);
+                    let state =
+                        find_iter_unbounded::<K, V>(manager.get_page(root), None, true, manager);
                     (true, state)
                 }
             };
@@ -259,12 +293,12 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
             Some(Leaf {
                 page: left_page,
                 entry: left_entry,
-                parent: _,
+                ..
             }),
             Some(Leaf {
                 page: right_page,
                 entry: right_entry,
-                parent: _,
+                ..
             }),
         ) = (&self.left, &self.right)
         {
@@ -288,12 +322,12 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                     Some(Leaf {
                         page: left_page,
                         entry: left_entry,
-                        parent: _,
+                        ..
                     }),
                     Some(Leaf {
                         page: right_page,
                         entry: right_entry,
-                        parent: _,
+                        ..
                     }),
                 ) = (&self.left, &self.right)
                 {
@@ -320,12 +354,12 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                     Some(Leaf {
                         page: left_page,
                         entry: left_entry,
-                        parent: _,
+                        ..
                     }),
                     Some(Leaf {
                         page: right_page,
                         entry: right_entry,
-                        parent: _,
+                        ..
                     }),
                 ) = (&self.left, &self.right)
                 {
@@ -346,7 +380,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
     }
 }
 
-fn find_iter_unbounded<'a>(
+fn find_iter_unbounded<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     reverse: bool,
@@ -355,10 +389,12 @@ fn find_iter_unbounded<'a>(
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(&page);
+            let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
             let entry = if reverse { accessor.num_pairs() - 1 } else { 0 };
             Some(Leaf {
                 page,
+                fixed_key_size: K::fixed_width(),
+                fixed_value_size: V::fixed_width(),
                 entry,
                 parent,
             })
@@ -375,10 +411,12 @@ fn find_iter_unbounded<'a>(
             let direction = if reverse { -1isize } else { 1 };
             parent = Some(Box::new(Internal {
                 page,
+                fixed_key_size: K::fixed_width(),
+                fixed_value_size: V::fixed_width(),
                 child: (child_index as isize + direction) as usize,
                 parent,
             }));
-            find_iter_unbounded(child_page, parent, reverse, manager)
+            find_iter_unbounded::<K, V>(child_page, parent, reverse, manager)
         }
         _ => unreachable!(),
     }
@@ -386,7 +424,7 @@ fn find_iter_unbounded<'a>(
 
 // Returns a bool indicating whether the first entry pointed to by the state is included in the
 // queried range
-fn find_iter_left<'a, K: RedbKey + ?Sized>(
+fn find_iter_left<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     query: &[u8],
@@ -396,7 +434,7 @@ fn find_iter_left<'a, K: RedbKey + ?Sized>(
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(&page);
+            let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
             let (mut position, found) = accessor.position::<K>(query);
             let include = if position < accessor.num_pairs() {
                 include_query || !found
@@ -408,6 +446,8 @@ fn find_iter_left<'a, K: RedbKey + ?Sized>(
             };
             let result = Leaf {
                 page,
+                fixed_key_size: K::fixed_width(),
+                fixed_value_size: V::fixed_width(),
                 entry: position,
                 parent,
             };
@@ -420,17 +460,19 @@ fn find_iter_left<'a, K: RedbKey + ?Sized>(
             if child_index < accessor.count_children() - 1 {
                 parent = Some(Box::new(Internal {
                     page,
+                    fixed_key_size: K::fixed_width(),
+                    fixed_value_size: V::fixed_width(),
                     child: child_index + 1,
                     parent,
                 }));
             }
-            find_iter_left::<K>(child_page, parent, query, include_query, manager)
+            find_iter_left::<K, V>(child_page, parent, query, include_query, manager)
         }
         _ => unreachable!(),
     }
 }
 
-fn find_iter_right<'a, K: RedbKey + ?Sized>(
+fn find_iter_right<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     query: &[u8],
@@ -440,7 +482,7 @@ fn find_iter_right<'a, K: RedbKey + ?Sized>(
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(&page);
+            let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
             let (mut position, found) = accessor.position::<K>(query);
             let include = if position < accessor.num_pairs() {
                 include_query && found
@@ -452,6 +494,8 @@ fn find_iter_right<'a, K: RedbKey + ?Sized>(
             };
             let result = Leaf {
                 page,
+                fixed_key_size: K::fixed_width(),
+                fixed_value_size: V::fixed_width(),
                 entry: position,
                 parent,
             };
@@ -464,11 +508,13 @@ fn find_iter_right<'a, K: RedbKey + ?Sized>(
             if child_index > 0 && accessor.child_page(child_index - 1).is_some() {
                 parent = Some(Box::new(Internal {
                     page,
+                    fixed_key_size: K::fixed_width(),
+                    fixed_value_size: V::fixed_width(),
                     child: child_index - 1,
                     parent,
                 }));
             }
-            find_iter_right::<K>(child_page, parent, query, include_query, manager)
+            find_iter_right::<K, V>(child_page, parent, query, include_query, manager)
         }
         _ => unreachable!(),
     }

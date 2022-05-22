@@ -47,6 +47,10 @@ name = "large_values_benchmark"
 harness = false
 
 [[bench]]
+name = "int_benchmark"
+harness = false
+
+[[bench]]
 name = "syscall_benchmark"
 harness = false
 

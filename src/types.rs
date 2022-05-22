@@ -36,6 +36,9 @@ pub trait RedbValue: Debug {
     type View: for<'a> WithLifetime<'a>;
     type ToBytes: for<'a> AsBytesWithLifetime<'a>;
 
+    /// Width of a fixed type, or None for variable width
+    fn fixed_width() -> Option<usize>;
+
     /// Deserializes data
     /// Implementations may return a view over data, or an owned type
     fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out;
@@ -55,6 +58,10 @@ pub trait RedbKey: RedbValue {
 impl RedbValue for [u8] {
     type View = RefLifetime<[u8]>;
     type ToBytes = RefAsBytesLifetime<[u8]>;
+
+    fn fixed_width() -> Option<usize> {
+        None
+    }
 
     fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
         data
@@ -79,6 +86,10 @@ impl<const N: usize> RedbValue for [u8; N] {
     type View = RefLifetime<[u8; N]>;
     type ToBytes = RefAsBytesLifetime<[u8; N]>;
 
+    fn fixed_width() -> Option<usize> {
+        Some(N)
+    }
+
     fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
         data.try_into().unwrap()
     }
@@ -101,6 +112,11 @@ impl<const N: usize> RedbKey for [u8; N] {
 impl RedbValue for str {
     type View = RefLifetime<str>;
     type ToBytes = RefAsBytesLifetime<str>;
+
+    // TODO: add fuzzer for fixed size types
+    fn fixed_width() -> Option<usize> {
+        None
+    }
 
     fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
         std::str::from_utf8(data).unwrap()
@@ -128,6 +144,10 @@ macro_rules! be_value {
         impl RedbValue for $t {
             type View = OwnedLifetime<$t>;
             type ToBytes = OwnedAsBytesLifetime<[u8; std::mem::size_of::<$t>()]>;
+
+            fn fixed_width() -> Option<usize> {
+                Some(std::mem::size_of::<$t>())
+            }
 
             fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
                 <$t>::from_le_bytes(data.try_into().unwrap())
