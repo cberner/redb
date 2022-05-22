@@ -66,7 +66,7 @@ impl<'a> RangeIterState<'a> {
                 child,
                 mut parent,
             } => {
-                let accessor = BranchAccessor::new(&page);
+                let accessor = BranchAccessor::new(&page, fixed_key_size);
                 let child_page = accessor.child_page(child).unwrap();
                 let child_page = manager.get_page(child_page);
                 let direction = if reverse { -1 } else { 1 };
@@ -98,7 +98,7 @@ impl<'a> RangeIterState<'a> {
                         })
                     }
                     BRANCH => {
-                        let child_accessor = BranchAccessor::new(&child_page);
+                        let child_accessor = BranchAccessor::new(&child_page, fixed_key_size);
                         let child = if reverse {
                             child_accessor.count_children() - 1
                         } else {
@@ -400,7 +400,7 @@ fn find_iter_unbounded<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
             })
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&page);
+            let accessor = BranchAccessor::new(&page, K::fixed_width());
             let child_index = if reverse {
                 accessor.count_children() - 1
             } else {
@@ -454,7 +454,7 @@ fn find_iter_left<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
             (include, Some(result))
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&page);
+            let accessor = BranchAccessor::new(&page, K::fixed_width());
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
             let child_page = manager.get_page(child_page_number);
             if child_index < accessor.count_children() - 1 {
@@ -502,7 +502,7 @@ fn find_iter_right<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
             (include, Some(result))
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&page);
+            let accessor = BranchAccessor::new(&page, K::fixed_width());
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
             let child_page = manager.get_page(child_page_number);
             if child_index > 0 && accessor.child_page(child_index - 1).is_some() {

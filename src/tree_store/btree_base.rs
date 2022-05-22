@@ -986,16 +986,18 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
 pub(super) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
     num_keys: usize,
+    fixed_key_size: Option<usize>,
     _page_lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
-    pub(super) fn new(page: &'b T) -> Self {
+    pub(super) fn new(page: &'b T, fixed_key_size: Option<usize>) -> Self {
         debug_assert_eq!(page.memory()[0], BRANCH);
         let num_keys = u16::from_le_bytes(page.memory()[2..4].try_into().unwrap()) as usize;
         BranchAccessor {
             page,
             num_keys,
+            fixed_key_size,
             _page_lifetime: Default::default(),
         }
     }
@@ -1043,16 +1045,27 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         (min_child, self.child_page(min_child).unwrap())
     }
 
-    fn key_offset(&self, n: usize) -> usize {
-        if n == 0 {
+    fn key_section_start(&self) -> usize {
+        if self.fixed_key_size.is_none() {
             4 + PageNumber::serialized_size() * self.count_children()
                 + size_of::<u32>() * self.num_keys()
+        } else {
+            4 + PageNumber::serialized_size() * self.count_children()
+        }
+    }
+
+    fn key_offset(&self, n: usize) -> usize {
+        if n == 0 {
+            self.key_section_start()
         } else {
             self.key_end(n - 1)
         }
     }
 
     fn key_end(&self, n: usize) -> usize {
+        if let Some(fixed) = self.fixed_key_size {
+            return self.key_section_start() + fixed * (n + 1);
+        }
         let offset =
             4 + PageNumber::serialized_size() * self.count_children() + size_of::<u32>() * n;
         u32::from_le_bytes(
@@ -1097,15 +1110,21 @@ pub(super) struct BranchBuilder<'a, 'b> {
     children: Vec<PageNumber>,
     keys: Vec<&'a [u8]>,
     total_key_bytes: usize,
+    fixed_key_size: Option<usize>,
     mem: &'b TransactionalMemory,
 }
 
 impl<'a, 'b> BranchBuilder<'a, 'b> {
-    pub(super) fn new(mem: &'b TransactionalMemory, child_capacity: usize) -> Self {
+    pub(super) fn new(
+        mem: &'b TransactionalMemory,
+        child_capacity: usize,
+        fixed_key_size: Option<usize>,
+    ) -> Self {
         Self {
             children: Vec::with_capacity(child_capacity),
             keys: Vec::with_capacity(child_capacity - 1),
             total_key_bytes: 0,
+            fixed_key_size,
             mem,
         }
     }
@@ -1142,9 +1161,13 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
 
     pub(super) fn build(self) -> Result<PageMut<'b>> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
-        let size = RawBranchBuilder::required_bytes(self.keys.len(), self.total_key_bytes);
+        let size = RawBranchBuilder::required_bytes(
+            self.keys.len(),
+            self.total_key_bytes,
+            self.fixed_key_size,
+        );
         let mut page = self.mem.allocate(size)?;
-        let mut builder = RawBranchBuilder::new(&mut page, self.keys.len());
+        let mut builder = RawBranchBuilder::new(&mut page, self.keys.len(), self.fixed_key_size);
         builder.write_first_page(self.children[0]);
         for i in 1..self.children.len() {
             let key = &self.keys[i - 1];
@@ -1156,7 +1179,11 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
     }
 
     pub(super) fn should_split(&self) -> bool {
-        let size = RawBranchBuilder::required_bytes(self.keys.len(), self.total_key_bytes);
+        let size = RawBranchBuilder::required_bytes(
+            self.keys.len(),
+            self.total_key_bytes,
+            self.fixed_key_size,
+        );
         size > self.mem.get_page_size() && self.keys.len() >= 3
     }
 
@@ -1168,9 +1195,10 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         let division_key = self.keys[division];
         let second_split_key_len = self.total_key_bytes - first_split_key_len - division_key.len();
 
-        let size = RawBranchBuilder::required_bytes(division, first_split_key_len);
+        let size =
+            RawBranchBuilder::required_bytes(division, first_split_key_len, self.fixed_key_size);
         let mut page1 = self.mem.allocate(size)?;
-        let mut builder = RawBranchBuilder::new(&mut page1, division);
+        let mut builder = RawBranchBuilder::new(&mut page1, division, self.fixed_key_size);
         builder.write_first_page(self.children[0]);
         for i in 0..division {
             let key = &self.keys[i];
@@ -1178,10 +1206,17 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         }
         drop(builder);
 
-        let size =
-            RawBranchBuilder::required_bytes(self.keys.len() - division - 1, second_split_key_len);
+        let size = RawBranchBuilder::required_bytes(
+            self.keys.len() - division - 1,
+            second_split_key_len,
+            self.fixed_key_size,
+        );
         let mut page2 = self.mem.allocate(size)?;
-        let mut builder = RawBranchBuilder::new(&mut page2, self.keys.len() - division - 1);
+        let mut builder = RawBranchBuilder::new(
+            &mut page2,
+            self.keys.len() - division - 1,
+            self.fixed_key_size,
+        );
         builder.write_first_page(self.children[division + 1]);
         for i in (division + 1)..self.keys.len() {
             let key = &self.keys[i];
@@ -1201,25 +1236,39 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
 // 2 bytes: num_keys (number of keys)
 // repeating (num_keys + 1 times):
 // 8 bytes: page number
-// repeating (num_keys times):
+// (optional) repeating (num_keys times):
 // * 4 bytes: key end. Ending offset of the key, exclusive
 // repeating (num_keys times):
 // * n bytes: key data
 pub(super) struct RawBranchBuilder<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
+    fixed_key_size: Option<usize>,
     num_keys: usize,
     keys_written: usize, // used for debugging
 }
 
 impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
-    pub(super) fn required_bytes(num_keys: usize, size_of_keys: usize) -> usize {
-        let fixed_size =
-            4 + PageNumber::serialized_size() * (num_keys + 1) + size_of::<u32>() * num_keys;
-        size_of_keys + fixed_size
+    pub(super) fn required_bytes(
+        num_keys: usize,
+        size_of_keys: usize,
+        fixed_key_size: Option<usize>,
+    ) -> usize {
+        if fixed_key_size.is_none() {
+            let fixed_size =
+                4 + PageNumber::serialized_size() * (num_keys + 1) + size_of::<u32>() * num_keys;
+            size_of_keys + fixed_size
+        } else {
+            let fixed_size = 4 + PageNumber::serialized_size() * (num_keys + 1);
+            size_of_keys + fixed_size
+        }
     }
 
     // Caller MUST write num_keys values
-    pub(super) fn new(page: &'b mut PageMut<'a>, num_keys: usize) -> Self {
+    pub(super) fn new(
+        page: &'b mut PageMut<'a>,
+        num_keys: usize,
+        fixed_key_size: Option<usize>,
+    ) -> Self {
         assert!(num_keys > 0);
         page.memory_mut()[0] = BRANCH;
         page.memory_mut()[2..4].copy_from_slice(&(num_keys as u16).to_le_bytes());
@@ -1234,6 +1283,7 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
         }
         RawBranchBuilder {
             page,
+            fixed_key_size,
             num_keys,
             keys_written: 0,
         }
@@ -1245,7 +1295,19 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
             .copy_from_slice(&page_number.to_le_bytes());
     }
 
+    fn key_section_start(&self) -> usize {
+        let mut offset = 4 + PageNumber::serialized_size() * (self.num_keys + 1);
+        if self.fixed_key_size.is_none() {
+            offset += size_of::<u32>() * self.num_keys;
+        }
+
+        offset
+    }
+
     fn key_end(&self, n: usize) -> usize {
+        if let Some(fixed) = self.fixed_key_size {
+            return self.key_section_start() + fixed * (n + 1);
+        }
         let offset = 4 + PageNumber::serialized_size() * (self.num_keys + 1) + size_of::<u32>() * n;
         u32::from_le_bytes(
             self.page.memory()[offset..(offset + size_of::<u32>())]
@@ -1267,12 +1329,14 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
         let data_offset = if n > 0 {
             self.key_end(n - 1)
         } else {
-            4 + PageNumber::serialized_size() * (self.num_keys + 1)
-                + size_of::<u32>() * self.num_keys
+            self.key_section_start()
         };
-        let offset = 4 + PageNumber::serialized_size() * (self.num_keys + 1) + size_of::<u32>() * n;
-        self.page.memory_mut()[offset..(offset + size_of::<u32>())]
-            .copy_from_slice(&((data_offset + key.len()) as u32).to_le_bytes());
+        if self.fixed_key_size.is_none() {
+            let offset =
+                4 + PageNumber::serialized_size() * (self.num_keys + 1) + size_of::<u32>() * n;
+            self.page.memory_mut()[offset..(offset + size_of::<u32>())]
+                .copy_from_slice(&((data_offset + key.len()) as u32).to_le_bytes());
+        }
 
         debug_assert!(data_offset > offset);
         self.page.memory_mut()[data_offset..(data_offset + key.len())].copy_from_slice(key);
