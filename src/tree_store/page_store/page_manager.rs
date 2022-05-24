@@ -54,8 +54,9 @@ const FILE_FORMAT_VERSION: u8 = 101;
 const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
 const PAGE_SIZE_OFFSET: usize = MAGICNUMBER.len();
 const GOD_BYTE_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u8>();
-const RESERVED: usize = 5;
-const REGION_MAX_USABLE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + RESERVED;
+const CHECKSUM_TYPE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>();
+const RESERVED: usize = 4;
+const REGION_MAX_USABLE_OFFSET: usize = CHECKSUM_TYPE_OFFSET + size_of::<u8>() + RESERVED;
 const DB_SIZE_OFFSET: usize = REGION_MAX_USABLE_OFFSET + size_of::<u64>();
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 128;
@@ -90,6 +91,29 @@ pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
     file.seek(SeekFrom::Start(DB_SIZE_OFFSET as u64))?;
     file.read_exact(&mut db_size)?;
     Ok(u64::from_le_bytes(db_size) as usize)
+}
+
+#[derive(Debug, PartialEq)]
+enum ChecksumType {
+    None,
+}
+
+impl From<u8> for ChecksumType {
+    fn from(x: u8) -> Self {
+        match x {
+            0 => ChecksumType::None,
+            _ => unimplemented!(),
+        }
+    }
+}
+
+#[allow(clippy::from_over_into)]
+impl Into<u8> for ChecksumType {
+    fn into(self) -> u8 {
+        match self {
+            ChecksumType::None => 0,
+        }
+    }
 }
 
 // Marker struct for the mutex guarding the metadata (header & allocators)
@@ -156,6 +180,10 @@ impl<'a> MetadataAccessor<'a> {
         } else {
             self.header[GOD_BYTE_OFFSET] &= !PRIMARY_BIT;
         }
+    }
+
+    fn get_checksum_type(&self) -> ChecksumType {
+        ChecksumType::from(self.header[CHECKSUM_TYPE_OFFSET])
     }
 
     fn get_max_capacity(&self) -> usize {
@@ -511,6 +539,7 @@ impl TransactionalMemory {
         if let Some(size) = requested_page_size {
             assert_eq!(page_size, size);
         }
+        assert_eq!(metadata.get_checksum_type(), ChecksumType::None);
         assert_eq!(metadata.primary_slot().get_version(), FILE_FORMAT_VERSION);
         assert_eq!(metadata.secondary_slot().get_version(), FILE_FORMAT_VERSION);
         let layout = metadata.primary_slot().get_data_section_layout();
