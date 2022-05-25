@@ -130,7 +130,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
     }
 
     pub(crate) fn stats(&self) -> BtreeStats {
-        self.read_tree().stats()
+        btree_stats(self.root, self.mem, K::fixed_width(), V::fixed_width())
     }
 
     fn read_tree(&self) -> Btree<K, V> {
@@ -216,8 +216,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
     }
 
     pub(crate) fn len(&self) -> Result<usize> {
-        let mut iter: BtreeRangeIter<[u8], [u8]> =
-            BtreeRangeIter::new::<RangeFull, [u8]>(.., self.root, self.mem);
+        let mut iter: BtreeRangeIter<K, V> =
+            BtreeRangeIter::new::<RangeFull, K>(.., self.root, self.mem);
         let mut count = 0;
         while iter.next().is_some() {
             count += 1;
@@ -256,70 +256,80 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
             }
         }
     }
+}
 
-    pub(crate) fn stats(&self) -> BtreeStats {
-        if let Some(root) = self.root {
-            self.stats_helper(root)
-        } else {
-            BtreeStats {
-                tree_height: 0,
-                leaf_pages: 0,
-                branch_pages: 0,
-                stored_leaf_bytes: 0,
-                metadata_bytes: 0,
-                fragmented_bytes: 0,
-            }
+pub(crate) fn btree_stats(
+    root: Option<PageNumber>,
+    mem: &TransactionalMemory,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+) -> BtreeStats {
+    if let Some(root) = root {
+        stats_helper(root, mem, fixed_key_size, fixed_value_size)
+    } else {
+        BtreeStats {
+            tree_height: 0,
+            leaf_pages: 0,
+            branch_pages: 0,
+            stored_leaf_bytes: 0,
+            metadata_bytes: 0,
+            fragmented_bytes: 0,
         }
     }
+}
 
-    fn stats_helper(&self, page_number: PageNumber) -> BtreeStats {
-        let page = self.mem.get_page(page_number);
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => {
-                let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
-                let leaf_bytes = accessor.length_of_pairs(0, accessor.num_pairs());
-                let overhead_bytes = accessor.total_length() - leaf_bytes;
-                let fragmented_bytes = page.memory().len() - accessor.total_length();
-                BtreeStats {
-                    tree_height: 1,
-                    leaf_pages: 1,
-                    branch_pages: 0,
-                    stored_leaf_bytes: leaf_bytes,
-                    metadata_bytes: overhead_bytes,
-                    fragmented_bytes,
-                }
+fn stats_helper(
+    page_number: PageNumber,
+    mem: &TransactionalMemory,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+) -> BtreeStats {
+    let page = mem.get_page(page_number);
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(&page, fixed_key_size, fixed_value_size);
+            let leaf_bytes = accessor.length_of_pairs(0, accessor.num_pairs());
+            let overhead_bytes = accessor.total_length() - leaf_bytes;
+            let fragmented_bytes = page.memory().len() - accessor.total_length();
+            BtreeStats {
+                tree_height: 1,
+                leaf_pages: 1,
+                branch_pages: 0,
+                stored_leaf_bytes: leaf_bytes,
+                metadata_bytes: overhead_bytes,
+                fragmented_bytes,
             }
-            BRANCH => {
-                let accessor = BranchAccessor::new(&page, K::fixed_width());
-                let mut max_child_height = 0;
-                let mut leaf_pages = 0;
-                let mut branch_pages = 1;
-                let mut stored_leaf_bytes = 0;
-                let mut metadata_bytes = accessor.total_length();
-                let mut fragmented_bytes = page.memory().len() - accessor.total_length();
-                for i in 0..accessor.count_children() {
-                    if let Some(child) = accessor.child_page(i) {
-                        let stats = self.stats_helper(child);
-                        max_child_height = max(max_child_height, stats.tree_height);
-                        leaf_pages += stats.leaf_pages;
-                        branch_pages += stats.branch_pages;
-                        stored_leaf_bytes += stats.stored_leaf_bytes;
-                        metadata_bytes += stats.metadata_bytes;
-                        fragmented_bytes += stats.fragmented_bytes;
-                    }
-                }
-
-                BtreeStats {
-                    tree_height: max_child_height + 1,
-                    leaf_pages,
-                    branch_pages,
-                    stored_leaf_bytes,
-                    metadata_bytes,
-                    fragmented_bytes,
-                }
-            }
-            _ => unreachable!(),
         }
+        BRANCH => {
+            let accessor = BranchAccessor::new(&page, fixed_key_size);
+            let mut max_child_height = 0;
+            let mut leaf_pages = 0;
+            let mut branch_pages = 1;
+            let mut stored_leaf_bytes = 0;
+            let mut metadata_bytes = accessor.total_length();
+            let mut fragmented_bytes = page.memory().len() - accessor.total_length();
+            for i in 0..accessor.count_children() {
+                if let Some(child) = accessor.child_page(i) {
+                    let stats = stats_helper(child, mem, fixed_key_size, fixed_value_size);
+                    max_child_height = max(max_child_height, stats.tree_height);
+                    leaf_pages += stats.leaf_pages;
+                    branch_pages += stats.branch_pages;
+                    stored_leaf_bytes += stats.stored_leaf_bytes;
+                    metadata_bytes += stats.metadata_bytes;
+                    fragmented_bytes += stats.fragmented_bytes;
+                }
+            }
+
+            BtreeStats {
+                tree_height: max_child_height + 1,
+                leaf_pages,
+                branch_pages,
+                stored_leaf_bytes,
+                metadata_bytes,
+                fragmented_bytes,
+            }
+        }
+        _ => unreachable!(),
     }
 }

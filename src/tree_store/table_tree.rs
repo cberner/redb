@@ -1,5 +1,6 @@
+use crate::tree_store::btree::btree_stats;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
-use crate::tree_store::{Btree, BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
+use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
 use crate::types::{
     AsBytesWithLifetime, OwnedAsBytesLifetime, OwnedLifetime, RedbKey, RedbValue, WithLifetime,
 };
@@ -395,8 +396,12 @@ impl<'txn> TableTree<'txn> {
         let mut iter = self.tree.range::<RangeFull, &str>(..)?;
         while let Some(entry) = iter.next() {
             let definition = InternalTableDefinition::from_bytes(entry.value());
-            let subtree: Btree<[u8], [u8]> = Btree::new(definition.get_root(), self.mem);
-            let subtree_stats = subtree.stats();
+            let subtree_stats = btree_stats(
+                definition.table_root,
+                self.mem,
+                definition.fixed_key_size,
+                definition.fixed_value_size,
+            );
             max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
             total_stored_bytes += subtree_stats.stored_leaf_bytes;
             total_metadata_bytes += subtree_stats.metadata_bytes;
