@@ -227,8 +227,8 @@ impl Database {
                 Box::new(AllPageNumbersBtreeIter::new(root, None, None, &mem));
 
             // Iterate over all other tables
-            let mut iter: BtreeRangeIter<[u8], [u8]> =
-                BtreeRangeIter::new::<RangeFull, [u8]>(.., Some(root), &mem);
+            let mut iter: BtreeRangeIter<str, InternalTableDefinition> =
+                BtreeRangeIter::new::<RangeFull, str>(.., Some(root), &mem);
 
             // Chain all the other tables to the master table iter
             while let Some(entry) = iter.next() {

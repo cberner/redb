@@ -14,7 +14,6 @@ use std::cell::RefCell;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::mem::size_of;
-use std::ops::RangeFull;
 use std::panic;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -465,20 +464,8 @@ impl<'db> WriteTransaction<'db> {
     pub(crate) fn print_debug(&self) {
         if let Some(page) = self.table_tree.borrow().get_root() {
             eprintln!("Master tree:");
-
             let master_tree: Btree<str, InternalTableDefinition> = Btree::new(Some(page), self.mem);
             master_tree.print_debug(true);
-            let mut iter = master_tree.range::<RangeFull, &str>(..).unwrap();
-
-            while let Some(entry) = iter.next() {
-                eprintln!("{} tree:", String::from_utf8_lossy(entry.key()));
-                let definition = InternalTableDefinition::from_bytes(entry.value());
-                if let Some(table_root) = definition.get_root() {
-                    // Print as &[u8], since we don't know the types at compile time
-                    let tree: Btree<[u8], [u8]> = Btree::new(Some(table_root), self.mem);
-                    tree.print_debug(false);
-                }
-            }
         }
     }
 }
