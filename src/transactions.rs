@@ -83,9 +83,9 @@ pub enum Durability {
     /// this function may result in Error::OutOfSpace.
     None,
     /// Commits with this durability level have been queued for persitance to disk, and should be
-    /// persistant some time after [WriteTransaction::commit] returns.
+    /// persistent some time after [WriteTransaction::commit] returns.
     Eventual,
-    /// Commits with this durability level are guaranteed to be persistant as soon as
+    /// Commits with this durability level are guaranteed to be persistent as soon as
     /// [WriteTransaction::commit] returns.
     Immediate,
 }
@@ -315,7 +315,7 @@ impl<'db> WriteTransaction<'db> {
     pub fn abort(self) -> Result {
         #[cfg(feature = "logging")]
         info!("Aborting transaction id={}", self.transaction_id);
-        self.mem.rollback_uncommited_writes()?;
+        self.mem.rollback_uncommitted_writes()?;
         self.db.deallocate_write_transaction(self.transaction_id);
         self.completed.store(true, Ordering::Release);
         #[cfg(feature = "logging")]

@@ -732,7 +732,7 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn rollback_uncommited_writes(&self) -> Result {
+    pub(crate) fn rollback_uncommitted_writes(&self) -> Result {
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
         let mut metadata = self.lock_metadata();
