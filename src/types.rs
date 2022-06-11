@@ -113,7 +113,6 @@ impl RedbValue for str {
     type View = RefLifetime<str>;
     type ToBytes = RefAsBytesLifetime<str>;
 
-    // TODO: add fuzzer for fixed size types
     fn fixed_width() -> Option<usize> {
         None
     }
