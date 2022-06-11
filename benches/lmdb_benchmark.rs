@@ -1,3 +1,4 @@
+use std::env::current_dir;
 use tempfile::{NamedTempFile, TempDir};
 
 mod common;
@@ -354,14 +355,14 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
 
 fn main() {
     let redb_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
         let db = unsafe { redb::Database::create(tmpfile.path(), 4096 * 1024 * 1024).unwrap() };
         // let table = RedbBenchDatabase::new(&db);
         benchmark_redb(db)
     };
 
     let lmdb_results = {
-        let tmpfile: TempDir = tempfile::tempdir().unwrap();
+        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
         let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
         env.set_map_size(4096 * 1024 * 1024).unwrap();
         let table = LmdbRkvBenchDatabase::new(&env);
@@ -369,7 +370,7 @@ fn main() {
     };
 
     let sled_results = {
-        let tmpfile: TempDir = tempfile::tempdir().unwrap();
+        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
         let db = sled::Config::new().path(tmpfile.path()).open().unwrap();
         let table = SledBenchDatabase::new(&db, tmpfile.path());
         benchmark(table)
