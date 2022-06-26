@@ -157,7 +157,7 @@ impl PageAllocator {
         U64GroupedBitMapMut::new(&mut data[start..end])
     }
 
-    fn get_num_pages(&self) -> u64 {
+    pub(crate) fn get_num_pages(&self) -> u64 {
         self.num_pages as u64
     }
 
@@ -190,8 +190,8 @@ impl PageAllocator {
         }
     }
 
-    pub(crate) fn is_allocated(&self, data: &mut [u8], page_number: u64) -> bool {
-        self.get_level_mut(data, self.get_height() - 1)
+    pub(crate) fn is_allocated(&self, data: &[u8], page_number: u64) -> bool {
+        self.get_level(data, self.get_height() - 1)
             .get(page_number as usize)
     }
 
