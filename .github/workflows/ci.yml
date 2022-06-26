@@ -50,6 +50,9 @@ jobs:
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: cargo install --force --version 0.9.1 cargo-deny --locked
 
+      - name: Compile
+        run: cargo build --all-targets --all-features
+
       - name: Run tests
         run: make build test
 

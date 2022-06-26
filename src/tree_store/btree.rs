@@ -82,7 +82,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
             "Btree(root={:?}): Inserting {:?} with {} reserved bytes for the value",
             &self.root,
             key,
-            value.as_bytes().as_ref().len()
+            value_length
         );
         let mut freed_pages = self.freed_pages.borrow_mut();
         let value = vec![0u8; value_length];
