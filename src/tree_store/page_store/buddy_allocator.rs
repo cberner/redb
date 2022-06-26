@@ -84,33 +84,97 @@ impl BuddyAllocator {
     }
 
     pub(crate) fn resize(&mut self, data: &mut [u8], new_size: usize) {
+        self.debug_check_consistency(data);
         assert!(new_size <= self.capacity);
-        let mut processed_pages = self.num_pages;
-        // Align to the highest order possible
-        while processed_pages < new_size {
-            let order = processed_pages.trailing_zeros() as usize;
-            let order_size = 2usize.pow(order as u32);
-            let page = processed_pages / order_size;
-            debug_assert_eq!(processed_pages % order_size, 0);
-            if order >= self.orders.len() || processed_pages + order_size > new_size {
-                break;
-            }
-            let order_data = Self::get_order_bytes_mut(data, order);
-            self.orders[order].free(order_data, page as u64);
-            processed_pages += order_size;
-        }
-        // Allocate the remaining space, at the highest order
-        for (order, allocator) in self.orders.iter().enumerate().rev() {
-            let order_data = Self::get_order_bytes_mut(data, order);
-            let order_size = 2usize.pow(order as u32);
-            while processed_pages + order_size <= new_size {
+        if new_size > self.num_pages {
+            let mut processed_pages = self.num_pages;
+            // Align to the highest order possible
+            while processed_pages < new_size {
+                let order = processed_pages.trailing_zeros() as usize;
+                let order_size = 2usize.pow(order as u32);
                 let page = processed_pages / order_size;
-                allocator.free(order_data, page as u64);
+                debug_assert_eq!(processed_pages % order_size, 0);
+                if order >= self.orders.len() || processed_pages + order_size > new_size {
+                    break;
+                }
+                self.free(data, page as u64, order);
                 processed_pages += order_size;
             }
+            // Allocate the remaining space, at the highest order
+            for order in (0..self.orders.len()).rev() {
+                let order_size = 2usize.pow(order as u32);
+                while processed_pages + order_size <= new_size {
+                    let page = processed_pages / order_size;
+                    self.free(data, page as u64, order);
+                    processed_pages += order_size;
+                }
+            }
+            assert_eq!(processed_pages, new_size);
+            self.debug_check_consistency(data);
+        } else {
+            let mut processed_pages = new_size;
+            // Align to the highest order possible
+            while processed_pages < self.num_pages {
+                let order = processed_pages.trailing_zeros() as usize;
+                let order_size = 2usize.pow(order as u32);
+                let page = processed_pages / order_size;
+                debug_assert_eq!(processed_pages % order_size, 0);
+                if order >= self.orders.len() || processed_pages + order_size > self.num_pages {
+                    break;
+                }
+                self.record_alloc(data, page as u64, order);
+                processed_pages += order_size;
+            }
+            // Allocate the remaining space, at the highest order
+            for order in (0..self.orders.len()).rev() {
+                let order_size = 2usize.pow(order as u32);
+                while processed_pages + order_size <= self.num_pages {
+                    let page = processed_pages / order_size;
+                    self.record_alloc(data, page as u64, order);
+                    processed_pages += order_size;
+                }
+            }
+            assert_eq!(processed_pages, self.num_pages);
         }
-        assert_eq!(processed_pages, new_size);
         self.num_pages = new_size;
+    }
+
+    #[allow(unused_variables)]
+    fn debug_check_consistency(&self, data: &[u8]) {
+        // Don't enable when fuzzing, because this is kind of expensive
+        #[cfg(all(debug_assertions, not(fuzzing)))]
+        {
+            let mut processed = 0;
+            // Ensure that no page is free at multiple orders
+            while processed < self.num_pages {
+                let mut found = false;
+                let mut page = processed as u64;
+                for (order, allocator) in self.orders.iter().enumerate() {
+                    if !allocator.is_allocated(Self::get_order_bytes(data, order), page) {
+                        assert!(!found);
+                        found = true;
+                    }
+                    page = Self::next_higher_order(page);
+                }
+                processed += 1;
+            }
+
+            // Ensure that all buddy pages are merged, except at the highest order
+            for (order, allocator) in self.orders.iter().enumerate().rev().skip(1) {
+                for page in 0..allocator.get_num_pages() {
+                    let order_bytes = Self::get_order_bytes(data, order);
+                    if !allocator.is_allocated(order_bytes, page) {
+                        let buddy = Self::buddy_page(page);
+                        let buddy_allocated = allocator.is_allocated(order_bytes, buddy);
+                        assert!(
+                            buddy_allocated,
+                            "order={} page={} buddy={}",
+                            order, page, buddy
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Returns the number of bytes required for the data argument of new()
@@ -132,6 +196,36 @@ impl BuddyAllocator {
         }
 
         pages
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.num_pages
+    }
+
+    fn find_free_order(&self, data: &[u8], mut page: u64) -> Option<usize> {
+        for (order, allocator) in self.orders.iter().enumerate() {
+            if !allocator.is_allocated(Self::get_order_bytes(data, order), page) {
+                return Some(order);
+            }
+            page = Self::next_higher_order(page);
+        }
+
+        None
+    }
+
+    pub(crate) fn trailing_free_pages(&self, data: &[u8]) -> usize {
+        let mut free_pages = 0;
+        let mut next_page = self.num_pages - 1;
+        while let Some(order) = self.find_free_order(data, next_page as u64) {
+            let order_size = 2usize.pow(order as u32);
+            free_pages += order_size;
+            if order_size > next_page {
+                break;
+            }
+            next_page -= order_size;
+        }
+
+        free_pages
     }
 
     fn get_order_offset_and_length(data: &[u8], order: usize) -> (usize, usize) {

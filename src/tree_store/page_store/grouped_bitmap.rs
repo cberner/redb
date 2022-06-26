@@ -12,8 +12,18 @@ impl<'a> U64GroupedBitMap<'a> {
         Self { data }
     }
 
+    fn data_index_of(&self, bit: usize) -> (usize, usize) {
+        ((bit / 64) as usize * size_of::<u64>(), (bit % 64) as usize)
+    }
+
     pub(crate) fn count_unset(&self) -> usize {
         self.data.iter().map(|x| x.count_zeros() as usize).sum()
+    }
+
+    pub(crate) fn get(&self, bit: usize) -> bool {
+        let (index, bit_index) = self.data_index_of(bit);
+        let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
+        group & U64GroupedBitMapMut::select_mask(bit_index) != 0
     }
 }
 

@@ -429,6 +429,7 @@ pub(crate) struct TransactionalMemory {
     region_size: usize,
     region_header_with_padding_size: usize,
     db_header_size: usize,
+    dynamic_growth: bool,
 }
 
 impl TransactionalMemory {
@@ -584,6 +585,7 @@ impl TransactionalMemory {
             region_size,
             region_header_with_padding_size: region_header_size,
             db_header_size: layout.header_bytes(),
+            dynamic_growth,
         })
     }
 
@@ -677,7 +679,13 @@ impl TransactionalMemory {
         assert!(self.regional_allocators.lock().unwrap().is_some());
 
         let mut metadata = self.lock_metadata();
-        let layout = self.layout.lock().unwrap();
+        let mut layout = self.layout.lock().unwrap();
+
+        // Trim surplus file space, before finalizing the commit
+        if self.dynamic_growth {
+            self.try_shrink(&mut metadata, &mut layout)?;
+        }
+
         let mut secondary = metadata.secondary_slot_mut();
         secondary.set_last_committed_transaction_id(transaction_id);
         secondary.set_root_page(data_root);
@@ -952,6 +960,66 @@ impl TransactionalMemory {
         ))
     }
 
+    // Safety: caller must guarantee that no references to free pages at the end of the last region exist
+    fn try_shrink(
+        &self,
+        metadata: &mut MetadataAccessor,
+        layout: &mut DatabaseLayout,
+    ) -> Result<()> {
+        let mut allocators = self.regional_allocators.lock().unwrap();
+        let last_region_index = layout.num_regions() - 1;
+        let last_allocator = allocators.as_ref().unwrap()[last_region_index].clone();
+        let last_region = layout.region_layout(last_region_index);
+        let allocator_data = metadata.get_regional_allocator(last_region_index, layout);
+        let trailing_free = last_allocator.trailing_free_pages(allocator_data);
+        // TODO: is this the right shrinkage heuristic?
+        if trailing_free < last_allocator.len() / 2 {
+            return Ok(());
+        }
+        let reduce_to_pages = if layout.num_regions() > 1 && trailing_free == last_allocator.len() {
+            0
+        } else {
+            max(MIN_USABLE_PAGES, last_allocator.len() - trailing_free)
+        };
+
+        let (mut region_allocator, mut regions) = metadata.allocators_mut(layout)?;
+        let new_usable_bytes = if reduce_to_pages == 0 {
+            region_allocator.set(last_region_index);
+            allocators
+                .as_mut()
+                .unwrap()
+                .pop()
+                .expect("allocators should not be empty");
+            // drop the whole region
+            layout.usable_bytes() - last_region.usable_bytes()
+        } else {
+            let mem = regions.get_regional_allocator_mut(last_region_index);
+            allocators.as_mut().unwrap()[last_region_index].resize(mem, reduce_to_pages);
+            layout.usable_bytes()
+                - (last_allocator.len() - reduce_to_pages) * metadata.get_page_size()
+        };
+
+        let new_layout = DatabaseLayout::calculate(
+            metadata.get_max_capacity(),
+            new_usable_bytes,
+            metadata.get_region_max_usable_bytes(),
+            self.page_size,
+        )?;
+        assert!(new_layout.len() <= layout.len());
+        assert_eq!(new_layout.header_bytes(), layout.header_bytes());
+        assert_eq!(new_layout.header_bytes(), self.db_header_size);
+
+        *layout = new_layout;
+
+        // Safety: we only removed unallocated free pages at the end of the database file
+        // references to unallocated pages are not allowed to exist
+        unsafe {
+            self.mmap.resize(layout.len())?;
+        }
+
+        Ok(())
+    }
+
     fn grow(
         &self,
         metadata: &mut MetadataAccessor,
@@ -975,6 +1043,7 @@ impl TransactionalMemory {
                 layout.usable_bytes() + max_region_size
             }
         } else {
+            // TODO: maybe we should grow by less than 2x each time, or make it configurable?
             max(
                 layout.usable_bytes() * 2,
                 layout.usable_bytes() + required_growth * 2,
