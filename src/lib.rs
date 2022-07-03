@@ -1,3 +1,5 @@
+#![allow(clippy::drop_non_drop)]
+
 pub use db::{Database, DatabaseBuilder, MultimapTableDefinition, TableDefinition};
 pub use error::Error;
 pub use multimap_table::{
