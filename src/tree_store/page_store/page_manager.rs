@@ -885,11 +885,10 @@ impl TransactionalMemory {
     // Frees the page if it was allocated since the last commit. Returns true, if the page was freed
     // Safety: the caller must ensure that no references to the memory in `page` exist
     pub(crate) unsafe fn free_if_uncommitted(&self, page: PageNumber) -> Result<bool> {
-        // Zero fill the page to ensure that deleted data is not stored in the file
-        let mut mut_page = self.get_page_mut(page);
-        mut_page.memory_mut().fill(0);
-
         if self.allocated_since_commit.lock().unwrap().remove(&page) {
+            // Zero fill the page to ensure that deleted data is not stored in the file
+            let mut mut_page = self.get_page_mut(page);
+            mut_page.memory_mut().fill(0);
             let mut metadata = self.lock_metadata();
             let layout = self.layout.lock().unwrap();
             let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
