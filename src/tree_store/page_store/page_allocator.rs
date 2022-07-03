@@ -14,7 +14,6 @@ pub(crate) struct PageAllocator {
 // borrowing the data array
 //
 // Data structure format:
-// num_pages: u64
 // root: u64
 // subtree layer: 2-64 u64s
 // ...consecutive layers. Except for the last level, all sub-trees of the root must be complete
@@ -23,8 +22,6 @@ impl PageAllocator {
         let mut tree_level_offsets = vec![];
 
         let mut offset = 0;
-        // Skip the num_pages header
-        offset += size_of::<u64>();
         // root level
         tree_level_offsets.push((offset, offset + size_of::<u64>()));
         offset += size_of::<u64>();
@@ -67,8 +64,6 @@ impl PageAllocator {
             *value = 0xFF;
         }
 
-        data[..8].copy_from_slice(&(num_pages as u64).to_le_bytes());
-
         let result = Self::new(num_pages);
 
         // Mark all the subtrees that don't exist
@@ -100,16 +95,16 @@ impl PageAllocator {
     pub(crate) fn required_space(num_pages: usize) -> usize {
         if Self::required_tree_height(num_pages) == 1 {
             assert!(num_pages <= 64);
-            // Space for num_pages header, and root
-            2 * size_of::<u64>()
+            // Space for root
+            size_of::<u64>()
         } else if Self::required_tree_height(num_pages) == 2 {
-            // Space for num_pages header, and root
-            2 * size_of::<u64>() +
+            // Space for root
+            size_of::<u64>() +
                 // Space for the leaves
                 (num_pages + 63) / 64 * size_of::<u64>()
         } else {
-            // Space for num_pages header, and root
-            2 * size_of::<u64>() +
+            // Space for root
+            size_of::<u64>() +
                 // Space for the subtrees
                 Self::required_subtrees(num_pages) * Self::required_interior_bytes_per_subtree(num_pages) +
                 // Space for the leaves
