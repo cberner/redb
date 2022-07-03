@@ -22,6 +22,7 @@ fuzz_target!(|config: FuzzConfig| {
     let mut reference = BTreeMap::new();
 
     for transaction in config.transactions.iter() {
+        let reference_backup = reference.clone();
         let mut txn = db.begin_write().unwrap();
         // We're not trying to test crash safety, so don't bother with durability
         if !transaction.durable {
@@ -98,9 +99,14 @@ fuzz_target!(|config: FuzzConfig| {
                 }
             }
         }
-        if let Err(err) = txn.commit() {
-            assert!(matches!(err, Error::OutOfSpace) && config.oom_plausible());
-            return;
+        if transaction.commit {
+            if let Err(err) = txn.commit() {
+                assert!(matches!(err, Error::OutOfSpace) && config.oom_plausible());
+                return;
+            }
+        } else {
+            txn.abort().unwrap();
+            reference = reference_backup;
         }
     }
 });
