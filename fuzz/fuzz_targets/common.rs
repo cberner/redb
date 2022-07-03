@@ -96,6 +96,7 @@ pub(crate) enum FuzzOperation {
 pub(crate) struct FuzzTransaction {
     pub ops: Vec<FuzzOperation>,
     pub durable: bool,
+    pub commit: bool,
 }
 
 #[derive(Arbitrary, Debug)]
