@@ -436,6 +436,7 @@ impl TransactionalMemory {
         file: File,
         max_capacity: usize,
         requested_page_size: Option<usize>,
+        requested_region_size: Option<usize>,
         dynamic_growth: bool,
     ) -> Result<Self> {
         let page_size = requested_page_size.unwrap_or_else(get_page_size);
@@ -456,8 +457,9 @@ impl TransactionalMemory {
         let mut metadata = unsafe { MetadataAccessor::new(&mmap, mutex.lock().unwrap()) };
 
         if metadata.get_magic_number() != MAGICNUMBER {
-            let max_usable_region_bytes =
-                min(MAX_USABLE_REGION_SPACE, max_capacity.next_power_of_two());
+            let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
+            assert!(region_size.is_power_of_two());
+            let max_usable_region_bytes = min(region_size, max_capacity.next_power_of_two());
 
             let starting_size = if dynamic_growth {
                 MIN_DESIRED_USABLE_BYTES
@@ -1192,7 +1194,7 @@ mod test {
         buffer[0] |= ALLOCATOR_STATE_DIRTY;
         file.write_all(&buffer).unwrap();
 
-        assert!(TransactionalMemory::new(file, max_size, None, true)
+        assert!(TransactionalMemory::new(file, max_size, None, None, true)
             .unwrap()
             .needs_repair()
             .unwrap());

@@ -182,7 +182,7 @@ impl Database {
                 .open(path)?
         };
 
-        Database::new(file, db_size, None, true)
+        Database::new(file, db_size, None, None, true)
     }
 
     /// Opens an existing redb database.
@@ -194,7 +194,7 @@ impl Database {
         if File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = get_db_size(path.as_ref())?;
             let file = OpenOptions::new().read(true).write(true).open(path)?;
-            Database::new(file, existing_size, None, true)
+            Database::new(file, existing_size, None, None, true)
         } else {
             Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
         }
@@ -208,6 +208,7 @@ impl Database {
         file: File,
         max_capacity: usize,
         page_size: Option<usize>,
+        region_size: Option<usize>,
         dynamic_growth: bool,
     ) -> Result<Self> {
         #[cfg(feature = "logging")]
@@ -215,7 +216,8 @@ impl Database {
             "Opening database {:?} with max size {}",
             &file, max_capacity
         );
-        let mem = TransactionalMemory::new(file, max_capacity, page_size, dynamic_growth)?;
+        let mem =
+            TransactionalMemory::new(file, max_capacity, page_size, region_size, dynamic_growth)?;
         if mem.needs_repair()? {
             let root = mem
                 .get_data_root()
@@ -338,6 +340,7 @@ impl Database {
 
 pub struct DatabaseBuilder {
     page_size: Option<usize>,
+    region_size: Option<usize>,
     dynamic_growth: bool,
 }
 
@@ -346,6 +349,7 @@ impl DatabaseBuilder {
     pub fn new() -> Self {
         Self {
             page_size: None,
+            region_size: None,
             dynamic_growth: true,
         }
     }
@@ -356,6 +360,16 @@ impl DatabaseBuilder {
     pub fn set_page_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
         self.page_size = Some(size);
+        self
+    }
+
+    /// Set the internal region size of the database
+    /// Smaller regions may allow the database to compact more effectively, but will limit the maximum
+    /// size of values that can be stored
+    /// Defaults to 4GiB
+    pub fn set_region_size(&mut self, size: usize) -> &mut Self {
+        assert!(size.is_power_of_two());
+        self.region_size = Some(size);
         self
     }
 
@@ -384,6 +398,12 @@ impl DatabaseBuilder {
             .create(true)
             .open(path)?;
 
-        Database::new(file, db_size, self.page_size, self.dynamic_growth)
+        Database::new(
+            file,
+            db_size,
+            self.page_size,
+            self.region_size,
+            self.dynamic_growth,
+        )
     }
 }
