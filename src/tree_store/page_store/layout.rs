@@ -18,7 +18,7 @@ fn round_up_to_multiple_of(value: usize, multiple: usize) -> usize {
 
 // Regions are laid out starting with the allocator state header, followed by the pages aligned
 // to the next page
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct RegionLayout {
     num_pages: usize,
     // Offset where pages start
@@ -96,9 +96,8 @@ impl RegionLayout {
     }
 
     fn full_region_layout(max_usable_region_bytes: usize, page_size: usize) -> RegionLayout {
-        let max_order = Self::calculate_usable_order(max_usable_region_bytes, page_size).unwrap();
         let max_region_size = max_usable_region_bytes
-            + BuddyAllocator::required_space(max_usable_region_bytes / page_size, max_order);
+            + Self::header_with_padding(max_usable_region_bytes, page_size).unwrap();
 
         Self::calculate(
             max_region_size,
@@ -413,5 +412,18 @@ impl DatabaseLayout {
             num_full_regions,
             trailing_partial_region,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::tree_store::page_store::layout::RegionLayout;
+
+    #[test]
+    fn full_layout() {
+        let layout = RegionLayout::full_region_layout(512 * 4096, 4096);
+        assert_eq!(layout.num_pages, 512);
+        assert_eq!(layout.page_size, 4096);
+        assert_eq!(layout.max_order, 9);
     }
 }
