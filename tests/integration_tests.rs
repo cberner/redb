@@ -677,6 +677,43 @@ fn regression10() {
 }
 
 #[test]
+fn regression11() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 10 * 1024 * 1024;
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+
+    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+
+    let tx = db.begin_write().unwrap();
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let v = vec![0u8; 1204];
+        t.insert(&118749, &v).unwrap();
+        let v = vec![0u8; 2062];
+        t.insert(&153697, &v).unwrap();
+        let v = vec![0u8; 2980];
+        t.insert(&110557, &v).unwrap();
+        let v = vec![0u8; 1999];
+        t.insert(&677853, &v).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let v = vec![0u8; 691];
+        t.insert(&103591, &v).unwrap();
+        let v = vec![0u8; 952];
+        t.insert(&118757, &v).unwrap();
+    }
+    tx.abort().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    tx.commit().unwrap();
+}
+
+#[test]
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };

@@ -112,6 +112,9 @@ impl FuzzConfig {
         let mut consecutive_nondurable_commits = 0;
         let mut max_consecutive_nondurable_commits = 0;
         for transaction in self.transactions.iter() {
+            if !transaction.commit {
+                continue;
+            }
             for write in transaction.ops.iter() {
                 total_entries += 1;
                 total_value_bytes += match write {

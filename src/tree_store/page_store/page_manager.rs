@@ -552,22 +552,7 @@ impl TransactionalMemory {
         let regional_allocators = if metadata.get_allocator_dirty() {
             None
         } else {
-            let full_regional_allocator = BuddyAllocator::new(
-                layout.full_region_layout().num_pages(),
-                layout.full_region_layout().num_pages(),
-                layout.full_region_layout().max_order(),
-            );
-            let mut allocators = vec![full_regional_allocator; layout.num_full_regions()];
-            if let Some(region_layout) = layout.trailing_region_layout() {
-                let trailing = BuddyAllocator::new(
-                    region_layout.num_pages(),
-                    layout.full_region_layout().num_pages(),
-                    region_layout.max_order(),
-                );
-                allocators.push(trailing);
-            }
-
-            Some(allocators)
+            Some(layout.create_allocators())
         };
         drop(metadata);
 
@@ -635,25 +620,10 @@ impl TransactionalMemory {
 
         metadata.set_allocator_dirty(false);
         self.mmap.flush()?;
-
-        let full_regional_allocator = BuddyAllocator::new(
-            layout.full_region_layout().num_pages(),
-            layout.full_region_layout().num_pages(),
-            layout.full_region_layout().max_order(),
-        );
-        let mut allocators = vec![full_regional_allocator; layout.num_full_regions()];
-        if let Some(region_layout) = layout.trailing_region_layout() {
-            let trailing = BuddyAllocator::new(
-                region_layout.num_pages(),
-                layout.full_region_layout().num_pages(),
-                region_layout.max_order(),
-            );
-            allocators.push(trailing);
-        }
         drop(metadata);
 
         let mut guard = self.regional_allocators.lock().unwrap();
-        *guard = Some(allocators);
+        *guard = Some(layout.create_allocators());
 
         Ok(())
     }
@@ -682,9 +652,10 @@ impl TransactionalMemory {
         let mut layout = self.layout.lock().unwrap();
 
         // Trim surplus file space, before finalizing the commit
+        let mut shrunk = false;
         if self.dynamic_growth {
-            self.try_shrink(&mut metadata, &mut layout)?;
-        }
+            shrunk = self.try_shrink(&mut metadata, &mut layout)?;
+        };
 
         let mut secondary = metadata.secondary_slot_mut();
         secondary.set_last_committed_transaction_id(transaction_id);
@@ -705,6 +676,15 @@ impl TransactionalMemory {
             self.mmap.flush()?;
         }
         drop(metadata);
+
+        // Safety: try_shrink() only removes unallocated free pages at the end of the database file
+        // references to unallocated pages are not allowed to exist, and we've now promoted the
+        // shrunked layout to the primary
+        if shrunk {
+            unsafe {
+                self.mmap.resize(layout.len())?;
+            }
+        }
 
         self.log_since_commit.lock().unwrap().clear();
         self.allocated_since_commit.lock().unwrap().clear();
@@ -746,7 +726,14 @@ impl TransactionalMemory {
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
         let mut metadata = self.lock_metadata();
-        let regional_guard = self.regional_allocators.lock().unwrap();
+        // The layout to restore
+        let restore = if self.read_from_secondary.load(Ordering::Acquire) {
+            metadata.secondary_slot().get_data_section_layout()
+        } else {
+            metadata.primary_slot().get_data_section_layout()
+        };
+
+        let mut regional_guard = self.regional_allocators.lock().unwrap();
         let mut layout = self.layout.lock().unwrap();
         let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
         for op in self.log_since_commit.lock().unwrap().drain(..).rev() {
@@ -773,11 +760,29 @@ impl TransactionalMemory {
             }
         }
         self.allocated_since_commit.lock().unwrap().clear();
+
+        // Shrinking only happens during commit
+        assert!(restore.len() <= layout.len());
         // Reset the layout, in case it changed during the writes
-        if self.read_from_secondary.load(Ordering::Acquire) {
-            *layout = metadata.secondary_slot().get_data_section_layout();
-        } else {
-            *layout = metadata.primary_slot().get_data_section_layout();
+        if restore.len() < layout.len() {
+            // Drop all the allocators for regions that are being deleted
+            regional_guard
+                .as_mut()
+                .unwrap()
+                .drain(restore.num_regions()..);
+            // Restore the size of the last region's allocator
+            let last_region_index = restore.num_regions() - 1;
+            let last_region = restore.region_layout(last_region_index);
+            let allocator_data = regions.get_regional_allocator_mut(last_region_index);
+            let last_allocator = &mut regional_guard.as_mut().unwrap()[last_region_index];
+            last_allocator.resize(allocator_data, last_region.num_pages());
+
+            *layout = restore;
+            // Safety: we've rollbacked the transaction, so any data in that was written into
+            // space that was grown during this transaction no longer exists
+            unsafe {
+                self.mmap.resize(layout.len())?;
+            }
         }
 
         Ok(())
@@ -964,7 +969,7 @@ impl TransactionalMemory {
         &self,
         metadata: &mut MetadataAccessor,
         layout: &mut DatabaseLayout,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut allocators = self.regional_allocators.lock().unwrap();
         let last_region_index = layout.num_regions() - 1;
         let last_allocator = allocators.as_ref().unwrap()[last_region_index].clone();
@@ -973,7 +978,7 @@ impl TransactionalMemory {
         let trailing_free = last_allocator.trailing_free_pages(allocator_data);
         // TODO: is this the right shrinkage heuristic?
         if trailing_free < last_allocator.len() / 2 {
-            return Ok(());
+            return Ok(false);
         }
         let reduce_to_pages = if layout.num_regions() > 1 && trailing_free == last_allocator.len() {
             0
@@ -1010,13 +1015,7 @@ impl TransactionalMemory {
 
         *layout = new_layout;
 
-        // Safety: we only removed unallocated free pages at the end of the database file
-        // references to unallocated pages are not allowed to exist
-        unsafe {
-            self.mmap.resize(layout.len())?;
-        }
-
-        Ok(())
+        Ok(true)
     }
 
     fn grow(
