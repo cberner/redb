@@ -225,7 +225,7 @@ impl DatabaseLayout {
         if db_capacity < min_header_size + MIN_USABLE_PAGES * page_size {
             return Err(Error::OutOfSpace);
         }
-        let result = if db_capacity - min_header_size <= full_region_layout.len() {
+        let result = if desired_usable_bytes <= full_region_layout.usable_bytes() {
             // Single region layout
             let region_layout = RegionLayout::calculate(
                 db_capacity - min_header_size,
@@ -256,6 +256,7 @@ impl DatabaseLayout {
                 db_capacity - db_header_bytes - num_full_regions * full_region_layout.len();
             let remaining_desired =
                 desired_usable_bytes - num_full_regions * max_usable_region_bytes;
+            assert!(num_full_regions > 0);
             DatabaseLayout {
                 db_header_bytes,
                 region_allocator_range,
