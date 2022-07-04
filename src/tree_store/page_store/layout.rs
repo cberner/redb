@@ -275,6 +275,25 @@ impl DatabaseLayout {
         Ok(result)
     }
 
+    pub(super) fn create_allocators(&self) -> Vec<BuddyAllocator> {
+        let full_regional_allocator = BuddyAllocator::new(
+            self.full_region_layout().num_pages(),
+            self.full_region_layout().num_pages(),
+            self.full_region_layout().max_order(),
+        );
+        let mut allocators = vec![full_regional_allocator; self.num_full_regions()];
+        if let Some(region_layout) = self.trailing_region_layout() {
+            let trailing = BuddyAllocator::new(
+                region_layout.num_pages(),
+                self.full_region_layout().num_pages(),
+                region_layout.max_order(),
+            );
+            allocators.push(trailing);
+        }
+
+        allocators
+    }
+
     pub(super) fn full_region_layout(&self) -> &RegionLayout {
         &self.full_region_layout
     }
