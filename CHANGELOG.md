@@ -1,5 +1,11 @@
 # redb - Changelog
 
+## 0.3.0 - 2022-07-19
+* Fix a serious data corruption issue that caused many write operations to corrupt the database
+* Make redb region size configurable
+* Implement garbage collection of empty regions
+* Fixes and optimizations to make the file format more efficient
+
 ## 0.2.0 - 2022-06-10
 * Add information log messages which can be enabled with the `logging` feature
 * Add support for `[u8; N]` type
