@@ -25,7 +25,7 @@ jobs:
         with:
             path: |
                 ~/.cargo/bin/
-            key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-cargo-deny-0-9-1
+            key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-cargo-deny-0-11-4
 
       - name: Check for forbidden words
         run: "! grep --include='*.rs' -RE 'to_be_bytes|from_be_bytes|dbg!' ."
@@ -48,7 +48,7 @@ jobs:
 
       - name: Install cargo-deny
         if: steps.rust-cache.outputs.cache-hit != 'true'
-        run: cargo install --force --version 0.9.1 cargo-deny --locked
+        run: cargo install --force --version 0.11.4 cargo-deny --locked
 
       - name: Compile
         run: cargo build --all-targets --all-features
