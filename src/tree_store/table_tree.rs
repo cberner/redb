@@ -7,6 +7,7 @@ use crate::types::{
 use crate::{DatabaseStats, Error, Result};
 use std::cell::RefCell;
 use std::cmp::max;
+use std::collections::HashMap;
 use std::mem::size_of;
 use std::ops::RangeFull;
 use std::rc::Rc;
@@ -247,6 +248,8 @@ impl<'a> Iterator for TableNameIter<'a> {
 pub(crate) struct TableTree<'txn> {
     tree: BtreeMut<'txn, str, InternalTableDefinition>,
     mem: &'txn TransactionalMemory,
+    // Cached updates from tables that have been closed. These must be flushed to the btree
+    pending_table_updates: HashMap<String, Option<PageNumber>>,
     freed_pages: Rc<RefCell<Vec<PageNumber>>>,
 }
 
@@ -259,32 +262,37 @@ impl<'txn> TableTree<'txn> {
         Self {
             tree: BtreeMut::new(master_root, mem, freed_pages.clone()),
             mem,
+            pending_table_updates: Default::default(),
             freed_pages,
         }
     }
 
-    pub(crate) fn get_root(&self) -> Option<PageNumber> {
-        self.tree.get_root()
+    // Queues an update to the table root
+    pub(crate) fn stage_update_table_root(&mut self, name: &str, table_root: Option<PageNumber>) {
+        self.pending_table_updates
+            .insert(name.to_string(), table_root);
     }
 
-    pub(crate) fn update_table_root(
-        &mut self,
-        name: &str,
-        table_root: Option<PageNumber>,
-    ) -> Result {
-        // Bypass .get_table() since the table types are dynamic
-        // TODO: optimize away this get()
-        let mut definition = self.tree.get(name).unwrap().unwrap();
-        // No-op if the root has not changed
-        if definition.table_root == table_root {
-            return Ok(());
+    pub(crate) fn clear_table_root_updates(&mut self) {
+        self.pending_table_updates.clear();
+    }
+
+    pub(crate) fn flush_table_root_updates(&mut self) -> Result<Option<PageNumber>> {
+        for (name, table_root) in self.pending_table_updates.drain() {
+            // Bypass .get_table() since the table types are dynamic
+            // TODO: optimize away this get()
+            let mut definition = self.tree.get(&name).unwrap().unwrap();
+            // No-op if the root has not changed
+            if definition.table_root == table_root {
+                continue;
+            }
+            definition.table_root = table_root;
+            // Safety: References into the master table are never returned to the user
+            unsafe {
+                self.tree.insert(&name, &definition)?;
+            }
         }
-        definition.table_root = table_root;
-        // Safety: References into the master table are never returned to the user
-        unsafe {
-            self.tree.insert(name, &definition)?;
-        }
-        Ok(())
+        Ok(self.tree.get_root())
     }
 
     // root_page: the root of the master table
@@ -303,7 +311,7 @@ impl<'txn> TableTree<'txn> {
         name: &str,
         table_type: TableType,
     ) -> Result<Option<InternalTableDefinition>> {
-        if let Some(definition) = self.tree.get(name)? {
+        if let Some(mut definition) = self.tree.get(name)? {
             if definition.get_type() != table_type {
                 return Err(Error::TableTypeMismatch(format!(
                     "{:?} is not of type {:?}",
@@ -321,6 +329,10 @@ impl<'txn> TableTree<'txn> {
                     K::redb_type_name(),
                     V::redb_type_name()
                 )));
+            }
+
+            if let Some(updated_root) = self.pending_table_updates.get(name) {
+                definition.table_root = *updated_root;
             }
 
             Ok(Some(definition))
@@ -348,6 +360,8 @@ impl<'txn> TableTree<'txn> {
                     freed_pages.push(page_number);
                 }
             }
+
+            self.pending_table_updates.remove(name);
 
             // Safety: References into the master table are never returned to the user
             let found = unsafe { self.tree.remove(name)?.is_some() };
@@ -395,7 +409,11 @@ impl<'txn> TableTree<'txn> {
 
         let mut iter = self.tree.range::<RangeFull, &str>(..)?;
         while let Some(entry) = iter.next() {
-            let definition = InternalTableDefinition::from_bytes(entry.value());
+            let mut definition = InternalTableDefinition::from_bytes(entry.value());
+            if let Some(updated_root) = self.pending_table_updates.get(str::from_bytes(entry.key()))
+            {
+                definition.table_root = *updated_root;
+            }
             let subtree_stats = btree_stats(
                 definition.table_root,
                 self.mem,
