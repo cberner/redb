@@ -1,5 +1,8 @@
 # redb - Changelog
 
+## 0.3.1 - 2022-07-20
+* Fix a bug where re-opening a `Table` during a `WriteTransaction` lead to stale results being read
+
 ## 0.3.0 - 2022-07-19
 * Fix a serious data corruption issue that caused many write operations to corrupt the database
 * Make redb region size configurable
