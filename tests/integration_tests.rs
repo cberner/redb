@@ -714,6 +714,29 @@ fn regression11() {
 }
 
 #[test]
+// Test that for stale read bug when re-opening a table during a write
+fn regression12() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024 * 1024;
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+
+    let table_def: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    let tx = db.begin_write().unwrap();
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        t.insert(&0, &0).unwrap();
+        assert_eq!(t.get(&0).unwrap().unwrap(), 0);
+        drop(t);
+
+        let t2 = tx.open_table(table_def).unwrap();
+        assert_eq!(t2.get(&0).unwrap().unwrap(), 0);
+    }
+    tx.commit().unwrap();
+}
+
+#[test]
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };

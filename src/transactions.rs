@@ -104,7 +104,6 @@ pub struct WriteTransaction<'db> {
     freed_tree: BtreeMut<'db, FreedTableKey, [u8]>,
     freed_pages: Rc<RefCell<Vec<PageNumber>>>,
     open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
-    pending_table_updates: RefCell<HashMap<String, Option<PageNumber>>>,
     completed: AtomicBool,
     durability: Durability,
 }
@@ -128,7 +127,6 @@ impl<'db> WriteTransaction<'db> {
             freed_tree: BtreeMut::new(freed_root, db.get_memory(), freed_pages.clone()),
             freed_pages,
             open_tables: RefCell::new(Default::default()),
-            pending_table_updates: RefCell::new(Default::default()),
             completed: Default::default(),
             durability: Durability::Immediate,
         })
@@ -212,9 +210,9 @@ impl<'db> WriteTransaction<'db> {
         table: &mut BtreeMut<K, V>,
     ) {
         self.open_tables.borrow_mut().remove(name).unwrap();
-        self.pending_table_updates
+        self.table_tree
             .borrow_mut()
-            .insert(name.to_string(), table.get_root());
+            .stage_update_table_root(name, table.get_root());
     }
 
     /// Delete the given table
@@ -268,11 +266,7 @@ impl<'db> WriteTransaction<'db> {
     /// All writes performed in this transaction will be visible to future transactions, and are
     /// durable as consistent with the [`Durability`] level set by [`Self::set_durability`]
     pub fn commit(mut self) -> Result {
-        for (name, root) in self.pending_table_updates.borrow_mut().drain() {
-            self.table_tree
-                .borrow_mut()
-                .update_table_root(&name, root)?;
-        }
+        self.table_tree.borrow_mut().flush_table_root_updates()?;
         match self.commit_inner() {
             Ok(_) => {
                 self.db.deallocate_write_transaction(self.transaction_id);
@@ -315,6 +309,7 @@ impl<'db> WriteTransaction<'db> {
     pub fn abort(self) -> Result {
         #[cfg(feature = "logging")]
         info!("Aborting transaction id={}", self.transaction_id);
+        self.table_tree.borrow_mut().clear_table_root_updates();
         self.mem.rollback_uncommitted_writes()?;
         self.db.deallocate_write_transaction(self.transaction_id);
         self.completed.store(true, Ordering::Release);
@@ -329,6 +324,8 @@ impl<'db> WriteTransaction<'db> {
             .oldest_live_read_transaction()
             .unwrap_or(self.transaction_id);
 
+        let root = self.table_tree.borrow_mut().flush_table_root_updates()?;
+
         self.process_freed_pages(oldest_live_read)?;
         if oldest_live_read < self.transaction_id {
             self.store_freed_pages()?;
@@ -342,7 +339,6 @@ impl<'db> WriteTransaction<'db> {
             }
         }
 
-        let root = self.table_tree.borrow().get_root();
         let freed_root = self.freed_tree.get_root();
 
         self.mem
@@ -352,11 +348,12 @@ impl<'db> WriteTransaction<'db> {
 
     // Commit without a durability guarantee
     pub(crate) fn non_durable_commit(&mut self) -> Result {
+        let root = self.table_tree.borrow_mut().flush_table_root_updates()?;
+
         // Store all freed pages for a future commit(), since we can't free pages during a
         // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
         self.store_freed_pages()?;
 
-        let root = self.table_tree.borrow().get_root();
         let freed_root = self.freed_tree.get_root();
 
         self.mem
@@ -462,7 +459,13 @@ impl<'db> WriteTransaction<'db> {
 
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self) {
-        if let Some(page) = self.table_tree.borrow().get_root() {
+        // Flush any pending updates to make sure we get the latest root
+        if let Some(page) = self
+            .table_tree
+            .borrow_mut()
+            .flush_table_root_updates()
+            .unwrap()
+        {
             eprintln!("Master tree:");
             let master_tree: Btree<str, InternalTableDefinition> = Btree::new(Some(page), self.mem);
             master_tree.print_debug(true);
