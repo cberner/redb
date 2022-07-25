@@ -6,7 +6,7 @@ use common::*;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use redb::TableDefinition;
+use redb::{TableDefinition, WriteStrategy};
 use std::time::{Duration, Instant};
 
 const ELEMENTS: usize = 1_000_000;
@@ -119,10 +119,26 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
 }
 
 fn main() {
-    let redb_results = {
+    let redb_latency_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        let db =
-            unsafe { redb::Database::create(tmpfile.path(), 10 * 4096 * 1024 * 1024).unwrap() };
+        let db = unsafe {
+            redb::Database::builder()
+                .set_write_strategy(WriteStrategy::CommitLatency)
+                .create(tmpfile.path(), 10 * 4096 * 1024 * 1024)
+                .unwrap()
+        };
+        // let table = RedbBenchDatabase::new(&db);
+        benchmark_redb(db)
+    };
+
+    let redb_throughput_results = {
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+        let db = unsafe {
+            redb::Database::builder()
+                .set_write_strategy(WriteStrategy::Throughput)
+                .create(tmpfile.path(), 10 * 4096 * 1024 * 1024)
+                .unwrap()
+        };
         // let table = RedbBenchDatabase::new(&db);
         benchmark_redb(db)
     };
@@ -144,11 +160,16 @@ fn main() {
 
     let mut rows = Vec::new();
 
-    for (benchmark, _duration) in &redb_results {
+    for (benchmark, _duration) in &redb_latency_results {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [redb_results, lmdb_results, sled_results] {
+    for results in [
+        redb_latency_results,
+        redb_throughput_results,
+        lmdb_results,
+        sled_results,
+    ] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
         }
@@ -156,7 +177,13 @@ fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_table_width(100);
-    table.set_header(&["", "redb", "lmdb", "sled"]);
+    table.set_header(&[
+        "",
+        "redb (latency opt.)",
+        "redb (throughput opt.)",
+        "lmdb",
+        "sled",
+    ]);
     for row in rows {
         table.add_row(row);
     }
