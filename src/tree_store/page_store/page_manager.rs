@@ -672,6 +672,22 @@ impl TransactionalMemory {
             assert!(metadata
                 .primary_slot()
                 .verify_checksum(metadata.get_checksum_type()));
+        } else {
+            // If the secondary is a valid commit, verify that the primary is newer. This handles an edge case where:
+            // * the primary bit is flipped to the secondary
+            // * a crash occurs during fsync, such that no other data is written out to the secondary. meaning that it contains a valid, but out of date transaction
+            let secondary_newer = metadata
+                .secondary_slot()
+                .get_last_committed_transaction_id()
+                > metadata.primary_slot().get_last_committed_transaction_id();
+            if secondary_newer
+                && metadata
+                    .secondary_slot()
+                    .verify_checksum(metadata.get_checksum_type())
+            {
+                metadata.swap_primary();
+                *self.layout.lock().unwrap() = metadata.primary_slot().get_data_section_layout();
+            }
         }
 
         let layout = self.layout.lock().unwrap();
