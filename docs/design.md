@@ -59,24 +59,37 @@ The dirty bit is set on the allocator state before it is written to, and cleared
 If the dirty bit is found set on the shadow page allocator state, when the database is opened, then it must be repaired
 by re-walking all the btree roots.
 
+## Commit strategies
+
 ### Non-durable commits
 redb supports "non-durable" commits, meaning that there is no guarantee of durability. However, in the event of a crash
 the database is still guaranteed to be consistent, and will return to either the last non-durable commit or the last
 full commit that was made.
-Non-durable commits are implemented by marking both the primary & secondary page allocator states as dirty, and keeping
-both in sync, an in-memory flag is set to direct readers to read from the secondary page, but it is not promoted to the
-primary. In the event of a crash, the primary page allocator state will be corrupt, but since it is marked dirty it will
-be safely rebuilt on the next database open.
+Non-durable commits are implemented with an in-memory flag that directs readers to read from the secondary page,
+even though it is not yet promoted to the primary.
+In the event of a crash, the database will simply rollback to the primary page and the allocator state can be safely
+rebuilt via the normal repair process.
 Note that freeing pages during a non-durable commit is not permitted, because it could be rolled back at anytime.
 
-### 2-phase (durable) commits
-redb uses a 2-phase commit strategy. First, data is written to a new copy of the btree, second an `fsync` is performed,
+### 2-phase durable commits (2PC)
+A 2-phase commit strategy is used when the database is configured for maximum write throughput (of bytes per transaction).
+First, data is written to a new copy of the btree, second an `fsync` is performed,
 finally the byte controlling which copy of the btree is the primary is flipped and a second `fsync` is performed.
 
-### 1-phase + checksum (durable) commits
-A reduced latency commit strategy is planned, in which all branch pages in a btree will contain checksums of their children,
-these checksums form a non-cryptographic Merkle tree allowing corruption of a btree to be detected. A commit can then be
-performed with a single `fsync`. All data and checksums will be written, along with a monotonically incrementing transaction
-id, then the primary will be flipped and `fsync` called. If a crash occurs, we must verify that the primary has a larger
+### 1-phase + checksum durable commits (1PC+C)
+A reduced latency commit strategy is used by default, in which all branch pages in the btree contain checksums of their children,
+these checksums form a non-cryptographic Merkle tree allowing corruption of a btree to be detected. A commit is then
+performed with a single `fsync`. First, all data and checksums are written, along with a monotonically incrementing transaction
+id, then the primary is flipped and `fsync` called. If a crash occurs, we must verify that the primary has a larger
 transaction id and that all of its checksums are valid. If this check fails, then the database will replace the partially
 updated primary with the secondary.
+
+Below we give a brief correctness analysis of this 1-phase commit approach, and consider the different failure cases that could
+occur during the fsync:
+
+1. If all or none of the data for the transaction is written to disk, this strategy clearly works
+2. If some, but not all the data is written, then there are a few cases to consider:
+   1. If the bit controlling the primary page is not updated, then the transaction has no effect and this approach is safe
+   2. If it is updated, then we must verify that the transaction was completely written, or roll it back:
+      1. If none of the transaction data was written, we will detect that the transaction id is older, and roll it back
+      2. If some, but not all was written, then the checksum verification will fail, and it will be rolled back.
