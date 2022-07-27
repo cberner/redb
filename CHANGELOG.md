@@ -1,6 +1,6 @@
 # redb - Changelog
 
-## 0.4.0 - 2022-07-XX
+## 0.4.0 - 2022-07-26
 * Add single phase with checksum commit strategy. This is now the default and reduces commit latency by ~2x. For more details,
   see the [design doc](docs/design.md#1-phase--checksum-durable-commits) and
   [blog post](https://www.redb.org/post/2022/07/26/faster-commits-with-1pcc-instead-of-2pc/). The previous behavior is available
