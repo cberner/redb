@@ -637,7 +637,7 @@ impl<'a: 'b, 'b> RawLeafBuilder<'a, 'b> {
 
     fn value_end(&self, n: usize) -> usize {
         if let Some(fixed) = self.fixed_value_size {
-            return self.key_end(self.num_pairs - 1) + fixed * (n + 1);
+            return self.key_section_start() + self.provisioned_key_bytes + fixed * (n + 1);
         }
         let mut offset = 4 + size_of::<u32>() * n;
         if self.fixed_key_size.is_none() {
@@ -712,6 +712,10 @@ impl<'a: 'b, 'b> RawLeafBuilder<'a, 'b> {
 impl<'a: 'b, 'b> Drop for RawLeafBuilder<'a, 'b> {
     fn drop(&mut self) {
         assert_eq!(self.pairs_written, self.num_pairs);
+        assert_eq!(
+            self.key_section_start() + self.provisioned_key_bytes,
+            self.key_end(self.num_pairs - 1)
+        );
     }
 }
 
