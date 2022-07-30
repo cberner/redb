@@ -47,7 +47,6 @@ have any guarantees of file format stability :)
 The following features are planned before the 1.0 release
 * Stable file format
 * User-defined zero-copy types
-* Further performance optimizations
 
 ## Benchmarks
 redb is nearly as fast as lmdb, and faster than sled, on many benchmarks

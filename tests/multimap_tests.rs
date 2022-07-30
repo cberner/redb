@@ -194,6 +194,30 @@ fn wrong_types() {
 }
 
 #[test]
+fn efficient_storage() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db_size = 1024 * 1024;
+    // Write enough values that big_key.len() * entries > db_size to check that duplicate key data is not stored
+    // and entries * sizeof(u32) > page_size to validate that large numbers of values can be stored per key
+    let entries = 10000;
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let table_def: MultimapTableDefinition<[u8], u32> = MultimapTableDefinition::new("x");
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(table_def).unwrap();
+        let big_key = [0u8; 1000];
+        for i in 0..entries {
+            table.insert(&big_key, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(table_def).unwrap();
+    assert_eq!(table.len().unwrap(), entries as usize);
+}
+
+#[test]
 fn reopen_table() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };

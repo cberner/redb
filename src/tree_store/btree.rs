@@ -114,7 +114,9 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
         Ok(result)
     }
 
+    // TODO: remove after verifying that this isn't needed to optimize multimap tables
     // Like remove(), but does not free uncommitted data
+    #[allow(dead_code)]
     pub(crate) fn remove_retain_uncommitted(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
         let mut freed_pages = self.freed_pages.borrow_mut();
         let mut operation = MutateHelper::new(

@@ -1,5 +1,10 @@
 # redb - Changelog
 
+## 0.5.0 - 2022-XX-XX
+* Optimize `MultimapTable` storage format to use `O(k * log(n_k) + v * log(n_v / n_k))` space instead of `O(k * log(n_k + n_v) + v * log(n_k + n_v))` space,
+  where k is the size of the stored keys, v is the size of the stored values, n_k is the number of stored keys,
+  n_v is the number of stored values
+
 ## 0.4.0 - 2022-07-26
 * Add single phase with checksum commit strategy. This is now the default and reduces commit latency by ~2x. For more details,
   see the [design doc](docs/design.md#1-phase--checksum-durable-commits) and

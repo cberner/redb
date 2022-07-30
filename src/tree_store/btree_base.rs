@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
 
-pub(super) const LEAF: u8 = 1;
+pub(crate) const LEAF: u8 = 1;
 pub(super) const BRANCH: u8 = 2;
 
 pub(crate) type Checksum = u128;
@@ -247,7 +247,7 @@ impl<'a: 'b, 'b> EntryAccessor<'a> {
 }
 
 // Provides a simple zero-copy way to access a leaf page
-pub(super) struct LeafAccessor<'a> {
+pub(crate) struct LeafAccessor<'a> {
     page: &'a [u8],
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
@@ -255,7 +255,7 @@ pub(super) struct LeafAccessor<'a> {
 }
 
 impl<'a> LeafAccessor<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         page: &'a [u8],
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
@@ -284,7 +284,7 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
-    pub(super) fn position<K: RedbKey + ?Sized>(&self, query: &[u8]) -> (usize, bool) {
+    pub(crate) fn position<K: RedbKey + ?Sized>(&self, query: &[u8]) -> (usize, bool) {
         // inclusive
         let mut min_entry = 0;
         // inclusive. Start past end, since it might be positioned beyond the end of the leaf
@@ -308,7 +308,7 @@ impl<'a> LeafAccessor<'a> {
         (min_entry, false)
     }
 
-    pub(super) fn find_key<K: RedbKey + ?Sized>(&self, query: &[u8]) -> Option<usize> {
+    pub(crate) fn find_key<K: RedbKey + ?Sized>(&self, query: &[u8]) -> Option<usize> {
         let (entry, found) = self.position::<K>(query);
         if found {
             Some(entry)
@@ -382,7 +382,7 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
-    pub(super) fn num_pairs(&self) -> usize {
+    pub(crate) fn num_pairs(&self) -> usize {
         self.num_pairs
     }
 
@@ -399,7 +399,7 @@ impl<'a> LeafAccessor<'a> {
     }
 
     // Returns the length of all keys and values between [start, end)
-    pub(super) fn length_of_pairs(&self, start: usize, end: usize) -> usize {
+    pub(crate) fn length_of_pairs(&self, start: usize, end: usize) -> usize {
         self.length_of_values(start, end) + self.length_of_keys(start, end)
     }
 
@@ -413,7 +413,7 @@ impl<'a> LeafAccessor<'a> {
     }
 
     // Returns the length of all keys between [start, end)
-    pub(super) fn length_of_keys(&self, start: usize, end: usize) -> usize {
+    pub(crate) fn length_of_keys(&self, start: usize, end: usize) -> usize {
         if end == 0 {
             return 0;
         }
@@ -431,7 +431,7 @@ impl<'a> LeafAccessor<'a> {
         &self.page[self.key_start(n).unwrap()..self.key_end(n).unwrap()]
     }
 
-    pub(super) fn entry(&self, n: usize) -> Option<EntryAccessor<'a>> {
+    pub(crate) fn entry(&self, n: usize) -> Option<EntryAccessor<'a>> {
         let key = &self.page[self.key_start(n)?..self.key_end(n)?];
         let value = &self.page[self.value_start(n)?..self.value_end(n)?];
         Some(EntryAccessor::new(key, value))
@@ -439,6 +439,63 @@ impl<'a> LeafAccessor<'a> {
 
     pub(super) fn last_entry(&self) -> EntryAccessor<'a> {
         self.entry(self.num_pairs() - 1).unwrap()
+    }
+}
+
+pub(crate) struct LeafKeyIter {
+    data: Vec<u8>,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    start_entry: isize, // inclusive
+    end_entry: isize,   // inclusive
+    reverse: bool,
+}
+
+impl LeafKeyIter {
+    pub(crate) fn new(
+        data: Vec<u8>,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+    ) -> Self {
+        let accessor = LeafAccessor::new(&data, fixed_key_size, fixed_value_size);
+        let end_entry = accessor.num_pairs() as isize - 1;
+        Self {
+            data,
+            fixed_key_size,
+            fixed_value_size,
+            start_entry: 0,
+            end_entry,
+            reverse: false,
+        }
+    }
+
+    pub(crate) fn next_key(&mut self) -> Option<&[u8]> {
+        if self.end_entry < self.start_entry {
+            return None;
+        }
+        let accessor = LeafAccessor::new(&self.data, self.fixed_key_size, self.fixed_value_size);
+        if self.reverse {
+            self.end_entry -= 1;
+            accessor
+                .entry((self.end_entry + 1) as usize)
+                .map(|e| e.key())
+        } else {
+            self.start_entry += 1;
+            accessor
+                .entry((self.start_entry - 1) as usize)
+                .map(|e| e.key())
+        }
+    }
+
+    pub(crate) fn reverse(self) -> Self {
+        Self {
+            data: self.data,
+            fixed_key_size: self.fixed_key_size,
+            fixed_value_size: self.fixed_value_size,
+            start_entry: self.start_entry,
+            end_entry: self.end_entry,
+            reverse: !self.reverse,
+        }
     }
 }
 
@@ -453,13 +510,7 @@ pub(super) struct LeafBuilder<'a, 'b> {
 
 impl<'a, 'b> LeafBuilder<'a, 'b> {
     pub(super) fn required_bytes(num_pairs: usize, keys_values_bytes: usize) -> usize {
-        // Page id & header;
-        let mut result = 4;
-        // key & value lengths
-        result += num_pairs * 2 * size_of::<u32>();
-        result += keys_values_bytes;
-
-        result
+        RawLeafBuilder::required_bytes(num_pairs, keys_values_bytes)
     }
 
     pub(super) fn new(
@@ -594,7 +645,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
 // * n bytes: key data
 // repeating (num_entries times):
 // * n bytes: value data
-struct RawLeafBuilder<'a> {
+pub(crate) struct RawLeafBuilder<'a> {
     page: &'a mut [u8],
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
@@ -604,7 +655,17 @@ struct RawLeafBuilder<'a> {
 }
 
 impl<'a> RawLeafBuilder<'a> {
-    fn new(
+    pub(crate) fn required_bytes(num_pairs: usize, keys_values_bytes: usize) -> usize {
+        // Page id & header;
+        let mut result = 4;
+        // key & value lengths
+        result += num_pairs * 2 * size_of::<u32>();
+        result += keys_values_bytes;
+
+        result
+    }
+
+    pub(crate) fn new(
         page: &'a mut [u8],
         num_pairs: usize,
         fixed_key_size: Option<usize>,
@@ -670,7 +731,7 @@ impl<'a> RawLeafBuilder<'a> {
         ) as usize
     }
 
-    fn append(&mut self, key: &[u8], value: &[u8]) {
+    pub(crate) fn append(&mut self, key: &[u8], value: &[u8]) {
         let key_offset = if self.pairs_written == 0 {
             self.key_section_start()
         } else {
