@@ -46,7 +46,11 @@ use std::sync::{Mutex, MutexGuard};
 
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
 // because the leaf node format uses 32bit offsets
+#[cfg(target_pointer_width = "64")]
 const MAX_USABLE_REGION_SPACE: usize = 4 * 1024 * 1024 * 1024;
+// Default to only 128MiB on 32bit platforms, since the mmap likely cannot be 4GiB or even close.
+#[cfg(target_pointer_width = "32")]
+const MAX_USABLE_REGION_SPACE: usize = 128 * 1024 * 1024;
 pub(crate) const MAX_PAGE_ORDER: usize = 20;
 pub(super) const MIN_USABLE_PAGES: usize = 10;
 const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
