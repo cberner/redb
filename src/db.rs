@@ -1,6 +1,6 @@
 use crate::tree_store::{
     get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition,
-    PageNumber, RawBtree, TransactionalMemory,
+    PageNumber, RawBtree, TableType, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
@@ -297,6 +297,8 @@ impl Database {
             // Chain all the other tables to the master table iter
             while let Some(entry) = iter.next() {
                 let definition = InternalTableDefinition::from_bytes(entry.value());
+                // TODO: correctly handle multitables. They can have nested subtrees
+                assert_eq!(definition.get_type(), TableType::Normal);
                 if let Some((table_root, _)) = definition.get_root() {
                     let table_pages_iter = AllPageNumbersBtreeIter::new(
                         table_root,
