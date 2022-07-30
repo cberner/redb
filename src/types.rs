@@ -55,6 +55,28 @@ pub trait RedbKey: RedbValue {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering;
 }
 
+impl RedbValue for () {
+    type View = OwnedLifetime<()>;
+    type ToBytes = RefAsBytesLifetime<[u8]>;
+
+    fn fixed_width() -> Option<usize> {
+        Some(0)
+    }
+
+    #[allow(clippy::unused_unit)]
+    fn from_bytes(_data: &[u8]) -> <Self::View as WithLifetime>::Out {
+        ()
+    }
+
+    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+        &[]
+    }
+
+    fn redb_type_name() -> String {
+        "()".to_string()
+    }
+}
+
 impl RedbValue for [u8] {
     type View = RefLifetime<[u8]>;
     type ToBytes = RefAsBytesLifetime<[u8]>;
