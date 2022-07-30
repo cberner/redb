@@ -93,3 +93,28 @@ occur during the fsync:
    2. If it is updated, then we must verify that the transaction was completely written, or roll it back:
       1. If none of the transaction data was written, we will detect that the transaction id is older, and roll it back
       2. If some, but not all was written, then the checksum verification will fail, and it will be rolled back.
+
+#### Security of 1PC+C
+Given that the 1PC+C commit strategy relies on a non-cyptographic checksum (XXH3) there is, at least in theory, a way to attack it.
+Users who need to accept malicious input are encouraged to use 2PC instead.
+
+An attacker, could make a partially committed transaction appear as if it were completely committed.
+The scenario would be something like:
+```
+table.insert(malicious_key, malicious_value);
+table.insert(good_key, good_value);
+txn.commit();
+```
+and the attacker wants the transaction to appear as:
+```
+table.insert(malicious_key, malicious_value);
+txn.commit();
+```
+To do this they need to:
+1) control the order in which pages are flushed to disk, so that the ones related to `good_key` are never written
+2) introduce a crash during, or immediately before, the fsync() operation of the commit
+3) ensure that the checksums for the partially written data are valid
+
+With complete control over the workload, or read access to the database file (3) is possible, since XXH3 is not collision resistant.
+However, it requires the attacker to have knowledge of the database contents, because the input to the checksum includes
+many other values (all the other keys in the b-tree root, along with their child node numbers)
