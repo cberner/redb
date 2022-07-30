@@ -81,7 +81,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 DeletedLeaf => None,
                 PartialLeaf { deleted_pair } => {
                     let page = self.mem.get_page(p);
-                    let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+                    let accessor =
+                        LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                     let mut builder = LeafBuilder::new(
                         self.mem,
                         accessor.num_pairs() - 1,
@@ -136,7 +137,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             builder.push(key_bytes, value_bytes);
             let page = builder.build()?;
 
-            let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
             let offset = accessor.offset_of_first_value();
             let page_num = page.get_page_number();
             let checksum = self.checksum_helper(&page);
@@ -159,7 +160,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
         let node_mem = page.memory();
         Ok(match node_mem[0] {
             LEAF => {
-                let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                 let (position, found) = accessor.position::<K>(key);
 
                 // Fast-path to avoid re-building and splitting pages with a single large value
@@ -173,7 +174,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     let new_page_number = new_page.get_page_number();
                     let new_page_checksum = self.checksum_helper(&new_page);
                     let new_page_accessor =
-                        LeafAccessor::new(&new_page, K::fixed_width(), V::fixed_width());
+                        LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
                     let offset = new_page_accessor.offset_of_value(position).unwrap();
                     drop(new_page_accessor);
                     let guard = AccessGuardMut::new(new_page, offset, value.len());
@@ -230,7 +231,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         LeafMutator::new(&mut page_mut, K::fixed_width(), V::fixed_width());
                     mutator.insert(position, found, key, value);
                     let new_page_accessor =
-                        LeafAccessor::new(&page_mut, K::fixed_width(), V::fixed_width());
+                        LeafAccessor::new(page_mut.memory(), K::fixed_width(), V::fixed_width());
                     let offset = new_page_accessor.offset_of_value(position).unwrap();
                     drop(new_page_accessor);
                     let new_checksum = self.checksum_helper(&page_mut);
@@ -288,7 +289,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
 
                     let new_page_number = new_page.get_page_number();
                     let new_page_checksum = self.checksum_helper(&new_page);
-                    let accessor = LeafAccessor::new(&new_page, K::fixed_width(), V::fixed_width());
+                    let accessor =
+                        LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
                     let offset = accessor.offset_of_value(position).unwrap();
                     let guard = AccessGuardMut::new(new_page, offset, value.len());
 
@@ -328,16 +330,22 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     let new_page_number2 = new_page2.get_page_number();
                     let new_page2_checksum = self.checksum_helper(&new_page2);
                     let accessor =
-                        LeafAccessor::new(&new_page1, K::fixed_width(), V::fixed_width());
+                        LeafAccessor::new(new_page1.memory(), K::fixed_width(), V::fixed_width());
                     let division = accessor.num_pairs();
                     let guard = if position < division {
-                        let accessor =
-                            LeafAccessor::new(&new_page1, K::fixed_width(), V::fixed_width());
+                        let accessor = LeafAccessor::new(
+                            new_page1.memory(),
+                            K::fixed_width(),
+                            V::fixed_width(),
+                        );
                         let offset = accessor.offset_of_value(position).unwrap();
                         AccessGuardMut::new(new_page1, offset, value.len())
                     } else {
-                        let accessor =
-                            LeafAccessor::new(&new_page2, K::fixed_width(), V::fixed_width());
+                        let accessor = LeafAccessor::new(
+                            new_page2.memory(),
+                            K::fixed_width(),
+                            V::fixed_width(),
+                        );
                         let offset = accessor.offset_of_value(position - division).unwrap();
                         AccessGuardMut::new(new_page2, offset, value.len())
                     };
@@ -477,7 +485,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
         checksum: Checksum,
         key: &[u8],
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
-        let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
         let (position, found) = accessor.position::<K>(key);
         if !found {
             return Ok((Subtree(page.get_page_number(), checksum), None));
@@ -671,15 +679,18 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             }
             PartialLeaf { deleted_pair } => {
                 let partial_child_page = self.mem.get_page(child_page_number);
-                let partial_child_accessor =
-                    LeafAccessor::new(&partial_child_page, K::fixed_width(), V::fixed_width());
+                let partial_child_accessor = LeafAccessor::new(
+                    partial_child_page.memory(),
+                    K::fixed_width(),
+                    V::fixed_width(),
+                );
                 debug_assert!(partial_child_accessor.num_pairs() > 1);
 
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 debug_assert!(merge_with < accessor.count_children());
                 let merge_with_page = self.mem.get_page(accessor.child_page(merge_with).unwrap());
                 let merge_with_accessor =
-                    LeafAccessor::new(&merge_with_page, K::fixed_width(), V::fixed_width());
+                    LeafAccessor::new(merge_with_page.memory(), K::fixed_width(), V::fixed_width());
 
                 let single_large_value = merge_with_accessor.num_pairs() == 1
                     && merge_with_accessor.total_length() >= self.mem.get_page_size();

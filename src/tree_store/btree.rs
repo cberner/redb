@@ -267,7 +267,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
-                let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                 let entry_index = accessor.find_key::<K>(query)?;
                 let (start, end) = accessor.value_range(entry_index).unwrap();
                 Some(V::from_bytes(&page.into_memory()[start..end]))
@@ -312,8 +312,10 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                     let node_mem = page.memory();
                     match node_mem[0] {
                         LEAF => {
-                            LeafAccessor::new(&page, K::fixed_width(), V::fixed_width())
+                            eprint!("Leaf[ (page={:?})", page.get_page_number());
+                            LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width())
                                 .print_node::<K, V>(include_values);
+                            eprint!("]");
                         }
                         BRANCH => {
                             let accessor = BranchAccessor::new(&page, K::fixed_width());
@@ -365,7 +367,7 @@ fn stats_helper(
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(&page, fixed_key_size, fixed_value_size);
+            let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
             let leaf_bytes = accessor.length_of_pairs(0, accessor.num_pairs());
             let overhead_bytes = accessor.total_length() - leaf_bytes;
             let fragmented_bytes = page.memory().len() - accessor.total_length();

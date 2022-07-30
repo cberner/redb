@@ -44,7 +44,7 @@ impl<'a> RangeIterState<'a> {
                 entry,
                 parent,
             } => {
-                let accessor = LeafAccessor::new(&page, fixed_key_size, fixed_value_size);
+                let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
                 let direction = if reverse { -1 } else { 1 };
                 let next_entry = entry as isize + direction;
                 if 0 <= next_entry && next_entry < accessor.num_pairs() as isize {
@@ -82,8 +82,11 @@ impl<'a> RangeIterState<'a> {
                 }
                 match child_page.memory()[0] {
                     LEAF => {
-                        let child_accessor =
-                            LeafAccessor::new(&child_page, fixed_key_size, fixed_value_size);
+                        let child_accessor = LeafAccessor::new(
+                            child_page.memory(),
+                            fixed_key_size,
+                            fixed_value_size,
+                        );
                         let entry = if reverse {
                             child_accessor.num_pairs() - 1
                         } else {
@@ -126,7 +129,7 @@ impl<'a> RangeIterState<'a> {
                 fixed_value_size,
                 entry,
                 ..
-            } => LeafAccessor::new(page, *fixed_key_size, *fixed_value_size).entry(*entry),
+            } => LeafAccessor::new(page.memory(), *fixed_key_size, *fixed_value_size).entry(*entry),
             _ => None,
         }
     }
@@ -389,7 +392,7 @@ fn find_iter_unbounded<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
             let entry = if reverse { accessor.num_pairs() - 1 } else { 0 };
             Some(Leaf {
                 page,
@@ -434,7 +437,7 @@ fn find_iter_left<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
             let (mut position, found) = accessor.position::<K>(query);
             let include = if position < accessor.num_pairs() {
                 include_query || !found
@@ -482,7 +485,7 @@ fn find_iter_right<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
             let (mut position, found) = accessor.position::<K>(query);
             let include = if position < accessor.num_pairs() {
                 include_query && found
