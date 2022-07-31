@@ -1,6 +1,6 @@
 use crate::tree_store::{
     get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition,
-    PageNumber, RawBtree, TableType, TransactionalMemory,
+    RawBtree, TableType, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::{io, panic};
 
+use crate::multimap_table::parse_subtree_roots;
 #[cfg(feature = "logging")]
 use log::{error, info};
 
@@ -281,14 +282,16 @@ impl Database {
                 assert!(Self::verify_primary_checksums(&mem));
             }
 
+            mem.begin_repair()?;
+
             let (root, root_checksum) = mem
                 .get_data_root()
                 .expect("Tried to repair an empty database");
 
             // Repair the allocator state
             // All pages in the master table
-            let mut all_pages_iter: Box<dyn Iterator<Item = PageNumber>> =
-                Box::new(AllPageNumbersBtreeIter::new(root, None, None, &mem));
+            let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, &mem);
+            mem.mark_pages_allocated(master_pages_iter)?;
 
             // Iterate over all other tables
             let mut iter: BtreeRangeIter<str, InternalTableDefinition> =
@@ -297,8 +300,6 @@ impl Database {
             // Chain all the other tables to the master table iter
             while let Some(entry) = iter.next() {
                 let definition = InternalTableDefinition::from_bytes(entry.value());
-                // TODO: correctly handle multitables. They can have nested subtrees
-                assert_eq!(definition.get_type(), TableType::Normal);
                 if let Some((table_root, _)) = definition.get_root() {
                     let table_pages_iter = AllPageNumbersBtreeIter::new(
                         table_root,
@@ -306,11 +307,30 @@ impl Database {
                         definition.get_fixed_value_size(),
                         &mem,
                     );
-                    all_pages_iter = Box::new(all_pages_iter.chain(table_pages_iter));
+                    mem.mark_pages_allocated(table_pages_iter)?;
+
+                    // Multimap tables may have additional subtrees in their values
+                    if definition.get_type() == TableType::Multimap {
+                        let table_pages_iter = AllPageNumbersBtreeIter::new(
+                            table_root,
+                            definition.get_fixed_key_size(),
+                            definition.get_fixed_value_size(),
+                            &mem,
+                        );
+                        for table_page in table_pages_iter {
+                            let page = mem.get_page(table_page);
+                            let mut subtree_roots = parse_subtree_roots(
+                                &page,
+                                definition.get_fixed_key_size(),
+                                definition.get_fixed_value_size(),
+                            );
+                            mem.mark_pages_allocated(subtree_roots.drain(..))?;
+                        }
+                    }
                 }
             }
 
-            mem.repair_allocator(all_pages_iter)?;
+            mem.end_repair()?;
 
             // Clear the freed table. We just rebuilt the allocator state by walking all the
             // reachable data pages, which implicitly frees the pages for the freed table

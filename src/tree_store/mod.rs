@@ -9,7 +9,7 @@ pub(crate) use btree::{Btree, BtreeMut, RawBtree};
 pub use btree_base::AccessGuard;
 pub(crate) use btree_base::AccessGuardMut;
 pub(crate) use btree_base::Checksum;
-pub(crate) use btree_base::{LeafAccessor, LeafKeyIter, RawLeafBuilder, LEAF};
+pub(crate) use btree_base::{LeafAccessor, LeafKeyIter, RawLeafBuilder, BRANCH, LEAF};
 pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeRangeIter};
 pub(crate) use page_store::{get_db_size, Page, PageNumber, TransactionalMemory};
 pub(crate) use table_tree::{FreedTableKey, InternalTableDefinition, TableTree, TableType};

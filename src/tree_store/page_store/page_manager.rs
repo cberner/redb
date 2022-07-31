@@ -661,10 +661,7 @@ impl TransactionalMemory {
         *self.layout.lock().unwrap() = metadata.primary_slot().get_data_section_layout();
     }
 
-    pub(crate) fn repair_allocator(
-        &self,
-        allocated_pages: impl Iterator<Item = PageNumber>,
-    ) -> Result<()> {
+    pub(crate) fn begin_repair(&self) -> Result<()> {
         let mut metadata = self.lock_metadata();
 
         if !metadata
@@ -718,25 +715,41 @@ impl TransactionalMemory {
             ));
         }
 
+        let mut guard = self.regional_allocators.lock().unwrap();
+        *guard = Some(layout.create_allocators());
+
+        Ok(())
+    }
+
+    pub(crate) fn mark_pages_allocated(
+        &self,
+        allocated_pages: impl Iterator<Item = PageNumber>,
+    ) -> Result<()> {
+        let mut metadata = self.lock_metadata();
+        let layout = self.layout.lock().unwrap();
+        let (_, mut regions) = metadata.allocators_mut(&layout)?;
+
+        let regional_allocators = self.regional_allocators.lock().unwrap();
+
         for page_number in allocated_pages {
             let region = page_number.region as usize;
             let mem = regions.get_regional_allocator_mut(region);
-            regional_allocators[region].record_alloc(
+            regional_allocators.as_ref().unwrap()[region].record_alloc(
                 mem,
                 page_number.page_index as u64,
                 page_number.page_order as usize,
             );
         }
+
+        Ok(())
+    }
+
+    pub(crate) fn end_repair(&self) -> Result<()> {
+        let mut metadata = self.lock_metadata();
         self.mmap.flush()?;
 
         metadata.set_allocator_dirty(false);
-        self.mmap.flush()?;
-        drop(metadata);
-
-        let mut guard = self.regional_allocators.lock().unwrap();
-        *guard = Some(layout.create_allocators());
-
-        Ok(())
+        self.mmap.flush()
     }
 
     fn lock_metadata(&self) -> MetadataAccessor {
