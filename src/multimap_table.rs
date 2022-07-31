@@ -1,7 +1,7 @@
 use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, LeafKeyIter,
-    Page, PageNumber, RawLeafBuilder, TransactionalMemory, LEAF,
+    Page, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
 };
 use crate::types::{
     AsBytesWithLifetime, OwnedLifetime, RedbKey, RedbValue, RefAsBytesLifetime, WithLifetime,
@@ -13,6 +13,32 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull};
 use std::rc::Rc;
+
+pub(crate) fn parse_subtree_roots<T: Page>(
+    page: &T,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+) -> Vec<PageNumber> {
+    match page.memory()[0] {
+        BRANCH => {
+            vec![]
+        }
+        LEAF => {
+            let mut result = vec![];
+            let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+            for i in 0..accessor.num_pairs() {
+                let entry = accessor.entry(i).unwrap();
+                let collection = DynamicCollection::from_bytes(entry.value());
+                if matches!(collection.collection_type(), DynamicCollectionType::Subtree) {
+                    result.push(collection.as_subtree().0);
+                }
+            }
+
+            result
+        }
+        _ => unreachable!(),
+    }
+}
 
 enum DynamicCollectionType {
     Inline,
