@@ -4,6 +4,7 @@ use std::{io, panic};
 
 #[derive(Debug)]
 pub enum Error {
+    DatabaseAlreadyOpen,
     Corrupted(String),
     TableTypeMismatch(String),
     DbSizeMismatch {
@@ -70,6 +71,9 @@ impl Display for Error {
             }
             Error::LockPoisoned(location) => {
                 write!(f, "Poisoned internal lock: {}", location)
+            }
+            Error::DatabaseAlreadyOpen => {
+                write!(f, "Database already open. Cannot acquire lock.")
             }
         }
     }

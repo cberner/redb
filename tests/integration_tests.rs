@@ -1053,3 +1053,15 @@ fn tree_balance() {
         expected
     );
 }
+
+#[test]
+fn database_lock() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let result = unsafe { Database::create(tmpfile.path(), 1024 * 1024) };
+    assert!(result.is_ok());
+    let result2 = unsafe { Database::open(tmpfile.path()) };
+    assert!(matches!(result2, Err(Error::DatabaseAlreadyOpen)));
+    drop(result);
+    let result = unsafe { Database::open(tmpfile.path()) };
+    assert!(result.is_ok());
+}
