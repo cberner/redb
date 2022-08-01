@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::{Error, Result};
 use std::fs::File;
 use std::io;
 use std::ops::Range;
@@ -6,9 +6,35 @@ use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{ptr, slice};
 
+struct FileLock {
+    fd: libc::c_int,
+}
+
+impl FileLock {
+    fn new(fd: libc::c_int) -> Result<Self> {
+        let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::WouldBlock {
+                Err(Error::DatabaseAlreadyOpen)
+            } else {
+                Err(Error::Io(err))
+            }
+        } else {
+            Ok(Self { fd })
+        }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        unsafe { libc::flock(self.fd, libc::LOCK_UN) };
+    }
+}
+
 pub(crate) struct Mmap {
-    #[allow(dead_code)]
     file: File,
+    _lock: FileLock,
     mmap: *mut u8,
     len: AtomicUsize,
     capacity: usize,
@@ -22,6 +48,7 @@ impl Mmap {
     pub(crate) fn new(file: File, max_capacity: usize) -> Result<Self> {
         let len = file.metadata()?.len();
         assert!(len <= max_capacity as u64);
+        let lock = FileLock::new(file.as_raw_fd())?;
         let mmap = unsafe {
             libc::mmap(
                 ptr::null_mut(),
@@ -38,6 +65,7 @@ impl Mmap {
         Ok(Self {
             mmap: mmap as *mut u8,
             file,
+            _lock: lock,
             len: AtomicUsize::new(len as usize),
             capacity: max_capacity,
         })
