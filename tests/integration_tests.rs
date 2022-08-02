@@ -737,6 +737,27 @@ fn regression12() {
 }
 
 #[test]
+fn regression13() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024 * 1024;
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+
+    let table_def: MultimapTableDefinition<u64, [u8]> = MultimapTableDefinition::new("x");
+
+    let mut tx = db.begin_write().unwrap();
+    tx.set_durability(Durability::None);
+    {
+        let mut t = tx.open_multimap_table(table_def).unwrap();
+        let value = vec![0; 1026];
+        t.insert(&539717, &value).unwrap();
+        let value = vec![0; 530];
+        t.insert(&539717, &value).unwrap();
+    }
+    tx.abort().unwrap();
+}
+
+#[test]
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
