@@ -665,6 +665,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Drop for MultimapTable
 pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapValueIter<'a, V>>;
 
+    // TODO: Take a KR: Borrow<K>, just like Table::range
     fn range<'a, T: RangeBounds<&'a K> + 'a>(
         &'a self,
         range: T,
