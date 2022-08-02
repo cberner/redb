@@ -83,6 +83,10 @@ pub(crate) enum FuzzOperation {
     Remove {
         key: BoundedU64<KEY_SPACE>,
     },
+    RemoveOne {
+        key: BoundedU64<KEY_SPACE>,
+        value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,
+    },
     Len {
     },
     Range {
@@ -101,9 +105,10 @@ pub(crate) struct FuzzTransaction {
 
 #[derive(Arbitrary, Debug)]
 pub(crate) struct FuzzConfig {
-    pub transactions: Vec<FuzzTransaction>,
-    pub max_db_size: BoundedUSize<MAX_DB_SIZE>,
     pub use_checksums: bool,
+    pub multimap_table: bool,
+    pub max_db_size: BoundedUSize<MAX_DB_SIZE>,
+    pub transactions: Vec<FuzzTransaction>,
 }
 
 impl FuzzConfig {
