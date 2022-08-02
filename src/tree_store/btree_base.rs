@@ -5,6 +5,7 @@ use crate::Result;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
+use std::thread;
 
 pub(crate) const LEAF: u8 = 1;
 pub(crate) const BRANCH: u8 = 2;
@@ -197,7 +198,7 @@ impl<'a, V: RedbValue + ?Sized> Drop for AccessGuard<'a, V> {
                 if let EitherPage::Mutable(ref mut mut_page) = self.page {
                     let mut mutator = LeafMutator::new(mut_page, fixed_key_size, V::fixed_width());
                     mutator.remove(position);
-                } else {
+                } else if !thread::panicking() {
                     unreachable!();
                 }
             }
@@ -768,11 +769,13 @@ impl<'a> RawLeafBuilder<'a> {
 
 impl<'a> Drop for RawLeafBuilder<'a> {
     fn drop(&mut self) {
-        assert_eq!(self.pairs_written, self.num_pairs);
-        assert_eq!(
-            self.key_section_start() + self.provisioned_key_bytes,
-            self.key_end(self.num_pairs - 1)
-        );
+        if !thread::panicking() {
+            assert_eq!(self.pairs_written, self.num_pairs);
+            assert_eq!(
+                self.key_section_start() + self.provisioned_key_bytes,
+                self.key_end(self.num_pairs - 1)
+            );
+        }
     }
 }
 
@@ -1502,7 +1505,9 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
 
 impl<'a: 'b, 'b> Drop for RawBranchBuilder<'a, 'b> {
     fn drop(&mut self) {
-        assert_eq!(self.keys_written, self.num_keys);
+        if !thread::panicking() {
+            assert_eq!(self.keys_written, self.num_keys);
+        }
     }
 }
 
