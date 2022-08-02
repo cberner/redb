@@ -403,9 +403,6 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'tx
                             <() as RedbValue>::fixed_width(),
                             new_key_bytes,
                         );
-                        if position == 0 {
-                            builder.append(value.as_bytes().as_ref(), ().as_bytes().as_ref());
-                        }
                         for i in 0..accessor.num_pairs() {
                             if i == position {
                                 builder.append(value.as_bytes().as_ref(), ().as_bytes().as_ref());
