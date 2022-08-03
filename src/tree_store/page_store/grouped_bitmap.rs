@@ -17,16 +17,18 @@ impl<'a> U64GroupedBitMap<'a> {
     }
 
     pub(crate) fn count_unset(&self) -> usize {
-        self.data.iter().map(|x| x.count_zeros() as usize).sum()
+        self.data.iter().map(|x| x.count_ones() as usize).sum()
     }
 
     pub(crate) fn get(&self, bit: usize) -> bool {
         let (index, bit_index) = self.data_index_of(bit);
         let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        group & U64GroupedBitMapMut::select_mask(bit_index) != 0
+        group & U64GroupedBitMapMut::select_mask(bit_index) == 0
     }
 }
 
+// Note bits are set in the opposite of what may be intuitive: they are 0 when set and 1 when unset.
+// This is so that the data structure can be efficiently initialized to be all set.
 pub(crate) struct U64GroupedBitMapMut<'a> {
     data: &'a mut [u8],
 }
@@ -35,6 +37,14 @@ impl<'a> U64GroupedBitMapMut<'a> {
     pub(crate) fn required_bytes(elements: usize) -> usize {
         let words = (elements + 63) / 64;
         words * size_of::<u64>()
+    }
+
+    pub(crate) fn init_full(data: &mut [u8]) {
+        // TODO: if we can guarantee that the mmap is zero'ed, we could skip this initialization
+        // since mmap'ed memory is zero initialized by the OS
+        for value in data.iter_mut() {
+            *value = 0;
+        }
     }
 
     pub(crate) fn new(data: &'a mut [u8]) -> Self {
@@ -50,22 +60,22 @@ impl<'a> U64GroupedBitMapMut<'a> {
     pub(crate) fn set(&mut self, bit: usize) -> bool {
         let (index, bit_index) = self.data_index_of(bit);
         let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        group |= Self::select_mask(bit_index);
+        group &= !Self::select_mask(bit_index);
         self.data[index..(index + 8)].copy_from_slice(&group.to_le_bytes());
 
-        group == u64::MAX
+        group == 0
     }
 
     pub(crate) fn get(&self, bit: usize) -> bool {
         let (index, bit_index) = self.data_index_of(bit);
         let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        group & Self::select_mask(bit_index) != 0
+        group & Self::select_mask(bit_index) == 0
     }
 
     pub(crate) fn clear(&mut self, bit: usize) {
         let (index, bit_index) = self.data_index_of(bit);
         let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        group &= !Self::select_mask(bit_index);
+        group |= Self::select_mask(bit_index);
         self.data[index..(index + 8)].copy_from_slice(&group.to_le_bytes());
     }
 
@@ -75,7 +85,7 @@ impl<'a> U64GroupedBitMapMut<'a> {
 
         let (index, _) = self.data_index_of(start_bit);
         let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        match group.trailing_ones() {
+        match group.trailing_zeros() {
             64 => None,
             x => Some(start_bit + x as usize),
         }
