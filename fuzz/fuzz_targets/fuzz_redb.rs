@@ -167,19 +167,9 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
                             table.range(&start..&end).unwrap()
                         };
                         while let Some((ref_key, ref_values)) = reference_iter.next() {
-                            if *reversed {
-                                for ref_value_len in ref_values.iter().rev() {
-                                    let (key, value) = iter.next().unwrap();
-                                    assert_eq!(*ref_key, key);
-                                    assert_eq!(*ref_value_len, value.len());
-                                }
-                            } else {
-                                for ref_value_len in ref_values.iter() {
-                                    let (key, value) = iter.next().unwrap();
-                                    assert_eq!(*ref_key, key);
-                                    assert_eq!(*ref_value_len, value.len());
-                                }
-                            }
+                            let (key, value_iter) = iter.next().unwrap();
+                            assert_eq!(*ref_key, key);
+                            assert_multimap_value_eq(value_iter, Some(ref_values));
                         }
                         assert!(iter.next().is_none());
                     },

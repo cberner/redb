@@ -5,8 +5,8 @@ use tempfile::NamedTempFile;
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use redb::{
-    Database, DatabaseBuilder, Durability, Error, MultimapTableDefinition, ReadableTable,
-    TableDefinition,
+    Database, DatabaseBuilder, Durability, Error, MultimapTableDefinition, ReadableMultimapTable,
+    ReadableTable, TableDefinition,
 };
 
 const ELEMENTS: usize = 100;
@@ -753,6 +753,42 @@ fn regression13() {
         t.insert(&539717, &value).unwrap();
         let value = vec![0; 530];
         t.insert(&539717, &value).unwrap();
+    }
+    tx.abort().unwrap();
+}
+
+#[test]
+fn regression14() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 150256483323;
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+
+    let table_def: MultimapTableDefinition<u64, [u8]> = MultimapTableDefinition::new("x");
+
+    let mut tx = db.begin_write().unwrap();
+    tx.set_durability(Durability::None);
+    {
+        let mut t = tx.open_multimap_table(table_def).unwrap();
+        let value = vec![0; 1424];
+        t.insert(&539749, &value).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let mut tx = db.begin_write().unwrap();
+    tx.set_durability(Durability::None);
+    {
+        let mut t = tx.open_multimap_table(table_def).unwrap();
+        let value = vec![0; 2230];
+        t.insert(&776971, &value).unwrap();
+
+        let mut iter = t.range(&514043..&(514043 + 514043)).unwrap().rev();
+        let (key, mut value_iter) = iter.next().unwrap();
+        assert_eq!(key, 776971);
+        assert_eq!(value_iter.next().unwrap(), &[0; 2230]);
+        let (key, mut value_iter) = iter.next().unwrap();
+        assert_eq!(key, 539749);
+        assert_eq!(value_iter.next().unwrap(), &[0; 1424]);
     }
     tx.abort().unwrap();
 }
