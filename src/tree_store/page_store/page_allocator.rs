@@ -56,13 +56,8 @@ impl PageAllocator {
 
     pub(crate) fn init_new(data: &mut [u8], num_pages: usize) -> Self {
         assert!(data.len() >= Self::required_space(num_pages));
-        // TODO: change the representation, so that this is zero initialized, instead of 1 initialized.
-        // That should be faster, since mmap'ed memory is zero initialized by the OS
-
         // Initialize the memory, so that all pages are allocated
-        for value in data.iter_mut() {
-            *value = 0xFF;
-        }
+        U64GroupedBitMapMut::init_full(data);
 
         let result = Self::new(num_pages);
 
@@ -318,7 +313,10 @@ mod test {
         while allocator.alloc(&mut data).is_ok() {}
         // The last u64 must be used, since the leaf layer is compact
         let l = data.len();
-        assert_ne!(0, u64::from_le_bytes(data[(l - 8)..].try_into().unwrap()));
+        assert_ne!(
+            u64::MAX,
+            u64::from_le_bytes(data[(l - 8)..].try_into().unwrap())
+        );
     }
 
     #[test]
