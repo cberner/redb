@@ -73,7 +73,7 @@ pub(super) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE
 
 // God byte flags
 const PRIMARY_BIT: u8 = 1;
-const ALLOCATOR_STATE_DIRTY: u8 = 2;
+const RECOVERY_REQUIRED: u8 = 2;
 
 // Structure of each commit slot
 const VERSION_OFFSET: usize = 0;
@@ -255,15 +255,15 @@ impl<'a> MetadataAccessor<'a> {
             .copy_from_slice(&(usable_size as u64).to_le_bytes());
     }
 
-    fn get_allocator_dirty(&self) -> bool {
-        self.header[GOD_BYTE_OFFSET] & ALLOCATOR_STATE_DIRTY != 0
+    fn get_recovery_required(&self) -> bool {
+        self.header[GOD_BYTE_OFFSET] & RECOVERY_REQUIRED != 0
     }
 
-    fn set_allocator_dirty(&mut self, dirty: bool) {
-        if dirty {
-            self.header[GOD_BYTE_OFFSET] |= ALLOCATOR_STATE_DIRTY;
+    fn set_recovery(&mut self, required: bool) {
+        if required {
+            self.header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
         } else {
-            self.header[GOD_BYTE_OFFSET] &= !ALLOCATOR_STATE_DIRTY;
+            self.header[GOD_BYTE_OFFSET] &= !RECOVERY_REQUIRED;
         }
     }
 
@@ -284,8 +284,8 @@ impl<'a> MetadataAccessor<'a> {
         &mut self,
         layout: &DatabaseLayout,
     ) -> Result<(U64GroupedBitMapMut, RegionsAccessor)> {
-        if !self.get_allocator_dirty() {
-            self.set_allocator_dirty(true);
+        if !self.get_recovery_required() {
+            self.set_recovery(true);
             self.mmap.flush()?
         }
 
@@ -570,7 +570,7 @@ impl TransactionalMemory {
             }
             // Set the allocator to not dirty, because the allocator initialization above will have
             // dirtied it
-            metadata.set_allocator_dirty(false);
+            metadata.set_recovery(false);
 
             // Store the page & db size. These are immutable
             metadata.set_page_size(page_size);
@@ -617,7 +617,7 @@ impl TransactionalMemory {
         let region_header_size = layout.full_region_layout().data_section().start;
         let checksum_type = metadata.get_checksum_type();
 
-        let regional_allocators = if metadata.get_allocator_dirty() {
+        let regional_allocators = if metadata.get_recovery_required() {
             None
         } else {
             Some(layout.create_allocators())
@@ -644,7 +644,7 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn needs_repair(&self) -> Result<bool> {
-        Ok(self.lock_metadata().get_allocator_dirty())
+        Ok(self.lock_metadata().get_recovery_required())
     }
 
     pub(crate) fn needs_checksum_verification(&self) -> Result<bool> {
@@ -748,7 +748,7 @@ impl TransactionalMemory {
         let mut metadata = self.lock_metadata();
         self.mmap.flush()?;
 
-        metadata.set_allocator_dirty(false);
+        metadata.set_recovery(false);
         self.mmap.flush()
     }
 
@@ -1338,7 +1338,7 @@ impl Drop for TransactionalMemory {
         match self.regional_allocators.lock() {
             Ok(allocators) => {
                 if self.mmap.flush().is_ok() && allocators.is_some() {
-                    self.lock_metadata().set_allocator_dirty(false);
+                    self.lock_metadata().set_recovery(false);
                     let _ = self.mmap.flush();
                 }
             }
@@ -1354,8 +1354,8 @@ impl Drop for TransactionalMemory {
 mod test {
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::page_manager::{
-        ALLOCATOR_STATE_DIRTY, DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, MIN_USABLE_PAGES,
-        PRIMARY_BIT, ROOT_CHECKSUM_OFFSET, TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET,
+        DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, MIN_USABLE_PAGES, PRIMARY_BIT,
+        RECOVERY_REQUIRED, ROOT_CHECKSUM_OFFSET, TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET,
     };
     use crate::tree_store::page_store::utils::get_page_size;
     use crate::tree_store::page_store::TransactionalMemory;
@@ -1398,7 +1398,7 @@ mod test {
         let mut buffer = [0u8; 1];
         file.read_exact(&mut buffer).unwrap();
         file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        buffer[0] |= ALLOCATOR_STATE_DIRTY;
+        buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
 
         assert!(
@@ -1452,7 +1452,7 @@ mod test {
         let mut buffer = [0u8; 1];
         file.read_exact(&mut buffer).unwrap();
         file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        buffer[0] |= ALLOCATOR_STATE_DIRTY;
+        buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
 
         // Overwrite the primary checksum to simulate a failure during commit
