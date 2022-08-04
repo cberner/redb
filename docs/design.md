@@ -1,5 +1,7 @@
 # redb design
 
+--------------------------------------------------------------------------------------------------
+
 redb is a simple, portable, high-performance, ACID, embedded key-value store.
 
 Each redb database contains a collection of tables, and supports a single writer and multiple
@@ -8,60 +10,296 @@ serializable, in which all writes are applied sequentially.
 
 Each table is a key-value mapping providing an interface similar to `BTreeMap`.
 
-## Assumptions about underlying media
-redb is designed to be safe even in the event of power failure or on poorly behaved media.
-Therefore, we make only a few assumptions about the guarantees provided by the underlying filesystem:
-1. single byte writes are atomic: i.e., each byte will be written completely or not at all,
-   even in the event of a power failure
-2. following a `fsync` operation writes are durable
-3. ["powersafe overwrite"](https://www.sqlite.org/psow.html): When an application writes
-   a range of bytes in a file, no bytes outside of that range will change,
-   even if the write occurs just before a crash or power failure. sqlite makes this same
-   assumption, by default, in all modern versions.
-
-## File format
-A redb database file consists of a header, and several B-trees:
+# File format
+Logically, a redb database file consists of some metadata, and several B-trees:
 * pending free tree: mapping from transaction ids to the list of pages they freed
 * table tree: name -> table definition mapping of table names to their definitions
 * data tree(s) (per one table): key -> value mapping for table
 
-Except for the database header, all other data structures are copy-on-write.
+Except for the database metadata, all other data structures are copy-on-write.
+
+All multi-byte integers are stored in little-endian order.
 
 The database file begins with the database header, and is followed by one or more regions. Each region contains a
 header, and a data section which is split into many pages. These regions allow for efficient, dynamic, growth of the
 database file.
 
 ```
--------------------------------------------------
-|               Database header                 |
--------------------------------------------------
-|               Region header                   |
--------------------------------------------------
-|               Region data                     |
--------------------------------------------------
-|               ...more regions                 |
--------------------------------------------------
+<-------------------------------------------- 8 bytes ------------------------------------------->
+========================================== Super header ==========================================
+-------------------------------------------- Header ----------------------------------------------
+| magic number                                                                                   |
+| magic con.| god byte  | chksum typ| padding   | super-header pages                             |
+| page size                                     | region tracker state length                    |
+| database max size                                                                              |
+| region header pages                           | region max data pages                          |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+----------------------------------------- Commit slot 0 ------------------------------------------
+| version   | root nn   | f-root nn | padding                                                    |
+| root page number                                                                               |
+| root checksum                                                                                  |
+| root checksum (cont.)                                                                          |
+| freed root page number                                                                         |
+| freed checksum                                                                                 |
+| freed checksum (cont.)                                                                         |
+| commit id                                                                                      |
+| number of full regions                        | data pages in trailing region                  |
+| slot checksum                                                                                  |
+| slot checksum (cont.)                                                                          |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+----------------------------------------- Commit slot 1 ------------------------------------------
+|                                 Same layout as commit slot 0                                   |
+--------------------------------------------------------------------------------------------------
+| Region tracker state                                                                           |
+==================================================================================================
+| Region header                                                                                  |
+--------------------------------------------------------------------------------------------------
+| Region data                                                                                    |
+==================================================================================================
+| ...more regions                                                                                |
+==================================================================================================
 ```
 
-### Database header
-The database header contains several immutable fields, such the database page size, region size, and a magic number.
+## Database super-header
+
+The database super-header starts with 512 bytes of fixed size header and is followed by the region tracker which is sized based on
+the maximum database size. The super-header's length is rounded up to the next full page, so that the regions are page aligned.
+
+### Database header (64 bytes)
+The database header contains several immutable fields, such as the database page size, region size, and a magic number.
 Transaction data is stored in a double buffered field, and the primary copy is managed by updating a single byte that
 controls which transaction pointer is the primary.
 
-### Page allocator state
-The page allocator uses a two level allocator approach. The top level, the "region allocator", allocates regions of memory
-in the data section.
-Each region has a "regional allocator", which is stored in the footer of the region. This allocator uses a buddy allocator
-approach to allocate pages of sizes between the configured page size and the size of the region.
+* 9 bytes: magic number
+* 1 byte: god byte
+* 1 byte: checksum type
+* 1 byte: padding
+* 4 bytes: super-header pages
+* 4 bytes: page size
+* 4 bytes: region tracker state length
+* 8 bytes: database max size
+* *Definition of region:*
+* 4 bytes: region header pages
+* 4 bytes: region max data pages
+* 24 bytes: padding to 64 bytes
 
-The page allocator state is technically just a cache: it can be reconstructed by walking the btree from all active roots.
-The dirty bit is set on the allocator state before it is written to, and cleared when the database is closed.
-If the dirty bit is found set on the shadow page allocator state, when the database is opened, then it must be repaired
-by re-walking all the btree roots.
+`magic number` must be set to the ASCII letters 'redb' followed by 0x1A, 0x0A, 0xA9, 0x0D, 0x0A. This sequence is
+inspired by the PNG magic number.
 
-## Commit strategies
+`god byte`, so named because this byte controls the state of the entire database, is a bitfield containing two flags:
+* first bit: `primary_bit` flag which indicates whether transaction slot 0 or transaction slot 1 contains the latest commit.
+  redb relies on the fact that this is a single bit to perform atomic commits.
+* second bit: `recovery_required` flag, if set then the recovery process must be run when opening the database.
+  During the recovery process, the region tracker and regional allocator states -- described below -- are reconstructed
+  by walking the btree from all active roots.
 
-### Non-durable commits
+`checksum type` is an enum indicating whether checksums are used. It is `1` if checksums are disabled, and `2` if
+128bit XXH3 checksums are used. When checksums are enabled, the 1-phase commit strategy is used.
+
+`super-header pages` is the length of the super-header in pages
+
+`page size` is the size of a redb page in bytes
+
+`region tracker state length` is the size of the region tracker in bytes
+
+`database max size` is the maximum size of the database file in bytes
+
+`region header pages` is the number of pages in each region's header
+
+`region max data pages` is the maximum number of data pages in each region
+
+### Transaction slot 0 (128 bytes):
+* 1 byte: file format version number
+* 1 byte: boolean indicating that root page is non-null
+* 1 byte: boolean indicating that freed table root page is non-null
+* 5 bytes: padding to 64-bit aligned
+* 8 bytes: root page
+* 16 bytes: root checksum
+* 8 bytes: freed table root page
+* 16 bytes: freed table root checksum
+* 8 bytes: last committed transaction id
+* 4 bytes: number of full regions
+* 4 bytes: data pages in partial trailing region
+* 16 bytes: slot checksum
+* 40 bytes: padding to 128 bytes
+
+`version` the file format version of the database. This is stored in the transaction data, so that it can be atomically
+changed during an upgrade.
+
+`root page` is the page number of the root of the table tree.
+
+`root checksum` stores the XXH3_128bit checksum of the root page, which in turn stores the checksum of its child pages.
+When 2-phase commit is used this field is zero, because checksums are disabled.
+
+`freed table root page` is the page of the root of the pending free table.
+
+`freed table root checksum` is the same as `root checksum` but for the pending free table.
+
+`number of full regions` stores the number of full regions in the database. This can change during a transaction if the database
+grows of shrinks.
+
+`pages in partial trailing region` all pages except the last must be full. This stores the number of pages in the last region.
+
+`slot checksum` is the XXH3_128bit checksum of all the preceding fields in the transaction slot.
+
+### Transaction slot 1 (128 bytes):
+* Same layout as slot 0
+
+### Region tracker
+Following the database header is the region tracker, which is an array of `PageAllocator`s that track the page orders
+which are free in each region:
+```
+<-------------------------------------------- 8 bytes ------------------------------------------->
+==================================================================================================
+| num_allocators                                | sub_allocator_len                              |
+| PageAllocator data...                                                                          |
+==================================================================================================
+```
+
+A `PageAllocator` is a 64-way tree, where each node is a single value indicating whether any descendant is free.
+These nodes are stored as single bits, packed into `u64` values. Every height of the tree is fully populated, except
+the leaf layer.
+
+* 4 bytes: tree height
+* 4 bytes: number of elements
+* 4 bytes: capacity
+* 4 bytes (repeating): ending offset of layers. Does not include the root layer
+* n bytes: tree data
+
+```
+<-------------------------------------------- 8 bytes ------------------------------------------->
+==================================================================================================
+| height                                        | elements                                       |
+| capacity                                      | end offset...                                  |
+==================================================================================================
+| Tree data                                                                                      |
+==================================================================================================
+```
+
+## Region layout
+* 1 byte: region format version
+* 3 bytes: padding
+* 4 bytes: length of the allocator state in bytes
+* n bytes: the allocator state
+
+Each region consists of a header containing metadata -- primarily the allocation state of the region's pages -- and a
+data section containing pages. Pages have a base size, which defaults to the OS page size, and are variably sized in
+power of 2 multiples of the base size. The format of pages is described in the [following section](#b-tree-pages)
+
+```
+<-------------------------------------------- 8 bytes ------------------------------------------->
+==================================================================================================
+| version  | padding                            | allocator state length                         |
+--------------------------------------------------------------------------------------------------
+| Regional allocator state                                                                       |
+==================================================================================================
+| Region pages                                                                                   |
+==================================================================================================
+```
+
+### Regional allocator state
+The regional allocator is a buddy allocator and allocates pages within the region. Its buddy allocator implementation relies
+on the `PageAllocator` described above.
+* 1 byte: max order
+* 3 byte: padding to 32bits aligned
+* 4 byte (repeating): end offset of order allocator state
+* n bytes: allocator data
+
+```
+<-------------------------------------------- 8 bytes ------------------------------------------->
+==================================================================================================
+| max order | padding                           | order end offset                               |
+--------------------------------------------------------------------------------------------------
+| Additional order end offsets...                                                                |
+==================================================================================================
+| Order allocator state...                                                                       |
+==================================================================================================
+```
+
+## B-tree pages
+
+Allocated pages may be of two types: b-tree branch pages, or b-tree leaf pages. The format of each is described below:
+
+### Branch page:
+* 1 byte: type
+* 1 byte: padding to 16bit alignment
+* 2 bytes: num_keys (number of keys)
+* 4 byte: padding to 64bit alignment
+* repeating (num_keys + 1 times):
+* * 16 bytes: child page checksum
+* repeating (num_keys + 1 times):
+* * 8 bytes: page number
+* (optional) repeating (num_keys times):
+* * 4 bytes: key end. Ending offset of the key, exclusive
+* repeating (num_keys times):
+* * n bytes: key data
+```
+<-------------------------------------------- 8 bytes ------------------------------------------->
+==================================================================================================
+| type     | padding   | number of keys        | padding                                         |
+--------------------------------------------------------------------------------------------------
+| child page checksum (repeated num_keys + 1 times)                                              |
+|                                                                                                |
+--------------------------------------------------------------------------------------------------
+| child page number (repeated num_keys + 1 times)                                                |
+--------------------------------------------------------------------------------------------------
+| (optional) key end (repeated num_keys times) | ... more key ends                               |
+==================================================================================================
+| Key data                                                                                       |
+==================================================================================================
+```
+`type` is `2` for a branch page
+
+`num_keys` specifies the number of key in the page
+
+`child page checksum` is an array of checksums of the child pages in the `page number` array
+
+`page number` is an array of child page numbers
+
+`key_end` is an array of ending offsets for the keys. It is optional, MUST NOT be stored for fixed width key types
+
+### Leaf page:
+* 1 byte: type
+* 1 byte: reserved (padding to 16bits aligned)
+* 2 bytes: num_entries (number of pairs)
+* (optional) repeating (num_entries times):
+* * 4 bytes: key_end
+* (optional) repeating (num_entries times):
+* * 4 bytes: value_end
+* repeating (num_entries times):
+* * n bytes: key data
+* repeating (num_entries times):
+* * n bytes: value data
+```
+<-------------------------------------------- 8 bytes ------------------------------------------->
+==================================================================================================
+| type     | padding   | number of entries      | (optional) key end (repeated entries times)    |
+--------------------------------------------------------------------------------------------------
+| (optional) value end (repeated entries times) | .. more key/value ends                         |
+==================================================================================================
+| Key data                                                                                       |
+==================================================================================================
+| Value data                                                                                     |
+==================================================================================================
+```
+
+`type` is `1` for a leaf page
+
+`num_entries` specifies the number of key-value pairs in the leaf
+
+`key_end` is an array of ending offsets for the keys. It is optional, MUST NOT be stored for fixed width key types
+
+`value_end` is an array of ending offsets for the values. It is optional, MUST NOT be stored for fixed width value types
+
+# Commit strategies
+
+## Non-durable commits
 redb supports "non-durable" commits, meaning that there is no guarantee of durability. However, in the event of a crash
 the database is still guaranteed to be consistent, and will return to either the last non-durable commit or the last
 full commit that was made.
@@ -71,12 +309,12 @@ In the event of a crash, the database will simply rollback to the primary page a
 rebuilt via the normal repair process.
 Note that freeing pages during a non-durable commit is not permitted, because it could be rolled back at anytime.
 
-### 2-phase durable commits (2PC)
+## 2-phase durable commits (2PC)
 A 2-phase commit strategy is used when the database is configured for maximum write throughput (of bytes per transaction).
 First, data is written to a new copy of the btree, second an `fsync` is performed,
 finally the byte controlling which copy of the btree is the primary is flipped and a second `fsync` is performed.
 
-### 1-phase + checksum durable commits (1PC+C)
+## 1-phase + checksum durable commits (1PC+C)
 A reduced latency commit strategy is used by default, in which all branch pages in the btree contain checksums of their children,
 these checksums form a non-cryptographic Merkle tree allowing corruption of a btree to be detected. A commit is then
 performed with a single `fsync`. First, all data and checksums are written, along with a monotonically incrementing transaction
@@ -94,7 +332,7 @@ occur during the fsync:
       1. If none of the transaction data was written, we will detect that the transaction id is older, and roll it back
       2. If some, but not all was written, then the checksum verification will fail, and it will be rolled back.
 
-#### Security of 1PC+C
+### Security of 1PC+C
 Given that the 1PC+C commit strategy relies on a non-cyptographic checksum (XXH3) there is, at least in theory, a way to attack it.
 Users who need to accept malicious input are encouraged to use 2PC instead.
 
@@ -118,3 +356,15 @@ To do this they need to:
 With complete control over the workload, or read access to the database file (3) is possible, since XXH3 is not collision resistant.
 However, it requires the attacker to have knowledge of the database contents, because the input to the checksum includes
 many other values (all the other keys in the b-tree root, along with their child node numbers)
+
+# Assumptions about underlying media
+redb is designed to be safe even in the event of power failure or on poorly behaved media.
+Therefore, we make only a few assumptions about the guarantees provided by the underlying filesystem:
+1. single byte writes are atomic: i.e., each byte will be written completely or not at all,
+   even in the event of a power failure
+2. following a `fsync` or `msync` operation writes are durable
+3. ["powersafe overwrite"](https://www.sqlite.org/psow.html): When an application writes
+   a range of bytes in a file, no bytes outside of that range will change,
+   even if the write occurs just before a crash or power failure. sqlite makes this same
+   assumption, by default, in all modern versions.
+
