@@ -1156,10 +1156,10 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
 
     fn key_section_start(&self) -> usize {
         if self.fixed_key_size.is_none() {
-            4 + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
+            8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
                 + size_of::<u32>() * self.num_keys()
         } else {
-            4 + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
+            8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
         }
     }
 
@@ -1175,7 +1175,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         if let Some(fixed) = self.fixed_key_size {
             return self.key_section_start() + fixed * (n + 1);
         }
-        let offset = 4
+        let offset = 8
             + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
             + size_of::<u32>() * n;
         u32::from_le_bytes(
@@ -1203,7 +1203,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
             return None;
         }
 
-        let offset = 4 + size_of::<Checksum>() * n;
+        let offset = 8 + size_of::<Checksum>() * n;
         Some(Checksum::from_le_bytes(
             self.page.memory()[offset..(offset + size_of::<Checksum>())]
                 .try_into()
@@ -1217,7 +1217,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         }
 
         let offset =
-            4 + size_of::<Checksum>() * self.count_children() + PageNumber::serialized_size() * n;
+            8 + size_of::<Checksum>() * self.count_children() + PageNumber::serialized_size() * n;
         Some(PageNumber::from_le_bytes(
             self.page.memory()[offset..(offset + PageNumber::serialized_size())]
                 .try_into()
@@ -1368,8 +1368,9 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
 // and rewriting all fields if any dynamically sized fields are written
 // Layout is:
 // 1 byte: type
-// 1 byte: reserved (padding to 32bits aligned)
+// 1 byte: padding (padding to 16bits aligned)
 // 2 bytes: num_keys (number of keys)
+// 4 byte: padding (padding to 64bits aligned)
 // repeating (num_keys + 1 times):
 // 16 bytes: child page checksum
 // repeating (num_keys + 1 times):
@@ -1392,13 +1393,13 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
         fixed_key_size: Option<usize>,
     ) -> usize {
         if fixed_key_size.is_none() {
-            let fixed_size = 4
+            let fixed_size = 8
                 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1)
                 + size_of::<u32>() * num_keys;
             size_of_keys + fixed_size
         } else {
             let fixed_size =
-                4 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1);
+                8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1);
             size_of_keys + fixed_size
         }
     }
@@ -1415,8 +1416,8 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
         #[cfg(debug_assertions)]
         {
             // Poison all the child pointers & key offsets, in case the caller forgets to write them
-            let start = 4 + size_of::<Checksum>() * (num_keys + 1);
-            let last = 4
+            let start = 8 + size_of::<Checksum>() * (num_keys + 1);
+            let last = 8
                 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1)
                 + size_of::<u32>() * num_keys;
             for x in &mut page.memory_mut()[start..last] {
@@ -1432,17 +1433,17 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
     }
 
     pub(super) fn write_first_page(&mut self, page_number: PageNumber, checksum: Checksum) {
-        let offset = 4;
+        let offset = 8;
         self.page.memory_mut()[offset..(offset + size_of::<Checksum>())]
             .copy_from_slice(&checksum.to_le_bytes());
-        let offset = 4 + size_of::<Checksum>() * (self.num_keys + 1);
+        let offset = 8 + size_of::<Checksum>() * (self.num_keys + 1);
         self.page.memory_mut()[offset..(offset + PageNumber::serialized_size())]
             .copy_from_slice(&page_number.to_le_bytes());
     }
 
     fn key_section_start(&self) -> usize {
         let mut offset =
-            4 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (self.num_keys + 1);
+            8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (self.num_keys + 1);
         if self.fixed_key_size.is_none() {
             offset += size_of::<u32>() * self.num_keys;
         }
@@ -1454,7 +1455,7 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
         if let Some(fixed) = self.fixed_key_size {
             return self.key_section_start() + fixed * (n + 1);
         }
-        let offset = 4
+        let offset = 8
             + (PageNumber::serialized_size() + size_of::<Checksum>()) * (self.num_keys + 1)
             + size_of::<u32>() * n;
         u32::from_le_bytes(
@@ -1476,10 +1477,10 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
         assert!(n < self.num_keys as usize);
         assert_eq!(n, self.keys_written);
         self.keys_written += 1;
-        let offset = 4 + size_of::<Checksum>() * (n + 1);
+        let offset = 8 + size_of::<Checksum>() * (n + 1);
         self.page.memory_mut()[offset..(offset + size_of::<Checksum>())]
             .copy_from_slice(&checksum.to_le_bytes());
-        let offset = 4
+        let offset = 8
             + size_of::<Checksum>() * (self.num_keys + 1)
             + PageNumber::serialized_size() * (n + 1);
         self.page.memory_mut()[offset..(offset + PageNumber::serialized_size())]
@@ -1491,7 +1492,7 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
             self.key_section_start()
         };
         if self.fixed_key_size.is_none() {
-            let offset = 4
+            let offset = 8
                 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (self.num_keys + 1)
                 + size_of::<u32>() * n;
             self.page.memory_mut()[offset..(offset + size_of::<u32>())]
@@ -1532,11 +1533,11 @@ impl<'a: 'b, 'b> BranchMutator<'a, 'b> {
         checksum: Checksum,
     ) {
         debug_assert!(i <= self.num_keys());
-        let offset = 4 + size_of::<Checksum>() * i;
+        let offset = 8 + size_of::<Checksum>() * i;
         self.page.memory_mut()[offset..(offset + size_of::<Checksum>())]
             .copy_from_slice(&checksum.to_le_bytes());
         let offset =
-            4 + size_of::<Checksum>() * (self.num_keys() + 1) + PageNumber::serialized_size() * i;
+            8 + size_of::<Checksum>() * (self.num_keys() + 1) + PageNumber::serialized_size() * i;
         self.page.memory_mut()[offset..(offset + PageNumber::serialized_size())]
             .copy_from_slice(&page_number.to_le_bytes());
     }
