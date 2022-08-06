@@ -9,14 +9,13 @@ use crate::{
     Result, Table, TableDefinition,
 };
 #[cfg(feature = "logging")]
-use log::info;
+use log::{info, warn};
 use std::cell::RefCell;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::panic;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Informational storage stats about the database
 #[derive(Debug)]
@@ -104,7 +103,7 @@ pub struct WriteTransaction<'db> {
     freed_tree: BtreeMut<'db, FreedTableKey, [u8]>,
     freed_pages: Rc<RefCell<Vec<PageNumber>>>,
     open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
-    completed: AtomicBool,
+    completed: bool,
     durability: Durability,
 }
 
@@ -127,7 +126,7 @@ impl<'db> WriteTransaction<'db> {
             freed_tree: BtreeMut::new(freed_root, db.get_memory(), freed_pages.clone()),
             freed_pages,
             open_tables: RefCell::new(Default::default()),
-            completed: Default::default(),
+            completed: false,
             durability: Durability::Immediate,
         })
     }
@@ -296,7 +295,7 @@ impl<'db> WriteTransaction<'db> {
             Durability::Immediate => self.durable_commit(false)?,
         }
 
-        self.completed.store(true, Ordering::Release);
+        self.completed = true;
         #[cfg(feature = "logging")]
         info!("Finished commit of transaction id={}", self.transaction_id);
 
@@ -306,13 +305,17 @@ impl<'db> WriteTransaction<'db> {
     /// Abort the transaction
     ///
     /// All writes performed in this transaction will be rolled back
-    pub fn abort(self) -> Result {
+    pub fn abort(mut self) -> Result {
+        self.abort_inner()
+    }
+
+    fn abort_inner(&mut self) -> Result {
         #[cfg(feature = "logging")]
         info!("Aborting transaction id={}", self.transaction_id);
         self.table_tree.borrow_mut().clear_table_root_updates();
         self.mem.rollback_uncommitted_writes()?;
         self.db.deallocate_write_transaction(self.transaction_id);
-        self.completed.store(true, Ordering::Release);
+        self.completed = true;
         #[cfg(feature = "logging")]
         info!("Finished abort of transaction id={}", self.transaction_id);
         Ok(())
@@ -475,8 +478,12 @@ impl<'db> WriteTransaction<'db> {
 
 impl<'a> Drop for WriteTransaction<'a> {
     fn drop(&mut self) {
-        if !self.completed.load(Ordering::Acquire) {
-            self.db.record_leaked_write_transaction(self.transaction_id);
+        if !self.completed {
+            #[allow(unused_variables)]
+            if let Err(error) = self.abort_inner() {
+                #[cfg(feature = "logging")]
+                warn!("Failure automatically aborting transaction: {}", error);
+            }
         }
     }
 }

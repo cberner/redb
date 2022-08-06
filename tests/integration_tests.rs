@@ -951,18 +951,19 @@ fn delete_table() {
 }
 
 #[test]
-fn leaked_write() {
+fn dropped_write() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
-    drop(write_txn);
-    let result = db.begin_write();
-    if let Err(Error::LeakedWriteTransaction(_message)) = result {
-        // Good
-    } else {
-        panic!();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"hello", b"world").unwrap();
     }
+    drop(write_txn);
+    let read_txn = db.begin_read().unwrap();
+    let result = read_txn.open_table(SLICE_TABLE);
+    assert!(matches!(result, Err(Error::TableDoesNotExist(_))));
 }
 
 #[test]

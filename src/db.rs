@@ -8,17 +8,17 @@ use crate::{ReadTransaction, Result, WriteTransaction};
 use std::collections::btree_set::BTreeSet;
 use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
+use std::io;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::ops::RangeFull;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::{io, panic};
 
 use crate::multimap_table::parse_subtree_roots;
 #[cfg(feature = "logging")]
-use log::{error, info};
+use log::info;
 
 pub(crate) type TransactionId = u64;
 type AtomicTransactionId = AtomicU64;
@@ -150,7 +150,6 @@ pub struct Database {
     next_transaction_id: AtomicTransactionId,
     live_read_transactions: Mutex<BTreeSet<TransactionId>>,
     live_write_transaction: Mutex<Option<TransactionId>>,
-    leaked_write_transaction: Mutex<Option<&'static panic::Location<'static>>>,
 }
 
 impl Database {
@@ -345,21 +344,7 @@ impl Database {
             next_transaction_id: AtomicTransactionId::new(next_transaction_id),
             live_write_transaction: Mutex::new(None),
             live_read_transactions: Mutex::new(Default::default()),
-            leaked_write_transaction: Mutex::new(Default::default()),
         })
-    }
-
-    pub(crate) fn record_leaked_write_transaction(&self, transaction_id: TransactionId) {
-        assert_eq!(
-            transaction_id,
-            self.live_write_transaction.lock().unwrap().unwrap()
-        );
-        *self.leaked_write_transaction.lock().unwrap() = Some(panic::Location::caller());
-        #[cfg(feature = "logging")]
-        error!(
-            "Leaked write transaction from {}",
-            panic::Location::caller()
-        );
     }
 
     pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) {
@@ -391,12 +376,6 @@ impl Database {
     /// Returns a [`WriteTransaction`] which may be used to read/write to the database. Only a single
     /// write may be in progress at a time
     pub fn begin_write(&self) -> Result<WriteTransaction> {
-        let guard = self.leaked_write_transaction.lock().unwrap();
-        if let Some(leaked) = *guard {
-            return Err(Error::LeakedWriteTransaction(leaked));
-        }
-        drop(guard);
-
         assert!(self.live_write_transaction.lock().unwrap().is_none());
         let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
         *self.live_write_transaction.lock().unwrap() = Some(id);
