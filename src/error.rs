@@ -13,7 +13,6 @@ pub enum Error {
         requested_size: usize,
     },
     TableDoesNotExist(String),
-    LeakedWriteTransaction(&'static panic::Location<'static>),
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
     TableAlreadyOpen(String, &'static panic::Location<'static>),
@@ -56,9 +55,6 @@ impl Display for Error {
             }
             Error::TableDoesNotExist(table) => {
                 write!(f, "Table '{}' does not exist", table)
-            }
-            Error::LeakedWriteTransaction(location) => {
-                write!(f, "Leaked write transaction: {}", location)
             }
             Error::TableAlreadyOpen(name, location) => {
                 write!(f, "Table '{}' already opened at: {}", name, location)
