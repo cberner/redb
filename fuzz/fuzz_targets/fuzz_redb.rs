@@ -132,7 +132,7 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
                     FuzzOperation::Remove { key } => {
                         let key = key.value;
                         let entry = reference.remove(&key);
-                        let iter = table.remove_all(&key).unwrap();
+                        let iter = table.remove_all(&key)?;
                         assert_multimap_value_eq(iter, entry.as_ref());
                     }
                     FuzzOperation::RemoveOne { key, value_size } => {
@@ -143,7 +143,7 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
                         if reference.entry(key).or_default().is_empty() {
                             reference.remove(&key);
                         }
-                        let existed = table.remove(&key, &value).unwrap();
+                        let existed = table.remove(&key, &value)?;
                         assert_eq!(reference_existed, existed);
                     }
                     FuzzOperation::Len {} => {
