@@ -24,6 +24,7 @@ publish_py: test_py
 test_py: install_py
 	python3 -m unittest discover
 
+
 install_py: pre
 	maturin develop
 
