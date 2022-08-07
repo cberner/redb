@@ -332,8 +332,6 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'
     }
 }
 
-// TODO: add fuzzer for multimap tables
-
 /// A multimap table
 ///
 /// [Multimap tables](https://en.wikipedia.org/wiki/Multimap) may have multiple values associated with each key
@@ -561,13 +559,47 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'tx
                     let existed = unsafe { subtree.remove(value)?.is_some() };
 
                     if let Some((new_root, new_checksum)) = subtree.get_root() {
-                        // TODO: if the tree has shrunk to a single small leaf then inline it
-                        unsafe {
-                            self.tree.insert(
-                                key,
-                                &DynamicCollection::new_subtree(new_root, new_checksum),
-                            )?
-                        };
+                        let page = self.mem.get_page(new_root);
+                        match page.memory()[0] {
+                            LEAF => {
+                                let accessor = LeafAccessor::new(
+                                    page.memory(),
+                                    V::fixed_width(),
+                                    <() as RedbValue>::fixed_width(),
+                                );
+                                let len = accessor.total_length();
+                                if len < self.mem.get_page_size() / 2 {
+                                    unsafe {
+                                        self.tree.insert(
+                                            key,
+                                            &DynamicCollection::new_inline(&page.memory()[..len]),
+                                        )?
+                                    };
+                                    drop(page);
+                                    unsafe {
+                                        if !self.mem.free_if_uncommitted(new_root)? {
+                                            (*self.freed_pages).borrow_mut().push(new_root);
+                                        }
+                                    }
+                                } else {
+                                    unsafe {
+                                        self.tree.insert(
+                                            key,
+                                            &DynamicCollection::new_subtree(new_root, new_checksum),
+                                        )?
+                                    };
+                                }
+                            }
+                            BRANCH => {
+                                unsafe {
+                                    self.tree.insert(
+                                        key,
+                                        &DynamicCollection::new_subtree(new_root, new_checksum),
+                                    )?
+                                };
+                            }
+                            _ => unreachable!(),
+                        }
                     } else {
                         unsafe { self.tree.remove(key)? };
                     }
