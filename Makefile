@@ -19,7 +19,7 @@ release_native: pre
 
 publish_py: test_py
 	docker pull quay.io/pypa/manylinux2014_x86_64
-	docker run -it --rm -v $(shell pwd):/redb quay.io/pypa/manylinux2014_x86_64 /redb/py_publish.sh
+	docker run -it --rm -v $(shell pwd):/redb-ro:ro quay.io/pypa/manylinux2014_x86_64 /redb-ro/py_publish.sh
 
 test_py: install_py
 	python3 -m unittest discover
