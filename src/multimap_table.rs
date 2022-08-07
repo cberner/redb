@@ -10,6 +10,7 @@ use crate::{Result, WriteTransaction};
 use std::cell::RefCell;
 use std::convert::TryInto;
 use std::marker::PhantomData;
+use std::mem;
 use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull};
 use std::rc::Rc;
@@ -155,6 +156,29 @@ impl DynamicCollection {
         }
     }
 
+    fn iter_free_on_drop<'a, V: RedbKey + ?Sized>(
+        &self,
+        pages: Vec<PageNumber>,
+        freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+        mem: &'a TransactionalMemory,
+    ) -> MultimapValueIter<'a, V> {
+        match self.collection_type() {
+            Inline => {
+                let leaf_iter = LeafKeyIter::new(
+                    self.as_inline().to_vec(), // TODO: optimize out this copy
+                    V::fixed_width(),
+                    <() as RedbValue>::fixed_width(),
+                );
+                MultimapValueIter::new_inline(leaf_iter)
+            }
+            Subtree => {
+                let root = self.as_subtree().0;
+                let inner = BtreeRangeIter::new::<RangeFull, &V>(.., Some(root), mem);
+                MultimapValueIter::new_subtree_free_on_drop(inner, freed_pages, pages, mem)
+            }
+        }
+    }
+
     fn new_inline(data: &[u8]) -> Self {
         let mut result = vec![Inline.into()];
         result.extend_from_slice(data);
@@ -188,18 +212,41 @@ impl<'a, V: RedbKey + ?Sized + 'a> ValueIterState<'a, V> {
 #[doc(hidden)]
 pub struct MultimapValueIter<'a, V: RedbKey + ?Sized + 'a> {
     inner: ValueIterState<'a, V>,
+    freed_pages: Option<Rc<RefCell<Vec<PageNumber>>>>,
+    free_on_drop: Vec<PageNumber>,
+    mem: Option<&'a TransactionalMemory>,
 }
 
 impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
     fn new_subtree(inner: BtreeRangeIter<'a, V, ()>) -> Self {
         Self {
             inner: ValueIterState::Subtree(inner),
+            freed_pages: None,
+            free_on_drop: vec![],
+            mem: None,
+        }
+    }
+
+    fn new_subtree_free_on_drop(
+        inner: BtreeRangeIter<'a, V, ()>,
+        freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+        pages: Vec<PageNumber>,
+        mem: &'a TransactionalMemory,
+    ) -> Self {
+        Self {
+            inner: ValueIterState::Subtree(inner),
+            freed_pages: Some(freed_pages),
+            free_on_drop: pages,
+            mem: Some(mem),
         }
     }
 
     fn new_inline(inner: LeafKeyIter) -> Self {
         Self {
             inner: ValueIterState::InlineLeaf(inner),
+            freed_pages: None,
+            free_on_drop: vec![],
+            mem: None,
         }
     }
 
@@ -214,10 +261,31 @@ impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
         }
     }
 
-    pub fn rev(self) -> Self {
-        Self {
-            inner: self.inner.reverse(),
+    pub fn rev(mut self) -> Self {
+        // TODO: remove this hack
+        let mut dummy_state =
+            ValueIterState::InlineLeaf(LeafKeyIter::new(vec![1, 0, 0, 0], None, None));
+        mem::swap(&mut self.inner, &mut dummy_state);
+        self.inner = dummy_state.reverse();
+
+        self
+    }
+}
+
+impl<'a, V: RedbKey + ?Sized> Drop for MultimapValueIter<'a, V> {
+    fn drop(&mut self) {
+        for page in self.free_on_drop.iter() {
+            // TODO: make free_if_uncommitted not return a Result by moving the dirtying of the allocator state into the open method of the TransactionMemory
+            unsafe {
+                // Safety: we have a &mut on the transaction
+                if !self.mem.unwrap().free_if_uncommitted(*page).unwrap() {
+                    (*self.freed_pages.as_ref().unwrap())
+                        .borrow_mut()
+                        .push(*page);
+                }
+            }
         }
+        if !self.free_on_drop.is_empty() {}
     }
 }
 
@@ -522,11 +590,11 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'tx
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
         let iter = if let Some(collection) = unsafe { self.tree.remove(key)? } {
+            let mut pages = vec![];
             if matches!(
                 collection.to_value().collection_type(),
                 DynamicCollectionType::Subtree
             ) {
-                // TODO: free these when the iter is dropped, if they are uncommitted
                 let root = collection.to_value().as_subtree().0;
                 let all_pages = AllPageNumbersBtreeIter::new(
                     root,
@@ -535,10 +603,12 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'tx
                     self.mem,
                 );
                 for page in all_pages {
-                    (*self.freed_pages).borrow_mut().push(page);
+                    pages.push(page);
                 }
             }
-            collection.to_value().iter(self.mem)
+            collection
+                .to_value()
+                .iter_free_on_drop(pages, self.freed_pages.clone(), self.mem)
         } else {
             MultimapValueIter::new_subtree(BtreeRangeIter::new::<RangeFull, &V>(.., None, self.mem))
         };
