@@ -28,6 +28,7 @@ jobs:
                 ~/.cargo/registry/index/
                 ~/.cargo/registry/cache/
                 ~/.cargo/git/db/
+                target/
             key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}-cargo-deny-0-11-4
 
       - name: Check for forbidden words
