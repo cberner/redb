@@ -29,7 +29,7 @@ jobs:
                 ~/.cargo/registry/cache/
                 ~/.cargo/git/db/
                 target/
-            key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}-cargo-deny-0-11-4
+            key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}-cargo-deny-0-12-2
 
       - name: Check for forbidden words
         run: "! grep --include='*.rs' -RE 'to_be_bytes|from_be_bytes|dbg!' ."
@@ -53,7 +53,7 @@ jobs:
 
       - name: Install cargo-deny
         if: steps.rust-cache.outputs.cache-hit != 'true'
-        run: cargo install --force --version 0.11.4 cargo-deny --locked
+        run: cargo install --force --version 0.12.2 cargo-deny --locked
 
       - name: Compile x64
         run: cargo build --all-targets --all-features
