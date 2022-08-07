@@ -1,5 +1,6 @@
 use redb::ReadableTable;
 use redb::TableDefinition;
+use rocksdb::{Direction, IteratorMode, TransactionDB, TransactionOptions, WriteOptions};
 use std::fs;
 use std::fs::File;
 use std::path::Path;
@@ -310,6 +311,88 @@ impl<'a, 'b> BenchReadTransaction<'b> for LmdbRkvBenchReadTransaction<'a> {
             .open_ro_cursor(self.db)
             .unwrap()
             .iter_from(key)
+            .next()
+            .is_some()
+    }
+}
+
+pub struct RocksdbBenchDatabase<'a> {
+    db: &'a TransactionDB,
+}
+
+impl<'a> RocksdbBenchDatabase<'a> {
+    pub fn new(db: &'a TransactionDB) -> Self {
+        Self { db }
+    }
+}
+
+impl<'a> BenchDatabase for RocksdbBenchDatabase<'a> {
+    type W = RocksdbBenchWriteTransaction<'a>;
+    type R = RocksdbBenchReadTransaction<'a>;
+
+    fn db_type_name() -> &'static str {
+        "rocksdb"
+    }
+
+    fn write_transaction(&mut self) -> Self::W {
+        let mut write_opt = WriteOptions::new();
+        write_opt.set_sync(true);
+        let mut txn_opt = TransactionOptions::new();
+        txn_opt.set_snapshot(true);
+        let txn = self.db.transaction_opt(&write_opt, &txn_opt);
+        RocksdbBenchWriteTransaction { txn }
+    }
+
+    fn read_transaction(&self) -> Self::R {
+        let snapshot = self.db.snapshot();
+        RocksdbBenchReadTransaction { snapshot }
+    }
+}
+
+pub struct RocksdbBenchWriteTransaction<'a> {
+    txn: rocksdb::Transaction<'a, TransactionDB>,
+}
+
+impl<'a, 'b> BenchWriteTransaction<'b> for RocksdbBenchWriteTransaction<'a> {
+    type T = RocksdbBenchInserter<'b>;
+
+    fn get_inserter(&'b self) -> Self::T {
+        RocksdbBenchInserter { txn: &self.txn }
+    }
+
+    fn commit(self) -> Result<(), ()> {
+        self.txn.commit().map_err(|_| ())
+    }
+}
+
+pub struct RocksdbBenchInserter<'a> {
+    txn: &'a rocksdb::Transaction<'a, TransactionDB>,
+}
+
+impl BenchInserter for RocksdbBenchInserter<'_> {
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
+        self.txn.put(key, value).map_err(|_| ())
+    }
+
+    fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
+        self.txn.delete(key).map_err(|_| ())
+    }
+}
+
+pub struct RocksdbBenchReadTransaction<'a> {
+    snapshot: rocksdb::SnapshotWithThreadMode<'a, TransactionDB>,
+}
+
+impl<'a, 'b> BenchReadTransaction<'b> for RocksdbBenchReadTransaction<'a> {
+    type Output = Vec<u8>;
+
+    fn get(&'b self, key: &[u8]) -> Option<Vec<u8>> {
+        self.snapshot.get(key).unwrap()
+    }
+
+    fn exists_after(&'b self, key: &[u8]) -> bool {
+        self.snapshot
+            .iterator(IteratorMode::From(key, Direction::Forward))
             .next()
             .is_some()
     }
