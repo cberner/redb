@@ -27,6 +27,7 @@ jobs:
                 ~/.cargo/bin/
                 ~/.cargo/registry/index/
                 ~/.cargo/registry/cache/
+                ~/.cargo/registry/src/
                 ~/.cargo/git/db/
                 target/
             key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}-cargo-deny-0-12-2
