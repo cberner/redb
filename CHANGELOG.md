@@ -6,7 +6,7 @@
   n_v is the number of stored values
 * Fix compilation errors for 32bit x86 targets
 * Add support for the unit type, `()`, as a value
-* Return an error when attempting to open the same database file writing in multiple locations, concurrently
+* Return an error when attempting to open the same database file for writing in multiple locations, concurrently
 * More robust handling of fsync failures
 * Change `MultimapTable::range` to return an iterator of key-value-collection pairs, instead of key-value pairs
 * Automatically abort `WriteTransaction` on drop
