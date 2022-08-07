@@ -107,6 +107,7 @@ exceptions = [
     # Each entry is the crate and version constraint, and its specific allow
     # list
     { allow = ["Unicode-DFS-2016"], name = "unicode-ident", version = "*" }, # Used only by comfy-table in the benchmarks
+    { allow = ["ISC"], name = "libloading", version = "*" }, # Used only by rocksdb in the benchmarks
 ]
 
 # Some crates don't have (easily) machine readable licensing information,

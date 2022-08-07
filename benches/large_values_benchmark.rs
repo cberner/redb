@@ -151,6 +151,13 @@ fn main() {
         benchmark(table)
     };
 
+    let rocksdb_results = {
+        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
+        let db = rocksdb::TransactionDB::open_default(tmpfile.path()).unwrap();
+        let table = RocksdbBenchDatabase::new(&db);
+        benchmark(table)
+    };
+
     let sled_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
         let db = sled::Config::new().path(tmpfile.path()).open().unwrap();
@@ -168,6 +175,7 @@ fn main() {
         redb_latency_results,
         redb_throughput_results,
         lmdb_results,
+        rocksdb_results,
         sled_results,
     ] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
@@ -177,7 +185,7 @@ fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_table_width(100);
-    table.set_header(&["", "redb (1PC+C)", "redb (2PC)", "lmdb", "sled"]);
+    table.set_header(&["", "redb (1PC+C)", "redb (2PC)", "lmdb", "rocksdb", "sled"]);
     for row in rows {
         table.add_row(row);
     }

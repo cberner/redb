@@ -107,6 +107,13 @@ fn main() {
         benchmark(table)
     };
 
+    let rocksdb_results = {
+        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
+        let db = rocksdb::TransactionDB::open_default(tmpfile.path()).unwrap();
+        let table = RocksdbBenchDatabase::new(&db);
+        benchmark(table)
+    };
+
     let sled_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
         let db = sled::Config::new().path(tmpfile.path()).open().unwrap();
@@ -120,7 +127,7 @@ fn main() {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [redb_results, lmdb_results, sled_results] {
+    for results in [redb_results, lmdb_results, rocksdb_results, sled_results] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
         }
@@ -128,7 +135,7 @@ fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_table_width(100);
-    table.set_header(&["", "redb", "lmdb", "sled"]);
+    table.set_header(&["", "redb", "lmdb", "rocksdb", "sled"]);
     for row in rows {
         table.add_row(row);
     }
