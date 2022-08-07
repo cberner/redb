@@ -1,13 +1,17 @@
 #!/bin/bash
 
+PYTHON3=/opt/python/cp311-cp311/bin/python3
+
+cp -r /redb-ro /redb
 cd /redb
-yum install -y python3-pip
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain=1.61.0
 source $HOME/.cargo/env
 
-pip3 install toml
-pip3 install maturin
+cd /tmp
+$PYTHON3 -m venv venv
+cd /redb
+source /tmp/venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install maturin
 
-# xargs is just to merge the lines together into a single line
-maturin publish --cargo-extra-args="--features python" \
- -i $(ls -1 /opt/python/*/bin/python3 | xargs | sed 's/ / -i /g')
+python3 -m maturin publish

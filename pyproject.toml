@@ -1,6 +1,12 @@
+[project]
+name = "redb"
+requires-python = ">=3.7"
+dynamic = ["version"]
+
 [build-system]
-requires = ["maturin>=0.11.3,<0.12"]
+requires = ["maturin>=0.13.0,<0.14"]
 build-backend = "maturin"
 
 [tool.maturin]
-cargo-extra-args = "--features python"
+compatibility = "manylinux2014"
+features = ["python"]
