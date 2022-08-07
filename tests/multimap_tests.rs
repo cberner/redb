@@ -102,20 +102,22 @@ fn range_query() {
     let end = b"1".as_ref();
     let mut iter = table.range(start..=end).unwrap();
 
-    let (key, mut values) = iter.next().unwrap();
-    for i in 0..5u8 {
-        assert_eq!(b"0", key);
-        let value = values.next().unwrap();
-        assert_eq!(&[i], value);
+    {
+        let (key, mut values) = iter.next().unwrap();
+        for i in 0..5u8 {
+            assert_eq!(b"0", key);
+            let value = values.next().unwrap();
+            assert_eq!(&[i], value);
+        }
     }
-
-    let (key, mut values) = iter.next().unwrap();
-    for i in 5..10u8 {
-        assert_eq!(b"1", key);
-        let value = values.next().unwrap();
-        assert_eq!(&[i], value);
+    {
+        let (key, mut values) = iter.next().unwrap();
+        for i in 5..10u8 {
+            assert_eq!(b"1", key);
+            let value = values.next().unwrap();
+            assert_eq!(&[i], value);
+        }
     }
-
     assert!(iter.next().is_none());
 }
 

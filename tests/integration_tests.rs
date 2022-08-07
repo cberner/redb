@@ -783,12 +783,16 @@ fn regression14() {
         t.insert(&776971, &value).unwrap();
 
         let mut iter = t.range(&514043..&(514043 + 514043)).unwrap().rev();
-        let (key, mut value_iter) = iter.next().unwrap();
-        assert_eq!(key, 776971);
-        assert_eq!(value_iter.next().unwrap(), &[0; 2230]);
-        let (key, mut value_iter) = iter.next().unwrap();
-        assert_eq!(key, 539749);
-        assert_eq!(value_iter.next().unwrap(), &[0; 1424]);
+        {
+            let (key, mut value_iter) = iter.next().unwrap();
+            assert_eq!(key, 776971);
+            assert_eq!(value_iter.next().unwrap(), &[0; 2230]);
+        }
+        {
+            let (key, mut value_iter) = iter.next().unwrap();
+            assert_eq!(key, 539749);
+            assert_eq!(value_iter.next().unwrap(), &[0; 1424]);
+        }
     }
     tx.abort().unwrap();
 }
