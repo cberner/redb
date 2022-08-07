@@ -4,6 +4,12 @@
 * Optimize `MultimapTable` storage format to use `O(k * log(n_k) + v * log(n_v / n_k))` space instead of `O(k * log(n_k + n_v) + v * log(n_k + n_v))` space,
   where k is the size of the stored keys, v is the size of the stored values, n_k is the number of stored keys,
   n_v is the number of stored values
+* Fix compilation errors for 32bit x86 targets
+* Add support for the unit type, `()`, as a value
+* Return an error when attempting to open the same database file writing in multiple locations, concurrently
+* More robust handling of fsync failures
+* Change `MultimapTable::range` to return an iterator of key-value-collection pairs, instead of key-value pairs
+* Automatically abort `WriteTransaction` on drop
 
 ## 0.4.0 - 2022-07-26
 * Add single phase with checksum commit strategy. This is now the default and reduces commit latency by ~2x. For more details,
