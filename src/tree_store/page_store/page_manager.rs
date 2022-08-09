@@ -610,8 +610,20 @@ impl TransactionalMemory {
         if let Some(size) = requested_page_size {
             assert_eq!(page_size, size);
         }
-        assert_eq!(metadata.primary_slot().get_version(), FILE_FORMAT_VERSION);
-        assert_eq!(metadata.secondary_slot().get_version(), FILE_FORMAT_VERSION);
+        let version = metadata.primary_slot().get_version();
+        if version != FILE_FORMAT_VERSION {
+            return Err(Error::Corrupted(format!(
+                "Expected file format version {}, found {}",
+                FILE_FORMAT_VERSION, version
+            )));
+        }
+        let version = metadata.secondary_slot().get_version();
+        if version != FILE_FORMAT_VERSION {
+            return Err(Error::Corrupted(format!(
+                "Expected file format version {}, found {}",
+                FILE_FORMAT_VERSION, version
+            )));
+        }
         let layout = metadata.primary_slot().get_data_section_layout();
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
