@@ -24,7 +24,8 @@ use std::sync::{Mutex, MutexGuard};
 // 9 bytes: magic number
 // 1 byte: page size exponent
 // 1 byte: god byte
-// 5 bytes: padding to 64-bit aligned
+// 1 byte: checksum type
+// 4 bytes: padding to 64-bit aligned
 // 8 bytes: region max usable bytes
 // 8 bytes: database max size
 //
