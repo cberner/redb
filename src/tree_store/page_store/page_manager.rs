@@ -1,7 +1,7 @@
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::grouped_bitmap::U64GroupedBitMapMut;
-use crate::tree_store::page_store::layout::DatabaseLayout;
+use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::utils::get_page_size;
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
@@ -20,14 +20,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 // Database layout:
+//
+// Super-header (header + region allocator state)
+// The super-header length is rounded up to the nearest full page size
+//
 // Header (first 128 bytes):
 // 9 bytes: magic number
-// 1 byte: page size exponent
+// 1 byte: max page order
 // 1 byte: god byte
 // 1 byte: checksum type
-// 4 bytes: padding to 64-bit aligned
-// 8 bytes: region max usable bytes
+// 4 bytes: super-header length
+// 4 bytes: page size
+// 4 bytes: region allocator state length
 // 8 bytes: database max size
+// Definition of region
+// 4 bytes: region header length
+// 4 bytes: regional allocator state length
+// 4 bytes: region max data pages
 //
 // Commit slot 0 (next 192 bytes):
 // 1 byte: version
@@ -39,11 +48,15 @@ use std::sync::{Mutex, MutexGuard};
 // 8 bytes: freed table root page
 // 16 bytes: freed table root checksum
 // 8 bytes: last committed transaction id
-// (db layout size) bytes: active database layout
+// 4 bytes: number of full regions
+// 4 bytes: data pages in partial trailing region
 // 16 bytes: slot checksum
 //
 // Commit slot 1 (next 192 bytes):
 // Same layout as slot 0
+//
+// TODO: the region allocator should be converted into a PageAllocator, not a Bitmap
+// Region allocator state (byte 512...(512 + n))
 
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
 // because the leaf node format uses 32bit offsets
@@ -52,21 +65,25 @@ const MAX_USABLE_REGION_SPACE: usize = 4 * 1024 * 1024 * 1024;
 // Default to only 128MiB on 32bit platforms, since the mmap likely cannot be 4GiB or even close.
 #[cfg(target_pointer_width = "32")]
 const MAX_USABLE_REGION_SPACE: usize = 128 * 1024 * 1024;
-pub(crate) const MAX_PAGE_ORDER: usize = 20;
+pub(crate) const MAX_MAX_PAGE_ORDER: usize = 20;
 pub(super) const MIN_USABLE_PAGES: usize = 10;
 const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
 
 // TODO: set to 1, when version 1.0 is released
-const FILE_FORMAT_VERSION: u8 = 103;
+const FILE_FORMAT_VERSION: u8 = 104;
 
 // Inspired by PNG's magic number
 const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
-const PAGE_SIZE_OFFSET: usize = MAGICNUMBER.len();
-const GOD_BYTE_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u8>();
+const MAX_PAGE_ORDER_OFFSET: usize = MAGICNUMBER.len();
+const GOD_BYTE_OFFSET: usize = MAX_PAGE_ORDER_OFFSET + size_of::<u8>();
 const CHECKSUM_TYPE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>();
-const RESERVED: usize = 4;
-const REGION_MAX_USABLE_OFFSET: usize = CHECKSUM_TYPE_OFFSET + size_of::<u8>() + RESERVED;
-const DB_SIZE_OFFSET: usize = REGION_MAX_USABLE_OFFSET + size_of::<u64>();
+const SUPERHEADER_LENGTH_OFFSET: usize = CHECKSUM_TYPE_OFFSET + size_of::<u8>();
+const PAGE_SIZE_OFFSET: usize = SUPERHEADER_LENGTH_OFFSET + size_of::<u32>();
+const REGION_ALLOCATOR_LENGTH_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u32>();
+const DB_SIZE_OFFSET: usize = REGION_ALLOCATOR_LENGTH_OFFSET + size_of::<u32>();
+const REGION_HEADER_LENGTH_OFFSET: usize = DB_SIZE_OFFSET + size_of::<u64>();
+const REGIONAL_ALLOCATOR_LENGTH_OFFSET: usize = REGION_HEADER_LENGTH_OFFSET + size_of::<u32>();
+const REGION_MAX_DATA_PAGES_OFFSET: usize = REGIONAL_ALLOCATOR_LENGTH_OFFSET + size_of::<u32>();
 const TRANSACTION_SIZE: usize = 192;
 const TRANSACTION_0_OFFSET: usize = 128;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
@@ -86,8 +103,10 @@ const ROOT_CHECKSUM_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
 const FREED_ROOT_OFFSET: usize = ROOT_CHECKSUM_OFFSET + size_of::<u128>();
 const FREED_ROOT_CHECKSUM_OFFSET: usize = FREED_ROOT_OFFSET + size_of::<u64>();
 const TRANSACTION_ID_OFFSET: usize = FREED_ROOT_CHECKSUM_OFFSET + size_of::<u128>();
-const DATA_LAYOUT_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
-const SLOT_CHECKSUM_OFFSET: usize = DATA_LAYOUT_OFFSET + DatabaseLayout::serialized_size();
+const NUM_FULL_REGIONS_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
+const TRAILING_REGION_DATA_PAGES_OFFSET: usize = NUM_FULL_REGIONS_OFFSET + size_of::<u32>();
+const SLOT_CHECKSUM_OFFSET: usize = TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>();
+const TRANSACTION_LAST_FIELD: usize = SLOT_CHECKSUM_OFFSET + size_of::<u128>();
 
 fn ceil_log2(x: usize) -> usize {
     if x.is_power_of_two() {
@@ -160,6 +179,49 @@ impl<'a> MetadataAccessor<'a> {
             mmap,
             guard,
         }
+    }
+
+    fn make_region_layout(&self, num_pages: usize) -> RegionLayout {
+        RegionLayout::new(
+            num_pages,
+            self.get_region_header_length(),
+            self.get_regional_allocator_state_length(),
+            self.get_max_page_order() as usize,
+            self.get_page_size(),
+        )
+    }
+
+    // TODO: refactor so that we're not passing DatabaseLayout objects all over the place
+    fn get_primary_layout(&self) -> DatabaseLayout {
+        let trailing_pages = self.primary_slot().get_trailing_region_data_pages();
+        let num_full_regions = self.primary_slot().get_full_regions();
+
+        let full_region = self.make_region_layout(self.get_region_max_data_pages());
+        let trailing_region = trailing_pages.map(|x| self.make_region_layout(x));
+
+        DatabaseLayout::new(
+            self.get_superheader_length(),
+            self.get_region_allocator_state_length(),
+            num_full_regions,
+            full_region,
+            trailing_region,
+        )
+    }
+
+    fn get_secondary_layout(&self) -> DatabaseLayout {
+        let trailing_pages = self.secondary_slot().get_trailing_region_data_pages();
+        let num_full_regions = self.secondary_slot().get_full_regions();
+
+        let full_region = self.make_region_layout(self.get_region_max_data_pages());
+        let trailing_region = trailing_pages.map(|x| self.make_region_layout(x));
+
+        DatabaseLayout::new(
+            self.get_superheader_length(),
+            self.get_region_allocator_state_length(),
+            num_full_regions,
+            full_region,
+            trailing_region,
+        )
     }
 
     fn primary_slot(&self) -> TransactionAccessor {
@@ -235,25 +297,102 @@ impl<'a> MetadataAccessor<'a> {
         self.header[..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
     }
 
-    fn get_page_size(&self) -> usize {
-        1usize << self.header[PAGE_SIZE_OFFSET]
-    }
-
-    fn set_page_size(&mut self, page_size: usize) {
-        self.header[PAGE_SIZE_OFFSET] = page_size.trailing_zeros() as u8;
-    }
-
-    fn get_region_max_usable_bytes(&self) -> usize {
-        u64::from_le_bytes(
-            self.header[REGION_MAX_USABLE_OFFSET..REGION_MAX_USABLE_OFFSET + size_of::<u64>()]
+    fn get_superheader_length(&self) -> usize {
+        u32::from_le_bytes(
+            self.header[SUPERHEADER_LENGTH_OFFSET..(SUPERHEADER_LENGTH_OFFSET + size_of::<u32>())]
                 .try_into()
                 .unwrap(),
         ) as usize
     }
 
-    fn set_region_max_usable_bytes(&mut self, usable_size: usize) {
-        self.header[REGION_MAX_USABLE_OFFSET..REGION_MAX_USABLE_OFFSET + size_of::<u64>()]
-            .copy_from_slice(&(usable_size as u64).to_le_bytes());
+    fn set_superheader_length(&mut self, length: usize) {
+        self.header[SUPERHEADER_LENGTH_OFFSET..(SUPERHEADER_LENGTH_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&(length as u32).to_le_bytes());
+    }
+
+    fn get_region_allocator_state_length(&self) -> usize {
+        u32::from_le_bytes(
+            self.header[REGION_ALLOCATOR_LENGTH_OFFSET
+                ..(REGION_ALLOCATOR_LENGTH_OFFSET + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    fn set_region_allocator_state_length(&mut self, length: usize) {
+        self.header
+            [REGION_ALLOCATOR_LENGTH_OFFSET..(REGION_ALLOCATOR_LENGTH_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&(length as u32).to_le_bytes());
+    }
+
+    fn get_region_header_length(&self) -> usize {
+        u32::from_le_bytes(
+            self.header
+                [REGION_HEADER_LENGTH_OFFSET..(REGION_HEADER_LENGTH_OFFSET + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    fn set_region_header_length(&mut self, length: usize) {
+        self.header[REGION_HEADER_LENGTH_OFFSET..(REGION_HEADER_LENGTH_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&(length as u32).to_le_bytes());
+    }
+
+    fn get_regional_allocator_state_length(&self) -> usize {
+        u32::from_le_bytes(
+            self.header[REGIONAL_ALLOCATOR_LENGTH_OFFSET
+                ..(REGIONAL_ALLOCATOR_LENGTH_OFFSET + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    fn set_regional_allocator_state_length(&mut self, length: usize) {
+        self.header[REGIONAL_ALLOCATOR_LENGTH_OFFSET
+            ..(REGIONAL_ALLOCATOR_LENGTH_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&(length as u32).to_le_bytes());
+    }
+
+    // TODO: remove this method
+    fn get_region_max_usable_bytes(&self) -> usize {
+        self.get_region_max_data_pages() * self.get_page_size()
+    }
+
+    fn get_region_max_data_pages(&self) -> usize {
+        u32::from_le_bytes(
+            self.header
+                [REGION_MAX_DATA_PAGES_OFFSET..(REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    fn set_region_max_data_pages(&mut self, pages: usize) {
+        self.header
+            [REGION_MAX_DATA_PAGES_OFFSET..(REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&(pages as u32).to_le_bytes());
+    }
+
+    fn get_max_page_order(&self) -> u8 {
+        self.header[MAX_PAGE_ORDER_OFFSET]
+    }
+
+    fn set_max_page_order(&mut self, order: u8) {
+        self.header[MAX_PAGE_ORDER_OFFSET] = order;
+    }
+
+    fn get_page_size(&self) -> usize {
+        u32::from_le_bytes(
+            self.header[PAGE_SIZE_OFFSET..(PAGE_SIZE_OFFSET + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    fn set_page_size(&mut self, page_size: usize) {
+        self.header[PAGE_SIZE_OFFSET..(PAGE_SIZE_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&(page_size as u32).to_le_bytes());
     }
 
     fn get_recovery_required(&self) -> bool {
@@ -390,12 +529,26 @@ impl<'a> TransactionAccessor<'a> {
         )
     }
 
-    fn get_data_section_layout(&self) -> DatabaseLayout {
-        DatabaseLayout::from_le_bytes(
-            self.mem[DATA_LAYOUT_OFFSET..(DATA_LAYOUT_OFFSET + DatabaseLayout::serialized_size())]
+    fn get_full_regions(&self) -> usize {
+        u32::from_le_bytes(
+            self.mem[NUM_FULL_REGIONS_OFFSET..(NUM_FULL_REGIONS_OFFSET + size_of::<u32>())]
                 .try_into()
                 .unwrap(),
-        )
+        ) as usize
+    }
+
+    fn get_trailing_region_data_pages(&self) -> Option<usize> {
+        let value = u32::from_le_bytes(
+            self.mem[TRAILING_REGION_DATA_PAGES_OFFSET
+                ..(TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        );
+        if value == 0 {
+            None
+        } else {
+            Some(value as usize)
+        }
     }
 
     fn get_version(&self) -> u8 {
@@ -442,9 +595,16 @@ impl<'a> TransactionMutator<'a> {
             .copy_from_slice(&transaction_id.to_le_bytes());
     }
 
-    fn set_data_section_layout(&mut self, layout: &DatabaseLayout) {
-        self.mem[DATA_LAYOUT_OFFSET..(DATA_LAYOUT_OFFSET + DatabaseLayout::serialized_size())]
-            .copy_from_slice(&layout.to_le_bytes());
+    fn set_data_section_layout(
+        &mut self,
+        full_regions: usize,
+        trailing_region_data_pages: Option<usize>,
+    ) {
+        self.mem[NUM_FULL_REGIONS_OFFSET..(NUM_FULL_REGIONS_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&(full_regions as u32).to_le_bytes());
+        self.mem[TRAILING_REGION_DATA_PAGES_OFFSET
+            ..(TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&(trailing_region_data_pages.unwrap_or(0) as u32).to_le_bytes());
     }
 
     fn update_checksum(&mut self, checksum_type: ChecksumType) {
@@ -501,7 +661,10 @@ impl TransactionalMemory {
         dynamic_growth: bool,
         use_checksums: Option<bool>,
     ) -> Result<Self> {
-        assert!(DATA_LAYOUT_OFFSET + DatabaseLayout::serialized_size() <= TRANSACTION_SIZE);
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(TRANSACTION_LAST_FIELD <= TRANSACTION_SIZE);
+        }
 
         let page_size = requested_page_size.unwrap_or_else(get_page_size);
         assert!(page_size.is_power_of_two());
@@ -575,8 +738,14 @@ impl TransactionalMemory {
 
             // Store the page & db size. These are immutable
             metadata.set_page_size(page_size);
+            metadata.set_max_page_order(layout.full_region_layout().max_order() as u8);
+            metadata.set_superheader_length(layout.header_bytes());
+            metadata
+                .set_region_allocator_state_length(layout.region_allocator_address_range().len());
+            metadata.set_region_header_length(layout.full_region_layout().data_section().start);
+            metadata.set_regional_allocator_state_length(layout.full_region_layout().header_len());
+            metadata.set_region_max_data_pages(layout.full_region_layout().num_pages());
             metadata.set_max_capacity(max_capacity);
-            metadata.set_region_max_usable_bytes(max_usable_region_bytes);
             let checksum_type = if use_checksums.unwrap_or(true) {
                 ChecksumType::XXH3_128
             } else {
@@ -588,7 +757,10 @@ impl TransactionalMemory {
             mutator.set_root_page(None);
             mutator.set_freed_root(None);
             mutator.set_last_committed_transaction_id(0);
-            mutator.set_data_section_layout(&layout);
+            mutator.set_data_section_layout(
+                layout.num_full_regions(),
+                layout.trailing_region_layout().map(|x| x.num_pages()),
+            );
             mutator.set_version(FILE_FORMAT_VERSION);
             drop(mutator);
             // Make the state we just wrote the primary
@@ -596,7 +768,10 @@ impl TransactionalMemory {
 
             // Initialize the secondary allocator state
             let mut mutator = metadata.secondary_slot_mut();
-            mutator.set_data_section_layout(&layout);
+            mutator.set_data_section_layout(
+                layout.num_full_regions(),
+                layout.trailing_region_layout().map(|x| x.num_pages()),
+            );
             mutator.set_version(FILE_FORMAT_VERSION);
             drop(mutator);
 
@@ -625,7 +800,7 @@ impl TransactionalMemory {
                 FILE_FORMAT_VERSION, version
             )));
         }
-        let layout = metadata.primary_slot().get_data_section_layout();
+        let layout = metadata.get_primary_layout();
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
         let checksum_type = metadata.get_checksum_type();
@@ -671,7 +846,7 @@ impl TransactionalMemory {
     pub(crate) fn repair_primary_corrupted(&self) {
         let mut metadata = self.lock_metadata();
         metadata.swap_primary();
-        *self.layout.lock().unwrap() = metadata.primary_slot().get_data_section_layout();
+        *self.layout.lock().unwrap() = metadata.get_primary_layout();
     }
 
     pub(crate) fn begin_repair(&self) -> Result<()> {
@@ -682,7 +857,7 @@ impl TransactionalMemory {
             .verify_checksum(metadata.get_checksum_type())
         {
             metadata.swap_primary();
-            *self.layout.lock().unwrap() = metadata.primary_slot().get_data_section_layout();
+            *self.layout.lock().unwrap() = metadata.get_primary_layout();
             assert!(metadata
                 .primary_slot()
                 .verify_checksum(metadata.get_checksum_type()));
@@ -700,7 +875,7 @@ impl TransactionalMemory {
                     .verify_checksum(metadata.get_checksum_type())
             {
                 metadata.swap_primary();
-                *self.layout.lock().unwrap() = metadata.primary_slot().get_data_section_layout();
+                *self.layout.lock().unwrap() = metadata.get_primary_layout();
             }
         }
 
@@ -799,7 +974,10 @@ impl TransactionalMemory {
         secondary.set_last_committed_transaction_id(transaction_id);
         secondary.set_root_page(data_root);
         secondary.set_freed_root(freed_root);
-        secondary.set_data_section_layout(&layout);
+        secondary.set_data_section_layout(
+            layout.num_full_regions(),
+            layout.trailing_region_layout().map(|x| x.num_pages()),
+        );
         secondary.update_checksum(checksum_type);
 
         // Use 2-phase commit, if checksums are disabled
@@ -856,7 +1034,10 @@ impl TransactionalMemory {
         secondary.set_last_committed_transaction_id(transaction_id);
         secondary.set_root_page(data_root);
         secondary.set_freed_root(freed_root);
-        secondary.set_data_section_layout(&layout);
+        secondary.set_data_section_layout(
+            layout.num_full_regions(),
+            layout.trailing_region_layout().map(|x| x.num_pages()),
+        );
         secondary.update_checksum(checksum_type);
 
         self.log_since_commit.lock().unwrap().clear();
@@ -872,9 +1053,9 @@ impl TransactionalMemory {
         let mut metadata = self.lock_metadata();
         // The layout to restore
         let restore = if self.read_from_secondary.load(Ordering::Acquire) {
-            metadata.secondary_slot().get_data_section_layout()
+            metadata.get_secondary_layout()
         } else {
-            metadata.primary_slot().get_data_section_layout()
+            metadata.get_primary_layout()
         };
 
         let mut regional_guard = self.regional_allocators.lock().unwrap();
