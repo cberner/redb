@@ -1,11 +1,10 @@
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::grouped_bitmap::U64GroupedBitMapMut;
 use crate::tree_store::page_store::page_manager::{
-    DB_HEADER_SIZE, MAX_PAGE_ORDER, MIN_USABLE_PAGES,
+    DB_HEADER_SIZE, MAX_MAX_PAGE_ORDER, MIN_USABLE_PAGES,
 };
 use crate::{Error, Result};
 use std::cmp::min;
-use std::mem::size_of;
 use std::ops::Range;
 
 fn round_up_to_multiple_of(value: usize, multiple: usize) -> usize {
@@ -29,13 +28,29 @@ pub(super) struct RegionLayout {
 }
 
 impl RegionLayout {
+    pub(super) fn new(
+        num_pages: usize,
+        header_size: usize,
+        allocator_state_len: usize,
+        max_order: usize,
+        page_size: usize,
+    ) -> Self {
+        Self {
+            num_pages,
+            pages_start: header_size,
+            allocator_state_len,
+            max_order,
+            page_size,
+        }
+    }
+
     fn calculate_usable_order(space: usize, page_size: usize) -> Option<usize> {
         if space < page_size {
             return None;
         }
         let total_pages = space / page_size;
         let max_order = (64 - total_pages.leading_zeros() - 1) as usize;
-        Some(min(MAX_PAGE_ORDER, max_order))
+        Some(min(MAX_MAX_PAGE_ORDER, max_order))
     }
 
     fn calculate_usable_pages(
@@ -131,72 +146,6 @@ impl RegionLayout {
     pub(super) fn max_order(&self) -> usize {
         self.max_order
     }
-
-    const fn serialized_size() -> usize {
-        5 * size_of::<u32>()
-    }
-
-    pub(super) fn to_le_bytes(&self) -> [u8; Self::serialized_size()] {
-        let mut result = [0; Self::serialized_size()];
-        let mut offset = 0;
-        result[offset..(offset + size_of::<u32>())]
-            .copy_from_slice(&(self.page_size as u32).to_le_bytes());
-        offset += size_of::<u32>();
-        result[offset..(offset + size_of::<u32>())]
-            .copy_from_slice(&(self.pages_start as u32).to_le_bytes());
-        offset += size_of::<u32>();
-        result[offset..(offset + size_of::<u32>())]
-            .copy_from_slice(&(self.num_pages as u32).to_le_bytes());
-        offset += size_of::<u32>();
-        result[offset..(offset + size_of::<u32>())]
-            .copy_from_slice(&(self.allocator_state_len as u32).to_le_bytes());
-        offset += size_of::<u32>();
-        result[offset..(offset + size_of::<u32>())]
-            .copy_from_slice(&(self.max_order as u32).to_le_bytes());
-
-        result
-    }
-
-    pub(super) fn from_le_bytes(data: [u8; Self::serialized_size()]) -> Self {
-        let mut offset = 0;
-        let page_size = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-        let pages_start = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-        let num_pages = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-        let allocator_state_len = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-        let max_order = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-
-        Self {
-            num_pages,
-            pages_start,
-            allocator_state_len,
-            max_order,
-            page_size,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -209,6 +158,22 @@ pub(super) struct DatabaseLayout {
 }
 
 impl DatabaseLayout {
+    pub(super) fn new(
+        superheader_bytes: usize,
+        region_allocator_len: usize,
+        full_regions: usize,
+        full_region: RegionLayout,
+        trailing_region: Option<RegionLayout>,
+    ) -> Self {
+        Self {
+            db_header_bytes: superheader_bytes,
+            region_allocator_range: DB_HEADER_SIZE..(DB_HEADER_SIZE + region_allocator_len),
+            full_region_layout: full_region,
+            num_full_regions: full_regions,
+            trailing_partial_region: trailing_region,
+        }
+    }
+
     pub(super) fn calculate(
         db_capacity: usize,
         mut desired_usable_bytes: usize,
@@ -257,17 +222,30 @@ impl DatabaseLayout {
             let remaining_desired =
                 desired_usable_bytes - num_full_regions * max_usable_region_bytes;
             assert!(num_full_regions > 0);
+            let trailing_region = RegionLayout::calculate(
+                remaining_space,
+                remaining_desired,
+                max_usable_region_bytes,
+                page_size,
+            );
+            // TODO: change the calculation to use a fixed header size for all regions, including the trailing one
+            let trailing_region = if let Some(region) = trailing_region {
+                if region.pages_start != full_region_layout.pages_start
+                    || region.allocator_state_len != full_region_layout.allocator_state_len
+                {
+                    None
+                } else {
+                    Some(region)
+                }
+            } else {
+                None
+            };
             DatabaseLayout {
                 db_header_bytes,
                 region_allocator_range,
                 full_region_layout,
                 num_full_regions,
-                trailing_partial_region: RegionLayout::calculate(
-                    remaining_space,
-                    remaining_desired,
-                    max_usable_region_bytes,
-                    page_size,
-                ),
+                trailing_partial_region: trailing_region,
             }
         };
 
@@ -348,89 +326,6 @@ impl DatabaseLayout {
             self.trailing_partial_region.as_ref().unwrap().clone()
         } else {
             self.full_region_layout.clone()
-        }
-    }
-
-    pub(super) const fn serialized_size() -> usize {
-        4 * size_of::<u64>() + 2 * RegionLayout::serialized_size() + 1
-    }
-
-    pub(super) fn to_le_bytes(&self) -> [u8; Self::serialized_size()] {
-        let mut result = [0; Self::serialized_size()];
-        let mut offset = 0;
-        result[offset..offset + size_of::<u64>()]
-            .copy_from_slice(&(self.db_header_bytes as u64).to_le_bytes());
-        offset += size_of::<u64>();
-        result[offset..offset + size_of::<u64>()]
-            .copy_from_slice(&(self.num_full_regions as u64).to_le_bytes());
-        offset += size_of::<u64>();
-
-        result[offset..offset + size_of::<u64>()]
-            .copy_from_slice(&(self.region_allocator_range.start as u64).to_le_bytes());
-        offset += size_of::<u64>();
-        result[offset..offset + size_of::<u64>()]
-            .copy_from_slice(&(self.region_allocator_range.end as u64).to_le_bytes());
-        offset += size_of::<u64>();
-
-        result[offset..offset + RegionLayout::serialized_size()]
-            .copy_from_slice(&self.full_region_layout.to_le_bytes());
-        offset += RegionLayout::serialized_size();
-        if let Some(trailing) = self.trailing_partial_region.as_ref() {
-            result[offset..offset + RegionLayout::serialized_size()]
-                .copy_from_slice(&trailing.to_le_bytes());
-            offset += RegionLayout::serialized_size();
-            result[offset] = 1;
-        } else {
-            result[offset..offset + RegionLayout::serialized_size()].fill(0);
-            offset += RegionLayout::serialized_size();
-            result[offset] = 0;
-        }
-
-        result
-    }
-
-    pub(super) fn from_le_bytes(data: [u8; Self::serialized_size()]) -> Self {
-        let mut offset = 0;
-        let db_header_bytes =
-            u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
-                as usize;
-        offset += size_of::<u64>();
-        let num_full_regions =
-            u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
-                as usize;
-        offset += size_of::<u64>();
-
-        let region_allocator_start =
-            u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
-                as usize;
-        offset += size_of::<u64>();
-        let region_allocator_end =
-            u64::from_le_bytes(data[offset..offset + size_of::<u64>()].try_into().unwrap())
-                as usize;
-        offset += size_of::<u64>();
-
-        let full_region_layout = RegionLayout::from_le_bytes(
-            data[offset..offset + RegionLayout::serialized_size()]
-                .try_into()
-                .unwrap(),
-        );
-        offset += RegionLayout::serialized_size();
-        let trailing_partial_region = if data[Self::serialized_size() - 1] == 0 {
-            None
-        } else {
-            Some(RegionLayout::from_le_bytes(
-                data[offset..offset + RegionLayout::serialized_size()]
-                    .try_into()
-                    .unwrap(),
-            ))
-        };
-
-        Self {
-            db_header_bytes,
-            region_allocator_range: region_allocator_start..region_allocator_end,
-            full_region_layout,
-            num_full_regions,
-            trailing_partial_region,
         }
     }
 }

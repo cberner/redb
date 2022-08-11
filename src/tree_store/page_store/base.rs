@@ -1,4 +1,4 @@
-use crate::tree_store::page_store::page_manager::MAX_PAGE_ORDER;
+use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
@@ -29,7 +29,7 @@ impl PageNumber {
     pub(crate) fn new(region: u32, page_index: u32, page_order: u8) -> Self {
         debug_assert!(region <= 0x000F_FFFF);
         debug_assert!(page_index <= 0x000F_FFFF);
-        debug_assert!(page_order <= MAX_PAGE_ORDER as u8);
+        debug_assert!(page_order <= MAX_MAX_PAGE_ORDER as u8);
         Self {
             region,
             page_index,
