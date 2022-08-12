@@ -1138,7 +1138,9 @@ impl TransactionalMemory {
     // Safety: the caller must ensure that no references to the memory in `page` exist
     pub(crate) unsafe fn get_page_mut(&self, page_number: PageNumber) -> PageMut {
         #[cfg(debug_assertions)]
-        self.open_dirty_pages.lock().unwrap().insert(page_number);
+        {
+            assert!(self.open_dirty_pages.lock().unwrap().insert(page_number));
+        }
 
         let address_range = page_number.address_range(
             self.db_header_size,

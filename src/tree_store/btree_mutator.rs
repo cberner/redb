@@ -515,7 +515,9 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             let mut mutator = LeafMutator::new(&mut temp, K::fixed_width(), V::fixed_width());
             mutator.remove(position);
             let checksum = self.checksum_helper(&temp);
-            self.mem.free(temp.get_page_number())?;
+            let temp_page_number = temp.get_page_number();
+            drop(temp);
+            self.mem.free(temp_page_number)?;
 
             let guard = AccessGuard::remove_on_drop(
                 page_mut,

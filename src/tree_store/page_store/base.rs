@@ -147,6 +147,6 @@ impl<'a> Page for PageMut<'a> {
 #[cfg(debug_assertions)]
 impl<'a> Drop for PageMut<'a> {
     fn drop(&mut self) {
-        self.open_pages.lock().unwrap().remove(&self.page_number);
+        assert!(self.open_pages.lock().unwrap().remove(&self.page_number));
     }
 }
