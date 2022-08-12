@@ -5,7 +5,7 @@ use crate::Result;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
-use std::thread;
+use std::{mem, thread};
 
 pub(crate) const LEAF: u8 = 1;
 pub(crate) const BRANCH: u8 = 2;
@@ -186,6 +186,10 @@ impl<'a, V: RedbValue + ?Sized> Drop for AccessGuard<'a, V> {
         match self.on_drop {
             OnDrop::None => {}
             OnDrop::Free(page_number) => {
+                // Drop our reference to the page, so that it can be freed
+                let mut dummy = EitherPage::OwnedMemory(vec![]);
+                mem::swap(&mut self.page, &mut dummy);
+                drop(dummy);
                 // Safety: caller to new() guaranteed that no other references to this page exist
                 unsafe {
                     self.mem.free(page_number).unwrap();

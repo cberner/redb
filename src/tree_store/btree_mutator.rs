@@ -933,6 +933,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             }
         };
 
+        drop(page);
         self.free_policy
             .conditional_free(original_page_number, self.freed, self.mem)?;
 

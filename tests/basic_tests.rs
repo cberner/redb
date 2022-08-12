@@ -550,6 +550,7 @@ fn ref_get_signatures() {
         assert_eq!(iter.next().unwrap().1, &[i + 1]);
     }
     assert!(iter.next().is_none());
+    drop(iter);
 
     let mut iter = table.range(start..end).unwrap();
     for i in 0..10 {
