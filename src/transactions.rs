@@ -330,17 +330,7 @@ impl<'db> WriteTransaction<'db> {
         let root = self.table_tree.borrow_mut().flush_table_root_updates()?;
 
         self.process_freed_pages(oldest_live_read)?;
-        if oldest_live_read < self.transaction_id {
-            self.store_freed_pages()?;
-        } else {
-            for page in self.freed_pages.borrow_mut().drain(..) {
-                // Safety: The oldest live read started after this transactions, so it can't
-                // have a references to this page, since we freed it in this transaction
-                unsafe {
-                    self.mem.free(page)?;
-                }
-            }
-        }
+        self.store_freed_pages()?;
 
         let freed_root = self.freed_tree.get_root();
 

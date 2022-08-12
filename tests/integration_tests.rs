@@ -152,9 +152,17 @@ fn free() {
     let txn = db.begin_write().unwrap();
     {
         let _table = txn.open_table(SLICE_TABLE).unwrap();
-        let _table = txn.open_table(SLICE_TABLE2).unwrap();
+        let mut table = txn.open_table(SLICE_TABLE2).unwrap();
+        table.insert(&[], &[]).unwrap();
     }
-
+    txn.commit().unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(SLICE_TABLE2).unwrap();
+        table.remove(&[]).unwrap();
+    }
+    txn.commit().unwrap();
+    let txn = db.begin_write().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
@@ -194,6 +202,9 @@ fn free() {
         }
     }
 
+    // Extra commit to finalize the cleanup of the freed pages
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
     let txn = db.begin_write().unwrap();
     assert_eq!(free_pages, txn.stats().unwrap().free_pages());
     txn.abort().unwrap();
@@ -337,6 +348,8 @@ fn dynamic_shrink() {
         let mut table = txn.open_table(table_definition).unwrap();
         table.remove(&0).unwrap();
     }
+    txn.commit().unwrap();
+    let txn = db.begin_write().unwrap();
     txn.commit().unwrap();
 
     let final_file_size = tmpfile.as_file().metadata().unwrap().len();
