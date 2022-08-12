@@ -274,6 +274,11 @@ impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
 
 impl<'a, V: RedbKey + ?Sized> Drop for MultimapValueIter<'a, V> {
     fn drop(&mut self) {
+        // Drop our references to the pages that are about to be freed
+        let mut dummy_state =
+            ValueIterState::InlineLeaf(LeafKeyIter::new(vec![1, 0, 0, 0], None, None));
+        mem::swap(&mut self.inner, &mut dummy_state);
+        drop(dummy_state);
         for page in self.free_on_drop.iter() {
             // TODO: make free_if_uncommitted not return a Result by moving the dirtying of the allocator state into the open method of the TransactionMemory
             unsafe {

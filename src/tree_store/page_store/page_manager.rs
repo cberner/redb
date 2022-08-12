@@ -9,7 +9,7 @@ use crate::tree_store::PageNumber;
 use crate::Error;
 use crate::Result;
 use std::cmp::{max, min};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fs::File;
 use std::io;
@@ -640,6 +640,9 @@ pub(crate) struct TransactionalMemory {
     // The number of PageMut which are outstanding
     #[cfg(debug_assertions)]
     open_dirty_pages: Mutex<HashSet<PageNumber>>,
+    // Reference counts of PageImpls that are outstanding
+    #[cfg(debug_assertions)]
+    read_page_ref_counts: Mutex<HashMap<PageNumber, u64>>,
     // Indicates that a non-durable commit has been made, so reads should be served from the secondary meta page
     read_from_secondary: AtomicBool,
     page_size: usize,
@@ -821,6 +824,8 @@ impl TransactionalMemory {
             layout: Mutex::new(layout.clone()),
             #[cfg(debug_assertions)]
             open_dirty_pages: Mutex::new(HashSet::new()),
+            #[cfg(debug_assertions)]
+            read_page_ref_counts: Mutex::new(HashMap::new()),
             read_from_secondary: AtomicBool::new(false),
             page_size,
             region_size,
@@ -1116,11 +1121,19 @@ impl TransactionalMemory {
     pub(crate) fn get_page(&self, page_number: PageNumber) -> PageImpl {
         // We must not retrieve an immutable reference to a page which already has a mutable ref to it
         #[cfg(debug_assertions)]
-        debug_assert!(
-            !self.open_dirty_pages.lock().unwrap().contains(&page_number),
-            "{:?}",
-            page_number
-        );
+        {
+            debug_assert!(
+                !self.open_dirty_pages.lock().unwrap().contains(&page_number),
+                "{:?}",
+                page_number
+            );
+            *(self
+                .read_page_ref_counts
+                .lock()
+                .unwrap()
+                .entry(page_number)
+                .or_default()) += 1;
+        }
 
         // Safety: we asserted that no mutable references are open
         let mem = unsafe {
@@ -1132,13 +1145,23 @@ impl TransactionalMemory {
             ))
         };
 
-        PageImpl { mem, page_number }
+        PageImpl {
+            mem,
+            page_number,
+            #[cfg(debug_assertions)]
+            open_pages: &self.read_page_ref_counts,
+        }
     }
 
     // Safety: the caller must ensure that no references to the memory in `page` exist
     pub(crate) unsafe fn get_page_mut(&self, page_number: PageNumber) -> PageMut {
         #[cfg(debug_assertions)]
         {
+            assert!(!self
+                .read_page_ref_counts
+                .lock()
+                .unwrap()
+                .contains_key(&page_number));
             assert!(self.open_dirty_pages.lock().unwrap().insert(page_number));
         }
 
@@ -1460,7 +1483,14 @@ impl TransactionalMemory {
             .unwrap()
             .push(AllocationOp::Allocate(page_number));
         #[cfg(debug_assertions)]
-        self.open_dirty_pages.lock().unwrap().insert(page_number);
+        {
+            assert!(!self
+                .read_page_ref_counts
+                .lock()
+                .unwrap()
+                .contains_key(&page_number));
+            assert!(self.open_dirty_pages.lock().unwrap().insert(page_number));
+        }
 
         let address_range = page_number.address_range(
             self.db_header_size,

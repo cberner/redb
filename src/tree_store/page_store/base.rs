@@ -1,4 +1,5 @@
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
+use std::collections::HashMap;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
@@ -97,11 +98,26 @@ pub(crate) trait Page {
 pub struct PageImpl<'a> {
     pub(super) mem: &'a [u8],
     pub(super) page_number: PageNumber,
+    #[cfg(debug_assertions)]
+    pub(super) open_pages: &'a Mutex<HashMap<PageNumber, u64>>,
 }
 
 impl<'a> Debug for PageImpl<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!("PageImpl: page_number={:?}", self.page_number))
+    }
+}
+
+#[cfg(debug_assertions)]
+impl<'a> Drop for PageImpl<'a> {
+    fn drop(&mut self) {
+        let mut open_pages = self.open_pages.lock().unwrap();
+        let value = open_pages.get_mut(&self.page_number).unwrap();
+        assert!(*value > 0);
+        *value -= 1;
+        if *value == 0 {
+            open_pages.remove(&self.page_number);
+        }
     }
 }
 
