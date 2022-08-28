@@ -29,7 +29,7 @@ use std::sync::{Mutex, MutexGuard};
 // 1 byte: max page order
 // 1 byte: god byte
 // 1 byte: checksum type
-// 4 bytes: super-header length
+// 4 bytes: super-header pages
 // 4 bytes: page size
 // 4 bytes: region allocator state length
 // 8 bytes: database max size
@@ -77,8 +77,8 @@ const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x
 const MAX_PAGE_ORDER_OFFSET: usize = MAGICNUMBER.len();
 const GOD_BYTE_OFFSET: usize = MAX_PAGE_ORDER_OFFSET + size_of::<u8>();
 const CHECKSUM_TYPE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>();
-const SUPERHEADER_LENGTH_OFFSET: usize = CHECKSUM_TYPE_OFFSET + size_of::<u8>();
-const PAGE_SIZE_OFFSET: usize = SUPERHEADER_LENGTH_OFFSET + size_of::<u32>();
+const SUPERHEADER_PAGES_OFFSET: usize = CHECKSUM_TYPE_OFFSET + size_of::<u8>();
+const PAGE_SIZE_OFFSET: usize = SUPERHEADER_PAGES_OFFSET + size_of::<u32>();
 const REGION_ALLOCATOR_LENGTH_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u32>();
 const DB_SIZE_OFFSET: usize = REGION_ALLOCATOR_LENGTH_OFFSET + size_of::<u32>();
 const REGION_HEADER_LENGTH_OFFSET: usize = DB_SIZE_OFFSET + size_of::<u64>();
@@ -298,16 +298,19 @@ impl<'a> MetadataAccessor<'a> {
     }
 
     fn get_superheader_length(&self) -> usize {
-        u32::from_le_bytes(
-            self.header[SUPERHEADER_LENGTH_OFFSET..(SUPERHEADER_LENGTH_OFFSET + size_of::<u32>())]
+        let pages = u32::from_le_bytes(
+            self.header[SUPERHEADER_PAGES_OFFSET..(SUPERHEADER_PAGES_OFFSET + size_of::<u32>())]
                 .try_into()
                 .unwrap(),
-        ) as usize
+        ) as usize;
+        pages * self.get_page_size()
     }
 
     fn set_superheader_length(&mut self, length: usize) {
-        self.header[SUPERHEADER_LENGTH_OFFSET..(SUPERHEADER_LENGTH_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&(length as u32).to_le_bytes());
+        assert_eq!(length % self.get_page_size(), 0);
+        let pages = length / self.get_page_size();
+        self.header[SUPERHEADER_PAGES_OFFSET..(SUPERHEADER_PAGES_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&(pages as u32).to_le_bytes());
     }
 
     fn get_region_allocator_state_length(&self) -> usize {
