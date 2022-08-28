@@ -43,7 +43,8 @@ jobs:
       - name: Install packages
         if: startsWith(matrix.os, 'macos')
         run: |
-          brew install python3
+          brew install python3 make
+          echo "/usr/local/opt/make/libexec/gnubin" >> $GITHUB_PATH
 
       - uses: actions-rs/toolchain@v1
         with:
