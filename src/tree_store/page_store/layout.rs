@@ -22,7 +22,6 @@ pub(super) struct RegionLayout {
     num_pages: usize,
     // Offset where pages start
     pages_start: usize,
-    allocator_state_len: usize,
     max_order: usize,
     page_size: usize,
 }
@@ -31,14 +30,12 @@ impl RegionLayout {
     pub(super) fn new(
         num_pages: usize,
         header_size: usize,
-        allocator_state_len: usize,
         max_order: usize,
         page_size: usize,
     ) -> Self {
         Self {
             num_pages,
             pages_start: header_size,
-            allocator_state_len,
             max_order,
             page_size,
         }
@@ -104,7 +101,6 @@ impl RegionLayout {
         Some(RegionLayout {
             num_pages,
             pages_start: required_header_size,
-            allocator_state_len: Self::header_size(max_usable_region_bytes, page_size)?,
             max_order,
             page_size,
         })
@@ -121,10 +117,6 @@ impl RegionLayout {
             page_size,
         )
         .unwrap()
-    }
-
-    pub(super) fn header_len(&self) -> usize {
-        self.allocator_state_len
     }
 
     pub(super) fn data_section(&self) -> Range<usize> {
@@ -230,9 +222,7 @@ impl DatabaseLayout {
             );
             // TODO: change the calculation to use a fixed header size for all regions, including the trailing one
             let trailing_region = if let Some(region) = trailing_region {
-                if region.pages_start != full_region_layout.pages_start
-                    || region.allocator_state_len != full_region_layout.allocator_state_len
-                {
+                if region.pages_start != full_region_layout.pages_start {
                     None
                 } else {
                     Some(region)
