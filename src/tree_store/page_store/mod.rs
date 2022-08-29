@@ -5,6 +5,7 @@ mod layout;
 mod mmap;
 mod page_allocator;
 mod page_manager;
+mod region;
 mod utils;
 #[allow(dead_code)]
 mod xxh3;
