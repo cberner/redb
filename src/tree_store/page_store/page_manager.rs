@@ -10,7 +10,9 @@ use crate::tree_store::PageNumber;
 use crate::Error;
 use crate::Result;
 use std::cmp::{max, min};
-use std::collections::{HashMap, HashSet};
+#[cfg(debug_assertions)]
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io;
