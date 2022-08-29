@@ -3,8 +3,14 @@ use crate::Error;
 use crate::Result;
 use std::mem::size_of;
 
+const ELEMENTS_OFFSET: usize = 0;
+const CAPACITY_OFFSET: usize = ELEMENTS_OFFSET + size_of::<u32>();
+const HEIGHT_OFFSET: usize = CAPACITY_OFFSET + size_of::<u32>();
+const END_OFFSETS: usize = HEIGHT_OFFSET + size_of::<u32>();
+
 #[derive(Clone)]
 pub(crate) struct PageAllocator {
+    // TODO: we can read these fields from the on-disk format, so remove them
     num_pages: usize,
     tree_level_offsets: Vec<(usize, usize)>,
 }
@@ -14,14 +20,19 @@ pub(crate) struct PageAllocator {
 // borrowing the data array
 //
 // Data structure format:
+// height: u32
+// elements: u32
+// capacity: u32
+// layer_ends: array of u32, ending offset in bytes of layers. Does not include the root layer
 // root: u64
 // subtree layer: 2-64 u64s
 // ...consecutive layers. Except for the last level, all sub-trees of the root must be complete
 impl PageAllocator {
+    // TODO: this should take capacity as well as num pages
     pub(crate) fn new(num_pages: usize) -> Self {
         let mut tree_level_offsets = vec![];
 
-        let mut offset = 0;
+        let mut offset = Self::tree_data_start(num_pages);
         // root level
         tree_level_offsets.push((offset, offset + size_of::<u64>()));
         offset += size_of::<u64>();
@@ -56,10 +67,24 @@ impl PageAllocator {
 
     pub(crate) fn init_new(data: &mut [u8], num_pages: usize) -> Self {
         assert!(data.len() >= Self::required_space(num_pages));
+        // TODO: elements and capacity should be separate, and there should be a resize() method to change elements
+        data[ELEMENTS_OFFSET..(ELEMENTS_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&(num_pages as u32).to_le_bytes());
+        data[CAPACITY_OFFSET..(CAPACITY_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&(num_pages as u32).to_le_bytes());
+        let height = Self::required_tree_height(num_pages);
+        data[HEIGHT_OFFSET..(HEIGHT_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&(height as u32).to_le_bytes());
         // Initialize the memory, so that all pages are allocated
-        U64GroupedBitMapMut::init_full(data);
+        U64GroupedBitMapMut::init_full(&mut data[Self::tree_data_start(num_pages)..]);
 
         let result = Self::new(num_pages);
+
+        let mut index = END_OFFSETS;
+        for (_, end) in result.tree_level_offsets.iter().skip(1) {
+            data[index..(index + size_of::<u32>())].copy_from_slice(&(*end as u32).to_le_bytes());
+            index += size_of::<u32>();
+        }
 
         // Mark all the subtrees that don't exist
         for i in Self::required_subtrees(num_pages)..64 {
@@ -88,7 +113,7 @@ impl PageAllocator {
 
     /// Returns the number of bytes required for the data argument of new()
     pub(crate) fn required_space(num_pages: usize) -> usize {
-        if Self::required_tree_height(num_pages) == 1 {
+        let tree_space = if Self::required_tree_height(num_pages) == 1 {
             assert!(num_pages <= 64);
             // Space for root
             size_of::<u64>()
@@ -104,7 +129,13 @@ impl PageAllocator {
                 Self::required_subtrees(num_pages) * Self::required_interior_bytes_per_subtree(num_pages) +
                 // Space for the leaves
                 (num_pages + 63) / 64 * size_of::<u64>()
-        }
+        };
+
+        Self::tree_data_start(num_pages) + tree_space
+    }
+
+    fn tree_data_start(capacity: usize) -> usize {
+        END_OFFSETS + (Self::required_tree_height(capacity) - 1) * size_of::<u32>()
     }
 
     fn required_interior_bytes_per_subtree(num_pages: usize) -> usize {
