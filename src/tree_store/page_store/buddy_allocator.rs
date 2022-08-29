@@ -15,8 +15,9 @@ pub(crate) struct BuddyAllocator {
 // Pages are marked free at only a single order, and it must always be the largest order
 //
 // Data structure format:
-// max_order: u64
-// order_offsets: array of (u64, u64), with offset & length for PageAllocator structure for the given order
+// max_order: u8
+// padding: 3 bytes
+// order_ends: array of u32, with ending offset for PageAllocator structure for the given order
 // ... PageAllocator structures
 impl BuddyAllocator {
     pub(crate) fn new(num_pages: usize, max_capacity: usize, max_order: usize) -> Self {
@@ -41,26 +42,24 @@ impl BuddyAllocator {
         max_order: usize,
     ) -> Self {
         assert!(data.len() >= Self::required_space(max_page_capacity, max_order));
-        data[..size_of::<u64>()].copy_from_slice(&(max_order as u64).to_le_bytes());
+        data[0] = max_order.try_into().unwrap();
 
-        let mut metadata_offset = size_of::<u64>();
-        let mut data_offset = size_of::<u64>() + 2 * (max_order + 1) * size_of::<u64>();
+        let mut metadata_offset = 4;
+        let mut data_offset = 4 + (max_order + 1) * size_of::<u32>();
 
         let mut orders = vec![];
         let mut pages_for_order = max_page_capacity;
         for order in 0..=max_order {
             let required = PageAllocator::required_space(pages_for_order);
-            data[metadata_offset..metadata_offset + size_of::<u64>()]
-                .copy_from_slice(&(data_offset as u64).to_le_bytes());
-            data[metadata_offset + size_of::<u64>()..metadata_offset + 2 * size_of::<u64>()]
-                .copy_from_slice(&(required as u64).to_le_bytes());
+            data_offset += required;
+            data[metadata_offset..metadata_offset + size_of::<u32>()]
+                .copy_from_slice(&(data_offset as u32).to_le_bytes());
             orders.push(PageAllocator::init_new(
                 Self::get_order_bytes_mut(data, order),
                 pages_for_order,
             ));
             pages_for_order = Self::next_higher_order(pages_for_order as u64) as usize;
-            metadata_offset += 2 * size_of::<u64>();
-            data_offset += required;
+            metadata_offset += size_of::<u32>();
         }
 
         // Mark the available pages, starting with the highest order
@@ -179,7 +178,7 @@ impl BuddyAllocator {
 
     /// Returns the number of bytes required for the data argument of new()
     pub(crate) fn required_space(mut capacity: usize, max_order: usize) -> usize {
-        let mut required = size_of::<u64>() + 2 * (max_order + 1) * size_of::<u64>();
+        let mut required = 4 + (max_order + 1) * size_of::<u32>();
         for _ in 0..=max_order {
             required += PageAllocator::required_space(capacity);
             capacity = Self::next_higher_order(capacity as u64) as usize;
@@ -228,19 +227,28 @@ impl BuddyAllocator {
         free_pages
     }
 
+    fn get_order_start_offset(data: &[u8], order: usize) -> usize {
+        if order == 0 {
+            let max_order = data[0] as usize;
+            4 + (max_order + 1) * size_of::<u32>()
+        } else {
+            Self::get_order_end_offset(data, order - 1)
+        }
+    }
+
+    fn get_order_end_offset(data: &[u8], order: usize) -> usize {
+        let base = 4 + order * size_of::<u32>();
+        u32::from_le_bytes(data[base..base + size_of::<u32>()].try_into().unwrap()) as usize
+    }
+
     fn get_order_offset_and_length(data: &[u8], order: usize) -> (usize, usize) {
-        let max_order = u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap()) as usize;
+        let max_order = data[0] as usize;
         assert!(order <= max_order);
-        let base = size_of::<u64>() + order * 2 * size_of::<u64>();
-        let offset =
-            u64::from_le_bytes(data[base..base + size_of::<u64>()].try_into().unwrap()) as usize;
-        let length = u64::from_le_bytes(
-            data[base + size_of::<u64>()..base + 2 * size_of::<u64>()]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let offset = Self::get_order_start_offset(data, order);
+        let end = Self::get_order_end_offset(data, order);
+        let length = end - offset;
         // Data starts with max_order
-        assert!(offset > size_of::<u64>());
+        assert!(offset > size_of::<u32>());
 
         (offset, length)
     }
