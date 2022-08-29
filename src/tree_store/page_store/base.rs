@@ -1,4 +1,5 @@
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
+#[cfg(debug_assertions)]
 use std::collections::HashMap;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
