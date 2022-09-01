@@ -187,6 +187,17 @@ impl BuddyAllocator {
         required
     }
 
+    pub(crate) fn highest_free_order(&self, data: &[u8]) -> Option<usize> {
+        for (order, allocator) in self.orders.iter().enumerate().rev() {
+            // TODO: optimize this. We don't need to count all the free pages, just determine whether there is at least one
+            if allocator.count_free_pages(Self::get_order_bytes(data, order)) > 0 {
+                return Some(order);
+            }
+        }
+
+        None
+    }
+
     pub(crate) fn count_free_pages(&self, data: &[u8]) -> usize {
         let mut pages = 0;
         for (order, allocator) in self.orders.iter().enumerate() {

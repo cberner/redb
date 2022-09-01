@@ -1,7 +1,6 @@
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
-use crate::tree_store::page_store::grouped_bitmap::U64GroupedBitMapMut;
 use crate::tree_store::page_store::page_manager::{
-    DB_HEADER_SIZE, MAX_MAX_PAGE_ORDER, MIN_USABLE_PAGES,
+    RegionAllocator, DB_HEADER_SIZE, MAX_MAX_PAGE_ORDER, MIN_USABLE_PAGES,
 };
 use crate::{Error, Result};
 use std::cmp::min;
@@ -175,24 +174,31 @@ impl DatabaseLayout {
         desired_usable_bytes = min(desired_usable_bytes, db_capacity);
         let full_region_layout =
             RegionLayout::full_region_layout(max_usable_region_bytes, page_size);
-        let min_header_size = DB_HEADER_SIZE + U64GroupedBitMapMut::required_bytes(1);
-        let region_allocator_range = DB_HEADER_SIZE..min_header_size;
+        let min_header_size =
+            DB_HEADER_SIZE + RegionAllocator::required_bytes(1, MAX_MAX_PAGE_ORDER + 1);
+        let max_regions = (db_capacity - min_header_size + full_region_layout.len() - 1)
+            / full_region_layout.len();
+        let db_header_bytes =
+            DB_HEADER_SIZE + RegionAllocator::required_bytes(max_regions, MAX_MAX_PAGE_ORDER + 1);
+        let region_allocator_range = DB_HEADER_SIZE..db_header_bytes;
         // Pad to be page aligned
-        let min_header_size = round_up_to_multiple_of(min_header_size, page_size);
-        if db_capacity < min_header_size + MIN_USABLE_PAGES * page_size {
+        let super_header_size = round_up_to_multiple_of(db_header_bytes, page_size);
+        if db_capacity < super_header_size + MIN_USABLE_PAGES * page_size {
             return Err(Error::OutOfSpace);
         }
-        let result = if desired_usable_bytes <= full_region_layout.usable_bytes() {
+        let result = if desired_usable_bytes <= full_region_layout.usable_bytes()
+            || db_capacity - super_header_size <= full_region_layout.len()
+        {
             // Single region layout
             let region_layout = RegionLayout::calculate(
-                db_capacity - min_header_size,
+                db_capacity - super_header_size,
                 desired_usable_bytes,
                 max_usable_region_bytes,
                 page_size,
             )
             .ok_or(Error::OutOfSpace)?;
             DatabaseLayout {
-                db_header_bytes: min_header_size,
+                db_header_bytes: super_header_size,
                 region_allocator_range,
                 full_region_layout,
                 num_full_regions: 0,
@@ -200,17 +206,11 @@ impl DatabaseLayout {
             }
         } else {
             // Multi region layout
-            let max_regions = (db_capacity - min_header_size + full_region_layout.len() - 1)
-                / full_region_layout.len();
-            let db_header_bytes = DB_HEADER_SIZE + U64GroupedBitMapMut::required_bytes(max_regions);
-            let region_allocator_range = DB_HEADER_SIZE..db_header_bytes;
-            // Pad to be page aligned
-            let db_header_bytes = round_up_to_multiple_of(db_header_bytes, page_size);
-            let max_full_regions = (db_capacity - db_header_bytes) / full_region_layout.len();
+            let max_full_regions = (db_capacity - super_header_size) / full_region_layout.len();
             let desired_full_regions = desired_usable_bytes / max_usable_region_bytes;
             let num_full_regions = min(max_full_regions, desired_full_regions);
             let remaining_space =
-                db_capacity - db_header_bytes - num_full_regions * full_region_layout.len();
+                db_capacity - super_header_size - num_full_regions * full_region_layout.len();
             let remaining_desired =
                 desired_usable_bytes - num_full_regions * max_usable_region_bytes;
             assert!(num_full_regions > 0);
@@ -231,7 +231,7 @@ impl DatabaseLayout {
                 None
             };
             DatabaseLayout {
-                db_header_bytes,
+                db_header_bytes: super_header_size,
                 region_allocator_range,
                 full_region_layout,
                 num_full_regions,

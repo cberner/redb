@@ -1,8 +1,8 @@
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
-use crate::tree_store::page_store::grouped_bitmap::U64GroupedBitMapMut;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::mmap::Mmap;
+use crate::tree_store::page_store::page_allocator::PageAllocator;
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
 use crate::tree_store::page_store::utils::get_page_size;
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
@@ -72,7 +72,7 @@ pub(super) const MIN_USABLE_PAGES: usize = 10;
 const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
 
 // TODO: set to 1, when version 1.0 is released
-const FILE_FORMAT_VERSION: u8 = 104;
+const FILE_FORMAT_VERSION: u8 = 105;
 
 // Inspired by PNG's magic number
 const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
@@ -411,12 +411,32 @@ impl<'a> MetadataAccessor<'a> {
         RegionHeaderAccessor::new(mem)
     }
 
+    fn initialize_region_allocator(&mut self, layout: &DatabaseLayout) {
+        let max_regions = DatabaseLayout::calculate(
+            self.get_max_capacity(),
+            self.get_max_capacity(),
+            self.get_region_max_usable_bytes(),
+            self.get_page_size(),
+        )
+        .unwrap()
+        .num_regions();
+
+        let range = layout.region_allocator_address_range();
+
+        // Safety: We own the metadata lock, so there can't be any other references
+        // and this function takes &mut self, so the returned lifetime can't overlap with any other
+        // calls into MetadataAccessor
+        assert!(range.start >= DB_HEADER_SIZE);
+        let mem = unsafe { self.mmap.get_memory_mut(range) };
+        RegionAllocator::init_new(max_regions, self.get_max_page_order() as usize + 1, mem);
+    }
+
     // Note: It's very important that the lifetime of the returned allocator accessors is the same
     // as self, since self holds the metadata lock
     fn allocators_mut(
         &mut self,
         layout: &DatabaseLayout,
-    ) -> Result<(U64GroupedBitMapMut, RegionsAccessor)> {
+    ) -> Result<(RegionAllocator, RegionsAccessor)> {
         if !self.get_recovery_required() {
             self.set_recovery(true);
             self.mmap.flush()?
@@ -436,7 +456,96 @@ impl<'a> MetadataAccessor<'a> {
             mmap: self.mmap,
             layout: layout.clone(),
         };
-        Ok((U64GroupedBitMapMut::new(mem), region_accessor))
+        Ok((RegionAllocator::new(mem), region_accessor))
+    }
+}
+
+// Tracks the page orders that MAY BE free in each region. This data structure is optimistic, so
+// a region may not actually have a page free for a given order
+//
+// Format:
+// num_allocators: u32 number of allocators
+// allocator_len: u32 length of each allocator
+// data: PageAllocator data for each order
+pub(crate) struct RegionAllocator<'a> {
+    // TODO: remove this field
+    accessor: PageAllocator,
+    data: &'a mut [u8],
+}
+
+impl<'a> RegionAllocator<'a> {
+    pub(crate) fn new(data: &'a mut [u8]) -> Self {
+        // TODO: this is hacky since we rely on private details of the PageAllocator implementation
+        let regions = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+        Self {
+            accessor: PageAllocator::new(regions),
+            data,
+        }
+    }
+
+    pub(crate) fn required_bytes(regions: usize, orders: usize) -> usize {
+        2 * size_of::<u32>() + orders * PageAllocator::required_space(regions)
+    }
+
+    pub(crate) fn init_new(regions: usize, orders: usize, data: &'a mut [u8]) -> Self {
+        assert!(data.len() >= Self::required_bytes(regions, orders));
+        data[..4].copy_from_slice(&(orders as u32).to_le_bytes());
+        data[4..8].copy_from_slice(&(PageAllocator::required_space(regions) as u32).to_le_bytes());
+        let mut result = Self {
+            accessor: PageAllocator::new(regions),
+            data,
+        };
+        for i in 0..orders {
+            PageAllocator::init_new(result.get_order_mut(i), regions);
+        }
+
+        result
+    }
+
+    pub(crate) fn find_free(&self, order: usize) -> Result<u64> {
+        self.accessor.find_free(self.get_order(order))
+    }
+
+    pub(crate) fn mark_free(&mut self, order: usize, region: u64) {
+        assert!(order < self.suballocators());
+        for i in 0..=order {
+            let start = 8 + i * self.suballocator_len();
+            let end = start + self.suballocator_len();
+            let mem = &mut self.data[start..end];
+            self.accessor.free(mem, region);
+        }
+    }
+
+    pub(crate) fn mark_full(&mut self, order: usize, region: u64) {
+        assert!(order < self.suballocators());
+        for i in order..self.suballocators() {
+            let start = 8 + i * self.suballocator_len();
+            let end = start + self.suballocator_len();
+            let mem = &mut self.data[start..end];
+            self.accessor.record_alloc(mem, region);
+        }
+    }
+
+    fn suballocator_len(&self) -> usize {
+        u32::from_le_bytes(self.data[4..8].try_into().unwrap()) as usize
+    }
+
+    fn suballocators(&self) -> usize {
+        u32::from_le_bytes(self.data[..4].try_into().unwrap()) as usize
+    }
+
+    fn get_order_mut(&mut self, order: usize) -> &mut [u8] {
+        assert!(order < self.suballocators());
+        let start = 8 + order * self.suballocator_len();
+        let end = start + self.suballocator_len();
+        &mut self.data[start..end]
+    }
+
+    fn get_order(&self, order: usize) -> &[u8] {
+        assert!(order < self.suballocators());
+        let start = 8 + order * self.suballocator_len();
+        let end = start + self.suballocator_len();
+        &self.data[start..end]
     }
 }
 
@@ -681,11 +790,11 @@ impl TransactionalMemory {
         let mutex = Mutex::new(MetadataGuard {});
         let mut metadata = unsafe { MetadataAccessor::new(&mmap, mutex.lock().unwrap()) };
 
-        if metadata.get_magic_number() != MAGICNUMBER {
-            let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
-            assert!(region_size.is_power_of_two());
-            let max_usable_region_bytes = min(region_size, max_capacity.next_power_of_two());
+        let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
+        assert!(region_size.is_power_of_two());
+        let max_usable_region_bytes = min(region_size, max_capacity.next_power_of_two());
 
+        if metadata.get_magic_number() != MAGICNUMBER {
             let starting_size = if dynamic_growth {
                 MIN_DESIRED_USABLE_BYTES
             } else {
@@ -708,31 +817,6 @@ impl TransactionalMemory {
             // Explicitly zero the header
             metadata.header.fill(0);
 
-            let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
-
-            // Initialize the region allocator
-            let num_regions = layout.num_regions();
-            for i in 0..num_regions {
-                region_allocator.clear(i);
-            }
-            for i in num_regions..region_allocator.len() {
-                region_allocator.set(i);
-            }
-
-            // Initialize all the regional allocators
-            for i in 0..num_regions {
-                let mut region = regions.get_region_mut(i);
-                let region_layout = layout.region_layout(i);
-                region.initialize(
-                    region_layout.num_pages(),
-                    layout.full_region_layout().num_pages(),
-                    region_layout.max_order(),
-                );
-            }
-            // Set the allocator to not dirty, because the allocator initialization above will have
-            // dirtied it
-            metadata.set_recovery(false);
-
             // Store the page & db size. These are immutable
             metadata.set_page_size(page_size);
             metadata.set_max_page_order(layout.full_region_layout().max_order() as u8);
@@ -748,6 +832,30 @@ impl TransactionalMemory {
                 ChecksumType::Zero
             };
             metadata.set_checksum_type(checksum_type);
+
+            // Initialize the region allocator. Must be done after writing the page_size and other
+            // immutable fields, since it relies on those fields.
+            metadata.initialize_region_allocator(&layout);
+            let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
+
+            let num_regions = layout.num_regions();
+            for i in 0..num_regions {
+                region_allocator.mark_free(layout.full_region_layout().max_order(), i as u64);
+            }
+
+            // Initialize all the regional allocators
+            for i in 0..num_regions {
+                let mut region = regions.get_region_mut(i);
+                let region_layout = layout.region_layout(i);
+                region.initialize(
+                    region_layout.num_pages(),
+                    layout.full_region_layout().num_pages(),
+                    region_layout.max_order(),
+                );
+            }
+            // Set the allocator to not dirty, because the allocator initialization above will have
+            // dirtied it
+            metadata.set_recovery(false);
 
             let mut mutator = metadata.secondary_slot_mut();
             mutator.set_root_page(None);
@@ -878,16 +986,10 @@ impl TransactionalMemory {
         }
 
         let layout = self.layout.lock().unwrap();
+        metadata.initialize_region_allocator(&layout);
         let (mut region_allocator, mut regions) = metadata.allocators_mut(&layout)?;
 
-        // Initialize the region allocator
         let num_regions = layout.num_regions();
-        for i in num_regions..region_allocator.len() {
-            region_allocator.set(i);
-        }
-        // Since the region allocator is lazily set, we can leave it all free, and it will be
-        // populated lazily when a region is discovered to be full
-
         // Initialize all the regional allocators
         let mut regional_allocators = vec![];
         for i in 0..num_regions {
@@ -898,11 +1000,17 @@ impl TransactionalMemory {
                 layout.full_region_layout().num_pages(),
                 region_layout.max_order(),
             );
-            regional_allocators.push(BuddyAllocator::new(
+            let allocator = BuddyAllocator::new(
                 region_layout.num_pages(),
                 layout.full_region_layout().num_pages(),
                 region_layout.max_order(),
-            ));
+            );
+            let highest_free = allocator
+                .highest_free_order(region.allocator_state_mut())
+                .unwrap();
+            // Initialize the region allocator
+            region_allocator.mark_free(highest_free, i as u64);
+            regional_allocators.push(allocator);
         }
 
         let mut guard = self.regional_allocators.lock().unwrap();
@@ -1068,7 +1176,8 @@ impl TransactionalMemory {
             match op {
                 AllocationOp::Allocate(page_number) => {
                     let region_index = page_number.region as usize;
-                    region_allocator.clear(region_index);
+                    region_allocator
+                        .mark_free(page_number.page_order as usize, region_index as u64);
                     let mut region = regions.get_region_mut(region_index);
                     let mem = region.allocator_state_mut();
                     regional_guard.as_ref().unwrap()[region_index].free(
@@ -1231,7 +1340,7 @@ impl TransactionalMemory {
             page.page_order as usize,
         );
         // Ensure that the region is marked as having free space
-        region_allocator.clear(region_index);
+        region_allocator.mark_free(page.page_order as usize, region_index as u64);
         self.log_since_commit
             .lock()
             .unwrap()
@@ -1260,7 +1369,7 @@ impl TransactionalMemory {
                 page.page_order as usize,
             );
             // Ensure that the region is marked as having free space
-            region_allocator.clear(page.region as usize);
+            region_allocator.mark_free(page.page_order as usize, page.region as u64);
 
             self.log_since_commit
                 .lock()
@@ -1284,40 +1393,33 @@ impl TransactionalMemory {
         layout: &DatabaseLayout,
         required_order: usize,
     ) -> Result<PageNumber> {
+        if required_order > metadata.get_max_page_order() as usize {
+            return Err(Error::OutOfSpace);
+        }
         let regional_guard = self.regional_allocators.lock().unwrap();
         let (mut region_allocator, mut regions) = metadata.allocators_mut(layout)?;
-        let mut allocated_page = None;
-        let mut allocated_region = 0;
-        for region_index in 0..region_allocator.len() {
-            allocated_region = region_index;
-            if !region_allocator.get(region_index) {
-                let mut region = regions.get_region_mut(region_index);
-                let mem = region.allocator_state_mut();
-                match regional_guard.as_ref().unwrap()[region_index].alloc(mem, required_order) {
-                    Ok(page) => {
-                        allocated_page = Some(page);
-                        break;
-                    }
-                    Err(err) => {
-                        if matches!(err, Error::OutOfSpace) {
-                            // Mark the region, if it's full
-                            if required_order == 0 {
-                                region_allocator.set(region_index);
-                            }
-                        } else {
-                            return Err(err);
-                        }
+        loop {
+            let candidate_region = region_allocator.find_free(required_order)? as usize;
+            let mut region = regions.get_region_mut(candidate_region);
+            let mem = region.allocator_state_mut();
+            match regional_guard.as_ref().unwrap()[candidate_region].alloc(mem, required_order) {
+                Ok(page) => {
+                    return Ok(PageNumber::new(
+                        candidate_region as u32,
+                        page as u32,
+                        required_order as u8,
+                    ));
+                }
+                Err(err) => {
+                    if matches!(err, Error::OutOfSpace) {
+                        // Mark the region, if it's full
+                        region_allocator.mark_full(required_order, candidate_region as u64);
+                    } else {
+                        return Err(err);
                     }
                 }
             }
         }
-
-        let page = allocated_page.ok_or(Error::OutOfSpace)?;
-        Ok(PageNumber::new(
-            allocated_region as u32,
-            page as u32,
-            required_order as u8,
-        ))
     }
 
     // Safety: caller must guarantee that no references to free pages at the end of the last region exist
@@ -1345,7 +1447,7 @@ impl TransactionalMemory {
 
         let (mut region_allocator, mut regions) = metadata.allocators_mut(layout)?;
         let new_usable_bytes = if reduce_to_pages == 0 {
-            region_allocator.set(last_region_index);
+            region_allocator.mark_full(0, last_region_index as u64);
             allocators
                 .as_mut()
                 .unwrap()
@@ -1436,27 +1538,32 @@ impl TransactionalMemory {
                 if new_region.len() != old_region.len() {
                     let (mut region_allocator, mut regions) =
                         metadata.allocators_mut(&new_layout)?;
-                    region_allocator.clear(i);
                     let mut region = regions.get_region_mut(i);
                     let mem = region.allocator_state_mut();
                     allocator.resize(mem, new_region.num_pages());
+                    let highest_free = allocator.highest_free_order(mem).unwrap();
+                    region_allocator.mark_free(highest_free, i as u64);
                 }
                 allocator
             } else {
                 // brand new region
                 let (mut region_allocator, mut regions) = metadata.allocators_mut(&new_layout)?;
-                region_allocator.clear(i);
                 let mut region = regions.get_region_mut(i);
                 region.initialize(
                     new_region.num_pages(),
                     new_layout.full_region_layout().num_pages(),
                     new_region.max_order(),
                 );
-                BuddyAllocator::new(
+                let allocator = BuddyAllocator::new(
                     new_region.num_pages(),
                     new_layout.full_region_layout().num_pages(),
                     new_region.max_order(),
-                )
+                );
+                let mem = region.allocator_state_mut();
+                let highest_free = allocator.highest_free_order(mem).unwrap();
+                region_allocator.mark_free(highest_free, i as u64);
+
+                allocator
             };
             new_allocators.push(new_allocator);
         }

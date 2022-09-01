@@ -20,6 +20,19 @@ impl<'a> U64GroupedBitMap<'a> {
         self.data.iter().map(|x| x.count_ones() as usize).sum()
     }
 
+    pub(crate) fn first_unset(&self, start_bit: usize, end_bit: usize) -> Option<usize> {
+        assert_eq!(end_bit, (start_bit - start_bit % 64) + 64);
+
+        let (index, bit) = self.data_index_of(start_bit);
+        let mask = !((1 << bit) - 1);
+        let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
+        let group = group & mask;
+        match group.trailing_zeros() {
+            64 => None,
+            x => Some(start_bit + x as usize - bit),
+        }
+    }
+
     pub(crate) fn get(&self, bit: usize) -> bool {
         let (index, bit_index) = self.data_index_of(bit);
         let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
@@ -66,29 +79,11 @@ impl<'a> U64GroupedBitMapMut<'a> {
         group == 0
     }
 
-    pub(crate) fn get(&self, bit: usize) -> bool {
-        let (index, bit_index) = self.data_index_of(bit);
-        let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        group & Self::select_mask(bit_index) == 0
-    }
-
     pub(crate) fn clear(&mut self, bit: usize) {
         let (index, bit_index) = self.data_index_of(bit);
         let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
         group |= Self::select_mask(bit_index);
         self.data[index..(index + 8)].copy_from_slice(&group.to_le_bytes());
-    }
-
-    pub(crate) fn first_unset(&self, start_bit: usize, end_bit: usize) -> Option<usize> {
-        assert_eq!(start_bit % 64, 0);
-        assert_eq!(end_bit, start_bit + 64);
-
-        let (index, _) = self.data_index_of(start_bit);
-        let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        match group.trailing_zeros() {
-            64 => None,
-            x => Some(start_bit + x as usize),
-        }
     }
 
     fn data_index_of(&self, bit: usize) -> (usize, usize) {
