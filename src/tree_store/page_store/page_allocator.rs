@@ -21,6 +21,7 @@ pub(crate) struct PageAllocator {
 //
 // Data structure format:
 // height: u32
+// TODO: maybe remove the elements & capacity fields?
 // elements: u32
 // capacity: u32
 // layer_ends: array of u32, ending offset in bytes of layers. Does not include the root layer
@@ -121,14 +122,14 @@ impl PageAllocator {
             // Space for root
             size_of::<u64>() +
                 // Space for the leaves
-                (num_pages + 63) / 64 * size_of::<u64>()
+                U64GroupedBitMapMut::required_bytes(num_pages)
         } else {
             // Space for root
             size_of::<u64>() +
                 // Space for the subtrees
                 Self::required_subtrees(num_pages) * Self::required_interior_bytes_per_subtree(num_pages) +
                 // Space for the leaves
-                (num_pages + 63) / 64 * size_of::<u64>()
+                U64GroupedBitMapMut::required_bytes(num_pages)
         };
 
         Self::tree_data_start(num_pages) + tree_space
@@ -218,20 +219,26 @@ impl PageAllocator {
 
     /// data must have been initialized by Self::init_new()
     pub(crate) fn alloc(&self, data: &mut [u8]) -> Result<u64> {
-        if let Some(mut entry) = self.get_level_mut(data, 0).first_unset(0, 64) {
+        let entry = self.find_free(data)?;
+        self.record_alloc(data, entry as u64);
+        Ok(entry)
+    }
+
+    /// data must have been initialized by Self::init_new(). Returns the first free id, after (inclusive) of start
+    pub(crate) fn find_free(&self, data: &[u8]) -> Result<u64> {
+        if let Some(mut entry) = self.get_level(data, 0).first_unset(0, 64) {
             let mut height = 0;
 
             while height < self.get_height() - 1 {
                 height += 1;
                 entry *= 64;
                 entry = self
-                    .get_level_mut(data, height)
+                    .get_level(data, height)
                     .first_unset(entry, entry + 64)
                     .unwrap();
             }
 
             assert!(entry < self.get_num_pages() as usize);
-            self.record_alloc(data, entry as u64);
             Ok(entry as u64)
         } else {
             Err(Error::OutOfSpace)
@@ -348,6 +355,25 @@ mod test {
             u64::MAX,
             u64::from_le_bytes(data[(l - 8)..].try_into().unwrap())
         );
+    }
+
+    #[test]
+    fn find_free() {
+        let num_pages = 129;
+        let mut data = vec![0; PageAllocator::required_space(num_pages)];
+        let allocator = PageAllocator::init_new(&mut data, num_pages);
+        assert!(matches!(
+            allocator.find_free(&data).unwrap_err(),
+            Error::OutOfSpace
+        ));
+        allocator.free(&mut data, 128);
+        assert_eq!(allocator.find_free(&data).unwrap(), 128);
+        allocator.free(&mut data, 65);
+        assert_eq!(allocator.find_free(&data).unwrap(), 65);
+        allocator.free(&mut data, 8);
+        assert_eq!(allocator.find_free(&data).unwrap(), 8);
+        allocator.free(&mut data, 0);
+        assert_eq!(allocator.find_free(&data).unwrap(), 0);
     }
 
     #[test]
