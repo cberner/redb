@@ -2,9 +2,11 @@ use crate::tree_store::page_store::{ChecksumType, Page, PageImpl, PageMut, Trans
 use crate::tree_store::{page_store, PageNumber};
 use crate::types::{RedbKey, RedbValue, WithLifetime};
 use crate::Result;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
+use std::rc::Rc;
 use std::{mem, thread};
 
 pub(crate) const LEAF: u8 = 1;
@@ -210,22 +212,101 @@ impl<'a, V: RedbValue + ?Sized> Drop for AccessGuard<'a, V> {
     }
 }
 
-pub struct AccessGuardMut<'a> {
+pub struct AccessGuardMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+    root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
+    key: Vec<u8>,
+    mem: &'a TransactionalMemory,
     page: PageMut<'a>,
     offset: usize,
     len: usize,
+    // TODO: kind of a hack that we have to have the key type to find the leaf page again. We
+    // could instead save the path from the root to the leaf during .insert_reserve()
+    _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
 }
 
-impl<'a> AccessGuardMut<'a> {
-    pub(crate) fn new(page: PageMut<'a>, offset: usize, len: usize) -> Self {
-        AccessGuardMut { page, offset, len }
+impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> AccessGuardMut<'a, K, V> {
+    pub(crate) fn new(
+        key: &[u8],
+        page: PageMut<'a>,
+        offset: usize,
+        len: usize,
+        mem: &'a TransactionalMemory,
+    ) -> Self {
+        AccessGuardMut {
+            root: Rc::new(RefCell::new(None)),
+            key: key.to_vec(),
+            mem,
+            page,
+            offset,
+            len,
+            _key_type: Default::default(),
+            _value_type: Default::default(),
+        }
+    }
+
+    pub(crate) fn set_root_for_drop(&mut self, root: Rc<RefCell<Option<(PageNumber, Checksum)>>>) {
+        self.root = root;
+    }
+
+    // Repairs the checksums after the user has filled the mutable buffer. This is necessary
+    // because the checksums will have been calculated with the values during .insert_reserve(),
+    // but the user is given a mutable reference and will have modified the value, which invalidates
+    // the checksum.
+    fn finalize_checksum(&mut self, page_number: PageNumber) -> Checksum {
+        if page_number == self.page.get_page_number() {
+            assert_eq!(LEAF, self.page.memory()[0]);
+            self.checksum_helper(&self.page)
+        } else {
+            // Safe because we're the only one with mutable access, and this is a dirty page so
+            // no readers can have a reference to it
+            assert!(self.mem.uncommitted(page_number));
+            let mut page = unsafe { self.mem.get_page_mut(page_number) };
+            assert_eq!(BRANCH, page.memory()[0]);
+            let accessor = BranchAccessor::new(&page, K::fixed_width());
+            let (child_index, child_page) = accessor.child_for_key::<K>(&self.key);
+            let child_checksum = self.finalize_checksum(child_page);
+            drop(accessor);
+            let mut mutator = BranchMutator::new(&mut page);
+            mutator.write_child_page(child_index, child_page, child_checksum);
+            self.checksum_helper(&page)
+        }
+    }
+
+    fn checksum_helper<T: Page>(&self, page: &T) -> Checksum {
+        if self.mem.checksum_type() == ChecksumType::Zero {
+            return 0;
+        }
+        match page.memory()[0] {
+            LEAF => leaf_checksum(
+                page,
+                K::fixed_width(),
+                V::fixed_width(),
+                self.mem.checksum_type(),
+            ),
+            BRANCH => branch_checksum(page, K::fixed_width(), self.mem.checksum_type()),
+            _ => unreachable!(),
+        }
     }
 }
 
 // TODO: this should return a RedbValue typed reference
-impl<'a> AsMut<[u8]> for AccessGuardMut<'a> {
+impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> AsMut<[u8]> for AccessGuardMut<'a, K, V> {
     fn as_mut(&mut self) -> &mut [u8] {
         &mut self.page.memory_mut()[self.offset..(self.offset + self.len)]
+    }
+}
+
+impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for AccessGuardMut<'a, K, V> {
+    fn drop(&mut self) {
+        // Was dropped before being returned to the user, so no clean up needed
+        if self.root.borrow().is_none() {
+            return;
+        }
+        let new_checksum = self.finalize_checksum((self.root.clone()).borrow().unwrap().0);
+        let mut borrow = self.root.borrow_mut();
+        let (_, root_checksum_ref) = borrow.as_mut().unwrap();
+        *root_checksum_ref = new_checksum;
     }
 }
 

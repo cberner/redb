@@ -1768,7 +1768,12 @@ mod test {
     fn repair_allocator_checksums() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let max_size = 1024 * 1024;
-        let db = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
+        let db = unsafe {
+            Database::builder()
+                .set_write_strategy(WriteStrategy::Checksum)
+                .create(tmpfile.path(), max_size)
+                .unwrap()
+        };
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
@@ -1833,6 +1838,63 @@ mod test {
             table.insert(b"hello2", b"world2").unwrap();
         }
         write_txn.commit().unwrap();
+    }
+
+    #[test]
+    fn repair_insert_reserve_regression() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let max_size = 1024 * 1024;
+        let db = unsafe {
+            Database::builder()
+                .set_write_strategy(WriteStrategy::Checksum)
+                .create(tmpfile.path(), max_size)
+                .unwrap()
+        };
+
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            let mut value = table.insert_reserve(b"hello", 5).unwrap();
+            value.as_mut().copy_from_slice(b"world");
+        }
+        write_txn.commit().unwrap();
+
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            let mut value = table.insert_reserve(b"hello2", 5).unwrap();
+            value.as_mut().copy_from_slice(b"world");
+        }
+        write_txn.commit().unwrap();
+
+        drop(db);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        let mut buffer = [0u8; 1];
+        file.read_exact(&mut buffer).unwrap();
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        buffer[0] |= RECOVERY_REQUIRED;
+        file.write_all(&buffer).unwrap();
+
+        assert!(TransactionalMemory::new(
+            file,
+            max_size,
+            None,
+            None,
+            true,
+            WriteStrategy::Checksum
+        )
+        .unwrap()
+        .needs_repair()
+        .unwrap());
+
+        unsafe { Database::open(tmpfile.path()).unwrap() };
     }
 
     #[test]
