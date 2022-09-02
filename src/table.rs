@@ -48,7 +48,12 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'db, 'txn, K, 
 
     /// Reserve space to insert a key-value pair
     /// The returned reference will have length equal to value_length
-    pub fn insert_reserve(&mut self, key: &K, value_length: usize) -> Result<AccessGuardMut> {
+    // TODO: return type should be V, not [u8]
+    pub fn insert_reserve(
+        &mut self,
+        key: &K,
+        value_length: usize,
+    ) -> Result<AccessGuardMut<K, [u8]>> {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
