@@ -1,6 +1,6 @@
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::page_manager::{
-    RegionAllocator, DB_HEADER_SIZE, MAX_MAX_PAGE_ORDER, MIN_USABLE_PAGES,
+    RegionTracker, DB_HEADER_SIZE, MAX_MAX_PAGE_ORDER, MIN_USABLE_PAGES,
 };
 use crate::{Error, Result};
 use std::cmp::min;
@@ -142,7 +142,7 @@ impl RegionLayout {
 #[derive(Clone)]
 pub(super) struct DatabaseLayout {
     db_header_bytes: usize,
-    region_allocator_range: Range<usize>,
+    region_tracker_range: Range<usize>,
     full_region_layout: RegionLayout,
     num_full_regions: usize,
     trailing_partial_region: Option<RegionLayout>,
@@ -151,14 +151,14 @@ pub(super) struct DatabaseLayout {
 impl DatabaseLayout {
     pub(super) fn new(
         superheader_bytes: usize,
-        region_allocator_len: usize,
+        region_tracker_len: usize,
         full_regions: usize,
         full_region: RegionLayout,
         trailing_region: Option<RegionLayout>,
     ) -> Self {
         Self {
             db_header_bytes: superheader_bytes,
-            region_allocator_range: DB_HEADER_SIZE..(DB_HEADER_SIZE + region_allocator_len),
+            region_tracker_range: DB_HEADER_SIZE..(DB_HEADER_SIZE + region_tracker_len),
             full_region_layout: full_region,
             num_full_regions: full_regions,
             trailing_partial_region: trailing_region,
@@ -175,12 +175,12 @@ impl DatabaseLayout {
         let full_region_layout =
             RegionLayout::full_region_layout(max_usable_region_bytes, page_size);
         let min_header_size =
-            DB_HEADER_SIZE + RegionAllocator::required_bytes(1, MAX_MAX_PAGE_ORDER + 1);
+            DB_HEADER_SIZE + RegionTracker::required_bytes(1, MAX_MAX_PAGE_ORDER + 1);
         let max_regions = (db_capacity - min_header_size + full_region_layout.len() - 1)
             / full_region_layout.len();
         let db_header_bytes =
-            DB_HEADER_SIZE + RegionAllocator::required_bytes(max_regions, MAX_MAX_PAGE_ORDER + 1);
-        let region_allocator_range = DB_HEADER_SIZE..db_header_bytes;
+            DB_HEADER_SIZE + RegionTracker::required_bytes(max_regions, MAX_MAX_PAGE_ORDER + 1);
+        let region_tracker_range = DB_HEADER_SIZE..db_header_bytes;
         // Pad to be page aligned
         let super_header_size = round_up_to_multiple_of(db_header_bytes, page_size);
         if db_capacity < super_header_size + MIN_USABLE_PAGES * page_size {
@@ -199,7 +199,7 @@ impl DatabaseLayout {
             .ok_or(Error::OutOfSpace)?;
             DatabaseLayout {
                 db_header_bytes: super_header_size,
-                region_allocator_range,
+                region_tracker_range,
                 full_region_layout,
                 num_full_regions: 0,
                 trailing_partial_region: Some(region_layout),
@@ -232,7 +232,7 @@ impl DatabaseLayout {
             };
             DatabaseLayout {
                 db_header_bytes: super_header_size,
-                region_allocator_range,
+                region_tracker_range,
                 full_region_layout,
                 num_full_regions,
                 trailing_partial_region: trailing_region,
@@ -300,8 +300,8 @@ impl DatabaseLayout {
         self.db_header_bytes
     }
 
-    pub(super) fn region_allocator_address_range(&self) -> Range<usize> {
-        self.region_allocator_range.clone()
+    pub(super) fn region_tracker_address_range(&self) -> Range<usize> {
+        self.region_tracker_range.clone()
     }
 
     pub(super) fn region_base_address(&self, region: usize) -> usize {
