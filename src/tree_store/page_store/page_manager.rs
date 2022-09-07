@@ -27,7 +27,7 @@ use std::sync::{Mutex, MutexGuard};
 // Super-header (header + region tracker state)
 // The super-header length is rounded up to the nearest full page size
 //
-// Header (first 128 bytes):
+// Header (first 64 bytes):
 // 9 bytes: magic number
 // 1 byte: max page order
 // 1 byte: god byte
@@ -40,7 +40,7 @@ use std::sync::{Mutex, MutexGuard};
 // 4 bytes: region header pages
 // 4 bytes: region max data pages
 //
-// Commit slot 0 (next 192 bytes):
+// Commit slot 0 (next 128 bytes):
 // 1 byte: version
 // 1 byte: != 0 if root page is non-null
 // 1 byte: != 0 if freed table root page is non-null
@@ -54,7 +54,7 @@ use std::sync::{Mutex, MutexGuard};
 // 4 bytes: data pages in partial trailing region
 // 16 bytes: slot checksum
 //
-// Commit slot 1 (next 192 bytes):
+// Commit slot 1 (next 128 bytes):
 // Same layout as slot 0
 //
 // Region tracker state (byte 512...(512 + n))
@@ -85,8 +85,8 @@ const REGION_TRACKER_LENGTH_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u32>();
 const DB_SIZE_OFFSET: usize = REGION_TRACKER_LENGTH_OFFSET + size_of::<u32>();
 const REGION_HEADER_PAGES_OFFSET: usize = DB_SIZE_OFFSET + size_of::<u64>();
 const REGION_MAX_DATA_PAGES_OFFSET: usize = REGION_HEADER_PAGES_OFFSET + size_of::<u32>();
-const TRANSACTION_SIZE: usize = 192;
-const TRANSACTION_0_OFFSET: usize = 128;
+const TRANSACTION_SIZE: usize = 128;
+const TRANSACTION_0_OFFSET: usize = 64;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
 pub(super) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
 
