@@ -28,10 +28,12 @@ pub(super) struct RegionLayout {
 impl RegionLayout {
     pub(super) fn new(
         num_pages: usize,
+        page_capacity: usize,
         header_size: usize,
-        max_order: usize,
         page_size: usize,
     ) -> Self {
+        // TODO: remove this, since its already stored in the regional allocator
+        let max_order = Self::calculate_usable_order(page_capacity * page_size, page_size).unwrap();
         Self {
             num_pages,
             pages_start: header_size,

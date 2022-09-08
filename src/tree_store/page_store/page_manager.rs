@@ -29,9 +29,9 @@ use std::sync::{Mutex, MutexGuard};
 //
 // Header (first 64 bytes):
 // 9 bytes: magic number
-// 1 byte: max page order
 // 1 byte: god byte
 // 1 byte: checksum type
+// 1 byte: padding
 // 4 bytes: super-header pages
 // 4 bytes: page size
 // 4 bytes: region tracker state length
@@ -76,10 +76,9 @@ const FILE_FORMAT_VERSION: u8 = 105;
 
 // Inspired by PNG's magic number
 const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
-const MAX_PAGE_ORDER_OFFSET: usize = MAGICNUMBER.len();
-const GOD_BYTE_OFFSET: usize = MAX_PAGE_ORDER_OFFSET + size_of::<u8>();
+const GOD_BYTE_OFFSET: usize = MAGICNUMBER.len();
 const CHECKSUM_TYPE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>();
-const SUPERHEADER_PAGES_OFFSET: usize = CHECKSUM_TYPE_OFFSET + size_of::<u8>();
+const SUPERHEADER_PAGES_OFFSET: usize = CHECKSUM_TYPE_OFFSET + size_of::<u8>() + 1; // +1 for padding
 const PAGE_SIZE_OFFSET: usize = SUPERHEADER_PAGES_OFFSET + size_of::<u32>();
 const REGION_TRACKER_LENGTH_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u32>();
 const DB_SIZE_OFFSET: usize = REGION_TRACKER_LENGTH_OFFSET + size_of::<u32>();
@@ -185,8 +184,8 @@ impl<'a> MetadataAccessor<'a> {
     fn make_region_layout(&self, num_pages: usize) -> RegionLayout {
         RegionLayout::new(
             num_pages,
+            self.get_region_max_data_pages(),
             self.get_region_header_length(),
-            self.get_max_page_order() as usize,
             self.get_page_size(),
         )
     }
@@ -365,14 +364,6 @@ impl<'a> MetadataAccessor<'a> {
             .copy_from_slice(&(pages as u32).to_le_bytes());
     }
 
-    fn get_max_page_order(&self) -> u8 {
-        self.header[MAX_PAGE_ORDER_OFFSET]
-    }
-
-    fn set_max_page_order(&mut self, order: u8) {
-        self.header[MAX_PAGE_ORDER_OFFSET] = order;
-    }
-
     fn get_page_size(&self) -> usize {
         u32::from_le_bytes(
             self.header[PAGE_SIZE_OFFSET..(PAGE_SIZE_OFFSET + size_of::<u32>())]
@@ -428,7 +419,7 @@ impl<'a> MetadataAccessor<'a> {
         // calls into MetadataAccessor
         assert!(range.start >= DB_HEADER_SIZE);
         let mem = unsafe { self.mmap.get_memory_mut(range) };
-        RegionTracker::init_new(max_regions, self.get_max_page_order() as usize + 1, mem);
+        RegionTracker::init_new(max_regions, MAX_MAX_PAGE_ORDER + 1, mem);
     }
 
     // Note: It's very important that the lifetime of the returned allocator accessors is the same
@@ -819,7 +810,6 @@ impl TransactionalMemory {
 
             // Store the page & db size. These are immutable
             metadata.set_page_size(page_size);
-            metadata.set_max_page_order(layout.full_region_layout().max_order() as u8);
             metadata.set_superheader_length(layout.header_bytes());
             metadata.set_region_tracker_state_length(layout.region_tracker_address_range().len());
             metadata.set_region_header_length(layout.full_region_layout().data_section().start);
@@ -1391,9 +1381,6 @@ impl TransactionalMemory {
         layout: &DatabaseLayout,
         required_order: usize,
     ) -> Result<PageNumber> {
-        if required_order > metadata.get_max_page_order() as usize {
-            return Err(Error::OutOfSpace);
-        }
         let regional_guard = self.regional_allocators.lock().unwrap();
         let (mut region_tracker, mut regions) = metadata.allocators_mut(layout)?;
         loop {
