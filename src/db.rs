@@ -402,9 +402,31 @@ impl Database {
 }
 
 pub enum WriteStrategy {
-    /// Use a storage format that optimizes for minimum [`WriteTransaction::commit`] latency
+    /// Optimize for minimum write transaction latency by calculating and storing recursive checksums
+    /// of database contents, with a single-phase [`WriteTransaction::commit`] that makes a single
+    /// call to `fsync`.
+    ///
+    /// Data is written with checksums, with the following commit algorithm:
+    ///
+    /// 1. Update the inactive commit slot with the new database state
+    /// 2. Flip the god byte primary bit to activate the newly updated commit slot
+    /// 3. Call `fsync` to ensure all writes have been persisted to disk
+    ///
+    /// This write strategy requires calculating checksums as data is written, which decreases write
+    /// throughput, but only requires one call to `fsync`, which decreases commit latency.
     OnePhaseWithChecksum,
-    /// Use a storage format that optimizes for maximum write throughput
+    /// Optimize for maximum write transaction throughput by omitting checksums, with a two-phase
+    /// [`WriteTransaction::commit`] that makes two calls to `fsync`.
+    ///
+    /// Data is written without checksums, with the following commit algorithm:
+    ///
+    /// 1. Update the inactive commit slot with the new database state
+    /// 2. Call `fsync` to ensure the database slate and commit slot update have been persisted
+    /// 3. Flip the god byte primary bit to activate the newly updated commit slot
+    /// 4. Call `fsync` to ensure the write to the god byte has been persisted
+    ///
+    /// This write strategy avoids calculating checksums, which increases write throughput, but
+    /// requires two calls to fsync, which increases commit latency.
     TwoPhase,
 }
 
