@@ -403,9 +403,9 @@ impl Database {
 
 pub enum WriteStrategy {
     /// Use a storage format that optimizes for minimum [`WriteTransaction::commit`] latency
-    CommitLatency,
+    OnePhaseWithChecksum,
     /// Use a storage format that optimizes for maximum write throughput
-    Throughput,
+    TwoPhase,
 }
 
 pub struct DatabaseBuilder {
@@ -436,7 +436,7 @@ impl DatabaseBuilder {
     }
 
     pub fn set_write_strategy(&mut self, strategy: WriteStrategy) -> &mut Self {
-        self.use_checksums = Some(matches!(strategy, WriteStrategy::CommitLatency));
+        self.use_checksums = Some(matches!(strategy, WriteStrategy::OnePhaseWithChecksum));
         self
     }
 
