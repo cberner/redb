@@ -401,6 +401,11 @@ impl Database {
     }
 }
 
+/// redb can be configured to use one of two write-and-commit strategies.
+///
+/// Both strategies have security tradeoffs in situations where an attacker has a high degree of
+/// control over the database workload. For example being able to control the exact order of reads
+/// and writes, or being able to crash the database process at will.
 pub enum WriteStrategy {
     /// Optimize for minimum write transaction latency by calculating and storing recursive checksums
     /// of database contents, with a single-phase [`WriteTransaction::commit`] that makes a single
@@ -412,8 +417,17 @@ pub enum WriteStrategy {
     /// 2. Flip the god byte primary bit to activate the newly updated commit slot
     /// 3. Call `fsync` to ensure all writes have been persisted to disk
     ///
+    /// When opening the database after a crash, the most recent of the two commit slots with a
+    /// valid checksum is used.
+    ///
     /// This write strategy requires calculating checksums as data is written, which decreases write
     /// throughput, but only requires one call to `fsync`, which decreases commit latency.
+    ///
+    /// Security considerations: The checksum used is xxhash, a fast, non-cryptographic hash
+    /// function with close to perfect collision resistance when used with non-malicious input. An
+    /// attacker with an extremely high degree of control over the database's workload, including
+    /// the ability to cause the database process to crash, can cause invalid data to be written
+    /// with a valid checksum, leaving the database in an invalid, attacker-controlled state.
     OnePhaseWithChecksum,
     /// Optimize for maximum write transaction throughput by omitting checksums, with a two-phase
     /// [`WriteTransaction::commit`] that makes two calls to `fsync`.
@@ -425,8 +439,17 @@ pub enum WriteStrategy {
     /// 3. Flip the god byte primary bit to activate the newly updated commit slot
     /// 4. Call `fsync` to ensure the write to the god byte has been persisted
     ///
+    /// When opening the database after a crash, the got byte primary bit will always point to the
+    /// most recent valid commit.
+    ///
     /// This write strategy avoids calculating checksums, which increases write throughput, but
     /// requires two calls to fsync, which increases commit latency.
+    ///
+    /// Security considerations: Many hard disk drives and SSDs do not actually guarantee that data
+    /// has been persisted to disk after calling `fsync`. An attacker with a high degree of control
+    /// over the database's workload, including the ability to cause the database process to crash,
+    /// can cause the database to crash with the god byte primary bit pointing to an invalid commit
+    /// slot, leaving the database in an invalid, potentially attacker-controlled state.
     TwoPhase,
 }
 
