@@ -182,7 +182,7 @@ impl Database {
                 .open(path)?
         };
 
-        Database::new(file, db_size, None, None, true, None)
+        Database::new(file, db_size, None, None, true, WriteStrategy::default())
     }
 
     /// Opens an existing redb database.
@@ -194,7 +194,14 @@ impl Database {
         if File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = get_db_size(path.as_ref())?;
             let file = OpenOptions::new().read(true).write(true).open(path)?;
-            Database::new(file, existing_size, None, None, true, None)
+            Database::new(
+                file,
+                existing_size,
+                None,
+                None,
+                true,
+                WriteStrategy::default(),
+            )
         } else {
             Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
         }
@@ -260,7 +267,7 @@ impl Database {
         page_size: Option<usize>,
         region_size: Option<usize>,
         dynamic_growth: bool,
-        use_checksums: Option<bool>,
+        write_strategy: WriteStrategy,
     ) -> Result<Self> {
         #[cfg(feature = "logging")]
         info!(
@@ -273,7 +280,7 @@ impl Database {
             page_size,
             region_size,
             dynamic_growth,
-            use_checksums,
+            write_strategy,
         )?;
         if mem.needs_repair()? {
             if mem.needs_checksum_verification()? && !Self::verify_primary_checksums(&mem) {
@@ -406,6 +413,7 @@ impl Database {
 /// Both strategies have security tradeoffs in situations where an attacker has a high degree of
 /// control over the database workload. For example being able to control the exact order of reads
 /// and writes, or being able to crash the database process at will.
+#[derive(Default, Copy, Clone)]
 pub enum WriteStrategy {
     /// Optimize for minimum write transaction latency by calculating and storing recursive checksums
     /// of database contents, with a single-phase [`WriteTransaction::commit`] that makes a single
@@ -428,7 +436,8 @@ pub enum WriteStrategy {
     /// attacker with an extremely high degree of control over the database's workload, including
     /// the ability to cause the database process to crash, can cause invalid data to be written
     /// with a valid checksum, leaving the database in an invalid, attacker-controlled state.
-    OnePhaseWithChecksum,
+    #[default]
+    Checksum,
     /// Optimize for maximum write transaction throughput by omitting checksums, with a two-phase
     /// [`WriteTransaction::commit`] that makes two calls to `fsync`.
     ///
@@ -457,7 +466,7 @@ pub struct DatabaseBuilder {
     page_size: Option<usize>,
     region_size: Option<usize>,
     dynamic_growth: bool,
-    use_checksums: Option<bool>,
+    write_strategy: WriteStrategy,
 }
 
 impl DatabaseBuilder {
@@ -467,7 +476,7 @@ impl DatabaseBuilder {
             page_size: None,
             region_size: None,
             dynamic_growth: true,
-            use_checksums: None,
+            write_strategy: WriteStrategy::default(),
         }
     }
 
@@ -480,8 +489,8 @@ impl DatabaseBuilder {
         self
     }
 
-    pub fn set_write_strategy(&mut self, strategy: WriteStrategy) -> &mut Self {
-        self.use_checksums = Some(matches!(strategy, WriteStrategy::OnePhaseWithChecksum));
+    pub fn set_write_strategy(&mut self, write_strategy: WriteStrategy) -> &mut Self {
+        self.write_strategy = write_strategy;
         self
     }
 
@@ -526,7 +535,7 @@ impl DatabaseBuilder {
             self.page_size,
             self.region_size,
             self.dynamic_growth,
-            self.use_checksums,
+            self.write_strategy,
         )
     }
 }

@@ -1,15 +1,19 @@
 #![no_main]
 
-use std::collections::{BTreeMap, BTreeSet};
 use libfuzzer_sys::fuzz_target;
+use redb::{
+    Database, Durability, Error, MultimapTableDefinition, MultimapValueIter, ReadableMultimapTable,
+    ReadableTable, TableDefinition, WriteStrategy,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use tempfile::NamedTempFile;
-use redb::{Database, Durability, Error, MultimapTableDefinition, MultimapValueIter, ReadableMultimapTable, ReadableTable, TableDefinition, WriteStrategy};
 
 mod common;
 use common::*;
 
 const TABLE_DEF: TableDefinition<u64, [u8]> = TableDefinition::new("fuzz_table");
-const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, [u8]> = MultimapTableDefinition::new("fuzz_multimap_table");
+const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, [u8]> =
+    MultimapTableDefinition::new("fuzz_multimap_table");
 
 fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb::Error> {
     let mut reference = BTreeMap::new();
@@ -31,42 +35,47 @@ fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb
                             Some(reference_len) => {
                                 let value = table.get(&key).unwrap().unwrap();
                                 assert_eq!(value.len(), *reference_len);
-                            },
+                            }
                             None => {
                                 assert!(table.get(&key).unwrap().is_none());
                             }
                         }
-                    },
+                    }
                     FuzzOperation::Insert { key, value_size } => {
                         let key = key.value;
                         let value_size = value_size.value as usize;
                         let value = vec![0xFF; value_size];
                         table.insert(&key, &value)?;
                         reference.insert(key, value_size);
-                    },
+                    }
                     FuzzOperation::Remove { key } | FuzzOperation::RemoveOne { key, .. } => {
                         let key = key.value;
                         match reference.remove(&key) {
                             Some(reference_len) => {
                                 let value = table.remove(&key)?;
                                 assert_eq!(value.unwrap().to_value().len(), reference_len);
-                            },
+                            }
                             None => {
                                 assert!(table.remove(&key).unwrap().is_none());
                             }
                         }
-                    },
+                    }
                     FuzzOperation::Len {} => {
                         assert_eq!(reference.len(), table.len().unwrap());
                     }
-                    FuzzOperation::Range { start_key, len, reversed } => {
+                    FuzzOperation::Range {
+                        start_key,
+                        len,
+                        reversed,
+                    } => {
                         let start = start_key.value;
                         let end = start + len.value;
-                        let mut reference_iter: Box<dyn Iterator<Item=(&u64, &usize)>> = if *reversed {
-                            Box::new(reference.range(start..end).rev())
-                        } else {
-                            Box::new(reference.range(start..end))
-                        };
+                        let mut reference_iter: Box<dyn Iterator<Item = (&u64, &usize)>> =
+                            if *reversed {
+                                Box::new(reference.range(start..end).rev())
+                            } else {
+                                Box::new(reference.range(start..end))
+                            };
                         let mut iter = if *reversed {
                             table.range(start..end).unwrap().rev()
                         } else {
@@ -78,7 +87,7 @@ fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb
                             assert_eq!(*ref_value_len, value.len());
                         }
                         assert!(iter.next().is_none());
-                    },
+                    }
                 }
             }
         }
@@ -93,7 +102,10 @@ fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb
     Ok(())
 }
 
-fn assert_multimap_value_eq(mut iter: MultimapValueIter<[u8]>, reference: Option<&BTreeSet<usize>>) {
+fn assert_multimap_value_eq(
+    mut iter: MultimapValueIter<[u8]>,
+    reference: Option<&BTreeSet<usize>>,
+) {
     if let Some(values) = reference {
         for value in values.iter() {
             assert_eq!(iter.next().unwrap().len(), *value);
@@ -139,7 +151,8 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
                         let key = key.value;
                         let value_size = value_size.value as usize;
                         let value = vec![0xFFu8; value_size];
-                        let reference_existed = reference.entry(key).or_default().remove(&value_size);
+                        let reference_existed =
+                            reference.entry(key).or_default().remove(&value_size);
                         if reference.entry(key).or_default().is_empty() {
                             reference.remove(&key);
                         }
@@ -153,14 +166,19 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
                         }
                         assert_eq!(reference_len, table.len().unwrap());
                     }
-                    FuzzOperation::Range { start_key, len, reversed } => {
+                    FuzzOperation::Range {
+                        start_key,
+                        len,
+                        reversed,
+                    } => {
                         let start = start_key.value;
                         let end = start + len.value;
-                        let mut reference_iter: Box<dyn Iterator<Item=(&u64, &BTreeSet<usize>)>> = if *reversed {
-                            Box::new(reference.range(start..end).rev())
-                        } else {
-                            Box::new(reference.range(start..end))
-                        };
+                        let mut reference_iter: Box<dyn Iterator<Item = (&u64, &BTreeSet<usize>)>> =
+                            if *reversed {
+                                Box::new(reference.range(start..end).rev())
+                            } else {
+                                Box::new(reference.range(start..end))
+                            };
                         let mut iter = if *reversed {
                             table.range(&start..&end).unwrap().rev()
                         } else {
@@ -172,7 +190,7 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
                             assert_multimap_value_eq(value_iter, Some(ref_values));
                         }
                         assert!(iter.next().is_none());
-                    },
+                    }
                 }
             }
         }
@@ -190,11 +208,15 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
 fuzz_target!(|config: FuzzConfig| {
     let redb_file: NamedTempFile = NamedTempFile::new().unwrap();
     let write_strategy = if config.use_checksums {
-        WriteStrategy::CommitLatency
+        WriteStrategy::OnePhaseWithChecksum
     } else {
-        WriteStrategy::Throughput
+        WriteStrategy::TwoPhase
     };
-    let db = unsafe { Database::builder().set_write_strategy(write_strategy).create(redb_file.path(), config.max_db_size.value) };
+    let db = unsafe {
+        Database::builder()
+            .set_write_strategy(write_strategy)
+            .create(redb_file.path(), config.max_db_size.value)
+    };
 
     if matches!(db, Err(Error::OutOfSpace)) {
         return;

@@ -1,3 +1,4 @@
+use crate::db::WriteStrategy;
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
@@ -757,7 +758,7 @@ impl TransactionalMemory {
         requested_page_size: Option<usize>,
         requested_region_size: Option<usize>,
         dynamic_growth: bool,
-        use_checksums: Option<bool>,
+        write_strategy: WriteStrategy,
     ) -> Result<Self> {
         #[allow(clippy::assertions_on_constants)]
         {
@@ -815,10 +816,9 @@ impl TransactionalMemory {
             metadata.set_region_header_length(layout.full_region_layout().data_section().start);
             metadata.set_region_max_data_pages(layout.full_region_layout().num_pages());
             metadata.set_max_capacity(max_capacity);
-            let checksum_type = if use_checksums.unwrap_or(true) {
-                ChecksumType::XXH3_128
-            } else {
-                ChecksumType::Zero
+            let checksum_type = match write_strategy {
+                WriteStrategy::Checksum => ChecksumType::XXH3_128,
+                WriteStrategy::TwoPhase => ChecksumType::Zero,
             };
             metadata.set_checksum_type(checksum_type);
 
@@ -1702,7 +1702,7 @@ mod test {
         let max_size = 1024 * 1024;
         let db = unsafe {
             Database::builder()
-                .set_write_strategy(WriteStrategy::Throughput)
+                .set_write_strategy(WriteStrategy::TwoPhase)
                 .create(tmpfile.path(), max_size)
                 .unwrap()
         };
@@ -1730,12 +1730,17 @@ mod test {
         buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
 
-        assert!(
-            TransactionalMemory::new(file, max_size, None, None, true, Some(false))
-                .unwrap()
-                .needs_repair()
-                .unwrap()
-        );
+        assert!(TransactionalMemory::new(
+            file,
+            max_size,
+            None,
+            None,
+            true,
+            WriteStrategy::TwoPhase
+        )
+        .unwrap()
+        .needs_repair()
+        .unwrap());
 
         let db2 = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
         let write_txn = db2.begin_write().unwrap();
@@ -1796,12 +1801,17 @@ mod test {
         .unwrap();
         file.write_all(&[0; size_of::<u128>()]).unwrap();
 
-        assert!(
-            TransactionalMemory::new(file, max_size, None, None, true, Some(true))
-                .unwrap()
-                .needs_repair()
-                .unwrap()
-        );
+        assert!(TransactionalMemory::new(
+            file,
+            max_size,
+            None,
+            None,
+            true,
+            WriteStrategy::TwoPhase
+        )
+        .unwrap()
+        .needs_repair()
+        .unwrap());
 
         let db2 = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
         let write_txn = db2.begin_write().unwrap();
