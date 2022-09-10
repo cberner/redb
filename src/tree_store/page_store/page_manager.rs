@@ -875,6 +875,13 @@ impl TransactionalMemory {
             mmap.flush()?;
         }
 
+        // TODO: make the write_strategy argument optional when opening an existing db, and read it from the file instead
+        let checksum_type = match write_strategy {
+            WriteStrategy::Checksum => ChecksumType::XXH3_128,
+            WriteStrategy::TwoPhase => ChecksumType::Zero,
+        };
+        assert_eq!(metadata.get_checksum_type(), checksum_type);
+
         let page_size = metadata.get_page_size();
         if let Some(size) = requested_page_size {
             assert_eq!(page_size, size);
@@ -1742,7 +1749,12 @@ mod test {
         .needs_repair()
         .unwrap());
 
-        let db2 = unsafe { Database::create(tmpfile.path(), max_size).unwrap() };
+        let db2 = unsafe {
+            Database::builder()
+                .set_write_strategy(WriteStrategy::TwoPhase)
+                .create(tmpfile.path(), max_size)
+                .unwrap()
+        };
         let write_txn = db2.begin_write().unwrap();
         assert_eq!(free_pages, write_txn.stats().unwrap().free_pages());
         {
@@ -1807,7 +1819,7 @@ mod test {
             None,
             None,
             true,
-            WriteStrategy::TwoPhase
+            WriteStrategy::Checksum
         )
         .unwrap()
         .needs_repair()
