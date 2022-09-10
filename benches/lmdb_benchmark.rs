@@ -1,35 +1,64 @@
 use std::env::current_dir;
+use std::mem::size_of;
 use tempfile::{NamedTempFile, TempDir};
 
 mod common;
 use common::*;
 
-use rand::prelude::SliceRandom;
-use rand::Rng;
 use redb::{ReadableTable, TableDefinition, WriteStrategy};
 use std::time::{Duration, Instant};
 
 const ITERATIONS: usize = 3;
 const ELEMENTS: usize = 1_000_000;
+const KEY_SIZE: usize = 24;
+const VALUE_SIZE: usize = 150;
+const RNG_SEED: u64 = 3;
+
+fn fill_slice(slice: &mut [u8], rng: &mut fastrand::Rng) {
+    let mut i = 0;
+    while i + size_of::<u128>() < slice.len() {
+        let tmp = rng.u128(..);
+        slice[i..(i + size_of::<u128>())].copy_from_slice(&tmp.to_le_bytes());
+        i += size_of::<u128>()
+    }
+    if i + size_of::<u64>() < slice.len() {
+        let tmp = rng.u64(..);
+        slice[i..(i + size_of::<u64>())].copy_from_slice(&tmp.to_le_bytes());
+        i += size_of::<u64>()
+    }
+    if i + size_of::<u32>() < slice.len() {
+        let tmp = rng.u32(..);
+        slice[i..(i + size_of::<u32>())].copy_from_slice(&tmp.to_le_bytes());
+        i += size_of::<u32>()
+    }
+    if i + size_of::<u16>() < slice.len() {
+        let tmp = rng.u16(..);
+        slice[i..(i + size_of::<u16>())].copy_from_slice(&tmp.to_le_bytes());
+        i += size_of::<u16>()
+    }
+    if i + size_of::<u8>() < slice.len() {
+        slice[i] = rng.u8(..);
+    }
+}
 
 /// Returns pairs of key, value
-fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let mut pairs = vec![];
+fn gen_pair(rng: &mut fastrand::Rng) -> ([u8; KEY_SIZE], Vec<u8>) {
+    let mut key = [0u8; KEY_SIZE];
+    fill_slice(&mut key, rng);
+    let mut value = vec![0u8; VALUE_SIZE];
+    fill_slice(&mut value, rng);
 
-    for _ in 0..count {
-        let key: Vec<u8> = (0..key_size).map(|_| rand::thread_rng().gen()).collect();
-        let value: Vec<u8> = (0..value_size).map(|_| rand::thread_rng().gen()).collect();
-        pairs.push((key, value));
-    }
+    (key, value)
+}
 
-    pairs
+fn make_rng() -> fastrand::Rng {
+    fastrand::Rng::with_seed(RNG_SEED)
 }
 
 // TODO: merge back into benchmark()
 fn benchmark_redb(db: redb::Database) -> Vec<(&'static str, Duration)> {
+    let mut rng = make_rng();
     let mut results = Vec::new();
-    let mut pairs = gen_data(1_000_000, 24, 150);
-    let mut written = 0;
 
     let table_def: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
 
@@ -38,11 +67,8 @@ fn benchmark_redb(db: redb::Database) -> Vec<(&'static str, Duration)> {
     let mut inserter = txn.open_table(table_def).unwrap();
     {
         for _ in 0..ELEMENTS {
-            let len = pairs.len();
-            let (key, value) = &mut pairs[written % len];
-            key[16..].copy_from_slice(&(written as u64).to_le_bytes());
-            inserter.insert(key, value).unwrap();
-            written += 1;
+            let (key, value) = gen_pair(&mut rng);
+            inserter.insert(&key, &value).unwrap();
         }
     }
     drop(inserter);
@@ -64,13 +90,10 @@ fn benchmark_redb(db: redb::Database) -> Vec<(&'static str, Duration)> {
         for _ in 0..writes {
             let txn = db.begin_write().unwrap();
             let mut inserter = txn.open_table(table_def).unwrap();
-            let len = pairs.len();
-            let (key, value) = &mut pairs[written % len];
-            key[16..].copy_from_slice(&(written as u64).to_le_bytes());
-            inserter.insert(key, value).unwrap();
+            let (key, value) = gen_pair(&mut rng);
+            inserter.insert(&key, &value).unwrap();
             drop(inserter);
             txn.commit().unwrap();
-            written += 1;
         }
     }
 
@@ -91,11 +114,8 @@ fn benchmark_redb(db: redb::Database) -> Vec<(&'static str, Duration)> {
             let txn = db.begin_write().unwrap();
             let mut inserter = txn.open_table(table_def).unwrap();
             for _ in 0..batch_size {
-                let len = pairs.len();
-                let (key, value) = &mut pairs[written % len];
-                key[16..].copy_from_slice(&(written as u64).to_le_bytes());
-                inserter.insert(key, value).unwrap();
-                written += 1;
+                let (key, value) = gen_pair(&mut rng);
+                inserter.insert(&key, &value).unwrap();
             }
             drop(inserter);
             txn.commit().unwrap();
@@ -113,21 +133,17 @@ fn benchmark_redb(db: redb::Database) -> Vec<(&'static str, Duration)> {
     );
     results.push(("batch writes", duration));
 
-    let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-    key_order.shuffle(&mut rand::thread_rng());
-
     let txn = db.begin_read().unwrap();
     let table = txn.open_table(table_def).unwrap();
     {
         for _ in 0..ITERATIONS {
+            let mut rng = make_rng();
             let start = Instant::now();
             let mut checksum = 0u64;
             let mut expected_checksum = 0u64;
-            for i in &key_order {
-                let len = pairs.len();
-                let (key, value) = &mut pairs[i % len];
-                key[16..].copy_from_slice(&(*i as u64).to_le_bytes());
-                let result = table.get(key).unwrap().unwrap();
+            for _ in 0..ELEMENTS {
+                let (key, value) = gen_pair(&mut rng);
+                let result = table.get(&key).unwrap().unwrap();
                 checksum += result[0] as u64;
                 expected_checksum += value[0] as u64;
             }
@@ -144,11 +160,10 @@ fn benchmark_redb(db: redb::Database) -> Vec<(&'static str, Duration)> {
         }
 
         for _ in 0..ITERATIONS {
+            let mut rng = make_rng();
             let start = Instant::now();
-            for i in &key_order {
-                let len = pairs.len();
-                let (key, _) = &mut pairs[i % len];
-                key[16..].copy_from_slice(&(*i as u64).to_le_bytes());
+            for _ in 0..ELEMENTS {
+                let (key, _value) = gen_pair(&mut rng);
                 table.range(key.as_slice()..).unwrap();
             }
             let end = Instant::now();
@@ -163,16 +178,15 @@ fn benchmark_redb(db: redb::Database) -> Vec<(&'static str, Duration)> {
         }
     }
 
+    let mut rng = make_rng();
     let start = Instant::now();
-    let deletes = key_order.len() / 2;
+    let deletes = ELEMENTS / 2;
     {
         let txn = db.begin_write().unwrap();
         let mut inserter = txn.open_table(table_def).unwrap();
-        for i in 0..deletes {
-            let len = pairs.len();
-            let (key, _) = &mut pairs[i % len];
-            key[16..].copy_from_slice(&(i as u64).to_le_bytes());
-            inserter.remove(key).unwrap();
+        for _ in 0..deletes {
+            let (key, _value) = gen_pair(&mut rng);
+            inserter.remove(&key).unwrap();
         }
         drop(inserter);
         txn.commit().unwrap();
@@ -192,20 +206,16 @@ fn benchmark_redb(db: redb::Database) -> Vec<(&'static str, Duration)> {
 }
 
 fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
+    let mut rng = make_rng();
     let mut results = Vec::new();
-    let mut pairs = gen_data(1_000_000, 24, 150);
-    let mut written = 0;
 
     let start = Instant::now();
     let txn = db.write_transaction();
     let mut inserter = txn.get_inserter();
     {
         for _ in 0..ELEMENTS {
-            let len = pairs.len();
-            let (key, value) = &mut pairs[written % len];
-            key[16..].copy_from_slice(&(written as u64).to_le_bytes());
-            inserter.insert(key, value).unwrap();
-            written += 1;
+            let (key, value) = gen_pair(&mut rng);
+            inserter.insert(&key, &value).unwrap();
         }
     }
     drop(inserter);
@@ -227,13 +237,10 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
         for _ in 0..writes {
             let txn = db.write_transaction();
             let mut inserter = txn.get_inserter();
-            let len = pairs.len();
-            let (key, value) = &mut pairs[written % len];
-            key[16..].copy_from_slice(&(written as u64).to_le_bytes());
-            inserter.insert(key, value).unwrap();
+            let (key, value) = gen_pair(&mut rng);
+            inserter.insert(&key, &value).unwrap();
             drop(inserter);
             txn.commit().unwrap();
-            written += 1;
         }
     }
 
@@ -254,11 +261,8 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
             let txn = db.write_transaction();
             let mut inserter = txn.get_inserter();
             for _ in 0..batch_size {
-                let len = pairs.len();
-                let (key, value) = &mut pairs[written % len];
-                key[16..].copy_from_slice(&(written as u64).to_le_bytes());
-                inserter.insert(key, value).unwrap();
-                written += 1;
+                let (key, value) = gen_pair(&mut rng);
+                inserter.insert(&key, &value).unwrap();
             }
             drop(inserter);
             txn.commit().unwrap();
@@ -276,20 +280,16 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
     );
     results.push(("batch writes", duration));
 
-    let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-    key_order.shuffle(&mut rand::thread_rng());
-
     let txn = db.read_transaction();
     {
         for _ in 0..ITERATIONS {
+            let mut rng = make_rng();
             let start = Instant::now();
             let mut checksum = 0u64;
             let mut expected_checksum = 0u64;
-            for i in &key_order {
-                let len = pairs.len();
-                let (key, value) = &mut pairs[i % len];
-                key[16..].copy_from_slice(&(*i as u64).to_le_bytes());
-                let result = txn.get(key).unwrap();
+            for _ in 0..ELEMENTS {
+                let (key, value) = gen_pair(&mut rng);
+                let result = txn.get(&key).unwrap();
                 checksum += result.as_ref()[0] as u64;
                 expected_checksum += value[0] as u64;
             }
@@ -306,12 +306,11 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
         }
 
         for _ in 0..ITERATIONS {
+            let mut rng = make_rng();
             let start = Instant::now();
-            for i in &key_order {
-                let len = pairs.len();
-                let (key, _) = &mut pairs[i % len];
-                key[16..].copy_from_slice(&(*i as u64).to_le_bytes());
-                txn.exists_after(key);
+            for _ in 0..ELEMENTS {
+                let (key, _value) = gen_pair(&mut rng);
+                txn.exists_after(&key);
             }
             let end = Instant::now();
             let duration = end - start;
@@ -326,15 +325,14 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
     }
 
     let start = Instant::now();
-    let deletes = key_order.len() / 2;
+    let deletes = ELEMENTS / 2;
     {
+        let mut rng = make_rng();
         let txn = db.write_transaction();
         let mut inserter = txn.get_inserter();
-        for i in 0..deletes {
-            let len = pairs.len();
-            let (key, _) = &mut pairs[i % len];
-            key[16..].copy_from_slice(&(i as u64).to_le_bytes());
-            inserter.remove(key).unwrap();
+        for _ in 0..deletes {
+            let (key, _value) = gen_pair(&mut rng);
+            inserter.remove(&key).unwrap();
         }
         drop(inserter);
         txn.commit().unwrap();
