@@ -23,6 +23,7 @@ log = {version = "0.4.17", optional = true }
 pyo3 = {version = "0.16", features=["extension-module", "abi3-py37"], optional = true }
 
 [dev-dependencies]
+fastrand = "1.8.0"
 rand = "0.8"
 lmdb-rkv = "0.14.0"
 tempfile = "3.2.0"
