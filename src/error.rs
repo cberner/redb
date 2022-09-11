@@ -9,8 +9,8 @@ pub enum Error {
     TableTypeMismatch(String),
     DbSizeMismatch {
         path: String,
-        size: usize,
-        requested_size: usize,
+        size: u64,
+        requested_size: u64,
     },
     TableDoesNotExist(String),
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &

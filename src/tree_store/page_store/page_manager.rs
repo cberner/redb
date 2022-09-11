@@ -62,12 +62,7 @@ use std::sync::{Mutex, MutexGuard};
 
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
 // because the leaf node format uses 32bit offsets
-#[cfg(target_pointer_width = "64")]
-const MAX_USABLE_REGION_SPACE: usize = 4 * 1024 * 1024 * 1024;
-// TODO: make this consistent with 64bit?
-// Default to only 128MiB on 32bit platforms, since the mmap likely cannot be 4GiB or even close.
-#[cfg(target_pointer_width = "32")]
-const MAX_USABLE_REGION_SPACE: usize = 128 * 1024 * 1024;
+const MAX_USABLE_REGION_SPACE: u64 = 4 * 1024 * 1024 * 1024;
 pub(crate) const MAX_MAX_PAGE_ORDER: usize = 20;
 pub(super) const MIN_USABLE_PAGES: usize = 10;
 const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
@@ -117,12 +112,12 @@ fn ceil_log2(x: usize) -> usize {
     }
 }
 
-pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<usize, io::Error> {
+pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<u64, io::Error> {
     let mut db_size = [0u8; size_of::<u64>()];
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(DB_SIZE_OFFSET as u64))?;
     file.read_exact(&mut db_size)?;
-    Ok(u64::from_le_bytes(db_size) as usize)
+    Ok(u64::from_le_bytes(db_size))
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -276,17 +271,17 @@ impl<'a> MetadataAccessor<'a> {
         self.header[CHECKSUM_TYPE_OFFSET] = checksum.into();
     }
 
-    fn get_max_capacity(&self) -> usize {
+    fn get_max_capacity(&self) -> u64 {
         u64::from_le_bytes(
             self.header[DB_SIZE_OFFSET..DB_SIZE_OFFSET + size_of::<u64>()]
                 .try_into()
                 .unwrap(),
-        ) as usize
+        )
     }
 
-    fn set_max_capacity(&mut self, max_size: usize) {
+    fn set_max_capacity(&mut self, max_size: u64) {
         self.header[DB_SIZE_OFFSET..DB_SIZE_OFFSET + size_of::<u64>()]
-            .copy_from_slice(&(max_size as u64).to_le_bytes());
+            .copy_from_slice(&max_size.to_le_bytes());
     }
 
     fn get_magic_number(&self) -> [u8; MAGICNUMBER.len()] {
@@ -346,8 +341,8 @@ impl<'a> MetadataAccessor<'a> {
     }
 
     // TODO: remove this method
-    fn get_region_max_usable_bytes(&self) -> usize {
-        self.get_region_max_data_pages() * self.get_page_size()
+    fn get_region_max_usable_bytes(&self) -> u64 {
+        self.get_region_max_data_pages() as u64 * self.get_page_size() as u64
     }
 
     fn get_region_max_data_pages(&self) -> usize {
@@ -744,7 +739,7 @@ pub(crate) struct TransactionalMemory {
     page_size: usize,
     // We store these separately from the layout because they're static, and accessed on the get_page()
     // code path where there is no locking
-    region_size: usize,
+    region_size: u64,
     region_header_with_padding_size: usize,
     db_header_size: usize,
     dynamic_growth: bool,
@@ -754,7 +749,7 @@ pub(crate) struct TransactionalMemory {
 impl TransactionalMemory {
     pub(crate) fn new(
         file: File,
-        max_capacity: usize,
+        max_capacity: u64,
         requested_page_size: Option<usize>,
         requested_region_size: Option<usize>,
         dynamic_growth: bool,
@@ -767,11 +762,11 @@ impl TransactionalMemory {
 
         let page_size = requested_page_size.unwrap_or_else(get_page_size);
         assert!(page_size.is_power_of_two());
-        if max_capacity < DB_HEADER_SIZE + page_size * MIN_USABLE_PAGES {
+        if max_capacity < (DB_HEADER_SIZE + page_size * MIN_USABLE_PAGES) as u64 {
             return Err(Error::OutOfSpace);
         }
 
-        let mmap = Mmap::new(file, max_capacity)?;
+        let mmap = Mmap::new(file, max_capacity.try_into().unwrap())?;
         if mmap.len() < DB_HEADER_SIZE {
             // Safety: We're growing the mmap
             unsafe {
@@ -782,13 +777,15 @@ impl TransactionalMemory {
         let mutex = Mutex::new(MetadataGuard {});
         let mut metadata = unsafe { MetadataAccessor::new(&mmap, mutex.lock().unwrap()) };
 
-        let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
+        let region_size = requested_region_size
+            .map(|x| x as u64)
+            .unwrap_or(MAX_USABLE_REGION_SPACE);
         assert!(region_size.is_power_of_two());
-        let max_usable_region_bytes = min(region_size, max_capacity.next_power_of_two());
+        let max_usable_region_bytes = min(region_size, max_capacity.next_power_of_two() as u64);
 
         if metadata.get_magic_number() != MAGICNUMBER {
             let starting_size = if dynamic_growth {
-                MIN_DESIRED_USABLE_BYTES
+                MIN_DESIRED_USABLE_BYTES as u64
             } else {
                 max_capacity
             };
@@ -799,10 +796,10 @@ impl TransactionalMemory {
                 page_size,
             )?;
 
-            if mmap.len() < layout.len() {
+            if (mmap.len() as u64) < layout.len() {
                 // Safety: We're growing the mmap
                 unsafe {
-                    mmap.resize(layout.len())?;
+                    mmap.resize(layout.len().try_into().unwrap())?;
                 }
             }
 
@@ -1109,7 +1106,7 @@ impl TransactionalMemory {
         // shrunked layout to the primary
         if shrunk {
             unsafe {
-                self.mmap.resize(layout.len())?;
+                self.mmap.resize(layout.len().try_into().unwrap())?;
             }
         }
 
@@ -1216,7 +1213,7 @@ impl TransactionalMemory {
             // Safety: we've rollbacked the transaction, so any data in that was written into
             // space that was grown during this transaction no longer exists
             unsafe {
-                self.mmap.resize(layout.len())?;
+                self.mmap.resize(layout.len().try_into().unwrap())?;
             }
         }
 
@@ -1452,7 +1449,8 @@ impl TransactionalMemory {
             let mem = region.allocator_state_mut();
             allocators.as_mut().unwrap()[last_region_index].resize(mem, reduce_to_pages);
             layout.usable_bytes()
-                - (last_allocator.len() - reduce_to_pages) * metadata.get_page_size()
+                - ((last_allocator.len() - reduce_to_pages) as u64)
+                    * (metadata.get_page_size() as u64)
         };
 
         let new_layout = DatabaseLayout::calculate(
@@ -1477,7 +1475,7 @@ impl TransactionalMemory {
         required_order_allocation: usize,
     ) -> Result<()> {
         let required_growth =
-            2usize.pow(required_order_allocation as u32) * metadata.get_page_size();
+            2u64.pow(required_order_allocation as u32) * metadata.get_page_size() as u64;
         let max_region_size = metadata.get_region_max_usable_bytes();
         let next_desired_size = if layout.num_full_regions() > 0 {
             if let Some(trailing) = layout.trailing_region_layout() {
@@ -1515,7 +1513,7 @@ impl TransactionalMemory {
 
         // Safety: We're growing the mmap
         unsafe {
-            self.mmap.resize(new_layout.len())?;
+            self.mmap.resize(new_layout.len().try_into().unwrap())?;
         }
         let mut allocators = self.regional_allocators.lock().unwrap();
         let mut new_allocators = vec![];
@@ -1574,7 +1572,7 @@ impl TransactionalMemory {
         let page_number = match self.allocate_helper(&mut metadata, &layout, required_order) {
             Ok(page_number) => page_number,
             Err(err) => {
-                if matches!(err, Error::OutOfSpace) && layout.len() < max_capacity {
+                if matches!(err, Error::OutOfSpace) && (layout.len() as u64) < max_capacity {
                     self.grow(&mut metadata, &mut layout, required_order)?;
                     self.allocate_helper(&mut metadata, &layout, required_order)?
                 } else {
@@ -1639,8 +1637,10 @@ impl TransactionalMemory {
             self.page_size,
         )
         .unwrap();
-        let potential_growth_pages =
-            (max_layout.usable_bytes() - layout.usable_bytes()) / self.page_size;
+        let potential_growth_pages: usize = ((max_layout.usable_bytes() - layout.usable_bytes())
+            / (self.page_size as u64))
+            .try_into()
+            .unwrap();
 
         Ok(count + potential_growth_pages)
     }
@@ -1739,7 +1739,7 @@ mod test {
 
         assert!(TransactionalMemory::new(
             file,
-            max_size,
+            max_size as u64,
             None,
             None,
             true,
@@ -1820,7 +1820,7 @@ mod test {
 
         assert!(TransactionalMemory::new(
             file,
-            max_size,
+            max_size as u64,
             None,
             None,
             true,
@@ -1884,7 +1884,7 @@ mod test {
 
         assert!(TransactionalMemory::new(
             file,
-            max_size,
+            max_size as u64,
             None,
             None,
             true,
