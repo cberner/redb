@@ -753,7 +753,7 @@ impl TransactionalMemory {
         requested_page_size: Option<usize>,
         requested_region_size: Option<usize>,
         dynamic_growth: bool,
-        write_strategy: WriteStrategy,
+        write_strategy: Option<WriteStrategy>,
     ) -> Result<Self> {
         #[allow(clippy::assertions_on_constants)]
         {
@@ -813,7 +813,7 @@ impl TransactionalMemory {
             metadata.set_region_header_length(layout.full_region_layout().data_section().start);
             metadata.set_region_max_data_pages(layout.full_region_layout().num_pages());
             metadata.set_max_capacity(max_capacity);
-            let checksum_type = match write_strategy {
+            let checksum_type = match write_strategy.unwrap_or_default() {
                 WriteStrategy::Checksum => ChecksumType::XXH3_128,
                 WriteStrategy::TwoPhase => ChecksumType::Zero,
             };
@@ -871,13 +871,6 @@ impl TransactionalMemory {
             metadata.set_magic_number();
             mmap.flush()?;
         }
-
-        // TODO: make the write_strategy argument optional when opening an existing db, and read it from the file instead
-        let checksum_type = match write_strategy {
-            WriteStrategy::Checksum => ChecksumType::XXH3_128,
-            WriteStrategy::TwoPhase => ChecksumType::Zero,
-        };
-        assert_eq!(metadata.get_checksum_type(), checksum_type);
 
         let page_size = metadata.get_page_size();
         if let Some(size) = requested_page_size {
@@ -1743,7 +1736,7 @@ mod test {
             None,
             None,
             true,
-            WriteStrategy::TwoPhase
+            Some(WriteStrategy::TwoPhase)
         )
         .unwrap()
         .needs_repair()
@@ -1824,7 +1817,7 @@ mod test {
             None,
             None,
             true,
-            WriteStrategy::Checksum
+            Some(WriteStrategy::Checksum)
         )
         .unwrap()
         .needs_repair()
@@ -1888,7 +1881,7 @@ mod test {
             None,
             None,
             true,
-            WriteStrategy::Checksum
+            Some(WriteStrategy::Checksum)
         )
         .unwrap()
         .needs_repair()

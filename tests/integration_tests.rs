@@ -852,6 +852,23 @@ fn regression17() {
 }
 
 #[test]
+fn twophase_open() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024 * 1024;
+    let db = unsafe {
+        Database::builder()
+            .set_write_strategy(WriteStrategy::TwoPhase)
+            .create(tmpfile.path(), db_size)
+            .unwrap()
+    };
+    drop(db);
+    unsafe {
+        Database::open(tmpfile.path()).unwrap();
+    }
+}
+
+#[test]
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
