@@ -59,6 +59,10 @@ harness = false
 name = "syscall_benchmark"
 harness = false
 
+[[bench]]
+name = "mmap_page_size_benchmark"
+harness = false
+
 [package.metadata.maturin]
 requires-python = ">= 3.7"
 classifier = ["Development Status :: 4 - Beta",
