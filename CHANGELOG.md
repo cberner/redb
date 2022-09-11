@@ -1,5 +1,13 @@
 # redb - Changelog
 
+## 0.6.0 - 2022-09-10
+* Return `Err` instead of panic'ing when opening a database file with an incompatible file format version
+* Many optimizations to the file format, and progress toward stabilizing it
+* Fix race between read & write transactions, which could cause reads to return corrupted data
+* Better document the different `WriteStrategy`s
+* Fix panic when recovering a database that was uncleanly shutdown, which had been created with `WriteStrategy::Checksum` (which is the default)
+* Fix panic when using `insert_reserve()` in certain cases
+
 ## 0.5.0 - 2022-08-06
 * Optimize `MultimapTable` storage format to use `O(k * log(n_k) + v * log(n_v / n_k))` space instead of `O(k * log(n_k + n_v) + v * log(n_k + n_v))` space,
   where k is the size of the stored keys, v is the size of the stored values, n_k is the number of stored keys,
