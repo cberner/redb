@@ -175,7 +175,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     let new_page_checksum = self.checksum_helper(&new_page);
                     let new_page_accessor =
                         LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
-                    let offset = new_page_accessor.offset_of_value(position).unwrap();
+                    let offset = new_page_accessor.offset_of_first_value();
                     drop(new_page_accessor);
                     let guard = AccessGuardMut::new(new_page, offset, value.len());
                     return if position == 0 {

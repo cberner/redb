@@ -6,7 +6,7 @@ use rand::prelude::SliceRandom;
 use rand::Rng;
 use redb::{
     Database, DatabaseBuilder, Durability, Error, MultimapTableDefinition, ReadableMultimapTable,
-    ReadableTable, TableDefinition,
+    ReadableTable, TableDefinition, WriteStrategy,
 };
 
 const ELEMENTS: usize = 100;
@@ -822,6 +822,33 @@ fn regression16() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db_size = 4294985472;
     unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+}
+
+#[test]
+fn regression17() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024 * 1024;
+    let db = unsafe {
+        Database::builder()
+            .set_write_strategy(WriteStrategy::Checksum)
+            .create(tmpfile.path(), db_size)
+            .unwrap()
+    };
+
+    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+
+    let mut tx = db.begin_write().unwrap();
+    tx.set_durability(Durability::None);
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let value = vec![0; 4578];
+        t.insert(&671325, &value).unwrap();
+
+        let mut value = t.insert_reserve(&723904, 2246).unwrap();
+        value.as_mut().fill(0xFF);
+    }
+    tx.abort().unwrap();
 }
 
 #[test]
