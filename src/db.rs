@@ -164,6 +164,7 @@ impl Database {
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
     pub unsafe fn create(path: impl AsRef<Path>, db_size: usize) -> Result<Database> {
+        let db_size = db_size as u64;
         let file = if path.as_ref().exists() && File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = get_db_size(path.as_ref())?;
             if existing_size != db_size {
@@ -263,7 +264,7 @@ impl Database {
 
     fn new(
         file: File,
-        max_capacity: usize,
+        max_capacity: u64,
         page_size: Option<usize>,
         region_size: Option<usize>,
         dynamic_growth: bool,
@@ -531,7 +532,7 @@ impl DatabaseBuilder {
 
         Database::new(
             file,
-            db_size,
+            db_size as u64,
             self.page_size,
             self.region_size,
             self.dynamic_growth,
