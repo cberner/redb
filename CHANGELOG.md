@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 0.6.1 - 2022-09-11
+* Fix crash when `Database::open()` was called on a database that had been created with `WriteStrategy::TwoPhase`
+* Change default region size on 32bit platforms to 4GiB
+
 ## 0.6.0 - 2022-09-10
 * Return `Err` instead of panic'ing when opening a database file with an incompatible file format version
 * Many optimizations to the file format, and progress toward stabilizing it
