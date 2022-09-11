@@ -183,7 +183,14 @@ impl Database {
                 .open(path)?
         };
 
-        Database::new(file, db_size, None, None, true, WriteStrategy::default())
+        Database::new(
+            file,
+            db_size,
+            None,
+            None,
+            true,
+            Some(WriteStrategy::default()),
+        )
     }
 
     /// Opens an existing redb database.
@@ -195,14 +202,7 @@ impl Database {
         if File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = get_db_size(path.as_ref())?;
             let file = OpenOptions::new().read(true).write(true).open(path)?;
-            Database::new(
-                file,
-                existing_size,
-                None,
-                None,
-                true,
-                WriteStrategy::default(),
-            )
+            Database::new(file, existing_size, None, None, true, None)
         } else {
             Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
         }
@@ -268,7 +268,7 @@ impl Database {
         page_size: Option<usize>,
         region_size: Option<usize>,
         dynamic_growth: bool,
-        write_strategy: WriteStrategy,
+        write_strategy: Option<WriteStrategy>,
     ) -> Result<Self> {
         #[cfg(feature = "logging")]
         info!(
@@ -536,7 +536,7 @@ impl DatabaseBuilder {
             self.page_size,
             self.region_size,
             self.dynamic_growth,
-            self.write_strategy,
+            Some(self.write_strategy),
         )
     }
 }
