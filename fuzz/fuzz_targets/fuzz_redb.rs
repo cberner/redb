@@ -48,6 +48,13 @@ fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb
                         table.insert(&key, &value)?;
                         reference.insert(key, value_size);
                     }
+                    FuzzOperation::InsertReserve { key, value_size } => {
+                        let key = key.value;
+                        let value_size = value_size.value as usize;
+                        let mut value = table.insert_reserve(&key, value_size)?;
+                        value.as_mut().fill(0xFF);
+                        reference.insert(key, value_size);
+                    }
                     FuzzOperation::Remove { key } | FuzzOperation::RemoveOne { key, .. } => {
                         let key = key.value;
                         match reference.remove(&key) {
@@ -141,6 +148,9 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
                         table.insert(&key, &value)?;
                         reference.entry(key).or_default().insert(value_size);
                     }
+                    FuzzOperation::InsertReserve { .. } => {
+                        // no-op. Multimap tables don't support insert_reserve
+                    }
                     FuzzOperation::Remove { key } => {
                         let key = key.value;
                         let entry = reference.remove(&key);
@@ -208,7 +218,7 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
 fuzz_target!(|config: FuzzConfig| {
     let redb_file: NamedTempFile = NamedTempFile::new().unwrap();
     let write_strategy = if config.use_checksums {
-        WriteStrategy::OnePhaseWithChecksum
+        WriteStrategy::Checksum
     } else {
         WriteStrategy::TwoPhase
     };

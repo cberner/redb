@@ -80,6 +80,10 @@ pub(crate) enum FuzzOperation {
         key: BoundedU64<KEY_SPACE>,
         value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,
     },
+    InsertReserve {
+        key: BoundedU64<KEY_SPACE>,
+        value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,
+    },
     Remove {
         key: BoundedU64<KEY_SPACE>,
     },
