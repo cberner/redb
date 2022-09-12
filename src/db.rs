@@ -374,9 +374,9 @@ impl Database {
             .cloned()
     }
 
-    /// Convenience method for [`DatabaseBuilder::new`]
-    pub fn builder() -> DatabaseBuilder {
-        DatabaseBuilder::new()
+    /// Convenience method for [`Builder::new`]
+    pub fn builder() -> Builder {
+        Builder::new()
     }
 
     /// Begins a write transaction
@@ -463,14 +463,14 @@ pub enum WriteStrategy {
     TwoPhase,
 }
 
-pub struct DatabaseBuilder {
+pub struct Builder {
     page_size: Option<usize>,
     region_size: Option<usize>,
     dynamic_growth: bool,
     write_strategy: WriteStrategy,
 }
 
-impl DatabaseBuilder {
+impl Builder {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {

@@ -5,7 +5,7 @@ use tempfile::NamedTempFile;
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use redb::{
-    Database, DatabaseBuilder, Durability, Error, MultimapTableDefinition, ReadableMultimapTable,
+    Builder, Database, Durability, Error, MultimapTableDefinition, ReadableMultimapTable,
     ReadableTable, TableDefinition, WriteStrategy,
 };
 
@@ -364,7 +364,7 @@ fn multi_page_kv() {
 
     let db_size = 1024_1024;
     let db = unsafe {
-        DatabaseBuilder::new()
+        Builder::new()
             .set_page_size(page_size)
             .create(tmpfile.path(), db_size)
             .unwrap()
