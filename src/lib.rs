@@ -1,6 +1,6 @@
 #![allow(clippy::drop_non_drop)]
 
-pub use db::{Database, DatabaseBuilder, MultimapTableDefinition, TableDefinition, WriteStrategy};
+pub use db::{Builder, Database, MultimapTableDefinition, TableDefinition, WriteStrategy};
 pub use error::Error;
 pub use multimap_table::{
     MultimapRangeIter, MultimapTable, MultimapValueIter, ReadOnlyMultimapTable,
