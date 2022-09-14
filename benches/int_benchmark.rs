@@ -135,7 +135,7 @@ fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_table_width(100);
-    table.set_header(&["", "redb", "lmdb", "rocksdb", "sled"]);
+    table.set_header(["", "redb", "lmdb", "rocksdb", "sled"]);
     for row in rows {
         table.add_row(row);
     }
