@@ -1064,7 +1064,7 @@ fn non_page_size_multiple() {
 #[test]
 fn does_not_exist() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    fs::remove_file(&tmpfile.path()).unwrap();
+    fs::remove_file(tmpfile.path()).unwrap();
     let result = unsafe { Database::open(tmpfile.path()) };
     if let Err(Error::Io(e)) = result {
         assert!(matches!(e.kind(), ErrorKind::NotFound));
