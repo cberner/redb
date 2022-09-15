@@ -1,50 +1,26 @@
 use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::fmt::Debug;
-use std::marker::PhantomData;
-
-pub trait AsBytesWithLifetime<'a> {
-    type Out: AsRef<[u8]>;
-}
-
-pub struct RefAsBytesLifetime<T: AsRef<[u8]> + ?Sized>(PhantomData<T>);
-impl<'a, T: 'a + AsRef<[u8]> + ?Sized> AsBytesWithLifetime<'a> for RefAsBytesLifetime<T> {
-    type Out = &'a T;
-}
-
-pub struct OwnedAsBytesLifetime<T: AsRef<[u8]>>(PhantomData<T>);
-impl<'a, T: AsRef<[u8]> + 'a> AsBytesWithLifetime<'a> for OwnedAsBytesLifetime<T> {
-    type Out = T;
-}
-
-pub trait WithLifetime<'a> {
-    type Out: Debug;
-}
-
-pub struct RefLifetime<T: ?Sized>(PhantomData<T>);
-impl<'a, T: 'a + Debug + ?Sized> WithLifetime<'a> for RefLifetime<T> {
-    type Out = &'a T;
-}
-
-pub struct OwnedLifetime<T>(PhantomData<T>);
-impl<'a, T: 'a + Debug> WithLifetime<'a> for OwnedLifetime<T> {
-    type Out = T;
-}
 
 pub trait RedbValue: Debug {
-    // TODO: need GATs, so that we can replace all this HRTB stuff
-    type View: for<'a> WithLifetime<'a>;
-    type ToBytes: for<'a> AsBytesWithLifetime<'a>;
+    type View<'a>: Debug + 'a
+    where
+        Self: 'a;
+    type AsBytes<'a>: AsRef<[u8]> + 'a
+    where
+        Self: 'a;
 
     /// Width of a fixed type, or None for variable width
     fn fixed_width() -> Option<usize>;
 
     /// Deserializes data
     /// Implementations may return a view over data, or an owned type
-    fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out;
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::View<'a>
+    where
+        Self: 'a;
 
     /// Serialize the key to a slice
-    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out;
+    fn as_bytes(&self) -> Self::AsBytes<'_>;
 
     /// Globally unique identifier for this type
     fn redb_type_name() -> String;
@@ -56,19 +32,26 @@ pub trait RedbKey: RedbValue {
 }
 
 impl RedbValue for () {
-    type View = OwnedLifetime<()>;
-    type ToBytes = RefAsBytesLifetime<[u8]>;
+    type View<'a> = ()
+    where
+        Self: 'a;
+    type AsBytes<'a> = &'a [u8]
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         Some(0)
     }
 
     #[allow(clippy::unused_unit)]
-    fn from_bytes(_data: &[u8]) -> <Self::View as WithLifetime>::Out {
+    fn from_bytes<'a>(_data: &'a [u8]) -> ()
+    where
+        Self: 'a,
+    {
         ()
     }
 
-    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+    fn as_bytes(&self) -> &[u8] {
         &[]
     }
 
@@ -78,18 +61,25 @@ impl RedbValue for () {
 }
 
 impl RedbValue for [u8] {
-    type View = RefLifetime<[u8]>;
-    type ToBytes = RefAsBytesLifetime<[u8]>;
+    type View<'a> = &'a [u8]
+    where
+        Self: 'a;
+    type AsBytes<'a> = &'a [u8]
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         None
     }
 
-    fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
+    fn from_bytes<'a>(data: &'a [u8]) -> &'a [u8]
+    where
+        Self: 'a,
+    {
         data
     }
 
-    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+    fn as_bytes(&self) -> &[u8] {
         self
     }
 
@@ -105,18 +95,25 @@ impl RedbKey for [u8] {
 }
 
 impl<const N: usize> RedbValue for [u8; N] {
-    type View = RefLifetime<[u8; N]>;
-    type ToBytes = RefAsBytesLifetime<[u8; N]>;
+    type View<'a> = &'a [u8; N]
+    where
+        Self: 'a;
+    type AsBytes<'a> = &'a [u8; N]
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         Some(N)
     }
 
-    fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
+    fn from_bytes<'a>(data: &'a [u8]) -> &'a [u8; N]
+    where
+        Self: 'a,
+    {
         data.try_into().unwrap()
     }
 
-    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+    fn as_bytes(&self) -> &[u8; N] {
         self
     }
 
@@ -132,18 +129,25 @@ impl<const N: usize> RedbKey for [u8; N] {
 }
 
 impl RedbValue for str {
-    type View = RefLifetime<str>;
-    type ToBytes = RefAsBytesLifetime<str>;
+    type View<'a> = &'a str
+    where
+        Self: 'a;
+    type AsBytes<'a> = &'a str
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         None
     }
 
-    fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
+    fn from_bytes<'a>(data: &'a [u8]) -> &'a str
+    where
+        Self: 'a,
+    {
         std::str::from_utf8(data).unwrap()
     }
 
-    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+    fn as_bytes(&self) -> &str {
         self
     }
 
@@ -163,18 +167,21 @@ impl RedbKey for str {
 macro_rules! be_value {
     ($t:ty) => {
         impl RedbValue for $t {
-            type View = OwnedLifetime<$t>;
-            type ToBytes = OwnedAsBytesLifetime<[u8; std::mem::size_of::<$t>()]>;
+            type View<'a> = $t;
+            type AsBytes<'a> = [u8; std::mem::size_of::<$t>()] where Self: 'a;
 
             fn fixed_width() -> Option<usize> {
                 Some(std::mem::size_of::<$t>())
             }
 
-            fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
+            fn from_bytes<'a>(data: &'a [u8]) -> $t
+            where
+                Self: 'a,
+            {
                 <$t>::from_le_bytes(data.try_into().unwrap())
             }
 
-            fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+            fn as_bytes(&self) -> [u8; std::mem::size_of::<$t>()] {
                 self.to_le_bytes()
             }
 

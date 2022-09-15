@@ -47,7 +47,7 @@ bench: pre
 	cargo bench --bench lmdb_benchmark
 
 # Nightly version selected from: https://rust-lang.github.io/rustup-components-history/
-NIGHTLY := "nightly-2022-09-10"
+NIGHTLY := "nightly-2022-11-01"
 .PHONY: fuzz
 fuzz: pre
 	rustup toolchain install $(NIGHTLY)
