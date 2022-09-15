@@ -5,7 +5,7 @@ use crate::tree_store::btree_base::{
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber};
-use crate::types::{RedbKey, RedbValue, WithLifetime};
+use crate::types::{RedbKey, RedbValue};
 use crate::{AccessGuard, Result};
 #[cfg(feature = "logging")]
 use log::trace;
@@ -149,10 +149,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
         Btree::new(self.get_root(), self.mem)
     }
 
-    pub(crate) fn get(
-        &self,
-        key: &K,
-    ) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
+    pub(crate) fn get(&self, key: &K) -> Result<Option<V::View<'_>>> {
         self.read_tree().get(key)
     }
 
@@ -250,10 +247,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         }
     }
 
-    pub(crate) fn get(
-        &self,
-        key: &K,
-    ) -> Result<Option<<<V as RedbValue>::View as WithLifetime<'a>>::Out>> {
+    pub(crate) fn get(&self, key: &K) -> Result<Option<V::View<'a>>> {
         if let Some((p, _)) = self.root {
             let root_page = self.mem.get_page(p);
             return Ok(self.get_helper(root_page, key.as_bytes().as_ref()));
@@ -263,11 +257,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
     }
 
     // Returns the value for the queried key, if present
-    fn get_helper(
-        &self,
-        page: PageImpl<'a>,
-        query: &[u8],
-    ) -> Option<<<V as RedbValue>::View as WithLifetime<'a>>::Out> {
+    fn get_helper(&self, page: PageImpl<'a>, query: &[u8]) -> Option<V::View<'a>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {

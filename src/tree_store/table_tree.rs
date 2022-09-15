@@ -2,9 +2,7 @@ use crate::tree_store::btree::btree_stats;
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
-use crate::types::{
-    AsBytesWithLifetime, OwnedAsBytesLifetime, OwnedLifetime, RedbKey, RedbValue, WithLifetime,
-};
+use crate::types::{RedbKey, RedbValue};
 use crate::{DatabaseStats, Error, Result};
 use std::cell::RefCell;
 use std::cmp::max;
@@ -20,14 +18,21 @@ pub(crate) struct FreedTableKey {
 }
 
 impl RedbValue for FreedTableKey {
-    type View = OwnedLifetime<FreedTableKey>;
-    type ToBytes = OwnedAsBytesLifetime<[u8; 2 * size_of::<u64>()]>;
+    type View<'a> = FreedTableKey
+    where
+        Self: 'a;
+    type AsBytes<'a> = [u8; 2 * size_of::<u64>()]
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         Some(2 * size_of::<u64>())
     }
 
-    fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
+    fn from_bytes<'a>(data: &'a [u8]) -> Self
+    where
+        Self: 'a,
+    {
         let transaction_id = u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap());
         let pagination_id = u64::from_le_bytes(data[size_of::<u64>()..].try_into().unwrap());
         Self {
@@ -36,7 +41,7 @@ impl RedbValue for FreedTableKey {
         }
     }
 
-    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+    fn as_bytes(&self) -> [u8; 2 * size_of::<u64>()] {
         let mut result = [0u8; 2 * size_of::<u64>()];
         result[..size_of::<u64>()].copy_from_slice(&self.transaction_id.to_le_bytes());
         result[size_of::<u64>()..].copy_from_slice(&self.pagination_id.to_le_bytes());
@@ -116,14 +121,17 @@ impl InternalTableDefinition {
 }
 
 impl RedbValue for InternalTableDefinition {
-    type View = OwnedLifetime<InternalTableDefinition>;
-    type ToBytes = OwnedAsBytesLifetime<Vec<u8>>;
+    type View<'a> = InternalTableDefinition;
+    type AsBytes<'a> = Vec<u8>;
 
     fn fixed_width() -> Option<usize> {
         None
     }
 
-    fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
+    fn from_bytes<'a>(data: &'a [u8]) -> Self
+    where
+        Self: 'a,
+    {
         debug_assert!(data.len() > 22);
         let mut offset = 0;
         let table_type = TableType::from(data[offset]);
@@ -201,7 +209,7 @@ impl RedbValue for InternalTableDefinition {
         }
     }
 
-    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+    fn as_bytes(&self) -> Vec<u8> {
         let mut result = vec![self.table_type.into()];
         if let Some((root, checksum)) = self.table_root {
             result.push(1);

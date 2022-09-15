@@ -3,9 +3,7 @@ use crate::tree_store::{
     AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, LeafKeyIter,
     Page, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
 };
-use crate::types::{
-    AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
-};
+use crate::types::{RedbKey, RedbValue};
 use crate::{Result, WriteTransaction};
 use std::cell::RefCell;
 use std::convert::TryInto;
@@ -86,18 +84,25 @@ struct DynamicCollection {
 }
 
 impl RedbValue for DynamicCollection {
-    type View = RefLifetime<DynamicCollection>;
-    type ToBytes = RefAsBytesLifetime<[u8]>;
+    type View<'a> = &'a DynamicCollection
+    where
+        Self: 'a;
+    type AsBytes<'a> = &'a [u8]
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         None
     }
 
-    fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
+    fn from_bytes<'a>(data: &'a [u8]) -> &'a DynamicCollection
+    where
+        Self: 'a,
+    {
         Self::new(data)
     }
 
-    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+    fn as_bytes(&self) -> &[u8] {
         &self.data
     }
 
@@ -246,7 +251,7 @@ impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
 }
 
 impl<'a, V: RedbKey + ?Sized> Iterator for MultimapValueIter<'a, V> {
-    type Item = <<V as RedbValue>::View as WithLifetime<'a>>::Out;
+    type Item = V::View<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.inner {
@@ -317,10 +322,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'
 impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> Iterator
     for MultimapRangeIter<'a, K, V>
 {
-    type Item = (
-        <<K as RedbValue>::View as WithLifetime<'a>>::Out,
-        MultimapValueIter<'a, V>,
-    );
+    type Item = (K::View<'a>, MultimapValueIter<'a, V>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next()?;
