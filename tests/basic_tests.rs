@@ -579,6 +579,25 @@ fn ref_get_signatures() {
 }
 
 #[test]
+fn str_ref() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let definition: TableDefinition<str, [u8]> = TableDefinition::new("x");
+    let ref_definition: TableDefinition<&str, [u8]> = TableDefinition::new("x");
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(ref_definition).unwrap();
+        table.insert(&"hello", b"world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    // Check that a &str can be read back as a str
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(table.len().unwrap(), 1);
+}
+
+#[test]
 fn concurrent_write_transactions_block() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = sync::Arc::new(unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() });

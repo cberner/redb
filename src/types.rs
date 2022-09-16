@@ -94,6 +94,40 @@ impl RedbKey for [u8] {
     }
 }
 
+impl RedbValue for &[u8] {
+    type View<'a> = &'a [u8]
+    where
+    Self: 'a;
+    type AsBytes<'a> = &'a [u8]
+    where
+    Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> &'a [u8]
+    where
+        Self: 'a,
+    {
+        data
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self
+    }
+
+    fn redb_type_name() -> String {
+        "[u8]".to_string()
+    }
+}
+
+impl RedbKey for &[u8] {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        data1.cmp(data2)
+    }
+}
+
 impl<const N: usize> RedbValue for [u8; N] {
     type View<'a> = &'a [u8; N]
     where
@@ -157,6 +191,42 @@ impl RedbValue for str {
 }
 
 impl RedbKey for str {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        let str1 = str::from_bytes(data1);
+        let str2 = str::from_bytes(data2);
+        str1.cmp(str2)
+    }
+}
+
+impl RedbValue for &str {
+    type View<'a> = &'a str
+    where
+    Self: 'a;
+    type AsBytes<'a> = &'a str
+    where
+    Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> &'a str
+    where
+        Self: 'a,
+    {
+        std::str::from_utf8(data).unwrap()
+    }
+
+    fn as_bytes(&self) -> &str {
+        self
+    }
+
+    fn redb_type_name() -> String {
+        "str".to_string()
+    }
+}
+
+impl RedbKey for &str {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         let str1 = str::from_bytes(data1);
         let str2 = str::from_bytes(data2);
