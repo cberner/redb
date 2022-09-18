@@ -1,4 +1,4 @@
-use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
+use crate::tree_store::page_store::buddy_allocator::BuddyAllocatorMut;
 use crate::tree_store::page_store::page_manager::{
     RegionTracker, DB_HEADER_SIZE, MAX_MAX_PAGE_ORDER, MIN_USABLE_PAGES,
 };
@@ -70,7 +70,7 @@ impl RegionLayout {
     fn header_size(max_usable_region_bytes: u64, page_size: usize) -> Option<usize> {
         let max_order = Self::calculate_usable_order(max_usable_region_bytes, page_size)?;
         let page_capacity = max_usable_region_bytes / (page_size as u64);
-        Some(BuddyAllocator::required_space(
+        Some(BuddyAllocatorMut::required_space(
             page_capacity.try_into().unwrap(),
             max_order,
         ))
@@ -258,23 +258,6 @@ impl DatabaseLayout {
 
         assert_eq!(result.db_header_bytes % page_size, 0);
         Ok(result)
-    }
-
-    pub(super) fn create_allocators(&self) -> Vec<BuddyAllocator> {
-        let full_regional_allocator = BuddyAllocator::new(
-            self.full_region_layout().num_pages(),
-            self.full_region_layout().num_pages(),
-        );
-        let mut allocators = vec![full_regional_allocator; self.num_full_regions()];
-        if let Some(region_layout) = self.trailing_region_layout() {
-            let trailing = BuddyAllocator::new(
-                region_layout.num_pages(),
-                self.full_region_layout().num_pages(),
-            );
-            allocators.push(trailing);
-        }
-
-        allocators
     }
 
     pub(super) fn full_region_layout(&self) -> &RegionLayout {

@@ -166,8 +166,6 @@ A `BtreeBitmap` is a 64-way tree, where each node is a single value indicating w
 These nodes are stored as single bits, packed into `u64` values. Every height of the tree is fully populated, except
 the leaf layer.
 
-* 4 bytes: number of elements
-* 4 bytes: capacity
 * 4 bytes: tree height
 * 4 bytes (repeating): ending offset of layers. Does not include the root layer
 * n bytes: tree data
@@ -175,7 +173,6 @@ the leaf layer.
 ```
 <-------------------------------------------- 8 bytes ------------------------------------------->
 ==================================================================================================
-| elements                                      | capacity                                       |
 | height                                        | end offset...                                  |
 ==================================================================================================
 | Tree data                                                                                      |
@@ -208,15 +205,16 @@ The regional allocator is a buddy allocator and allocates pages within the regio
 on the `BtreeBitmap` described above.
 * 1 byte: max order
 * 3 byte: padding to 32bits aligned
+* 4 bytes: number of pages
 * 4 byte (repeating): end offset of order allocator state
 * n bytes: allocator data
 
 ```
 <-------------------------------------------- 8 bytes ------------------------------------------->
 ==================================================================================================
-| max order | padding                           | order end offset                               |
+| max order | padding                           | number of pages                                |
 --------------------------------------------------------------------------------------------------
-| Additional order end offsets...                                                                |
+| Order end offsets...                                                                           |
 ==================================================================================================
 | Order allocator state...                                                                       |
 ==================================================================================================

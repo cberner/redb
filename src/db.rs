@@ -275,7 +275,7 @@ impl Database {
             "Opening database {:?} with max size {}",
             &file, max_capacity
         );
-        let mem = TransactionalMemory::new(
+        let mut mem = TransactionalMemory::new(
             file,
             max_capacity,
             page_size,
@@ -336,6 +336,7 @@ impl Database {
                     }
                 }
             }
+            drop(iter);
 
             mem.end_repair()?;
 
