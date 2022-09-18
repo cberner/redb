@@ -176,10 +176,10 @@ impl<'a> MetadataAccessor<'a> {
         }
     }
 
-    fn make_region_layout(&self, num_pages: usize) -> RegionLayout {
+    fn make_region_layout(&self, num_pages: u32) -> RegionLayout {
         RegionLayout::new(
             num_pages,
-            self.get_region_header_length(),
+            self.get_region_header_pages(),
             self.get_page_size(),
         )
     }
@@ -193,7 +193,7 @@ impl<'a> MetadataAccessor<'a> {
         let trailing_region = trailing_pages.map(|x| self.make_region_layout(x));
 
         DatabaseLayout::new(
-            self.get_superheader_length(),
+            self.get_superheader_pages(),
             self.get_region_tracker_state_length(),
             num_full_regions,
             full_region,
@@ -209,7 +209,7 @@ impl<'a> MetadataAccessor<'a> {
         let trailing_region = trailing_pages.map(|x| self.make_region_layout(x));
 
         DatabaseLayout::new(
-            self.get_superheader_length(),
+            self.get_superheader_pages(),
             self.get_region_tracker_state_length(),
             num_full_regions,
             full_region,
@@ -290,20 +290,17 @@ impl<'a> MetadataAccessor<'a> {
         self.header[..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
     }
 
-    fn get_superheader_length(&self) -> usize {
-        let pages = u32::from_le_bytes(
+    fn get_superheader_pages(&self) -> u32 {
+        u32::from_le_bytes(
             self.header[SUPERHEADER_PAGES_OFFSET..(SUPERHEADER_PAGES_OFFSET + size_of::<u32>())]
                 .try_into()
                 .unwrap(),
-        ) as usize;
-        pages * self.get_page_size()
+        )
     }
 
-    fn set_superheader_length(&mut self, length: usize) {
-        assert_eq!(length % self.get_page_size(), 0);
-        let pages = length / self.get_page_size();
+    fn set_superheader_pages(&mut self, pages: u32) {
         self.header[SUPERHEADER_PAGES_OFFSET..(SUPERHEADER_PAGES_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&(pages as u32).to_le_bytes());
+            .copy_from_slice(&pages.to_le_bytes());
     }
 
     fn get_region_tracker_state_length(&self) -> usize {
@@ -321,49 +318,41 @@ impl<'a> MetadataAccessor<'a> {
             .copy_from_slice(&(length as u32).to_le_bytes());
     }
 
-    fn get_region_header_length(&self) -> usize {
-        let pages = u32::from_le_bytes(
+    fn get_region_header_pages(&self) -> u32 {
+        u32::from_le_bytes(
             self.header
                 [REGION_HEADER_PAGES_OFFSET..(REGION_HEADER_PAGES_OFFSET + size_of::<u32>())]
                 .try_into()
                 .unwrap(),
-        ) as usize;
-        pages * self.get_page_size()
+        )
     }
 
-    fn set_region_header_length(&mut self, length: usize) {
-        assert_eq!(length % self.get_page_size(), 0);
-        let pages = length / self.get_page_size();
+    fn set_region_header_pages(&mut self, pages: u32) {
         self.header[REGION_HEADER_PAGES_OFFSET..(REGION_HEADER_PAGES_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&(pages as u32).to_le_bytes());
+            .copy_from_slice(&pages.to_le_bytes());
     }
 
-    // TODO: remove this method
-    fn get_region_max_usable_bytes(&self) -> u64 {
-        self.get_region_max_data_pages() as u64 * self.get_page_size() as u64
-    }
-
-    fn get_region_max_data_pages(&self) -> usize {
+    fn get_region_max_data_pages(&self) -> u32 {
         u32::from_le_bytes(
             self.header
                 [REGION_MAX_DATA_PAGES_OFFSET..(REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>())]
                 .try_into()
                 .unwrap(),
-        ) as usize
+        )
     }
 
-    fn set_region_max_data_pages(&mut self, pages: usize) {
+    fn set_region_max_data_pages(&mut self, pages: u32) {
         self.header
             [REGION_MAX_DATA_PAGES_OFFSET..(REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>())]
             .copy_from_slice(&(pages as u32).to_le_bytes());
     }
 
-    fn get_page_size(&self) -> usize {
+    fn get_page_size(&self) -> u32 {
         u32::from_le_bytes(
             self.header[PAGE_SIZE_OFFSET..(PAGE_SIZE_OFFSET + size_of::<u32>())]
                 .try_into()
                 .unwrap(),
-        ) as usize
+        )
     }
 
     fn set_page_size(&mut self, page_size: usize) {
@@ -383,7 +372,7 @@ impl<'a> MetadataAccessor<'a> {
         }
     }
 
-    fn get_region(&mut self, region: usize, layout: &DatabaseLayout) -> RegionHeaderAccessor {
+    fn get_region(&mut self, region: u32, layout: &DatabaseLayout) -> RegionHeaderAccessor {
         let base = layout.region_base_address(region);
         let len = layout.region_layout(region).data_section().start;
         let absolute = base..(base + len);
@@ -400,7 +389,7 @@ impl<'a> MetadataAccessor<'a> {
         let max_regions = DatabaseLayout::calculate(
             self.get_max_capacity(),
             self.get_max_capacity(),
-            self.get_region_max_usable_bytes(),
+            self.get_region_max_data_pages(),
             self.get_page_size(),
         )
         .unwrap()
@@ -461,18 +450,20 @@ impl<'a> RegionTracker<'a> {
         Self { data }
     }
 
-    pub(crate) fn required_bytes(regions: usize, orders: usize) -> usize {
-        2 * size_of::<u32>() + orders * BtreeBitmapMut::required_space(regions)
+    pub(crate) fn required_bytes(regions: u32, orders: usize) -> usize {
+        2 * size_of::<u32>() + orders * BtreeBitmapMut::required_space(regions as usize)
     }
 
-    pub(crate) fn init_new(regions: usize, orders: usize, data: &'a mut [u8]) -> Self {
+    pub(crate) fn init_new(regions: u32, orders: usize, data: &'a mut [u8]) -> Self {
         assert!(data.len() >= Self::required_bytes(regions, orders));
         data[..4].copy_from_slice(&(orders as u32).to_le_bytes());
-        data[4..8].copy_from_slice(&(BtreeBitmapMut::required_space(regions) as u32).to_le_bytes());
+        data[4..8].copy_from_slice(
+            &(BtreeBitmapMut::required_space(regions as usize) as u32).to_le_bytes(),
+        );
 
         let mut result = Self { data };
         for i in 0..orders {
-            BtreeBitmapMut::init_new(result.get_order_mut(i), regions);
+            BtreeBitmapMut::init_new(result.get_order_mut(i), regions as usize);
         }
 
         result
@@ -536,13 +527,13 @@ struct RegionsAccessor<'a> {
 }
 
 impl<'a> RegionsAccessor<'a> {
-    fn get_region_mut(&mut self, region: usize) -> RegionHeaderMutator {
+    fn get_region_mut(&mut self, region: u32) -> RegionHeaderMutator {
         // Safety: We have exclusive access to regional metadata
         let base = self.layout.region_base_address(region);
         let region_header_len = &self.layout.region_layout(region).data_section().start;
         let absolute = base..(base + region_header_len);
 
-        assert!(absolute.start >= self.layout.header_bytes());
+        assert!(absolute.start >= self.layout.superheader_bytes());
         let mem = unsafe { self.mmap.get_memory_mut(absolute) };
 
         RegionHeaderMutator::new(mem)
@@ -613,15 +604,15 @@ impl<'a> TransactionAccessor<'a> {
         )
     }
 
-    fn get_full_regions(&self) -> usize {
+    fn get_full_regions(&self) -> u32 {
         u32::from_le_bytes(
             self.mem[NUM_FULL_REGIONS_OFFSET..(NUM_FULL_REGIONS_OFFSET + size_of::<u32>())]
                 .try_into()
                 .unwrap(),
-        ) as usize
+        )
     }
 
-    fn get_trailing_region_data_pages(&self) -> Option<usize> {
+    fn get_trailing_region_data_pages(&self) -> Option<u32> {
         let value = u32::from_le_bytes(
             self.mem[TRAILING_REGION_DATA_PAGES_OFFSET
                 ..(TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>())]
@@ -631,7 +622,7 @@ impl<'a> TransactionAccessor<'a> {
         if value == 0 {
             None
         } else {
-            Some(value as usize)
+            Some(value)
         }
     }
 
@@ -681,14 +672,14 @@ impl<'a> TransactionMutator<'a> {
 
     fn set_data_section_layout(
         &mut self,
-        full_regions: usize,
-        trailing_region_data_pages: Option<usize>,
+        full_regions: u32,
+        trailing_region_data_pages: Option<u32>,
     ) {
         self.mem[NUM_FULL_REGIONS_OFFSET..(NUM_FULL_REGIONS_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&(full_regions as u32).to_le_bytes());
+            .copy_from_slice(&full_regions.to_le_bytes());
         self.mem[TRAILING_REGION_DATA_PAGES_OFFSET
             ..(TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&(trailing_region_data_pages.unwrap_or(0) as u32).to_le_bytes());
+            .copy_from_slice(&(trailing_region_data_pages.unwrap_or(0)).to_le_bytes());
     }
 
     fn update_checksum(&mut self, checksum_type: ChecksumType) {
@@ -784,8 +775,8 @@ impl TransactionalMemory {
             let layout = DatabaseLayout::calculate(
                 max_capacity,
                 starting_size,
-                max_usable_region_bytes,
-                page_size,
+                (max_usable_region_bytes / page_size as u64) as u32,
+                page_size as u32,
             )?;
 
             if (mmap.len() as u64) < layout.len() {
@@ -800,9 +791,9 @@ impl TransactionalMemory {
 
             // Store the page & db size. These are immutable
             metadata.set_page_size(page_size);
-            metadata.set_superheader_length(layout.header_bytes());
+            metadata.set_superheader_pages(layout.superheader_pages());
             metadata.set_region_tracker_state_length(layout.region_tracker_address_range().len());
-            metadata.set_region_header_length(layout.full_region_layout().data_section().start);
+            metadata.set_region_header_pages(layout.full_region_layout().get_header_pages());
             metadata.set_region_max_data_pages(layout.full_region_layout().num_pages());
             metadata.set_max_capacity(max_capacity);
             let checksum_type = match write_strategy.unwrap_or_default() {
@@ -863,7 +854,7 @@ impl TransactionalMemory {
 
         let page_size = metadata.get_page_size();
         if let Some(size) = requested_page_size {
-            assert_eq!(page_size, size);
+            assert_eq!(page_size as usize, size);
         }
         let version = metadata.primary_slot().get_version();
         if version != FILE_FORMAT_VERSION {
@@ -899,10 +890,10 @@ impl TransactionalMemory {
             #[cfg(debug_assertions)]
             read_page_ref_counts: Mutex::new(HashMap::new()),
             read_from_secondary: AtomicBool::new(false),
-            page_size,
+            page_size: page_size as usize,
             region_size,
             region_header_with_padding_size: region_header_size,
-            db_header_size: layout.header_bytes(),
+            db_header_size: layout.superheader_bytes(),
             dynamic_growth,
             checksum_type,
         })
@@ -986,7 +977,7 @@ impl TransactionalMemory {
         let (_, mut regions) = metadata.allocators_mut(&layout)?;
 
         for page_number in allocated_pages {
-            let region_index = page_number.region as usize;
+            let region_index = page_number.region;
             let mut region = regions.get_region_mut(region_index);
             region.allocator_mut().record_alloc(
                 page_number.page_index as u64,
@@ -1132,7 +1123,7 @@ impl TransactionalMemory {
         for op in self.log_since_commit.lock().unwrap().drain(..).rev() {
             match op {
                 AllocationOp::Allocate(page_number) => {
-                    let region_index = page_number.region as usize;
+                    let region_index = page_number.region;
                     region_tracker.mark_free(page_number.page_order as usize, region_index as u64);
                     let mut region = regions.get_region_mut(region_index);
                     region.allocator_mut().free(
@@ -1141,7 +1132,7 @@ impl TransactionalMemory {
                     );
                 }
                 AllocationOp::Free(page_number) | AllocationOp::FreeUncommitted(page_number) => {
-                    let region_index = page_number.region as usize;
+                    let region_index = page_number.region;
                     let mut region = regions.get_region_mut(region_index);
                     region.allocator_mut().record_alloc(
                         page_number.page_index as u64,
@@ -1160,7 +1151,9 @@ impl TransactionalMemory {
             let last_region_index = restore.num_regions() - 1;
             let last_region = restore.region_layout(last_region_index);
             let mut region = regions.get_region_mut(last_region_index);
-            region.allocator_mut().resize(last_region.num_pages());
+            region
+                .allocator_mut()
+                .resize(last_region.num_pages() as usize);
 
             *layout = restore;
             // Safety: we've rollbacked the transaction, so any data in that was written into
@@ -1275,7 +1268,7 @@ impl TransactionalMemory {
         let mut metadata = self.lock_metadata();
         let layout = self.layout.lock().unwrap();
         let (mut region_tracker, mut regions) = metadata.allocators_mut(&layout)?;
-        let region_index = page.region as usize;
+        let region_index = page.region;
         // Free in the regional allocator
         let mut region = regions.get_region_mut(region_index);
         region
@@ -1303,7 +1296,7 @@ impl TransactionalMemory {
             let layout = self.layout.lock().unwrap();
             let (mut region_tracker, mut regions) = metadata.allocators_mut(&layout)?;
             // Free in the regional allocator
-            let mut region = regions.get_region_mut(page.region as usize);
+            let mut region = regions.get_region_mut(page.region);
             region
                 .allocator_mut()
                 .free(page.page_index as u64, page.page_order as usize);
@@ -1334,7 +1327,7 @@ impl TransactionalMemory {
     ) -> Result<PageNumber> {
         let (mut region_tracker, mut regions) = metadata.allocators_mut(layout)?;
         loop {
-            let candidate_region = region_tracker.find_free(required_order)? as usize;
+            let candidate_region = region_tracker.find_free(required_order)? as u32;
             let mut region = regions.get_region_mut(candidate_region);
             match region.allocator_mut().alloc(required_order) {
                 Ok(page) => {
@@ -1395,12 +1388,12 @@ impl TransactionalMemory {
         let new_layout = DatabaseLayout::calculate(
             metadata.get_max_capacity(),
             new_usable_bytes,
-            metadata.get_region_max_usable_bytes(),
-            self.page_size,
+            metadata.get_region_max_data_pages(),
+            self.page_size as u32,
         )?;
         assert!(new_layout.len() <= layout.len());
-        assert_eq!(new_layout.header_bytes(), layout.header_bytes());
-        assert_eq!(new_layout.header_bytes(), self.db_header_size);
+        assert_eq!(new_layout.superheader_pages(), layout.superheader_pages());
+        assert_eq!(new_layout.superheader_bytes(), self.db_header_size);
 
         *layout = new_layout;
 
@@ -1415,7 +1408,8 @@ impl TransactionalMemory {
     ) -> Result<()> {
         let required_growth =
             2u64.pow(required_order_allocation as u32) * metadata.get_page_size() as u64;
-        let max_region_size = metadata.get_region_max_usable_bytes();
+        let max_region_size =
+            (metadata.get_region_max_data_pages() as u64) * (metadata.get_page_size() as u64);
         let next_desired_size = if layout.num_full_regions() > 0 {
             if let Some(trailing) = layout.trailing_region_layout() {
                 if 2 * required_growth < max_region_size - trailing.usable_bytes() {
@@ -1439,12 +1433,12 @@ impl TransactionalMemory {
         let new_layout = DatabaseLayout::calculate(
             metadata.get_max_capacity(),
             next_desired_size,
-            metadata.get_region_max_usable_bytes(),
-            self.page_size,
+            metadata.get_region_max_data_pages(),
+            self.page_size as u32,
         )?;
         assert!(new_layout.len() >= layout.len());
-        assert_eq!(new_layout.header_bytes(), layout.header_bytes());
-        assert_eq!(new_layout.header_bytes(), self.db_header_size);
+        assert_eq!(new_layout.superheader_pages(), layout.superheader_pages());
+        assert_eq!(new_layout.superheader_bytes(), self.db_header_size);
         if new_layout.len() == layout.len() {
             // Can't grow
             return Err(Error::OutOfSpace);
@@ -1465,7 +1459,7 @@ impl TransactionalMemory {
                     let (mut region_tracker, mut regions) = metadata.allocators_mut(&new_layout)?;
                     let mut region = regions.get_region_mut(i);
                     let mut allocator = region.allocator_mut();
-                    allocator.resize(new_region.num_pages());
+                    allocator.resize(new_region.num_pages() as usize);
                     let highest_free = allocator.highest_free_order().unwrap();
                     region_tracker.mark_free(highest_free, i as u64);
                 }
@@ -1555,8 +1549,8 @@ impl TransactionalMemory {
         let max_layout = DatabaseLayout::calculate(
             metadata.get_max_capacity(),
             metadata.get_max_capacity(),
-            metadata.get_region_max_usable_bytes(),
-            self.page_size,
+            metadata.get_region_max_data_pages(),
+            self.page_size as u32,
         )
         .unwrap();
         let potential_growth_pages: usize = ((max_layout.usable_bytes() - layout.usable_bytes())
