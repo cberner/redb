@@ -3,7 +3,7 @@ use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::mmap::Mmap;
-use crate::tree_store::page_store::page_allocator::PageAllocator;
+use crate::tree_store::page_store::page_allocator::{PageAllocator, PageAllocatorMut};
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
 use crate::tree_store::page_store::utils::get_page_size;
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
@@ -455,42 +455,36 @@ impl<'a> MetadataAccessor<'a> {
 // allocator_len: u32 length of each allocator
 // data: PageAllocator data for each order
 pub(crate) struct RegionTracker<'a> {
-    // TODO: remove this field
-    accessor: PageAllocator,
     data: &'a mut [u8],
 }
 
 impl<'a> RegionTracker<'a> {
     pub(crate) fn new(data: &'a mut [u8]) -> Self {
-        // TODO: this is hacky since we rely on private details of the PageAllocator implementation
-        let regions = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
-        Self {
-            accessor: PageAllocator::new(regions),
-            data,
-        }
+        Self { data }
     }
 
     pub(crate) fn required_bytes(regions: usize, orders: usize) -> usize {
-        2 * size_of::<u32>() + orders * PageAllocator::required_space(regions)
+        2 * size_of::<u32>() + orders * PageAllocatorMut::required_space(regions)
     }
 
     pub(crate) fn init_new(regions: usize, orders: usize, data: &'a mut [u8]) -> Self {
         assert!(data.len() >= Self::required_bytes(regions, orders));
         data[..4].copy_from_slice(&(orders as u32).to_le_bytes());
-        data[4..8].copy_from_slice(&(PageAllocator::required_space(regions) as u32).to_le_bytes());
-        let mut result = Self {
-            accessor: PageAllocator::new(regions),
-            data,
-        };
+        data[4..8]
+            .copy_from_slice(&(PageAllocatorMut::required_space(regions) as u32).to_le_bytes());
+
+        let mut result = Self { data };
         for i in 0..orders {
-            PageAllocator::init_new(result.get_order_mut(i), regions);
+            PageAllocatorMut::init_new(result.get_order_mut(i), regions, regions);
         }
 
         result
     }
 
     pub(crate) fn find_free(&self, order: usize) -> Result<u64> {
-        self.accessor.find_free(self.get_order(order))
+        let mem = self.get_order(order);
+        let accessor = PageAllocator::new(mem);
+        accessor.find_free()
     }
 
     pub(crate) fn mark_free(&mut self, order: usize, region: u64) {
@@ -499,7 +493,8 @@ impl<'a> RegionTracker<'a> {
             let start = 8 + i * self.suballocator_len();
             let end = start + self.suballocator_len();
             let mem = &mut self.data[start..end];
-            self.accessor.free(mem, region);
+            let mut accessor = PageAllocatorMut::new(mem);
+            accessor.free(region);
         }
     }
 
@@ -509,7 +504,8 @@ impl<'a> RegionTracker<'a> {
             let start = 8 + i * self.suballocator_len();
             let end = start + self.suballocator_len();
             let mem = &mut self.data[start..end];
-            self.accessor.record_alloc(mem, region);
+            let mut accessor = PageAllocatorMut::new(mem);
+            accessor.record_alloc(region);
         }
     }
 
@@ -989,7 +985,6 @@ impl TransactionalMemory {
             let allocator = BuddyAllocator::new(
                 region_layout.num_pages(),
                 layout.full_region_layout().num_pages(),
-                region_layout.max_order(),
             );
             let highest_free = allocator
                 .highest_free_order(region.allocator_state_mut())
@@ -1539,7 +1534,6 @@ impl TransactionalMemory {
                 let allocator = BuddyAllocator::new(
                     new_region.num_pages(),
                     new_layout.full_region_layout().num_pages(),
-                    new_region.max_order(),
                 );
                 let mem = region.allocator_state_mut();
                 let highest_free = allocator.highest_free_order(mem).unwrap();
