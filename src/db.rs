@@ -343,7 +343,13 @@ impl Database {
             // Clear the freed table. We just rebuilt the allocator state by walking all the
             // reachable data pages, which implicitly frees the pages for the freed table
             let transaction_id = mem.get_last_committed_transaction_id()? + 1;
-            mem.commit(Some((root, root_checksum)), None, transaction_id, false)?;
+            mem.commit(
+                Some((root, root_checksum)),
+                None,
+                transaction_id,
+                false,
+                None,
+            )?;
         }
 
         let next_transaction_id = mem.get_last_committed_transaction_id()? + 1;
@@ -378,6 +384,26 @@ impl Database {
     /// Convenience method for [`Builder::new`]
     pub fn builder() -> Builder {
         Builder::new()
+    }
+
+    /// Changes the write strategy of the database for future [`WriteTransaction`]s.
+    ///
+    /// Note: Changing to the [`WriteStrategy::Checksum`] strategy can take a long time, as checksums
+    /// will need to be calculated for every entry in the database
+    pub fn set_write_strategy(&self, strategy: WriteStrategy) -> Result {
+        let write_guard = self.live_write_transaction.lock().unwrap();
+        assert!(write_guard.is_none());
+        // TODO: implement switching to checksum strategy
+        assert!(matches!(strategy, WriteStrategy::TwoPhase));
+
+        let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
+        let root_page = self.mem.get_data_root();
+        let freed_root = self.mem.get_freed_root();
+        self.mem
+            .commit(root_page, freed_root, id, false, Some(strategy.into()))?;
+        drop(write_guard);
+
+        Ok(())
     }
 
     /// Begins a write transaction
