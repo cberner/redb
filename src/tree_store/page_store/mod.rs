@@ -1,8 +1,8 @@
 mod base;
+mod bitmap;
 mod buddy_allocator;
 mod layout;
 mod mmap;
-mod page_allocator;
 mod page_manager;
 mod region;
 mod utils;
