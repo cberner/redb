@@ -1361,14 +1361,13 @@ impl TransactionalMemory {
         let trailing_free = last_allocator.trailing_free_pages();
         let last_allocator_len = last_allocator.len();
         drop(last_allocator);
-        // TODO: is this the right shrinkage heuristic?
         if trailing_free < last_allocator_len / 2 {
             return Ok(false);
         }
         let reduce_to_pages = if layout.num_regions() > 1 && trailing_free == last_allocator_len {
             0
         } else {
-            max(MIN_USABLE_PAGES, last_allocator_len - trailing_free)
+            max(MIN_USABLE_PAGES, last_allocator_len - trailing_free / 2)
         };
 
         let (mut region_tracker, mut regions) = metadata.allocators_mut(layout)?;
