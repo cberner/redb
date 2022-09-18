@@ -373,6 +373,8 @@ impl<'a> BuddyAllocatorMut<'a> {
 
     /// data must have been initialized by Self::init_new()
     pub(crate) fn free(&mut self, page_number: u64, order: usize) {
+        debug_assert!(self.get_order_mut(order as u32).get(page_number));
+
         if order == self.get_max_order() {
             let mut allocator = self.get_order_mut(order as u32);
             allocator.clear(page_number);
