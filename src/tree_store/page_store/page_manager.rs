@@ -179,7 +179,6 @@ impl<'a> MetadataAccessor<'a> {
     fn make_region_layout(&self, num_pages: usize) -> RegionLayout {
         RegionLayout::new(
             num_pages,
-            self.get_region_max_data_pages(),
             self.get_region_header_length(),
             self.get_page_size(),
         )
@@ -818,10 +817,6 @@ impl TransactionalMemory {
             let (mut region_tracker, mut regions) = metadata.allocators_mut(&layout)?;
 
             let num_regions = layout.num_regions();
-            for i in 0..num_regions {
-                region_tracker.mark_free(layout.full_region_layout().max_order(), i as u64);
-            }
-
             // Initialize all the regional allocators
             for i in 0..num_regions {
                 let mut region = regions.get_region_mut(i);
@@ -829,8 +824,9 @@ impl TransactionalMemory {
                 region.initialize(
                     region_layout.num_pages(),
                     layout.full_region_layout().num_pages(),
-                    region_layout.max_order(),
                 );
+                let max_order = region.allocator_mut().get_max_order();
+                region_tracker.mark_free(max_order, i as u64);
             }
             // Set the allocator to not dirty, because the allocator initialization above will have
             // dirtied it
@@ -972,7 +968,6 @@ impl TransactionalMemory {
             region.initialize(
                 region_layout.num_pages(),
                 layout.full_region_layout().num_pages(),
-                region_layout.max_order(),
             );
             let highest_free = region.allocator_mut().highest_free_order().unwrap();
             // Initialize the region tracker
@@ -1481,7 +1476,6 @@ impl TransactionalMemory {
                 region.initialize(
                     new_region.num_pages(),
                     new_layout.full_region_layout().num_pages(),
-                    new_region.max_order(),
                 );
                 let highest_free = region.allocator_mut().highest_free_order().unwrap();
                 region_tracker.mark_free(highest_free, i as u64);
