@@ -599,7 +599,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
     }
 
     fn checksum_helper<T: Page>(&self, page: &T) -> Checksum {
-        if self.mem.checksum_type() == ChecksumType::Zero {
+        if self.mem.checksum_type() == ChecksumType::Unused {
             return 0;
         }
         match page.memory()[0] {

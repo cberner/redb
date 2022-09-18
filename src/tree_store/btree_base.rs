@@ -25,7 +25,7 @@ pub(super) fn leaf_checksum<T: Page>(
     // arbitrary data
     let end = accessor.value_end(accessor.num_pairs() - 1).unwrap();
     match checksum {
-        ChecksumType::Zero => 0,
+        ChecksumType::Unused => 0,
         ChecksumType::XXH3_128 => page_store::hash128_with_seed(&page.memory()[..end], 0),
     }
 }
@@ -40,7 +40,7 @@ pub(super) fn branch_checksum<T: Page>(
     // arbitrary data
     let end = accessor.key_end(accessor.num_keys() - 1);
     match checksum {
-        ChecksumType::Zero => 0,
+        ChecksumType::Unused => 0,
         ChecksumType::XXH3_128 => page_store::hash128_with_seed(&page.memory()[..end], 0),
     }
 }
@@ -274,7 +274,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> AccessGuardMut<'a, K, V> {
     }
 
     fn checksum_helper<T: Page>(&self, page: &T) -> Checksum {
-        if self.mem.checksum_type() == ChecksumType::Zero {
+        if self.mem.checksum_type() == ChecksumType::Unused {
             return 0;
         }
         match page.memory()[0] {

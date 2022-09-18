@@ -335,7 +335,7 @@ impl<'db> WriteTransaction<'db> {
         let freed_root = self.freed_tree.get_root();
 
         self.mem
-            .commit(root, freed_root, self.transaction_id, eventual)?;
+            .commit(root, freed_root, self.transaction_id, eventual, None)?;
         Ok(())
     }
 

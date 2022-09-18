@@ -29,7 +29,7 @@ database file.
 ========================================== Super header ==========================================
 -------------------------------------------- Header ----------------------------------------------
 | magic number                                                                                   |
-| magic con.| god byte  | chksum typ| padding   | super-header pages                             |
+| magic con.| god byte  | padding               | super-header pages                             |
 | page size                                     | region tracker state length                    |
 | database max size                                                                              |
 | region header pages                           | region max data pages                          |
@@ -37,7 +37,7 @@ database file.
 | padding                                                                                        |
 | padding                                                                                        |
 ----------------------------------------- Commit slot 0 ------------------------------------------
-| version   | root nn   | f-root nn | padding                                                    |
+| version   | root nn   | f-root nn | chksum typ| padding                                        |
 | root page number                                                                               |
 | root checksum                                                                                  |
 | root checksum (cont.)                                                                          |
@@ -78,8 +78,7 @@ controls which transaction pointer is the primary.
 
 * 9 bytes: magic number
 * 1 byte: god byte
-* 1 byte: checksum type
-* 1 byte: padding
+* 2 byte: padding
 * 4 bytes: super-header pages
 * 4 bytes: page size
 * 4 bytes: region tracker state length
@@ -99,9 +98,6 @@ inspired by the PNG magic number.
   During the recovery process, the region tracker and regional allocator states -- described below -- are reconstructed
   by walking the btree from all active roots.
 
-`checksum type` is an enum indicating whether checksums are used. It is `1` if checksums are disabled, and `2` if
-128bit XXH3 checksums are used. When checksums are enabled, the 1-phase commit strategy is used.
-
 `super-header pages` is the length of the super-header in pages
 
 `page size` is the size of a redb page in bytes
@@ -118,7 +114,8 @@ inspired by the PNG magic number.
 * 1 byte: file format version number
 * 1 byte: boolean indicating that root page is non-null
 * 1 byte: boolean indicating that freed table root page is non-null
-* 5 bytes: padding to 64-bit aligned
+* 1 byte: checksum type
+* 4 bytes: padding to 64-bit aligned
 * 8 bytes: root page
 * 16 bytes: root checksum
 * 8 bytes: freed table root page
@@ -131,6 +128,9 @@ inspired by the PNG magic number.
 
 `version` the file format version of the database. This is stored in the transaction data, so that it can be atomically
 changed during an upgrade.
+
+`checksum type` is an enum indicating whether checksums are used. It is `1` if checksums are disabled, and `2` if
+128bit XXH3 checksums are used. When checksums are enabled the 1-phase commit strategy is used.
 
 `root page` is the page number of the root of the table tree.
 

@@ -30,8 +30,7 @@ use std::sync::{Mutex, MutexGuard};
 // Header (first 64 bytes):
 // 9 bytes: magic number
 // 1 byte: god byte
-// 1 byte: checksum type
-// 1 byte: padding
+// 2 byte: padding
 // 4 bytes: super-header pages
 // 4 bytes: page size
 // 4 bytes: region tracker state length
@@ -44,7 +43,8 @@ use std::sync::{Mutex, MutexGuard};
 // 1 byte: version
 // 1 byte: != 0 if root page is non-null
 // 1 byte: != 0 if freed table root page is non-null
-// 5 bytes: padding
+// 1 byte: checksum type
+// 4 bytes: padding
 // 8 bytes: root page
 // 16 bytes: root checksum
 // 8 bytes: freed table root page
@@ -72,8 +72,7 @@ const FILE_FORMAT_VERSION: u8 = 106;
 // Inspired by PNG's magic number
 const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
 const GOD_BYTE_OFFSET: usize = MAGICNUMBER.len();
-const CHECKSUM_TYPE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>();
-const SUPERHEADER_PAGES_OFFSET: usize = CHECKSUM_TYPE_OFFSET + size_of::<u8>() + 1; // +1 for padding
+const SUPERHEADER_PAGES_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + 2; // +2 for padding
 const PAGE_SIZE_OFFSET: usize = SUPERHEADER_PAGES_OFFSET + size_of::<u32>();
 const REGION_TRACKER_LENGTH_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u32>();
 const DB_SIZE_OFFSET: usize = REGION_TRACKER_LENGTH_OFFSET + size_of::<u32>();
@@ -92,8 +91,9 @@ const RECOVERY_REQUIRED: u8 = 2;
 const VERSION_OFFSET: usize = 0;
 const ROOT_NON_NULL_OFFSET: usize = size_of::<u8>();
 const FREED_ROOT_NON_NULL_OFFSET: usize = ROOT_NON_NULL_OFFSET + size_of::<u8>();
-const PADDING: usize = 5;
-const ROOT_PAGE_OFFSET: usize = FREED_ROOT_NON_NULL_OFFSET + size_of::<u8>() + PADDING;
+const CHECKSUM_TYPE_OFFSET: usize = FREED_ROOT_NON_NULL_OFFSET + size_of::<u8>();
+const PADDING: usize = 4;
+const ROOT_PAGE_OFFSET: usize = CHECKSUM_TYPE_OFFSET + size_of::<u8>() + PADDING;
 const ROOT_CHECKSUM_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
 const FREED_ROOT_OFFSET: usize = ROOT_CHECKSUM_OFFSET + size_of::<u128>();
 const FREED_ROOT_CHECKSUM_OFFSET: usize = FREED_ROOT_OFFSET + size_of::<u64>();
@@ -121,15 +121,24 @@ pub(crate) fn get_db_size(path: impl AsRef<Path>) -> Result<u64, io::Error> {
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub(crate) enum ChecksumType {
-    Zero, // No checksum is calculated. Just stores zero
+    Unused, // No checksum is calculated. Stores arbitrary data
     XXH3_128,
 }
 
 impl ChecksumType {
     pub(crate) fn checksum(&self, data: &[u8]) -> Checksum {
         match self {
-            ChecksumType::Zero => 0,
+            ChecksumType::Unused => 0,
             ChecksumType::XXH3_128 => hash128_with_seed(data, 0),
+        }
+    }
+}
+
+impl From<WriteStrategy> for ChecksumType {
+    fn from(strategy: WriteStrategy) -> Self {
+        match strategy {
+            WriteStrategy::Checksum => ChecksumType::XXH3_128,
+            WriteStrategy::TwoPhase => ChecksumType::Unused,
         }
     }
 }
@@ -137,7 +146,7 @@ impl ChecksumType {
 impl From<u8> for ChecksumType {
     fn from(x: u8) -> Self {
         match x {
-            1 => ChecksumType::Zero,
+            1 => ChecksumType::Unused,
             2 => ChecksumType::XXH3_128,
             _ => unimplemented!(),
         }
@@ -148,7 +157,7 @@ impl From<u8> for ChecksumType {
 impl Into<u8> for ChecksumType {
     fn into(self) -> u8 {
         match self {
-            ChecksumType::Zero => 1,
+            ChecksumType::Unused => 1,
             ChecksumType::XXH3_128 => 2,
         }
     }
@@ -258,14 +267,6 @@ impl<'a> MetadataAccessor<'a> {
         } else {
             self.header[GOD_BYTE_OFFSET] &= !PRIMARY_BIT;
         }
-    }
-
-    fn get_checksum_type(&self) -> ChecksumType {
-        ChecksumType::from(self.header[CHECKSUM_TYPE_OFFSET])
-    }
-
-    fn set_checksum_type(&mut self, checksum: ChecksumType) {
-        self.header[CHECKSUM_TYPE_OFFSET] = checksum.into();
     }
 
     fn get_max_capacity(&self) -> u64 {
@@ -549,13 +550,15 @@ impl<'a> TransactionAccessor<'a> {
         TransactionAccessor { mem, _guard: guard }
     }
 
-    fn verify_checksum(&self, checksum_type: ChecksumType) -> bool {
+    fn verify_checksum(&self) -> bool {
         let checksum = Checksum::from_le_bytes(
             self.mem[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
                 .try_into()
                 .unwrap(),
         );
-        checksum_type.checksum(&self.mem[..SLOT_CHECKSUM_OFFSET]) == checksum
+        self.get_checksum_type()
+            .checksum(&self.mem[..SLOT_CHECKSUM_OFFSET])
+            == checksum
     }
 
     fn get_root_page(&self) -> Option<(PageNumber, Checksum)> {
@@ -593,6 +596,10 @@ impl<'a> TransactionAccessor<'a> {
             );
             Some((num, checksum))
         }
+    }
+
+    fn get_checksum_type(&self) -> ChecksumType {
+        ChecksumType::from(self.mem[CHECKSUM_TYPE_OFFSET])
     }
 
     fn get_last_committed_transaction_id(&self) -> u64 {
@@ -664,6 +671,10 @@ impl<'a> TransactionMutator<'a> {
         }
     }
 
+    fn set_checksum_type(&mut self, checksum: ChecksumType) {
+        self.mem[CHECKSUM_TYPE_OFFSET] = checksum.into();
+    }
+
     fn set_last_committed_transaction_id(&mut self, transaction_id: u64) {
         self.mem[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
             .copy_from_slice(&transaction_id.to_le_bytes());
@@ -727,7 +738,6 @@ pub(crate) struct TransactionalMemory {
     region_header_with_padding_size: usize,
     db_header_size: usize,
     dynamic_growth: bool,
-    checksum_type: ChecksumType,
 }
 
 impl TransactionalMemory {
@@ -797,11 +807,6 @@ impl TransactionalMemory {
             metadata.set_region_header_pages(layout.full_region_layout().get_header_pages());
             metadata.set_region_max_data_pages(layout.full_region_layout().num_pages());
             metadata.set_max_capacity(max_capacity);
-            let checksum_type = match write_strategy.unwrap_or_default() {
-                WriteStrategy::Checksum => ChecksumType::XXH3_128,
-                WriteStrategy::TwoPhase => ChecksumType::Zero,
-            };
-            metadata.set_checksum_type(checksum_type);
 
             // Initialize the region tracker. Must be done after writing the page_size and other
             // immutable fields, since it relies on those fields.
@@ -824,9 +829,14 @@ impl TransactionalMemory {
             // dirtied it
             metadata.set_recovery(false);
 
+            let checksum_type = match write_strategy.unwrap_or_default() {
+                WriteStrategy::Checksum => ChecksumType::XXH3_128,
+                WriteStrategy::TwoPhase => ChecksumType::Unused,
+            };
             let mut mutator = metadata.secondary_slot_mut();
             mutator.set_root_page(None);
             mutator.set_freed_root(None);
+            mutator.set_checksum_type(checksum_type);
             mutator.set_last_committed_transaction_id(0);
             mutator.set_data_section_layout(
                 layout.num_full_regions(),
@@ -839,6 +849,10 @@ impl TransactionalMemory {
 
             // Initialize the secondary allocator state
             let mut mutator = metadata.secondary_slot_mut();
+            mutator.set_root_page(None);
+            mutator.set_freed_root(None);
+            mutator.set_checksum_type(checksum_type);
+            mutator.set_last_committed_transaction_id(0);
             mutator.set_data_section_layout(
                 layout.num_full_regions(),
                 layout.trailing_region_layout().map(|x| x.num_pages()),
@@ -851,6 +865,11 @@ impl TransactionalMemory {
             // to ensure that it's crash safe
             metadata.set_magic_number();
             mmap.flush()?;
+        }
+
+        if let Some(requested_strategy) = write_strategy {
+            let checksum_type: ChecksumType = requested_strategy.into();
+            assert_eq!(checksum_type, metadata.primary_slot().get_checksum_type());
         }
 
         let page_size = metadata.get_page_size();
@@ -874,7 +893,6 @@ impl TransactionalMemory {
         let layout = metadata.get_primary_layout();
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
-        let checksum_type = metadata.get_checksum_type();
 
         let needs_recovery = metadata.get_recovery_required();
         drop(metadata);
@@ -896,7 +914,6 @@ impl TransactionalMemory {
             region_header_with_padding_size: region_header_size,
             db_header_size: layout.superheader_bytes(),
             dynamic_growth,
-            checksum_type,
         })
     }
 
@@ -905,11 +922,11 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn needs_checksum_verification(&self) -> Result<bool> {
-        Ok(self.lock_metadata().get_checksum_type() == ChecksumType::XXH3_128)
+        Ok(self.checksum_type() == ChecksumType::XXH3_128)
     }
 
     pub(crate) fn checksum_type(&self) -> ChecksumType {
-        self.lock_metadata().get_checksum_type()
+        self.lock_metadata().primary_slot().get_checksum_type()
     }
 
     pub(crate) fn repair_primary_corrupted(&self) {
@@ -921,15 +938,10 @@ impl TransactionalMemory {
     pub(crate) fn begin_repair(&self) -> Result<()> {
         let mut metadata = self.lock_metadata();
 
-        if !metadata
-            .primary_slot()
-            .verify_checksum(metadata.get_checksum_type())
-        {
+        if !metadata.primary_slot().verify_checksum() {
             metadata.swap_primary();
             *self.layout.lock().unwrap() = metadata.get_primary_layout();
-            assert!(metadata
-                .primary_slot()
-                .verify_checksum(metadata.get_checksum_type()));
+            assert!(metadata.primary_slot().verify_checksum());
         } else {
             // If the secondary is a valid commit, verify that the primary is newer. This handles an edge case where:
             // * the primary bit is flipped to the secondary
@@ -938,11 +950,7 @@ impl TransactionalMemory {
                 .secondary_slot()
                 .get_last_committed_transaction_id()
                 > metadata.primary_slot().get_last_committed_transaction_id();
-            if secondary_newer
-                && metadata
-                    .secondary_slot()
-                    .verify_checksum(metadata.get_checksum_type())
-            {
+            if secondary_newer && metadata.secondary_slot().verify_checksum() {
                 metadata.swap_primary();
                 *self.layout.lock().unwrap() = metadata.get_primary_layout();
             }
@@ -1007,12 +1015,15 @@ impl TransactionalMemory {
     }
 
     // Commit all outstanding changes and make them visible as the primary
+    //
+    // If new_checksum_type is provided, caller must ensure that all pages conform to the new checksum
     pub(crate) fn commit(
         &self,
         data_root: Option<(PageNumber, Checksum)>,
         freed_root: Option<(PageNumber, Checksum)>,
         transaction_id: u64,
         eventual: bool,
+        new_checksum_type: Option<ChecksumType>,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
@@ -1022,7 +1033,8 @@ impl TransactionalMemory {
         assert!(!self.needs_recovery);
 
         let mut metadata = self.lock_metadata();
-        let checksum_type = metadata.get_checksum_type();
+        let original_checksum_type = metadata.primary_slot().get_checksum_type();
+        let checksum_type = new_checksum_type.unwrap_or(original_checksum_type);
         let mut layout = self.layout.lock().unwrap();
 
         // Trim surplus file space, before finalizing the commit
@@ -1032,6 +1044,7 @@ impl TransactionalMemory {
         };
 
         let mut secondary = metadata.secondary_slot_mut();
+        secondary.set_checksum_type(checksum_type);
         secondary.set_last_committed_transaction_id(transaction_id);
         secondary.set_root_page(data_root);
         secondary.set_freed_root(freed_root);
@@ -1042,7 +1055,7 @@ impl TransactionalMemory {
         secondary.update_checksum(checksum_type);
 
         // Use 2-phase commit, if checksums are disabled
-        if matches!(self.checksum_type, ChecksumType::Zero) {
+        if matches!(checksum_type, ChecksumType::Unused) {
             if eventual {
                 self.mmap.eventual_flush()?;
             } else {
@@ -1089,9 +1102,10 @@ impl TransactionalMemory {
         assert!(!self.needs_recovery);
 
         let mut metadata = self.lock_metadata();
-        let checksum_type = metadata.get_checksum_type();
+        let checksum_type = metadata.primary_slot().get_checksum_type();
         let layout = self.layout.lock().unwrap();
         let mut secondary = metadata.secondary_slot_mut();
+        secondary.set_checksum_type(checksum_type);
         secondary.set_last_committed_transaction_id(transaction_id);
         secondary.set_root_page(data_root);
         secondary.set_freed_root(freed_root);
@@ -1571,7 +1585,7 @@ impl Drop for TransactionalMemory {
                 let root = self.get_data_root();
                 let freed_root = self.get_freed_root();
                 if self
-                    .commit(root, freed_root, non_durable_transaction_id, false)
+                    .commit(root, freed_root, non_durable_transaction_id, false, None)
                     .is_err()
                 {
                     eprintln!(
@@ -1740,6 +1754,68 @@ mod test {
         {
             let mut table = write_txn.open_table(X).unwrap();
             assert_eq!(table.get(b"hello").unwrap().unwrap(), b"world");
+            table.insert(b"hello2", b"world2").unwrap();
+        }
+        write_txn.commit().unwrap();
+    }
+
+    #[test]
+    fn change_write_strategy_to_2pc() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let max_size = 1024 * 1024;
+        let db = unsafe {
+            Database::builder()
+                .set_write_strategy(WriteStrategy::Checksum)
+                .create(tmpfile.path(), max_size)
+                .unwrap()
+        };
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            table.insert(b"hello", b"world").unwrap();
+        }
+        write_txn.commit().unwrap();
+        let write_txn = db.begin_write().unwrap();
+        let free_pages = write_txn.stats().unwrap().free_pages();
+        write_txn.abort().unwrap();
+        db.set_write_strategy(WriteStrategy::TwoPhase).unwrap();
+        drop(db);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        let mut buffer = [0u8; 1];
+        file.read_exact(&mut buffer).unwrap();
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        buffer[0] |= RECOVERY_REQUIRED;
+        file.write_all(&buffer).unwrap();
+
+        assert!(TransactionalMemory::new(
+            file,
+            max_size as u64,
+            None,
+            None,
+            true,
+            Some(WriteStrategy::TwoPhase)
+        )
+        .unwrap()
+        .needs_repair()
+        .unwrap());
+
+        let db2 = unsafe {
+            Database::builder()
+                .set_write_strategy(WriteStrategy::TwoPhase)
+                .create(tmpfile.path(), max_size)
+                .unwrap()
+        };
+        let write_txn = db2.begin_write().unwrap();
+        assert_eq!(free_pages, write_txn.stats().unwrap().free_pages());
+        {
+            let mut table = write_txn.open_table(X).unwrap();
             table.insert(b"hello2", b"world2").unwrap();
         }
         write_txn.commit().unwrap();
