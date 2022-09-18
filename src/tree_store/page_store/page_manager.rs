@@ -1422,7 +1422,6 @@ impl TransactionalMemory {
                 layout.usable_bytes() + max_region_size
             }
         } else {
-            // TODO: maybe we should grow by less than 2x each time, or make it configurable?
             max(
                 layout.usable_bytes() * 2,
                 layout.usable_bytes() + required_growth * 2,
