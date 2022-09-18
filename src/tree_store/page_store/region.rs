@@ -1,4 +1,4 @@
-use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
+use crate::tree_store::page_store::buddy_allocator::{BuddyAllocator, BuddyAllocatorMut};
 use std::mem::size_of;
 
 const REGION_FORMAT_VERSION: u8 = 1;
@@ -26,10 +26,10 @@ impl<'a> RegionHeaderMutator<'a> {
         max_order: usize,
     ) {
         self.mem[0] = REGION_FORMAT_VERSION;
-        let allocator_len = BuddyAllocator::required_space(max_page_capacity, max_order);
+        let allocator_len = BuddyAllocatorMut::required_space(max_page_capacity, max_order);
         self.mem[ALLOCATOR_LENGTH_OFFSET..(ALLOCATOR_LENGTH_OFFSET + size_of::<u32>())]
             .copy_from_slice(&(allocator_len as u32).to_le_bytes());
-        BuddyAllocator::init_new(
+        BuddyAllocatorMut::init_new(
             &mut self.mem[ALLOCATOR_OFFSET..(ALLOCATOR_OFFSET + allocator_len)],
             num_pages,
             max_page_capacity,
@@ -45,9 +45,9 @@ impl<'a> RegionHeaderMutator<'a> {
         ) as usize
     }
 
-    pub(crate) fn allocator_state_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn allocator_mut(&mut self) -> BuddyAllocatorMut {
         let len = self.get_allocator_len();
-        &mut self.mem[ALLOCATOR_OFFSET..(ALLOCATOR_OFFSET + len)]
+        BuddyAllocatorMut::new(&mut self.mem[ALLOCATOR_OFFSET..(ALLOCATOR_OFFSET + len)])
     }
 }
 
@@ -69,7 +69,9 @@ impl<'a> RegionHeaderAccessor<'a> {
         ) as usize
     }
 
-    pub(crate) fn allocator_state(&self) -> &[u8] {
-        &self.mem[ALLOCATOR_OFFSET..(ALLOCATOR_OFFSET + self.get_allocator_len())]
+    pub(crate) fn allocator(&self) -> BuddyAllocator {
+        BuddyAllocator::new(
+            &self.mem[ALLOCATOR_OFFSET..(ALLOCATOR_OFFSET + self.get_allocator_len())],
+        )
     }
 }

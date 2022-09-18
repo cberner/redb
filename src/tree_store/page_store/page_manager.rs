@@ -1,7 +1,6 @@
 use crate::db::WriteStrategy;
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
-use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
@@ -68,7 +67,7 @@ pub(super) const MIN_USABLE_PAGES: usize = 10;
 const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
 
 // TODO: set to 1, when version 1.0 is released
-const FILE_FORMAT_VERSION: u8 = 105;
+const FILE_FORMAT_VERSION: u8 = 106;
 
 // Inspired by PNG's magic number
 const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
@@ -474,7 +473,7 @@ impl<'a> RegionTracker<'a> {
 
         let mut result = Self { data };
         for i in 0..orders {
-            BtreeBitmapMut::init_new(result.get_order_mut(i), regions, regions);
+            BtreeBitmapMut::init_new(result.get_order_mut(i), regions);
         }
 
         result
@@ -714,9 +713,8 @@ pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
     allocated_since_commit: Mutex<HashSet<PageNumber>>,
     log_since_commit: Mutex<Vec<AllocationOp>>,
-    // Metadata guard lock should be held when using this to modify the page allocator state
-    // May be None, if the allocator state was corrupted when the file was opened
-    regional_allocators: Mutex<Option<Vec<BuddyAllocator>>>,
+    // True if the allocator state was corrupted when the file was opened
+    needs_recovery: bool,
     mmap: Mmap,
     // We use unsafe to access the metadata, and so guard it with this mutex
     // It would be nice if this was a RefCell<&[u8]> on the metadata. However, that would be
@@ -890,17 +888,13 @@ impl TransactionalMemory {
         let region_header_size = layout.full_region_layout().data_section().start;
         let checksum_type = metadata.get_checksum_type();
 
-        let regional_allocators = if metadata.get_recovery_required() {
-            None
-        } else {
-            Some(layout.create_allocators())
-        };
+        let needs_recovery = metadata.get_recovery_required();
         drop(metadata);
 
         Ok(TransactionalMemory {
             allocated_since_commit: Mutex::new(HashSet::new()),
             log_since_commit: Mutex::new(vec![]),
-            regional_allocators: Mutex::new(regional_allocators),
+            needs_recovery,
             mmap,
             metadata_guard: mutex,
             layout: Mutex::new(layout.clone()),
@@ -972,7 +966,6 @@ impl TransactionalMemory {
 
         let num_regions = layout.num_regions();
         // Initialize all the regional allocators
-        let mut regional_allocators = vec![];
         for i in 0..num_regions {
             let mut region = regions.get_region_mut(i);
             let region_layout = layout.region_layout(i);
@@ -981,20 +974,10 @@ impl TransactionalMemory {
                 layout.full_region_layout().num_pages(),
                 region_layout.max_order(),
             );
-            let allocator = BuddyAllocator::new(
-                region_layout.num_pages(),
-                layout.full_region_layout().num_pages(),
-            );
-            let highest_free = allocator
-                .highest_free_order(region.allocator_state_mut())
-                .unwrap();
+            let highest_free = region.allocator_mut().highest_free_order().unwrap();
             // Initialize the region tracker
             region_tracker.mark_free(highest_free, i as u64);
-            regional_allocators.push(allocator);
         }
-
-        let mut guard = self.regional_allocators.lock().unwrap();
-        *guard = Some(layout.create_allocators());
 
         Ok(())
     }
@@ -1007,14 +990,10 @@ impl TransactionalMemory {
         let layout = self.layout.lock().unwrap();
         let (_, mut regions) = metadata.allocators_mut(&layout)?;
 
-        let regional_allocators = self.regional_allocators.lock().unwrap();
-
         for page_number in allocated_pages {
             let region_index = page_number.region as usize;
             let mut region = regions.get_region_mut(region_index);
-            let mem = region.allocator_state_mut();
-            regional_allocators.as_ref().unwrap()[region_index].record_alloc(
-                mem,
+            region.allocator_mut().record_alloc(
                 page_number.page_index as u64,
                 page_number.page_order as usize,
             );
@@ -1023,12 +1002,16 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn end_repair(&self) -> Result<()> {
+    pub(crate) fn end_repair(&mut self) -> Result<()> {
         let mut metadata = self.lock_metadata();
         self.mmap.flush()?;
 
         metadata.set_recovery(false);
-        self.mmap.flush()
+        let result = self.mmap.flush();
+        drop(metadata);
+        self.needs_recovery = false;
+
+        result
     }
 
     fn lock_metadata(&self) -> MetadataAccessor {
@@ -1049,7 +1032,7 @@ impl TransactionalMemory {
         // to future read transactions
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
-        assert!(self.regional_allocators.lock().unwrap().is_some());
+        assert!(!self.needs_recovery);
 
         let mut metadata = self.lock_metadata();
         let checksum_type = metadata.get_checksum_type();
@@ -1116,7 +1099,7 @@ impl TransactionalMemory {
         // to future read transactions
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
-        assert!(self.regional_allocators.lock().unwrap().is_some());
+        assert!(!self.needs_recovery);
 
         let mut metadata = self.lock_metadata();
         let checksum_type = metadata.get_checksum_type();
@@ -1149,7 +1132,6 @@ impl TransactionalMemory {
             metadata.get_primary_layout()
         };
 
-        let mut regional_guard = self.regional_allocators.lock().unwrap();
         let mut layout = self.layout.lock().unwrap();
         let (mut region_tracker, mut regions) = metadata.allocators_mut(&layout)?;
         for op in self.log_since_commit.lock().unwrap().drain(..).rev() {
@@ -1158,9 +1140,7 @@ impl TransactionalMemory {
                     let region_index = page_number.region as usize;
                     region_tracker.mark_free(page_number.page_order as usize, region_index as u64);
                     let mut region = regions.get_region_mut(region_index);
-                    let mem = region.allocator_state_mut();
-                    regional_guard.as_ref().unwrap()[region_index].free(
-                        mem,
+                    region.allocator_mut().free(
                         page_number.page_index as u64,
                         page_number.page_order as usize,
                     );
@@ -1168,9 +1148,7 @@ impl TransactionalMemory {
                 AllocationOp::Free(page_number) | AllocationOp::FreeUncommitted(page_number) => {
                     let region_index = page_number.region as usize;
                     let mut region = regions.get_region_mut(region_index);
-                    let mem = region.allocator_state_mut();
-                    regional_guard.as_ref().unwrap()[region_index].record_alloc(
-                        mem,
+                    region.allocator_mut().record_alloc(
                         page_number.page_index as u64,
                         page_number.page_order as usize,
                     );
@@ -1183,18 +1161,11 @@ impl TransactionalMemory {
         assert!(restore.len() <= layout.len());
         // Reset the layout, in case it changed during the writes
         if restore.len() < layout.len() {
-            // Drop all the allocators for regions that are being deleted
-            regional_guard
-                .as_mut()
-                .unwrap()
-                .drain(restore.num_regions()..);
             // Restore the size of the last region's allocator
             let last_region_index = restore.num_regions() - 1;
             let last_region = restore.region_layout(last_region_index);
             let mut region = regions.get_region_mut(last_region_index);
-            let allocator_data = region.allocator_state_mut();
-            let last_allocator = &mut regional_guard.as_mut().unwrap()[last_region_index];
-            last_allocator.resize(allocator_data, last_region.num_pages());
+            region.allocator_mut().resize(last_region.num_pages());
 
             *layout = restore;
             // Safety: we've rollbacked the transaction, so any data in that was written into
@@ -1312,12 +1283,9 @@ impl TransactionalMemory {
         let region_index = page.region as usize;
         // Free in the regional allocator
         let mut region = regions.get_region_mut(region_index);
-        let mem = region.allocator_state_mut();
-        self.regional_allocators.lock().unwrap().as_ref().unwrap()[region_index].free(
-            mem,
-            page.page_index as u64,
-            page.page_order as usize,
-        );
+        region
+            .allocator_mut()
+            .free(page.page_index as u64, page.page_order as usize);
         // Ensure that the region is marked as having free space
         region_tracker.mark_free(page.page_order as usize, region_index as u64);
         self.log_since_commit
@@ -1341,12 +1309,9 @@ impl TransactionalMemory {
             let (mut region_tracker, mut regions) = metadata.allocators_mut(&layout)?;
             // Free in the regional allocator
             let mut region = regions.get_region_mut(page.region as usize);
-            let mem = region.allocator_state_mut();
-            self.regional_allocators.lock().unwrap().as_ref().unwrap()[page.region as usize].free(
-                mem,
-                page.page_index as u64,
-                page.page_order as usize,
-            );
+            region
+                .allocator_mut()
+                .free(page.page_index as u64, page.page_order as usize);
             // Ensure that the region is marked as having free space
             region_tracker.mark_free(page.page_order as usize, page.region as u64);
 
@@ -1372,13 +1337,11 @@ impl TransactionalMemory {
         layout: &DatabaseLayout,
         required_order: usize,
     ) -> Result<PageNumber> {
-        let regional_guard = self.regional_allocators.lock().unwrap();
         let (mut region_tracker, mut regions) = metadata.allocators_mut(layout)?;
         loop {
             let candidate_region = region_tracker.find_free(required_order)? as usize;
             let mut region = regions.get_region_mut(candidate_region);
-            let mem = region.allocator_state_mut();
-            match regional_guard.as_ref().unwrap()[candidate_region].alloc(mem, required_order) {
+            match region.allocator_mut().alloc(required_order) {
                 Ok(page) => {
                     return Ok(PageNumber::new(
                         candidate_region as u32,
@@ -1404,39 +1367,33 @@ impl TransactionalMemory {
         metadata: &mut MetadataAccessor,
         layout: &mut DatabaseLayout,
     ) -> Result<bool> {
-        let mut allocators = self.regional_allocators.lock().unwrap();
         let last_region_index = layout.num_regions() - 1;
-        let last_allocator = allocators.as_ref().unwrap()[last_region_index].clone();
         let last_region = layout.region_layout(last_region_index);
         let region = metadata.get_region(last_region_index, layout);
-        let allocator_data = region.allocator_state();
-        let trailing_free = last_allocator.trailing_free_pages(allocator_data);
+        let last_allocator = region.allocator();
+        let trailing_free = last_allocator.trailing_free_pages();
+        let last_allocator_len = last_allocator.len();
+        drop(last_allocator);
         // TODO: is this the right shrinkage heuristic?
-        if trailing_free < last_allocator.len() / 2 {
+        if trailing_free < last_allocator_len / 2 {
             return Ok(false);
         }
-        let reduce_to_pages = if layout.num_regions() > 1 && trailing_free == last_allocator.len() {
+        let reduce_to_pages = if layout.num_regions() > 1 && trailing_free == last_allocator_len {
             0
         } else {
-            max(MIN_USABLE_PAGES, last_allocator.len() - trailing_free)
+            max(MIN_USABLE_PAGES, last_allocator_len - trailing_free)
         };
 
         let (mut region_tracker, mut regions) = metadata.allocators_mut(layout)?;
         let new_usable_bytes = if reduce_to_pages == 0 {
             region_tracker.mark_full(0, last_region_index as u64);
-            allocators
-                .as_mut()
-                .unwrap()
-                .pop()
-                .expect("allocators should not be empty");
             // drop the whole region
             layout.usable_bytes() - last_region.usable_bytes()
         } else {
             let mut region = regions.get_region_mut(last_region_index);
-            let mem = region.allocator_state_mut();
-            allocators.as_mut().unwrap()[last_region_index].resize(mem, reduce_to_pages);
+            region.allocator_mut().resize(reduce_to_pages);
             layout.usable_bytes()
-                - ((last_allocator.len() - reduce_to_pages) as u64)
+                - ((last_allocator_len - reduce_to_pages) as u64)
                     * (metadata.get_page_size() as u64)
         };
 
@@ -1502,25 +1459,21 @@ impl TransactionalMemory {
         unsafe {
             self.mmap.resize(new_layout.len().try_into().unwrap())?;
         }
-        let mut allocators = self.regional_allocators.lock().unwrap();
-        let mut new_allocators = vec![];
         for i in 0..new_layout.num_regions() {
             let new_region_base = new_layout.region_base_address(i);
             let new_region = new_layout.region_layout(i);
-            let new_allocator = if i < layout.num_regions() {
+            if i < layout.num_regions() {
                 let old_region_base = layout.region_base_address(i);
                 let old_region = layout.region_layout(i);
                 assert_eq!(old_region_base, new_region_base);
-                let mut allocator = allocators.as_ref().unwrap()[i].clone();
                 if new_region.len() != old_region.len() {
                     let (mut region_tracker, mut regions) = metadata.allocators_mut(&new_layout)?;
                     let mut region = regions.get_region_mut(i);
-                    let mem = region.allocator_state_mut();
-                    allocator.resize(mem, new_region.num_pages());
-                    let highest_free = allocator.highest_free_order(mem).unwrap();
+                    let mut allocator = region.allocator_mut();
+                    allocator.resize(new_region.num_pages());
+                    let highest_free = allocator.highest_free_order().unwrap();
                     region_tracker.mark_free(highest_free, i as u64);
                 }
-                allocator
             } else {
                 // brand new region
                 let (mut region_tracker, mut regions) = metadata.allocators_mut(&new_layout)?;
@@ -1530,19 +1483,10 @@ impl TransactionalMemory {
                     new_layout.full_region_layout().num_pages(),
                     new_region.max_order(),
                 );
-                let allocator = BuddyAllocator::new(
-                    new_region.num_pages(),
-                    new_layout.full_region_layout().num_pages(),
-                );
-                let mem = region.allocator_state_mut();
-                let highest_free = allocator.highest_free_order(mem).unwrap();
+                let highest_free = region.allocator_mut().highest_free_order().unwrap();
                 region_tracker.mark_free(highest_free, i as u64);
-
-                allocator
-            };
-            new_allocators.push(new_allocator);
+            }
         }
-        *allocators = Some(new_allocators);
         *layout = new_layout;
         Ok(())
     }
@@ -1606,13 +1550,11 @@ impl TransactionalMemory {
 
     pub(crate) fn count_free_pages(&self) -> Result<usize> {
         let mut metadata = self.lock_metadata();
-        let regional_guard = self.regional_allocators.lock().unwrap();
         let layout = self.layout.lock().unwrap();
         let mut count = 0;
         for i in 0..layout.num_regions() {
             let region = metadata.get_region(i, &layout);
-            let mem = region.allocator_state();
-            count += regional_guard.as_ref().unwrap()[i].count_free_pages(mem);
+            count += region.allocator().count_free_pages();
         }
 
         // Calculate the number of pages worth of expansion space left, if database grows to max size
@@ -1657,17 +1599,9 @@ impl Drop for TransactionalMemory {
                 );
             }
         }
-        match self.regional_allocators.lock() {
-            Ok(allocators) => {
-                if self.mmap.flush().is_ok() && allocators.is_some() {
-                    self.lock_metadata().set_recovery(false);
-                    let _ = self.mmap.flush();
-                }
-            }
-            Err(_) => {
-                let _ = self.mmap.flush();
-                eprintln!("Failure while closing database");
-            }
+        if self.mmap.flush().is_ok() && !self.needs_recovery {
+            self.lock_metadata().set_recovery(false);
+            let _ = self.mmap.flush();
         }
     }
 }
