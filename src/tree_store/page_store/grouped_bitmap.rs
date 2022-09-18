@@ -20,6 +20,10 @@ impl<'a> U64GroupedBitMap<'a> {
         self.data.iter().map(|x| x.count_ones() as usize).sum()
     }
 
+    pub(crate) fn any_unset(&self) -> bool {
+        self.data.iter().any(|x| x.count_ones() > 0)
+    }
+
     pub(crate) fn first_unset(&self, start_bit: usize, end_bit: usize) -> Option<usize> {
         assert_eq!(end_bit, (start_bit - start_bit % 64) + 64);
 
