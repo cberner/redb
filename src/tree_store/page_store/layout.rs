@@ -264,14 +264,12 @@ impl DatabaseLayout {
         let full_regional_allocator = BuddyAllocator::new(
             self.full_region_layout().num_pages(),
             self.full_region_layout().num_pages(),
-            self.full_region_layout().max_order(),
         );
         let mut allocators = vec![full_regional_allocator; self.num_full_regions()];
         if let Some(region_layout) = self.trailing_region_layout() {
             let trailing = BuddyAllocator::new(
                 region_layout.num_pages(),
                 self.full_region_layout().num_pages(),
-                region_layout.max_order(),
             );
             allocators.push(trailing);
         }
