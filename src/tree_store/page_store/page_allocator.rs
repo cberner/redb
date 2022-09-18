@@ -169,6 +169,10 @@ impl PageAllocator {
         self.get_level(data, self.get_height() - 1).count_unset()
     }
 
+    pub(crate) fn has_free_pages(&self, data: &[u8]) -> bool {
+        self.get_level(data, self.get_height() - 1).any_unset()
+    }
+
     fn get_level<'a>(&self, data: &'a [u8], i: usize) -> U64GroupedBitMap<'a> {
         let (start, end) = self.tree_level_offsets[i];
         U64GroupedBitMap::new(&data[start..end])
