@@ -1,9 +1,9 @@
 use crate::db::WriteStrategy;
 use crate::tree_store::btree_base::Checksum;
+use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::mmap::Mmap;
-use crate::tree_store::page_store::page_allocator::{PageAllocator, PageAllocatorMut};
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
 use crate::tree_store::page_store::utils::get_page_size;
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
@@ -453,7 +453,7 @@ impl<'a> MetadataAccessor<'a> {
 // Format:
 // num_allocators: u32 number of allocators
 // allocator_len: u32 length of each allocator
-// data: PageAllocator data for each order
+// data: BtreeBitmap data for each order
 pub(crate) struct RegionTracker<'a> {
     data: &'a mut [u8],
 }
@@ -464,18 +464,17 @@ impl<'a> RegionTracker<'a> {
     }
 
     pub(crate) fn required_bytes(regions: usize, orders: usize) -> usize {
-        2 * size_of::<u32>() + orders * PageAllocatorMut::required_space(regions)
+        2 * size_of::<u32>() + orders * BtreeBitmapMut::required_space(regions)
     }
 
     pub(crate) fn init_new(regions: usize, orders: usize, data: &'a mut [u8]) -> Self {
         assert!(data.len() >= Self::required_bytes(regions, orders));
         data[..4].copy_from_slice(&(orders as u32).to_le_bytes());
-        data[4..8]
-            .copy_from_slice(&(PageAllocatorMut::required_space(regions) as u32).to_le_bytes());
+        data[4..8].copy_from_slice(&(BtreeBitmapMut::required_space(regions) as u32).to_le_bytes());
 
         let mut result = Self { data };
         for i in 0..orders {
-            PageAllocatorMut::init_new(result.get_order_mut(i), regions, regions);
+            BtreeBitmapMut::init_new(result.get_order_mut(i), regions, regions);
         }
 
         result
@@ -483,8 +482,8 @@ impl<'a> RegionTracker<'a> {
 
     pub(crate) fn find_free(&self, order: usize) -> Result<u64> {
         let mem = self.get_order(order);
-        let accessor = PageAllocator::new(mem);
-        accessor.find_free()
+        let accessor = BtreeBitmap::new(mem);
+        accessor.find_first_unset()
     }
 
     pub(crate) fn mark_free(&mut self, order: usize, region: u64) {
@@ -493,8 +492,8 @@ impl<'a> RegionTracker<'a> {
             let start = 8 + i * self.suballocator_len();
             let end = start + self.suballocator_len();
             let mem = &mut self.data[start..end];
-            let mut accessor = PageAllocatorMut::new(mem);
-            accessor.free(region);
+            let mut accessor = BtreeBitmapMut::new(mem);
+            accessor.clear(region);
         }
     }
 
@@ -504,8 +503,8 @@ impl<'a> RegionTracker<'a> {
             let start = 8 + i * self.suballocator_len();
             let end = start + self.suballocator_len();
             let mem = &mut self.data[start..end];
-            let mut accessor = PageAllocatorMut::new(mem);
-            accessor.record_alloc(region);
+            let mut accessor = BtreeBitmapMut::new(mem);
+            accessor.set(region);
         }
     }
 

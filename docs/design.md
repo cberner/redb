@@ -152,17 +152,17 @@ grows of shrinks.
 * Same layout as slot 0
 
 ### Region tracker
-Following the database header is the region tracker, which is an array of `PageAllocator`s that track the page orders
+Following the database header is the region tracker, which is an array of `BtreeBitmap`s that track the page orders
 which are free in each region:
 ```
 <-------------------------------------------- 8 bytes ------------------------------------------->
 ==================================================================================================
 | num_allocators                                | sub_allocator_len                              |
-| PageAllocator data...                                                                          |
+| BtreeBitmap data...                                                                            |
 ==================================================================================================
 ```
 
-A `PageAllocator` is a 64-way tree, where each node is a single value indicating whether any descendant is free.
+A `BtreeBitmap` is a 64-way tree, where each node is a single value indicating whether any descendant is free.
 These nodes are stored as single bits, packed into `u64` values. Every height of the tree is fully populated, except
 the leaf layer.
 
@@ -205,7 +205,7 @@ power of 2 multiples of the base size. The format of pages is described in the [
 
 ### Regional allocator state
 The regional allocator is a buddy allocator and allocates pages within the region. Its buddy allocator implementation relies
-on the `PageAllocator` described above.
+on the `BtreeBitmap` described above.
 * 1 byte: max order
 * 3 byte: padding to 32bits aligned
 * 4 byte (repeating): end offset of order allocator state
