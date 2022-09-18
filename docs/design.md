@@ -166,17 +166,17 @@ A `PageAllocator` is a 64-way tree, where each node is a single value indicating
 These nodes are stored as single bits, packed into `u64` values. Every height of the tree is fully populated, except
 the leaf layer.
 
-* 4 bytes: tree height
 * 4 bytes: number of elements
 * 4 bytes: capacity
+* 4 bytes: tree height
 * 4 bytes (repeating): ending offset of layers. Does not include the root layer
 * n bytes: tree data
 
 ```
 <-------------------------------------------- 8 bytes ------------------------------------------->
 ==================================================================================================
-| height                                        | elements                                       |
-| capacity                                      | end offset...                                  |
+| elements                                      | capacity                                       |
+| height                                        | end offset...                                  |
 ==================================================================================================
 | Tree data                                                                                      |
 ==================================================================================================

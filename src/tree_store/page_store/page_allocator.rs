@@ -20,10 +20,9 @@ pub(crate) struct PageAllocator {
 // borrowing the data array
 //
 // Data structure format:
-// height: u32
-// TODO: maybe remove the elements & capacity fields?
 // elements: u32
 // capacity: u32
+// height: u32
 // layer_ends: array of u32, ending offset in bytes of layers. Does not include the root layer
 // root: u64
 // subtree layer: 2-64 u64s
