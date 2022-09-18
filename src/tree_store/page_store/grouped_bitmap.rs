@@ -57,8 +57,6 @@ impl<'a> U64GroupedBitMapMut<'a> {
     }
 
     pub(crate) fn init_full(data: &mut [u8]) {
-        // TODO: if we can guarantee that the mmap is zero'ed, we could skip this initialization
-        // since mmap'ed memory is zero initialized by the OS
         for value in data.iter_mut() {
             *value = 0;
         }
