@@ -21,36 +21,16 @@ pub(super) struct RegionLayout {
     num_pages: usize,
     // Offset where pages start
     pages_start: usize,
-    max_order: usize,
     page_size: usize,
 }
 
 impl RegionLayout {
-    pub(super) fn new(
-        num_pages: usize,
-        page_capacity: usize,
-        header_size: usize,
-        page_size: usize,
-    ) -> Self {
-        // TODO: remove this, since its already stored in the regional allocator
-        let max_order =
-            Self::calculate_usable_order((page_capacity as u64) * (page_size as u64), page_size)
-                .unwrap();
+    pub(super) fn new(num_pages: usize, header_size: usize, page_size: usize) -> Self {
         Self {
             num_pages,
             pages_start: header_size,
-            max_order,
             page_size,
         }
-    }
-
-    fn calculate_usable_order(space: u64, page_size: usize) -> Option<usize> {
-        if space < page_size as u64 {
-            return None;
-        }
-        let total_pages = space / (page_size as u64);
-        let max_order = (64 - total_pages.leading_zeros() - 1) as usize;
-        Some(min(MAX_MAX_PAGE_ORDER, max_order))
     }
 
     fn calculate_usable_pages(
@@ -68,11 +48,9 @@ impl RegionLayout {
     }
 
     fn header_size(max_usable_region_bytes: u64, page_size: usize) -> Option<usize> {
-        let max_order = Self::calculate_usable_order(max_usable_region_bytes, page_size)?;
         let page_capacity = max_usable_region_bytes / (page_size as u64);
         Some(BuddyAllocatorMut::required_space(
             page_capacity.try_into().unwrap(),
-            max_order,
         ))
     }
 
@@ -91,7 +69,6 @@ impl RegionLayout {
         max_usable_region_bytes: u64,
         page_size: usize,
     ) -> Option<RegionLayout> {
-        let max_order = Self::calculate_usable_order(max_usable_region_bytes, page_size)?;
         let required_header_size = Self::header_with_padding(max_usable_region_bytes, page_size)?;
         if desired_usable_bytes / (page_size as u64) < MIN_USABLE_PAGES as u64 {
             return None;
@@ -111,7 +88,6 @@ impl RegionLayout {
         Some(RegionLayout {
             num_pages,
             pages_start: required_header_size,
-            max_order,
             page_size,
         })
     }
@@ -144,10 +120,6 @@ impl RegionLayout {
 
     pub(super) fn usable_bytes(&self) -> u64 {
         self.page_size as u64 * self.num_pages as u64
-    }
-
-    pub(super) fn max_order(&self) -> usize {
-        self.max_order
     }
 }
 
@@ -329,6 +301,5 @@ mod test {
         let layout = RegionLayout::full_region_layout(512 * 4096, 4096);
         assert_eq!(layout.num_pages, 512);
         assert_eq!(layout.page_size, 4096);
-        assert_eq!(layout.max_order, 9);
     }
 }

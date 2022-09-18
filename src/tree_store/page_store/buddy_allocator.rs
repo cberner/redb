@@ -1,12 +1,19 @@
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
+use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 use crate::Error;
 use crate::Result;
+use std::cmp::min;
 use std::mem::size_of;
 
 const MAX_ORDER_OFFSET: usize = 0;
 const PADDING: usize = 3;
 const NUM_PAGES_OFFSET: usize = MAX_ORDER_OFFSET + size_of::<u8>() + PADDING;
 const END_OFFSETS: usize = NUM_PAGES_OFFSET + size_of::<u32>();
+
+fn calculate_usable_order(pages: u64) -> usize {
+    let max_order = (64 - pages.leading_zeros() - 1) as usize;
+    min(MAX_MAX_PAGE_ORDER, max_order)
+}
 
 fn get_order_start(data: &[u8], i: u32) -> usize {
     if i == 0 {
@@ -147,13 +154,9 @@ impl<'a> BuddyAllocatorMut<'a> {
         Self { data }
     }
 
-    pub(crate) fn init_new(
-        data: &'a mut [u8],
-        num_pages: usize,
-        max_page_capacity: usize,
-        max_order: usize,
-    ) -> Self {
-        assert!(data.len() >= Self::required_space(max_page_capacity, max_order));
+    pub(crate) fn init_new(data: &'a mut [u8], num_pages: usize, max_page_capacity: usize) -> Self {
+        let max_order = calculate_usable_order(max_page_capacity as u64);
+        assert!(data.len() >= Self::required_space(max_page_capacity));
         data[MAX_ORDER_OFFSET] = max_order.try_into().unwrap();
         data[NUM_PAGES_OFFSET..(NUM_PAGES_OFFSET + size_of::<u32>())]
             .copy_from_slice(&(num_pages as u32).to_le_bytes());
@@ -289,7 +292,8 @@ impl<'a> BuddyAllocatorMut<'a> {
     }
 
     /// Returns the number of bytes required for the data argument of new()
-    pub(crate) fn required_space(mut capacity: usize, max_order: usize) -> usize {
+    pub(crate) fn required_space(mut capacity: usize) -> usize {
+        let max_order = calculate_usable_order(capacity as u64);
         let mut required = END_OFFSETS + (max_order + 1) * size_of::<u32>();
         for _ in 0..=max_order {
             required += BtreeBitmapMut::required_space(capacity);
@@ -386,7 +390,7 @@ impl<'a> BuddyAllocatorMut<'a> {
         }
     }
 
-    fn get_max_order(&self) -> usize {
+    pub(super) fn get_max_order(&self) -> usize {
         self.data[0] as usize
     }
 
@@ -404,9 +408,8 @@ mod test {
     #[test]
     fn record_alloc_buddy() {
         let num_pages = 256;
-        let max_order = 7;
-        let mut data = vec![0; BuddyAllocatorMut::required_space(num_pages, max_order)];
-        let mut allocator = BuddyAllocatorMut::init_new(&mut data, num_pages, num_pages, max_order);
+        let mut data = vec![0; BuddyAllocatorMut::required_space(num_pages)];
+        let mut allocator = BuddyAllocatorMut::init_new(&mut data, num_pages, num_pages);
         assert_eq!(allocator.count_free_pages(), num_pages);
 
         for page in 0..num_pages {
@@ -425,9 +428,8 @@ mod test {
     #[test]
     fn buddy_merge() {
         let num_pages = 256;
-        let max_order = 7;
-        let mut data = vec![0; BuddyAllocatorMut::required_space(num_pages, max_order)];
-        let mut allocator = BuddyAllocatorMut::init_new(&mut data, num_pages, num_pages, max_order);
+        let mut data = vec![0; BuddyAllocatorMut::required_space(num_pages)];
+        let mut allocator = BuddyAllocatorMut::init_new(&mut data, num_pages, num_pages);
         assert_eq!(allocator.count_free_pages(), num_pages);
 
         for _ in 0..num_pages {
@@ -448,8 +450,8 @@ mod test {
     fn alloc_large() {
         let num_pages = 256;
         let max_order = 7;
-        let mut data = vec![0; BuddyAllocatorMut::required_space(num_pages, max_order)];
-        let mut allocator = BuddyAllocatorMut::init_new(&mut data, num_pages, num_pages, max_order);
+        let mut data = vec![0; BuddyAllocatorMut::required_space(num_pages)];
+        let mut allocator = BuddyAllocatorMut::init_new(&mut data, num_pages, num_pages);
         assert_eq!(allocator.count_free_pages(), num_pages);
 
         let mut allocated = vec![];
