@@ -207,8 +207,7 @@ impl<'a> BuddyAllocatorMut<'a> {
                 processed_pages += order_size;
             }
             // Allocate the remaining space, at the highest order
-            // TODO: seems like this should be =self.get_max_order()???
-            for order in (0..self.get_max_order()).rev() {
+            for order in (0..=self.get_max_order()).rev() {
                 let order_size = 2usize.pow(order as u32);
                 while processed_pages + order_size <= new_size {
                     let page = processed_pages / order_size;
@@ -233,8 +232,7 @@ impl<'a> BuddyAllocatorMut<'a> {
                 processed_pages += order_size;
             }
             // Allocate the remaining space, at the highest order
-            // TODO: seems like this should be =self.get_max_order()???
-            for order in (0..self.get_max_order()).rev() {
+            for order in (0..=self.get_max_order()).rev() {
                 let order_size = 2usize.pow(order as u32);
                 while processed_pages + order_size <= self.len() {
                     let page = processed_pages / order_size;
