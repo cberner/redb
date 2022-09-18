@@ -184,7 +184,6 @@ impl<'a> MetadataAccessor<'a> {
         )
     }
 
-    // TODO: refactor so that we're not passing DatabaseLayout objects all over the place
     fn get_primary_layout(&self) -> DatabaseLayout {
         let trailing_pages = self.primary_slot().get_trailing_region_data_pages();
         let num_full_regions = self.primary_slot().get_full_regions();
@@ -710,6 +709,8 @@ pub(crate) struct TransactionalMemory {
     // It would be nice if this was a RefCell<&[u8]> on the metadata. However, that would be
     // self-referential, since we also hold the mmap object
     metadata_guard: Mutex<MetadataGuard>,
+    // The current layout for the active transaction.
+    // May include uncommitted changes to the database layout, if it grew or shrank
     layout: Mutex<DatabaseLayout>,
     // The number of PageMut which are outstanding
     #[cfg(debug_assertions)]
