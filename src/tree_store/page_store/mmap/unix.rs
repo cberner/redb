@@ -34,7 +34,7 @@ pub(super) struct MmapInner {
 }
 
 impl MmapInner {
-    pub(super) fn create_mapping(file: &File, max_capacity: usize) -> Result<Self> {
+    pub(super) fn create_mapping(file: &File, _len: u64, max_capacity: usize) -> Result<Self> {
         let mmap = unsafe {
             libc::mmap(
                 ptr::null_mut(),
@@ -56,7 +56,9 @@ impl MmapInner {
     }
 
     /// Safety: if new_len < len(), caller must ensure that no references to memory in new_len..len() exist
-    pub(super) unsafe fn resize(&self, owner: &Mmap) -> Result<()> {
+    pub(super) unsafe fn resize(&self, new_len: u64, owner: &Mmap) -> Result<()> {
+        owner.file.set_len(new_len as u64)?;
+
         let mmap = libc::mmap(
             self.mmap as *mut libc::c_void,
             self.capacity as libc::size_t,

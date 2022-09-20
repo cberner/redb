@@ -31,11 +31,11 @@ unsafe impl Sync for Mmap {}
 impl Mmap {
     pub(crate) fn new(file: File, max_capacity: usize) -> Result<Self> {
         let len = file.metadata()?.len();
-
         assert!(len <= max_capacity as u64);
+
         let lock = FileLock::new(&file)?;
 
-        let mmap = MmapInner::create_mapping(&file, max_capacity)?;
+        let mmap = MmapInner::create_mapping(&file, len, max_capacity)?;
 
         let mapping = Self {
             file,
@@ -55,12 +55,13 @@ impl Mmap {
         self.len.load(Ordering::Acquire)
     }
 
+    /// SAFETY: if `new_len < len()`, caller must ensure that no references to
+    /// memory in `new_len..len()` exist
     pub(crate) unsafe fn resize(&self, new_len: usize) -> Result<()> {
         assert!(new_len <= self.mmap.capacity);
         self.check_fsync_failure()?;
-        self.file.set_len(new_len as u64)?;
 
-        self.mmap.resize(self)?;
+        self.mmap.resize(new_len as u64, self)?;
 
         self.len.store(new_len, Ordering::Release);
         Ok(())
