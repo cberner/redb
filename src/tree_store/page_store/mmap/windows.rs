@@ -26,6 +26,14 @@ struct OVERLAPPED_0_0 {
 const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x00000002;
 const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x00000001;
 const ERROR_IO_PENDING: i32 = 997;
+const PAGE_READWRITE: u32 = 0x04;
+
+#[repr(C)]
+struct SECURITY_ATTRIBUTES {
+    length: u32,
+    descriptor: *mut c_void,
+    inherit: u32,
+}
 
 extern "system" {
     /// <https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex>
@@ -38,6 +46,7 @@ extern "system" {
         overlapped: *mut OVERLAPPED,
     ) -> i32;
 
+    /// <https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-unlockfileex>
     fn UnlockFileEx(
         file: RawHandle,
         _reserved: u32,
@@ -45,6 +54,16 @@ extern "system" {
         length_high: u32,
         overlapped: *mut OVERLAPPED,
     ) -> i32;
+
+    /// <https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-createfilemappingw>
+    fn CreateFileMappingW(
+        file: RawHandle,
+        attributes: *mut SECURITY_ATTRIBUTES,
+        protect: u32,
+        max_size_high: u32,
+        max_size_low: u32,
+        name: *const u16,
+    ) -> RawHandle;
 }
 
 struct FileLock {
@@ -96,30 +115,6 @@ impl MmapInner {
         // MapViewOfFile
     }
 
-    // Safety: if new_len < len(), caller must ensure that no references to memory in new_len..len() exist
-    pub(crate) unsafe fn resize(&self, new_len: usize) -> Result<()> {
-        assert!(new_len <= self.capacity);
-        self.check_fsync_failure()?;
-        self.file.set_len(new_len as u64)?;
-
-        let mmap = libc::mmap(
-            self.mmap as *mut libc::c_void,
-            self.capacity as libc::size_t,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED | libc::MAP_FIXED,
-            self.file.as_raw_fd(),
-            0,
-        );
-
-        if mmap == libc::MAP_FAILED {
-            Err(io::Error::last_os_error().into())
-        } else {
-            assert_eq!(mmap as *mut u8, self.mmap);
-            self.len.store(new_len, Ordering::Release);
-            Ok(())
-        }
-    }
-
     /// Safety: if new_len < len(), caller must ensure that no references to memory in new_len..len() exist
     pub(super) unsafe fn resize(&self, owner: &Mmap) -> Result<()> {
         let mmap = libc::mmap(
@@ -140,49 +135,37 @@ impl MmapInner {
     }
 
     pub(super) fn flush(&self, owner: &Mmap) -> Result {
-        // Disable fsync when fuzzing, since it doesn't test crash consistency
+        self.eventual_flush(owner)?;
+
         #[cfg(not(fuzzing))]
         {
-            #[cfg(not(target_os = "macos"))]
-            {
-                let result = unsafe {
-                    libc::msync(
-                        self.mmap as *mut libc::c_void,
-                        owner.len() as libc::size_t,
-                        libc::MS_SYNC,
-                    )
-                };
-                if result != 0 {
-                    return Err(io::Error::last_os_error().into());
-                }
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_FULLFSYNC) };
-                if code == -1 {
-                    return Err(io::Error::last_os_error().into());
+            if let Some(handle) = self.handle {
+                let ok = unsafe { FlushFileBuffers(handle) };
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
                 }
             }
         }
         Ok(())
     }
 
+    #[inline]
     pub(super) fn eventual_flush(&self, owner: &Mmap) -> Result {
-        #[cfg(not(target_os = "macos"))]
-        {
-            return self.flush(owner);
+        if self.mmap == empty_slice_ptr() {
+            return Ok(());
         }
-        #[cfg(all(target_os = "macos", not(fuzzing)))]
+
+        #[cfg(not(fuzzing))]
         {
-            // TODO: It may be unsafe to mix F_BARRIERFSYNC with writes to the mmap.
-            //       Investigate switching to `write()`
-            let code = unsafe { libc::fcntl(owner.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
-            if code == -1 {
-                Err(io::Error::last_os_error().into());
-            } else {
+            let result = unsafe { FlushViewOfFile(self.ptr.add(offset), len as SIZE_T) };
+            if result != 0 {
                 Ok(())
+            } else {
+                Err(io::Error::last_os_error())
             }
         }
+
+        Ok(())
     }
 }
 
