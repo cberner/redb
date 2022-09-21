@@ -1,5 +1,6 @@
 use super::*;
 use std::os::unix::io::AsRawFd;
+use std::ptr;
 
 pub(super) struct FileLock {
     fd: libc::c_int,
@@ -56,8 +57,9 @@ impl MmapInner {
     }
 
     /// Safety: if new_len < len(), caller must ensure that no references to memory in new_len..len() exist
+    #[inline]
     pub(super) unsafe fn resize(&self, new_len: u64, owner: &Mmap) -> Result<()> {
-        owner.file.set_len(new_len as u64)?;
+        owner.file.set_len(new_len)?;
 
         let mmap = libc::mmap(
             self.mmap as *mut libc::c_void,
@@ -76,6 +78,7 @@ impl MmapInner {
         }
     }
 
+    #[inline]
     pub(super) fn flush(&self, owner: &Mmap) -> Result {
         // Disable fsync when fuzzing, since it doesn't test crash consistency
         #[cfg(not(fuzzing))]
@@ -104,6 +107,7 @@ impl MmapInner {
         Ok(())
     }
 
+    #[inline]
     pub(super) fn eventual_flush(&self, owner: &Mmap) -> Result {
         #[cfg(not(target_os = "macos"))]
         {

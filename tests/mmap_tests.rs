@@ -1,11 +1,13 @@
-use std::os::unix::io::AsRawFd;
 use std::sync::mpsc::channel;
 use std::{ptr, slice, thread};
 use tempfile::NamedTempFile;
 
+#[cfg(unix)]
 #[test]
 // Test that reloading an mmap'ed region is thread-safe and atomic
 fn reload_mmap() {
+    use std::os::unix::io::AsRawFd;
+
     struct SendPtr(*mut libc::c_void);
     unsafe impl Send for SendPtr {}
 

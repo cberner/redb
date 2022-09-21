@@ -3,8 +3,8 @@ use std::fs::File;
 use std::io;
 use std::io::ErrorKind;
 use std::ops::Range;
+use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::{ptr, slice};
 
 #[cfg(unix)]
 mod unix;
