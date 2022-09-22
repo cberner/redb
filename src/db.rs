@@ -434,12 +434,13 @@ impl Database {
     /// Returns a [`WriteTransaction`] which may be used to read/write to the database. Only a single
     /// write may be in progress at a time
     pub fn begin_write(&self) -> Result<WriteTransaction> {
-        assert!(self.live_write_transaction.lock().unwrap().is_none());
+        let mut guard = self.live_write_transaction.lock().unwrap();
+        assert!(guard.is_none());
         let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
-        *self.live_write_transaction.lock().unwrap() = Some(id);
-        // Safety: We just asserted there was no previous write in progress
+        *guard = Some(id);
         #[cfg(feature = "logging")]
         info!("Beginning write transaction id={}", id);
+        // Safety: We just asserted there was no previous write in progress
         unsafe { WriteTransaction::new(self, id) }
     }
 
