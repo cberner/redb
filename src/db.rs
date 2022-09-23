@@ -166,7 +166,7 @@ impl Database {
     pub unsafe fn create(path: impl AsRef<Path>, db_size: usize) -> Result<Database> {
         let db_size = db_size as u64;
         let file = if path.as_ref().exists() && File::open(path.as_ref())?.metadata()?.len() > 0 {
-            let existing_size = get_db_size(path.as_ref())?;
+            let existing_size = Self::get_db_size(path.as_ref())?;
             if existing_size != db_size {
                 return Err(Error::DbSizeMismatch {
                     path: path.as_ref().to_string_lossy().to_string(),
@@ -200,11 +200,32 @@ impl Database {
     /// The file referenced by `path` must not be concurrently modified by any other process
     pub unsafe fn open(path: impl AsRef<Path>) -> Result<Database> {
         if File::open(path.as_ref())?.metadata()?.len() > 0 {
-            let existing_size = get_db_size(path.as_ref())?;
+            let existing_size = Self::get_db_size(path.as_ref())?;
             let file = OpenOptions::new().read(true).write(true).open(path)?;
             Database::new(file, existing_size, None, None, cfg!(unix), None)
         } else {
             Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
+        }
+    }
+
+    #[inline]
+    fn get_db_size(path: impl AsRef<Path>) -> Result<u64> {
+        #[cfg(unix)]
+        {
+            Ok(get_db_size(path)?)
+        }
+        #[cfg(windows)]
+        {
+            get_db_size(path).map_err(|err| {
+                // On Windows, an exclusive file lock also applies to reads, unlike on Unix, so
+                // we detect that specific error code and transform it to the correct error
+                // 0x21 - ERROR_LOCK_VIOLATION
+                if matches!(err.raw_os_error(), Some(0x21)) {
+                    Error::DatabaseAlreadyOpen
+                } else {
+                    err.into()
+                }
+            })
         }
     }
 
@@ -566,5 +587,12 @@ impl Builder {
             self.dynamic_growth,
             Some(self.write_strategy),
         )
+    }
+}
+
+// This just makes it easier to throw dbg! etc statements on `Result<Database>`
+impl std::fmt::Debug for Database {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Database").finish()
     }
 }
