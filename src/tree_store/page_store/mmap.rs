@@ -146,18 +146,3 @@ impl Mmap {
         slice::from_raw_parts_mut(ptr, range.len())
     }
 }
-
-#[cfg(test)]
-mod test {
-    #[test]
-    #[cfg(unix)]
-    fn leak() {
-        use crate::tree_store::page_store::mmap::Mmap;
-        use tempfile::NamedTempFile;
-
-        for _ in 0..100_000 {
-            let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-            Mmap::new(tmpfile.into_file(), 1024 * 1024).unwrap();
-        }
-    }
-}

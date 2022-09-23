@@ -98,7 +98,7 @@ impl MmapInner {
             }
             #[cfg(target_os = "macos")]
             {
-                let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_FULLFSYNC) };
+                let code = unsafe { libc::fcntl(owner.file.as_raw_fd(), libc::F_FULLFSYNC) };
                 if code == -1 {
                     return Err(io::Error::last_os_error().into());
                 }
@@ -119,7 +119,7 @@ impl MmapInner {
             //       Investigate switching to `write()`
             let code = unsafe { libc::fcntl(owner.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
             if code == -1 {
-                Err(io::Error::last_os_error().into());
+                Err(io::Error::last_os_error().into())
             } else {
                 Ok(())
             }
@@ -134,6 +134,24 @@ impl Drop for MmapInner {
                 self.mmap as *mut libc::c_void,
                 self.capacity as libc::size_t,
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #[test]
+    fn leak() {
+        use crate::tree_store::page_store::mmap::Mmap;
+        use tempfile::NamedTempFile;
+
+        for _ in 0..if cfg!(target_os = "macos") {
+            100
+        } else {
+            100_000
+        } {
+            let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+            Mmap::new(tmpfile.into_file(), 1024 * 1024).unwrap();
         }
     }
 }
