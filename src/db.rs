@@ -199,7 +199,9 @@ impl Database {
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
     pub unsafe fn open(path: impl AsRef<Path>) -> Result<Database> {
-        if File::open(path.as_ref())?.metadata()?.len() > 0 {
+        if !path.as_ref().exists() {
+            Err(Error::Io(ErrorKind::NotFound.into()))
+        } else if File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = Self::get_db_size(path.as_ref())?;
             let file = OpenOptions::new().read(true).write(true).open(path)?;
             Database::new(file, existing_size, None, None, cfg!(unix), None)
