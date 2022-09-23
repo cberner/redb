@@ -779,6 +779,8 @@ fn regression13() {
 }
 
 #[test]
+// Disabling on Windows for now since this requires a minimum of 140GiB of disk space due to lack of resizing
+#[cfg(unix)]
 fn regression14() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
@@ -819,6 +821,8 @@ fn regression14() {
 }
 
 #[test]
+// Disabling on Windows for now since this requires a minimum of 400GiB of disk space due to lack of resizing
+#[cfg(unix)]
 fn regression15() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db_size = 400998358365;
