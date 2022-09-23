@@ -217,6 +217,7 @@ impl MmapInner {
     }
 
     pub(super) unsafe fn resize(&self, len: u64, owner: &Mmap) -> Result<()> {
+        panic!("this should not be called");
         UnmapViewOfFile(self.mmap);
 
         owner.file.set_len(len)?;

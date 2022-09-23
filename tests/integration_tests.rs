@@ -144,10 +144,13 @@ fn free() {
 
     let db_size = 8 * 1024 * 1024;
     let db = unsafe {
-        Database::builder()
-            .set_dynamic_growth(false)
-            .create(tmpfile.path(), db_size)
-            .unwrap()
+        let mut builder = Database::builder();
+        #[cfg(unix)]
+        {
+            builder.set_dynamic_growth(false);
+        }
+
+        builder.create(tmpfile.path(), db_size).unwrap()
     };
     let txn = db.begin_write().unwrap();
     {
@@ -271,6 +274,7 @@ fn large_keys() {
 }
 
 #[test]
+#[cfg(unix)]
 fn dynamic_growth() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let table_definition: TableDefinition<u64, [u8]> = TableDefinition::new("x");
@@ -303,6 +307,7 @@ fn dynamic_growth() {
 }
 
 #[test]
+#[cfg(unix)]
 fn dynamic_shrink() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let table_definition: TableDefinition<u64, [u8]> = TableDefinition::new("x");

@@ -30,9 +30,7 @@ unsafe impl Sync for Mmap {}
 
 impl Mmap {
     pub(crate) fn new(file: File, max_capacity: usize) -> Result<Self> {
-        let len = file.metadata()?.len();
-        assert!(len <= max_capacity as u64);
-
+        let len = Self::get_valid_length(&file, max_capacity)?;
         let lock = FileLock::new(&file)?;
 
         let mmap = MmapInner::create_mapping(&file, len, max_capacity)?;
@@ -48,6 +46,27 @@ impl Mmap {
         mapping.flush()?;
 
         Ok(mapping)
+    }
+
+    /// Retrieves the length of the specified file and validates that it is <=
+    /// the maximum capacity the file is allowed to support
+    #[inline]
+    pub(crate) fn get_valid_length(file: &File, max_capacity: usize) -> Result<u64> {
+        let len = file.metadata()?.len();
+
+        if len > max_capacity as u64 {
+            // Unfortunately io::ErrorKind::FileTooLarge is unstable, so we just
+            // cheat here instead and provide the os specific codes
+            let code = if cfg!(target_os = "windows") {
+                0xdf // ERROR_FILE_TOO_LARGE
+            } else {
+                assert!(cfg!(unix), "unsupported target platform");
+                libc::EFBIG
+            };
+            Err(Error::Io(io::Error::from_raw_os_error(code)))
+        } else {
+            Ok(len)
+        }
     }
 
     #[inline]
@@ -134,6 +153,7 @@ mod test {
     use tempfile::NamedTempFile;
 
     #[test]
+    #[cfg(unix)]
     fn leak() {
         for _ in 0..100_000 {
             let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();

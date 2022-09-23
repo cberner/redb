@@ -760,43 +760,39 @@ impl TransactionalMemory {
             return Err(Error::OutOfSpace);
         }
 
-        let mmap = Mmap::new(file, max_capacity.try_into().unwrap())?;
-        if mmap.len() < DB_HEADER_SIZE {
-            // Safety: We're growing the mmap
-            unsafe {
-                mmap.resize(DB_HEADER_SIZE)?;
-            }
-        }
-
-        let mutex = Mutex::new(MetadataGuard {});
-        let mut metadata = unsafe { MetadataAccessor::new(&mmap, mutex.lock().unwrap()) };
-
         let region_size = requested_region_size
             .map(|x| x as u64)
             .unwrap_or(MAX_USABLE_REGION_SPACE);
         assert!(region_size.is_power_of_two());
         let max_usable_region_bytes = min(region_size, max_capacity.next_power_of_two() as u64);
 
-        if metadata.get_magic_number() != MAGICNUMBER {
-            let starting_size = if dynamic_growth {
-                MIN_DESIRED_USABLE_BYTES as u64
-            } else {
-                max_capacity
-            };
-            let layout = DatabaseLayout::calculate(
-                max_capacity,
-                starting_size,
-                (max_usable_region_bytes / page_size as u64) as u32,
-                page_size as u32,
-            )?;
+        let starting_size = if dynamic_growth {
+            MIN_DESIRED_USABLE_BYTES as u64
+        } else {
+            max_capacity
+        };
+        let layout = DatabaseLayout::calculate(
+            max_capacity,
+            starting_size,
+            (max_usable_region_bytes / page_size as u64) as u32,
+            page_size as u32,
+        )?;
 
-            if (mmap.len() as u64) < layout.len() {
-                // Safety: We're growing the mmap
-                unsafe {
-                    mmap.resize(layout.len().try_into().unwrap())?;
-                }
+        let max_cap: usize = max_capacity.try_into().unwrap();
+        {
+            let file_len = Mmap::get_valid_length(&file, max_cap)?;
+
+            if file_len < layout.len() {
+                file.set_len(layout.len())?;
             }
+        }
 
+        let mmap = Mmap::new(file, max_cap)?;
+
+        let mutex = Mutex::new(MetadataGuard {});
+        let mut metadata = unsafe { MetadataAccessor::new(&mmap, mutex.lock().unwrap()) };
+
+        if metadata.get_magic_number() != MAGICNUMBER {
             // Explicitly zero the header
             metadata.header.fill(0);
 
@@ -897,7 +893,7 @@ impl TransactionalMemory {
         let needs_recovery = metadata.get_recovery_required();
         drop(metadata);
 
-        Ok(TransactionalMemory {
+        Ok(Self {
             allocated_since_commit: Mutex::new(HashSet::new()),
             log_since_commit: Mutex::new(vec![]),
             needs_recovery,
