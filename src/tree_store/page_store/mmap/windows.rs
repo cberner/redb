@@ -1,3 +1,5 @@
+#![allow(clippy::upper_case_acronyms)]
+
 use super::*;
 use std::ffi::c_void;
 use std::os::windows::io::AsRawHandle;
@@ -216,17 +218,17 @@ impl MmapInner {
         Ok(ptr)
     }
 
-    pub(super) unsafe fn resize(&self, len: u64, owner: &Mmap) -> Result<()> {
-        panic!("this should not be called");
-        UnmapViewOfFile(self.mmap);
+    pub(super) unsafe fn resize(&self, _len: u64, _owner: &Mmap) -> Result<()> {
+        unreachable!("Mmap resizing is not supported on Windows");
+        // UnmapViewOfFile(self.mmap);
 
-        owner.file.set_len(len)?;
-        let ptr = Self::map_file(&owner.file, len, self.mmap)?;
+        // owner.file.set_len(len)?;
+        // let ptr = Self::map_file(&owner.file, len, self.mmap)?;
 
-        // This is the same logic as in unix
-        assert_eq!(ptr, self.mmap);
+        // // This is the same logic as in unix
+        // assert_eq!(ptr, self.mmap);
 
-        Ok(())
+        // Ok(())
     }
 
     pub(super) fn flush(&self, owner: &Mmap) -> Result {
