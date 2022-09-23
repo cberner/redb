@@ -85,13 +85,11 @@ impl<'a> BuddyAllocator<'a> {
         Self { data }
     }
 
+    #[inline]
     pub(crate) fn highest_free_order(&self) -> Option<usize> {
-        for order in (0..=self.get_max_order()).rev() {
-            if self.get_order(order as u32).has_unset() {
-                return Some(order);
-            }
-        }
-        None
+        (0..=self.get_max_order())
+            .rev()
+            .find(|order| self.get_order(*order as u32).has_unset())
     }
 
     pub(crate) fn count_free_pages(&self) -> usize {
