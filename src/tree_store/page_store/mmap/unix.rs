@@ -111,7 +111,7 @@ impl MmapInner {
     pub(super) fn eventual_flush(&self, owner: &Mmap) -> Result {
         #[cfg(not(target_os = "macos"))]
         {
-            return self.flush(owner);
+            self.flush(owner)
         }
         #[cfg(all(target_os = "macos", not(fuzzing)))]
         {
