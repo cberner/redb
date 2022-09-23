@@ -4,9 +4,11 @@ use tempfile::NamedTempFile;
 
 use rand::prelude::SliceRandom;
 use rand::Rng;
+#[cfg(unix)]
+use redb::ReadableMultimapTable;
 use redb::{
-    Builder, Database, Durability, Error, MultimapTableDefinition, ReadableMultimapTable,
-    ReadableTable, TableDefinition, WriteStrategy,
+    Builder, Database, Durability, Error, MultimapTableDefinition, ReadableTable, TableDefinition,
+    WriteStrategy,
 };
 
 const ELEMENTS: usize = 100;
@@ -143,6 +145,7 @@ fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 8 * 1024 * 1024;
+    #[cfg_attr(windows, allow(unused_mut))]
     let db = unsafe {
         let mut builder = Database::builder();
         #[cfg(unix)]
