@@ -600,3 +600,23 @@ fn ref_get_signatures() {
     }
     assert!(iter.next().is_none());
 }
+
+#[test]
+fn concurrent_write_transactions_block() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = std::sync::Arc::new(unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() });
+
+    {
+        let db = db.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            db.begin_write().unwrap().commit().unwrap();
+        });
+    }
+
+    let wtx = db.begin_write().unwrap();
+
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    wtx.commit().unwrap();
+}
