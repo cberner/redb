@@ -864,6 +864,74 @@ fn regression17() {
 }
 
 #[test]
+fn regression18() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024 * 1024;
+    let db = unsafe {
+        Database::builder()
+            .set_write_strategy(WriteStrategy::Checksum)
+            .create(tmpfile.path(), db_size)
+            .unwrap()
+    };
+
+    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+
+    let savepoint0 = db.savepoint().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let mut value = t.insert_reserve(&118749, 817).unwrap();
+        value.as_mut().fill(0xFF);
+    }
+    tx.commit().unwrap();
+
+    let savepoint1 = db.savepoint().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let mut value = t.insert_reserve(&65373, 1807).unwrap();
+        value.as_mut().fill(0xFF);
+    }
+    tx.commit().unwrap();
+
+    let savepoint2 = db.savepoint().unwrap();
+
+    db.restore_savepoint(&savepoint2).unwrap();
+
+    drop(savepoint0);
+
+    let tx = db.begin_write().unwrap();
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let mut value = t.insert_reserve(&118749, 2494).unwrap();
+        value.as_mut().fill(0xFF);
+    }
+    tx.commit().unwrap();
+
+    let savepoint4 = db.savepoint().unwrap();
+    drop(savepoint1);
+
+    let tx = db.begin_write().unwrap();
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let mut value = t.insert_reserve(&429469, 667).unwrap();
+        value.as_mut().fill(0xFF);
+        drop(value);
+        let mut value = t.insert_reserve(&266845, 1614).unwrap();
+        value.as_mut().fill(0xFF);
+    }
+    tx.commit().unwrap();
+
+    db.restore_savepoint(&savepoint4).unwrap();
+
+    drop(savepoint2);
+    drop(savepoint4);
+}
+
+#[test]
 fn twophase_open() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
@@ -1209,4 +1277,43 @@ fn database_lock() {
     drop(result);
     let result = unsafe { Database::open(tmpfile.path()) };
     assert!(result.is_ok());
+}
+
+#[test]
+fn savepoint() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let definition: TableDefinition<u32, str> = TableDefinition::new("x");
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        table.insert(&0, "hello").unwrap();
+    }
+    txn.commit().unwrap();
+
+    let savepoint = db.savepoint().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        table.remove(&0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let savepoint2 = db.savepoint().unwrap();
+
+    db.restore_savepoint(&savepoint).unwrap();
+
+    assert!(matches!(
+        db.restore_savepoint(&savepoint2).err().unwrap(),
+        Error::InvalidSavepoint
+    ));
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(definition).unwrap();
+    assert_eq!(table.get(&0).unwrap().unwrap(), "hello");
+
+    // Test that savepoints can be used multiple times
+    db.restore_savepoint(&savepoint).unwrap();
 }

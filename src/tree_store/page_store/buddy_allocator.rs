@@ -1,8 +1,10 @@
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
+use crate::tree_store::PageNumber;
 use crate::Error;
 use crate::Result;
 use std::cmp::min;
+use std::collections::HashSet;
 use std::mem::size_of;
 
 const MAX_ORDER_OFFSET: usize = 0;
@@ -127,6 +129,18 @@ impl<'a> BuddyAllocator<'a> {
         }
 
         free_pages
+    }
+
+    pub(crate) fn get_order0_allocated_pages(&self, region: u32) -> HashSet<PageNumber> {
+        let mut result = HashSet::new();
+
+        for i in 0..(self.len() as u64) {
+            if self.find_free_order(i).is_none() {
+                result.insert(PageNumber::new(region, i as u32, 0));
+            }
+        }
+
+        result
     }
 
     fn get_max_order(&self) -> usize {

@@ -1,6 +1,6 @@
 use crate::tree_store::{
     get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition,
-    RawBtree, TableType, TransactionalMemory,
+    RawBtree, Savepoint, TableType, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
@@ -149,6 +149,7 @@ pub struct Database {
     mem: TransactionalMemory,
     next_transaction_id: AtomicTransactionId,
     live_read_transactions: Mutex<BTreeSet<TransactionId>>,
+    valid_savepoints: Mutex<BTreeSet<TransactionId>>,
     pub(crate) live_write_transaction: Mutex<Option<TransactionId>>,
 }
 
@@ -382,11 +383,17 @@ impl Database {
             next_transaction_id: AtomicTransactionId::new(next_transaction_id),
             live_write_transaction: Mutex::new(None),
             live_read_transactions: Mutex::new(Default::default()),
+            valid_savepoints: Mutex::new(Default::default()),
         })
     }
 
     pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) {
         self.live_read_transactions.lock().unwrap().remove(&id);
+    }
+
+    pub(crate) fn deallocate_savepoint(&self, id: TransactionId) {
+        self.live_read_transactions.lock().unwrap().remove(&id);
+        self.valid_savepoints.lock().unwrap().remove(&id);
     }
 
     pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
@@ -423,6 +430,47 @@ impl Database {
         self.mem
             .commit(root_page, freed_root, id, false, Some(strategy.into()))?;
         drop(guard);
+
+        Ok(())
+    }
+
+    /// Creates a snapshot of the current database state, which can be used to rollback the database
+    pub fn savepoint(&self) -> Result<Savepoint> {
+        // Hold write lock to ensure we get a consistent snapshot
+        let guard = self.live_write_transaction.lock().unwrap();
+        assert!(guard.is_none());
+
+        let id = self.increment_transaction_id();
+        self.live_read_transactions.lock().unwrap().insert(id);
+
+        #[cfg(feature = "logging")]
+        info!("Creating savepoint id={}", id);
+        let regional_allocators = self.mem.get_raw_allocator_states();
+        let root = self.mem.get_data_root();
+        let freed_root = self.mem.get_freed_root();
+        let savepoint = Savepoint::new(self, id, root, freed_root, regional_allocators);
+        self.valid_savepoints
+            .lock()
+            .unwrap()
+            .insert(savepoint.get_id());
+        drop(guard);
+
+        Ok(savepoint)
+    }
+
+    pub fn restore_savepoint(&self, savepoint: &Savepoint) -> Result {
+        // TODO: ensure that restoring a savepoint can't undo a database upgrade or change in WriteStrategy
+        // right now it could restore pages without checksums after the database had been changed to use
+        // WriteStrategy::Checksum, which could lead to data corruption
+        let mut guard = self.valid_savepoints.lock().unwrap();
+        if !guard.contains(&savepoint.get_id()) {
+            return Err(Error::InvalidSavepoint);
+        }
+        WriteTransaction::commit_savepoint(self, savepoint)?;
+
+        // Invalidate all savepoints that are newer than the one being applied to prevent the user
+        // from later trying to restore a savepoint on "another timeline"
+        guard.retain(|x| *x <= savepoint.get_id());
 
         Ok(())
     }
