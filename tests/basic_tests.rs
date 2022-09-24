@@ -1,5 +1,6 @@
 use redb::{Database, MultimapTableDefinition, RangeIter, ReadableTable, TableDefinition};
 use std::ops::{Range, RangeFull};
+use std::sync;
 use tempfile::NamedTempFile;
 
 const SLICE_TABLE: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
@@ -604,19 +605,20 @@ fn ref_get_signatures() {
 #[test]
 fn concurrent_write_transactions_block() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = std::sync::Arc::new(unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() });
+    let db = sync::Arc::new(unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() });
+    let wtx = db.begin_write().unwrap();
+    let (sender, receiver) = sync::mpsc::channel();
 
-    {
+    let t = {
         let db = db.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            sender.send(()).unwrap();
             db.begin_write().unwrap().commit().unwrap();
-        });
-    }
+        })
+    };
 
-    let wtx = db.begin_write().unwrap();
-
+    receiver.recv().unwrap();
     std::thread::sleep(std::time::Duration::from_secs(1));
-
     wtx.commit().unwrap();
+    t.join().unwrap();
 }
