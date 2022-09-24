@@ -147,7 +147,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Display for MultimapTableDefi
 /// ```
 pub struct Database {
     mem: TransactionalMemory,
-    pub(crate) next_transaction_id: AtomicTransactionId,
+    next_transaction_id: AtomicTransactionId,
     live_read_transactions: Mutex<BTreeSet<TransactionId>>,
     pub(crate) live_write_transaction: Mutex<Option<TransactionId>>,
 }
@@ -398,6 +398,10 @@ impl Database {
             .cloned()
     }
 
+    pub(crate) fn increment_transaction_id(&self) -> TransactionId {
+        self.next_transaction_id.fetch_add(1, Ordering::AcqRel)
+    }
+
     /// Convenience method for [`Builder::new`]
     pub fn builder() -> Builder {
         Builder::new()
@@ -413,7 +417,7 @@ impl Database {
         // TODO: implement switching to checksum strategy
         assert!(matches!(strategy, WriteStrategy::TwoPhase));
 
-        let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
+        let id = self.increment_transaction_id();
         let root_page = self.mem.get_data_root();
         let freed_root = self.mem.get_freed_root();
         self.mem
@@ -440,7 +444,7 @@ impl Database {
     /// Returns a [`ReadTransaction`] which may be used to read from the database. Read transactions
     /// may exist concurrently with writes
     pub fn begin_read(&self) -> Result<ReadTransaction> {
-        let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
+        let id = self.increment_transaction_id();
         self.live_read_transactions.lock().unwrap().insert(id);
         #[cfg(feature = "logging")]
         info!("Beginning read transaction id={}", id);

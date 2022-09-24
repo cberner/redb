@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::panic;
 use std::rc::Rc;
-use std::sync::atomic::Ordering;
 use std::sync::MutexGuard;
 
 /// Informational storage stats about the database
@@ -116,7 +115,7 @@ impl<'db> WriteTransaction<'db> {
         assert!(live_write_transaction.is_none());
         #[cfg(feature = "logging")]
         info!("Beginning write transaction id={}", transaction_id);
-        let transaction_id = db.next_transaction_id.fetch_add(1, Ordering::AcqRel);
+        let transaction_id = db.increment_transaction_id();
         *live_write_transaction = Some(transaction_id);
 
         let root_page = db.get_memory().get_data_root();
