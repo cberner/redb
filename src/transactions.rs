@@ -113,9 +113,9 @@ impl<'db> WriteTransaction<'db> {
     pub(crate) fn new(db: &'db Database) -> Result<Self> {
         let mut live_write_transaction = db.live_write_transaction.lock().unwrap();
         assert!(live_write_transaction.is_none());
+        let transaction_id = db.increment_transaction_id();
         #[cfg(feature = "logging")]
         info!("Beginning write transaction id={}", transaction_id);
-        let transaction_id = db.increment_transaction_id();
         *live_write_transaction = Some(transaction_id);
 
         let root_page = db.get_memory().get_data_root();
