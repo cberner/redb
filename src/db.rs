@@ -149,7 +149,7 @@ pub struct Database {
     mem: TransactionalMemory,
     next_transaction_id: AtomicTransactionId,
     live_read_transactions: Mutex<BTreeSet<TransactionId>>,
-    live_write_transaction: Mutex<Option<TransactionId>>,
+    pub(crate) live_write_transaction: Mutex<Option<TransactionId>>,
 }
 
 impl Database {
@@ -389,12 +389,6 @@ impl Database {
         self.live_read_transactions.lock().unwrap().remove(&id);
     }
 
-    pub(crate) fn deallocate_write_transaction(&self, id: TransactionId) {
-        let mut live = self.live_write_transaction.lock().unwrap();
-        assert_eq!(Some(id), *live);
-        *live = None;
-    }
-
     pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
         self.live_read_transactions
             .lock()
@@ -404,7 +398,7 @@ impl Database {
             .cloned()
     }
 
-    fn increment_transaction_id(&self) -> TransactionId {
+    pub(crate) fn increment_transaction_id(&self) -> TransactionId {
         self.next_transaction_id.fetch_add(1, Ordering::AcqRel)
     }
 
@@ -418,8 +412,8 @@ impl Database {
     /// Note: Changing to the [`WriteStrategy::Checksum`] strategy can take a long time, as checksums
     /// will need to be calculated for every entry in the database
     pub fn set_write_strategy(&self, strategy: WriteStrategy) -> Result {
-        let write_guard = self.live_write_transaction.lock().unwrap();
-        assert!(write_guard.is_none());
+        let guard = self.live_write_transaction.lock().unwrap();
+        assert!(guard.is_none());
         // TODO: implement switching to checksum strategy
         assert!(matches!(strategy, WriteStrategy::TwoPhase));
 
@@ -428,7 +422,7 @@ impl Database {
         let freed_root = self.mem.get_freed_root();
         self.mem
             .commit(root_page, freed_root, id, false, Some(strategy.into()))?;
-        drop(write_guard);
+        drop(guard);
 
         Ok(())
     }
@@ -436,16 +430,10 @@ impl Database {
     /// Begins a write transaction
     ///
     /// Returns a [`WriteTransaction`] which may be used to read/write to the database. Only a single
-    /// write may be in progress at a time
+    /// write may be in progress at a time. If a write is in progress, this function will block
+    /// until it completes.
     pub fn begin_write(&self) -> Result<WriteTransaction> {
-        let mut guard = self.live_write_transaction.lock().unwrap();
-        assert!(guard.is_none());
-        let id = self.increment_transaction_id();
-        *guard = Some(id);
-        #[cfg(feature = "logging")]
-        info!("Beginning write transaction id={}", id);
-        // Safety: We just asserted there was no previous write in progress
-        unsafe { WriteTransaction::new(self, id) }
+        WriteTransaction::new(self)
     }
 
     /// Begins a read transaction

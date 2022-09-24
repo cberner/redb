@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::panic;
 use std::rc::Rc;
+use std::sync::MutexGuard;
 
 /// Informational storage stats about the database
 #[derive(Debug)]
@@ -105,12 +106,18 @@ pub struct WriteTransaction<'db> {
     open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
     completed: bool,
     durability: Durability,
+    live_write_transaction: MutexGuard<'db, Option<TransactionId>>,
 }
 
 impl<'db> WriteTransaction<'db> {
-    // Safety: caller must guarantee that there is only a single WriteTransaction in existence
-    // at a time
-    pub(crate) unsafe fn new(db: &'db Database, transaction_id: TransactionId) -> Result<Self> {
+    pub(crate) fn new(db: &'db Database) -> Result<Self> {
+        let mut live_write_transaction = db.live_write_transaction.lock().unwrap();
+        assert!(live_write_transaction.is_none());
+        let transaction_id = db.increment_transaction_id();
+        #[cfg(feature = "logging")]
+        info!("Beginning write transaction id={}", transaction_id);
+        *live_write_transaction = Some(transaction_id);
+
         let root_page = db.get_memory().get_data_root();
         let freed_root = db.get_memory().get_freed_root();
         let freed_pages = Rc::new(RefCell::new(vec![]));
@@ -128,6 +135,7 @@ impl<'db> WriteTransaction<'db> {
             open_tables: RefCell::new(Default::default()),
             completed: false,
             durability: Durability::Immediate,
+            live_write_transaction,
         })
     }
 
@@ -267,10 +275,7 @@ impl<'db> WriteTransaction<'db> {
     pub fn commit(mut self) -> Result {
         self.table_tree.borrow_mut().flush_table_root_updates()?;
         match self.commit_inner() {
-            Ok(_) => {
-                self.db.deallocate_write_transaction(self.transaction_id);
-                Ok(())
-            }
+            Ok(_) => Ok(()),
             Err(err) => match err {
                 // Rollback the transaction if we ran out of space during commit, so that user may
                 // continue with another transaction (like a delete)
@@ -314,7 +319,6 @@ impl<'db> WriteTransaction<'db> {
         info!("Aborting transaction id={}", self.transaction_id);
         self.table_tree.borrow_mut().clear_table_root_updates();
         self.mem.rollback_uncommitted_writes()?;
-        self.db.deallocate_write_transaction(self.transaction_id);
         self.completed = true;
         #[cfg(feature = "logging")]
         info!("Finished abort of transaction id={}", self.transaction_id);
@@ -468,6 +472,7 @@ impl<'db> WriteTransaction<'db> {
 
 impl<'a> Drop for WriteTransaction<'a> {
     fn drop(&mut self) {
+        *self.live_write_transaction = None;
         if !self.completed {
             #[allow(unused_variables)]
             if let Err(error) = self.abort_inner() {
