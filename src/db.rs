@@ -426,7 +426,8 @@ impl Database {
     /// Begins a write transaction
     ///
     /// Returns a [`WriteTransaction`] which may be used to read/write to the database. Only a single
-    /// write may be in progress at a time
+    /// write may be in progress at a time. If a write is in progress, this function will block
+    /// until it completes.
     pub fn begin_write(&self) -> Result<WriteTransaction> {
         let mut guard = self.live_write_transaction.lock().unwrap();
         assert!(guard.is_none());
