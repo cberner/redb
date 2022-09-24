@@ -147,9 +147,9 @@ impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Display for MultimapTableDefi
 /// ```
 pub struct Database {
     mem: TransactionalMemory,
-    next_transaction_id: AtomicTransactionId,
+    pub(crate) next_transaction_id: AtomicTransactionId,
     live_read_transactions: Mutex<BTreeSet<TransactionId>>,
-    live_write_transaction: Mutex<Option<TransactionId>>,
+    pub(crate) live_write_transaction: Mutex<Option<TransactionId>>,
 }
 
 impl Database {
@@ -429,14 +429,7 @@ impl Database {
     /// write may be in progress at a time. If a write is in progress, this function will block
     /// until it completes.
     pub fn begin_write(&self) -> Result<WriteTransaction> {
-        let mut guard = self.live_write_transaction.lock().unwrap();
-        assert!(guard.is_none());
-        let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
-        *guard = Some(id);
-        #[cfg(feature = "logging")]
-        info!("Beginning write transaction id={}", id);
-        // Safety: We just asserted there was no previous write in progress
-        unsafe { WriteTransaction::new(self, guard, id) }
+        WriteTransaction::new(self)
     }
 
     /// Begins a read transaction

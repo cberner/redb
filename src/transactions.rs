@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::panic;
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 use std::sync::MutexGuard;
 
 /// Informational storage stats about the database
@@ -106,17 +107,18 @@ pub struct WriteTransaction<'db> {
     open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
     completed: bool,
     durability: Durability,
-    write_lock: MutexGuard<'db, Option<TransactionId>>,
+    live_write_transaction: MutexGuard<'db, Option<TransactionId>>,
 }
 
 impl<'db> WriteTransaction<'db> {
-    // Safety: caller must guarantee that there is only a single WriteTransaction in existence
-    // at a time
-    pub(crate) unsafe fn new(
-        db: &'db Database,
-        write_lock: MutexGuard<'db, Option<TransactionId>>,
-        transaction_id: TransactionId,
-    ) -> Result<Self> {
+    pub(crate) fn new(db: &'db Database) -> Result<Self> {
+        let mut live_write_transaction = db.live_write_transaction.lock().unwrap();
+        assert!(live_write_transaction.is_none());
+        #[cfg(feature = "logging")]
+        info!("Beginning write transaction id={}", id);
+        let transaction_id = db.next_transaction_id.fetch_add(1, Ordering::AcqRel);
+        *live_write_transaction = Some(transaction_id);
+
         let root_page = db.get_memory().get_data_root();
         let freed_root = db.get_memory().get_freed_root();
         let freed_pages = Rc::new(RefCell::new(vec![]));
@@ -134,7 +136,7 @@ impl<'db> WriteTransaction<'db> {
             open_tables: RefCell::new(Default::default()),
             completed: false,
             durability: Durability::Immediate,
-            write_lock,
+            live_write_transaction,
         })
     }
 
@@ -471,7 +473,7 @@ impl<'db> WriteTransaction<'db> {
 
 impl<'a> Drop for WriteTransaction<'a> {
     fn drop(&mut self) {
-        *self.write_lock = None;
+        *self.live_write_transaction = None;
         if !self.completed {
             #[allow(unused_variables)]
             if let Err(error) = self.abort_inner() {
