@@ -17,8 +17,29 @@ const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, [u8]> =
 
 fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb::Error> {
     let mut reference = BTreeMap::new();
+    let mut savepoints = vec![];
+    let mut reference_savepoints = vec![];
 
     for transaction in transactions.iter() {
+        if transaction.create_savepoint {
+            reference_savepoints.push(reference.clone());
+            savepoints.push(db.savepoint()?);
+            if savepoints.len() > MAX_SAVEPOINTS {
+                savepoints.remove(0);
+                reference_savepoints.remove(0);
+            }
+        }
+        let restore_to = transaction.restore_savepoint.value;
+        if restore_to > 0 && restore_to <= savepoints.len() {
+            let index = savepoints.len() - restore_to;
+            let result = db.restore_savepoint(&savepoints[index]);
+            if result.is_ok() {
+                reference = reference_savepoints[index].clone();
+            }
+            if result.is_err() && !matches!(result, Err(Error::InvalidSavepoint)) {
+                return result;
+            }
+        }
         let reference_backup = reference.clone();
         let mut txn = db.begin_write().unwrap();
         // We're not trying to test crash safety, so don't bother with durability
@@ -26,7 +47,7 @@ fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb
             txn.set_durability(Durability::None);
         }
         {
-            let mut table = txn.open_table(TABLE_DEF).unwrap();
+            let mut table = txn.open_table(TABLE_DEF)?;
             for op in transaction.ops.iter() {
                 match op {
                     FuzzOperation::Get { key } => {
@@ -123,8 +144,29 @@ fn assert_multimap_value_eq(
 
 fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb::Error> {
     let mut reference: BTreeMap<u64, BTreeSet<usize>> = BTreeMap::new();
+    let mut savepoints = vec![];
+    let mut reference_savepoints = vec![];
 
     for transaction in transactions.iter() {
+        if transaction.create_savepoint {
+            reference_savepoints.push(reference.clone());
+            savepoints.push(db.savepoint()?);
+            if savepoints.len() > MAX_SAVEPOINTS {
+                savepoints.remove(0);
+                reference_savepoints.remove(0);
+            }
+        }
+        let restore_to = transaction.restore_savepoint.value;
+        if restore_to > 0 && restore_to <= savepoints.len() {
+            let index = savepoints.len() - restore_to;
+            let result = db.restore_savepoint(&savepoints[index]);
+            if result.is_ok() {
+                reference = reference_savepoints[index].clone();
+            }
+            if result.is_err() && !matches!(result, Err(Error::InvalidSavepoint)) {
+                return result;
+            }
+        }
         let reference_backup = reference.clone();
         let mut txn = db.begin_write().unwrap();
         // We're not trying to test crash safety, so don't bother with durability
@@ -132,7 +174,7 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
             txn.set_durability(Durability::None);
         }
         {
-            let mut table = txn.open_multimap_table(MULTIMAP_TABLE_DEF).unwrap();
+            let mut table = txn.open_multimap_table(MULTIMAP_TABLE_DEF)?;
             for op in transaction.ops.iter() {
                 match op {
                     FuzzOperation::Get { key } => {

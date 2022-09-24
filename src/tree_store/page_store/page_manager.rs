@@ -1,6 +1,7 @@
 use crate::db::WriteStrategy;
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
+use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
@@ -1001,6 +1002,48 @@ impl TransactionalMemory {
         let result = self.mmap.flush();
         drop(metadata);
         self.needs_recovery = false;
+
+        result
+    }
+
+    pub(crate) fn get_raw_allocator_states(&self) -> Vec<Vec<u8>> {
+        let mut metadata = self.lock_metadata();
+        let layout = self.layout.lock().unwrap();
+
+        let mut regional_allocators = vec![];
+        for i in 0..layout.num_regions() {
+            regional_allocators.push(metadata.get_region(i, &layout).allocator_raw());
+        }
+
+        regional_allocators
+    }
+
+    // Diffs region_states, which must be the result of calling get_raw_allocator_states(), against
+    // the currently allocated set of pages
+    pub(crate) fn pages_allocated_since_raw_state(
+        &self,
+        region_states: &[Vec<u8>],
+    ) -> Vec<PageNumber> {
+        let mut result = vec![];
+        let mut metadata = self.lock_metadata();
+        let layout = self.layout.lock().unwrap();
+
+        assert!(region_states.len() <= layout.num_regions() as usize);
+
+        for i in 0..layout.num_regions() {
+            let region = metadata.get_region(i, &layout);
+            let current_state = region.allocator();
+            if let Some(old_state) = region_states.get(i as usize) {
+                let old_allocated = BuddyAllocator::new(old_state).get_order0_allocated_pages(i);
+                let new_allocated = current_state.get_order0_allocated_pages(i);
+                result.extend(new_allocated.difference(&old_allocated));
+            } else {
+                // This region didn't exist, so everything is newly allocated
+                result.extend(current_state.get_order0_allocated_pages(i));
+            }
+        }
+
+        // TODO: it would be more efficient if we merged all the adjacent order0 pages together
 
         result
     }

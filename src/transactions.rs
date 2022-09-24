@@ -6,7 +6,7 @@ use crate::tree_store::{
 use crate::types::{RedbKey, RedbValue};
 use crate::{
     Database, Error, MultimapTable, MultimapTableDefinition, ReadOnlyMultimapTable, ReadOnlyTable,
-    Result, Table, TableDefinition,
+    Result, Savepoint, Table, TableDefinition,
 };
 #[cfg(feature = "logging")]
 use log::{info, warn};
@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::mem::size_of;
+use std::ops::RangeFull;
 use std::panic;
 use std::rc::Rc;
 use std::sync::MutexGuard;
@@ -137,6 +138,77 @@ impl<'db> WriteTransaction<'db> {
             durability: Durability::Immediate,
             live_write_transaction,
         })
+    }
+
+    pub(crate) fn commit_savepoint(db: &'db Database, savepoint: &'_ Savepoint<'_>) -> Result {
+        let mut live_write_transaction = db.live_write_transaction.lock().unwrap();
+        assert!(live_write_transaction.is_none());
+        let transaction_id = db.increment_transaction_id();
+        #[cfg(feature = "logging")]
+        info!(
+            "Beginning savepoint restore (id={}) in transaction id={}",
+            savepoint.get_id(),
+            transaction_id
+        );
+        *live_write_transaction = Some(transaction_id);
+
+        let freed_pages = db
+            .get_memory()
+            .pages_allocated_since_raw_state(savepoint.get_regional_allocator_states());
+        let freed_pages = Rc::new(RefCell::new(freed_pages));
+        let root_page = savepoint.get_root();
+        let freed_root = savepoint.get_freed_root();
+
+        // Remove any freed pages that have already been processed. Otherwise this would result in a double free
+        // We assume below that PageNumber is length 8
+        let old_freed_tree: BtreeMut<FreedTableKey, [u8]> = BtreeMut::new(
+            db.get_memory().get_freed_root(),
+            db.get_memory(),
+            freed_pages.clone(),
+        );
+        let oldest_unprocessed_transaction =
+            if let Some(entry) = old_freed_tree.range::<RangeFull, FreedTableKey>(..)?.next() {
+                FreedTableKey::from_bytes(entry.key()).transaction_id
+            } else {
+                transaction_id
+            };
+        drop(old_freed_tree);
+        let lookup_key = FreedTableKey {
+            transaction_id: oldest_unprocessed_transaction,
+            pagination_id: 0,
+        };
+        let mut freed_tree = BtreeMut::new(freed_root, db.get_memory(), freed_pages.clone());
+        let mut to_remove = vec![];
+        let mut iter = freed_tree.range(..lookup_key)?;
+        while let Some(entry) = iter.next() {
+            to_remove.push(FreedTableKey::from_bytes(entry.key()));
+        }
+        drop(iter);
+        for key in to_remove {
+            // Safety: all references to the freed table above have already been dropped.
+            unsafe { freed_tree.remove(&key)? };
+        }
+
+        let transaction = Self {
+            db,
+            mem: db.get_memory(),
+            transaction_id,
+            table_tree: RefCell::new(TableTree::new(
+                root_page,
+                db.get_memory(),
+                freed_pages.clone(),
+            )),
+            freed_tree,
+            freed_pages,
+            open_tables: RefCell::new(Default::default()),
+            completed: false,
+            durability: Durability::Immediate,
+            live_write_transaction,
+        };
+
+        transaction.commit()?;
+
+        Ok(())
     }
 
     /// Set the desired durability level for writes made in this transaction

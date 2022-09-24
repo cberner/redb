@@ -5,6 +5,8 @@ use std::{io, panic};
 #[derive(Debug)]
 pub enum Error {
     DatabaseAlreadyOpen,
+    /// This savepoint is invalid because an older savepoint was restored after it was created
+    InvalidSavepoint,
     Corrupted(String),
     TableTypeMismatch(String),
     DbSizeMismatch {
@@ -70,6 +72,12 @@ impl Display for Error {
             }
             Error::DatabaseAlreadyOpen => {
                 write!(f, "Database already open. Cannot acquire lock.")
+            }
+            Error::InvalidSavepoint => {
+                write!(
+                    f,
+                    "Savepoint is invalid because an older savepoint was already restored."
+                )
             }
         }
     }
