@@ -4,9 +4,11 @@ use tempfile::NamedTempFile;
 
 use rand::prelude::SliceRandom;
 use rand::Rng;
+#[cfg(unix)]
+use redb::ReadableMultimapTable;
 use redb::{
-    Builder, Database, Durability, Error, MultimapTableDefinition, ReadableMultimapTable,
-    ReadableTable, TableDefinition, WriteStrategy,
+    Builder, Database, Durability, Error, MultimapTableDefinition, ReadableTable, TableDefinition,
+    WriteStrategy,
 };
 
 const ELEMENTS: usize = 100;
@@ -143,11 +145,15 @@ fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 8 * 1024 * 1024;
+    #[cfg_attr(windows, allow(unused_mut))]
     let db = unsafe {
-        Database::builder()
-            .set_dynamic_growth(false)
-            .create(tmpfile.path(), db_size)
-            .unwrap()
+        let mut builder = Database::builder();
+        #[cfg(unix)]
+        {
+            builder.set_dynamic_growth(false);
+        }
+
+        builder.create(tmpfile.path(), db_size).unwrap()
     };
     let txn = db.begin_write().unwrap();
     {
@@ -271,6 +277,7 @@ fn large_keys() {
 }
 
 #[test]
+#[cfg(unix)]
 fn dynamic_growth() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let table_definition: TableDefinition<u64, [u8]> = TableDefinition::new("x");
@@ -303,6 +310,7 @@ fn dynamic_growth() {
 }
 
 #[test]
+#[cfg(unix)]
 fn dynamic_shrink() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let table_definition: TableDefinition<u64, [u8]> = TableDefinition::new("x");
@@ -771,6 +779,8 @@ fn regression13() {
 }
 
 #[test]
+// Disabling on Windows for now since this requires a minimum of 140GiB of disk space due to lack of resizing
+#[cfg(unix)]
 fn regression14() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
@@ -811,6 +821,8 @@ fn regression14() {
 }
 
 #[test]
+// Disabling on Windows for now since this requires a minimum of 400GiB of disk space due to lack of resizing
+#[cfg(unix)]
 fn regression15() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db_size = 400998358365;

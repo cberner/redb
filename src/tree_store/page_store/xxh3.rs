@@ -70,9 +70,7 @@ pub fn hash64_with_seed(data: &[u8], seed: u64) -> u64 {
         }
         #[cfg(target_arch = "aarch64")]
         {
-            unsafe {
-                return hash64_large_neon(data, seed);
-            }
+            unsafe { hash64_large_neon(data, seed) }
         }
         #[cfg(not(target_arch = "aarch64"))]
         hash64_large_generic(
@@ -99,9 +97,7 @@ pub fn hash128_with_seed(data: &[u8], seed: u64) -> u128 {
         }
         #[cfg(target_arch = "aarch64")]
         {
-            unsafe {
-                return hash128_large_neon(data, seed);
-            }
+            unsafe { hash128_large_neon(data, seed) }
         }
         #[cfg(not(target_arch = "aarch64"))]
         hash128_large_generic(
