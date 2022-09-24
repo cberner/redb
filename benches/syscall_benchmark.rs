@@ -6,10 +6,10 @@ use rand::Rng;
 use std::env::current_dir;
 use std::fs::OpenOptions;
 use std::io::{IoSlice, Read, Seek, SeekFrom, Write};
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
-use std::{ptr, slice};
+#[cfg(unix)]
+use std::{os::unix::io::AsRawFd, ptr, slice};
 
 const ITERATIONS: usize = 3;
 const KEY_SIZE: usize = 24;
@@ -261,6 +261,7 @@ fn readwrite_bench(path: &Path) {
     }
 }
 
+#[cfg(unix)]
 fn mmap_bench(path: &Path) {
     let file = OpenOptions::new()
         .read(true)
@@ -351,6 +352,7 @@ fn main() {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
         uring_bench(tmpfile.path());
     }
+    #[cfg(unix)]
     {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
         mmap_bench(tmpfile.path());
