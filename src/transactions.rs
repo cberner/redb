@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::panic;
 use std::rc::Rc;
-use std::sync::RwLockWriteGuard;
+use std::sync::MutexGuard;
 
 /// Informational storage stats about the database
 #[derive(Debug)]
@@ -106,7 +106,7 @@ pub struct WriteTransaction<'db> {
     open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
     completed: bool,
     durability: Durability,
-    write_lock: RwLockWriteGuard<'db, Option<TransactionId>>,
+    write_lock: MutexGuard<'db, Option<TransactionId>>,
 }
 
 impl<'db> WriteTransaction<'db> {
@@ -114,7 +114,7 @@ impl<'db> WriteTransaction<'db> {
     // at a time
     pub(crate) unsafe fn new(
         db: &'db Database,
-        write_lock: RwLockWriteGuard<'db, Option<TransactionId>>,
+        write_lock: MutexGuard<'db, Option<TransactionId>>,
         transaction_id: TransactionId,
     ) -> Result<Self> {
         let root_page = db.get_memory().get_data_root();

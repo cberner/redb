@@ -15,7 +15,6 @@ use std::ops::RangeFull;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::sync::RwLock;
 
 use crate::multimap_table::parse_subtree_roots;
 #[cfg(feature = "logging")]
@@ -150,7 +149,7 @@ pub struct Database {
     mem: TransactionalMemory,
     next_transaction_id: AtomicTransactionId,
     live_read_transactions: Mutex<BTreeSet<TransactionId>>,
-    live_write_transaction: RwLock<Option<TransactionId>>,
+    live_write_transaction: Mutex<Option<TransactionId>>,
 }
 
 impl Database {
@@ -381,7 +380,7 @@ impl Database {
         Ok(Database {
             mem,
             next_transaction_id: AtomicTransactionId::new(next_transaction_id),
-            live_write_transaction: RwLock::new(None),
+            live_write_transaction: Mutex::new(None),
             live_read_transactions: Mutex::new(Default::default()),
         })
     }
@@ -409,8 +408,8 @@ impl Database {
     /// Note: Changing to the [`WriteStrategy::Checksum`] strategy can take a long time, as checksums
     /// will need to be calculated for every entry in the database
     pub fn set_write_strategy(&self, strategy: WriteStrategy) -> Result {
-        let write_guard = self.live_write_transaction.write().unwrap();
-        assert!(write_guard.is_none());
+        let guard = self.live_write_transaction.lock().unwrap();
+        assert!(guard.is_none());
         // TODO: implement switching to checksum strategy
         assert!(matches!(strategy, WriteStrategy::TwoPhase));
 
@@ -419,7 +418,7 @@ impl Database {
         let freed_root = self.mem.get_freed_root();
         self.mem
             .commit(root_page, freed_root, id, false, Some(strategy.into()))?;
-        drop(write_guard);
+        drop(guard);
 
         Ok(())
     }
@@ -429,7 +428,7 @@ impl Database {
     /// Returns a [`WriteTransaction`] which may be used to read/write to the database. Only a single
     /// write may be in progress at a time
     pub fn begin_write(&self) -> Result<WriteTransaction> {
-        let mut guard = self.live_write_transaction.write().unwrap();
+        let mut guard = self.live_write_transaction.lock().unwrap();
         assert!(guard.is_none());
         let id = self.next_transaction_id.fetch_add(1, Ordering::AcqRel);
         *guard = Some(id);
