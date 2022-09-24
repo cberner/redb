@@ -115,7 +115,7 @@ impl<'db> WriteTransaction<'db> {
         let mut live_write_transaction = db.live_write_transaction.lock().unwrap();
         assert!(live_write_transaction.is_none());
         #[cfg(feature = "logging")]
-        info!("Beginning write transaction id={}", id);
+        info!("Beginning write transaction id={}", transaction_id);
         let transaction_id = db.next_transaction_id.fetch_add(1, Ordering::AcqRel);
         *live_write_transaction = Some(transaction_id);
 
