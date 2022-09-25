@@ -544,7 +544,7 @@ impl LeafKeyIter {
         fixed_value_size: Option<usize>,
     ) -> Self {
         let accessor = LeafAccessor::new(&data, fixed_key_size, fixed_value_size);
-        let end_entry = accessor.num_pairs() as isize - 1;
+        let end_entry = isize::try_from(accessor.num_pairs()).unwrap() - 1;
         Self {
             data,
             fixed_key_size,
@@ -563,12 +563,12 @@ impl LeafKeyIter {
         if self.reverse {
             self.end_entry -= 1;
             accessor
-                .entry((self.end_entry + 1) as usize)
+                .entry((self.end_entry + 1).try_into().unwrap())
                 .map(|e| e.key())
         } else {
             self.start_entry += 1;
             accessor
-                .entry((self.start_entry - 1) as usize)
+                .entry((self.start_entry - 1).try_into().unwrap())
                 .map(|e| e.key())
         }
     }
@@ -759,7 +759,7 @@ impl<'a> RawLeafBuilder<'a> {
         key_bytes: usize,
     ) -> Self {
         page[0] = LEAF;
-        page[2..4].copy_from_slice(&(num_pairs as u16).to_le_bytes());
+        page[2..4].copy_from_slice(&u16::try_from(num_pairs).unwrap().to_le_bytes());
         #[cfg(debug_assertions)]
         {
             // Poison all the key & value offsets, in case the caller forgets to write them
@@ -833,7 +833,7 @@ impl<'a> RawLeafBuilder<'a> {
         if self.fixed_key_size.is_none() {
             let offset = 4 + size_of::<u32>() * n;
             self.page[offset..(offset + size_of::<u32>())]
-                .copy_from_slice(&((key_offset + key.len()) as u32).to_le_bytes());
+                .copy_from_slice(&u32::try_from(key_offset + key.len()).unwrap().to_le_bytes());
         }
         self.page[key_offset..(key_offset + key.len())].copy_from_slice(key);
         let written_key_len = key_offset + key.len() - self.key_section_start();
@@ -844,8 +844,11 @@ impl<'a> RawLeafBuilder<'a> {
             if self.fixed_key_size.is_none() {
                 offset += size_of::<u32>() * self.num_pairs;
             }
-            self.page[offset..(offset + size_of::<u32>())]
-                .copy_from_slice(&((value_offset + value.len()) as u32).to_le_bytes());
+            self.page[offset..(offset + size_of::<u32>())].copy_from_slice(
+                &u32::try_from(value_offset + value.len())
+                    .unwrap()
+                    .to_le_bytes(),
+            );
         }
         self.page[value_offset..(value_offset + value.len())].copy_from_slice(value);
         self.pairs_written += 1;
@@ -896,9 +899,9 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
         let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
         if overwrite {
             let remaining = page.memory().len() - accessor.total_length();
-            let required_delta = (new_key.len() + new_value.len()) as isize
-                - accessor.length_of_pairs(position, position + 1) as isize;
-            required_delta <= remaining as isize
+            let required_delta = isize::try_from(new_key.len() + new_value.len()).unwrap()
+                - isize::try_from(accessor.length_of_pairs(position, position + 1)).unwrap();
+            required_delta <= isize::try_from(remaining).unwrap()
         } else {
             let remaining = page.memory().len() - accessor.total_length();
             let mut required_delta = new_key.len() + new_value.len();
@@ -920,7 +923,8 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
             self.fixed_value_size,
         );
         let required_delta = if overwrite {
-            (key.len() + value.len()) as isize - accessor.length_of_pairs(i, i + 1) as isize
+            isize::try_from(key.len() + value.len()).unwrap()
+                - isize::try_from(accessor.length_of_pairs(i, i + 1)).unwrap()
         } else {
             let mut delta = key.len() + value.len();
             if self.fixed_key_size.is_none() {
@@ -929,10 +933,11 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
             if self.fixed_value_size.is_none() {
                 delta += size_of::<u32>();
             }
-            delta as isize
+            delta.try_into().unwrap()
         };
         assert!(
-            accessor.total_length() as isize + required_delta <= self.page.memory().len() as isize
+            isize::try_from(accessor.total_length()).unwrap() + required_delta
+                <= isize::try_from(self.page.memory().len()).unwrap()
         );
 
         let num_pairs = accessor.num_pairs();
@@ -948,22 +953,24 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
         drop(accessor);
 
         let value_delta = if overwrite {
-            value.len() as isize - existing_value_len as isize
+            isize::try_from(value.len()).unwrap() - isize::try_from(existing_value_len).unwrap()
         } else {
-            value.len() as isize
+            value.len().try_into().unwrap()
         };
 
         // Update all the pointers
-        let key_ptr_size = if self.fixed_key_size.is_none() { 4 } else { 0 } as usize;
-        let value_ptr_size = if self.fixed_value_size.is_none() {
+        let key_ptr_size: usize = if self.fixed_key_size.is_none() { 4 } else { 0 };
+        let value_ptr_size: usize = if self.fixed_value_size.is_none() {
             4
         } else {
             0
-        } as usize;
+        };
         if !overwrite {
             for j in 0..i {
-                self.update_key_end(j, (key_ptr_size + value_ptr_size) as isize);
-                let value_delta = (key_ptr_size + value_ptr_size + key.len()) as isize;
+                self.update_key_end(j, (key_ptr_size + value_ptr_size).try_into().unwrap());
+                let value_delta: isize = (key_ptr_size + value_ptr_size + key.len())
+                    .try_into()
+                    .unwrap();
                 self.update_value_end(j, value_delta);
             }
         }
@@ -971,19 +978,24 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
             if overwrite {
                 self.update_value_end(j, value_delta);
             } else {
-                let key_delta = (key_ptr_size + value_ptr_size + key.len()) as isize;
+                let key_delta: isize = (key_ptr_size + value_ptr_size + key.len())
+                    .try_into()
+                    .unwrap();
                 self.update_key_end(j, key_delta);
-                let value_delta = key_delta + value.len() as isize;
+                let value_delta = key_delta + isize::try_from(value.len()).unwrap();
                 self.update_value_end(j, value_delta);
             }
         }
 
         let new_num_pairs = if overwrite { num_pairs } else { num_pairs + 1 };
-        self.page.memory_mut()[2..4].copy_from_slice(&(new_num_pairs as u16).to_le_bytes());
+        self.page.memory_mut()[2..4]
+            .copy_from_slice(&u16::try_from(new_num_pairs).unwrap().to_le_bytes());
 
         // Right shift the trailing values
         let mut dest = if overwrite {
-            (shift_value_start as isize + value_delta) as usize
+            (isize::try_from(shift_value_start).unwrap() + value_delta)
+                .try_into()
+                .unwrap()
         } else {
             shift_value_start + key_ptr_size + value_ptr_size + key.len() + value.len()
         };
@@ -992,7 +1004,7 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
         self.page.memory_mut().copy_within(start..end, dest);
 
         // Insert the value
-        let inserted_value_end = dest as u32;
+        let inserted_value_end: u32 = dest.try_into().unwrap();
         dest -= value.len();
         self.page.memory_mut()[dest..(dest + value.len())].copy_from_slice(value);
 
@@ -1004,7 +1016,7 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
             self.page.memory_mut().copy_within(start..end, dest);
 
             // Insert the key
-            let inserted_key_end = dest as u32;
+            let inserted_key_end: u32 = dest.try_into().unwrap();
             dest -= key.len();
             self.page.memory_mut()[dest..(dest + key.len())].copy_from_slice(key);
 
@@ -1070,23 +1082,24 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
             0
         };
         for j in 0..i {
-            self.update_key_end(j, -((key_ptr_size + value_ptr_size) as isize));
-            let value_delta =
-                -((key_ptr_size + value_ptr_size) as isize) - (key_end - key_start) as isize;
+            self.update_key_end(j, -isize::try_from(key_ptr_size + value_ptr_size).unwrap());
+            let value_delta = -isize::try_from(key_ptr_size + value_ptr_size).unwrap()
+                - isize::try_from(key_end - key_start).unwrap();
             self.update_value_end(j, value_delta);
         }
         for j in (i + 1)..num_pairs {
-            let key_delta =
-                -((key_ptr_size + value_ptr_size) as isize) - (key_end - key_start) as isize;
+            let key_delta = -isize::try_from(key_ptr_size + value_ptr_size).unwrap()
+                - isize::try_from(key_end - key_start).unwrap();
             self.update_key_end(j, key_delta);
-            let value_delta = key_delta - (value_end - value_start) as isize;
+            let value_delta = key_delta - isize::try_from(value_end - value_start).unwrap();
             self.update_value_end(j, value_delta);
         }
 
         // Left shift all the pointers & data
 
         let new_num_pairs = num_pairs - 1;
-        self.page.memory_mut()[2..4].copy_from_slice(&(new_num_pairs as u16).to_le_bytes());
+        self.page.memory_mut()[2..4]
+            .copy_from_slice(&u16::try_from(new_num_pairs).unwrap().to_le_bytes());
         // Left shift the trailing key pointers & preceding value pointers
         let mut dest = 4 + key_ptr_size * i;
         // First trailing key pointer
@@ -1145,7 +1158,7 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
                 .try_into()
                 .unwrap(),
         );
-        ptr = (ptr as isize + delta) as u32;
+        ptr = (isize::try_from(ptr).unwrap() + delta).try_into().unwrap();
         self.page.memory_mut()[offset..(offset + size_of::<u32>())]
             .copy_from_slice(&ptr.to_le_bytes());
     }
@@ -1170,7 +1183,7 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
                 .try_into()
                 .unwrap(),
         );
-        ptr = (ptr as isize + delta) as u32;
+        ptr = (isize::try_from(ptr).unwrap() + delta).try_into().unwrap();
         self.page.memory_mut()[offset..(offset + size_of::<u32>())]
             .copy_from_slice(&ptr.to_le_bytes());
     }
@@ -1497,7 +1510,7 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
     ) -> Self {
         assert!(num_keys > 0);
         page.memory_mut()[0] = BRANCH;
-        page.memory_mut()[2..4].copy_from_slice(&(num_keys as u16).to_le_bytes());
+        page.memory_mut()[2..4].copy_from_slice(&u16::try_from(num_keys).unwrap().to_le_bytes());
         #[cfg(debug_assertions)]
         {
             // Poison all the child pointers & key offsets, in case the caller forgets to write them
@@ -1580,8 +1593,11 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
             let offset = 8
                 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (self.num_keys + 1)
                 + size_of::<u32>() * n;
-            self.page.memory_mut()[offset..(offset + size_of::<u32>())]
-                .copy_from_slice(&((data_offset + key.len()) as u32).to_le_bytes());
+            self.page.memory_mut()[offset..(offset + size_of::<u32>())].copy_from_slice(
+                &u32::try_from(data_offset + key.len())
+                    .unwrap()
+                    .to_le_bytes(),
+            );
         }
 
         debug_assert!(data_offset > offset);

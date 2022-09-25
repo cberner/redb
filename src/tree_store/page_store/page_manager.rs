@@ -316,7 +316,7 @@ impl<'a> MetadataAccessor<'a> {
     fn set_region_tracker_state_length(&mut self, length: usize) {
         self.header
             [REGION_TRACKER_LENGTH_OFFSET..(REGION_TRACKER_LENGTH_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&(length as u32).to_le_bytes());
+            .copy_from_slice(&u32::try_from(length).unwrap().to_le_bytes());
     }
 
     fn get_region_header_pages(&self) -> u32 {
@@ -358,7 +358,7 @@ impl<'a> MetadataAccessor<'a> {
 
     fn set_page_size(&mut self, page_size: usize) {
         self.header[PAGE_SIZE_OFFSET..(PAGE_SIZE_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&(page_size as u32).to_le_bytes());
+            .copy_from_slice(&u32::try_from(page_size).unwrap().to_le_bytes());
     }
 
     fn get_recovery_required(&self) -> bool {
@@ -452,14 +452,16 @@ impl<'a> RegionTracker<'a> {
     }
 
     pub(crate) fn required_bytes(regions: u32, orders: usize) -> usize {
-        2 * size_of::<u32>() + orders * BtreeBitmapMut::required_space(regions as usize)
+        2 * size_of::<u32>() + orders * BtreeBitmapMut::required_space(regions.try_into().unwrap())
     }
 
     pub(crate) fn init_new(regions: u32, orders: usize, data: &'a mut [u8]) -> Self {
         assert!(data.len() >= Self::required_bytes(regions, orders));
-        data[..4].copy_from_slice(&(orders as u32).to_le_bytes());
+        data[..4].copy_from_slice(&u32::try_from(orders).unwrap().to_le_bytes());
         data[4..8].copy_from_slice(
-            &(BtreeBitmapMut::required_space(regions as usize) as u32).to_le_bytes(),
+            &u32::try_from(BtreeBitmapMut::required_space(regions.try_into().unwrap()))
+                .unwrap()
+                .to_le_bytes(),
         );
 
         let mut result = Self { data };
@@ -770,15 +772,17 @@ impl TransactionalMemory {
         let max_usable_region_bytes = min(region_size, max_capacity.next_power_of_two() as u64);
 
         let starting_size = if dynamic_growth {
-            MIN_DESIRED_USABLE_BYTES as u64
+            MIN_DESIRED_USABLE_BYTES.try_into().unwrap()
         } else {
             max_capacity
         };
         let layout = DatabaseLayout::calculate(
             max_capacity,
             starting_size,
-            (max_usable_region_bytes / page_size as u64) as u32,
-            page_size as u32,
+            (max_usable_region_bytes / u64::try_from(page_size).unwrap())
+                .try_into()
+                .unwrap(),
+            page_size.try_into().unwrap(),
         )?;
 
         let max_cap: usize = max_capacity.try_into().unwrap();
@@ -1391,14 +1395,17 @@ impl TransactionalMemory {
     ) -> Result<PageNumber> {
         let (mut region_tracker, mut regions) = metadata.allocators_mut(layout)?;
         loop {
-            let candidate_region = region_tracker.find_free(required_order)? as u32;
+            let candidate_region = region_tracker
+                .find_free(required_order)?
+                .try_into()
+                .unwrap();
             let mut region = regions.get_region_mut(candidate_region);
             match region.allocator_mut().alloc(required_order) {
                 Ok(page) => {
                     return Ok(PageNumber::new(
-                        candidate_region as u32,
-                        page as u32,
-                        required_order as u8,
+                        candidate_region,
+                        page.try_into().unwrap(),
+                        required_order.try_into().unwrap(),
                     ));
                 }
                 Err(err) => {
@@ -1452,7 +1459,7 @@ impl TransactionalMemory {
             metadata.get_max_capacity(),
             new_usable_bytes,
             metadata.get_region_max_data_pages(),
-            self.page_size as u32,
+            self.page_size.try_into().unwrap(),
         )?;
         assert!(new_layout.len() <= layout.len());
         assert_eq!(new_layout.superheader_pages(), layout.superheader_pages());
@@ -1469,8 +1476,8 @@ impl TransactionalMemory {
         layout: &mut DatabaseLayout,
         required_order_allocation: usize,
     ) -> Result<()> {
-        let required_growth =
-            2u64.pow(required_order_allocation as u32) * metadata.get_page_size() as u64;
+        let required_growth = 2u64.pow(required_order_allocation.try_into().unwrap())
+            * metadata.get_page_size() as u64;
         let max_region_size =
             (metadata.get_region_max_data_pages() as u64) * (metadata.get_page_size() as u64);
         let next_desired_size = if layout.num_full_regions() > 0 {
@@ -1496,7 +1503,7 @@ impl TransactionalMemory {
             metadata.get_max_capacity(),
             next_desired_size,
             metadata.get_region_max_data_pages(),
-            self.page_size as u32,
+            self.page_size.try_into().unwrap(),
         )?;
         assert!(new_layout.len() >= layout.len());
         assert_eq!(new_layout.superheader_pages(), layout.superheader_pages());
@@ -1631,7 +1638,7 @@ impl TransactionalMemory {
             metadata.get_max_capacity(),
             metadata.get_max_capacity(),
             metadata.get_region_max_data_pages(),
-            self.page_size as u32,
+            self.page_size.try_into().unwrap(),
         )
         .unwrap();
         let potential_growth_pages: usize = ((max_layout.usable_bytes() - layout.usable_bytes())

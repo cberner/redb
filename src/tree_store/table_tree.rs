@@ -214,19 +214,23 @@ impl RedbValue for InternalTableDefinition {
         }
         if let Some(fixed) = self.fixed_key_size {
             result.push(1);
-            result.extend_from_slice(&(fixed as u32).to_le_bytes());
+            result.extend_from_slice(&u32::try_from(fixed).unwrap().to_le_bytes());
         } else {
             result.push(0);
             result.extend_from_slice(&[0; size_of::<u32>()])
         }
         if let Some(fixed) = self.fixed_value_size {
             result.push(1);
-            result.extend_from_slice(&(fixed as u32).to_le_bytes());
+            result.extend_from_slice(&u32::try_from(fixed).unwrap().to_le_bytes());
         } else {
             result.push(0);
             result.extend_from_slice(&[0; size_of::<u32>()])
         }
-        result.extend_from_slice(&(self.key_type.as_bytes().len() as u32).to_le_bytes());
+        result.extend_from_slice(
+            &u32::try_from(self.key_type.as_bytes().len())
+                .unwrap()
+                .to_le_bytes(),
+        );
         result.extend_from_slice(self.key_type.as_bytes());
         result.extend_from_slice(self.value_type.as_bytes());
 

@@ -64,7 +64,8 @@ impl<'a> BtreeBitmap<'a> {
     }
 
     pub(crate) fn get(&self, i: u64) -> bool {
-        self.get_level(self.get_height() - 1).get(i as usize)
+        self.get_level(self.get_height() - 1)
+            .get(i.try_into().unwrap())
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -118,7 +119,7 @@ impl<'a> BtreeBitmapMut<'a> {
         assert!(data.len() >= Self::required_space(elements));
         let height = Self::required_tree_height(elements);
         data[HEIGHT_OFFSET..(HEIGHT_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&(height as u32).to_le_bytes());
+            .copy_from_slice(&u32::try_from(height).unwrap().to_le_bytes());
         // Initialize the memory, so that all ids are allocated
         U64GroupedBitmapMut::init_full(&mut data[Self::tree_data_start(elements)..]);
 
@@ -130,7 +131,8 @@ impl<'a> BtreeBitmapMut<'a> {
         // Intermediate levels
         if Self::required_tree_height(elements) > 2 {
             for i in 1..(Self::required_tree_height(elements) - 1) {
-                let len = Self::required_subtrees(elements) * 64usize.pow(i as u32) / 8;
+                let len =
+                    Self::required_subtrees(elements) * 64usize.pow(i.try_into().unwrap()) / 8;
                 tree_level_offsets.push(offset + len);
                 offset += len;
             }
@@ -151,7 +153,8 @@ impl<'a> BtreeBitmapMut<'a> {
 
         let mut index = END_OFFSETS;
         for end in tree_level_offsets {
-            data[index..(index + size_of::<u32>())].copy_from_slice(&(end as u32).to_le_bytes());
+            data[index..(index + size_of::<u32>())]
+                .copy_from_slice(&u32::try_from(end).unwrap().to_le_bytes());
             index += size_of::<u32>();
         }
 
@@ -174,13 +177,16 @@ impl<'a> BtreeBitmapMut<'a> {
     }
 
     pub(crate) fn set(&mut self, i: u64) {
-        let full = self.get_level_mut(self.get_height() - 1).set(i as usize);
-        self.update_to_root(i as usize, full);
+        let full = self
+            .get_level_mut(self.get_height() - 1)
+            .set(i.try_into().unwrap());
+        self.update_to_root(i.try_into().unwrap(), full);
     }
 
     pub(crate) fn clear(&mut self, i: u64) {
-        self.get_level_mut(self.get_height() - 1).clear(i as usize);
-        self.update_to_root(i as usize, false);
+        self.get_level_mut(self.get_height() - 1)
+            .clear(i.try_into().unwrap());
+        self.update_to_root(i.try_into().unwrap(), false);
     }
 
     pub(crate) fn required_space(capacity: usize) -> usize {
@@ -212,14 +218,14 @@ impl<'a> BtreeBitmapMut<'a> {
     fn required_interior_bytes_per_subtree(capacity: usize) -> usize {
         let subtree_height = Self::required_tree_height(capacity) - 1;
         (1..subtree_height)
-            .map(|i| 64usize.pow(i as u32))
+            .map(|i| 64usize.pow(i.try_into().unwrap()))
             .sum::<usize>()
             / 8
     }
 
     fn required_subtrees(capacity: usize) -> usize {
         let height = Self::required_tree_height(capacity);
-        let values_per_subtree = 64usize.pow((height - 1) as u32);
+        let values_per_subtree = 64usize.pow((height - 1).try_into().unwrap());
 
         (capacity + values_per_subtree - 1) / values_per_subtree
     }

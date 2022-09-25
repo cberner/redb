@@ -451,7 +451,9 @@ impl<'db> WriteTransaction<'db> {
         while let Some(entry) = iter.next() {
             to_remove.push(FreedTableKey::from_bytes(entry.key()));
             let value = entry.value();
-            let length = u64::from_le_bytes(value[..size_of::<u64>()].try_into().unwrap()) as usize;
+            let length: usize = u64::from_le_bytes(value[..size_of::<u64>()].try_into().unwrap())
+                .try_into()
+                .unwrap();
             // 1..=length because the array is length prefixed
             for i in 1..=length {
                 let page = PageNumber::from_le_bytes(value[i * 8..(i + 1) * 8].try_into().unwrap());
