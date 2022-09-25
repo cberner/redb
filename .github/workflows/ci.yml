@@ -35,12 +35,6 @@ jobs:
         run: "! grep --include='*.rs' -RE 'to_be_bytes|from_be_bytes|dbg!' ."
         if: runner.os != 'Windows'
 
-      - name: Check for forbidden words
-        run: |
-            findstr /s "to_be_bytes from_be_bytes dbg!" *.rs
-            if ("%ERRORLEVEL%" -ne "1") { exit "%ERRORLEVEL%" }
-        if: runner.os == 'Windows'
-
       - name: Install packages
         if: startsWith(matrix.os, 'ubuntu')
         run: |
