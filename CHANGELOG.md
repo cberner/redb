@@ -1,5 +1,13 @@
 # redb - Changelog
 
+## 0.7.0 - 2022-09-25
+* Add support for Windows
+* Add `Database::set_write_strategy` which allows the `WriteStrategy` of the database to be changed after creation
+* Make `Database::begin_write` block, instead of panic'ing, if there is another write already in progress
+* Add `Database::savepoint` and `Database::restore_savepoint` which can be used to snapshot and rollback the database
+* Rename `DatabaseBuilder` to `Builder`
+* Performance optimizations for large databases
+
 ## 0.6.1 - 2022-09-11
 * Fix crash when `Database::open()` was called on a database that had been created with `WriteStrategy::TwoPhase`
 * Change default region size on 32bit platforms to 4GiB
