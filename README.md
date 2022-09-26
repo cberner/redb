@@ -42,6 +42,7 @@ have any guarantees of file format stability :)
 * Fully ACID-compliant transactions
 * MVCC support for concurrent readers & writer, without blocking
 * Crash-safe by default
+* Savepoints and rollbacks
 
 ## Roadmap
 The following features are planned before the 1.0 release
