@@ -9,3 +9,15 @@ pub(crate) fn get_page_size() -> usize {
 pub(crate) fn get_page_size() -> usize {
     4096
 }
+
+#[cfg(unix)]
+pub(crate) fn is_page_aligned(size: usize) -> bool {
+    let os_page_size = get_page_size();
+
+    size % os_page_size == 0
+}
+
+#[cfg(not(unix))]
+pub(crate) fn is_page_aligned(_: usize) -> bool {
+    false
+}
