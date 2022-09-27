@@ -49,10 +49,18 @@ impl MmapInner {
         if mmap == libc::MAP_FAILED {
             Err(io::Error::last_os_error().into())
         } else {
-            Ok(Self {
-                mmap: mmap as *mut u8,
-                capacity: max_capacity,
-            })
+            // Accesses will primarily be jumping between nodes in b-trees, so will be to random pages
+            // Benchmarks show ~2x better performance when the database no longer fits in memory
+            let result =
+                unsafe { libc::madvise(mmap, max_capacity as libc::size_t, libc::MADV_RANDOM) };
+            if result != 0 {
+                Err(io::Error::last_os_error().into())
+            } else {
+                Ok(Self {
+                    mmap: mmap as *mut u8,
+                    capacity: max_capacity,
+                })
+            }
         }
     }
 
@@ -74,7 +82,12 @@ impl MmapInner {
             Err(io::Error::last_os_error().into())
         } else {
             assert_eq!(mmap as *mut u8, self.mmap);
-            Ok(())
+            let result = libc::madvise(mmap, self.capacity as libc::size_t, libc::MADV_RANDOM);
+            if result != 0 {
+                Err(io::Error::last_os_error().into())
+            } else {
+                Ok(())
+            }
         }
     }
 

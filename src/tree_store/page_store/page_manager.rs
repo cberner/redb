@@ -5,7 +5,7 @@ use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
-use crate::tree_store::page_store::utils::get_page_size;
+use crate::tree_store::page_store::utils::{get_page_size, is_page_aligned};
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
 use crate::tree_store::PageNumber;
 use crate::Error;
@@ -739,6 +739,8 @@ pub(crate) struct TransactionalMemory {
     region_header_with_padding_size: usize,
     db_header_size: usize,
     dynamic_growth: bool,
+    #[allow(dead_code)]
+    pages_are_os_page_aligned: bool,
 }
 
 impl TransactionalMemory {
@@ -911,6 +913,7 @@ impl TransactionalMemory {
             region_header_with_padding_size: region_header_size,
             db_header_size: layout.superheader_bytes(),
             dynamic_growth,
+            pages_are_os_page_aligned: is_page_aligned(page_size.try_into().unwrap()),
         })
     }
 
@@ -1573,10 +1576,29 @@ impl TransactionalMemory {
             self.region_header_with_padding_size,
             self.page_size,
         );
+
         // Safety:
         // The address range we're returning was just allocated, so no other references exist
         let mem = unsafe { self.mmap.get_memory_mut(address_range) };
         debug_assert!(mem.len() >= allocation_size);
+
+        #[cfg(unix)]
+        {
+            let len = mem.len();
+            // If this is a large page, hint that it should be paged in
+            if self.pages_are_os_page_aligned && len > self.page_size {
+                let result = unsafe {
+                    libc::madvise(
+                        mem.as_mut_ptr() as *mut libc::c_void,
+                        len as libc::size_t,
+                        libc::MADV_WILLNEED,
+                    )
+                };
+                if result != 0 {
+                    return Err(io::Error::last_os_error().into());
+                }
+            }
+        }
 
         Ok(PageMut {
             mem,
