@@ -68,7 +68,7 @@ database file.
 
 ## Database super-header
 
-The database super-header starts with 512 bytes of fixed size header and is followed by the region tracker which is sized based on
+The database super-header starts with 512 bytes of fixed-size header and is followed by the region tracker which is sized based on
 the maximum database size. The super-header's length is rounded up to the next full page, so that the regions are page aligned.
 
 ### Database header (64 bytes)
@@ -83,7 +83,6 @@ controls which transaction pointer is the primary.
 * 4 bytes: page size
 * 4 bytes: region tracker state length
 * 8 bytes: database max size
-* *Definition of region:*
 * 4 bytes: region header pages
 * 4 bytes: region max data pages
 * 24 bytes: padding to 64 bytes
@@ -186,8 +185,9 @@ the leaf layer.
 * n bytes: the allocator state
 
 Each region consists of a header containing metadata -- primarily the allocation state of the region's pages -- and a
-data section containing pages. Pages have a base size, which defaults to the OS page size, and are variably sized in
-power of 2 multiples of the base size. The format of pages is described in the [following section](#b-tree-pages)
+data section containing pages. Pages have a base size, which defaults to the OS page size, and are
+variably sized in higher orders in power of 2 multiples of the base size. The format of pages is
+described in the [following section](#b-tree-pages)
 
 ```
 <-------------------------------------------- 8 bytes ------------------------------------------->
@@ -297,6 +297,8 @@ Allocated pages may be of two types: b-tree branch pages, or b-tree leaf pages. 
 
 # Commit strategies
 
+All redb transactions are atomic, and use one of the following commit strategies.
+
 ## Non-durable commits
 redb supports "non-durable" commits, meaning that there is no guarantee of durability. However, in the event of a crash
 the database is still guaranteed to be consistent, and will return to either the last non-durable commit or the last
@@ -354,6 +356,23 @@ To do this they need to:
 With complete control over the workload, or read access to the database file (3) is possible, since XXH3 is not collision resistant.
 However, it requires the attacker to have knowledge of the database contents, because the input to the checksum includes
 many other values (all the other keys in the b-tree root, along with their child node numbers)
+
+# MVCC (multi-version concurrency control)
+
+redb uses MVCC to isolation transactions from one another. This is implemented on top of the copy-on-write
+b-tree datastructure which underlies most of redb. Read transactions make a private copy of the root
+of the b-tree, and are registered in the database so that no pages that root references are freed.
+When a write transaction frees a page it is pushed into a queue, and only reused after all read transactions
+that could reference it have completed.
+
+## Savepoints
+
+Savepoints and rollback are implemented on the same MVCC structures. When a savepoint is created it
+registers as a read transaction to preserve a snapshot of the database. Additionally, it saves a copy
+of the page allocator state -- this is about 64kB per 1GB of values (assuming 4kb pages). To rollback
+the database to a savepoint the root of the b-tree is restored, and the snapshot of the page allocator
+is diff'ed against the currently allocated pages to determine which have been allocated since the savepoint
+was created. These pages are then queued to be freed, completing the rollback.
 
 # Assumptions about underlying media
 redb is designed to be safe even in the event of power failure or on poorly behaved media.
