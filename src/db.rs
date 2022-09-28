@@ -18,7 +18,7 @@ use std::sync::Mutex;
 
 use crate::multimap_table::parse_subtree_roots;
 #[cfg(feature = "logging")]
-use log::info;
+use log::{info, warn};
 
 pub(crate) type TransactionId = u64;
 type AtomicTransactionId = AtomicU64;
@@ -295,9 +295,11 @@ impl Database {
         write_strategy: Option<WriteStrategy>,
     ) -> Result<Self> {
         #[cfg(feature = "logging")]
+        let file_path = format!("{:?}", &file);
+        #[cfg(feature = "logging")]
         info!(
             "Opening database {:?} with max size {}",
-            &file, max_capacity
+            &file_path, max_capacity
         );
         let mut mem = TransactionalMemory::new(
             file,
@@ -308,6 +310,9 @@ impl Database {
             write_strategy,
         )?;
         if mem.needs_repair()? {
+            #[cfg(feature = "logging")]
+            warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
+
             if mem.needs_checksum_verification()? && !Self::verify_primary_checksums(&mem) {
                 mem.repair_primary_corrupted();
                 assert!(Self::verify_primary_checksums(&mem));
