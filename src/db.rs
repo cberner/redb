@@ -441,6 +441,7 @@ impl Database {
 
     /// Creates a snapshot of the current database state, which can be used to rollback the database
     pub fn savepoint(&self) -> Result<Savepoint> {
+        let mut valid_savepoints_guard = self.valid_savepoints.lock().unwrap();
         // Hold write lock to ensure we get a consistent snapshot
         let guard = self.live_write_transaction.lock().unwrap();
         assert!(guard.is_none());
@@ -454,10 +455,7 @@ impl Database {
         let root = self.mem.get_data_root();
         let freed_root = self.mem.get_freed_root();
         let savepoint = Savepoint::new(self, id, root, freed_root, regional_allocators);
-        self.valid_savepoints
-            .lock()
-            .unwrap()
-            .insert(savepoint.get_id());
+        valid_savepoints_guard.insert(savepoint.get_id());
         drop(guard);
 
         Ok(savepoint)
