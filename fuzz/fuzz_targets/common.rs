@@ -1,5 +1,6 @@
 use std::cmp::max;
 use std::mem::size_of;
+use std::sync::{Condvar, Mutex};
 use arbitrary::Unstructured;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use rand_distr::{Binomial, Distribution};
@@ -13,7 +14,7 @@ const MAX_DB_SIZE: usize = 2usize.pow(40);
 const KEY_SPACE: u64 = 1_000_000;
 pub const MAX_SAVEPOINTS: usize = 3;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct BoundedU64<const N: u64> {
     pub value: u64
 }
@@ -31,7 +32,7 @@ impl<const N: u64> Arbitrary<'_> for BoundedU64<N> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct BinomialDifferenceBoundedUSize<const N: usize> {
     pub value: usize
 }
@@ -54,7 +55,7 @@ impl<const N: usize> Arbitrary<'_> for BinomialDifferenceBoundedUSize<N> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct BoundedUSize<const N: usize> {
     pub value: usize
 }
@@ -72,7 +73,7 @@ impl<const N: usize> Arbitrary<'_> for BoundedUSize<N> {
     }
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 pub(crate) enum FuzzOperation {
     Get {
         key: BoundedU64<KEY_SPACE>,
@@ -101,7 +102,7 @@ pub(crate) enum FuzzOperation {
     },
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 pub(crate) struct FuzzTransaction {
     pub ops: Vec<FuzzOperation>,
     pub durable: bool,
@@ -110,12 +111,13 @@ pub(crate) struct FuzzTransaction {
     pub restore_savepoint: BoundedUSize<MAX_SAVEPOINTS>,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 pub(crate) struct FuzzConfig {
     pub use_checksums: bool,
     pub multimap_table: bool,
     pub max_db_size: BoundedUSize<MAX_DB_SIZE>,
-    pub transactions: Vec<FuzzTransaction>,
+    pub thread0_transactions: Vec<FuzzTransaction>,
+    pub thread1_transactions: Vec<FuzzTransaction>,
 }
 
 impl FuzzConfig {
@@ -127,7 +129,9 @@ impl FuzzConfig {
         let mut consecutive_nondurable_commits = 0;
         let mut max_consecutive_nondurable_commits = 0;
         let mut savepoint_restores = 0;
-        for transaction in self.transactions.iter() {
+        let mut transactions = self.thread0_transactions.clone();
+        transactions.extend(self.thread1_transactions.iter().cloned());
+        for transaction in transactions.iter() {
             if transaction.restore_savepoint.value > 0 {
                 savepoint_restores += 1;
             }
@@ -153,5 +157,39 @@ impl FuzzConfig {
         let expected_size = (total_value_bytes + (size_of::<u64>() * 4) * total_entries) * (1 + max_consecutive_nondurable_commits) + approximate_overhead;
         // If we're within a factor of 10 of the max db size, then assume an OOM is plausible
         expected_size * 10 > self.max_db_size.value
+    }
+}
+
+pub(crate) struct CustomBarrier {
+    mutex: Mutex<(u64, u64)>,
+    condition: Condvar
+}
+
+impl CustomBarrier {
+    pub(crate) fn new(waiters: u64) -> Self {
+        Self {
+            mutex: Mutex::new((0, waiters)),
+            condition: Default::default()
+        }
+    }
+
+    pub(crate) fn decrement_waiters(&self) {
+        let mut guard = self.mutex.lock().unwrap();
+        guard.1 -= 1;
+        if guard.0 == guard.1 {
+            guard.0 = 0;
+            self.condition.notify_all()
+        }
+    }
+
+    pub(crate) fn wait(&self) {
+        let mut guard = self.mutex.lock().unwrap();
+        guard.0 += 1;
+        if guard.0 == guard.1 {
+            guard.0 = 0;
+            self.condition.notify_all();
+        } else {
+            drop(self.condition.wait(guard).unwrap());
+        }
     }
 }

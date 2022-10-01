@@ -56,7 +56,7 @@ NIGHTLY := "nightly-2022-09-10"
 .PHONY: fuzz
 fuzz: pre
 > rustup toolchain install $(NIGHTLY)
-> cargo +$(NIGHTLY) fuzz run fuzz_redb -- -max_len=1000000
+> cargo +$(NIGHTLY) fuzz run fuzz_redb -- -max_len=1000000 -timeout=60
 
 RUST_SYSROOT := $(shell cargo +$(NIGHTLY) rustc -- --print sysroot 2>/dev/null)
 LLVM_COV := $(shell find $(RUST_SYSROOT) -name llvm-cov)
