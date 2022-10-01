@@ -6,6 +6,8 @@ use redb::{
     ReadableTable, TableDefinition, WriteStrategy,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use tempfile::NamedTempFile;
 
 mod common;
@@ -15,15 +17,28 @@ const TABLE_DEF: TableDefinition<u64, [u8]> = TableDefinition::new("fuzz_table")
 const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, [u8]> =
     MultimapTableDefinition::new("fuzz_multimap_table");
 
-fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb::Error> {
-    let mut reference = BTreeMap::new();
+fn exec_table(db: Arc<Database>, transactions: &[FuzzTransaction], reference: Arc<Mutex<BTreeMap<u64, usize>>>, barrier: Arc<CustomBarrier>, oom_plausible: bool) {
+    let result = exec_table_inner(db, &transactions, reference, barrier.clone());
+    if let Err(err) = result {
+        assert!(matches!(err, Error::OutOfSpace) && oom_plausible);
+    }
+    barrier.decrement_waiters();
+}
+
+fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], reference: Arc<Mutex<BTreeMap<u64, usize>>>, barrier: Arc<CustomBarrier>) -> Result<(), redb::Error> {
     let mut savepoints = vec![];
     let mut reference_savepoints = vec![];
 
     for transaction in transactions.iter() {
+        barrier.wait();
+
         if transaction.create_savepoint {
-            reference_savepoints.push(reference.clone());
             savepoints.push(db.savepoint()?);
+            // XXX: potentially there's race here. We should hold the lock before savepoint(),
+            // but that could deadlock, because savepoint() may block
+            let guard = reference.lock().unwrap();
+            reference_savepoints.push(guard.clone());
+            drop(guard);
             if savepoints.len() > MAX_SAVEPOINTS {
                 savepoints.remove(0);
                 reference_savepoints.remove(0);
@@ -33,15 +48,23 @@ fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb
         if restore_to > 0 && restore_to <= savepoints.len() {
             let index = savepoints.len() - restore_to;
             let result = db.restore_savepoint(&savepoints[index]);
+            // XXX: potentially there's race here. We should hold the lock before restore_savepoint(),
+            // but that could deadlock, because restore_savepoint() may block
+            let mut guard = reference.lock().unwrap();
             if result.is_ok() {
-                reference = reference_savepoints[index].clone();
+                *guard = reference_savepoints[index].clone();
             }
+            drop(guard);
             if result.is_err() && !matches!(result, Err(Error::InvalidSavepoint)) {
                 return result;
             }
         }
-        let reference_backup = reference.clone();
         let mut txn = db.begin_write().unwrap();
+        // XXX: potentially there's race here. We should hold the lock before begin_write(),
+        // but that could deadlock, because begin_write() may block
+        let guard = reference.lock().unwrap();
+        let mut local_reference = guard.clone();
+        drop(guard);
         // We're not trying to test crash safety, so don't bother with durability
         if !transaction.durable {
             txn.set_durability(Durability::None);
@@ -52,7 +75,7 @@ fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb
                 match op {
                     FuzzOperation::Get { key } => {
                         let key = key.value;
-                        match reference.get(&key) {
+                        match local_reference.get(&key) {
                             Some(reference_len) => {
                                 let value = table.get(&key).unwrap().unwrap();
                                 assert_eq!(value.len(), *reference_len);
@@ -67,18 +90,18 @@ fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb
                         let value_size = value_size.value as usize;
                         let value = vec![0xFF; value_size];
                         table.insert(&key, &value)?;
-                        reference.insert(key, value_size);
+                        local_reference.insert(key, value_size);
                     }
                     FuzzOperation::InsertReserve { key, value_size } => {
                         let key = key.value;
                         let value_size = value_size.value as usize;
                         let mut value = table.insert_reserve(&key, value_size)?;
                         value.as_mut().fill(0xFF);
-                        reference.insert(key, value_size);
+                        local_reference.insert(key, value_size);
                     }
                     FuzzOperation::Remove { key } | FuzzOperation::RemoveOne { key, .. } => {
                         let key = key.value;
-                        match reference.remove(&key) {
+                        match local_reference.remove(&key) {
                             Some(reference_len) => {
                                 let value = table.remove(&key)?;
                                 assert_eq!(value.unwrap().to_value().len(), reference_len);
@@ -89,7 +112,7 @@ fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb
                         }
                     }
                     FuzzOperation::Len {} => {
-                        assert_eq!(reference.len(), table.len().unwrap());
+                        assert_eq!(local_reference.len(), table.len().unwrap());
                     }
                     FuzzOperation::Range {
                         start_key,
@@ -100,9 +123,9 @@ fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb
                         let end = start + len.value;
                         let mut reference_iter: Box<dyn Iterator<Item = (&u64, &usize)>> =
                             if *reversed {
-                                Box::new(reference.range(start..end).rev())
+                                Box::new(local_reference.range(start..end).rev())
                             } else {
-                                Box::new(reference.range(start..end))
+                                Box::new(local_reference.range(start..end))
                             };
                         let mut iter = if *reversed {
                             table.range(start..end).unwrap().rev()
@@ -120,10 +143,11 @@ fn exec_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb
             }
         }
         if transaction.commit {
+            let mut guard = reference.lock().unwrap();
             txn.commit()?;
+            *guard = local_reference;
         } else {
             txn.abort().unwrap();
-            reference = reference_backup;
         }
     }
 
@@ -142,15 +166,28 @@ fn assert_multimap_value_eq(
     assert!(iter.next().is_none());
 }
 
-fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result<(), redb::Error> {
-    let mut reference: BTreeMap<u64, BTreeSet<usize>> = BTreeMap::new();
+fn exec_multimap_table(db: Arc<Database>, transactions: &[FuzzTransaction], reference: Arc<Mutex<BTreeMap<u64, BTreeSet<usize>>>>, barrier: Arc<CustomBarrier>, oom_plausible: bool) {
+    let result = exec_multimap_table_inner(db, &transactions, reference, barrier.clone());
+    if let Err(err) = result {
+        assert!(matches!(err, Error::OutOfSpace) && oom_plausible);
+    }
+    barrier.decrement_waiters();
+}
+
+fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], reference: Arc<Mutex<BTreeMap<u64, BTreeSet<usize>>>>, barrier: Arc<CustomBarrier>) -> Result<(), redb::Error> {
     let mut savepoints = vec![];
     let mut reference_savepoints = vec![];
 
     for transaction in transactions.iter() {
+        barrier.wait();
+
         if transaction.create_savepoint {
-            reference_savepoints.push(reference.clone());
             savepoints.push(db.savepoint()?);
+            // XXX: potentially there's race here. We should hold the lock before savepoint(),
+            // but that could deadlock, because savepoint() may block
+            let guard = reference.lock().unwrap();
+            reference_savepoints.push(guard.clone());
+            drop(guard);
             if savepoints.len() > MAX_SAVEPOINTS {
                 savepoints.remove(0);
                 reference_savepoints.remove(0);
@@ -160,15 +197,23 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
         if restore_to > 0 && restore_to <= savepoints.len() {
             let index = savepoints.len() - restore_to;
             let result = db.restore_savepoint(&savepoints[index]);
+            // XXX: potentially there's race here. We should hold the lock before restore_savepoint(),
+            // but that could deadlock, because restore_savepoint() may block
+            let mut guard = reference.lock().unwrap();
             if result.is_ok() {
-                reference = reference_savepoints[index].clone();
+                *guard = reference_savepoints[index].clone();
             }
+            drop(guard);
             if result.is_err() && !matches!(result, Err(Error::InvalidSavepoint)) {
                 return result;
             }
         }
-        let reference_backup = reference.clone();
         let mut txn = db.begin_write().unwrap();
+        // XXX: potentially there's race here. We should hold the lock before begin_write(),
+        // but that could deadlock, because begin_write() may block
+        let guard = reference.lock().unwrap();
+        let mut local_reference = guard.clone();
+        drop(guard);
         // We're not trying to test crash safety, so don't bother with durability
         if !transaction.durable {
             txn.set_durability(Durability::None);
@@ -180,7 +225,7 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
                     FuzzOperation::Get { key } => {
                         let key = key.value;
                         let iter = table.get(&key).unwrap();
-                        let entry = reference.get(&key);
+                        let entry = local_reference.get(&key);
                         assert_multimap_value_eq(iter, entry);
                     }
                     FuzzOperation::Insert { key, value_size } => {
@@ -188,14 +233,14 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
                         let value_size = value_size.value as usize;
                         let value = vec![0xFFu8; value_size];
                         table.insert(&key, &value)?;
-                        reference.entry(key).or_default().insert(value_size);
+                        local_reference.entry(key).or_default().insert(value_size);
                     }
                     FuzzOperation::InsertReserve { .. } => {
                         // no-op. Multimap tables don't support insert_reserve
                     }
                     FuzzOperation::Remove { key } => {
                         let key = key.value;
-                        let entry = reference.remove(&key);
+                        let entry = local_reference.remove(&key);
                         let iter = table.remove_all(&key)?;
                         assert_multimap_value_eq(iter, entry.as_ref());
                     }
@@ -204,16 +249,16 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
                         let value_size = value_size.value as usize;
                         let value = vec![0xFFu8; value_size];
                         let reference_existed =
-                            reference.entry(key).or_default().remove(&value_size);
-                        if reference.entry(key).or_default().is_empty() {
-                            reference.remove(&key);
+                            local_reference.entry(key).or_default().remove(&value_size);
+                        if local_reference.entry(key).or_default().is_empty() {
+                            local_reference.remove(&key);
                         }
                         let existed = table.remove(&key, &value)?;
                         assert_eq!(reference_existed, existed);
                     }
                     FuzzOperation::Len {} => {
                         let mut reference_len = 0;
-                        for v in reference.values() {
+                        for v in local_reference.values() {
                             reference_len += v.len();
                         }
                         assert_eq!(reference_len, table.len().unwrap());
@@ -227,9 +272,9 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
                         let end = start + len.value;
                         let mut reference_iter: Box<dyn Iterator<Item = (&u64, &BTreeSet<usize>)>> =
                             if *reversed {
-                                Box::new(reference.range(start..end).rev())
+                                Box::new(local_reference.range(start..end).rev())
                             } else {
-                                Box::new(reference.range(start..end))
+                                Box::new(local_reference.range(start..end))
                             };
                         let mut iter = if *reversed {
                             table.range(&start..&end).unwrap().rev()
@@ -247,10 +292,11 @@ fn exec_multimap_table(db: Database, transactions: &[FuzzTransaction]) -> Result
             }
         }
         if transaction.commit {
+            let mut guard = reference.lock().unwrap();
             txn.commit()?;
+            *guard = local_reference;
         } else {
             txn.abort().unwrap();
-            reference = reference_backup;
         }
     }
 
@@ -273,15 +319,40 @@ fuzz_target!(|config: FuzzConfig| {
     if matches!(db, Err(Error::OutOfSpace)) {
         return;
     }
-    let db = db.unwrap();
+    let db = Arc::new(db.unwrap());
 
-    let result = if config.multimap_table {
-        exec_multimap_table(db, &config.transactions)
+    let barrier = Arc::new(CustomBarrier::new(2));
+    let oom_plausible = config.oom_plausible();
+    if config.multimap_table {
+        let reference = Arc::new(Mutex::new(Default::default()));
+        let reference2 = reference.clone();
+        let barrier2 = barrier.clone();
+        let db2 = db.clone();
+        let transactions = config.thread0_transactions.clone();
+        let t0 = thread::spawn(move || {
+            exec_multimap_table(db, &transactions, reference, barrier, oom_plausible);
+        });
+        let transactions = config.thread1_transactions.clone();
+        let t1 = thread::spawn(move || {
+            exec_multimap_table(db2, &transactions, reference2, barrier2, oom_plausible);
+        });
+        assert!(t0.join().is_ok());
+        assert!(t1.join().is_ok());
     } else {
-        exec_table(db, &config.transactions)
+        let reference = Arc::new(Mutex::new(Default::default()));
+        let reference2 = reference.clone();
+        let barrier2 = barrier.clone();
+        let db2 = db.clone();
+        let transactions = config.thread0_transactions.clone();
+        let t0 = thread::spawn(move || {
+            exec_table(db, &transactions, reference, barrier, oom_plausible);
+        });
+        let transactions = config.thread1_transactions.clone();
+        let t1 = thread::spawn(move || {
+            exec_table(db2, &transactions, reference2, barrier2, oom_plausible);
+        });
+        assert!(t0.join().is_ok());
+        assert!(t1.join().is_ok());
     };
 
-    if let Err(err) = result {
-        assert!(matches!(err, Error::OutOfSpace) && config.oom_plausible());
-    }
 });
