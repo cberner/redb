@@ -44,8 +44,7 @@ jobs:
       - name: Install packages
         if: startsWith(matrix.os, 'macos')
         run: |
-          brew install python3 make
-          echo "/usr/local/opt/make/libexec/gnubin" >> $GITHUB_PATH
+          brew install python3
 
       - name: Install packages
         uses: actions/setup-python@v4
