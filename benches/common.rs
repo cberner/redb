@@ -1,6 +1,8 @@
 use redb::ReadableTable;
 use redb::TableDefinition;
 use rocksdb::{Direction, IteratorMode, TransactionDB, TransactionOptions, WriteOptions};
+use sanakirja::btree::page_unsized;
+use sanakirja::{Commit, RootDb};
 use std::fs;
 use std::fs::File;
 use std::path::Path;
@@ -513,6 +515,146 @@ pub struct RocksdbBenchIterator<'a> {
 
 impl BenchIterator for RocksdbBenchIterator<'_> {
     type Output<'out> = Box<[u8]> where Self: 'out;
+
+    fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
+        self.iter.next().map(|x| {
+            let x = x.unwrap();
+            (x.0, x.1)
+        })
+    }
+}
+
+pub struct SanakirjaBenchDatabase<'a> {
+    db: &'a sanakirja::Env,
+}
+
+impl<'a> SanakirjaBenchDatabase<'a> {
+    pub fn new(db: &'a sanakirja::Env) -> Self {
+        let mut txn = sanakirja::Env::mut_txn_begin(db).unwrap();
+        let table =
+            sanakirja::btree::create_db_::<_, [u8], [u8], page_unsized::Page<[u8], [u8]>>(&mut txn)
+                .unwrap();
+        txn.set_root(0, table.db);
+        txn.commit().unwrap();
+        Self { db }
+    }
+}
+
+impl<'a> BenchDatabase for SanakirjaBenchDatabase<'a> {
+    type W<'db> = SanakirjaBenchWriteTransaction<'db> where Self: 'db;
+    type R<'db> = SanakirjaBenchReadTransaction<'db> where Self: 'db;
+
+    fn db_type_name() -> &'static str {
+        "sanakirja"
+    }
+
+    fn write_transaction(&mut self) -> Self::W<'_> {
+        let txn = sanakirja::Env::mut_txn_begin(self.db).unwrap();
+        SanakirjaBenchWriteTransaction { txn }
+    }
+
+    fn read_transaction(&self) -> Self::R<'_> {
+        let txn = sanakirja::Env::txn_begin(self.db).unwrap();
+        SanakirjaBenchReadTransaction { txn }
+    }
+}
+
+pub struct SanakirjaBenchWriteTransaction<'db> {
+    txn: sanakirja::MutTxn<&'db sanakirja::Env, ()>,
+}
+
+impl<'db> BenchWriteTransaction for SanakirjaBenchWriteTransaction<'db> {
+    type W<'txn> = SanakirjaBenchInserter<'db, 'txn> where Self: 'txn;
+
+    fn get_inserter(&mut self) -> Self::W<'_> {
+        let table = self.txn.root_db(0).unwrap();
+        SanakirjaBenchInserter {
+            txn: &mut self.txn,
+            table,
+        }
+    }
+
+    fn commit(self) -> Result<(), ()> {
+        self.txn.commit().map_err(|_| ())
+    }
+}
+
+pub struct SanakirjaBenchInserter<'db, 'txn> {
+    txn: &'txn mut sanakirja::MutTxn<&'db sanakirja::Env, ()>,
+    #[allow(clippy::type_complexity)]
+    table: sanakirja::btree::Db_<[u8], [u8], page_unsized::Page<[u8], [u8]>>,
+}
+
+impl BenchInserter for SanakirjaBenchInserter<'_, '_> {
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
+        let result = sanakirja::btree::put(self.txn, &mut self.table, key, value)
+            .map_err(|_| ())
+            .map(|_| ());
+        self.txn.set_root(0, self.table.db);
+        result
+    }
+
+    fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
+        let result = sanakirja::btree::del(self.txn, &mut self.table, key, None)
+            .map_err(|_| ())
+            .map(|_| ());
+        self.txn.set_root(0, self.table.db);
+        result
+    }
+}
+
+pub struct SanakirjaBenchReadTransaction<'db> {
+    txn: sanakirja::Txn<&'db sanakirja::Env>,
+}
+
+impl<'db> BenchReadTransaction for SanakirjaBenchReadTransaction<'db> {
+    type T<'txn> = SanakirjaBenchReader<'db, 'txn> where Self: 'txn;
+
+    fn get_reader(&self) -> Self::T<'_> {
+        let table = self.txn.root_db(0).unwrap();
+        SanakirjaBenchReader {
+            txn: &self.txn,
+            table,
+        }
+    }
+}
+
+pub struct SanakirjaBenchReader<'db, 'txn> {
+    txn: &'txn sanakirja::Txn<&'db sanakirja::Env>,
+    #[allow(clippy::type_complexity)]
+    table: sanakirja::btree::Db_<[u8], [u8], page_unsized::Page<[u8], [u8]>>,
+}
+
+impl<'db, 'txn> BenchReader for SanakirjaBenchReader<'db, 'txn> {
+    type Output<'out> = &'out [u8] where Self: 'out;
+    type Iterator<'out> = SanakirjaBenchIterator<'db, 'txn> where Self: 'out;
+
+    fn get(&self, key: &[u8]) -> Option<&[u8]> {
+        sanakirja::btree::get(self.txn, &self.table, key, None)
+            .unwrap()
+            .map(|(_, v)| v)
+    }
+
+    fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
+        let iter = sanakirja::btree::iter(self.txn, &self.table, Some((key, None))).unwrap();
+
+        SanakirjaBenchIterator { iter }
+    }
+}
+
+pub struct SanakirjaBenchIterator<'db, 'txn> {
+    #[allow(clippy::type_complexity)]
+    iter: sanakirja::btree::Iter<
+        'txn,
+        sanakirja::Txn<&'db sanakirja::Env>,
+        [u8],
+        [u8],
+        page_unsized::Page<[u8], [u8]>,
+    >,
+}
+
+impl<'db, 'txn> BenchIterator for SanakirjaBenchIterator<'db, 'txn> {
+    type Output<'out> = &'txn [u8] where Self: 'out;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
         self.iter.next().map(|x| {

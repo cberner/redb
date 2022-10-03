@@ -26,6 +26,7 @@ pyo3 = {version = "0.17.1", features=["extension-module", "abi3-py37"], optional
 fastrand = "1.8.0"
 rand = "0.8"
 lmdb-rkv = "0.14.0"
+sanakirja = "1.2.16"
 tempfile = "3.2.0"
 sled = "0.34.6"
 rocksdb = "0.19.0"
