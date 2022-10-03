@@ -932,6 +932,25 @@ fn regression18() {
 }
 
 #[test]
+fn change_invalidate_savepoint() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024 * 1024;
+    let db = unsafe {
+        Database::builder()
+            .set_write_strategy(WriteStrategy::Checksum)
+            .create(tmpfile.path(), db_size)
+            .unwrap()
+    };
+    let savepoint = db.savepoint().unwrap();
+    db.set_write_strategy(WriteStrategy::TwoPhase).unwrap();
+    assert!(matches!(
+        db.restore_savepoint(&savepoint),
+        Err(Error::InvalidSavepoint)
+    ));
+}
+
+#[test]
 fn twophase_open() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
