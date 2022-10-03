@@ -421,9 +421,14 @@ impl Database {
 
     /// Changes the write strategy of the database for future [`WriteTransaction`]s.
     ///
+    /// Calling this method will invalidate all existing [`Savepoint`]s.
+    ///
     /// Note: Changing to the [`WriteStrategy::Checksum`] strategy can take a long time, as checksums
     /// will need to be calculated for every entry in the database
     pub fn set_write_strategy(&self, strategy: WriteStrategy) -> Result {
+        let mut valid_savepoints = self.valid_savepoints.lock().unwrap();
+        valid_savepoints.clear();
+
         let guard = self.live_write_transaction.lock().unwrap();
         assert!(guard.is_none());
         // TODO: implement switching to checksum strategy
@@ -435,6 +440,8 @@ impl Database {
         self.mem
             .commit(root_page, freed_root, id, false, Some(strategy.into()))?;
         drop(guard);
+
+        drop(valid_savepoints);
 
         Ok(())
     }
@@ -462,9 +469,6 @@ impl Database {
     }
 
     pub fn restore_savepoint(&self, savepoint: &Savepoint) -> Result {
-        // TODO: ensure that restoring a savepoint can't undo a database upgrade or change in WriteStrategy
-        // right now it could restore pages without checksums after the database had been changed to use
-        // WriteStrategy::Checksum, which could lead to data corruption
         let mut guard = self.valid_savepoints.lock().unwrap();
         if !guard.contains(&savepoint.get_id()) {
             return Err(Error::InvalidSavepoint);

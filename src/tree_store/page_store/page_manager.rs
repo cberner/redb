@@ -1286,6 +1286,15 @@ impl TransactionalMemory {
         }
     }
 
+    pub(crate) fn get_version(&self) -> u8 {
+        let metadata = self.lock_metadata();
+        if self.read_from_secondary.load(Ordering::Acquire) {
+            metadata.secondary_slot().get_version()
+        } else {
+            metadata.primary_slot().get_version()
+        }
+    }
+
     pub(crate) fn get_data_root(&self) -> Option<(PageNumber, Checksum)> {
         let metadata = self.lock_metadata();
         if self.read_from_secondary.load(Ordering::Acquire) {

@@ -152,6 +152,14 @@ impl<'db> WriteTransaction<'db> {
         );
         *live_write_transaction = Some(transaction_id);
 
+        // Restoring a savepoint that reverted a file format or checksum type change could corrupt
+        // the database
+        assert_eq!(db.get_memory().get_version(), savepoint.get_version());
+        assert_eq!(
+            db.get_memory().checksum_type(),
+            savepoint.get_checksum_type()
+        );
+
         let freed_pages = db
             .get_memory()
             .pages_allocated_since_raw_state(savepoint.get_regional_allocator_states());
