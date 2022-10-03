@@ -323,7 +323,6 @@ impl<'db> WriteTransaction<'db> {
     }
 
     /// List all the tables
-    // TODO: should return an iterator of &str, once GATs are available
     pub fn list_tables(&self) -> Result<impl Iterator<Item = String> + '_> {
         self.table_tree
             .borrow()
@@ -332,7 +331,6 @@ impl<'db> WriteTransaction<'db> {
     }
 
     /// List all the multimap tables
-    // TODO: should return an iterator of &str, once GATs are available
     pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String> + '_> {
         self.table_tree
             .borrow()
