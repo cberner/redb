@@ -195,17 +195,15 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> RangeIter<'a, K, 
     fn new(inner: BtreeRangeIter<'a, K, V>) -> Self {
         Self { inner }
     }
+}
 
-    // TODO: Simplify this when GATs are stable
-    #[allow(clippy::type_complexity)]
-    // TODO: implement Iter when GATs are stable
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(
-        &mut self,
-    ) -> Option<(
-        <<K as RedbValue>::View as WithLifetime>::Out,
-        <<V as RedbValue>::View as WithLifetime>::Out,
-    )> {
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for RangeIter<'a, K, V> {
+    type Item = (
+        <<K as RedbValue>::View as WithLifetime<'a>>::Out,
+        <<V as RedbValue>::View as WithLifetime<'a>>::Out,
+    );
+
+    fn next(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next() {
             let key = K::from_bytes(entry.key());
             let value = V::from_bytes(entry.value());
@@ -214,9 +212,19 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> RangeIter<'a, K, 
             None
         }
     }
+}
 
-    pub fn rev(self) -> Self {
-        Self::new(self.inner.reverse())
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterator
+    for RangeIter<'a, K, V>
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if let Some(entry) = self.inner.next_back() {
+            let key = K::from_bytes(entry.key());
+            let value = V::from_bytes(entry.value());
+            Some((key, value))
+        } else {
+            None
+        }
     }
 }
 

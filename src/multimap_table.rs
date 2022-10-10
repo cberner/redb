@@ -1,7 +1,7 @@
 use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, LeafKeyIter,
-    Page, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
+    AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, EntryAccessor,
+    LeafAccessor, LeafKeyIter, Page, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
 };
 use crate::types::{
     AsBytesWithLifetime, OwnedLifetime, RedbKey, RedbValue, RefAsBytesLifetime, WithLifetime,
@@ -195,15 +195,15 @@ impl DynamicCollection {
     }
 }
 
-enum ValueIterState<'a, V: RedbKey + ?Sized + 'a> {
-    Subtree(BtreeRangeIter<'a, V, ()>),
+enum ValueIterState<'a> {
+    Subtree(Box<dyn DoubleEndedIterator<Item = EntryAccessor<'a>> + 'a>),
     InlineLeaf(LeafKeyIter),
 }
 
-impl<'a, V: RedbKey + ?Sized + 'a> ValueIterState<'a, V> {
+impl<'a> ValueIterState<'a> {
     fn reverse(self) -> Self {
         match self {
-            ValueIterState::Subtree(iter) => ValueIterState::Subtree(iter.reverse()),
+            ValueIterState::Subtree(iter) => ValueIterState::Subtree(Box::new(iter.rev())),
             ValueIterState::InlineLeaf(iter) => ValueIterState::InlineLeaf(iter.reverse()),
         }
     }
@@ -211,19 +211,21 @@ impl<'a, V: RedbKey + ?Sized + 'a> ValueIterState<'a, V> {
 
 #[doc(hidden)]
 pub struct MultimapValueIter<'a, V: RedbKey + ?Sized + 'a> {
-    inner: ValueIterState<'a, V>,
+    inner: ValueIterState<'a>,
     freed_pages: Option<Rc<RefCell<Vec<PageNumber>>>>,
     free_on_drop: Vec<PageNumber>,
     mem: Option<&'a TransactionalMemory>,
+    _value_type: PhantomData<V>,
 }
 
 impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
     fn new_subtree(inner: BtreeRangeIter<'a, V, ()>) -> Self {
         Self {
-            inner: ValueIterState::Subtree(inner),
+            inner: ValueIterState::Subtree(Box::new(inner)),
             freed_pages: None,
             free_on_drop: vec![],
             mem: None,
+            _value_type: Default::default(),
         }
     }
 
@@ -234,10 +236,11 @@ impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
         mem: &'a TransactionalMemory,
     ) -> Self {
         Self {
-            inner: ValueIterState::Subtree(inner),
+            inner: ValueIterState::Subtree(Box::new(inner)),
             freed_pages: Some(freed_pages),
             free_on_drop: pages,
             mem: Some(mem),
+            _value_type: Default::default(),
         }
     }
 
@@ -247,6 +250,7 @@ impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
             freed_pages: None,
             free_on_drop: vec![],
             mem: None,
+            _value_type: Default::default(),
         }
     }
 
@@ -296,16 +300,18 @@ impl<'a, V: RedbKey + ?Sized> Drop for MultimapValueIter<'a, V> {
 
 #[doc(hidden)]
 pub struct MultimapRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> {
-    inner: BtreeRangeIter<'a, K, DynamicCollection>,
+    inner: Box<dyn DoubleEndedIterator<Item = EntryAccessor<'a>> + 'a>,
     mem: &'a TransactionalMemory,
+    _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
 impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'a, K, V> {
     fn new(inner: BtreeRangeIter<'a, K, DynamicCollection>, mem: &'a TransactionalMemory) -> Self {
         Self {
-            inner,
+            inner: Box::new(inner),
             mem,
+            _key_type: Default::default(),
             _value_type: Default::default(),
         }
     }
@@ -330,8 +336,9 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'
 
     pub fn rev(self) -> Self {
         Self {
-            inner: self.inner.reverse(),
+            inner: Box::new(self.inner.rev()),
             mem: self.mem,
+            _key_type: Default::default(),
             _value_type: Default::default(),
         }
     }
