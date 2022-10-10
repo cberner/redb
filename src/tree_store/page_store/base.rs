@@ -127,6 +127,11 @@ impl<'a> PageImpl<'a> {
     pub(crate) fn into_memory(self) -> &'a [u8] {
         self.mem
     }
+
+    // Kind of hacky, but Page::memory() can't return the 'a lifetime, because then PageMut can't implement it
+    pub(crate) fn memory_full_lifetime(&self) -> &'a [u8] {
+        self.mem
+    }
 }
 
 impl<'a> Page for PageImpl<'a> {

@@ -187,11 +187,9 @@ impl<'db> WriteTransaction<'db> {
         };
         let mut freed_tree = BtreeMut::new(freed_root, db.get_memory(), freed_pages.clone());
         let mut to_remove = vec![];
-        let mut iter = freed_tree.range(..lookup_key)?;
-        while let Some(entry) = iter.next() {
+        for entry in freed_tree.range(..lookup_key)? {
             to_remove.push(FreedTableKey::from_bytes(entry.key()));
         }
-        drop(iter);
         for key in to_remove {
             // Safety: all references to the freed table above have already been dropped.
             unsafe { freed_tree.remove(&key)? };
@@ -447,8 +445,7 @@ impl<'db> WriteTransaction<'db> {
         };
 
         let mut to_remove = vec![];
-        let mut iter = self.freed_tree.range(..lookup_key)?;
-        while let Some(entry) = iter.next() {
+        for entry in self.freed_tree.range(..lookup_key)? {
             to_remove.push(FreedTableKey::from_bytes(entry.key()));
             let value = entry.value();
             let length: usize = u64::from_le_bytes(value[..size_of::<u64>()].try_into().unwrap())
@@ -464,7 +461,6 @@ impl<'db> WriteTransaction<'db> {
                 }
             }
         }
-        drop(iter);
 
         // Remove all the old transactions
         for key in to_remove {

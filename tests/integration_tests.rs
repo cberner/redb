@@ -1036,6 +1036,9 @@ fn range_query() {
         assert_eq!(i, value);
     }
     assert!(iter.next().is_none());
+
+    let total: u64 = table.range(1..=3).unwrap().map(|(_, v)| v).sum();
+    assert_eq!(total, 6);
 }
 
 #[test]
@@ -1066,13 +1069,13 @@ fn range_query_reversed() {
     let (key, _) = iter.next().unwrap();
     assert_eq!(3, key);
 
-    iter = iter.rev();
+    let mut iter = iter.rev();
     let (key, _) = iter.next().unwrap();
     assert_eq!(6, key);
     let (key, _) = iter.next().unwrap();
     assert_eq!(5, key);
 
-    iter = iter.rev();
+    let mut iter = iter.rev();
     let (key, _) = iter.next().unwrap();
     assert_eq!(4, key);
 

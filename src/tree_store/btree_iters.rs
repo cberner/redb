@@ -121,7 +121,7 @@ impl<'a> RangeIterState<'a> {
         }
     }
 
-    fn get_entry(&self) -> Option<EntryAccessor> {
+    fn get_entry(&self) -> Option<EntryAccessor<'a>> {
         match self {
             Leaf {
                 page,
@@ -129,7 +129,12 @@ impl<'a> RangeIterState<'a> {
                 fixed_value_size,
                 entry,
                 ..
-            } => LeafAccessor::new(page.memory(), *fixed_key_size, *fixed_value_size).entry(*entry),
+            } => LeafAccessor::new(
+                page.memory_full_lifetime(),
+                *fixed_key_size,
+                *fixed_value_size,
+            )
+            .entry(*entry),
             _ => None,
         }
     }
@@ -198,7 +203,6 @@ pub struct BtreeRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 
     right: Option<RangeIterState<'a>>, // Exclusive. The previous element returned
     include_left: bool,               // left is inclusive, instead of exclusive
     include_right: bool,              // right is inclusive, instead of exclusive
-    reversed: bool,
     manager: &'a TransactionalMemory,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -258,7 +262,6 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                 right,
                 include_left,
                 include_right,
-                reversed: false,
                 manager,
                 _key_type: Default::default(),
                 _value_type: Default::default(),
@@ -269,29 +272,20 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                 right: None,
                 include_left: false,
                 include_right: false,
-                reversed: false,
                 manager,
                 _key_type: Default::default(),
                 _value_type: Default::default(),
             }
         }
     }
+}
 
-    pub(crate) fn reverse(self) -> Self {
-        Self {
-            left: self.left,
-            right: self.right,
-            include_left: self.include_left,
-            include_right: self.include_right,
-            reversed: !self.reversed,
-            manager: self.manager,
-            _key_type: Default::default(),
-            _value_type: Default::default(),
-        }
-    }
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator
+    for BtreeRangeIter<'a, K, V>
+{
+    type Item = EntryAccessor<'a>;
 
-    // TODO: we need generic-associated-types to implement Iterator
-    pub fn next(&mut self) -> Option<EntryAccessor> {
+    fn next(&mut self) -> Option<Self::Item> {
         if let (
             Some(Leaf {
                 page: left_page,
@@ -314,70 +308,97 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
         }
 
         loop {
-            if !self.reversed {
-                if !self.include_left {
-                    self.left = self.left.take()?.next(self.reversed, self.manager);
-                }
-                // Return None if the next state is None
-                self.left.as_ref()?;
+            if !self.include_left {
+                self.left = self.left.take()?.next(false, self.manager);
+            }
+            // Return None if the next state is None
+            self.left.as_ref()?;
 
-                if let (
-                    Some(Leaf {
-                        page: left_page,
-                        entry: left_entry,
-                        ..
-                    }),
-                    Some(Leaf {
-                        page: right_page,
-                        entry: right_entry,
-                        ..
-                    }),
-                ) = (&self.left, &self.right)
+            if let (
+                Some(Leaf {
+                    page: left_page,
+                    entry: left_entry,
+                    ..
+                }),
+                Some(Leaf {
+                    page: right_page,
+                    entry: right_entry,
+                    ..
+                }),
+            ) = (&self.left, &self.right)
+            {
+                if left_page.get_page_number() == right_page.get_page_number()
+                    && (left_entry > right_entry
+                        || (left_entry == right_entry && !self.include_right))
                 {
-                    if left_page.get_page_number() == right_page.get_page_number()
-                        && (left_entry > right_entry
-                            || (left_entry == right_entry && !self.include_right))
-                    {
-                        return None;
-                    }
+                    return None;
                 }
+            }
 
-                self.include_left = false;
-                if self.left.as_ref().unwrap().get_entry().is_some() {
-                    return self.left.as_ref().map(|s| s.get_entry().unwrap());
-                }
-            } else {
-                if !self.include_right {
-                    self.right = self.right.take()?.next(self.reversed, self.manager);
-                }
-                // Return None if the next state is None
-                self.right.as_ref()?;
+            self.include_left = false;
+            if self.left.as_ref().unwrap().get_entry().is_some() {
+                return self.left.as_ref().map(|s| s.get_entry().unwrap());
+            }
+        }
+    }
+}
 
-                if let (
-                    Some(Leaf {
-                        page: left_page,
-                        entry: left_entry,
-                        ..
-                    }),
-                    Some(Leaf {
-                        page: right_page,
-                        entry: right_entry,
-                        ..
-                    }),
-                ) = (&self.left, &self.right)
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterator
+    for BtreeRangeIter<'a, K, V>
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if let (
+            Some(Leaf {
+                page: left_page,
+                entry: left_entry,
+                ..
+            }),
+            Some(Leaf {
+                page: right_page,
+                entry: right_entry,
+                ..
+            }),
+        ) = (&self.left, &self.right)
+        {
+            if left_page.get_page_number() == right_page.get_page_number()
+                && (left_entry > right_entry
+                    || (left_entry == right_entry && (!self.include_left || !self.include_right)))
+            {
+                return None;
+            }
+        }
+
+        loop {
+            if !self.include_right {
+                self.right = self.right.take()?.next(true, self.manager);
+            }
+            // Return None if the next state is None
+            self.right.as_ref()?;
+
+            if let (
+                Some(Leaf {
+                    page: left_page,
+                    entry: left_entry,
+                    ..
+                }),
+                Some(Leaf {
+                    page: right_page,
+                    entry: right_entry,
+                    ..
+                }),
+            ) = (&self.left, &self.right)
+            {
+                if left_page.get_page_number() == right_page.get_page_number()
+                    && (left_entry > right_entry
+                        || (left_entry == right_entry && !self.include_left))
                 {
-                    if left_page.get_page_number() == right_page.get_page_number()
-                        && (left_entry > right_entry
-                            || (left_entry == right_entry && !self.include_left))
-                    {
-                        return None;
-                    }
+                    return None;
                 }
+            }
 
-                self.include_right = false;
-                if self.right.as_ref().unwrap().get_entry().is_some() {
-                    return self.right.as_ref().map(|s| s.get_entry().unwrap());
-                }
+            self.include_right = false;
+            if self.right.as_ref().unwrap().get_entry().is_some() {
+                return self.right.as_ref().map(|s| s.get_entry().unwrap());
             }
         }
     }

@@ -251,7 +251,7 @@ impl<'a> Iterator for TableNameIter<'a> {
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(entry) = self.inner.next() {
+        for entry in self.inner.by_ref() {
             if InternalTableDefinition::from_bytes(entry.value()).table_type == self.table_type {
                 return Some(str::from_bytes(entry.key()).to_string());
             }
@@ -426,8 +426,7 @@ impl<'txn> TableTree<'txn> {
             master_tree_stats.metadata_bytes + master_tree_stats.stored_leaf_bytes;
         let mut total_fragmented = master_tree_stats.fragmented_bytes;
 
-        let mut iter = self.tree.range::<RangeFull, &str>(..)?;
-        while let Some(entry) = iter.next() {
+        for entry in self.tree.range::<RangeFull, &str>(..)? {
             let mut definition = InternalTableDefinition::from_bytes(entry.value());
             if let Some(updated_root) = self.pending_table_updates.get(str::from_bytes(entry.key()))
             {
