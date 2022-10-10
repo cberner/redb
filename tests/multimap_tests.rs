@@ -3,6 +3,8 @@ use tempfile::NamedTempFile;
 
 const SLICE_TABLE: MultimapTableDefinition<[u8], [u8]> =
     MultimapTableDefinition::new("slice_to_slice");
+const SLICE_U64_TABLE: MultimapTableDefinition<[u8], u64> =
+    MultimapTableDefinition::new("slice_to_u64");
 
 fn get_vec(table: &impl ReadableMultimapTable<[u8], [u8]>, key: &[u8]) -> Vec<Vec<u8>> {
     let mut result = vec![];
@@ -80,42 +82,39 @@ fn range_query() {
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
-        for i in 0..5u8 {
-            let value = vec![i];
-            table.insert(b"0", &value).unwrap();
+        let mut table = write_txn.open_multimap_table(SLICE_U64_TABLE).unwrap();
+        for i in 0..5 {
+            table.insert(b"0", &i).unwrap();
         }
-        for i in 5..10u8 {
-            let value = vec![i];
-            table.insert(b"1", &value).unwrap();
+        for i in 5..10 {
+            table.insert(b"1", &i).unwrap();
         }
-        for i in 10..15u8 {
-            let value = vec![i];
-            table.insert(b"2", &value).unwrap();
+        for i in 10..15 {
+            table.insert(b"2", &i).unwrap();
         }
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_multimap_table(SLICE_TABLE).unwrap();
+    let table = read_txn.open_multimap_table(SLICE_U64_TABLE).unwrap();
     let start = b"0".as_ref();
     let end = b"1".as_ref();
     let mut iter = table.range(start..=end).unwrap();
 
     {
         let (key, mut values) = iter.next().unwrap();
-        for i in 0..5u8 {
+        for i in 0..5 {
             assert_eq!(b"0", key);
             let value = values.next().unwrap();
-            assert_eq!(&[i], value);
+            assert_eq!(i, value);
         }
     }
     {
         let (key, mut values) = iter.next().unwrap();
-        for i in 5..10u8 {
+        for i in 5..10 {
             assert_eq!(b"1", key);
             let value = values.next().unwrap();
-            assert_eq!(&[i], value);
+            assert_eq!(i, value);
         }
     }
     assert!(iter.next().is_none());
