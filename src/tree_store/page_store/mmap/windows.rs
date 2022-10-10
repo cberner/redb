@@ -187,6 +187,7 @@ impl MmapInner {
     unsafe fn map_file(file: &File, len: u64, map_addr: *mut u8) -> Result<*mut u8> {
         let handle = file.as_raw_handle();
 
+        #[allow(clippy::cast_possible_truncation)]
         let lo = (len & u32::MAX as u64) as u32;
         let hi = (len >> 32) as u32;
 

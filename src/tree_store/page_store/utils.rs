@@ -2,7 +2,7 @@
 pub(crate) fn get_page_size() -> usize {
     use libc::{sysconf, _SC_PAGESIZE};
 
-    unsafe { sysconf(_SC_PAGESIZE) as usize }
+    unsafe { sysconf(_SC_PAGESIZE).try_into().unwrap() }
 }
 
 #[cfg(not(unix))]

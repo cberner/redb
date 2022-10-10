@@ -39,7 +39,7 @@ impl Mmap {
             file,
             _lock: lock,
             mmap,
-            len: AtomicUsize::new(len as usize),
+            len: AtomicUsize::new(len.try_into().unwrap()),
             fsync_failed: AtomicBool::new(false),
         };
 

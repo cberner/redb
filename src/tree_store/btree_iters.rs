@@ -46,13 +46,13 @@ impl<'a> RangeIterState<'a> {
             } => {
                 let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
                 let direction = if reverse { -1 } else { 1 };
-                let next_entry = entry as isize + direction;
-                if 0 <= next_entry && next_entry < accessor.num_pairs() as isize {
+                let next_entry = isize::try_from(entry).unwrap() + direction;
+                if 0 <= next_entry && next_entry < accessor.num_pairs().try_into().unwrap() {
                     Some(Leaf {
                         page,
                         fixed_key_size,
                         fixed_value_size,
-                        entry: next_entry as usize,
+                        entry: next_entry.try_into().unwrap(),
                         parent,
                     })
                 } else {
@@ -70,13 +70,13 @@ impl<'a> RangeIterState<'a> {
                 let child_page = accessor.child_page(child).unwrap();
                 let child_page = manager.get_page(child_page);
                 let direction = if reverse { -1 } else { 1 };
-                let next_child = child as isize + direction;
-                if 0 <= next_child && next_child < accessor.count_children() as isize {
+                let next_child = isize::try_from(child).unwrap() + direction;
+                if 0 <= next_child && next_child < accessor.count_children().try_into().unwrap() {
                     parent = Some(Box::new(Internal {
                         page,
                         fixed_key_size,
                         fixed_value_size,
-                        child: next_child as usize,
+                        child: next_child.try_into().unwrap(),
                         parent,
                     }));
                 }
@@ -416,7 +416,9 @@ fn find_iter_unbounded<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                 page,
                 fixed_key_size: K::fixed_width(),
                 fixed_value_size: V::fixed_width(),
-                child: (child_index as isize + direction) as usize,
+                child: (isize::try_from(child_index).unwrap() + direction)
+                    .try_into()
+                    .unwrap(),
                 parent,
             }));
             find_iter_unbounded::<K, V>(child_page, parent, reverse, manager)

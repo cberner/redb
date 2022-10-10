@@ -48,8 +48,10 @@ impl RegionLayout {
     }
 
     fn header_pages(page_capacity: u32, page_size: u32) -> u32 {
-        let mut header_size =
-            BuddyAllocatorMut::required_space(page_capacity.try_into().unwrap()) as u32;
+        let mut header_size: u32 =
+            BuddyAllocatorMut::required_space(page_capacity.try_into().unwrap())
+                .try_into()
+                .unwrap();
 
         if header_size % page_size != 0 {
             header_size += page_size - header_size % page_size;
@@ -69,7 +71,10 @@ impl RegionLayout {
         if desired_usable_bytes / (page_size as u64) < MIN_USABLE_PAGES as u64 {
             return None;
         }
-        if available_space < (required_header_bytes + (MIN_USABLE_PAGES as u32) * page_size) as u64
+        if available_space
+            < (required_header_bytes + u32::try_from(MIN_USABLE_PAGES).unwrap() * page_size)
+                .try_into()
+                .unwrap()
         {
             return None;
         }
@@ -77,7 +82,7 @@ impl RegionLayout {
         let used_space = min(max_region_size, available_space);
 
         let num_pages = Self::calculate_usable_pages(used_space, page_capacity, page_size);
-        if num_pages < MIN_USABLE_PAGES as u32 {
+        if num_pages < MIN_USABLE_PAGES.try_into().unwrap() {
             return None;
         }
 
@@ -187,7 +192,7 @@ impl DatabaseLayout {
             )
             .ok_or(Error::OutOfSpace)?;
             DatabaseLayout {
-                superheader_pages: div_even(superheader_bytes as u32, page_size),
+                superheader_pages: div_even(superheader_bytes.try_into().unwrap(), page_size),
                 region_tracker_range,
                 full_region_layout,
                 num_full_regions: 0,
@@ -216,7 +221,7 @@ impl DatabaseLayout {
                 assert_eq!(region.header_pages, full_region_layout.header_pages);
             }
             DatabaseLayout {
-                superheader_pages: div_even(superheader_bytes as u32, page_size),
+                superheader_pages: div_even(superheader_bytes.try_into().unwrap(), page_size),
                 region_tracker_range,
                 full_region_layout,
                 num_full_regions: num_full_regions.try_into().unwrap(),
