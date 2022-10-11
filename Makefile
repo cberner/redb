@@ -53,6 +53,10 @@ fuzz: pre
 	rustup toolchain install $(NIGHTLY)
 	cargo +$(NIGHTLY) fuzz run fuzz_redb -- -max_len=1000000 -timeout=60
 
+fuzz_ci: pre
+	rustup toolchain install $(NIGHTLY)
+	cargo +$(NIGHTLY) fuzz run fuzz_redb -- -max_len=1000000 -max_total_time=60
+
 .PHONY: fuzz_coverage
 fuzz_coverage: pre
 	rustup toolchain install $(NIGHTLY)
