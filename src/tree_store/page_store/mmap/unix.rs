@@ -92,7 +92,7 @@ impl MmapInner {
     }
 
     #[inline]
-    pub(super) fn flush(&self, owner: &Mmap) -> Result {
+    pub(super) fn flush(&self, #[allow(unused_variables)] owner: &Mmap) -> Result {
         // Disable fsync when fuzzing, since it doesn't test crash consistency
         #[cfg(not(fuzzing))]
         {
