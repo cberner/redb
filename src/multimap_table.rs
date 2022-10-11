@@ -1,7 +1,7 @@
 use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, EntryAccessor,
-    LeafAccessor, LeafKeyIter, Page, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
+    AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, LeafKeyIter,
+    Page, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
 };
 use crate::types::{
     AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
@@ -299,7 +299,7 @@ impl<'a, V: RedbKey + ?Sized> Drop for MultimapValueIter<'a, V> {
 
 #[doc(hidden)]
 pub struct MultimapRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> {
-    inner: Box<dyn DoubleEndedIterator<Item = EntryAccessor<'a>> + 'a>,
+    inner: BtreeRangeIter<'a, K, DynamicCollection>,
     mem: &'a TransactionalMemory,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -308,23 +308,23 @@ pub struct MultimapRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized +
 impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'a, K, V> {
     fn new(inner: BtreeRangeIter<'a, K, DynamicCollection>, mem: &'a TransactionalMemory) -> Self {
         Self {
-            inner: Box::new(inner),
+            inner,
             mem,
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
     }
+}
 
-    // TODO: Simplify this when GATs are stable
-    #[allow(clippy::type_complexity)]
-    // TODO: implement Iter when GATs are stable
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(
-        &mut self,
-    ) -> Option<(
-        <<K as RedbValue>::View as WithLifetime>::Out,
-        MultimapValueIter<V>,
-    )> {
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> Iterator
+    for MultimapRangeIter<'a, K, V>
+{
+    type Item = (
+        <<K as RedbValue>::View as WithLifetime<'a>>::Out,
+        MultimapValueIter<'a, V>,
+    );
+
+    fn next(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next()?;
         let key = K::from_bytes(entry.key());
         let collection = DynamicCollection::from_bytes(entry.value());
@@ -332,14 +332,18 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'
 
         Some((key, iter))
     }
+}
 
-    pub fn rev(self) -> Self {
-        Self {
-            inner: Box::new(self.inner.rev()),
-            mem: self.mem,
-            _key_type: Default::default(),
-            _value_type: Default::default(),
-        }
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> DoubleEndedIterator
+    for MultimapRangeIter<'a, K, V>
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let entry = self.inner.next_back()?;
+        let key = K::from_bytes(entry.key());
+        let collection = DynamicCollection::from_bytes(entry.value());
+        let iter = collection.iter(self.mem);
+
+        Some((key, iter))
     }
 }
 
@@ -699,9 +703,8 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<
 
     /// Returns the number of key-value pairs in the table
     fn len(&self) -> Result<usize> {
-        let mut iter: MultimapRangeIter<K, V> = self.range(..)?;
         let mut count = 0;
-        while let Some((_, mut values)) = iter.next() {
+        for (_, mut values) in self.range(..)? {
             while values.next().is_some() {
                 count += 1;
             }
@@ -777,9 +780,8 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     }
 
     fn len(&self) -> Result<usize> {
-        let mut iter: MultimapRangeIter<K, V> = self.range(..)?;
         let mut count = 0;
-        while let Some((_, mut values)) = iter.next() {
+        for (_, mut values) in self.range(..)? {
             while values.next().is_some() {
                 count += 1;
             }

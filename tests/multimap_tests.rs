@@ -120,9 +120,9 @@ fn range_query() {
     assert!(iter.next().is_none());
 
     let mut total: u64 = 0;
-    let mut iter = table.range(start..=end).unwrap();
-    total += iter.next().unwrap().1.sum::<u64>();
-    total += iter.next().unwrap().1.sum::<u64>();
+    for (_, values) in table.range(start..=end).unwrap() {
+        total += values.sum::<u64>();
+    }
     assert_eq!(total, 45);
 }
 
