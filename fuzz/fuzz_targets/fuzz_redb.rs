@@ -127,10 +127,10 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
                             } else {
                                 Box::new(local_reference.range(start..end))
                             };
-                        let mut iter = if *reversed {
-                            table.range(start..end).unwrap().rev()
+                        let mut iter: Box<dyn Iterator<Item = (u64, &[u8])>> = if *reversed {
+                            Box::new(table.range(start..end).unwrap().rev())
                         } else {
-                            table.range(start..end).unwrap()
+                            Box::new(table.range(start..end).unwrap())
                         };
                         while let Some((ref_key, ref_value_len)) = reference_iter.next() {
                             let (key, value) = iter.next().unwrap();
@@ -276,10 +276,10 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
                             } else {
                                 Box::new(local_reference.range(start..end))
                             };
-                        let mut iter = if *reversed {
-                            table.range(&start..&end).unwrap().rev()
+                        let mut iter: Box<dyn Iterator<Item = (u64, MultimapValueIter<[u8]>)>> = if *reversed {
+                            Box::new(table.range(&start..&end).unwrap().rev())
                         } else {
-                            table.range(&start..&end).unwrap()
+                            Box::new(table.range(&start..&end).unwrap())
                         };
                         while let Some((ref_key, ref_values)) = reference_iter.next() {
                             let (key, value_iter) = iter.next().unwrap();
