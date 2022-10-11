@@ -528,8 +528,8 @@ impl<'a> LeafAccessor<'a> {
     }
 }
 
-pub(crate) struct LeafKeyIter {
-    data: Vec<u8>,
+pub(crate) struct LeafKeyIter<'a> {
+    data: &'a [u8],
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
     start_entry: isize, // inclusive
@@ -537,13 +537,13 @@ pub(crate) struct LeafKeyIter {
     reverse: bool,
 }
 
-impl LeafKeyIter {
+impl<'a> LeafKeyIter<'a> {
     pub(crate) fn new(
-        data: Vec<u8>,
+        data: &'a [u8],
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
     ) -> Self {
-        let accessor = LeafAccessor::new(&data, fixed_key_size, fixed_value_size);
+        let accessor = LeafAccessor::new(data, fixed_key_size, fixed_value_size);
         let end_entry = isize::try_from(accessor.num_pairs()).unwrap() - 1;
         Self {
             data,
@@ -559,7 +559,7 @@ impl LeafKeyIter {
         if self.end_entry < self.start_entry {
             return None;
         }
-        let accessor = LeafAccessor::new(&self.data, self.fixed_key_size, self.fixed_value_size);
+        let accessor = LeafAccessor::new(self.data, self.fixed_key_size, self.fixed_value_size);
         if self.reverse {
             self.end_entry -= 1;
             accessor
