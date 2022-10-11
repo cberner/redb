@@ -195,23 +195,14 @@ impl DynamicCollection {
     }
 }
 
-enum ValueIterState<'a> {
-    Subtree(Box<dyn DoubleEndedIterator<Item = EntryAccessor<'a>> + 'a>),
+enum ValueIterState<'a, V: RedbKey + ?Sized + 'a> {
+    Subtree(BtreeRangeIter<'a, V, ()>),
     InlineLeaf(LeafKeyIter<'a>),
-}
-
-impl<'a> ValueIterState<'a> {
-    fn reverse(self) -> Self {
-        match self {
-            ValueIterState::Subtree(iter) => ValueIterState::Subtree(Box::new(iter.rev())),
-            ValueIterState::InlineLeaf(iter) => ValueIterState::InlineLeaf(iter.reverse()),
-        }
-    }
 }
 
 #[doc(hidden)]
 pub struct MultimapValueIter<'a, V: RedbKey + ?Sized + 'a> {
-    inner: ValueIterState<'a>,
+    inner: ValueIterState<'a, V>,
     freed_pages: Option<Rc<RefCell<Vec<PageNumber>>>>,
     free_on_drop: Vec<PageNumber>,
     mem: Option<&'a TransactionalMemory>,
@@ -221,7 +212,7 @@ pub struct MultimapValueIter<'a, V: RedbKey + ?Sized + 'a> {
 impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
     fn new_subtree(inner: BtreeRangeIter<'a, V, ()>) -> Self {
         Self {
-            inner: ValueIterState::Subtree(Box::new(inner)),
+            inner: ValueIterState::Subtree(inner),
             freed_pages: None,
             free_on_drop: vec![],
             mem: None,
@@ -236,7 +227,7 @@ impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
         mem: &'a TransactionalMemory,
     ) -> Self {
         Self {
-            inner: ValueIterState::Subtree(Box::new(inner)),
+            inner: ValueIterState::Subtree(inner),
             freed_pages: Some(freed_pages),
             free_on_drop: pages,
             mem: Some(mem),
@@ -253,10 +244,12 @@ impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
             _value_type: Default::default(),
         }
     }
+}
 
-    // TODO: implement Iter when GATs are stable
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Option<<<V as RedbValue>::View as WithLifetime>::Out> {
+impl<'a, V: RedbKey + ?Sized> Iterator for MultimapValueIter<'a, V> {
+    type Item = <<V as RedbValue>::View as WithLifetime<'a>>::Out;
+
+    fn next(&mut self) -> Option<Self::Item> {
         match self.inner {
             ValueIterState::Subtree(ref mut iter) => iter.next().map(|e| V::from_bytes(e.key())),
             ValueIterState::InlineLeaf(ref mut iter) => {
@@ -264,18 +257,18 @@ impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
             }
         }
     }
+}
 
-    pub fn rev(mut self) -> Self {
-        // TODO: remove this hack
-        let mut dummy_state = ValueIterState::InlineLeaf(LeafKeyIter::new(
-            b"\x01\x00\x00\x00".as_slice(),
-            None,
-            None,
-        ));
-        mem::swap(&mut self.inner, &mut dummy_state);
-        self.inner = dummy_state.reverse();
-
-        self
+impl<'a, V: RedbKey + ?Sized> DoubleEndedIterator for MultimapValueIter<'a, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self.inner {
+            ValueIterState::Subtree(ref mut iter) => {
+                iter.next_back().map(|e| V::from_bytes(e.key()))
+            }
+            ValueIterState::InlineLeaf(ref mut iter) => {
+                iter.next_key_back().map(|key| V::from_bytes(key))
+            }
+        }
     }
 }
 
