@@ -534,7 +534,6 @@ pub(crate) struct LeafKeyIter<'a> {
     fixed_value_size: Option<usize>,
     start_entry: isize, // inclusive
     end_entry: isize,   // inclusive
-    reverse: bool,
 }
 
 impl<'a> LeafKeyIter<'a> {
@@ -551,37 +550,29 @@ impl<'a> LeafKeyIter<'a> {
             fixed_value_size,
             start_entry: 0,
             end_entry,
-            reverse: false,
         }
     }
 
-    pub(crate) fn next_key(&mut self) -> Option<&[u8]> {
+    pub(crate) fn next_key(&mut self) -> Option<&'a [u8]> {
         if self.end_entry < self.start_entry {
             return None;
         }
         let accessor = LeafAccessor::new(self.data, self.fixed_key_size, self.fixed_value_size);
-        if self.reverse {
-            self.end_entry -= 1;
-            accessor
-                .entry((self.end_entry + 1).try_into().unwrap())
-                .map(|e| e.key())
-        } else {
-            self.start_entry += 1;
-            accessor
-                .entry((self.start_entry - 1).try_into().unwrap())
-                .map(|e| e.key())
-        }
+        self.start_entry += 1;
+        accessor
+            .entry((self.start_entry - 1).try_into().unwrap())
+            .map(|e| e.key())
     }
 
-    pub(crate) fn reverse(self) -> Self {
-        Self {
-            data: self.data,
-            fixed_key_size: self.fixed_key_size,
-            fixed_value_size: self.fixed_value_size,
-            start_entry: self.start_entry,
-            end_entry: self.end_entry,
-            reverse: !self.reverse,
+    pub(crate) fn next_key_back(&mut self) -> Option<&'a [u8]> {
+        if self.end_entry < self.start_entry {
+            return None;
         }
+        let accessor = LeafAccessor::new(self.data, self.fixed_key_size, self.fixed_value_size);
+        self.end_entry -= 1;
+        accessor
+            .entry((self.end_entry + 1).try_into().unwrap())
+            .map(|e| e.key())
     }
 }
 
