@@ -186,7 +186,6 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     }
 }
 
-#[doc(hidden)]
 pub struct RangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> {
     inner: BtreeRangeIter<'a, K, V>,
 }
