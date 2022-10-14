@@ -200,7 +200,6 @@ enum ValueIterState<'a, V: RedbKey + ?Sized + 'a> {
     InlineLeaf(LeafKeyIter<'a>),
 }
 
-#[doc(hidden)]
 pub struct MultimapValueIter<'a, V: RedbKey + ?Sized + 'a> {
     inner: ValueIterState<'a, V>,
     freed_pages: Option<Rc<RefCell<Vec<PageNumber>>>>,
@@ -297,7 +296,6 @@ impl<'a, V: RedbKey + ?Sized> Drop for MultimapValueIter<'a, V> {
     }
 }
 
-#[doc(hidden)]
 pub struct MultimapRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> {
     inner: BtreeRangeIter<'a, K, DynamicCollection>,
     mem: &'a TransactionalMemory,
