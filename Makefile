@@ -51,7 +51,7 @@ NIGHTLY := "nightly-2022-09-10"
 .PHONY: fuzz
 fuzz: pre
 	rustup toolchain install $(NIGHTLY)
-	cargo +$(NIGHTLY) fuzz run fuzz_redb -- -max_len=1000000 -timeout=60
+	cargo +$(NIGHTLY) fuzz run fuzz_redb -- -max_len=1000000
 
 fuzz_ci: pre
 	rustup toolchain install $(NIGHTLY)
