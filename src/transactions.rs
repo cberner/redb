@@ -150,7 +150,6 @@ impl<'db> WriteTransaction<'db> {
             savepoint.get_id(),
             transaction_id
         );
-        *live_write_transaction = Some(transaction_id);
 
         // Restoring a savepoint that reverted a file format or checksum type change could corrupt
         // the database
@@ -195,6 +194,7 @@ impl<'db> WriteTransaction<'db> {
             unsafe { freed_tree.remove(&key)? };
         }
 
+        *live_write_transaction = Some(transaction_id);
         let transaction = Self {
             db,
             mem: db.get_memory(),
