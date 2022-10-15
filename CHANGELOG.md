@@ -1,5 +1,12 @@
 # redb - Changelog
 
+## 0.8.0 - 2022-10-18
+* Performance improvements for database files that are too large to fit in RAM
+* Fix deadlock in concurrent calls to `savepoint()` and `restore_savepoint()`
+* Fix crash if `restore_savepoint()` failed
+* Move `savepoint()` and `restore_savepoint()` methods to `WriteTransaction`
+* Implement `Iterator` for the types returned from `range()` and `remove_all()`
+
 ## 0.7.0 - 2022-09-25
 * Add support for Windows
 * Add `Database::set_write_strategy` which allows the `WriteStrategy` of the database to be changed after creation
