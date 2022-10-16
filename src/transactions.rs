@@ -17,6 +17,7 @@ use std::mem::size_of;
 use std::ops::RangeFull;
 use std::panic;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::MutexGuard;
 
 /// Informational storage stats about the database
@@ -106,6 +107,7 @@ pub struct WriteTransaction<'db> {
     freed_pages: Rc<RefCell<Vec<PageNumber>>>,
     open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
     completed: bool,
+    dirty: AtomicBool,
     durability: Durability,
     live_write_transaction: MutexGuard<'db, Option<TransactionId>>,
 }
@@ -135,84 +137,118 @@ impl<'db> WriteTransaction<'db> {
             freed_pages,
             open_tables: RefCell::new(Default::default()),
             completed: false,
+            dirty: AtomicBool::new(false),
             durability: Durability::Immediate,
             live_write_transaction,
         })
     }
 
-    pub(crate) fn commit_savepoint(db: &'db Database, savepoint: &'_ Savepoint<'_>) -> Result {
-        let mut live_write_transaction = db.live_write_transaction.lock().unwrap();
-        assert!(live_write_transaction.is_none());
-        let transaction_id = db.increment_transaction_id();
+    /// Creates a snapshot of the current database state, which can be used to rollback the database
+    ///
+    /// Returns `[Error::InvalidSavepoint`], if the transaction is "dirty" (any tables have been openned)
+    pub fn savepoint(&self) -> Result<Savepoint<'db>> {
+        if self.dirty.load(Ordering::Acquire) {
+            return Err(Error::InvalidSavepoint);
+        }
+
+        let (id, transaction_id) = self.db.allocate_savepoint()?;
+        #[cfg(feature = "logging")]
+        info!(
+            "Creating savepoint id={:?}, txn_id={:?}",
+            id, transaction_id
+        );
+
+        let regional_allocators = self.mem.get_raw_allocator_states();
+        let root = self.mem.get_data_root();
+        let freed_root = self.mem.get_freed_root();
+        let savepoint = Savepoint::new(
+            self.db,
+            id,
+            transaction_id,
+            root,
+            freed_root,
+            regional_allocators,
+        );
+
+        Ok(savepoint)
+    }
+
+    /// Restore the state of the database to the given [`Savepoint`]
+    ///
+    /// Calling this method invalidates all [`Savepoint`]s created after savepoint
+    pub fn restore_savepoint(&mut self, savepoint: &Savepoint) -> Result {
+        if !self.db.is_valid_savepoint(savepoint.get_id()) {
+            return Err(Error::InvalidSavepoint);
+        }
         #[cfg(feature = "logging")]
         info!(
             "Beginning savepoint restore (id={:?}) in transaction id={:?}",
             savepoint.get_id(),
-            transaction_id
+            self.transaction_id
         );
-
         // Restoring a savepoint that reverted a file format or checksum type change could corrupt
         // the database
-        assert_eq!(db.get_memory().get_version(), savepoint.get_version());
+        assert_eq!(self.db.get_memory().get_version(), savepoint.get_version());
         assert_eq!(
-            db.get_memory().checksum_type(),
+            self.db.get_memory().checksum_type(),
             savepoint.get_checksum_type()
         );
+        self.dirty.store(true, Ordering::Release);
 
-        let freed_pages = db
-            .get_memory()
+        let allocated_since_savepoint = self
+            .mem
             .pages_allocated_since_raw_state(savepoint.get_regional_allocator_states());
-        let freed_pages = Rc::new(RefCell::new(freed_pages));
-        let root_page = savepoint.get_root();
-        let freed_root = savepoint.get_freed_root();
+        let mut freed_pages = vec![];
+        for page in allocated_since_savepoint {
+            if self.mem.uncommitted(page) {
+                // Safety: The page is uncommitted and we have a &mut on the transaction
+                unsafe {
+                    self.mem.free(page)?;
+                }
+            } else {
+                freed_pages.push(page);
+            }
+        }
+        *self.freed_pages.borrow_mut() = freed_pages;
+        self.table_tree = RefCell::new(TableTree::new(
+            savepoint.get_root(),
+            self.mem,
+            self.freed_pages.clone(),
+        ));
 
         // Remove any freed pages that have already been processed. Otherwise this would result in a double free
         // We assume below that PageNumber is length 8
-        let old_freed_tree: BtreeMut<FreedTableKey, [u8]> = BtreeMut::new(
-            db.get_memory().get_freed_root(),
-            db.get_memory(),
-            freed_pages.clone(),
+        let oldest_unprocessed_transaction = if let Some(entry) = self
+            .freed_tree
+            .range::<RangeFull, FreedTableKey>(..)?
+            .next()
+        {
+            FreedTableKey::from_bytes(entry.key()).transaction_id
+        } else {
+            self.transaction_id.0
+        };
+
+        self.freed_tree = BtreeMut::new(
+            savepoint.get_freed_root(),
+            self.mem,
+            self.freed_pages.clone(),
         );
-        let oldest_unprocessed_transaction =
-            if let Some(entry) = old_freed_tree.range::<RangeFull, FreedTableKey>(..)?.next() {
-                FreedTableKey::from_bytes(entry.key()).transaction_id
-            } else {
-                transaction_id.0
-            };
-        drop(old_freed_tree);
         let lookup_key = FreedTableKey {
             transaction_id: oldest_unprocessed_transaction,
             pagination_id: 0,
         };
-        let mut freed_tree = BtreeMut::new(freed_root, db.get_memory(), freed_pages.clone());
         let mut to_remove = vec![];
-        for entry in freed_tree.range(..lookup_key)? {
+        for entry in self.freed_tree.range(..lookup_key)? {
             to_remove.push(FreedTableKey::from_bytes(entry.key()));
         }
         for key in to_remove {
             // Safety: all references to the freed table above have already been dropped.
-            unsafe { freed_tree.remove(&key)? };
+            unsafe { self.freed_tree.remove(&key)? };
         }
 
-        *live_write_transaction = Some(transaction_id);
-        let transaction = Self {
-            db,
-            mem: db.get_memory(),
-            transaction_id,
-            table_tree: RefCell::new(TableTree::new(
-                root_page,
-                db.get_memory(),
-                freed_pages.clone(),
-            )),
-            freed_tree,
-            freed_pages,
-            open_tables: RefCell::new(Default::default()),
-            completed: false,
-            durability: Durability::Immediate,
-            live_write_transaction,
-        };
-
-        transaction.commit()?;
+        // Invalidate all savepoints that are newer than the one being applied to prevent the user
+        // from later trying to restore a savepoint "on another timeline"
+        self.db.invalidate_savepoints_after(savepoint.get_id());
 
         Ok(())
     }
@@ -238,6 +274,7 @@ impl<'db> WriteTransaction<'db> {
                 location,
             ));
         }
+        self.dirty.store(true, Ordering::Release);
         self.open_tables
             .borrow_mut()
             .insert(definition.name().to_string(), panic::Location::caller());
@@ -271,6 +308,7 @@ impl<'db> WriteTransaction<'db> {
                 location,
             ));
         }
+        self.dirty.store(true, Ordering::Release);
         self.open_tables
             .borrow_mut()
             .insert(definition.name().to_string(), panic::Location::caller());
@@ -309,6 +347,7 @@ impl<'db> WriteTransaction<'db> {
     ) -> Result<bool> {
         #[cfg(feature = "logging")]
         info!("Deleting table: {}", definition);
+        self.dirty.store(true, Ordering::Release);
         self.table_tree
             .borrow_mut()
             .delete_table::<K, V>(definition.name(), TableType::Normal)
@@ -323,6 +362,7 @@ impl<'db> WriteTransaction<'db> {
     ) -> Result<bool> {
         #[cfg(feature = "logging")]
         info!("Deleting multimap table: {}", definition);
+        self.dirty.store(true, Ordering::Release);
         self.table_tree
             .borrow_mut()
             .delete_table::<K, V>(definition.name(), TableType::Multimap)

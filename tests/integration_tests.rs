@@ -877,9 +877,8 @@ fn regression18() {
 
     let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
 
-    let savepoint0 = db.savepoint().unwrap();
-
     let tx = db.begin_write().unwrap();
+    let savepoint0 = tx.savepoint().unwrap();
     {
         let mut t = tx.open_table(table_def).unwrap();
         let mut value = t.insert_reserve(&118749, 817).unwrap();
@@ -887,9 +886,8 @@ fn regression18() {
     }
     tx.commit().unwrap();
 
-    let savepoint1 = db.savepoint().unwrap();
-
     let tx = db.begin_write().unwrap();
+    let savepoint1 = tx.savepoint().unwrap();
     {
         let mut t = tx.open_table(table_def).unwrap();
         let mut value = t.insert_reserve(&65373, 1807).unwrap();
@@ -897,9 +895,11 @@ fn regression18() {
     }
     tx.commit().unwrap();
 
-    let savepoint2 = db.savepoint().unwrap();
+    let mut tx = db.begin_write().unwrap();
+    let savepoint2 = tx.savepoint().unwrap();
 
-    db.restore_savepoint(&savepoint2).unwrap();
+    tx.restore_savepoint(&savepoint2).unwrap();
+    tx.commit().unwrap();
 
     drop(savepoint0);
 
@@ -911,7 +911,9 @@ fn regression18() {
     }
     tx.commit().unwrap();
 
-    let savepoint4 = db.savepoint().unwrap();
+    let tx = db.begin_write().unwrap();
+    let savepoint4 = tx.savepoint().unwrap();
+    tx.abort().unwrap();
     drop(savepoint1);
 
     let tx = db.begin_write().unwrap();
@@ -925,10 +927,59 @@ fn regression18() {
     }
     tx.commit().unwrap();
 
-    db.restore_savepoint(&savepoint4).unwrap();
+    let mut tx = db.begin_write().unwrap();
+    tx.restore_savepoint(&savepoint4).unwrap();
+    tx.commit().unwrap();
 
     drop(savepoint2);
     drop(savepoint4);
+}
+
+#[test]
+fn regression19() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024 * 1024;
+    let db = unsafe {
+        Database::builder()
+            .set_write_strategy(WriteStrategy::Checksum)
+            .create(tmpfile.path(), db_size)
+            .unwrap()
+    };
+
+    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+
+    let tx = db.begin_write().unwrap();
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let value = vec![0xFF; 100];
+        t.insert(&1, &value).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    let savepoint0 = tx.savepoint().unwrap();
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let value = vec![0xFF; 101];
+        t.insert(&1, &value).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    {
+        let mut t = tx.open_table(table_def).unwrap();
+        let value = vec![0xFF; 102];
+        t.insert(&1, &value).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let mut tx = db.begin_write().unwrap();
+    tx.restore_savepoint(&savepoint0).unwrap();
+    tx.commit().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    tx.open_table(table_def).unwrap();
 }
 
 #[test]
@@ -942,10 +993,14 @@ fn change_invalidate_savepoint() {
             .create(tmpfile.path(), db_size)
             .unwrap()
     };
-    let savepoint = db.savepoint().unwrap();
+    let tx = db.begin_write().unwrap();
+    let savepoint = tx.savepoint().unwrap();
+    tx.abort().unwrap();
     db.set_write_strategy(WriteStrategy::TwoPhase).unwrap();
+
+    let mut tx = db.begin_write().unwrap();
     assert!(matches!(
-        db.restore_savepoint(&savepoint),
+        tx.restore_savepoint(&savepoint),
         Err(Error::InvalidSavepoint)
     ));
 }
@@ -1314,28 +1369,31 @@ fn savepoint() {
     }
     txn.commit().unwrap();
 
-    let savepoint = db.savepoint().unwrap();
-
     let txn = db.begin_write().unwrap();
+    let savepoint = txn.savepoint().unwrap();
     {
         let mut table = txn.open_table(definition).unwrap();
         table.remove(&0).unwrap();
     }
     txn.commit().unwrap();
 
-    let savepoint2 = db.savepoint().unwrap();
+    let mut txn = db.begin_write().unwrap();
+    let savepoint2 = txn.savepoint().unwrap();
 
-    db.restore_savepoint(&savepoint).unwrap();
+    txn.restore_savepoint(&savepoint).unwrap();
 
     assert!(matches!(
-        db.restore_savepoint(&savepoint2).err().unwrap(),
+        txn.restore_savepoint(&savepoint2).err().unwrap(),
         Error::InvalidSavepoint
     ));
+    txn.commit().unwrap();
 
     let txn = db.begin_read().unwrap();
     let table = txn.open_table(definition).unwrap();
     assert_eq!(table.get(&0).unwrap().unwrap(), "hello");
 
     // Test that savepoints can be used multiple times
-    db.restore_savepoint(&savepoint).unwrap();
+    let mut txn = db.begin_write().unwrap();
+    txn.restore_savepoint(&savepoint).unwrap();
+    txn.commit().unwrap();
 }
