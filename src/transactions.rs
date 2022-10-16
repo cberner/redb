@@ -116,7 +116,7 @@ impl<'db> WriteTransaction<'db> {
         assert!(live_write_transaction.is_none());
         let transaction_id = db.increment_transaction_id();
         #[cfg(feature = "logging")]
-        info!("Beginning write transaction id={}", transaction_id);
+        info!("Beginning write transaction id={:?}", transaction_id);
         *live_write_transaction = Some(transaction_id);
 
         let root_page = db.get_memory().get_data_root();
@@ -146,7 +146,7 @@ impl<'db> WriteTransaction<'db> {
         let transaction_id = db.increment_transaction_id();
         #[cfg(feature = "logging")]
         info!(
-            "Beginning savepoint restore (id={}) in transaction id={}",
+            "Beginning savepoint restore (id={:?}) in transaction id={:?}",
             savepoint.get_id(),
             transaction_id
         );
@@ -177,7 +177,7 @@ impl<'db> WriteTransaction<'db> {
             if let Some(entry) = old_freed_tree.range::<RangeFull, FreedTableKey>(..)?.next() {
                 FreedTableKey::from_bytes(entry.key()).transaction_id
             } else {
-                transaction_id
+                transaction_id.0
             };
         drop(old_freed_tree);
         let lookup_key = FreedTableKey {
@@ -367,7 +367,7 @@ impl<'db> WriteTransaction<'db> {
     fn commit_inner(&mut self) -> Result {
         #[cfg(feature = "logging")]
         info!(
-            "Committing transaction id={} with durability={:?}",
+            "Committing transaction id={:?} with durability={:?}",
             self.transaction_id, self.durability
         );
         match self.durability {
@@ -378,7 +378,10 @@ impl<'db> WriteTransaction<'db> {
 
         self.completed = true;
         #[cfg(feature = "logging")]
-        info!("Finished commit of transaction id={}", self.transaction_id);
+        info!(
+            "Finished commit of transaction id={:?}",
+            self.transaction_id
+        );
 
         Ok(())
     }
@@ -392,12 +395,12 @@ impl<'db> WriteTransaction<'db> {
 
     fn abort_inner(&mut self) -> Result {
         #[cfg(feature = "logging")]
-        info!("Aborting transaction id={}", self.transaction_id);
+        info!("Aborting transaction id={:?}", self.transaction_id);
         self.table_tree.borrow_mut().clear_table_root_updates();
         self.mem.rollback_uncommitted_writes()?;
         self.completed = true;
         #[cfg(feature = "logging")]
-        info!("Finished abort of transaction id={}", self.transaction_id);
+        info!("Finished abort of transaction id={:?}", self.transaction_id);
         Ok(())
     }
 
@@ -440,7 +443,7 @@ impl<'db> WriteTransaction<'db> {
         // We assume below that PageNumber is length 8
         assert_eq!(PageNumber::serialized_size(), 8);
         let lookup_key = FreedTableKey {
-            transaction_id: oldest_live_read,
+            transaction_id: oldest_live_read.0,
             pagination_id: 0,
         };
 
@@ -479,7 +482,7 @@ impl<'db> WriteTransaction<'db> {
             let chunk_size = 100;
             let buffer_size = size_of::<u64>() + 8 * chunk_size;
             let key = FreedTableKey {
-                transaction_id: self.transaction_id,
+                transaction_id: self.transaction_id.0,
                 pagination_id: pagination_counter,
             };
             // Safety: The freed table is only accessed from the writer, so only this function

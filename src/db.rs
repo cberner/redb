@@ -20,8 +20,51 @@ use crate::multimap_table::parse_subtree_roots;
 #[cfg(feature = "logging")]
 use log::{info, warn};
 
-pub(crate) type TransactionId = u64;
-type AtomicTransactionId = AtomicU64;
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
+pub(crate) struct TransactionId(pub u64);
+
+impl TransactionId {
+    fn next(&self) -> TransactionId {
+        TransactionId(self.0 + 1)
+    }
+}
+
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
+pub(crate) struct SavepointId(pub u64);
+
+struct AtomicTransactionId {
+    inner: AtomicU64,
+}
+
+impl AtomicTransactionId {
+    fn new(last_id: TransactionId) -> Self {
+        Self {
+            inner: AtomicU64::new(last_id.0),
+        }
+    }
+
+    fn next(&self) -> TransactionId {
+        let id = self.inner.fetch_add(1, Ordering::AcqRel);
+        TransactionId(id)
+    }
+}
+
+struct AtomicSavepointId {
+    inner: AtomicU64,
+}
+
+impl AtomicSavepointId {
+    fn new() -> Self {
+        Self {
+            inner: AtomicU64::new(0),
+        }
+    }
+
+    fn next(&self) -> SavepointId {
+        let id = self.inner.fetch_add(1, Ordering::AcqRel);
+        SavepointId(id)
+    }
+}
 
 /// Defines the name and types of a table
 ///
@@ -148,8 +191,9 @@ impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Display for MultimapTableDefi
 pub struct Database {
     mem: TransactionalMemory,
     next_transaction_id: AtomicTransactionId,
+    next_savepoint_id: AtomicSavepointId,
     live_read_transactions: Mutex<BTreeSet<TransactionId>>,
-    valid_savepoints: Mutex<BTreeSet<TransactionId>>,
+    valid_savepoints: Mutex<BTreeSet<SavepointId>>,
     pub(crate) live_write_transaction: Mutex<Option<TransactionId>>,
 }
 
@@ -370,7 +414,7 @@ impl Database {
 
             // Clear the freed table. We just rebuilt the allocator state by walking all the
             // reachable data pages, which implicitly frees the pages for the freed table
-            let transaction_id = mem.get_last_committed_transaction_id()? + 1;
+            let transaction_id = mem.get_last_committed_transaction_id()?.next();
             mem.commit(
                 Some((root, root_checksum)),
                 None,
@@ -380,11 +424,12 @@ impl Database {
             )?;
         }
 
-        let next_transaction_id = mem.get_last_committed_transaction_id()? + 1;
+        let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
 
         Ok(Database {
             mem,
             next_transaction_id: AtomicTransactionId::new(next_transaction_id),
+            next_savepoint_id: AtomicSavepointId::new(),
             live_write_transaction: Mutex::new(None),
             live_read_transactions: Mutex::new(Default::default()),
             valid_savepoints: Mutex::new(Default::default()),
@@ -395,9 +440,15 @@ impl Database {
         self.live_read_transactions.lock().unwrap().remove(&id);
     }
 
-    pub(crate) fn deallocate_savepoint(&self, id: TransactionId) {
-        self.live_read_transactions.lock().unwrap().remove(&id);
-        self.valid_savepoints.lock().unwrap().remove(&id);
+    pub(crate) fn deallocate_savepoint(&self, savepoint: &Savepoint) {
+        self.live_read_transactions
+            .lock()
+            .unwrap()
+            .remove(&savepoint.get_transaction_id());
+        self.valid_savepoints
+            .lock()
+            .unwrap()
+            .remove(&savepoint.get_id());
     }
 
     pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
@@ -410,7 +461,7 @@ impl Database {
     }
 
     pub(crate) fn increment_transaction_id(&self) -> TransactionId {
-        self.next_transaction_id.fetch_add(1, Ordering::AcqRel)
+        self.next_transaction_id.next()
     }
 
     /// Convenience method for [`Builder::new`]
@@ -452,15 +503,29 @@ impl Database {
         let guard = self.live_write_transaction.lock().unwrap();
         assert!(guard.is_none());
 
-        let id = self.increment_transaction_id();
-        self.live_read_transactions.lock().unwrap().insert(id);
+        let transaction_id = self.increment_transaction_id();
+        let id = self.next_savepoint_id.next();
+        self.live_read_transactions
+            .lock()
+            .unwrap()
+            .insert(transaction_id);
 
         #[cfg(feature = "logging")]
-        info!("Creating savepoint id={}", id);
+        info!(
+            "Creating savepoint id={:?}, txn_id={:?}",
+            id, transaction_id
+        );
         let regional_allocators = self.mem.get_raw_allocator_states();
         let root = self.mem.get_data_root();
         let freed_root = self.mem.get_freed_root();
-        let savepoint = Savepoint::new(self, id, root, freed_root, regional_allocators);
+        let savepoint = Savepoint::new(
+            self,
+            id,
+            transaction_id,
+            root,
+            freed_root,
+            regional_allocators,
+        );
         valid_savepoints_guard.insert(savepoint.get_id());
         drop(guard);
 
@@ -501,7 +566,7 @@ impl Database {
         let id = self.increment_transaction_id();
         self.live_read_transactions.lock().unwrap().insert(id);
         #[cfg(feature = "logging")]
-        info!("Beginning read transaction id={}", id);
+        info!("Beginning read transaction id={:?}", id);
         Ok(ReadTransaction::new(self, id))
     }
 }
