@@ -32,10 +32,11 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
     for transaction in transactions.iter() {
         barrier.wait();
 
+        let mut txn = db.begin_write().unwrap();
+        let mut local_reference = reference.lock().unwrap().clone();
+
         if transaction.create_savepoint {
-            savepoints.push(db.savepoint()?);
-            // XXX: potentially there's race here. We should hold the lock before savepoint(),
-            // but that could deadlock, because savepoint() may block
+            savepoints.push(txn.savepoint()?);
             let guard = reference.lock().unwrap();
             reference_savepoints.push(guard.clone());
             drop(guard);
@@ -47,24 +48,15 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
         let restore_to = transaction.restore_savepoint.value;
         if restore_to > 0 && restore_to <= savepoints.len() {
             let index = savepoints.len() - restore_to;
-            let result = db.restore_savepoint(&savepoints[index]);
-            // XXX: potentially there's race here. We should hold the lock before restore_savepoint(),
-            // but that could deadlock, because restore_savepoint() may block
-            let mut guard = reference.lock().unwrap();
+            let result = txn.restore_savepoint(&savepoints[index]);
             if result.is_ok() {
-                *guard = reference_savepoints[index].clone();
+                local_reference = reference_savepoints[index].clone();
             }
-            drop(guard);
             if result.is_err() && !matches!(result, Err(Error::InvalidSavepoint)) {
                 return result;
             }
         }
-        let mut txn = db.begin_write().unwrap();
-        // XXX: potentially there's race here. We should hold the lock before begin_write(),
-        // but that could deadlock, because begin_write() may block
-        let guard = reference.lock().unwrap();
-        let mut local_reference = guard.clone();
-        drop(guard);
+
         // We're not trying to test crash safety, so don't bother with durability
         if !transaction.durable {
             txn.set_durability(Durability::None);
@@ -181,10 +173,11 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
     for transaction in transactions.iter() {
         barrier.wait();
 
+        let mut txn = db.begin_write().unwrap();
+        let mut local_reference = reference.lock().unwrap().clone();
+
         if transaction.create_savepoint {
-            savepoints.push(db.savepoint()?);
-            // XXX: potentially there's race here. We should hold the lock before savepoint(),
-            // but that could deadlock, because savepoint() may block
+            savepoints.push(txn.savepoint()?);
             let guard = reference.lock().unwrap();
             reference_savepoints.push(guard.clone());
             drop(guard);
@@ -196,24 +189,15 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
         let restore_to = transaction.restore_savepoint.value;
         if restore_to > 0 && restore_to <= savepoints.len() {
             let index = savepoints.len() - restore_to;
-            let result = db.restore_savepoint(&savepoints[index]);
-            // XXX: potentially there's race here. We should hold the lock before restore_savepoint(),
-            // but that could deadlock, because restore_savepoint() may block
-            let mut guard = reference.lock().unwrap();
+            let result = txn.restore_savepoint(&savepoints[index]);
             if result.is_ok() {
-                *guard = reference_savepoints[index].clone();
+                local_reference = reference_savepoints[index].clone();
             }
-            drop(guard);
             if result.is_err() && !matches!(result, Err(Error::InvalidSavepoint)) {
                 return result;
             }
         }
-        let mut txn = db.begin_write().unwrap();
-        // XXX: potentially there's race here. We should hold the lock before begin_write(),
-        // but that could deadlock, because begin_write() may block
-        let guard = reference.lock().unwrap();
-        let mut local_reference = guard.clone();
-        drop(guard);
+
         // We're not trying to test crash safety, so don't bother with durability
         if !transaction.durable {
             txn.set_durability(Durability::None);
