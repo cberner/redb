@@ -1,4 +1,4 @@
-use crate::db::WriteStrategy;
+use crate::db::{TransactionId, WriteStrategy};
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
@@ -605,12 +605,13 @@ impl<'a> TransactionAccessor<'a> {
         ChecksumType::from(self.mem[CHECKSUM_TYPE_OFFSET])
     }
 
-    fn get_last_committed_transaction_id(&self) -> u64 {
-        u64::from_le_bytes(
+    fn get_last_committed_transaction_id(&self) -> TransactionId {
+        let id = u64::from_le_bytes(
             self.mem[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
                 .try_into()
                 .unwrap(),
-        )
+        );
+        TransactionId(id)
     }
 
     fn get_full_regions(&self) -> u32 {
@@ -678,9 +679,9 @@ impl<'a> TransactionMutator<'a> {
         self.mem[CHECKSUM_TYPE_OFFSET] = checksum.into();
     }
 
-    fn set_last_committed_transaction_id(&mut self, transaction_id: u64) {
+    fn set_last_committed_transaction_id(&mut self, transaction_id: TransactionId) {
         self.mem[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
-            .copy_from_slice(&transaction_id.to_le_bytes());
+            .copy_from_slice(&transaction_id.0.to_le_bytes());
     }
 
     fn set_data_section_layout(
@@ -840,7 +841,7 @@ impl TransactionalMemory {
             mutator.set_root_page(None);
             mutator.set_freed_root(None);
             mutator.set_checksum_type(checksum_type);
-            mutator.set_last_committed_transaction_id(0);
+            mutator.set_last_committed_transaction_id(TransactionId(0));
             mutator.set_data_section_layout(
                 layout.num_full_regions(),
                 layout.trailing_region_layout().map(|x| x.num_pages()),
@@ -855,7 +856,7 @@ impl TransactionalMemory {
             mutator.set_root_page(None);
             mutator.set_freed_root(None);
             mutator.set_checksum_type(checksum_type);
-            mutator.set_last_committed_transaction_id(0);
+            mutator.set_last_committed_transaction_id(TransactionId(0));
             mutator.set_data_section_layout(
                 layout.num_full_regions(),
                 layout.trailing_region_layout().map(|x| x.num_pages()),
@@ -1067,7 +1068,7 @@ impl TransactionalMemory {
         &self,
         data_root: Option<(PageNumber, Checksum)>,
         freed_root: Option<(PageNumber, Checksum)>,
-        transaction_id: u64,
+        transaction_id: TransactionId,
         eventual: bool,
         new_checksum_type: Option<ChecksumType>,
     ) -> Result {
@@ -1138,7 +1139,7 @@ impl TransactionalMemory {
         &self,
         data_root: Option<(PageNumber, Checksum)>,
         freed_root: Option<(PageNumber, Checksum)>,
-        transaction_id: u64,
+        transaction_id: TransactionId,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
@@ -1317,7 +1318,7 @@ impl TransactionalMemory {
         }
     }
 
-    pub(crate) fn get_last_committed_transaction_id(&self) -> Result<u64> {
+    pub(crate) fn get_last_committed_transaction_id(&self) -> Result<TransactionId> {
         let metadata = self.lock_metadata();
         if self.read_from_secondary.load(Ordering::Acquire) {
             Ok(metadata
