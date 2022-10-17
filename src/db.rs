@@ -5,6 +5,7 @@ use crate::tree_store::{
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
 use crate::{ReadTransaction, Result, WriteTransaction};
+use std::collections::btree_map::BTreeMap;
 use std::collections::btree_set::BTreeSet;
 use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
@@ -192,7 +193,8 @@ pub struct Database {
     mem: TransactionalMemory,
     next_transaction_id: AtomicTransactionId,
     next_savepoint_id: AtomicSavepointId,
-    live_read_transactions: Mutex<BTreeSet<TransactionId>>,
+    // reference count of read transactions per transaction id
+    live_read_transactions: Mutex<BTreeMap<TransactionId, u64>>,
     valid_savepoints: Mutex<BTreeSet<SavepointId>>,
     pub(crate) live_write_transaction: Mutex<Option<TransactionId>>,
 }
@@ -437,25 +439,32 @@ impl Database {
     }
 
     pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) {
-        self.live_read_transactions.lock().unwrap().remove(&id);
+        let mut guard = self.live_read_transactions.lock().unwrap();
+        let ref_count = guard.get_mut(&id).unwrap();
+        *ref_count -= 1;
+        if *ref_count == 0 {
+            guard.remove(&id);
+        }
     }
 
     pub(crate) fn deallocate_savepoint(&self, savepoint: &Savepoint) {
-        self.live_read_transactions
-            .lock()
-            .unwrap()
-            .remove(&savepoint.get_transaction_id());
         self.valid_savepoints
             .lock()
             .unwrap()
             .remove(&savepoint.get_id());
+        let mut guard = self.live_read_transactions.lock().unwrap();
+        let ref_count = guard.get_mut(&savepoint.get_transaction_id()).unwrap();
+        *ref_count -= 1;
+        if *ref_count == 0 {
+            guard.remove(&savepoint.get_transaction_id());
+        }
     }
 
     pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
         self.live_read_transactions
             .lock()
             .unwrap()
-            .iter()
+            .keys()
             .next()
             .cloned()
     }
@@ -503,12 +512,14 @@ impl Database {
         let guard = self.live_write_transaction.lock().unwrap();
         assert!(guard.is_none());
 
-        let transaction_id = self.increment_transaction_id();
         let id = self.next_savepoint_id.next();
-        self.live_read_transactions
-            .lock()
-            .unwrap()
-            .insert(transaction_id);
+        let mut live_reads = self.live_read_transactions.lock().unwrap();
+
+        let transaction_id = self.mem.get_last_committed_transaction_id()?;
+        live_reads
+            .entry(transaction_id)
+            .and_modify(|x| *x += 1)
+            .or_insert(1);
 
         #[cfg(feature = "logging")]
         info!(
@@ -518,6 +529,7 @@ impl Database {
         let regional_allocators = self.mem.get_raw_allocator_states();
         let root = self.mem.get_data_root();
         let freed_root = self.mem.get_freed_root();
+        drop(live_reads);
         let savepoint = Savepoint::new(
             self,
             id,
@@ -563,8 +575,9 @@ impl Database {
     /// Returns a [`ReadTransaction`] which may be used to read from the database. Read transactions
     /// may exist concurrently with writes
     pub fn begin_read(&self) -> Result<ReadTransaction> {
-        let id = self.increment_transaction_id();
-        self.live_read_transactions.lock().unwrap().insert(id);
+        let mut guard = self.live_read_transactions.lock().unwrap();
+        let id = self.mem.get_last_committed_transaction_id()?;
+        guard.entry(id).and_modify(|x| *x += 1).or_insert(1);
         #[cfg(feature = "logging")]
         info!("Beginning read transaction id={:?}", id);
         Ok(ReadTransaction::new(self, id))
