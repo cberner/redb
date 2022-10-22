@@ -230,14 +230,7 @@ impl Database {
                 .open(path)?
         };
 
-        Database::new(
-            file,
-            db_size,
-            None,
-            None,
-            cfg!(unix),
-            Some(WriteStrategy::default()),
-        )
+        Database::new(file, db_size, None, None, cfg!(unix), None)
     }
 
     /// Opens an existing redb database.

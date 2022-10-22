@@ -1006,6 +1006,22 @@ fn change_invalidate_savepoint() {
 }
 
 #[test]
+fn create_open_mismatch() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db_size = 1024 * 1024;
+    let db = unsafe {
+        Database::builder()
+            .set_write_strategy(WriteStrategy::TwoPhase)
+            .create(tmpfile.path(), db_size)
+            .unwrap()
+    };
+    drop(db);
+
+    unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+}
+
+#[test]
 fn twophase_open() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
