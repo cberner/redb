@@ -638,7 +638,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'tx
 
     /// Removes all values for the given key
     ///
-    /// Returns an iterator over the removed values
+    /// Returns an iterator over the removed values. Values are in ascending order.
     pub fn remove_all(&mut self, key: &K) -> Result<MultimapValueIter<V>> {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
@@ -679,7 +679,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTable<'db, 'tx
 impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     for MultimapTable<'db, 'txn, K, V>
 {
-    /// Returns an iterator over all values for the given key
+    /// Returns an iterator over all values for the given key. Values are in ascending order.
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapValueIter<'a, V>> {
         let iter = if let Some(collection) = self.tree.get(key)? {
             collection.iter(self.mem)
@@ -723,6 +723,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Drop for MultimapTable
 }
 
 pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+    /// Returns an iterator over all values for the given key. Values are in ascending order.
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapValueIter<'a, V>>;
 
     // TODO: Take a KR: Borrow<K>, just like Table::range
@@ -759,6 +760,7 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'txn,
 impl<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     for ReadOnlyMultimapTable<'txn, K, V>
 {
+    /// Returns an iterator over all values for the given key. Values are in ascending order.
     fn get<'a>(&'a self, key: &'a K) -> Result<MultimapValueIter<'a, V>> {
         let iter = if let Some(collection) = self.tree.get(key)? {
             collection.iter(self.mem)
