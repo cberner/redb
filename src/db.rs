@@ -70,13 +70,21 @@ impl AtomicSavepointId {
 /// Defines the name and types of a table
 ///
 /// A [`TableDefinition`] should be opened for use by calling [`ReadTransaction::open_table`] or [`WriteTransaction::open_table`]
-pub struct TableDefinition<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub struct TableDefinition<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
     name: &'a str,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> TableDefinition<'a, K, V> {
+impl<'a, K, V> TableDefinition<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
         Self {
@@ -91,15 +99,27 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> TableDefinition<'a, K, V> {
     }
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Clone for TableDefinition<'a, K, V> {
+impl<'a, K, V> Clone for TableDefinition<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Copy for TableDefinition<'a, K, V> {}
+impl<'a, K, V> Copy for TableDefinition<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{}
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Display for TableDefinition<'a, K, V> {
+impl<'a, K, V> Display for TableDefinition<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -117,13 +137,21 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Display for TableDefinition
 ///
 /// [Multimap tables](https://en.wikipedia.org/wiki/Multimap) may have multiple values associated with each key
 ///
-pub struct MultimapTableDefinition<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+pub struct MultimapTableDefinition<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbKey + ?Sized
+{
     name: &'a str,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTableDefinition<'a, K, V> {
+impl<'a, K, V> MultimapTableDefinition<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbKey + ?Sized
+{
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
         Self {
@@ -138,15 +166,27 @@ impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapTableDefinition<'a, K
     }
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Clone for MultimapTableDefinition<'a, K, V> {
+impl<'a, K, V> Clone for MultimapTableDefinition<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbKey + ?Sized
+{
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Copy for MultimapTableDefinition<'a, K, V> {}
+impl<'a, K, V> Copy for MultimapTableDefinition<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbKey + ?Sized
+{}
 
-impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Display for MultimapTableDefinition<'a, K, V> {
+impl<'a, K, V> Display for MultimapTableDefinition<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbKey + ?Sized
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -261,7 +301,7 @@ impl Database {
             get_db_size(path).map_err(|err| {
                 // On Windows, an exclusive file lock also applies to reads, unlike on Unix, so
                 // we detect that specific error code and transform it to the correct error
-                // 0x21 - ERROR_LOCK_VIOLATION
+                // 0x21 - `ERROR_LOCK_VIOLATION`
                 if matches!(err.raw_os_error(), Some(0x21)) {
                     Error::DatabaseAlreadyOpen
                 } else {
@@ -384,7 +424,7 @@ impl Database {
                     );
                     mem.mark_pages_allocated(table_pages_iter)?;
 
-                    // Multimap tables may have additional subtrees in their values
+                    // `Multimap` tables may have additional subtrees in their values
                     if definition.get_type() == TableType::Multimap {
                         let table_pages_iter = AllPageNumbersBtreeIter::new(
                             table_root,
@@ -562,7 +602,7 @@ pub enum WriteStrategy {
     /// This write strategy requires calculating checksums as data is written, which decreases write
     /// throughput, but only requires one call to `fsync`, which decreases commit latency.
     ///
-    /// Security considerations: The checksum used is xxhash, a fast, non-cryptographic hash
+    /// Security considerations: The checksum used is `xxhash`, a fast, non-cryptographic hash
     /// function with close to perfect collision resistance when used with non-malicious input. An
     /// attacker with an extremely high degree of control over the database's workload, including
     /// the ability to cause the database process to crash, can cause invalid data to be written

@@ -10,13 +10,21 @@ use std::ops::RangeBounds;
 use std::rc::Rc;
 
 /// A table containing key-value mappings
-pub struct Table<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub struct Table<'db, 'txn, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized,
+{
     name: String,
     transaction: &'txn WriteTransaction<'db>,
     tree: BtreeMut<'txn, K, V>,
 }
 
-impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'db, 'txn, K, V> {
+impl<'db, 'txn, K, V> Table<'db, 'txn, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized,
+{
     pub(crate) fn new(
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
@@ -47,7 +55,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'db, 'txn, K, 
     }
 
     /// Reserve space to insert a key-value pair
-    /// The returned reference will have length equal to value_length
+    /// The returned reference will have length equal to `value_length`
     // TODO: return type should be V, not [u8]
     pub fn insert_reserve(
         &mut self,
@@ -65,14 +73,17 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'db, 'txn, K, 
     /// Returns the old value, if the key was present in the table
     pub fn remove(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
         // Safety: No other references to this table can exist.
-        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-        // and we borrow &mut self.
+        // Tables can only be opened mutably in one location (see `Error::TableAlreadyOpen`),
+        // and we borrow `&mut self`.
         unsafe { self.tree.remove(key) }
     }
 }
 
-impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
+impl<'db, 'txn, K, V> ReadableTable<K, V>
     for Table<'db, 'txn, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized,
 {
     fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
         self.tree.get(key)
@@ -94,13 +105,22 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     }
 }
 
-impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for Table<'db, 'txn, K, V> {
+impl<'db, 'txn, K, V> Drop
+    for Table<'db, 'txn, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized,
+{
     fn drop(&mut self) {
         self.transaction.close_table(&self.name, &mut self.tree);
     }
 }
 
-pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub trait ReadableTable<K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized,
+{
     /// Returns the value corresponding to the given key
     fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>>;
 
@@ -148,11 +168,19 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 }
 
 /// A read-only table
-pub struct ReadOnlyTable<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub struct ReadOnlyTable<'txn, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized,
+{
     tree: Btree<'txn, K, V>,
 }
 
-impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'txn, K, V> {
+impl<'txn, K, V> ReadOnlyTable<'txn, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized,
+{
     pub(crate) fn new(
         root_page: Option<(PageNumber, Checksum)>,
         mem: &'txn TransactionalMemory,
@@ -163,8 +191,11 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'txn, K, V>
     }
 }
 
-impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
+impl<'txn, K, V> ReadableTable<K, V>
     for ReadOnlyTable<'txn, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized,
 {
     fn get(&self, key: &K) -> Result<Option<<<V as RedbValue>::View as WithLifetime>::Out>> {
         self.tree.get(key)
@@ -186,17 +217,29 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     }
 }
 
-pub struct RangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> {
+pub struct RangeIter<'a, K, V>
+where
+    K: RedbKey + ?Sized + 'a,
+    V: RedbValue + ?Sized + 'a
+{
     inner: BtreeRangeIter<'a, K, V>,
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> RangeIter<'a, K, V> {
+impl<'a, K, V> RangeIter<'a, K, V>
+where
+    K: RedbKey + ?Sized + 'a,
+    V: RedbValue + ?Sized + 'a
+{
     fn new(inner: BtreeRangeIter<'a, K, V>) -> Self {
         Self { inner }
     }
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for RangeIter<'a, K, V> {
+impl<'a, K, V> Iterator for RangeIter<'a, K, V>
+where
+    K: RedbKey + ?Sized + 'a,
+    V: RedbValue + ?Sized + 'a
+{
     type Item = (
         <<K as RedbValue>::View as WithLifetime<'a>>::Out,
         <<V as RedbValue>::View as WithLifetime<'a>>::Out,
@@ -213,8 +256,11 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for Rang
     }
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterator
+impl<'a, K, V> DoubleEndedIterator
     for RangeIter<'a, K, V>
+where
+    K: RedbKey + ?Sized + 'a,
+    V: RedbValue + ?Sized + 'a
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {

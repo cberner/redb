@@ -8,12 +8,18 @@ pub trait AsBytesWithLifetime<'a> {
 }
 
 pub struct RefAsBytesLifetime<T: AsRef<[u8]> + ?Sized>(PhantomData<T>);
-impl<'a, T: 'a + AsRef<[u8]> + ?Sized> AsBytesWithLifetime<'a> for RefAsBytesLifetime<T> {
+impl<'a, T> AsBytesWithLifetime<'a> for RefAsBytesLifetime<T>
+where
+    T: 'a + AsRef<[u8]> + ?Sized,
+{
     type Out = &'a T;
 }
 
 pub struct OwnedAsBytesLifetime<T: AsRef<[u8]>>(PhantomData<T>);
-impl<'a, T: AsRef<[u8]> + 'a> AsBytesWithLifetime<'a> for OwnedAsBytesLifetime<T> {
+impl<'a, T> AsBytesWithLifetime<'a> for OwnedAsBytesLifetime<T>
+where
+    T: AsRef<[u8]> + 'a
+{
     type Out = T;
 }
 
@@ -40,6 +46,7 @@ pub trait RedbValue: Debug {
     fn fixed_width() -> Option<usize>;
 
     /// Deserializes data
+    ///
     /// Implementations may return a view over data, or an owned type
     fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out;
 

@@ -16,7 +16,7 @@ pub enum Error {
     },
     TableDoesNotExist(String),
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
-    // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
+    // mutable references to the same dirty pages, or multiple mutable references via `insert_reserve()`
     TableAlreadyOpen(String, &'static panic::Location<'static>),
     OutOfSpace,
     Io(io::Error),

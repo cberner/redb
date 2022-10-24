@@ -55,6 +55,7 @@ impl DatabaseStats {
     }
 
     /// Number of bytes consumed by keys and values that have been inserted.
+    ///
     /// Does not include indexing overhead
     pub fn stored_bytes(&self) -> usize {
         self.stored_leaf_bytes
@@ -82,13 +83,13 @@ pub enum Durability {
     /// commit with a higher durability level.
     ///
     /// Note: Pages are only freed during commits with higher durability levels. Exclusively using
-    /// this function may result in Error::OutOfSpace.
+    /// this function may result in [`Error::OutOfSpace`].
     None,
     /// Commits with this durability level have been queued for persitance to disk, and should be
-    /// persistent some time after [WriteTransaction::commit] returns.
+    /// persistent some time after [`WriteTransaction::commit`] returns.
     Eventual,
     /// Commits with this durability level are guaranteed to be persistent as soon as
-    /// [WriteTransaction::commit] returns.
+    /// [`WriteTransaction::commit`] returns.
     Immediate,
 }
 
@@ -101,7 +102,7 @@ pub struct WriteTransaction<'db> {
     transaction_id: TransactionId,
     table_tree: RefCell<TableTree<'db>>,
     // TODO: change the value type to Vec<PageNumber>
-    // The table of freed pages by transaction. FreedTableKey -> binary.
+    // The table of freed pages by transaction. `FreedTableKey` -> binary.
     // The binary blob is a length-prefixed array of PageNumber
     freed_tree: BtreeMut<'db, FreedTableKey, [u8]>,
     freed_pages: Rc<RefCell<Vec<PageNumber>>>,
@@ -145,7 +146,7 @@ impl<'db> WriteTransaction<'db> {
 
     /// Creates a snapshot of the current database state, which can be used to rollback the database
     ///
-    /// Returns `[Error::InvalidSavepoint`], if the transaction is "dirty" (any tables have been openned)
+    /// Returns [`Error::InvalidSavepoint`], if the transaction is "dirty" (any tables have been openned)
     pub fn savepoint(&self) -> Result<Savepoint<'db>> {
         if self.dirty.load(Ordering::Acquire) {
             return Err(Error::InvalidSavepoint);
@@ -201,7 +202,7 @@ impl<'db> WriteTransaction<'db> {
         let mut freed_pages = vec![];
         for page in allocated_since_savepoint {
             if self.mem.uncommitted(page) {
-                // Safety: The page is uncommitted and we have a &mut on the transaction
+                // Safety: The page is uncommitted and we have a `&mut` on the transaction
                 unsafe {
                     self.mem.free(page)?;
                 }
@@ -466,7 +467,7 @@ impl<'db> WriteTransaction<'db> {
     pub(crate) fn non_durable_commit(&mut self) -> Result {
         let root = self.table_tree.borrow_mut().flush_table_root_updates()?;
 
-        // Store all freed pages for a future commit(), since we can't free pages during a
+        // Store all freed pages for a future `commit()`, since we can't free pages during a
         // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
         self.store_freed_pages()?;
 
@@ -477,7 +478,7 @@ impl<'db> WriteTransaction<'db> {
         Ok(())
     }
 
-    // NOTE: must be called before store_freed_pages() during commit, since this can create
+    // NOTE: must be called before `store_freed_pages()` during commit, since this can create
     // more pages freed by the current transaction
     fn process_freed_pages(&mut self, oldest_live_read: TransactionId) -> Result {
         // We assume below that PageNumber is length 8
@@ -526,7 +527,7 @@ impl<'db> WriteTransaction<'db> {
                 pagination_id: pagination_counter,
             };
             // Safety: The freed table is only accessed from the writer, so only this function
-            // is using it. The only reference retrieved, access_guard, is dropped before the next call
+            // is using it. The only reference retrieved, `access_guard`, is dropped before the next call
             // to this method
             let mut access_guard = unsafe { self.freed_tree.insert_reserve(&key, buffer_size)? };
 
@@ -622,10 +623,14 @@ impl<'db> ReadTransaction<'db> {
     }
 
     /// Open the given table
-    pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub fn open_table<K, V>(
         &self,
-        definition: TableDefinition<K, V>,
-    ) -> Result<ReadOnlyTable<K, V>> {
+        definition: TableDefinition<K, V>
+    ) -> Result<ReadOnlyTable<K, V>>
+    where
+        K: RedbKey + ?Sized,
+        V: RedbValue + ?Sized,
+    {
         let header = self
             .tree
             .get_table::<K, V>(definition.name(), TableType::Normal)?
