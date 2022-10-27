@@ -65,6 +65,10 @@ impl Savepoint {
     pub(crate) fn get_regional_allocator_states(&self) -> &[Vec<u8>] {
         &self.regional_allocators
     }
+
+    pub(crate) fn db_address(&self) -> *const Mutex<TransactionTracker> {
+        self.transaction_tracker.as_ref() as *const _
+    }
 }
 
 impl Drop for Savepoint {
