@@ -1,10 +1,10 @@
-use crate::db::{SavepointId, TransactionId};
+use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::page_store::ChecksumType;
 use crate::tree_store::{Checksum, PageNumber};
 use crate::Database;
+use std::sync::{Arc, Mutex};
 
-pub struct Savepoint<'a> {
-    db: &'a Database,
+pub struct Savepoint {
     id: SavepointId,
     // Each savepoint has an associated read transaction id to ensure that any pages it references
     // are not freed
@@ -14,11 +14,12 @@ pub struct Savepoint<'a> {
     root: Option<(PageNumber, Checksum)>,
     freed_root: Option<(PageNumber, Checksum)>,
     regional_allocators: Vec<Vec<u8>>,
+    transaction_tracker: Arc<Mutex<TransactionTracker>>,
 }
 
-impl<'a> Savepoint<'a> {
+impl Savepoint {
     pub(crate) fn new(
-        db: &'a Database,
+        db: &Database,
         id: SavepointId,
         transaction_id: TransactionId,
         root: Option<(PageNumber, Checksum)>,
@@ -26,7 +27,6 @@ impl<'a> Savepoint<'a> {
         regional_allocators: Vec<Vec<u8>>,
     ) -> Self {
         Self {
-            db,
             id,
             transaction_id,
             version: db.get_memory().get_version(),
@@ -34,6 +34,7 @@ impl<'a> Savepoint<'a> {
             root,
             freed_root,
             regional_allocators,
+            transaction_tracker: db.transaction_tracker(),
         }
     }
 
@@ -66,8 +67,11 @@ impl<'a> Savepoint<'a> {
     }
 }
 
-impl Drop for Savepoint<'_> {
+impl Drop for Savepoint {
     fn drop(&mut self) {
-        self.db.deallocate_savepoint(self);
+        self.transaction_tracker
+            .lock()
+            .unwrap()
+            .deallocate_savepoint(self);
     }
 }

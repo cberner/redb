@@ -27,6 +27,7 @@ mod multimap_table;
 #[cfg(feature = "python")]
 mod python;
 mod table;
+mod transaction_tracker;
 mod transactions;
 mod tree_store;
 mod types;
