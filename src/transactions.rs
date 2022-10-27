@@ -1,4 +1,4 @@
-use crate::db::TransactionId;
+use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeMut, FreedTableKey, InternalTableDefinition, PageNumber, TableTree, TableType,
     TransactionalMemory,
@@ -18,7 +18,7 @@ use std::ops::RangeFull;
 use std::panic;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::MutexGuard;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Informational storage stats about the database
 #[derive(Debug)]
@@ -97,6 +97,7 @@ pub enum Durability {
 /// Only a single [`WriteTransaction`] may exist at a time
 pub struct WriteTransaction<'db> {
     db: &'db Database,
+    transaction_tracker: Arc<Mutex<TransactionTracker>>,
     mem: &'db TransactionalMemory,
     transaction_id: TransactionId,
     table_tree: RefCell<TableTree<'db>>,
@@ -126,6 +127,7 @@ impl<'db> WriteTransaction<'db> {
         let freed_pages = Rc::new(RefCell::new(vec![]));
         Ok(Self {
             db,
+            transaction_tracker: db.transaction_tracker(),
             mem: db.get_memory(),
             transaction_id,
             table_tree: RefCell::new(TableTree::new(
@@ -146,7 +148,7 @@ impl<'db> WriteTransaction<'db> {
     /// Creates a snapshot of the current database state, which can be used to rollback the database
     ///
     /// Returns `[Error::InvalidSavepoint`], if the transaction is "dirty" (any tables have been openned)
-    pub fn savepoint(&self) -> Result<Savepoint<'db>> {
+    pub fn savepoint(&self) -> Result<Savepoint> {
         if self.dirty.load(Ordering::Acquire) {
             return Err(Error::InvalidSavepoint);
         }
@@ -177,7 +179,12 @@ impl<'db> WriteTransaction<'db> {
     ///
     /// Calling this method invalidates all [`Savepoint`]s created after savepoint
     pub fn restore_savepoint(&mut self, savepoint: &Savepoint) -> Result {
-        if !self.db.is_valid_savepoint(savepoint.get_id()) {
+        if !self
+            .transaction_tracker
+            .lock()
+            .unwrap()
+            .is_valid_savepoint(savepoint.get_id())
+        {
             return Err(Error::InvalidSavepoint);
         }
         #[cfg(feature = "logging")]
@@ -248,7 +255,10 @@ impl<'db> WriteTransaction<'db> {
 
         // Invalidate all savepoints that are newer than the one being applied to prevent the user
         // from later trying to restore a savepoint "on another timeline"
-        self.db.invalidate_savepoints_after(savepoint.get_id());
+        self.transaction_tracker
+            .lock()
+            .unwrap()
+            .invalidate_savepoints_after(savepoint.get_id());
 
         Ok(())
     }
@@ -446,7 +456,9 @@ impl<'db> WriteTransaction<'db> {
 
     pub(crate) fn durable_commit(&mut self, eventual: bool) -> Result {
         let oldest_live_read = self
-            .db
+            .transaction_tracker
+            .lock()
+            .unwrap()
             .oldest_live_read_transaction()
             .unwrap_or(self.transaction_id);
 
@@ -669,7 +681,11 @@ impl<'db> ReadTransaction<'db> {
 
 impl<'a> Drop for ReadTransaction<'a> {
     fn drop(&mut self) {
-        self.db.deallocate_read_transaction(self.transaction_id);
+        self.db
+            .transaction_tracker()
+            .lock()
+            .unwrap()
+            .deallocate_read_transaction(self.transaction_id);
     }
 }
 
