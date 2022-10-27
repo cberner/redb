@@ -180,6 +180,12 @@ impl<'db> WriteTransaction<'db> {
     ///
     /// Calling this method invalidates all [`Savepoint`]s created after savepoint
     pub fn restore_savepoint(&mut self, savepoint: &Savepoint) -> Result {
+        // Ensure that user does not try to restore a Savepoint that is from a different Database
+        assert_eq!(
+            self.db.transaction_tracker().as_ref() as *const _,
+            savepoint.db_address()
+        );
+
         if !self
             .transaction_tracker
             .lock()
