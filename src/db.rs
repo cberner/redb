@@ -1,12 +1,11 @@
+use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition,
-    RawBtree, Savepoint, TableType, TransactionalMemory,
+    RawBtree, TableType, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
 use crate::{ReadTransaction, Result, WriteTransaction};
-use std::collections::btree_map::BTreeMap;
-use std::collections::btree_set::BTreeSet;
 use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -15,23 +14,11 @@ use std::marker::PhantomData;
 use std::ops::RangeFull;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::multimap_table::parse_subtree_roots;
 #[cfg(feature = "logging")]
 use log::{info, warn};
-
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
-pub(crate) struct TransactionId(pub u64);
-
-impl TransactionId {
-    fn next(&self) -> TransactionId {
-        TransactionId(self.0 + 1)
-    }
-}
-
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
-pub(crate) struct SavepointId(pub u64);
 
 struct AtomicTransactionId {
     inner: AtomicU64,
@@ -47,23 +34,6 @@ impl AtomicTransactionId {
     fn next(&self) -> TransactionId {
         let id = self.inner.fetch_add(1, Ordering::AcqRel);
         TransactionId(id)
-    }
-}
-
-struct AtomicSavepointId {
-    inner: AtomicU64,
-}
-
-impl AtomicSavepointId {
-    fn new() -> Self {
-        Self {
-            inner: AtomicU64::new(0),
-        }
-    }
-
-    fn next(&self) -> SavepointId {
-        let id = self.inner.fetch_add(1, Ordering::AcqRel);
-        SavepointId(id)
     }
 }
 
@@ -192,10 +162,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Display for MultimapTableDefi
 pub struct Database {
     mem: TransactionalMemory,
     next_transaction_id: AtomicTransactionId,
-    next_savepoint_id: AtomicSavepointId,
-    // reference count of read transactions per transaction id
-    live_read_transactions: Mutex<BTreeMap<TransactionId, u64>>,
-    valid_savepoints: Mutex<BTreeSet<SavepointId>>,
+    transaction_tracker: Arc<Mutex<TransactionTracker>>,
     pub(crate) live_write_transaction: Mutex<Option<TransactionId>>,
 }
 
@@ -424,59 +391,31 @@ impl Database {
         Ok(Database {
             mem,
             next_transaction_id: AtomicTransactionId::new(next_transaction_id),
-            next_savepoint_id: AtomicSavepointId::new(),
+            transaction_tracker: Arc::new(Mutex::new(TransactionTracker::new())),
             live_write_transaction: Mutex::new(None),
-            live_read_transactions: Mutex::new(Default::default()),
-            valid_savepoints: Mutex::new(Default::default()),
         })
     }
 
+    // TODO: we could probably remove this method and pass this clone into the Transaction objects
+    pub(crate) fn transaction_tracker(&self) -> Arc<Mutex<TransactionTracker>> {
+        self.transaction_tracker.clone()
+    }
+
     fn allocate_read_transaction(&self) -> Result<TransactionId> {
-        let mut guard = self.live_read_transactions.lock().unwrap();
+        let mut guard = self.transaction_tracker.lock().unwrap();
         let id = self.mem.get_last_committed_transaction_id()?;
-        guard.entry(id).and_modify(|x| *x += 1).or_insert(1);
+        guard.register_read_transaction(id);
 
         Ok(id)
     }
 
-    pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) {
-        let mut guard = self.live_read_transactions.lock().unwrap();
-        let ref_count = guard.get_mut(&id).unwrap();
-        *ref_count -= 1;
-        if *ref_count == 0 {
-            guard.remove(&id);
-        }
-    }
-
     pub(crate) fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionId)> {
-        let id = self.next_savepoint_id.next();
-        self.valid_savepoints.lock().unwrap().insert(id);
+        let id = self
+            .transaction_tracker
+            .lock()
+            .unwrap()
+            .allocate_savepoint();
         Ok((id, self.allocate_read_transaction()?))
-    }
-
-    pub(crate) fn is_valid_savepoint(&self, id: SavepointId) -> bool {
-        self.valid_savepoints.lock().unwrap().contains(&id)
-    }
-
-    pub(crate) fn invalidate_savepoints_after(&self, id: SavepointId) {
-        self.valid_savepoints.lock().unwrap().retain(|x| *x <= id);
-    }
-
-    pub(crate) fn deallocate_savepoint(&self, savepoint: &Savepoint) {
-        self.valid_savepoints
-            .lock()
-            .unwrap()
-            .remove(&savepoint.get_id());
-        self.deallocate_read_transaction(savepoint.get_transaction_id());
-    }
-
-    pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
-        self.live_read_transactions
-            .lock()
-            .unwrap()
-            .keys()
-            .next()
-            .cloned()
     }
 
     pub(crate) fn increment_transaction_id(&self) -> TransactionId {
@@ -490,13 +429,13 @@ impl Database {
 
     /// Changes the write strategy of the database for future [`WriteTransaction`]s.
     ///
-    /// Calling this method will invalidate all existing [`Savepoint`]s.
+    /// Calling this method will invalidate all existing [`crate::Savepoint`]s.
     ///
     /// Note: Changing to the [`WriteStrategy::Checksum`] strategy can take a long time, as checksums
     /// will need to be calculated for every entry in the database
     pub fn set_write_strategy(&self, strategy: WriteStrategy) -> Result {
-        let mut valid_savepoints = self.valid_savepoints.lock().unwrap();
-        valid_savepoints.clear();
+        let mut tracker = self.transaction_tracker.lock().unwrap();
+        tracker.invalidate_all_savepoints();
 
         let guard = self.live_write_transaction.lock().unwrap();
         assert!(guard.is_none());
@@ -510,7 +449,7 @@ impl Database {
             .commit(root_page, freed_root, id, false, Some(strategy.into()))?;
         drop(guard);
 
-        drop(valid_savepoints);
+        drop(tracker);
 
         Ok(())
     }

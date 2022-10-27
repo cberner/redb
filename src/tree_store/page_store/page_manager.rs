@@ -1,4 +1,5 @@
-use crate::db::{TransactionId, WriteStrategy};
+use crate::db::WriteStrategy;
+use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
