@@ -35,7 +35,11 @@ impl<'a> RangeIterState<'a> {
         }
     }
 
-    fn next(self, reverse: bool, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
+    fn next(
+        self,
+        reverse: bool,
+        manager: &'a TransactionalMemory
+    ) -> Option<RangeIterState> {
         match self {
             Leaf {
                 page,
@@ -198,7 +202,11 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
     }
 }
 
-pub struct BtreeRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> {
+pub struct BtreeRangeIter<'a, K, V>
+where
+    K: RedbKey + ?Sized + 'a,
+    V: RedbValue + ?Sized + 'a
+{
     left: Option<RangeIterState<'a>>, // Exclusive. The previous element returned
     right: Option<RangeIterState<'a>>, // Exclusive. The previous element returned
     include_left: bool,               // left is inclusive, instead of exclusive
@@ -208,12 +216,20 @@ pub struct BtreeRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a, K, V> {
-    pub(crate) fn new<T: RangeBounds<KR>, KR: Borrow<K> + ?Sized + 'a>(
+impl<'a, K, V> BtreeRangeIter<'a, K, V>
+where
+    K: RedbKey + ?Sized + 'a,
+    V: RedbValue + ?Sized + 'a
+{
+    pub(crate) fn new<T, KR>(
         query_range: T,
         table_root: Option<PageNumber>,
         manager: &'a TransactionalMemory,
-    ) -> Self {
+    ) -> Self
+    where
+        T: RangeBounds<KR>,
+        KR: Borrow<K> + ?Sized + 'a
+    {
         if let Some(root) = table_root {
             let (include_left, left) = match query_range.start_bound() {
                 Bound::Included(k) => find_iter_left::<K, V>(
@@ -280,8 +296,11 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
     }
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator
+impl<'a, K, V> Iterator
     for BtreeRangeIter<'a, K, V>
+where
+    K: RedbKey + ?Sized + 'a,
+    V: RedbValue + ?Sized + 'a
 {
     type Item = EntryAccessor<'a>;
 
@@ -343,8 +362,11 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator
     }
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterator
+impl<'a, K, V> DoubleEndedIterator
     for BtreeRangeIter<'a, K, V>
+where
+    K: RedbKey + ?Sized + 'a,
+    V: RedbValue + ?Sized + 'a
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let (
@@ -404,12 +426,16 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterat
     }
 }
 
-fn find_iter_unbounded<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+fn find_iter_unbounded<'a, K, V>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     reverse: bool,
     manager: &'a TransactionalMemory,
-) -> Option<RangeIterState<'a>> {
+) -> Option<RangeIterState<'a>>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -450,13 +476,17 @@ fn find_iter_unbounded<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
 
 // Returns a bool indicating whether the first entry pointed to by the state is included in the
 // queried range
-fn find_iter_left<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+fn find_iter_left<'a, K, V>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     query: &[u8],
     include_query: bool,
     manager: &'a TransactionalMemory,
-) -> (bool, Option<RangeIterState<'a>>) {
+) -> (bool, Option<RangeIterState<'a>>)
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -498,13 +528,17 @@ fn find_iter_left<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     }
 }
 
-fn find_iter_right<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+fn find_iter_right<'a, K, V>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
     query: &[u8],
     include_query: bool,
     manager: &'a TransactionalMemory,
-) -> (bool, Option<RangeIterState<'a>>) {
+) -> (bool, Option<RangeIterState<'a>>)
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {

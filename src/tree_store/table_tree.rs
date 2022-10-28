@@ -296,7 +296,8 @@ impl<'txn> TableTree<'txn> {
         self.pending_table_updates.clear();
     }
 
-    pub(crate) fn flush_table_root_updates(&mut self) -> Result<Option<(PageNumber, Checksum)>> {
+    pub(crate) fn flush_table_root_updates(&mut self)
+    -> Result<Option<(PageNumber, Checksum)>> {
         for (name, table_root) in self.pending_table_updates.drain() {
             // Bypass .get_table() since the table types are dynamic
             // TODO: optimize away this get()
@@ -315,7 +316,8 @@ impl<'txn> TableTree<'txn> {
     }
 
     // root_page: the root of the master table
-    pub(crate) fn list_tables(&self, table_type: TableType) -> Result<Vec<String>> {
+    pub(crate) fn list_tables(&self, table_type: TableType)
+    -> Result<Vec<String>> {
         let iter = self.tree.range::<RangeFull, &str>(..)?;
         let iter = TableNameIter {
             inner: iter,
@@ -325,11 +327,15 @@ impl<'txn> TableTree<'txn> {
     }
 
     // root_page: the root of the master table
-    pub(crate) fn get_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub(crate) fn get_table<K, V>(
         &self,
         name: &str,
         table_type: TableType,
-    ) -> Result<Option<InternalTableDefinition>> {
+    ) -> Result<Option<InternalTableDefinition>>
+    where
+        K: RedbKey + ?Sized,
+        V: RedbValue + ?Sized
+    {
         if let Some(mut definition) = self.tree.get(name)? {
             if definition.get_type() != table_type {
                 return Err(Error::TableTypeMismatch(format!(
@@ -361,11 +367,15 @@ impl<'txn> TableTree<'txn> {
     }
 
     // root_page: the root of the master table
-    pub(crate) fn delete_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub(crate) fn delete_table<K, V>(
         &mut self,
         name: &str,
         table_type: TableType,
-    ) -> Result<bool> {
+    ) -> Result<bool>
+    where
+        K: RedbKey + ?Sized,
+        V: RedbValue + ?Sized
+    {
         if let Some(definition) = self.get_table::<K, V>(name, table_type)? {
             if let Some((table_root, _)) = definition.get_root() {
                 let iter = AllPageNumbersBtreeIter::new(
@@ -392,11 +402,15 @@ impl<'txn> TableTree<'txn> {
 
     // Returns a tuple of the table id and the new root page
     // root_page: the root of the master table
-    pub(crate) fn get_or_create_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub(crate) fn get_or_create_table<K, V>(
         &mut self,
         name: &str,
         table_type: TableType,
-    ) -> Result<InternalTableDefinition> {
+    ) -> Result<InternalTableDefinition>
+    where
+        K: RedbKey + ?Sized,
+        V: RedbValue + ?Sized
+    {
         if let Some(found) = self.get_table::<K, V>(name, table_type)? {
             return Ok(found);
         }

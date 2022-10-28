@@ -28,7 +28,11 @@ enum DeletionResult {
     DeletedBranch(PageNumber, Checksum),
 }
 
-struct InsertionResult<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+struct InsertionResult<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
     // the new root page
     new_root: PageNumber,
     // checksum of the root page
@@ -41,7 +45,11 @@ struct InsertionResult<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     old_value: Option<AccessGuard<'a, V>>,
 }
 
-pub(crate) struct MutateHelper<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub(crate) struct MutateHelper<'a, 'b, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
     root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
     free_policy: FreePolicy,
     mem: &'a TransactionalMemory,
@@ -50,7 +58,11 @@ pub(crate) struct MutateHelper<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Size
     _value_type: PhantomData<V>,
 }
 
-impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K, V> {
+impl<'a, 'b, K, V> MutateHelper<'a, 'b, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
     pub(crate) fn new(
         root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
         free_policy: FreePolicy,
@@ -78,14 +90,23 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
         let root = { *(*self.root.clone()).borrow() };
         if let Some((p, checksum)) = root {
             let (deletion_result, found) =
-                self.delete_helper(self.mem.get_page(p), checksum, key.as_bytes().as_ref())?;
+                self.delete_helper(
+                    self.mem.get_page(p),
+                    checksum,
+                    key.as_bytes().as_ref()
+                )?;
+
             let new_root = match deletion_result {
                 Subtree(page, checksum) => Some((page, checksum)),
                 DeletedLeaf => None,
                 PartialLeaf { deleted_pair } => {
                     let page = self.mem.get_page(p);
                     let accessor =
-                        LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                        LeafAccessor::new(
+                            page.memory(),
+                            K::fixed_width(),
+                            V::fixed_width()
+                        );
                     let mut builder = LeafBuilder::new(
                         self.mem,
                         accessor.num_pairs() - 1,
@@ -598,7 +619,10 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
         Ok(result)
     }
 
-    fn checksum_helper<T: Page>(&self, page: &T) -> Checksum {
+    fn checksum_helper<T>(&self, page: &T) -> Checksum
+    where
+        T: Page
+    {
         if self.mem.checksum_type() == ChecksumType::Unused {
             return 0;
         }

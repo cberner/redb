@@ -33,7 +33,11 @@ pub(crate) struct BtreeMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
+impl<'a, K, V> BtreeMut<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
     pub(crate) fn new(
         root: Option<(PageNumber, Checksum)>,
         mem: &'a TransactionalMemory,
@@ -198,7 +202,11 @@ impl<'a> RawBtree<'a> {
         }
     }
 
-    fn verify_checksum_helper(&self, page_number: PageNumber, expected_checksum: Checksum) -> bool {
+    fn verify_checksum_helper(
+        &self,
+        page_number: PageNumber,
+        expected_checksum: Checksum
+    ) -> bool {
         let page = self.mem.get_page(page_number);
         let node_mem = page.memory();
         match node_mem[0] {
@@ -233,15 +241,26 @@ impl<'a> RawBtree<'a> {
     }
 }
 
-pub(crate) struct Btree<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub(crate) struct Btree<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
     mem: &'a TransactionalMemory,
     root: Option<(PageNumber, Checksum)>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
-    pub(crate) fn new(root: Option<(PageNumber, Checksum)>, mem: &'a TransactionalMemory) -> Self {
+impl<'a, K, V> Btree<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized
+{
+    pub(crate) fn new(
+        root: Option<(PageNumber, Checksum)>,
+        mem: &'a TransactionalMemory
+    ) -> Self {
         Self {
             mem,
             root,
@@ -285,10 +304,14 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         }
     }
 
-    pub(crate) fn range<T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
+    pub(crate) fn range<T, KR>(
         &self,
         range: T,
-    ) -> Result<BtreeRangeIter<'a, K, V>> {
+    ) -> Result<BtreeRangeIter<'a, K, V>>
+    where
+        T: RangeBounds<KR>,
+        KR: Borrow<K> + 'a
+    {
         Ok(BtreeRangeIter::new(
             range,
             self.root.map(|(p, _)| p),

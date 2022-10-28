@@ -75,7 +75,11 @@ impl FreePolicy {
         Ok(())
     }
 
-    pub(crate) fn free_on_drop(&self, page: PageNumber, mem: &TransactionalMemory) -> bool {
+    pub(crate) fn free_on_drop(
+        &self,
+        page: PageNumber,
+        mem: &TransactionalMemory
+    ) -> bool {
         match self {
             FreePolicy::Never => false,
             FreePolicy::Uncommitted => mem.uncommitted(page),
@@ -108,7 +112,10 @@ impl<'a> EitherPage<'a> {
     }
 }
 
-pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
+pub struct AccessGuard<'a, V>
+where
+    V: RedbValue + ?Sized
+{
     page: EitherPage<'a>,
     offset: usize,
     len: usize,
@@ -117,8 +124,11 @@ pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
     _value_type: PhantomData<V>,
 }
 
-impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
-    // Safety: if free_on_drop is true, caller must guarantee that no other references to page exist,
+impl<'a, V> AccessGuard<'a, V>
+where
+    V: RedbValue + ?Sized,
+{
+    // Safety: if `free_on_drop` is true, caller must guarantee that no other references to page exist,
     // and that no references will be created until this AccessGuard is dropped
     pub(super) unsafe fn new(
         page: PageImpl<'a>,
@@ -142,7 +152,10 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
         }
     }
 
-    pub(super) fn with_owned_value(value: Vec<u8>, mem: &'a TransactionalMemory) -> Self {
+    pub(super) fn with_owned_value(
+        value: Vec<u8>,
+        mem: &'a TransactionalMemory
+    ) -> Self {
         let len = value.len();
         Self {
             page: EitherPage::OwnedMemory(value),
@@ -183,7 +196,10 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
     }
 }
 
-impl<'a, V: RedbValue + ?Sized> Drop for AccessGuard<'a, V> {
+impl<'a, V> Drop for AccessGuard<'a, V>
+where
+    V: RedbValue + ?Sized,
+{
     fn drop(&mut self) {
         match self.on_drop {
             OnDrop::None => {}
@@ -212,7 +228,11 @@ impl<'a, V: RedbValue + ?Sized> Drop for AccessGuard<'a, V> {
     }
 }
 
-pub struct AccessGuardMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub struct AccessGuardMut<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized,
+{
     root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
     key: Vec<u8>,
     mem: &'a TransactionalMemory,
@@ -225,7 +245,11 @@ pub struct AccessGuardMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> AccessGuardMut<'a, K, V> {
+impl<'a, K, V> AccessGuardMut<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized,
+{
     pub(crate) fn new(
         key: &[u8],
         page: PageMut<'a>,
@@ -245,12 +269,15 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> AccessGuardMut<'a, K, V> {
         }
     }
 
-    pub(crate) fn set_root_for_drop(&mut self, root: Rc<RefCell<Option<(PageNumber, Checksum)>>>) {
+    pub(crate) fn set_root_for_drop(
+        &mut self,
+        root: Rc<RefCell<Option<(PageNumber, Checksum)>>>
+    ){
         self.root = root;
     }
 
     // Repairs the checksums after the user has filled the mutable buffer. This is necessary
-    // because the checksums will have been calculated with the values during .insert_reserve(),
+    // because the checksums will have been calculated with the values during . `insert_reserve()`,
     // but the user is given a mutable reference and will have modified the value, which invalidates
     // the checksum.
     fn finalize_checksum(&mut self, page_number: PageNumber) -> Checksum {
@@ -273,7 +300,10 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> AccessGuardMut<'a, K, V> {
         }
     }
 
-    fn checksum_helper<T: Page>(&self, page: &T) -> Checksum {
+    fn checksum_helper<T>(&self, page: &T) -> Checksum
+    where
+        T: Page,
+    {
         if self.mem.checksum_type() == ChecksumType::Unused {
             return 0;
         }
@@ -291,13 +321,21 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> AccessGuardMut<'a, K, V> {
 }
 
 // TODO: this should return a RedbValue typed reference
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> AsMut<[u8]> for AccessGuardMut<'a, K, V> {
+impl<'a, K, V> AsMut<[u8]> for AccessGuardMut<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized,
+{
     fn as_mut(&mut self) -> &mut [u8] {
         &mut self.page.memory_mut()[self.offset..(self.offset + self.len)]
     }
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for AccessGuardMut<'a, K, V> {
+impl<'a, K, V> Drop for AccessGuardMut<'a, K, V>
+where
+    K: RedbKey + ?Sized,
+    V: RedbValue + ?Sized,
+{
     fn drop(&mut self) {
         // Was dropped before being returned to the user, so no clean up needed
         if self.root.borrow().is_none() {
@@ -356,10 +394,11 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
-    pub(super) fn print_node<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
-        &self,
-        include_value: bool,
-    ) {
+    pub(super) fn print_node<K, V>(&self, include_value: bool)
+    where
+        K: RedbKey + ?Sized,
+        V: RedbValue + ?Sized,
+    {
         let mut i = 0;
         while let Some(entry) = self.entry(i) {
             eprint!(" key_{}={:?}", i, K::from_bytes(entry.key()));
@@ -370,7 +409,10 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
-    pub(crate) fn position<K: RedbKey + ?Sized>(&self, query: &[u8]) -> (usize, bool) {
+    pub(crate) fn position<K>(&self, query: &[u8]) -> (usize, bool)
+    where
+        K: RedbKey + ?Sized,
+    {
         // inclusive
         let mut min_entry = 0;
         // inclusive. Start past end, since it might be positioned beyond the end of the leaf
@@ -394,7 +436,10 @@ impl<'a> LeafAccessor<'a> {
         (min_entry, false)
     }
 
-    pub(crate) fn find_key<K: RedbKey + ?Sized>(&self, query: &[u8]) -> Option<usize> {
+    pub(crate) fn find_key<K>(&self, query: &[u8]) -> Option<usize>
+    where
+        K: RedbKey + ?Sized,
+    {
         let (entry, found) = self.position::<K>(query);
         if found {
             Some(entry)
@@ -586,7 +631,10 @@ pub(super) struct LeafBuilder<'a, 'b> {
 }
 
 impl<'a, 'b> LeafBuilder<'a, 'b> {
-    pub(super) fn required_bytes(num_pairs: usize, keys_values_bytes: usize) -> usize {
+    pub(super) fn required_bytes(
+        num_pairs: usize,
+        keys_values_bytes: usize
+    ) -> usize {
         RawLeafBuilder::required_bytes(num_pairs, keys_values_bytes)
     }
 
@@ -907,7 +955,13 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
     }
 
     // Insert the given key, value pair at index i and shift all following pairs to the right
-    pub(super) fn insert(&mut self, i: usize, overwrite: bool, key: &[u8], value: &[u8]) {
+    pub(super) fn insert(
+        &mut self,
+        i: usize,
+        overwrite: bool,
+        key: &[u8],
+        value: &[u8]
+    ) {
         let accessor = LeafAccessor::new(
             self.page.memory(),
             self.fixed_key_size,
@@ -1181,14 +1235,22 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
 }
 
 // Provides a simple zero-copy way to access a branch page
-pub(super) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
+pub(super) struct BranchAccessor<'a, 'b, T>
+where
+    'a: 'b,
+    T: Page + 'a
+{
     page: &'b T,
     num_keys: usize,
     fixed_key_size: Option<usize>,
     _page_lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
+impl<'a, 'b, T> BranchAccessor<'a, 'b, T>
+where
+    'a: 'b,
+    T: Page + 'a
+{
     pub(super) fn new(page: &'b T, fixed_key_size: Option<usize>) -> Self {
         debug_assert_eq!(page.memory()[0], BRANCH);
         let num_keys = u16::from_le_bytes(page.memory()[2..4].try_into().unwrap()) as usize;
@@ -1200,7 +1262,10 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         }
     }
 
-    pub(super) fn print_node<K: RedbKey + ?Sized>(&self) {
+    pub(super) fn print_node<K>(&self)
+    where
+        K: RedbKey + ?Sized,
+    {
         eprint!(
             "Internal[ (page={:?}), child_0={:?}",
             self.page.get_page_number(),
@@ -1221,7 +1286,10 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         self.key_end(self.num_keys() - 1)
     }
 
-    pub(super) fn child_for_key<K: RedbKey + ?Sized>(&self, query: &[u8]) -> (usize, PageNumber) {
+    pub(super) fn child_for_key<K>(&self, query: &[u8]) -> (usize, PageNumber)
+    where
+        K: RedbKey + ?Sized,
+    {
         let mut min_child = 0; // inclusive
         let mut max_child = self.num_keys(); // inclusive
         while min_child < max_child {
@@ -1342,11 +1410,20 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         }
     }
 
-    pub(super) fn replace_child(&mut self, index: usize, child: PageNumber, checksum: Checksum) {
+    pub(super) fn replace_child(
+        &mut self,
+        index: usize,
+        child: PageNumber,
+        checksum: Checksum
+    ) {
         self.children[index] = (child, checksum);
     }
 
-    pub(super) fn push_child(&mut self, child: PageNumber, checksum: Checksum) {
+    pub(super) fn push_child(
+        &mut self,
+        child: PageNumber,
+        checksum: Checksum
+    ) {
         self.children.push((child, checksum));
     }
 
@@ -1355,7 +1432,10 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         self.total_key_bytes += key.len();
     }
 
-    pub(super) fn push_all<T: Page>(&mut self, accessor: &'a BranchAccessor<'_, '_, T>) {
+    pub(super) fn push_all<T: Page>(
+        &mut self,
+        accessor: &'a BranchAccessor<'_, '_, T>
+    ) {
         for i in 0..accessor.count_children() {
             let child = accessor.child_page(i).unwrap();
             let checksum = accessor.child_checksum(i).unwrap();
@@ -1468,14 +1548,20 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
 // * 4 bytes: key end. Ending offset of the key, exclusive
 // repeating (num_keys times):
 // * n bytes: key data
-pub(super) struct RawBranchBuilder<'a: 'b, 'b> {
+pub(super) struct RawBranchBuilder<'a, 'b>
+where
+    'a: 'b,
+{
     page: &'b mut PageMut<'a>,
     fixed_key_size: Option<usize>,
     num_keys: usize,
     keys_written: usize, // used for debugging
 }
 
-impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
+impl<'a, 'b> RawBranchBuilder<'a, 'b>
+where
+    'a: 'b
+{
     pub(super) fn required_bytes(
         num_keys: usize,
         size_of_keys: usize,
@@ -1596,7 +1682,10 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
     }
 }
 
-impl<'a: 'b, 'b> Drop for RawBranchBuilder<'a, 'b> {
+impl<'a, 'b> Drop for RawBranchBuilder<'a, 'b>
+where
+    'a: 'b
+{
     fn drop(&mut self) {
         if !thread::panicking() {
             assert_eq!(self.keys_written, self.num_keys);
@@ -1604,11 +1693,17 @@ impl<'a: 'b, 'b> Drop for RawBranchBuilder<'a, 'b> {
     }
 }
 
-pub(super) struct BranchMutator<'a: 'b, 'b> {
+pub(super) struct BranchMutator<'a, 'b>
+where
+    'a: 'b
+{
     page: &'b mut PageMut<'a>,
 }
 
-impl<'a: 'b, 'b> BranchMutator<'a, 'b> {
+impl<'a, 'b> BranchMutator<'a, 'b>
+where
+    'a: 'b
+{
     pub(super) fn new(page: &'b mut PageMut<'a>) -> Self {
         assert_eq!(page.memory()[0], BRANCH);
         Self { page }
