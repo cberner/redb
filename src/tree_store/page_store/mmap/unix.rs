@@ -30,8 +30,8 @@ impl Drop for FileLock {
 }
 
 pub(super) struct MmapInner {
-    pub(super) mmap: *mut u8,
-    pub(super) capacity: usize,
+    mmap: *mut u8,
+    capacity: usize,
 }
 
 impl MmapInner {
@@ -62,6 +62,14 @@ impl MmapInner {
                 })
             }
         }
+    }
+
+    pub(super) fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub(super) fn base_addr(&self) -> *mut u8 {
+        self.mmap
     }
 
     /// Safety: if new_len < len(), caller must ensure that no references to memory in new_len..len() exist

@@ -77,7 +77,7 @@ impl Mmap {
     /// SAFETY: if `new_len < len()`, caller must ensure that no references to
     /// memory in `new_len..len()` exist
     pub(crate) unsafe fn resize(&self, new_len: usize) -> Result<()> {
-        assert!(new_len <= self.mmap.capacity);
+        assert!(new_len <= self.mmap.capacity());
         self.check_fsync_failure()?;
 
         self.mmap.resize(new_len as u64, self)?;
@@ -130,7 +130,7 @@ impl Mmap {
         // TODO: propagate the error
         self.check_fsync_failure()
             .expect("fsync previously failed. Connection closed");
-        let ptr = self.mmap.mmap.add(range.start);
+        let ptr = self.mmap.base_addr().add(range.start);
         slice::from_raw_parts(ptr, range.len())
     }
 
@@ -142,7 +142,7 @@ impl Mmap {
         // TODO: propagate the error
         self.check_fsync_failure()
             .expect("fsync previously failed. Connection closed");
-        let ptr = self.mmap.mmap.add(range.start);
+        let ptr = self.mmap.base_addr().add(range.start);
         slice::from_raw_parts_mut(ptr, range.len())
     }
 }

@@ -162,8 +162,8 @@ impl Drop for FileLock {
 }
 
 pub(super) struct MmapInner {
-    pub(super) mmap: *mut u8,
-    pub(super) capacity: usize,
+    mmap: *mut u8,
+    capacity: usize,
 }
 
 impl MmapInner {
@@ -182,6 +182,14 @@ impl MmapInner {
             mmap,
             capacity: max_capacity,
         })
+    }
+
+    pub(super) fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub(super) fn base_addr(&self) -> *mut u8 {
+        self.mmap
     }
 
     unsafe fn map_file(file: &File, len: u64, map_addr: *mut u8) -> Result<*mut u8> {
