@@ -5,6 +5,8 @@ use std::ffi::c_void;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::io::RawHandle;
 use std::ptr;
+use std::sync::atomic::{AtomicPtr, AtomicU64};
+use std::sync::Mutex;
 
 #[repr(C)]
 struct OVERLAPPED {
@@ -161,8 +163,13 @@ impl Drop for FileLock {
     }
 }
 
+// TODO: optimize this so that it doesn't use quadratic address space when growing. It should instead keep an array
+// of mmaps, one for each redb region, instead of an array of maps that all cover the whole file (at the time they were created).
 pub(super) struct MmapInner {
-    mmap: *mut u8,
+    mmap: AtomicPtr<u8>,
+    // old mappings that user may still have pointers into
+    old_mmaps: Mutex<Vec<*mut u8>>,
+    len: AtomicU64,
     capacity: usize,
 }
 
@@ -176,10 +183,12 @@ impl MmapInner {
         // > (zero) and reject those files.
         assert!(len > 0);
 
-        let mmap = unsafe { Self::map_file(file, len, ptr::null_mut())? };
+        let mmap = unsafe { Self::map_file(file, len)? };
 
         Ok(Self {
-            mmap,
+            mmap: AtomicPtr::new(mmap),
+            old_mmaps: Mutex::new(vec![]),
+            len: AtomicU64::new(len),
             capacity: max_capacity,
         })
     }
@@ -189,10 +198,10 @@ impl MmapInner {
     }
 
     pub(super) fn base_addr(&self) -> *mut u8 {
-        self.mmap
+        self.mmap.load(Ordering::Acquire)
     }
 
-    unsafe fn map_file(file: &File, len: u64, map_addr: *mut u8) -> Result<*mut u8> {
+    unsafe fn map_file(file: &File, len: u64) -> Result<*mut u8> {
         let handle = file.as_raw_handle();
 
         #[allow(clippy::cast_possible_truncation)]
@@ -220,24 +229,26 @@ impl MmapInner {
                 0,
                 0,
                 len.try_into().unwrap(),
-                map_addr,
+                ptr::null_mut(),
             )
         };
 
         Ok(ptr)
     }
 
-    pub(super) unsafe fn resize(&self, _len: u64, _owner: &Mmap) -> Result<()> {
-        unreachable!("Mmap resizing is not supported on Windows");
-        // UnmapViewOfFile(self.mmap);
+    pub(super) unsafe fn resize(&self, len: u64, owner: &Mmap) -> Result<()> {
+        // TODO: support shrinking on Windows
+        assert!(len >= self.len.load(Ordering::Acquire));
+        let mut guard = self.old_mmaps.lock().unwrap();
+        guard.push(self.base_addr());
 
-        // owner.file.set_len(len)?;
-        // let ptr = Self::map_file(&owner.file, len, self.mmap)?;
+        owner.file.set_len(len)?;
+        let ptr = Self::map_file(&owner.file, len)?;
 
-        // // This is the same logic as in unix
-        // assert_eq!(ptr, self.mmap);
+        self.mmap.store(ptr, Ordering::Release);
+        self.len.store(len, Ordering::Release);
 
-        // Ok(())
+        Ok(())
     }
 
     pub(super) fn flush(&self, owner: &Mmap) -> Result {
@@ -256,7 +267,7 @@ impl MmapInner {
     pub(super) fn eventual_flush(&self, owner: &Mmap) -> Result {
         #[cfg(not(fuzzing))]
         {
-            let result = unsafe { FlushViewOfFile(self.mmap, owner.len()) };
+            let result = unsafe { FlushViewOfFile(self.base_addr(), owner.len()) };
             if result != 0 {
                 Ok(())
             } else {
@@ -273,8 +284,12 @@ impl MmapInner {
 
 impl Drop for MmapInner {
     fn drop(&mut self) {
-        unsafe {
-            UnmapViewOfFile(self.mmap);
+        if let Ok(guard) = self.old_mmaps.lock() {
+            for addr in guard.iter() {
+                unsafe {
+                    UnmapViewOfFile(*addr);
+                }
+            }
         }
     }
 }

@@ -197,7 +197,7 @@ impl Database {
                 .open(path)?
         };
 
-        Database::new(file, db_size, None, None, cfg!(unix), None)
+        Database::new(file, db_size, None, None, true, None)
     }
 
     /// Opens an existing redb database.
@@ -211,7 +211,7 @@ impl Database {
         } else if File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = Self::get_db_size(path.as_ref())?;
             let file = OpenOptions::new().read(true).write(true).open(path)?;
-            Database::new(file, existing_size, None, None, cfg!(unix), None)
+            Database::new(file, existing_size, None, None, true, None)
         } else {
             Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
         }
@@ -545,7 +545,7 @@ impl Builder {
         Self {
             page_size: None,
             region_size: None,
-            dynamic_growth: cfg!(unix),
+            dynamic_growth: true,
             write_strategy: WriteStrategy::default(),
         }
     }
@@ -577,7 +577,6 @@ impl Builder {
     /// Whether to grow the database file dynamically.
     /// When set to true, the database file will start at a small size and grow as insertions are made
     /// When set to false, the database file will be statically sized
-    #[cfg(unix)]
     pub fn set_dynamic_growth(&mut self, enabled: bool) -> &mut Self {
         self.dynamic_growth = enabled;
         self

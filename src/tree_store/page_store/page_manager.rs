@@ -1423,11 +1423,19 @@ impl TransactionalMemory {
     }
 
     // Safety: caller must guarantee that no references to free pages at the end of the last region exist
+    #[cfg_attr(windows, allow(unreachable_code))]
+    #[cfg_attr(windows, allow(unused_variables))]
     fn try_shrink(
         &self,
         metadata: &mut MetadataAccessor,
         layout: &mut DatabaseLayout,
     ) -> Result<bool> {
+        // TODO: enable shrinking on Windows
+        #[cfg(windows)]
+        {
+            return Ok(false);
+        }
+
         let last_region_index = layout.num_regions() - 1;
         let last_region = layout.region_layout(last_region_index);
         let region = metadata.get_region(last_region_index, layout);
