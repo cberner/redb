@@ -4,7 +4,6 @@ use tempfile::NamedTempFile;
 
 use rand::prelude::SliceRandom;
 use rand::Rng;
-#[cfg(unix)]
 use redb::ReadableMultimapTable;
 use redb::{
     Builder, Database, Durability, Error, MultimapTableDefinition, ReadableTable, TableDefinition,
@@ -148,7 +147,6 @@ fn free() {
     #[cfg_attr(windows, allow(unused_mut))]
     let db = unsafe {
         let mut builder = Database::builder();
-        #[cfg(unix)]
         {
             builder.set_dynamic_growth(false);
         }
@@ -277,7 +275,6 @@ fn large_keys() {
 }
 
 #[test]
-#[cfg(unix)]
 fn dynamic_growth() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let table_definition: TableDefinition<u64, [u8]> = TableDefinition::new("x");
@@ -779,8 +776,6 @@ fn regression13() {
 }
 
 #[test]
-// Disabling on Windows for now since this requires a minimum of 140GiB of disk space due to lack of resizing
-#[cfg(unix)]
 fn regression14() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
@@ -821,8 +816,6 @@ fn regression14() {
 }
 
 #[test]
-// Disabling on Windows for now since this requires a minimum of 400GiB of disk space due to lack of resizing
-#[cfg(unix)]
 fn regression15() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db_size = 400998358365;
