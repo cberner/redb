@@ -7,31 +7,6 @@ const SLICE_TABLE: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
 
 #[test]
-fn custom_region_size() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe {
-        Database::builder()
-            .set_region_size(512 * 1024)
-            .create(tmpfile.path(), 20 * 1024 * 1024)
-            .unwrap()
-    };
-    let rows = 4 * 1024;
-    let write_txn = db.begin_write().unwrap();
-    {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        let big_value = vec![0u8; 1024];
-        for i in 0..rows {
-            table.insert(&(i as u32).to_le_bytes(), &big_value).unwrap();
-        }
-    }
-    write_txn.commit().unwrap();
-
-    let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(table.len().unwrap(), rows);
-}
-
-#[test]
 fn len() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
