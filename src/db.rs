@@ -564,11 +564,9 @@ impl Builder {
         self
     }
 
-    /// Set the internal region size of the database
-    /// Smaller regions may allow the database to compact more effectively, but will limit the maximum
-    /// size of values that can be stored
-    /// Defaults to 4GiB
-    pub fn set_region_size(&mut self, size: usize) -> &mut Self {
+    #[cfg(test)]
+    #[cfg(unix)]
+    fn set_region_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
         self.region_size = Some(size);
         self
@@ -614,5 +612,69 @@ impl Builder {
 impl std::fmt::Debug for Database {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Database").finish()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #[cfg(unix)]
+    use tempfile::NamedTempFile;
+
+    #[cfg(unix)]
+    use crate::{Database, TableDefinition};
+
+    #[test]
+    #[cfg(unix)]
+    fn dynamic_shrink() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let table_definition: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+        let big_value = vec![0; 1024];
+
+        let db_size = 20 * 1024 * 1024;
+        let db = unsafe {
+            Database::builder()
+                .set_region_size(1024 * 1024)
+                .create(tmpfile.path(), db_size)
+                .unwrap()
+        };
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_definition).unwrap();
+            for i in 0..2048 {
+                table.insert(&i, &big_value).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        let file_size = tmpfile.as_file().metadata().unwrap().len();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_definition).unwrap();
+            for i in 0..2048 {
+                table.remove(&i).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        // Perform a couple more commits to be sure the database has a chance to compact
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_definition).unwrap();
+            table.insert(&0, &[]).unwrap();
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_definition).unwrap();
+            table.remove(&0).unwrap();
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        txn.commit().unwrap();
+
+        let final_file_size = tmpfile.as_file().metadata().unwrap().len();
+        assert!(final_file_size < file_size);
     }
 }

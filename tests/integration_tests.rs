@@ -307,61 +307,6 @@ fn dynamic_growth() {
 }
 
 #[test]
-#[cfg(unix)]
-fn dynamic_shrink() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let table_definition: TableDefinition<u64, [u8]> = TableDefinition::new("x");
-    let big_value = vec![0; 1024];
-
-    let db_size = 20 * 1024 * 1024;
-    let db = unsafe {
-        Database::builder()
-            .set_region_size(1024 * 1024)
-            .create(tmpfile.path(), db_size)
-            .unwrap()
-    };
-
-    let txn = db.begin_write().unwrap();
-    {
-        let mut table = txn.open_table(table_definition).unwrap();
-        for i in 0..2048 {
-            table.insert(&i, &big_value).unwrap();
-        }
-    }
-    txn.commit().unwrap();
-
-    let file_size = tmpfile.as_file().metadata().unwrap().len();
-
-    let txn = db.begin_write().unwrap();
-    {
-        let mut table = txn.open_table(table_definition).unwrap();
-        for i in 0..2048 {
-            table.remove(&i).unwrap();
-        }
-    }
-    txn.commit().unwrap();
-
-    // Perform a couple more commits to be sure the database has a chance to compact
-    let txn = db.begin_write().unwrap();
-    {
-        let mut table = txn.open_table(table_definition).unwrap();
-        table.insert(&0, &[]).unwrap();
-    }
-    txn.commit().unwrap();
-    let txn = db.begin_write().unwrap();
-    {
-        let mut table = txn.open_table(table_definition).unwrap();
-        table.remove(&0).unwrap();
-    }
-    txn.commit().unwrap();
-    let txn = db.begin_write().unwrap();
-    txn.commit().unwrap();
-
-    let final_file_size = tmpfile.as_file().metadata().unwrap().len();
-    assert!(final_file_size < file_size);
-}
-
-#[test]
 fn multi_page_kv() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let elements = 4;
