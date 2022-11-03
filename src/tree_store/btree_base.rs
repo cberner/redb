@@ -894,6 +894,13 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
                 - isize::try_from(accessor.length_of_pairs(position, position + 1)).unwrap();
             required_delta <= isize::try_from(remaining).unwrap()
         } else {
+            // If this is a large page, only allow in-place appending to avoid write amplification
+            //
+            // Note: this check is also required to avoid inserting an unbounded number of small values
+            // into a large page, which could result in overflowing a u16 which is the maximum number of entries per leaf
+            if page.get_page_number().page_order > 0 && position < accessor.num_pairs() {
+                return false;
+            }
             let remaining = page.memory().len() - accessor.total_length();
             let mut required_delta = new_key.len() + new_value.len();
             if fixed_key_size.is_none() {
