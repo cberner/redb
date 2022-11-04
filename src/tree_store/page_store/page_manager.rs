@@ -774,7 +774,9 @@ impl TransactionalMemory {
         let max_usable_region_bytes = min(region_size, max_capacity.next_power_of_two() as u64);
 
         let starting_size = if dynamic_growth {
-            MIN_DESIRED_USABLE_BYTES.try_into().unwrap()
+            max(MIN_DESIRED_USABLE_BYTES, page_size * MIN_USABLE_PAGES)
+                .try_into()
+                .unwrap()
         } else {
             max_capacity
         };
