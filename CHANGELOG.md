@@ -1,5 +1,14 @@
 # redb - Changelog
 
+## 0.9.0 - 2022-11-05
+* Add support for dynamic file growth on Windows
+* Add support for tuple types as keys and values
+* Remove `Builder::set_region_size`
+* Save lifetime from `Savepoint`
+* Fix crash when using `create()` to open an existing database created with `WriteStrategy::TwoPhase`
+* Fix rare crash when writing a mix of small and very large values into the same table
+* Performance optimizations
+
 ## 0.8.0 - 2022-10-18
 * Performance improvements for database files that are too large to fit in RAM
 * Fix deadlock in concurrent calls to `savepoint()` and `restore_savepoint()`
