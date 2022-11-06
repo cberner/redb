@@ -29,10 +29,10 @@ database file.
 ========================================== Super header ==========================================
 -------------------------------------------- Header ----------------------------------------------
 | magic number                                                                                   |
-| magic con.| god byte  | padding               | super-header pages                             |
-| page size                                     | region tracker state length                    |
+| magic con.| god byte  | padding               | page size                                      |
 | database max size                                                                              |
 | region header pages                           | region max data pages                          |
+| padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
@@ -46,17 +46,15 @@ database file.
 | freed checksum (cont.)                                                                         |
 | commit id                                                                                      |
 | number of full regions                        | data pages in trailing region                  |
+| region tracker page number                                                                     |
 | slot checksum                                                                                  |
 | slot checksum (cont.)                                                                          |
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
-| padding                                                                                        |
 ----------------------------------------- Commit slot 1 ------------------------------------------
 |                                 Same layout as commit slot 0                                   |
---------------------------------------------------------------------------------------------------
-| Region tracker state                                                                           |
 ==================================================================================================
 | Region header                                                                                  |
 --------------------------------------------------------------------------------------------------
@@ -68,8 +66,7 @@ database file.
 
 ## Database super-header
 
-The database super-header starts with 512 bytes of fixed-size header and is followed by the region tracker which is sized based on
-the maximum database size. The super-header's length is rounded up to the next full page, so that the regions are page aligned.
+The database super-header is 512 bytes (rounded up to the nearest page) long, and consists of a header and two "commit slots".
 
 ### Database header (64 bytes)
 The database header contains several immutable fields, such as the database page size, region size, and a magic number.
@@ -79,13 +76,11 @@ controls which transaction pointer is the primary.
 * 9 bytes: magic number
 * 1 byte: god byte
 * 2 byte: padding
-* 4 bytes: super-header pages
 * 4 bytes: page size
-* 4 bytes: region tracker state length
 * 8 bytes: database max size
 * 4 bytes: region header pages
 * 4 bytes: region max data pages
-* 24 bytes: padding to 64 bytes
+* 32 bytes: padding to 64 bytes
 
 `magic number` must be set to the ASCII letters 'redb' followed by 0x1A, 0x0A, 0xA9, 0x0D, 0x0A. This sequence is
 inspired by the PNG magic number.
@@ -97,11 +92,7 @@ inspired by the PNG magic number.
   During the recovery process, the region tracker and regional allocator states -- described below -- are reconstructed
   by walking the btree from all active roots.
 
-`super-header pages` is the length of the super-header in pages
-
 `page size` is the size of a redb page in bytes
-
-`region tracker state length` is the size of the region tracker in bytes
 
 `database max size` is the maximum size of the database file in bytes
 
@@ -122,8 +113,9 @@ inspired by the PNG magic number.
 * 8 bytes: last committed transaction id
 * 4 bytes: number of full regions
 * 4 bytes: data pages in partial trailing region
+* 8 bytes: region tracker page number
 * 16 bytes: slot checksum
-* 40 bytes: padding to 128 bytes
+* 32 bytes: padding to 128 bytes
 
 `version` the file format version of the database. This is stored in the transaction data, so that it can be atomically
 changed during an upgrade.
@@ -145,14 +137,16 @@ grows of shrinks.
 
 `pages in partial trailing region` all pages except the last must be full. This stores the number of pages in the last region.
 
+`region tracker page number` the page storing the region tracker data structure
+
 `slot checksum` is the XXH3_128bit checksum of all the preceding fields in the transaction slot.
 
 ### Transaction slot 1 (128 bytes):
 * Same layout as slot 0
 
 ### Region tracker
-Following the database header is the region tracker, which is an array of `BtreeBitmap`s that track the page orders
-which are free in each region:
+The region tracker is an array of `BtreeBitmap`s that tracks the page orders which are free in each region.
+It is stored in a page in the data section of a region:
 ```
 <-------------------------------------------- 8 bytes ------------------------------------------->
 ==================================================================================================
