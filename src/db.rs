@@ -1,11 +1,12 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition,
-    RawBtree, TableType, TransactionalMemory,
+    RawBtree, TableType, TransactionalMemory, DB_HEADER_SIZE,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
 use crate::{ReadTransaction, Result, WriteTransaction};
+use std::cmp::max;
 use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -551,11 +552,14 @@ impl Builder {
     }
 
     /// Set the internal page size of the database
+    ///
+    /// Valid values are powers of two, greater than or equal to 512
+    ///
     /// Larger page sizes will reduce the database file's overhead, but may decrease write performance
     /// Defaults to the native OS page size
     pub fn set_page_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
-        self.page_size = Some(size);
+        self.page_size = Some(max(size, DB_HEADER_SIZE));
         self
     }
 
