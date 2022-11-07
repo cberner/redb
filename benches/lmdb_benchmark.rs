@@ -56,7 +56,7 @@ fn make_rng() -> fastrand::Rng {
     fastrand::Rng::with_seed(RNG_SEED)
 }
 
-fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
+fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
     let mut rng = make_rng();
     let mut results = Vec::new();
 

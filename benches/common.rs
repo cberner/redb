@@ -20,7 +20,7 @@ pub trait BenchDatabase {
 
     fn db_type_name() -> &'static str;
 
-    fn write_transaction(&mut self) -> Self::W<'_>;
+    fn write_transaction(&self) -> Self::W<'_>;
 
     fn read_transaction(&self) -> Self::R<'_>;
 }
@@ -92,7 +92,7 @@ impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
         "redb"
     }
 
-    fn write_transaction(&mut self) -> Self::W<'_> {
+    fn write_transaction(&self) -> Self::W<'_> {
         let txn = self.db.begin_write().unwrap();
         RedbBenchWriteTransaction { txn }
     }
@@ -196,7 +196,7 @@ impl<'a> BenchDatabase for SledBenchDatabase<'a> {
         "sled"
     }
 
-    fn write_transaction(&mut self) -> Self::W<'_> {
+    fn write_transaction(&self) -> Self::W<'_> {
         SledBenchWriteTransaction {
             db: self.db,
             db_dir: self.db_dir,
@@ -312,7 +312,7 @@ impl<'a> BenchDatabase for LmdbRkvBenchDatabase<'a> {
         "lmdb-rkv"
     }
 
-    fn write_transaction(&mut self) -> Self::W<'_> {
+    fn write_transaction(&self) -> Self::W<'_> {
         let txn = self.env.begin_rw_txn().unwrap();
         LmdbRkvBenchWriteTransaction { db: self.db, txn }
     }
@@ -429,7 +429,7 @@ impl<'a> BenchDatabase for RocksdbBenchDatabase<'a> {
         "rocksdb"
     }
 
-    fn write_transaction(&mut self) -> Self::W<'_> {
+    fn write_transaction(&self) -> Self::W<'_> {
         let mut write_opt = WriteOptions::new();
         write_opt.set_sync(true);
         let mut txn_opt = TransactionOptions::new();
@@ -548,7 +548,7 @@ impl<'a> BenchDatabase for SanakirjaBenchDatabase<'a> {
         "sanakirja"
     }
 
-    fn write_transaction(&mut self) -> Self::W<'_> {
+    fn write_transaction(&self) -> Self::W<'_> {
         let txn = sanakirja::Env::mut_txn_begin(self.db).unwrap();
         SanakirjaBenchWriteTransaction { txn }
     }
