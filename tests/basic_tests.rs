@@ -119,6 +119,21 @@ fn list_tables() {
 }
 
 #[test]
+fn tuple_type_function_lifetime() {
+    fn insert_inferred_lifetime(table: &mut redb::Table<(&str, u8), u64>) {
+        table
+            .insert(&(String::from("hello").as_str(), 8), &1)
+            .unwrap();
+    }
+
+    fn insert_explicit_lifetime<'a>(table: &mut redb::Table<(&'a str, u8), u64>) {
+        table
+            .insert(&(String::from("hello").as_str(), 8), &1)
+            .unwrap();
+    }
+}
+
+#[test]
 fn tuple_type_lifetime() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
