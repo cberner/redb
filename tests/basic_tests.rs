@@ -118,6 +118,45 @@ fn list_tables() {
 }
 
 #[test]
+// Test that these signatures compile
+fn tuple_type_function_lifetime() {
+    #[allow(dead_code)]
+    fn insert_inferred_lifetime(table: &mut redb::Table<(&str, u8), u64>) {
+        table
+            .insert(&(String::from("hello").as_str(), 8), &1)
+            .unwrap();
+    }
+
+    #[allow(dead_code)]
+    fn insert_explicit_lifetime<'a>(table: &mut redb::Table<(&'a str, u8), u64>) {
+        table
+            .insert(&(String::from("hello").as_str(), 8), &1)
+            .unwrap();
+    }
+}
+
+#[test]
+fn tuple_type_lifetime() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+
+    let table_def: TableDefinition<(&str, u8), (u16, u32)> = TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(&(String::from("hello").as_str(), 5), &(0, 123))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(table.get(&("hello", 5)).unwrap().unwrap(), (0, 123));
+}
+
+#[test]
 fn tuple2_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
