@@ -5,8 +5,6 @@ use std::ffi::c_void;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::io::RawHandle;
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicU64};
-use std::sync::Mutex;
 
 #[repr(C)]
 struct OVERLAPPED {
@@ -163,18 +161,13 @@ impl Drop for FileLock {
     }
 }
 
-// TODO: optimize this so that it doesn't use quadratic address space when growing. It should instead keep an array
-// of mmaps, one for each redb region, instead of an array of maps that all cover the whole file (at the time they were created).
 pub(super) struct MmapInner {
-    mmap: AtomicPtr<u8>,
-    // old mappings that user may still have pointers into
-    old_mmaps: Mutex<Vec<*mut u8>>,
-    len: AtomicU64,
-    capacity: usize,
+    mmap: *mut u8,
+    len: usize,
 }
 
 impl MmapInner {
-    pub(super) fn create_mapping(file: &File, len: u64, max_capacity: usize) -> Result<Self> {
+    pub(super) fn create_mapping(file: &File, len: u64, _max_capacity: usize) -> Result<Self> {
         // `CreateFileMappingW` documents:
         //
         // https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-createfilemappingw
@@ -186,19 +179,21 @@ impl MmapInner {
         let mmap = unsafe { Self::map_file(file, len)? };
 
         Ok(Self {
-            mmap: AtomicPtr::new(mmap),
-            old_mmaps: Mutex::new(vec![]),
-            len: AtomicU64::new(len),
-            capacity: max_capacity,
+            mmap,
+            len: len.try_into().unwrap(),
         })
     }
 
+    pub(super) fn can_resize(&self, _new_len: u64) -> bool {
+        false
+    }
+
     pub(super) fn capacity(&self) -> usize {
-        self.capacity
+        self.len
     }
 
     pub(super) fn base_addr(&self) -> *mut u8 {
-        self.mmap.load(Ordering::Acquire)
+        self.mmap
     }
 
     unsafe fn map_file(file: &File, len: u64) -> Result<*mut u8> {
@@ -236,19 +231,8 @@ impl MmapInner {
         Ok(ptr)
     }
 
-    pub(super) unsafe fn resize(&self, len: u64, owner: &Mmap) -> Result<()> {
-        // TODO: support shrinking on Windows
-        assert!(len >= self.len.load(Ordering::Acquire));
-        let mut guard = self.old_mmaps.lock().unwrap();
-        guard.push(self.base_addr());
-
-        owner.file.set_len(len)?;
-        let ptr = Self::map_file(&owner.file, len)?;
-
-        self.mmap.store(ptr, Ordering::Release);
-        self.len.store(len, Ordering::Release);
-
-        Ok(())
+    pub(super) unsafe fn resize(&self, _len: u64, _owner: &Mmap) -> Result<()> {
+        unimplemented!()
     }
 
     pub(super) fn flush(&self, owner: &Mmap) -> Result {
@@ -264,10 +248,10 @@ impl MmapInner {
     }
 
     #[inline]
-    pub(super) fn eventual_flush(&self, owner: &Mmap) -> Result {
+    pub(super) fn eventual_flush(&self, _owner: &Mmap) -> Result {
         #[cfg(not(fuzzing))]
         {
-            let result = unsafe { FlushViewOfFile(self.base_addr(), owner.len()) };
+            let result = unsafe { FlushViewOfFile(self.mmap, self.len) };
             if result != 0 {
                 Ok(())
             } else {
@@ -284,12 +268,8 @@ impl MmapInner {
 
 impl Drop for MmapInner {
     fn drop(&mut self) {
-        if let Ok(guard) = self.old_mmaps.lock() {
-            for addr in guard.iter() {
-                unsafe {
-                    UnmapViewOfFile(*addr);
-                }
-            }
+        unsafe {
+            UnmapViewOfFile(self.mmap);
         }
     }
 }
