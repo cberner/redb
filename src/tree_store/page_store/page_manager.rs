@@ -1485,6 +1485,14 @@ impl TransactionalMemory {
         self.allocated_since_commit.lock().unwrap().contains(&page)
     }
 
+    pub(crate) unsafe fn mark_transaction(&self, id: TransactionId) {
+        self.mmap.mark_transaction(id)
+    }
+
+    pub(crate) unsafe fn mmap_gc(&self, oldest_live_id: TransactionId) -> Result {
+        self.mmap.gc(oldest_live_id)
+    }
+
     fn allocate_helper(
         &self,
         metadata: &mut MetadataAccessor,

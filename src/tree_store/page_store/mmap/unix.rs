@@ -64,6 +64,10 @@ impl MmapInner {
         }
     }
 
+    pub(super) fn can_resize(&self, new_len: u64) -> bool {
+        new_len <= self.capacity as u64
+    }
+
     pub(super) fn capacity(&self) -> usize {
         self.capacity
     }
