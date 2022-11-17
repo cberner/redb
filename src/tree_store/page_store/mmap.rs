@@ -77,7 +77,7 @@ impl Mmap {
         for (id, mmap) in mmaps.iter() {
             // Flush all old mmaps before we drop them
             if *id < oldest_live_id {
-                mmap.flush(self)?;
+                mmap.flush()?;
             }
         }
         mmaps.retain(|(id, _)| *id >= oldest_live_id);
@@ -91,11 +91,11 @@ impl Mmap {
         self.check_fsync_failure()?;
 
         let mut mmap = self.mmap.lock().unwrap();
+        self.file.set_len(new_len as u64)?;
         if mmap.can_resize(new_len as u64) {
-            mmap.resize(new_len as u64, self)?;
+            mmap.resize(new_len as u64)?;
         } else {
             let transaction_id = TransactionId(self.current_transaction_id.load(Ordering::Acquire));
-            self.file.set_len(new_len as u64)?;
             let new_mmap = MmapInner::create_mapping(&self.file, new_len as u64)?;
             let old_mmap = std::mem::replace(&mut *mmap, new_mmap);
             self.old_mmaps
@@ -128,7 +128,7 @@ impl Mmap {
     pub(crate) fn flush(&self) -> Result<()> {
         self.check_fsync_failure()?;
 
-        let res = self.mmap.lock().unwrap().flush(self);
+        let res = self.mmap.lock().unwrap().flush();
         if res.is_err() {
             self.set_fsync_failed(true);
         }
@@ -139,7 +139,7 @@ impl Mmap {
     #[inline]
     pub(crate) fn eventual_flush(&self) -> Result {
         self.check_fsync_failure()?;
-        let res = self.mmap.lock().unwrap().eventual_flush(self);
+        let res = self.mmap.lock().unwrap().eventual_flush();
         if res.is_err() {
             self.set_fsync_failed(true);
         }
