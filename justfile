@@ -16,7 +16,7 @@ flamegraph:
 
 publish_py: test_py
     docker pull quay.io/pypa/manylinux2014_x86_64
-    docker run -it --rm -v $(shell pwd):/redb-ro:ro quay.io/pypa/manylinux2014_x86_64 /redb-ro/py_publish.sh
+    docker run -it --rm -v `pwd`:/redb-ro:ro quay.io/pypa/manylinux2014_x86_64 /redb-ro/py_publish.sh
 
 test_py: install_py
     python3 -m unittest discover
@@ -41,7 +41,7 @@ fuzz_ci: pre
     cargo +{{NIGHTLY}} fuzz run fuzz_redb -- -max_len=1000000 -max_total_time=60
 
 fuzz_coverage: pre
-    #!/usr/bin/bash
+    #!/usr/bin/env bash
     set -euxo pipefail
     rustup toolchain install {{NIGHTLY}}
     RUST_SYSROOT=`cargo +{{NIGHTLY}} rustc -- --print sysroot 2>/dev/null`
