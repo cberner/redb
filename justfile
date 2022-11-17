@@ -41,16 +41,18 @@ fuzz_ci: pre
     cargo +{{NIGHTLY}} fuzz run fuzz_redb -- -max_len=1000000 -max_total_time=60
 
 fuzz_coverage: pre
+    #!/usr/bin/bash
+    set -euxo pipefail
     rustup toolchain install {{NIGHTLY}}
-    $(eval RUST_SYSROOT := $(shell cargo +{{NIGHTLY}} rustc -- --print sysroot 2>/dev/null))
-    $(eval LLVM_COV := $(shell find $(RUST_SYSROOT) -name llvm-cov))
-    echo $(LLVM_COV)
+    RUST_SYSROOT=`cargo +{{NIGHTLY}} rustc -- --print sysroot 2>/dev/null`
+    LLVM_COV=`find $RUST_SYSROOT -name llvm-cov`
+    echo $LLVM_COV
     rustup component add llvm-tools-preview --toolchain {{NIGHTLY}}
     cargo +{{NIGHTLY}} fuzz coverage fuzz_redb
-    $(LLVM_COV) show fuzz/target/*/release/fuzz_redb --format html \
+    $LLVM_COV show fuzz/target/*/release/fuzz_redb --format html \
           -instr-profile=fuzz/coverage/fuzz_redb/coverage.profdata \
           -ignore-filename-regex='.*(cargo/registry|redb/fuzz|rustc).*' > fuzz/coverage/coverage_report.html
-    $(LLVM_COV) report fuzz/target/*/release/fuzz_redb \
+    $LLVM_COV report fuzz/target/*/release/fuzz_redb \
           -instr-profile=fuzz/coverage/fuzz_redb/coverage.profdata \
           -ignore-filename-regex='.*(cargo/registry|redb/fuzz|rustc).*'
     firefox ./fuzz/coverage/coverage_report.html
