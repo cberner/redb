@@ -87,56 +87,70 @@ fn populate<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
 fn main() {
     let redb_latency_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        let db = unsafe {
-            redb::Database::builder()
-                .set_write_strategy(WriteStrategy::Checksum)
-                .create(tmpfile.path(), 4096 * 1024 * 1024)
-                .unwrap()
+        let mut results = {
+            let db = unsafe {
+                redb::Database::builder()
+                    .set_write_strategy(WriteStrategy::Checksum)
+                    .create(tmpfile.path(), 4096 * 1024 * 1024)
+                    .unwrap()
+            };
+            let table = RedbBenchDatabase::new(&db);
+            populate(table)
         };
-        let table = RedbBenchDatabase::new(&db);
-        populate(table)
+
+        let start = Instant::now();
+
+        unsafe { redb::Database::open(tmpfile.path()).unwrap() };
+
+        let duration = start.elapsed();
+
+        results.push(("open", duration));
+
+        results
     };
 
     let redb_throughput_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        let db = unsafe {
-            redb::Database::builder()
-                .set_write_strategy(WriteStrategy::TwoPhase)
-                .create(tmpfile.path(), 4096 * 1024 * 1024)
-                .unwrap()
+        let mut results = {
+            let db = unsafe {
+                redb::Database::builder()
+                    .set_write_strategy(WriteStrategy::TwoPhase)
+                    .create(tmpfile.path(), 4096 * 1024 * 1024)
+                    .unwrap()
+            };
+            let table = RedbBenchDatabase::new(&db);
+            populate(table)
         };
-        let table = RedbBenchDatabase::new(&db);
-        populate(table)
+
+        let start = Instant::now();
+
+        unsafe { redb::Database::open(tmpfile.path()).unwrap() };
+
+        let duration = start.elapsed();
+
+        results.push(("open", duration));
+
+        results
     };
 
     let lmdb_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
-        let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
-        env.set_map_size(4096 * 1024 * 1024).unwrap();
-        let table = LmdbRkvBenchDatabase::new(&env);
-        populate(table)
-    };
+        let mut results = {
+            let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
+            env.set_map_size(4096 * 1024 * 1024).unwrap();
+            let table = LmdbRkvBenchDatabase::new(&env);
+            populate(table)
+        };
 
-    let rocksdb_results = {
-        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
-        let db = rocksdb::TransactionDB::open_default(tmpfile.path()).unwrap();
-        let table = RocksdbBenchDatabase::new(&db);
-        populate(table)
-    };
+        let start = Instant::now();
 
-    let sled_results = {
-        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
-        let db = sled::Config::new().path(tmpfile.path()).open().unwrap();
-        let table = SledBenchDatabase::new(&db, tmpfile.path());
-        populate(table)
-    };
+        lmdb::Environment::new().open(tmpfile.path()).unwrap();
 
-    let sanakirja_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        fs::remove_file(tmpfile.path()).unwrap();
-        let db = sanakirja::Env::new(tmpfile.path(), 4096 * 1024 * 1024, 2).unwrap();
-        let table = SanakirjaBenchDatabase::new(&db);
-        populate(table)
+        let duration = start.elapsed();
+
+        results.push(("open", duration));
+
+        results
     };
 
     let mut rows = Vec::new();
@@ -145,14 +159,7 @@ fn main() {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [
-        redb_latency_results,
-        redb_throughput_results,
-        lmdb_results,
-        rocksdb_results,
-        sled_results,
-        sanakirja_results,
-    ] {
+    for results in [redb_latency_results, redb_throughput_results, lmdb_results] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
         }
@@ -160,15 +167,7 @@ fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_width(100);
-    table.set_header([
-        "",
-        "redb (1PC+C)",
-        "redb (2PC)",
-        "lmdb",
-        "rocksdb",
-        "sled",
-        "sanakirja",
-    ]);
+    table.set_header(["", "redb (1PC+C)", "redb (2PC)", "lmdb"]);
     for row in rows {
         table.add_row(row);
     }
