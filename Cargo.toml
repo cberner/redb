@@ -64,6 +64,10 @@ harness = false
 name = "mmap_page_size_benchmark"
 harness = false
 
+[[bench]]
+name = "open_benchmark"
+harness = false
+
 [package.metadata.maturin]
 requires-python = ">= 3.7"
 classifier = ["Development Status :: 4 - Beta",
