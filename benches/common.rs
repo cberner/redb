@@ -183,6 +183,7 @@ pub struct SledBenchDatabase<'a> {
 }
 
 impl<'a> SledBenchDatabase<'a> {
+    #[allow(dead_code)]
     pub fn new(db: &'a sled::Db, path: &'a Path) -> Self {
         SledBenchDatabase { db, db_dir: path }
     }
@@ -416,6 +417,7 @@ pub struct RocksdbBenchDatabase<'a> {
 }
 
 impl<'a> RocksdbBenchDatabase<'a> {
+    #[allow(dead_code)]
     pub fn new(db: &'a TransactionDB) -> Self {
         Self { db }
     }
@@ -529,6 +531,7 @@ pub struct SanakirjaBenchDatabase<'a> {
 }
 
 impl<'a> SanakirjaBenchDatabase<'a> {
+    #[allow(dead_code)]
     pub fn new(db: &'a sanakirja::Env) -> Self {
         let mut txn = sanakirja::Env::mut_txn_begin(db).unwrap();
         let table =

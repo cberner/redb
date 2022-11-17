@@ -1,5 +1,4 @@
 use std::env::current_dir;
-use std::fs;
 use std::mem::size_of;
 use tempfile::{NamedTempFile, TempDir};
 
