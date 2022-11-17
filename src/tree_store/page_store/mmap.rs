@@ -35,11 +35,11 @@ unsafe impl Send for Mmap {}
 unsafe impl Sync for Mmap {}
 
 impl Mmap {
-    pub(crate) fn new(file: File, max_capacity: usize) -> Result<Self> {
-        let len = Self::get_valid_length(&file, max_capacity)?;
+    pub(crate) fn new(file: File) -> Result<Self> {
+        let len = file.metadata()?.len();
         let lock = FileLock::new(&file)?;
 
-        let mmap = MmapInner::create_mapping(&file, len, max_capacity)?;
+        let mmap = MmapInner::create_mapping(&file, len)?;
 
         let address = mmap.base_addr();
 
@@ -57,27 +57,6 @@ impl Mmap {
         mapping.flush()?;
 
         Ok(mapping)
-    }
-
-    /// Retrieves the length of the specified file and validates that it is <=
-    /// the maximum capacity the file is allowed to support
-    #[inline]
-    pub(crate) fn get_valid_length(file: &File, max_capacity: usize) -> Result<u64> {
-        let len = file.metadata()?.len();
-
-        if len > max_capacity as u64 {
-            // Unfortunately io::ErrorKind::FileTooLarge is unstable, so we just
-            // cheat here instead and provide the os specific codes
-            let code = if cfg!(target_os = "windows") {
-                0xdf // ERROR_FILE_TOO_LARGE
-            } else {
-                assert!(cfg!(unix), "unsupported target platform");
-                libc::EFBIG
-            };
-            Err(Error::Io(io::Error::from_raw_os_error(code)))
-        } else {
-            Ok(len)
-        }
     }
 
     #[inline]
@@ -117,7 +96,7 @@ impl Mmap {
         } else {
             let transaction_id = TransactionId(self.current_transaction_id.load(Ordering::Acquire));
             self.file.set_len(new_len as u64)?;
-            let new_mmap = MmapInner::create_mapping(&self.file, new_len as u64, mmap.capacity())?;
+            let new_mmap = MmapInner::create_mapping(&self.file, new_len as u64)?;
             let old_mmap = std::mem::replace(&mut *mmap, new_mmap);
             self.old_mmaps
                 .lock()
