@@ -819,16 +819,15 @@ impl TransactionalMemory {
             max_capacity
         );
 
-        let max_cap: usize = max_capacity.try_into().unwrap();
         {
-            let file_len = Mmap::get_valid_length(&file, max_cap)?;
+            let file_len = file.metadata()?.len();
 
             if file_len < layout.len() {
                 file.set_len(layout.len())?;
             }
         }
 
-        let mmap = Mmap::new(file, max_cap)?;
+        let mmap = Mmap::new(file)?;
 
         let mutex = Mutex::new(MetadataGuard {});
         let mut metadata = unsafe { MetadataAccessor::new(&mmap, mutex.lock().unwrap()) };

@@ -167,7 +167,7 @@ pub(super) struct MmapInner {
 }
 
 impl MmapInner {
-    pub(super) fn create_mapping(file: &File, len: u64, _max_capacity: usize) -> Result<Self> {
+    pub(super) fn create_mapping(file: &File, len: u64) -> Result<Self> {
         // `CreateFileMappingW` documents:
         //
         // https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-createfilemappingw
