@@ -164,6 +164,7 @@ impl Drop for FileLock {
 pub(super) struct MmapInner {
     mmap: *mut u8,
     len: usize,
+    handle: RawHandle,
 }
 
 impl MmapInner {
@@ -181,15 +182,12 @@ impl MmapInner {
         Ok(Self {
             mmap,
             len: len.try_into().unwrap(),
+            handle: file.as_raw_handle(),
         })
     }
 
     pub(super) fn can_resize(&self, _new_len: u64) -> bool {
         false
-    }
-
-    pub(super) fn capacity(&self) -> usize {
-        self.len
     }
 
     pub(super) fn base_addr(&self) -> *mut u8 {
@@ -231,16 +229,16 @@ impl MmapInner {
         Ok(ptr)
     }
 
-    pub(super) unsafe fn resize(&self, _len: u64, _owner: &Mmap) -> Result<()> {
+    pub(super) unsafe fn resize(&self, _len: u64) -> Result<()> {
         unimplemented!()
     }
 
-    pub(super) fn flush(&self, owner: &Mmap) -> Result {
-        self.eventual_flush(owner)?;
+    pub(super) fn flush(&self) -> Result {
+        self.eventual_flush()?;
 
         #[cfg(not(fuzzing))]
         {
-            if unsafe { FlushFileBuffers(owner.file.as_raw_handle()) } == 0 {
+            if unsafe { FlushFileBuffers(self.handle) } == 0 {
                 return Err(Error::Io(io::Error::last_os_error()));
             }
         }
@@ -248,7 +246,7 @@ impl MmapInner {
     }
 
     #[inline]
-    pub(super) fn eventual_flush(&self, _owner: &Mmap) -> Result {
+    pub(super) fn eventual_flush(&self) -> Result {
         #[cfg(not(fuzzing))]
         {
             let result = unsafe { FlushViewOfFile(self.mmap, self.len) };

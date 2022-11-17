@@ -1,5 +1,5 @@
 use super::*;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::ptr;
 
 pub(super) struct FileLock {
@@ -32,6 +32,7 @@ impl Drop for FileLock {
 pub(super) struct MmapInner {
     mmap: *mut u8,
     capacity: usize,
+    fd: RawFd,
 }
 
 impl MmapInner {
@@ -61,6 +62,7 @@ impl MmapInner {
                 Ok(Self {
                     mmap: mmap as *mut u8,
                     capacity,
+                    fd: file.as_raw_fd(),
                 })
             }
         }
@@ -76,16 +78,15 @@ impl MmapInner {
 
     /// Safety: if new_len < len(), caller must ensure that no references to memory in new_len..len() exist
     #[inline]
-    pub(super) unsafe fn resize(&self, new_len: u64, owner: &Mmap) -> Result<()> {
+    pub(super) unsafe fn resize(&self, new_len: u64) -> Result<()> {
         assert!(new_len <= self.capacity as u64);
-        owner.file.set_len(new_len)?;
 
         let mmap = libc::mmap(
             self.mmap as *mut libc::c_void,
             self.capacity as libc::size_t,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_SHARED | libc::MAP_FIXED,
-            owner.file.as_raw_fd(),
+            self.fd,
             0,
         );
 
@@ -103,7 +104,7 @@ impl MmapInner {
     }
 
     #[inline]
-    pub(super) fn flush(&self, #[allow(unused_variables)] owner: &Mmap) -> Result {
+    pub(super) fn flush(&self) -> Result {
         // Disable fsync when fuzzing, since it doesn't test crash consistency
         #[cfg(not(fuzzing))]
         {
@@ -122,7 +123,7 @@ impl MmapInner {
             }
             #[cfg(target_os = "macos")]
             {
-                let code = unsafe { libc::fcntl(owner.file.as_raw_fd(), libc::F_FULLFSYNC) };
+                let code = unsafe { libc::fcntl(self.fd, libc::F_FULLFSYNC) };
                 if code == -1 {
                     return Err(io::Error::last_os_error().into());
                 }
@@ -132,16 +133,16 @@ impl MmapInner {
     }
 
     #[inline]
-    pub(super) fn eventual_flush(&self, owner: &Mmap) -> Result {
+    pub(super) fn eventual_flush(&self) -> Result {
         #[cfg(not(target_os = "macos"))]
         {
-            self.flush(owner)
+            self.flush()
         }
         #[cfg(all(target_os = "macos", not(fuzzing)))]
         {
             // TODO: It may be unsafe to mix F_BARRIERFSYNC with writes to the mmap.
             //       Investigate switching to `write()`
-            let code = unsafe { libc::fcntl(owner.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
+            let code = unsafe { libc::fcntl(self.fd, libc::F_BARRIERFSYNC) };
             if code == -1 {
                 Err(io::Error::last_os_error().into())
             } else {
