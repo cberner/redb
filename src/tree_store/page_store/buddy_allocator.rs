@@ -1,8 +1,6 @@
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 use crate::tree_store::PageNumber;
-use crate::Error;
-use crate::Result;
 use std::cmp::min;
 use std::collections::HashSet;
 use std::mem::size_of;
@@ -92,6 +90,10 @@ impl<'a> BuddyAllocator<'a> {
         (0..=self.get_max_order())
             .rev()
             .find(|order| self.get_order((*order).try_into().unwrap()).has_unset())
+    }
+
+    pub(crate) fn count_allocated_pages(&self) -> usize {
+        self.len() - self.count_free_pages()
     }
 
     pub(crate) fn count_free_pages(&self) -> usize {
@@ -334,8 +336,8 @@ impl<'a> BuddyAllocatorMut<'a> {
     }
 
     #[cfg(test)]
-    fn count_free_pages(&self) -> usize {
-        BuddyAllocator::new(self.data).count_free_pages()
+    fn count_allocated_pages(&self) -> usize {
+        BuddyAllocator::new(self.data).count_allocated_pages()
     }
 
     pub(crate) fn highest_free_order(&self) -> Option<usize> {
@@ -343,30 +345,24 @@ impl<'a> BuddyAllocatorMut<'a> {
     }
 
     /// data must have been initialized by Self::init_new()
-    pub(crate) fn alloc(&mut self, order: usize) -> Result<u64> {
+    pub(crate) fn alloc(&mut self, order: usize) -> Option<u64> {
         if order > self.get_max_order() {
-            return Err(Error::OutOfSpace);
+            return None;
         }
         let mut allocator = self.get_order_mut(order.try_into().unwrap());
-        match allocator.alloc() {
-            Ok(x) => Ok(x),
-            Err(e) => {
-                match e {
-                    Error::OutOfSpace => {
-                        // Try to allocate a higher order page and split it
-                        drop(allocator);
-                        let upper_page = self.alloc(order + 1)?;
-                        let (free1, free2) = (upper_page * 2, upper_page * 2 + 1);
-                        let mut allocator = self.get_order_mut(order.try_into().unwrap());
-                        debug_assert!(allocator.get(free1));
-                        debug_assert!(allocator.get(free2));
-                        allocator.clear(free2);
+        if let Some(x) = allocator.alloc() {
+            Some(x)
+        } else {
+            // Try to allocate a higher order page and split it
+            drop(allocator);
+            let upper_page = self.alloc(order + 1)?;
+            let (free1, free2) = (upper_page * 2, upper_page * 2 + 1);
+            let mut allocator = self.get_order_mut(order.try_into().unwrap());
+            debug_assert!(allocator.get(free1));
+            debug_assert!(allocator.get(free2));
+            allocator.clear(free2);
 
-                        Ok(free1)
-                    }
-                    other => Err(other),
-                }
-            }
+            Some(free1)
         }
     }
 
@@ -429,26 +425,25 @@ impl<'a> BuddyAllocatorMut<'a> {
 #[cfg(test)]
 mod test {
     use crate::tree_store::page_store::buddy_allocator::BuddyAllocatorMut;
-    use crate::Error;
 
     #[test]
     fn record_alloc_buddy() {
         let num_pages = 256;
         let mut data = vec![0; BuddyAllocatorMut::required_space(num_pages)];
         let mut allocator = BuddyAllocatorMut::init_new(&mut data, num_pages, num_pages);
-        assert_eq!(allocator.count_free_pages(), num_pages);
+        assert_eq!(allocator.count_allocated_pages(), 0);
 
         for page in 0..num_pages {
             allocator.record_alloc(page as u64, 0);
         }
-        assert_eq!(allocator.count_free_pages(), 0);
+        assert_eq!(allocator.count_allocated_pages(), num_pages);
 
-        assert!(matches!(allocator.alloc(0).unwrap_err(), Error::OutOfSpace));
+        assert!(allocator.alloc(0).is_none());
 
         for page in 0..num_pages {
             allocator.free(page as u64, 0);
         }
-        assert_eq!(allocator.count_free_pages(), num_pages);
+        assert_eq!(allocator.count_allocated_pages(), 0);
     }
 
     #[test]
@@ -456,7 +451,7 @@ mod test {
         let num_pages = 256;
         let mut data = vec![0; BuddyAllocatorMut::required_space(num_pages)];
         let mut allocator = BuddyAllocatorMut::init_new(&mut data, num_pages, num_pages);
-        assert_eq!(allocator.count_free_pages(), num_pages);
+        assert_eq!(allocator.count_allocated_pages(), 0);
 
         for _ in 0..num_pages {
             allocator.alloc(0).unwrap();
@@ -464,7 +459,7 @@ mod test {
         for page in 0..num_pages {
             allocator.free(page as u64, 0);
         }
-        assert_eq!(allocator.count_free_pages(), num_pages);
+        assert_eq!(allocator.count_allocated_pages(), 0);
 
         // Test that everything got merged back together, so that we fill order 7 allocations
         for _ in 0..(num_pages / 2usize.pow(7)) {
@@ -478,24 +473,21 @@ mod test {
         let max_order = 7;
         let mut data = vec![0; BuddyAllocatorMut::required_space(num_pages)];
         let mut allocator = BuddyAllocatorMut::init_new(&mut data, num_pages, num_pages);
-        assert_eq!(allocator.count_free_pages(), num_pages);
+        assert_eq!(allocator.count_allocated_pages(), 0);
 
         let mut allocated = vec![];
         for order in 0..=max_order {
             allocated.push((allocator.alloc(order).unwrap(), order));
         }
-        assert_eq!(allocator.count_free_pages(), 1);
+        assert_eq!(allocator.count_allocated_pages(), num_pages - 1);
 
         for order in 1..=max_order {
-            assert!(matches!(
-                allocator.alloc(order).unwrap_err(),
-                Error::OutOfSpace
-            ));
+            assert!(allocator.alloc(order).is_none());
         }
 
         for (page, order) in allocated {
             allocator.free(page, order);
         }
-        assert_eq!(allocator.count_free_pages(), num_pages);
+        assert_eq!(allocator.count_allocated_pages(), 0);
     }
 }

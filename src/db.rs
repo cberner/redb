@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
-    get_db_size, AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition,
-    RawBtree, TableType, TransactionalMemory, DB_HEADER_SIZE,
+    AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition, RawBtree,
+    TableType, TransactionalMemory, DB_HEADER_SIZE,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
@@ -149,8 +149,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Display for MultimapTableDefi
 /// # fn main() -> Result<(), Error> {
 /// # let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 /// # let filename = tmpfile.path();
-/// # let db_max_size = 1024 * 1024;
-/// let db = unsafe { Database::create(filename, db_max_size)? };
+/// let db = unsafe { Database::create(filename)? };
 /// let write_txn = db.begin_write()?;
 /// {
 ///     let mut table = write_txn.open_table(TABLE)?;
@@ -173,22 +172,11 @@ impl Database {
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
     ///
-    /// `db_size`: the maximum size in bytes of the database.
-    ///
     /// # Safety
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
-    pub unsafe fn create(path: impl AsRef<Path>, db_size: usize) -> Result<Database> {
-        let db_size = db_size as u64;
+    pub unsafe fn create(path: impl AsRef<Path>) -> Result<Database> {
         let file = if path.as_ref().exists() && File::open(path.as_ref())?.metadata()?.len() > 0 {
-            let existing_size = Self::get_db_size(path.as_ref())?;
-            if existing_size != db_size {
-                return Err(Error::DbSizeMismatch {
-                    path: path.as_ref().to_string_lossy().to_string(),
-                    size: existing_size,
-                    requested_size: db_size,
-                });
-            }
             OpenOptions::new().read(true).write(true).open(path)?
         } else {
             OpenOptions::new()
@@ -198,7 +186,7 @@ impl Database {
                 .open(path)?
         };
 
-        Database::new(file, db_size, None, None, None, None)
+        Database::new(file, None, None, None, None)
     }
 
     /// Opens an existing redb database.
@@ -210,32 +198,10 @@ impl Database {
         if !path.as_ref().exists() {
             Err(Error::Io(ErrorKind::NotFound.into()))
         } else if File::open(path.as_ref())?.metadata()?.len() > 0 {
-            let existing_size = Self::get_db_size(path.as_ref())?;
             let file = OpenOptions::new().read(true).write(true).open(path)?;
-            Database::new(file, existing_size, None, None, None, None)
+            Database::new(file, None, None, None, None)
         } else {
             Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
-        }
-    }
-
-    #[inline]
-    fn get_db_size(path: impl AsRef<Path>) -> Result<u64> {
-        #[cfg(unix)]
-        {
-            Ok(get_db_size(path)?)
-        }
-        #[cfg(windows)]
-        {
-            get_db_size(path).map_err(|err| {
-                // On Windows, an exclusive file lock also applies to reads, unlike on Unix, so
-                // we detect that specific error code and transform it to the correct error
-                // 0x21 - ERROR_LOCK_VIOLATION
-                if matches!(err.raw_os_error(), Some(0x21)) {
-                    Error::DatabaseAlreadyOpen
-                } else {
-                    err.into()
-                }
-            })
         }
     }
 
@@ -295,7 +261,6 @@ impl Database {
 
     fn new(
         file: File,
-        max_capacity: u64,
         page_size: Option<usize>,
         region_size: Option<usize>,
         initial_size: Option<u64>,
@@ -304,18 +269,9 @@ impl Database {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
         #[cfg(feature = "logging")]
-        info!(
-            "Opening database {:?} with max size {}",
-            &file_path, max_capacity
-        );
-        let mut mem = TransactionalMemory::new(
-            file,
-            max_capacity,
-            page_size,
-            region_size,
-            initial_size,
-            write_strategy,
-        )?;
+        info!("Opening database {:?}", &file_path);
+        let mut mem =
+            TransactionalMemory::new(file, page_size, region_size, initial_size, write_strategy)?;
         if mem.needs_repair()? {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
@@ -590,12 +546,10 @@ impl Builder {
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
     ///
-    /// `db_size`: the maximum size in bytes of the database.
-    ///
     /// # Safety
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
-    pub unsafe fn create(&self, path: impl AsRef<Path>, db_size: usize) -> Result<Database> {
+    pub unsafe fn create(&self, path: impl AsRef<Path>) -> Result<Database> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -604,7 +558,6 @@ impl Builder {
 
         Database::new(
             file,
-            db_size as u64,
             self.page_size,
             self.region_size,
             self.initial_size,
@@ -635,11 +588,10 @@ mod test {
         let table_definition: TableDefinition<u64, [u8]> = TableDefinition::new("x");
         let big_value = vec![0; 1024];
 
-        let db_size = 20 * 1024 * 1024;
         let db = unsafe {
             Database::builder()
                 .set_region_size(1024 * 1024)
-                .create(tmpfile.path(), db_size)
+                .create(tmpfile.path())
                 .unwrap()
         };
 

@@ -22,7 +22,7 @@ fn get_vec(table: &impl ReadableMultimapTable<[u8], [u8]>, key: &[u8]) -> Vec<Ve
 #[test]
 fn len() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
@@ -40,7 +40,7 @@ fn len() {
 #[test]
 fn is_empty() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -57,7 +57,7 @@ fn is_empty() {
 #[test]
 fn insert() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
@@ -79,7 +79,7 @@ fn insert() {
 #[test]
 fn range_query() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_multimap_table(SLICE_U64_TABLE).unwrap();
@@ -129,7 +129,7 @@ fn range_query() {
 #[test]
 fn delete() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
@@ -182,7 +182,7 @@ fn delete() {
 #[test]
 fn wrong_types() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let definition: MultimapTableDefinition<u32, u32> = MultimapTableDefinition::new("x");
     let wrong_definition: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("x");
@@ -209,11 +209,11 @@ fn wrong_types() {
 #[test]
 fn efficient_storage() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db_size = 1024 * 1024;
+    let expected_max_size = 1024 * 1024;
     // Write enough values that big_key.len() * entries > db_size to check that duplicate key data is not stored
     // and entries * sizeof(u32) > page_size to validate that large numbers of values can be stored per key
     let entries = 10000;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let table_def: MultimapTableDefinition<[u8], u32> = MultimapTableDefinition::new("x");
     let write_txn = db.begin_write().unwrap();
     {
@@ -223,6 +223,7 @@ fn efficient_storage() {
             table.insert(&big_key, &i).unwrap();
         }
     }
+    assert!(write_txn.stats().unwrap().stored_bytes() <= expected_max_size);
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
@@ -233,7 +234,7 @@ fn efficient_storage() {
 #[test]
 fn reopen_table() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();

@@ -1,7 +1,6 @@
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocatorMut;
-use crate::tree_store::page_store::page_manager::{DB_HEADER_SIZE, MIN_USABLE_PAGES};
-use crate::{Error, Result};
-use std::cmp::min;
+use crate::tree_store::page_store::page_manager::DB_HEADER_SIZE;
+use crate::Result;
 use std::ops::Range;
 
 fn round_up_to_multiple_of(value: u64, multiple: u64) -> u64 {
@@ -31,15 +30,6 @@ impl RegionLayout {
         }
     }
 
-    fn calculate_usable_pages(space: u64, page_capacity: u32, page_size: u32) -> u32 {
-        let header_pages = Self::header_pages(page_capacity, page_size) as u64;
-        let page_size = page_size as u64;
-        assert!(header_pages * page_size < space);
-        ((space - header_pages * page_size) / page_size)
-            .try_into()
-            .unwrap()
-    }
-
     fn header_pages(page_capacity: u32, page_size: u32) -> u32 {
         let mut header_size: u32 =
             BuddyAllocatorMut::required_space(page_capacity.try_into().unwrap())
@@ -54,51 +44,30 @@ impl RegionLayout {
     }
 
     pub(super) fn calculate(
-        available_space: u64,
         desired_usable_bytes: u64,
         page_capacity: u32,
         page_size: u32,
-    ) -> Option<RegionLayout> {
+    ) -> RegionLayout {
+        assert!(desired_usable_bytes <= page_capacity as u64 * page_size as u64);
         let header_pages = Self::header_pages(page_capacity, page_size);
-        let required_header_bytes = header_pages * page_size;
-        if desired_usable_bytes / (page_size as u64) < MIN_USABLE_PAGES as u64 {
-            return None;
-        }
-        if available_space
-            < (required_header_bytes + u32::try_from(MIN_USABLE_PAGES).unwrap() * page_size)
-                .try_into()
-                .unwrap()
-        {
-            return None;
-        }
-        let max_region_size = desired_usable_bytes + required_header_bytes as u64;
-        let used_space = min(max_region_size, available_space);
+        let num_pages =
+            round_up_to_multiple_of(desired_usable_bytes, page_size.into()) / page_size as u64;
 
-        let num_pages = Self::calculate_usable_pages(used_space, page_capacity, page_size);
-        if num_pages < MIN_USABLE_PAGES.try_into().unwrap() {
-            return None;
-        }
-
-        Some(RegionLayout {
-            num_pages,
+        Self {
+            num_pages: num_pages.try_into().unwrap(),
             header_pages,
             page_size,
-        })
+        }
     }
 
     fn full_region_layout(page_capacity: u32, page_size: u32) -> RegionLayout {
-        let max_usable_region_bytes = (page_capacity as u64) * (page_size as u64);
-        let header_bytes =
-            (Self::header_pages(page_capacity, page_size) as u64) * (page_size as u64);
-        let max_region_size = max_usable_region_bytes + header_bytes;
+        let header_pages = Self::header_pages(page_capacity, page_size);
 
-        Self::calculate(
-            max_region_size,
-            max_usable_region_bytes,
-            page_capacity,
+        Self {
+            num_pages: page_capacity,
+            header_pages,
             page_size,
-        )
-        .unwrap()
+        }
     }
 
     pub(super) fn data_section(&self) -> Range<usize> {
@@ -145,31 +114,15 @@ impl DatabaseLayout {
     }
 
     pub(super) fn calculate(
-        db_capacity: u64,
-        mut desired_usable_bytes: u64,
+        desired_usable_bytes: u64,
         page_capacity: u32,
         page_size: u32,
     ) -> Result<Self> {
-        desired_usable_bytes = min(desired_usable_bytes, db_capacity);
         let full_region_layout = RegionLayout::full_region_layout(page_capacity, page_size);
-        // Pad to be page aligned
-        let superheader_size =
-            round_up_to_multiple_of(DB_HEADER_SIZE.try_into().unwrap(), page_size.into());
-        let page_size_u64: u64 = page_size.into();
-        if db_capacity < (superheader_size + (MIN_USABLE_PAGES as u64) * page_size_u64) {
-            return Err(Error::OutOfSpace);
-        }
-        let result = if desired_usable_bytes <= full_region_layout.usable_bytes()
-            || db_capacity - superheader_size <= full_region_layout.len()
-        {
+        let result = if desired_usable_bytes <= full_region_layout.usable_bytes() {
             // Single region layout
-            let region_layout = RegionLayout::calculate(
-                db_capacity - superheader_size,
-                desired_usable_bytes,
-                page_capacity,
-                page_size,
-            )
-            .ok_or(Error::OutOfSpace)?;
+            let region_layout =
+                RegionLayout::calculate(desired_usable_bytes, page_capacity, page_size);
             DatabaseLayout {
                 full_region_layout,
                 num_full_regions: 0,
@@ -177,27 +130,26 @@ impl DatabaseLayout {
             }
         } else {
             // Multi region layout
-            let max_full_regions = (db_capacity - superheader_size) / full_region_layout.len();
-            let desired_full_regions = desired_usable_bytes / full_region_layout.usable_bytes();
-            let num_full_regions = min(max_full_regions, desired_full_regions);
-            let remaining_space =
-                db_capacity - superheader_size - num_full_regions * full_region_layout.len();
+            let full_regions = desired_usable_bytes / full_region_layout.usable_bytes();
             let remaining_desired =
-                desired_usable_bytes - num_full_regions * full_region_layout.usable_bytes();
-            assert!(num_full_regions > 0);
-            let trailing_region = RegionLayout::calculate(
-                remaining_space,
-                remaining_desired,
-                page_capacity,
-                page_size,
-            );
+                desired_usable_bytes - full_regions * full_region_layout.usable_bytes();
+            assert!(full_regions > 0);
+            let trailing_region = if remaining_desired > 0 {
+                Some(RegionLayout::calculate(
+                    remaining_desired,
+                    page_capacity,
+                    page_size,
+                ))
+            } else {
+                None
+            };
             if let Some(ref region) = trailing_region {
                 // All regions must have the same header size
                 assert_eq!(region.header_pages, full_region_layout.header_pages);
             }
             DatabaseLayout {
                 full_region_layout,
-                num_full_regions: num_full_regions.try_into().unwrap(),
+                num_full_regions: full_regions.try_into().unwrap(),
                 trailing_partial_region: trailing_region,
             }
         };

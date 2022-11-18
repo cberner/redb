@@ -221,7 +221,7 @@ fn main() {
         let db = unsafe {
             redb::Database::builder()
                 .set_write_strategy(WriteStrategy::Checksum)
-                .create(tmpfile.path(), 4096 * 1024 * 1024)
+                .create(tmpfile.path())
                 .unwrap()
         };
         let table = RedbBenchDatabase::new(&db);
@@ -233,7 +233,7 @@ fn main() {
         let db = unsafe {
             redb::Database::builder()
                 .set_write_strategy(WriteStrategy::TwoPhase)
-                .create(tmpfile.path(), 4096 * 1024 * 1024)
+                .create(tmpfile.path())
                 .unwrap()
         };
         let table = RedbBenchDatabase::new(&db);

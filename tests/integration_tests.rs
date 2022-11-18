@@ -33,8 +33,7 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
 fn mixed_durable_commit() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 129 * 4096;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let mut txn = db.begin_write().unwrap();
     txn.set_durability(Durability::None);
     {
@@ -51,8 +50,7 @@ fn mixed_durable_commit() {
 fn non_durable_commit_persistence() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 16 * 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let mut txn = db.begin_write().unwrap();
     txn.set_durability(Durability::None);
     let pairs = gen_data(100, 16, 20);
@@ -67,7 +65,7 @@ fn non_durable_commit_persistence() {
 
     // Check that cleanly closing the database persists the non-durable commit
     drop(db);
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let txn = db.begin_read().unwrap();
     let table = txn.open_table(SLICE_TABLE).unwrap();
 
@@ -86,8 +84,7 @@ fn non_durable_commit_persistence() {
 fn test_persistence(durability: Durability) {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 16 * 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let mut txn = db.begin_write().unwrap();
     txn.set_durability(durability);
     let pairs = gen_data(100, 16, 20);
@@ -101,7 +98,7 @@ fn test_persistence(durability: Durability) {
     txn.commit().unwrap();
 
     drop(db);
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let txn = db.begin_read().unwrap();
     let table = txn.open_table(SLICE_TABLE).unwrap();
 
@@ -128,23 +125,10 @@ fn immediate_persistence() {
 }
 
 #[test]
-fn change_db_size() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-
-    let db_size = 16 * 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
-    drop(db);
-
-    let db = unsafe { Database::create(tmpfile.path(), db_size * 2) };
-    assert!(matches!(db.err().unwrap(), Error::DbSizeMismatch { .. }));
-}
-
-#[test]
 fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 8 * 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
     {
         let _table = txn.open_table(SLICE_TABLE).unwrap();
@@ -162,12 +146,13 @@ fn free() {
     txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
-    let free_pages = txn.stats().unwrap().free_pages();
+    let allocated_pages = txn.stats().unwrap().allocated_pages();
 
     let key = vec![0; 100];
     let value = vec![0; 1024];
+    let target_db_size = 8 * 1024 * 1024;
     // Write 10% of db space each iteration
-    let num_writes = db_size / 10 / (key.len() + value.len());
+    let num_writes = target_db_size / 10 / (key.len() + value.len());
     // Make sure an internal index page is required
     assert!(num_writes > 64);
 
@@ -202,7 +187,7 @@ fn free() {
     let txn = db.begin_write().unwrap();
     txn.commit().unwrap();
     let txn = db.begin_write().unwrap();
-    assert_eq!(free_pages, txn.stats().unwrap().free_pages());
+    assert_eq!(allocated_pages, txn.stats().unwrap().allocated_pages());
     txn.abort().unwrap();
 }
 
@@ -210,8 +195,7 @@ fn free() {
 fn large_values() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 50 * 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
 
     let mut key = vec![0; 1024];
@@ -240,8 +224,7 @@ fn large_values() {
 fn large_keys() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024_1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
 
     let mut key = vec![0; 1024];
@@ -272,8 +255,8 @@ fn dynamic_growth() {
     let table_definition: TableDefinition<u64, [u8]> = TableDefinition::new("x");
     let big_value = vec![0; 1024];
 
-    let db_size = 10 * 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let expected_size = 10 * 1024 * 1024;
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(table_definition).unwrap();
@@ -282,7 +265,7 @@ fn dynamic_growth() {
     txn.commit().unwrap();
 
     let initial_file_size = tmpfile.as_file().metadata().unwrap().len();
-    assert!(initial_file_size < (db_size / 2) as u64);
+    assert!(initial_file_size < (expected_size / 2) as u64);
 
     let txn = db.begin_write().unwrap();
     {
@@ -304,11 +287,10 @@ fn multi_page_kv() {
     let elements = 4;
     let page_size = 4096;
 
-    let db_size = 1024_1024;
     let db = unsafe {
         Builder::new()
             .set_page_size(page_size)
-            .create(tmpfile.path(), db_size)
+            .create(tmpfile.path())
             .unwrap()
     };
     let txn = db.begin_write().unwrap();
@@ -349,8 +331,7 @@ fn multi_page_kv() {
 fn regression() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(U64_TABLE).unwrap();
@@ -411,8 +392,7 @@ fn regression() {
 fn regression2() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let tx = db.begin_write().unwrap();
 
     let a_def: TableDefinition<[u8], [u8]> = TableDefinition::new("a");
@@ -432,8 +412,7 @@ fn regression2() {
 fn regression3() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let tx = db.begin_write().unwrap();
     {
         let mut t = tx.open_table(SLICE_TABLE).unwrap();
@@ -452,45 +431,10 @@ fn regression3() {
 }
 
 #[test]
-// Test for bug in growth code
-fn regression4() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-
-    let db_size = 1507328;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
-    let tx = db.begin_write().unwrap();
-    {
-        let mut t = tx.open_table(SLICE_TABLE).unwrap();
-        let big_value = vec![0u8; 9134464];
-        assert!(matches!(t.insert(&[0], &big_value), Err(Error::OutOfSpace)));
-    }
-    tx.commit().unwrap();
-}
-
-#[test]
-fn regression5() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-
-    let db_size = 387;
-    let db = unsafe { Database::create(tmpfile.path(), db_size) };
-    assert!(matches!(db, Err(Error::OutOfSpace)));
-}
-
-#[test]
-fn regression6() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-
-    let db_size = 0;
-    let db = unsafe { Database::create(tmpfile.path(), db_size) };
-    assert!(matches!(db, Err(Error::OutOfSpace)));
-}
-
-#[test]
 fn regression7() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 321033;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
 
@@ -533,8 +477,7 @@ fn regression7() {
 fn regression8() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 321033;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
 
@@ -583,8 +526,7 @@ fn regression8() {
 fn regression9() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 117440512;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
 
@@ -602,8 +544,7 @@ fn regression9() {
 fn regression10() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 10 * 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
 
@@ -635,8 +576,7 @@ fn regression10() {
 fn regression11() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 10 * 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
 
@@ -673,8 +613,7 @@ fn regression11() {
 fn regression12() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let table_def: TableDefinition<u64, u64> = TableDefinition::new("x");
 
@@ -695,8 +634,7 @@ fn regression12() {
 fn regression13() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024 * 1024;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let table_def: MultimapTableDefinition<u64, [u8]> = MultimapTableDefinition::new("x");
 
@@ -716,8 +654,7 @@ fn regression13() {
 fn regression14() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 150256483323;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let table_def: MultimapTableDefinition<u64, [u8]> = MultimapTableDefinition::new("x");
 
@@ -753,28 +690,13 @@ fn regression14() {
 }
 
 #[test]
-fn regression15() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db_size = 400998358365;
-    unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
-}
-
-#[test]
-fn regression16() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db_size = 4294985472;
-    unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
-}
-
-#[test]
 fn regression17() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024 * 1024;
     let db = unsafe {
         Database::builder()
             .set_write_strategy(WriteStrategy::Checksum)
-            .create(tmpfile.path(), db_size)
+            .create(tmpfile.path())
             .unwrap()
     };
 
@@ -797,11 +719,10 @@ fn regression17() {
 fn regression18() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024 * 1024;
     let db = unsafe {
         Database::builder()
             .set_write_strategy(WriteStrategy::Checksum)
-            .create(tmpfile.path(), db_size)
+            .create(tmpfile.path())
             .unwrap()
     };
 
@@ -869,11 +790,10 @@ fn regression18() {
 fn regression19() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024 * 1024;
     let db = unsafe {
         Database::builder()
             .set_write_strategy(WriteStrategy::Checksum)
-            .create(tmpfile.path(), db_size)
+            .create(tmpfile.path())
             .unwrap()
     };
 
@@ -916,11 +836,10 @@ fn regression19() {
 fn change_invalidate_savepoint() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024 * 1024;
     let db = unsafe {
         Database::builder()
             .set_write_strategy(WriteStrategy::Checksum)
-            .create(tmpfile.path(), db_size)
+            .create(tmpfile.path())
             .unwrap()
     };
     let tx = db.begin_write().unwrap();
@@ -939,27 +858,25 @@ fn change_invalidate_savepoint() {
 fn create_open_mismatch() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024 * 1024;
     let db = unsafe {
         Database::builder()
             .set_write_strategy(WriteStrategy::TwoPhase)
-            .create(tmpfile.path(), db_size)
+            .create(tmpfile.path())
             .unwrap()
     };
     drop(db);
 
-    unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    unsafe { Database::create(tmpfile.path()).unwrap() };
 }
 
 #[test]
 fn twophase_open() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024 * 1024;
     let db = unsafe {
         Database::builder()
             .set_write_strategy(WriteStrategy::TwoPhase)
-            .create(tmpfile.path(), db_size)
+            .create(tmpfile.path())
             .unwrap()
     };
     drop(db);
@@ -971,7 +888,7 @@ fn twophase_open() {
 #[test]
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let mut write_txn = db.begin_write().unwrap();
     write_txn.set_durability(Durability::None);
     {
@@ -1010,7 +927,7 @@ fn non_durable_read_isolation() {
 #[test]
 fn range_query() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
@@ -1045,7 +962,7 @@ fn range_query() {
 #[test]
 fn range_query_reversed() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
@@ -1086,7 +1003,7 @@ fn range_query_reversed() {
 #[test]
 fn alias_table() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
     let table = write_txn.open_table(SLICE_TABLE).unwrap();
@@ -1101,7 +1018,7 @@ fn alias_table() {
 #[test]
 fn delete_table() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let y_def: MultimapTableDefinition<[u8], [u8]> = MultimapTableDefinition::new("y");
 
@@ -1131,7 +1048,7 @@ fn delete_table() {
 #[test]
 fn dropped_write() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -1148,8 +1065,7 @@ fn dropped_write() {
 fn non_page_size_multiple() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db_size = 1024 * 1024 + 1;
-    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
     let key = vec![0; 1024];
     let value = vec![0; 1];
@@ -1188,7 +1104,7 @@ fn does_not_exist() {
 #[test]
 fn wrong_types() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
     let definition: TableDefinition<u32, u32> = TableDefinition::new("x");
     let wrong_definition: TableDefinition<u64, u64> = TableDefinition::new("x");
@@ -1240,7 +1156,7 @@ fn tree_balance() {
     let db = unsafe {
         Database::builder()
             .set_page_size(page_size)
-            .create(tmpfile.path(), 16 * 1024 * 1024)
+            .create(tmpfile.path())
             .unwrap()
     };
     let txn = db.begin_write().unwrap();
@@ -1293,10 +1209,14 @@ fn tree_balance() {
 #[test]
 fn database_lock() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let result = unsafe { Database::create(tmpfile.path(), 1024 * 1024) };
+    let result = unsafe { Database::create(tmpfile.path()) };
     assert!(result.is_ok());
     let result2 = unsafe { Database::open(tmpfile.path()) };
-    assert!(matches!(result2, Err(Error::DatabaseAlreadyOpen)));
+    assert!(
+        matches!(result2, Err(Error::DatabaseAlreadyOpen)),
+        "{:?}",
+        result2
+    );
     drop(result);
     let result = unsafe { Database::open(tmpfile.path()) };
     assert!(result.is_ok());
@@ -1305,7 +1225,7 @@ fn database_lock() {
 #[test]
 fn savepoint() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let definition: TableDefinition<u32, str> = TableDefinition::new("x");
 
     let txn = db.begin_write().unwrap();

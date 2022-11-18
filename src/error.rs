@@ -9,16 +9,10 @@ pub enum Error {
     InvalidSavepoint,
     Corrupted(String),
     TableTypeMismatch(String),
-    DbSizeMismatch {
-        path: String,
-        size: u64,
-        requested_size: u64,
-    },
     TableDoesNotExist(String),
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
     TableAlreadyOpen(String, &'static panic::Location<'static>),
-    OutOfSpace,
     Io(io::Error),
     LockPoisoned(&'static panic::Location<'static>),
 }
@@ -44,25 +38,11 @@ impl Display for Error {
             Error::TableTypeMismatch(msg) => {
                 write!(f, "{}", msg)
             }
-            Error::DbSizeMismatch {
-                path,
-                size,
-                requested_size,
-            } => {
-                write!(
-                    f,
-                    "Database {} is of size {} bytes, but you requested {} bytes",
-                    path, size, requested_size
-                )
-            }
             Error::TableDoesNotExist(table) => {
                 write!(f, "Table '{}' does not exist", table)
             }
             Error::TableAlreadyOpen(name, location) => {
                 write!(f, "Table '{}' already opened at: {}", name, location)
-            }
-            Error::OutOfSpace => {
-                write!(f, "Database is out of space")
             }
             Error::Io(err) => {
                 write!(f, "I/O error: {}", err)

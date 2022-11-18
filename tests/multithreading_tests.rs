@@ -8,7 +8,7 @@ const SLICE_TABLE: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
 #[test]
 fn len() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let db = Arc::new(db);
     let write_txn = db.begin_write().unwrap();
     {
