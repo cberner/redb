@@ -144,15 +144,7 @@ fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
     let db_size = 8 * 1024 * 1024;
-    #[cfg_attr(windows, allow(unused_mut))]
-    let db = unsafe {
-        let mut builder = Database::builder();
-        {
-            builder.set_dynamic_growth(false);
-        }
-
-        builder.create(tmpfile.path(), db_size).unwrap()
-    };
+    let db = unsafe { Database::create(tmpfile.path(), db_size).unwrap() };
     let txn = db.begin_write().unwrap();
     {
         let _table = txn.open_table(SLICE_TABLE).unwrap();

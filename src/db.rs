@@ -198,7 +198,7 @@ impl Database {
                 .open(path)?
         };
 
-        Database::new(file, db_size, None, None, true, None)
+        Database::new(file, db_size, None, None, None, None)
     }
 
     /// Opens an existing redb database.
@@ -212,7 +212,7 @@ impl Database {
         } else if File::open(path.as_ref())?.metadata()?.len() > 0 {
             let existing_size = Self::get_db_size(path.as_ref())?;
             let file = OpenOptions::new().read(true).write(true).open(path)?;
-            Database::new(file, existing_size, None, None, true, None)
+            Database::new(file, existing_size, None, None, None, None)
         } else {
             Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
         }
@@ -298,7 +298,7 @@ impl Database {
         max_capacity: u64,
         page_size: Option<usize>,
         region_size: Option<usize>,
-        dynamic_growth: bool,
+        initial_size: Option<u64>,
         write_strategy: Option<WriteStrategy>,
     ) -> Result<Self> {
         #[cfg(feature = "logging")]
@@ -313,7 +313,7 @@ impl Database {
             max_capacity,
             page_size,
             region_size,
-            dynamic_growth,
+            initial_size,
             write_strategy,
         )?;
         if mem.needs_repair()? {
@@ -536,7 +536,7 @@ pub enum WriteStrategy {
 pub struct Builder {
     page_size: Option<usize>,
     region_size: Option<usize>,
-    dynamic_growth: bool,
+    initial_size: Option<u64>,
     write_strategy: WriteStrategy,
 }
 
@@ -546,7 +546,7 @@ impl Builder {
         Self {
             page_size: None,
             region_size: None,
-            dynamic_growth: true,
+            initial_size: None,
             write_strategy: WriteStrategy::default(),
         }
     }
@@ -576,11 +576,12 @@ impl Builder {
         self
     }
 
-    /// Whether to grow the database file dynamically.
-    /// When set to true, the database file will start at a small size and grow as insertions are made
-    /// When set to false, the database file will be statically sized
-    pub fn set_dynamic_growth(&mut self, enabled: bool) -> &mut Self {
-        self.dynamic_growth = enabled;
+    /// The initial amount of usable space in bytes for the database
+    ///
+    /// Databases grow dynamically, so it is generally unnecessary to set this. However, it can
+    /// be used to avoid runtime overhead caused by resizing the database.
+    pub fn set_initial_size(&mut self, size: u64) -> &mut Self {
+        self.initial_size = Some(size);
         self
     }
 
@@ -606,7 +607,7 @@ impl Builder {
             db_size as u64,
             self.page_size,
             self.region_size,
-            self.dynamic_growth,
+            self.initial_size,
             Some(self.write_strategy),
         )
     }
