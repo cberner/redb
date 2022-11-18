@@ -756,7 +756,6 @@ pub(crate) struct TransactionalMemory {
     region_size: u64,
     region_header_with_padding_size: usize,
     db_header_size: usize,
-    dynamic_growth: bool,
     #[allow(dead_code)]
     pages_are_os_page_aligned: bool,
 }
@@ -767,7 +766,7 @@ impl TransactionalMemory {
         max_capacity: u64,
         requested_page_size: Option<usize>,
         requested_region_size: Option<usize>,
-        dynamic_growth: bool,
+        initial_size: Option<u64>,
         write_strategy: Option<WriteStrategy>,
     ) -> Result<Self> {
         #[allow(clippy::assertions_on_constants)]
@@ -793,7 +792,9 @@ impl TransactionalMemory {
         // TODO: remove the option of disabling dynamic growth
         let region_tracker_required_bytes =
             RegionTracker::required_bytes(max_possible_regions, MAX_MAX_PAGE_ORDER + 1);
-        let starting_size = if dynamic_growth {
+        let starting_size = if let Some(size) = initial_size {
+            size
+        } else {
             // Make sure that there is enough room to allocate the region tracker into a page
             let size: u64 = max(MIN_DESIRED_USABLE_BYTES, page_size * MIN_USABLE_PAGES)
                 .try_into()
@@ -801,8 +802,6 @@ impl TransactionalMemory {
             let tracker_space =
                 (page_size * ((region_tracker_required_bytes + page_size - 1) / page_size)) as u64;
             size + tracker_space
-        } else {
-            max_capacity
         };
         let layout = DatabaseLayout::calculate(
             max_capacity,
@@ -977,7 +976,6 @@ impl TransactionalMemory {
             region_size,
             region_header_with_padding_size: region_header_size,
             db_header_size: layout.superheader_bytes(),
-            dynamic_growth,
             pages_are_os_page_aligned: is_page_aligned(page_size.try_into().unwrap()),
         })
     }
@@ -1162,10 +1160,7 @@ impl TransactionalMemory {
         let mut layout = self.layout.lock().unwrap();
 
         // Trim surplus file space, before finalizing the commit
-        let mut shrunk = false;
-        if self.dynamic_growth {
-            shrunk = self.try_shrink(&mut metadata, &mut layout)?;
-        };
+        let shrunk = self.try_shrink(&mut metadata, &mut layout)?;
 
         let mut secondary = metadata.secondary_slot_mut();
         secondary.set_checksum_type(checksum_type);
@@ -1866,7 +1861,7 @@ mod test {
             max_size as u64,
             None,
             None,
-            true,
+            None,
             Some(WriteStrategy::TwoPhase)
         )
         .unwrap()
@@ -1947,7 +1942,7 @@ mod test {
             max_size as u64,
             None,
             None,
-            true,
+            None,
             Some(WriteStrategy::Checksum)
         )
         .unwrap()
@@ -2004,7 +1999,7 @@ mod test {
             max_size as u64,
             None,
             None,
-            true,
+            None,
             Some(WriteStrategy::TwoPhase)
         )
         .unwrap()
@@ -2073,7 +2068,7 @@ mod test {
             max_size as u64,
             None,
             None,
-            true,
+            None,
             Some(WriteStrategy::Checksum)
         )
         .unwrap()
