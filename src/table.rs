@@ -117,8 +117,7 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     /// # fn main() -> Result<(), Error> {
     /// # let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     /// # let filename = tmpfile.path();
-    /// # let db_max_size = 1024 * 1024;
-    /// let db = unsafe { Database::create(filename, db_max_size)? };
+    /// let db = unsafe { Database::create(filename)? };
     /// let write_txn = db.begin_write()?;
     /// {
     ///     let mut table = write_txn.open_table(TABLE)?;
@@ -273,7 +272,7 @@ mod test {
         let definition: TableDefinition<ReverseKey, [u8]> = TableDefinition::new("x");
 
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+        let db = unsafe { Database::create(tmpfile.path()).unwrap() };
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(definition).unwrap();

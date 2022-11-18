@@ -30,8 +30,8 @@ database file.
 -------------------------------------------- Header ----------------------------------------------
 | magic number                                                                                   |
 | magic con.| god byte  | padding               | page size                                      |
-| database max size                                                                              |
 | region header pages                           | region max data pages                          |
+| padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
@@ -77,10 +77,9 @@ controls which transaction pointer is the primary.
 * 1 byte: god byte
 * 2 byte: padding
 * 4 bytes: page size
-* 8 bytes: database max size
 * 4 bytes: region header pages
 * 4 bytes: region max data pages
-* 32 bytes: padding to 64 bytes
+* 40 bytes: padding to 64 bytes
 
 `magic number` must be set to the ASCII letters 'redb' followed by 0x1A, 0x0A, 0xA9, 0x0D, 0x0A. This sequence is
 inspired by the PNG magic number.
@@ -93,8 +92,6 @@ inspired by the PNG magic number.
   by walking the btree from all active roots.
 
 `page size` is the size of a redb page in bytes
-
-`database max size` is the maximum size of the database file in bytes
 
 `region header pages` is the number of pages in each region's header
 

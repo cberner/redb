@@ -17,11 +17,8 @@ const TABLE_DEF: TableDefinition<u64, [u8]> = TableDefinition::new("fuzz_table")
 const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, [u8]> =
     MultimapTableDefinition::new("fuzz_multimap_table");
 
-fn exec_table(db: Arc<Database>, transactions: &[FuzzTransaction], reference: Arc<Mutex<BTreeMap<u64, usize>>>, barrier: Arc<CustomBarrier>, oom_plausible: bool) {
-    let result = exec_table_inner(db, &transactions, reference, barrier.clone());
-    if let Err(err) = result {
-        assert!(matches!(err, Error::OutOfSpace) && oom_plausible);
-    }
+fn exec_table(db: Arc<Database>, transactions: &[FuzzTransaction], reference: Arc<Mutex<BTreeMap<u64, usize>>>, barrier: Arc<CustomBarrier>) {
+    exec_table_inner(db, &transactions, reference, barrier.clone()).unwrap();
     barrier.decrement_waiters();
 }
 
@@ -158,11 +155,8 @@ fn assert_multimap_value_eq(
     assert!(iter.next().is_none());
 }
 
-fn exec_multimap_table(db: Arc<Database>, transactions: &[FuzzTransaction], reference: Arc<Mutex<BTreeMap<u64, BTreeSet<usize>>>>, barrier: Arc<CustomBarrier>, oom_plausible: bool) {
-    let result = exec_multimap_table_inner(db, &transactions, reference, barrier.clone());
-    if let Err(err) = result {
-        assert!(matches!(err, Error::OutOfSpace) && oom_plausible);
-    }
+fn exec_multimap_table(db: Arc<Database>, transactions: &[FuzzTransaction], reference: Arc<Mutex<BTreeMap<u64, BTreeSet<usize>>>>, barrier: Arc<CustomBarrier>) {
+    exec_multimap_table_inner(db, &transactions, reference, barrier.clone()).unwrap();
     barrier.decrement_waiters();
 }
 
@@ -297,16 +291,12 @@ fuzz_target!(|config: FuzzConfig| {
     let db = unsafe {
         Database::builder()
             .set_write_strategy(write_strategy)
-            .create(redb_file.path(), config.max_db_size.value)
+            .create(redb_file.path())
     };
 
-    if matches!(db, Err(Error::OutOfSpace)) {
-        return;
-    }
     let db = Arc::new(db.unwrap());
 
     let barrier = Arc::new(CustomBarrier::new(2));
-    let oom_plausible = config.oom_plausible();
     if config.multimap_table {
         let reference = Arc::new(Mutex::new(Default::default()));
         let reference2 = reference.clone();
@@ -314,11 +304,11 @@ fuzz_target!(|config: FuzzConfig| {
         let db2 = db.clone();
         let transactions = config.thread0_transactions.clone();
         let t0 = thread::spawn(move || {
-            exec_multimap_table(db, &transactions, reference, barrier, oom_plausible);
+            exec_multimap_table(db, &transactions, reference, barrier);
         });
         let transactions = config.thread1_transactions.clone();
         let t1 = thread::spawn(move || {
-            exec_multimap_table(db2, &transactions, reference2, barrier2, oom_plausible);
+            exec_multimap_table(db2, &transactions, reference2, barrier2);
         });
         assert!(t0.join().is_ok());
         assert!(t1.join().is_ok());
@@ -329,11 +319,11 @@ fuzz_target!(|config: FuzzConfig| {
         let db2 = db.clone();
         let transactions = config.thread0_transactions.clone();
         let t0 = thread::spawn(move || {
-            exec_table(db, &transactions, reference, barrier, oom_plausible);
+            exec_table(db, &transactions, reference, barrier);
         });
         let transactions = config.thread1_transactions.clone();
         let t1 = thread::spawn(move || {
-            exec_table(db2, &transactions, reference2, barrier2, oom_plausible);
+            exec_table(db2, &transactions, reference2, barrier2);
         });
         assert!(t0.join().is_ok());
         assert!(t1.join().is_ok());

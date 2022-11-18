@@ -1,4 +1,3 @@
-use std::cmp::max;
 use std::mem::size_of;
 use std::sync::{Condvar, Mutex};
 use arbitrary::Unstructured;
@@ -9,8 +8,6 @@ use rand::SeedableRng;
 
 // Limit values to 10MiB
 const MAX_VALUE_SIZE: usize = 10_000_000;
-// Limit testing to 1TB databases
-const MAX_DB_SIZE: usize = 2usize.pow(40);
 const KEY_SPACE: u64 = 1_000_000;
 pub const MAX_SAVEPOINTS: usize = 3;
 
@@ -115,49 +112,8 @@ pub(crate) struct FuzzTransaction {
 pub(crate) struct FuzzConfig {
     pub use_checksums: bool,
     pub multimap_table: bool,
-    pub max_db_size: BoundedUSize<MAX_DB_SIZE>,
     pub thread0_transactions: Vec<FuzzTransaction>,
     pub thread1_transactions: Vec<FuzzTransaction>,
-}
-
-impl FuzzConfig {
-    pub(crate) fn oom_plausible(&self) -> bool {
-        const PAGE_SIZE: usize = 4096;
-
-        let mut total_entries = 0;
-        let mut total_value_bytes = 0;
-        let mut consecutive_nondurable_commits = 0;
-        let mut max_consecutive_nondurable_commits = 0;
-        let mut savepoint_restores = 0;
-        let mut transactions = self.thread0_transactions.clone();
-        transactions.extend(self.thread1_transactions.iter().cloned());
-        for transaction in transactions.iter() {
-            if transaction.restore_savepoint.value > 0 {
-                savepoint_restores += 1;
-            }
-            if !transaction.commit {
-                continue;
-            }
-            for write in transaction.ops.iter() {
-                total_entries += 1;
-                total_value_bytes += match write {
-                    FuzzOperation::Insert { value_size, .. } => value_size.value,
-                    _ => 0
-                };
-            }
-            if !transaction.durable {
-                consecutive_nondurable_commits += 1;
-            } else {
-                consecutive_nondurable_commits = 0;
-            }
-            max_consecutive_nondurable_commits = max(max_consecutive_nondurable_commits, consecutive_nondurable_commits);
-        }
-
-        let approximate_overhead = 4 * PAGE_SIZE + PAGE_SIZE * savepoint_restores;
-        let expected_size = (total_value_bytes + (size_of::<u64>() * 4) * total_entries) * (1 + max_consecutive_nondurable_commits) + approximate_overhead;
-        // If we're within a factor of 10 of the max db size, then assume an OOM is plausible
-        expected_size * 10 > self.max_db_size.value
-    }
 }
 
 pub(crate) struct CustomBarrier {

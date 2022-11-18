@@ -29,6 +29,7 @@ struct OVERLAPPED_0_0 {
 
 const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x00000002;
 const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x00000001;
+const ERROR_LOCK_VIOLATION: i32 = 0x21;
 const ERROR_IO_PENDING: i32 = 997;
 const PAGE_READWRITE: u32 = 0x4;
 
@@ -141,7 +142,9 @@ impl FileLock {
 
             if result == 0 {
                 let err = io::Error::last_os_error();
-                return if err.raw_os_error() == Some(ERROR_IO_PENDING) {
+                return if err.raw_os_error() == Some(ERROR_IO_PENDING)
+                    || err.raw_os_error() == Some(ERROR_LOCK_VIOLATION)
+                {
                     Err(Error::DatabaseAlreadyOpen)
                 } else {
                     Err(Error::Io(err))

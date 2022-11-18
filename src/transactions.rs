@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 #[derive(Debug)]
 pub struct DatabaseStats {
     pub(crate) tree_height: usize,
-    pub(crate) free_pages: usize,
+    pub(crate) allocated_pages: usize,
     pub(crate) leaf_pages: usize,
     pub(crate) branch_pages: usize,
     pub(crate) stored_leaf_bytes: usize,
@@ -39,9 +39,9 @@ impl DatabaseStats {
         self.tree_height
     }
 
-    /// Number of free pages remaining
-    pub fn free_pages(&self) -> usize {
-        self.free_pages
+    /// Number of pages allocated
+    pub fn allocated_pages(&self) -> usize {
+        self.allocated_pages
     }
 
     /// Number of leaf pages that store user data
@@ -411,18 +411,7 @@ impl<'db> WriteTransaction<'db> {
     /// durable as consistent with the [`Durability`] level set by [`Self::set_durability`]
     pub fn commit(mut self) -> Result {
         self.table_tree.borrow_mut().flush_table_root_updates()?;
-        match self.commit_inner() {
-            Ok(_) => Ok(()),
-            Err(err) => match err {
-                // Rollback the transaction if we ran out of space during commit, so that user may
-                // continue with another transaction (like a delete)
-                Error::OutOfSpace => {
-                    self.abort()?;
-                    Err(err)
-                }
-                err => Err(err),
-            },
-        }
+        self.commit_inner()
     }
 
     fn commit_inner(&mut self) -> Result {
@@ -592,7 +581,7 @@ impl<'db> WriteTransaction<'db> {
 
         Ok(DatabaseStats {
             tree_height: data_tree_stats.tree_height(),
-            free_pages: self.mem.count_free_pages()?,
+            allocated_pages: self.mem.count_allocated_pages()?,
             leaf_pages: data_tree_stats.leaf_pages(),
             branch_pages: data_tree_stats.branch_pages(),
             stored_leaf_bytes: data_tree_stats.stored_bytes(),
@@ -716,7 +705,7 @@ mod test {
     #[test]
     fn transaction_id_persistence() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+        let db = unsafe { Database::create(tmpfile.path()).unwrap() };
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
@@ -726,7 +715,7 @@ mod test {
         write_txn.commit().unwrap();
         drop(db);
 
-        let db2 = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+        let db2 = unsafe { Database::create(tmpfile.path()).unwrap() };
         let write_txn = db2.begin_write().unwrap();
         assert!(write_txn.transaction_id > first_txn_id);
     }

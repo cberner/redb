@@ -1,5 +1,3 @@
-use crate::Error;
-use crate::Result;
 use std::mem::size_of;
 
 const HEIGHT_OFFSET: usize = 0;
@@ -73,7 +71,7 @@ impl<'a> BtreeBitmap<'a> {
     }
 
     /// data must have been initialized by Self::init_new(). Returns the first free id, after (inclusive) of start
-    pub(crate) fn find_first_unset(&self) -> Result<u64> {
+    pub(crate) fn find_first_unset(&self) -> Option<u64> {
         if let Some(mut entry) = self.get_level(0).first_unset(0, 64) {
             let mut height = 0;
 
@@ -86,9 +84,9 @@ impl<'a> BtreeBitmap<'a> {
                     .unwrap();
             }
 
-            Ok(entry as u64)
+            Some(entry as u64)
         } else {
-            Err(Error::OutOfSpace)
+            None
         }
     }
 
@@ -161,7 +159,7 @@ impl<'a> BtreeBitmapMut<'a> {
         Self::new(data)
     }
 
-    pub(crate) fn find_first_unset(&self) -> Result<u64> {
+    pub(crate) fn find_first_unset(&self) -> Option<u64> {
         BtreeBitmap::new(self.data).find_first_unset()
     }
 
@@ -170,10 +168,10 @@ impl<'a> BtreeBitmapMut<'a> {
     }
 
     // Returns the first unset id, and sets it
-    pub(crate) fn alloc(&mut self) -> Result<u64> {
+    pub(crate) fn alloc(&mut self) -> Option<u64> {
         let entry = self.find_first_unset()?;
         self.set(entry as u64);
-        Ok(entry)
+        Some(entry)
     }
 
     pub(crate) fn set(&mut self, i: u64) {
@@ -377,7 +375,6 @@ impl<'a> U64GroupedBitmapMut<'a> {
 #[cfg(test)]
 mod test {
     use crate::tree_store::page_store::bitmap::BtreeBitmapMut;
-    use crate::Error;
     use rand::prelude::IteratorRandom;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -395,7 +392,7 @@ mod test {
         for i in 0..num_pages {
             assert_eq!(i as u64, allocator.alloc().unwrap());
         }
-        assert!(matches!(allocator.alloc().unwrap_err(), Error::OutOfSpace));
+        assert!(allocator.alloc().is_none());
     }
 
     #[test]
@@ -406,7 +403,7 @@ mod test {
         allocator.clear(1);
         allocator.set(0);
         assert_eq!(1, allocator.alloc().unwrap());
-        assert!(matches!(allocator.alloc().unwrap_err(), Error::OutOfSpace));
+        assert!(allocator.alloc().is_none());
     }
 
     #[test]
@@ -415,7 +412,7 @@ mod test {
         let mut allocator = BtreeBitmapMut::init_new(&mut data, 1);
         allocator.clear(0);
         assert_eq!(0, allocator.alloc().unwrap());
-        assert!(matches!(allocator.alloc().unwrap_err(), Error::OutOfSpace));
+        assert!(allocator.alloc().is_none());
         allocator.clear(0);
         assert_eq!(0, allocator.alloc().unwrap());
     }
@@ -435,7 +432,7 @@ mod test {
         allocator.clear(15);
         assert_eq!(5, allocator.alloc().unwrap());
         assert_eq!(15, allocator.alloc().unwrap());
-        assert!(matches!(allocator.alloc().unwrap_err(), Error::OutOfSpace));
+        assert!(allocator.alloc().is_none());
     }
 
     #[test]
@@ -447,7 +444,7 @@ mod test {
             allocator.clear(i as u64);
         }
         // Allocate everything
-        while allocator.alloc().is_ok() {}
+        while allocator.alloc().is_some() {}
         // The last u64 must be used, since the leaf layer is compact
         let l = data.len();
         assert_ne!(
@@ -461,10 +458,7 @@ mod test {
         let num_pages = 129;
         let mut data = vec![0; BtreeBitmapMut::required_space(num_pages)];
         let mut allocator = BtreeBitmapMut::init_new(&mut data, num_pages);
-        assert!(matches!(
-            allocator.find_first_unset().unwrap_err(),
-            Error::OutOfSpace
-        ));
+        assert!(allocator.find_first_unset().is_none());
         allocator.clear(128);
         assert_eq!(allocator.find_first_unset().unwrap(), 128);
         allocator.clear(65);
@@ -492,7 +486,7 @@ mod test {
 
         for _ in 0..(num_pages * 2) {
             if rng.gen_bool(0.75) {
-                if let Ok(page) = allocator.alloc() {
+                if let Some(page) = allocator.alloc() {
                     allocated.insert(page);
                 } else {
                     assert_eq!(allocated.len(), num_pages);
@@ -506,7 +500,7 @@ mod test {
         for _ in allocated.len()..num_pages {
             allocator.alloc().unwrap();
         }
-        assert!(matches!(allocator.alloc().unwrap_err(), Error::OutOfSpace));
+        assert!(allocator.alloc().is_none());
 
         for i in 0..num_pages {
             allocator.clear(i as u64);
@@ -515,6 +509,6 @@ mod test {
         for _ in 0..num_pages {
             allocator.alloc().unwrap();
         }
-        assert!(matches!(allocator.alloc().unwrap_err(), Error::OutOfSpace));
+        assert!(allocator.alloc().is_none());
     }
 }
