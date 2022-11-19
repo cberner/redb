@@ -1,6 +1,6 @@
 use std::env::current_dir;
-use std::fs;
 use std::mem::size_of;
+use std::{fs, process};
 use tempfile::{NamedTempFile, TempDir};
 
 mod common;
@@ -216,8 +216,18 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
 }
 
 fn main() {
+    let tmpdir = current_dir().unwrap().join(".benchmark");
+    fs::create_dir(&tmpdir).unwrap();
+
+    let tmpdir2 = tmpdir.clone();
+    ctrlc::set_handler(move || {
+        fs::remove_dir_all(&tmpdir2).unwrap();
+        process::exit(1);
+    })
+    .unwrap();
+
     let redb_latency_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
         let db = unsafe {
             redb::Database::builder()
                 .set_write_strategy(WriteStrategy::Checksum)
@@ -229,7 +239,7 @@ fn main() {
     };
 
     let redb_throughput_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
         let db = unsafe {
             redb::Database::builder()
                 .set_write_strategy(WriteStrategy::TwoPhase)
@@ -241,7 +251,7 @@ fn main() {
     };
 
     let lmdb_results = {
-        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
+        let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
         let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
         env.set_map_size(4096 * 1024 * 1024).unwrap();
         let table = LmdbRkvBenchDatabase::new(&env);
@@ -249,26 +259,28 @@ fn main() {
     };
 
     let rocksdb_results = {
-        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
+        let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
         let db = rocksdb::TransactionDB::open_default(tmpfile.path()).unwrap();
         let table = RocksdbBenchDatabase::new(&db);
         benchmark(table)
     };
 
     let sled_results = {
-        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
+        let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
         let db = sled::Config::new().path(tmpfile.path()).open().unwrap();
         let table = SledBenchDatabase::new(&db, tmpfile.path());
         benchmark(table)
     };
 
     let sanakirja_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
         fs::remove_file(tmpfile.path()).unwrap();
         let db = sanakirja::Env::new(tmpfile.path(), 4096 * 1024 * 1024, 2).unwrap();
         let table = SanakirjaBenchDatabase::new(&db);
         benchmark(table)
     };
+
+    fs::remove_dir_all(&tmpdir).unwrap();
 
     let mut rows = Vec::new();
 
