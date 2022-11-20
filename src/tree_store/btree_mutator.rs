@@ -67,18 +67,27 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
         }
     }
 
-    pub(crate) fn safe_delete(&mut self, key: &K) -> Result<Option<AccessGuard<'a, V>>> {
+    pub(crate) fn safe_delete(
+        &mut self,
+        key: &K::RefBaseType<'_>,
+    ) -> Result<Option<AccessGuard<'a, V>>> {
         assert_eq!(self.free_policy, FreePolicy::Never);
         // Safety: we asserted that the free policy is Never
         unsafe { self.delete(key) }
     }
 
     // Safety: caller must ensure that no references to uncommitted pages in this table exist
-    pub(crate) unsafe fn delete(&mut self, key: &K) -> Result<Option<AccessGuard<'a, V>>> {
+    pub(crate) unsafe fn delete(
+        &mut self,
+        key: &K::RefBaseType<'_>,
+    ) -> Result<Option<AccessGuard<'a, V>>> {
         let root = { *(*self.root.clone()).borrow() };
         if let Some((p, checksum)) = root {
-            let (deletion_result, found) =
-                self.delete_helper(self.mem.get_page(p), checksum, key.as_bytes().as_ref())?;
+            let (deletion_result, found) = self.delete_helper(
+                self.mem.get_page(p),
+                checksum,
+                K::as_bytes_ref_type(key).as_ref(),
+            )?;
             let new_root = match deletion_result {
                 Subtree(page, checksum) => Some((page, checksum)),
                 DeletedLeaf => None,
@@ -110,16 +119,16 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
     #[allow(clippy::type_complexity)]
     pub(crate) unsafe fn insert(
         &mut self,
-        key: &K,
-        value: &V,
+        key: &K::RefBaseType<'_>,
+        value: &V::RefBaseType<'_>,
     ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMut<'a, K, V>)> {
         let root = { *(*self.root.clone()).borrow() };
         let (new_root, old_value, guard) = if let Some((p, checksum)) = root {
             let result = self.insert_helper(
                 self.mem.get_page(p),
                 checksum,
-                key.as_bytes().as_ref(),
-                value.as_bytes().as_ref(),
+                K::as_bytes_ref_type(key).as_ref(),
+                V::as_bytes_ref_type(value).as_ref(),
             )?;
 
             let new_root = if let Some((key, page2, page2_checksum)) = result.additional_sibling {
@@ -134,8 +143,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             };
             (new_root, result.old_value, result.inserted_value)
         } else {
-            let key_bytes = key.as_bytes();
-            let value_bytes = value.as_bytes();
+            let key_bytes = K::as_bytes_ref_type(key);
+            let value_bytes = V::as_bytes_ref_type(value);
             let key_bytes = key_bytes.as_ref();
             let value_bytes = value_bytes.as_ref();
             let mut builder = LeafBuilder::new(self.mem, 1, K::fixed_width(), V::fixed_width());

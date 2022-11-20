@@ -18,7 +18,10 @@ pub(crate) struct FreedTableKey {
 }
 
 impl RedbValue for FreedTableKey {
-    type View<'a> = FreedTableKey
+    type SelfType<'a> = FreedTableKey
+    where
+        Self: 'a;
+    type RefBaseType<'a> = FreedTableKey
     where
         Self: 'a;
     type AsBytes<'a> = [u8; 2 * size_of::<u64>()]
@@ -41,11 +44,23 @@ impl RedbValue for FreedTableKey {
         }
     }
 
-    fn as_bytes(&self) -> [u8; 2 * size_of::<u64>()] {
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> [u8; 2 * size_of::<u64>()]
+    where
+        Self: 'a,
+        Self: 'b,
+    {
         let mut result = [0u8; 2 * size_of::<u64>()];
-        result[..size_of::<u64>()].copy_from_slice(&self.transaction_id.to_le_bytes());
-        result[size_of::<u64>()..].copy_from_slice(&self.pagination_id.to_le_bytes());
+        result[..size_of::<u64>()].copy_from_slice(&value.transaction_id.to_le_bytes());
+        result[size_of::<u64>()..].copy_from_slice(&value.pagination_id.to_le_bytes());
         result
+    }
+
+    fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> [u8; 2 * size_of::<u64>()]
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        Self::as_bytes(value)
     }
 
     fn redb_type_name() -> String {
@@ -121,7 +136,8 @@ impl InternalTableDefinition {
 }
 
 impl RedbValue for InternalTableDefinition {
-    type View<'a> = InternalTableDefinition;
+    type SelfType<'a> = InternalTableDefinition;
+    type RefBaseType<'a> = InternalTableDefinition;
     type AsBytes<'a> = Vec<u8>;
 
     fn fixed_width() -> Option<usize> {
@@ -209,9 +225,13 @@ impl RedbValue for InternalTableDefinition {
         }
     }
 
-    fn as_bytes(&self) -> Vec<u8> {
-        let mut result = vec![self.table_type.into()];
-        if let Some((root, checksum)) = self.table_root {
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        let mut result = vec![value.table_type.into()];
+        if let Some((root, checksum)) = value.table_root {
             result.push(1);
             result.extend_from_slice(&root.to_le_bytes());
             result.extend_from_slice(&checksum.to_le_bytes());
@@ -220,14 +240,14 @@ impl RedbValue for InternalTableDefinition {
             result.extend_from_slice(&[0; PageNumber::serialized_size()]);
             result.extend_from_slice(&[0; size_of::<Checksum>()]);
         }
-        if let Some(fixed) = self.fixed_key_size {
+        if let Some(fixed) = value.fixed_key_size {
             result.push(1);
             result.extend_from_slice(&u32::try_from(fixed).unwrap().to_le_bytes());
         } else {
             result.push(0);
             result.extend_from_slice(&[0; size_of::<u32>()])
         }
-        if let Some(fixed) = self.fixed_value_size {
+        if let Some(fixed) = value.fixed_value_size {
             result.push(1);
             result.extend_from_slice(&u32::try_from(fixed).unwrap().to_le_bytes());
         } else {
@@ -235,14 +255,22 @@ impl RedbValue for InternalTableDefinition {
             result.extend_from_slice(&[0; size_of::<u32>()])
         }
         result.extend_from_slice(
-            &u32::try_from(self.key_type.as_bytes().len())
+            &u32::try_from(value.key_type.as_bytes().len())
                 .unwrap()
                 .to_le_bytes(),
         );
-        result.extend_from_slice(self.key_type.as_bytes());
-        result.extend_from_slice(self.value_type.as_bytes());
+        result.extend_from_slice(value.key_type.as_bytes());
+        result.extend_from_slice(value.value_type.as_bytes());
 
         result
+    }
+
+    fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> Vec<u8>
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        Self::as_bytes(value)
     }
 
     fn redb_type_name() -> String {
@@ -308,7 +336,7 @@ impl<'txn> TableTree<'txn> {
         for (name, table_root) in self.pending_table_updates.drain() {
             // Bypass .get_table() since the table types are dynamic
             // TODO: optimize away this get()
-            let mut definition = self.tree.get(&name).unwrap().unwrap();
+            let mut definition = self.tree.get(name.as_str()).unwrap().unwrap();
             // No-op if the root has not changed
             if definition.table_root == table_root {
                 continue;
@@ -316,7 +344,7 @@ impl<'txn> TableTree<'txn> {
             definition.table_root = table_root;
             // Safety: References into the master table are never returned to the user
             unsafe {
-                self.tree.insert(&name, &definition)?;
+                self.tree.insert(name.as_str(), &definition)?;
             }
         }
         Ok(self.tree.get_root())

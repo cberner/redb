@@ -227,8 +227,8 @@ impl Database {
         }
 
         // Iterate over all other tables
-        let iter: BtreeRangeIter<str, InternalTableDefinition> =
-            BtreeRangeIter::new::<RangeFull, str>(.., Some(root), mem);
+        let iter: BtreeRangeIter<&str, InternalTableDefinition> =
+            BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem);
         for entry in iter {
             let definition = InternalTableDefinition::from_bytes(entry.value());
             if let Some((table_root, table_checksum)) = definition.get_root() {
@@ -282,8 +282,8 @@ impl Database {
             mem.mark_pages_allocated(master_pages_iter)?;
 
             // Iterate over all other tables
-            let iter: BtreeRangeIter<str, InternalTableDefinition> =
-                BtreeRangeIter::new::<RangeFull, str>(.., Some(root), &mem);
+            let iter: BtreeRangeIter<&str, InternalTableDefinition> =
+                BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), &mem);
 
             // Chain all the other tables to the master table iter
             for entry in iter {
@@ -574,8 +574,8 @@ mod test {
     #[cfg(unix)]
     fn dynamic_shrink() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let table_definition: TableDefinition<u64, [u8]> = TableDefinition::new("x");
-        let big_value = vec![0; 1024];
+        let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+        let big_value = vec![0u8; 1024];
 
         let db = unsafe {
             Database::builder()

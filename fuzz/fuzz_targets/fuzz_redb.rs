@@ -13,8 +13,8 @@ use tempfile::NamedTempFile;
 mod common;
 use common::*;
 
-const TABLE_DEF: TableDefinition<u64, [u8]> = TableDefinition::new("fuzz_table");
-const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, [u8]> =
+const TABLE_DEF: TableDefinition<u64, &[u8]> = TableDefinition::new("fuzz_table");
+const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, &[u8]> =
     MultimapTableDefinition::new("fuzz_multimap_table");
 
 fn exec_table(db: Arc<Database>, transactions: &[FuzzTransaction], reference: Arc<Mutex<BTreeMap<u64, usize>>>, barrier: Arc<CustomBarrier>) {
@@ -144,7 +144,7 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
 }
 
 fn assert_multimap_value_eq(
-    mut iter: MultimapValueIter<[u8]>,
+    mut iter: MultimapValueIter<&[u8]>,
     reference: Option<&BTreeSet<usize>>,
 ) {
     if let Some(values) = reference {
@@ -209,8 +209,7 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
                     FuzzOperation::Insert { key, value_size } => {
                         let key = key.value;
                         let value_size = value_size.value as usize;
-                        let value = vec![0xFFu8; value_size];
-                        table.insert(&key, &value)?;
+                        table.insert(&key, &vec![0xFFu8; value_size])?;
                         local_reference.entry(key).or_default().insert(value_size);
                     }
                     FuzzOperation::InsertReserve { .. } => {
@@ -254,7 +253,7 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
                             } else {
                                 Box::new(local_reference.range(start..end))
                             };
-                        let mut iter: Box<dyn Iterator<Item = (u64, MultimapValueIter<[u8]>)>> = if *reversed {
+                        let mut iter: Box<dyn Iterator<Item = (u64, MultimapValueIter<&[u8]>)>> = if *reversed {
                             Box::new(table.range(&start..&end).unwrap().rev())
                         } else {
                             Box::new(table.range(&start..&end).unwrap())
