@@ -1,9 +1,8 @@
 use redb::{Database, MultimapTableDefinition, RangeIter, ReadableTable, TableDefinition};
-use std::ops::{Range, RangeFull};
 use std::sync;
 use tempfile::NamedTempFile;
 
-const SLICE_TABLE: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
+const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
 
 #[test]
@@ -646,11 +645,13 @@ fn u64_type() {
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
         table.insert(&0, &1).unwrap();
+        table.insert(&1, &1).unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(2u64, table.range(0..2).unwrap().map(|(_, x)| x).sum());
     assert_eq!(1, table.get(&0).unwrap().unwrap());
 }
 
@@ -673,7 +674,7 @@ fn i128_type() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(definition).unwrap();
     assert_eq!(-2, table.get(&-1).unwrap().unwrap());
-    let mut iter: RangeIter<i128, i128> = table.range::<RangeFull, i128>(..).unwrap();
+    let mut iter: RangeIter<i128, i128> = table.range::<i128>(..).unwrap();
     for i in -11..10 {
         assert_eq!(iter.next().unwrap().1, i);
     }
@@ -704,7 +705,7 @@ fn str_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
-    let definition: TableDefinition<str, str> = TableDefinition::new("x");
+    let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -715,19 +716,14 @@ fn str_type() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(definition).unwrap();
-    let hello = "hello".to_string();
-    assert_eq!("world", table.get(&hello).unwrap().unwrap());
+    assert_eq!("world", table.get("hello").unwrap().unwrap());
 
     // TODO: is there a way to avoid having to annotate the return type for RangeFull queries?
-    let mut iter: RangeIter<str, str> = table.range::<RangeFull, &str>(..).unwrap();
+    let mut iter: RangeIter<&str, &str> = table.range::<&str>(..).unwrap();
     assert_eq!(iter.next().unwrap().1, "world");
     assert!(iter.next().is_none());
 
-    let mut iter: RangeIter<str, str> = table.range("a".to_string().."z".to_string()).unwrap();
-    assert_eq!(iter.next().unwrap().1, "world");
-    assert!(iter.next().is_none());
-
-    let mut iter: RangeIter<str, str> = table.range("a".."z").unwrap();
+    let mut iter: RangeIter<&str, &str> = table.range("a".."z").unwrap();
     assert_eq!(iter.next().unwrap().1, "world");
     assert!(iter.next().is_none());
 }
@@ -756,7 +752,7 @@ fn array_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
-    let definition: TableDefinition<[u8; 5], [u8; 9]> = TableDefinition::new("x");
+    let definition: TableDefinition<&[u8; 5], &[u8; 9]> = TableDefinition::new("x");
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -770,7 +766,7 @@ fn array_type() {
     let hello = b"hello";
     assert_eq!(b"world_123", table.get(hello).unwrap().unwrap());
 
-    let mut iter: RangeIter<[u8; 5], [u8; 9]> = table.range::<RangeFull, &[u8; 5]>(..).unwrap();
+    let mut iter: RangeIter<&[u8; 5], &[u8; 9]> = table.range::<&[u8; 5]>(..).unwrap();
     assert_eq!(iter.next().unwrap().1, b"world_123");
     assert!(iter.next().is_none());
 }
@@ -796,7 +792,7 @@ fn owned_get_signatures() {
 
     assert_eq!(2, table.get(&1).unwrap().unwrap());
 
-    let mut iter: RangeIter<u32, u32> = table.range::<RangeFull, u32>(..).unwrap();
+    let mut iter: RangeIter<u32, u32> = table.range::<u32>(..).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, i + 1);
     }
@@ -806,7 +802,7 @@ fn owned_get_signatures() {
         assert_eq!(iter.next().unwrap().1, i + 1);
     }
     assert!(iter.next().is_none());
-    let mut iter = table.range::<Range<&u32>, &u32>(&0..&10).unwrap();
+    let mut iter = table.range::<&u32>(&0..&10).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, i + 1);
     }
@@ -820,7 +816,7 @@ fn ref_get_signatures() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        for i in 0..10 {
+        for i in 0..10u8 {
             table.insert(&[i], &[i + 1]).unwrap();
         }
     }
@@ -836,7 +832,7 @@ fn ref_get_signatures() {
 
     let start = vec![0u8];
     let end = vec![10u8];
-    let mut iter = table.range::<RangeFull, &[u8]>(..).unwrap();
+    let mut iter = table.range::<&[u8]>(..).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, &[i + 1]);
     }
@@ -855,7 +851,7 @@ fn ref_get_signatures() {
     }
     assert!(iter.next().is_none());
 
-    let mut iter = table.range([0u8].as_slice()..[10u8].as_slice()).unwrap();
+    let mut iter = table.range([0u8]..[10u8]).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, &[i + 1]);
     }
@@ -871,14 +867,16 @@ fn str_ref() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(ref_definition).unwrap();
-        table.insert(&"hello", b"world").unwrap();
+        table.insert("hello", b"world").unwrap();
+        let hello2 = "hello2".to_string();
+        table.insert(hello2.as_str(), b"world").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
     // Check that a &str can be read back as a str
     let table = read_txn.open_table(definition).unwrap();
-    assert_eq!(table.len().unwrap(), 1);
+    assert_eq!(table.len().unwrap(), 2);
 }
 
 #[test]

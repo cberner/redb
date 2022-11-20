@@ -10,13 +10,13 @@ use std::ops::RangeBounds;
 use std::rc::Rc;
 
 /// A table containing key-value mappings
-pub struct Table<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub struct Table<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> {
     name: String,
     transaction: &'txn WriteTransaction<'db>,
     tree: BtreeMut<'txn, K, V>,
 }
 
-impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'db, 'txn, K, V> {
+impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<'db, 'txn, K, V> {
     pub(crate) fn new(
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
@@ -39,49 +39,72 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Table<'db, 'txn, K, 
     /// Insert mapping of the given key to the given value
     ///
     /// Returns the old value, if the key was present in the table
-    pub fn insert(&mut self, key: &K, value: &V) -> Result<Option<AccessGuard<V>>> {
+    pub fn insert<'a, 'b: 'a, AK, AV>(
+        &mut self,
+        key: &'a AK,
+        value: &'a AV,
+    ) -> Result<Option<AccessGuard<V>>>
+    where
+        K: 'b,
+        V: 'b,
+        AK: Borrow<K::RefBaseType<'b>> + ?Sized,
+        AV: Borrow<V::RefBaseType<'b>> + ?Sized,
+    {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
-        unsafe { self.tree.insert(key, value) }
+        unsafe { self.tree.insert(key.borrow(), value.borrow()) }
     }
 
     /// Reserve space to insert a key-value pair
     /// The returned reference will have length equal to value_length
     // TODO: return type should be V, not [u8]
-    pub fn insert_reserve(
+    pub fn insert_reserve<'a, 'b: 'a, AK>(
         &mut self,
-        key: &K,
+        key: &'a AK,
         value_length: usize,
-    ) -> Result<AccessGuardMut<K, [u8]>> {
+    ) -> Result<AccessGuardMut<K, [u8]>>
+    where
+        K: 'b,
+        AK: Borrow<K::RefBaseType<'b>> + ?Sized,
+    {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
-        unsafe { self.tree.insert_reserve(key, value_length) }
+        unsafe { self.tree.insert_reserve(key.borrow(), value_length) }
     }
 
     /// Removes the given key
     ///
     /// Returns the old value, if the key was present in the table
-    pub fn remove(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
+    pub fn remove<'a, 'b: 'a, AK>(&mut self, key: &'a AK) -> Result<Option<AccessGuard<V>>>
+    where
+        K: 'b,
+        AK: Borrow<K::RefBaseType<'b>> + ?Sized,
+    {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
-        unsafe { self.tree.remove(key) }
+        unsafe { self.tree.remove(key.borrow()) }
     }
 }
 
 impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     for Table<'db, 'txn, K, V>
 {
-    fn get(&self, key: &K) -> Result<Option<V::View<'_>>> {
-        self.tree.get(key)
+    fn get<'a, 'b: 'a, AK>(&self, key: &'a AK) -> Result<Option<V::SelfType<'_>>>
+    where
+        K: 'b,
+        AK: Borrow<K::RefBaseType<'b>> + ?Sized,
+    {
+        self.tree.get(key.borrow())
     }
 
-    fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
-        &'a self,
-        range: T,
-    ) -> Result<RangeIter<K, V>> {
+    fn range<'a, KR>(&'a self, range: impl RangeBounds<KR> + 'a) -> Result<RangeIter<'a, K, V>>
+    where
+        K: 'a,
+        KR: Borrow<K::RefBaseType<'a>> + ?Sized + 'a,
+    {
         self.tree.range(range).map(RangeIter::new)
     }
 
@@ -102,7 +125,10 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for Table<'db, 
 
 pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     /// Returns the value corresponding to the given key
-    fn get(&self, key: &K) -> Result<Option<V::View<'_>>>;
+    fn get<'a, 'b: 'a, AK>(&self, key: &'a AK) -> Result<Option<V::SelfType<'_>>>
+    where
+        K: 'b,
+        AK: Borrow<K::RefBaseType<'b>> + ?Sized;
 
     /// Returns a double-ended iterator over a range of elements in the table
     ///
@@ -134,10 +160,10 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     /// # Ok(())
     /// # }
     /// ```
-    fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
-        &'a self,
-        range: T,
-    ) -> Result<RangeIter<K, V>>;
+    fn range<'a, KR>(&'a self, range: impl RangeBounds<KR> + 'a) -> Result<RangeIter<'a, K, V>>
+    where
+        K: 'a,
+        KR: Borrow<K::RefBaseType<'a>> + ?Sized + 'a;
 
     /// Returns the number of entries in the table
     fn len(&self) -> Result<usize>;
@@ -147,7 +173,7 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 
     /// Returns a double-ended iterator over all elements in the table
     fn iter(&self) -> Result<RangeIter<K, V>> {
-        self.range::<std::ops::RangeFull, &K>(..)
+        self.range::<K::RefBaseType<'_>>(..)
     }
 }
 
@@ -170,14 +196,19 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'txn, K, V>
 impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     for ReadOnlyTable<'txn, K, V>
 {
-    fn get(&self, key: &K) -> Result<Option<V::View<'_>>> {
-        self.tree.get(key)
+    fn get<'a, 'b: 'a, AK>(&self, key: &'a AK) -> Result<Option<V::SelfType<'_>>>
+    where
+        K: 'b,
+        AK: Borrow<K::RefBaseType<'b>> + ?Sized,
+    {
+        self.tree.get(key.borrow())
     }
 
-    fn range<'a, T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
-        &'a self,
-        range: T,
-    ) -> Result<RangeIter<K, V>> {
+    fn range<'a, KR>(&'a self, range: impl RangeBounds<KR> + 'a) -> Result<RangeIter<'a, K, V>>
+    where
+        K: 'a,
+        KR: Borrow<K::RefBaseType<'a>> + ?Sized + 'a,
+    {
         self.tree.range(range).map(RangeIter::new)
     }
 
@@ -201,7 +232,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> RangeIter<'a, K, 
 }
 
 impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for RangeIter<'a, K, V> {
-    type Item = (K::View<'a>, V::View<'a>);
+    type Item = (K::SelfType<'a>, V::SelfType<'a>);
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next() {
@@ -241,7 +272,10 @@ mod test {
         struct ReverseKey(Vec<u8>);
 
         impl RedbValue for ReverseKey {
-            type View<'a> = &'a [u8]
+            type SelfType<'a> = ReverseKey
+            where
+                Self: 'a;
+            type RefBaseType<'a> = ReverseKey
             where
                 Self: 'a;
             type AsBytes<'a> = &'a [u8]
@@ -252,15 +286,27 @@ mod test {
                 None
             }
 
-            fn from_bytes<'a>(data: &'a [u8]) -> &'a [u8]
+            fn from_bytes<'a>(data: &'a [u8]) -> ReverseKey
             where
                 Self: 'a,
             {
-                data
+                ReverseKey(data.to_vec())
             }
 
-            fn as_bytes(&self) -> &[u8] {
-                &self.0
+            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
+            where
+                Self: 'a,
+                Self: 'b,
+            {
+                &value.0
+            }
+
+            fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8]
+            where
+                Self: 'a,
+                Self: 'b,
+            {
+                &value.0
             }
 
             fn redb_type_name() -> String {
@@ -274,7 +320,7 @@ mod test {
             }
         }
 
-        let definition: TableDefinition<ReverseKey, [u8]> = TableDefinition::new("x");
+        let definition: TableDefinition<ReverseKey, &[u8]> = TableDefinition::new("x");
 
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = unsafe { Database::create(tmpfile.path()).unwrap() };
@@ -295,7 +341,7 @@ mod test {
         let mut iter = table.range(start..=end).unwrap();
         for i in (3..=7u8).rev() {
             let (key, value) = iter.next().unwrap();
-            assert_eq!(&[i], key);
+            assert_eq!(&[i], key.0.as_slice());
             assert_eq!(b"value", value);
         }
         assert!(iter.next().is_none());

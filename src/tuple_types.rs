@@ -54,17 +54,17 @@ macro_rules! fixed_width_impl {
 }
 
 macro_rules! as_bytes_impl {
-    ( $self:expr, $( $i:tt ),+ ) => {{
+    ( $value:expr, $( $t:ty, $i:tt ),+ ) => {{
         if Self::fixed_width().is_some() {
             serialize_tuple_elements_fixed(&[
                 $(
-                    $self.$i.as_bytes().as_ref(),
+                    <$t>::as_bytes(&$value.$i).as_ref(),
                 )+
             ])
         } else {
             serialize_tuple_elements_variable(&[
                 $(
-                    $self.$i.as_bytes().as_ref(),
+                    <$t>::as_bytes(&$value.$i).as_ref(),
                 )+
             ])
         }
@@ -184,9 +184,15 @@ macro_rules! compare_fixed_impl {
 macro_rules! tuple_impl {
     ( $($t:ident, $v:ident, $i:tt ),+ | $t_last:ident, $v_last:ident, $i_last:tt ) => {
         impl<$($t: RedbValue,)+ $t_last: RedbValue> RedbValue for ($($t,)+ $t_last) {
-            type View<'a> = (
-                $(<$t>::View<'a>,)+
-                <$t_last>::View<'a>,
+            type SelfType<'a> = (
+                $(<$t>::SelfType<'a>,)+
+                <$t_last>::SelfType<'a>,
+            )
+            where
+                Self: 'a;
+            type RefBaseType<'a> = (
+                $(<$t>::SelfType<'a>,)+
+                <$t_last>::SelfType<'a>,
             )
             where
                 Self: 'a;
@@ -198,7 +204,7 @@ macro_rules! tuple_impl {
                 fixed_width_impl!($($t,)+ $t_last)
             }
 
-            fn from_bytes<'a>(data: &'a [u8]) -> Self::View<'a>
+            fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
             where
                 Self: 'a,
             {
@@ -209,8 +215,20 @@ macro_rules! tuple_impl {
                 }
             }
 
-            fn as_bytes(&self) -> Vec<u8> {
-                as_bytes_impl!(self, $($i,)+ $i_last)
+            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
+            where
+                Self: 'a,
+                Self: 'b,
+            {
+                as_bytes_impl!(value, $($t,$i,)+ $t_last, $i_last)
+            }
+
+            fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> Vec<u8>
+            where
+                Self: 'a,
+                Self: 'b,
+            {
+                as_bytes_impl!(value, $($t,$i,)+ $t_last, $i_last)
             }
 
             fn redb_type_name() -> String {

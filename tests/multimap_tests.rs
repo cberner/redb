@@ -1,19 +1,21 @@
 use redb::{Database, Error, MultimapTableDefinition, ReadableMultimapTable};
 use tempfile::NamedTempFile;
 
-const SLICE_TABLE: MultimapTableDefinition<[u8], [u8]> =
-    MultimapTableDefinition::new("slice_to_slice");
-const SLICE_U64_TABLE: MultimapTableDefinition<[u8], u64> =
+const STR_TABLE: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("str_to_str");
+const SLICE_U64_TABLE: MultimapTableDefinition<&[u8], u64> =
     MultimapTableDefinition::new("slice_to_u64");
 const U64_TABLE: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("u64");
 
-fn get_vec(table: &impl ReadableMultimapTable<[u8], [u8]>, key: &[u8]) -> Vec<Vec<u8>> {
+fn get_vec(
+    table: &impl ReadableMultimapTable<&'static str, &'static str>,
+    key: &str,
+) -> Vec<String> {
     let mut result = vec![];
     let mut iter = table.get(key).unwrap();
     loop {
         let item = iter.next();
         if let Some(item_value) = item {
-            result.push(item_value.to_vec());
+            result.push(item_value.to_string());
         } else {
             return result;
         }
@@ -26,15 +28,15 @@ fn len() {
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
-        table.insert(b"hello", b"world2").unwrap();
-        table.insert(b"hi", b"world").unwrap();
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+        table.insert("hello", "world2").unwrap();
+        table.insert("hi", "world").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_multimap_table(SLICE_TABLE).unwrap();
+    let table = read_txn.open_multimap_table(STR_TABLE).unwrap();
     assert_eq!(table.len().unwrap(), 3);
 }
 
@@ -45,13 +47,13 @@ fn is_empty() {
 
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_multimap_table(SLICE_TABLE).unwrap();
+    let table = read_txn.open_multimap_table(STR_TABLE).unwrap();
     assert!(!table.is_empty().unwrap());
 }
 
@@ -61,18 +63,18 @@ fn insert() {
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
-        assert!(!table.insert(b"hello", b"world").unwrap());
-        assert!(!table.insert(b"hello", b"world2").unwrap());
-        assert!(table.insert(b"hello", b"world2").unwrap());
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        assert!(!table.insert("hello", "world").unwrap());
+        assert!(!table.insert("hello", "world2").unwrap());
+        assert!(table.insert("hello", "world2").unwrap());
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_multimap_table(SLICE_TABLE).unwrap();
+    let table = read_txn.open_multimap_table(STR_TABLE).unwrap();
     assert_eq!(
-        vec![b"world".to_vec(), b"world2".to_vec()],
-        get_vec(&table, b"hello")
+        vec!["world".to_string(), "world2".to_string()],
+        get_vec(&table, "hello")
     );
     assert_eq!(table.len().unwrap(), 2);
 }
@@ -100,7 +102,8 @@ fn range_query() {
     let table = read_txn.open_multimap_table(SLICE_U64_TABLE).unwrap();
     let start = b"0".as_ref();
     let end = b"1".as_ref();
-    let mut iter = table.range(start..=end).unwrap();
+    // TODO: why does this range need to be a & ?
+    let mut iter = table.range(&start..=&end).unwrap();
 
     {
         let (key, mut values) = iter.next().unwrap();
@@ -121,7 +124,7 @@ fn range_query() {
     assert!(iter.next().is_none());
 
     let mut total: u64 = 0;
-    for (_, values) in table.range(start..=end).unwrap() {
+    for (_, values) in table.range(&start..=&end).unwrap() {
         total += values.sum::<u64>();
     }
     assert_eq!(total, 45);
@@ -133,51 +136,55 @@ fn delete() {
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
-        table.insert(b"hello", b"world2").unwrap();
-        table.insert(b"hello", b"world3").unwrap();
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+        table.insert("hello", "world2").unwrap();
+        table.insert("hello", "world3").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_multimap_table(SLICE_TABLE).unwrap();
+    let table = read_txn.open_multimap_table(STR_TABLE).unwrap();
     assert_eq!(
-        vec![b"world".to_vec(), b"world2".to_vec(), b"world3".to_vec()],
-        get_vec(&table, b"hello")
+        vec![
+            "world".to_string(),
+            "world2".to_string(),
+            "world3".to_string()
+        ],
+        get_vec(&table, "hello")
     );
     assert_eq!(table.len().unwrap(), 3);
 
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
-        table.remove(b"hello", b"world2").unwrap();
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        table.remove("hello", "world2").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_multimap_table(SLICE_TABLE).unwrap();
+    let table = read_txn.open_multimap_table(STR_TABLE).unwrap();
     assert_eq!(
-        vec![b"world".to_vec(), b"world3".to_vec()],
-        get_vec(&table, b"hello")
+        vec!["world".to_string(), "world3".to_string()],
+        get_vec(&table, "hello")
     );
     assert_eq!(table.len().unwrap(), 2);
 
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
-        let mut iter = table.remove_all(b"hello").unwrap();
-        assert_eq!(b"world", iter.next().unwrap());
-        assert_eq!(b"world3", iter.next().unwrap());
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        let mut iter = table.remove_all("hello").unwrap();
+        assert_eq!("world", iter.next().unwrap());
+        assert_eq!("world3", iter.next().unwrap());
         assert!(iter.next().is_none());
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_multimap_table(SLICE_TABLE).unwrap();
+    let table = read_txn.open_multimap_table(STR_TABLE).unwrap();
     assert!(table.is_empty().unwrap());
-    let empty: Vec<Vec<u8>> = vec![];
-    assert_eq!(empty, get_vec(&table, b"hello"));
+    let empty: Vec<String> = vec![];
+    assert_eq!(empty, get_vec(&table, "hello"));
 }
 
 #[test]
@@ -215,7 +222,7 @@ fn efficient_storage() {
     // and entries * sizeof(u32) > page_size to validate that large numbers of values can be stored per key
     let entries = 10000;
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
-    let table_def: MultimapTableDefinition<[u8], u32> = MultimapTableDefinition::new("x");
+    let table_def: MultimapTableDefinition<&[u8], u32> = MultimapTableDefinition::new("x");
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_multimap_table(table_def).unwrap();
@@ -238,12 +245,12 @@ fn reopen_table() {
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
-        table.insert(&[0], &[0]).unwrap();
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        table.insert("0", "0").unwrap();
     }
     {
-        let mut table = write_txn.open_multimap_table(SLICE_TABLE).unwrap();
-        table.insert(&[1], &[1]).unwrap();
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        table.insert("1", "1").unwrap();
     }
     write_txn.commit().unwrap();
 }

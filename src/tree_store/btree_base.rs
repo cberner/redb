@@ -178,7 +178,7 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
     }
 
     // TODO: implement Deref instead of this to_value() method, when GAT is stable
-    pub fn to_value(&self) -> V::View<'_> {
+    pub fn to_value(&self) -> V::SelfType<'_> {
         V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
     }
 }

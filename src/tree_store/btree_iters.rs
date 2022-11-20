@@ -209,24 +209,31 @@ pub struct BtreeRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 
 }
 
 impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a, K, V> {
-    pub(crate) fn new<T: RangeBounds<KR>, KR: Borrow<K> + ?Sized + 'a>(
+    pub(crate) fn new<
+        'a0,
+        T: RangeBounds<KR> + 'a0,
+        KR: Borrow<K::RefBaseType<'a0>> + ?Sized + 'a0,
+    >(
         query_range: T,
         table_root: Option<PageNumber>,
         manager: &'a TransactionalMemory,
-    ) -> Self {
+    ) -> Self
+    where
+        'a: 'a0,
+    {
         if let Some(root) = table_root {
             let (include_left, left) = match query_range.start_bound() {
                 Bound::Included(k) => find_iter_left::<K, V>(
                     manager.get_page(root),
                     None,
-                    k.borrow().as_bytes().as_ref(),
+                    K::as_bytes_ref_type(k.borrow()).as_ref(),
                     true,
                     manager,
                 ),
                 Bound::Excluded(k) => find_iter_left::<K, V>(
                     manager.get_page(root),
                     None,
-                    k.borrow().as_bytes().as_ref(),
+                    K::as_bytes_ref_type(k.borrow()).as_ref(),
                     false,
                     manager,
                 ),
@@ -240,14 +247,14 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                 Bound::Included(k) => find_iter_right::<K, V>(
                     manager.get_page(root),
                     None,
-                    k.borrow().as_bytes().as_ref(),
+                    K::as_bytes_ref_type(k.borrow()).as_ref(),
                     true,
                     manager,
                 ),
                 Bound::Excluded(k) => find_iter_right::<K, V>(
                     manager.get_page(root),
                     None,
-                    k.borrow().as_bytes().as_ref(),
+                    K::as_bytes_ref_type(k.borrow()).as_ref(),
                     false,
                     manager,
                 ),

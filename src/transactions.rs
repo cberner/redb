@@ -700,7 +700,7 @@ mod test {
     use crate::{Database, TableDefinition};
     use tempfile::NamedTempFile;
 
-    const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
+    const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 
     #[test]
     fn transaction_id_persistence() {

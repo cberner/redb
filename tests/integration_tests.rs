@@ -12,8 +12,8 @@ use redb::{
 
 const ELEMENTS: usize = 100;
 
-const SLICE_TABLE: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
-const SLICE_TABLE2: TableDefinition<[u8], [u8]> = TableDefinition::new("y");
+const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
+const SLICE_TABLE2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("y");
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
 
 /// Returns pairs of key, value
@@ -75,7 +75,7 @@ fn non_durable_commit_persistence() {
     {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
-            let result = &table.get(key).unwrap().unwrap();
+            let result = table.get(key).unwrap().unwrap();
             assert_eq!(result, value);
         }
     }
@@ -149,7 +149,7 @@ fn free() {
     let allocated_pages = txn.stats().unwrap().allocated_pages();
 
     let key = vec![0; 100];
-    let value = vec![0; 1024];
+    let value = vec![0u8; 1024];
     let target_db_size = 8 * 1024 * 1024;
     // Write 10% of db space each iteration
     let num_writes = target_db_size / 10 / (key.len() + value.len());
@@ -198,8 +198,8 @@ fn large_values() {
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
 
-    let mut key = vec![0; 1024];
-    let value = vec![0; 2_000_000];
+    let mut key = vec![0u8; 1024];
+    let value = vec![0u8; 2_000_000];
     {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..5 {
@@ -227,8 +227,8 @@ fn large_keys() {
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
 
-    let mut key = vec![0; 1024];
-    let value = vec![0; 1];
+    let mut key = vec![0u8; 1024];
+    let value = vec![0u8; 1];
     {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..100 {
@@ -252,8 +252,8 @@ fn large_keys() {
 #[test]
 fn dynamic_growth() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let table_definition: TableDefinition<u64, [u8]> = TableDefinition::new("x");
-    let big_value = vec![0; 1024];
+    let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let big_value = vec![0u8; 1024];
 
     let expected_size = 10 * 1024 * 1024;
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
@@ -290,7 +290,7 @@ fn multi_page_kv() {
     let db = unsafe { Builder::new().create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
 
-    let mut key = vec![0; page_size + 1];
+    let mut key = vec![0u8; page_size + 1];
     let mut value = vec![0; page_size + 1];
     {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
@@ -390,9 +390,9 @@ fn regression2() {
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let tx = db.begin_write().unwrap();
 
-    let a_def: TableDefinition<[u8], [u8]> = TableDefinition::new("a");
-    let b_def: TableDefinition<[u8], [u8]> = TableDefinition::new("b");
-    let c_def: TableDefinition<[u8], [u8]> = TableDefinition::new("c");
+    let a_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new("a");
+    let b_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new("b");
+    let c_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new("c");
 
     let _c = tx.open_table(c_def).unwrap();
     let b = tx.open_table(b_def).unwrap();
@@ -412,10 +412,10 @@ fn regression3() {
     {
         let mut t = tx.open_table(SLICE_TABLE).unwrap();
         let big_value = vec![0u8; 1000];
-        for i in 0..20 {
+        for i in 0..20u8 {
             t.insert(&[i], &big_value).unwrap();
         }
-        for i in (10..20).rev() {
+        for i in (10..20u8).rev() {
             t.remove(&[i]).unwrap();
             for j in 0..i {
                 assert!(t.get(&[j]).unwrap().is_some());
@@ -431,7 +431,7 @@ fn regression7() {
 
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
-    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
     let tx = db.begin_write().unwrap();
     {
@@ -474,7 +474,7 @@ fn regression8() {
 
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
-    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
     let mut tx = db.begin_write().unwrap();
     tx.set_durability(Durability::None);
@@ -523,7 +523,7 @@ fn regression9() {
 
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
-    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
     let tx = db.begin_write().unwrap();
     {
@@ -541,7 +541,7 @@ fn regression10() {
 
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
-    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
     let tx = db.begin_write().unwrap();
     {
@@ -573,7 +573,7 @@ fn regression11() {
 
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
-    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
     let tx = db.begin_write().unwrap();
     {
@@ -631,7 +631,7 @@ fn regression13() {
 
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
-    let table_def: MultimapTableDefinition<u64, [u8]> = MultimapTableDefinition::new("x");
+    let table_def: MultimapTableDefinition<u64, &[u8]> = MultimapTableDefinition::new("x");
 
     let mut tx = db.begin_write().unwrap();
     tx.set_durability(Durability::None);
@@ -651,7 +651,7 @@ fn regression14() {
 
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
-    let table_def: MultimapTableDefinition<u64, [u8]> = MultimapTableDefinition::new("x");
+    let table_def: MultimapTableDefinition<u64, &[u8]> = MultimapTableDefinition::new("x");
 
     let mut tx = db.begin_write().unwrap();
     tx.set_durability(Durability::None);
@@ -695,7 +695,7 @@ fn regression17() {
             .unwrap()
     };
 
-    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
     let mut tx = db.begin_write().unwrap();
     tx.set_durability(Durability::None);
@@ -721,7 +721,7 @@ fn regression18() {
             .unwrap()
     };
 
-    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
     let tx = db.begin_write().unwrap();
     let savepoint0 = tx.savepoint().unwrap();
@@ -792,7 +792,7 @@ fn regression19() {
             .unwrap()
     };
 
-    let table_def: TableDefinition<u64, [u8]> = TableDefinition::new("x");
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
     let tx = db.begin_write().unwrap();
     {
@@ -1017,7 +1017,7 @@ fn delete_table() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
-    let y_def: MultimapTableDefinition<[u8], [u8]> = MultimapTableDefinition::new("y");
+    let y_def: MultimapTableDefinition<&[u8], &[u8]> = MultimapTableDefinition::new("y");
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -1064,8 +1064,8 @@ fn non_page_size_multiple() {
 
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
-    let key = vec![0; 1024];
-    let value = vec![0; 1];
+    let key = vec![0u8; 1024];
+    let value = vec![0u8; 1];
     {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         table.insert(&key, &value).unwrap();
@@ -1217,7 +1217,7 @@ fn database_lock() {
 fn savepoint() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
-    let definition: TableDefinition<u32, str> = TableDefinition::new("x");
+    let definition: TableDefinition<u32, &str> = TableDefinition::new("x");
 
     let txn = db.begin_write().unwrap();
     {

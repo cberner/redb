@@ -33,7 +33,7 @@ pub(crate) struct BtreeMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V> {
     pub(crate) fn new(
         root: Option<(PageNumber, Checksum)>,
         mem: &'a TransactionalMemory,
@@ -53,16 +53,20 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
     }
 
     // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
-    pub(crate) unsafe fn insert(&mut self, key: &K, value: &V) -> Result<Option<AccessGuard<V>>> {
+    pub(crate) unsafe fn insert(
+        &mut self,
+        key: &K::RefBaseType<'_>,
+        value: &V::RefBaseType<'_>,
+    ) -> Result<Option<AccessGuard<V>>> {
         #[cfg(feature = "logging")]
         trace!(
             "Btree(root={:?}): Inserting {:?} with value of length {}",
             &self.root,
             key,
-            value.as_bytes().as_ref().len()
+            V::as_bytes_ref_type(value).as_ref().len()
         );
         let mut freed_pages = self.freed_pages.borrow_mut();
-        let mut operation = MutateHelper::new(
+        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             self.root.clone(),
             FreePolicy::Uncommitted,
             self.mem,
@@ -78,7 +82,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
     // TODO: return type should be V, not [u8]
     pub(crate) unsafe fn insert_reserve(
         &mut self,
-        key: &K,
+        key: &K::RefBaseType<'_>,
         value_length: usize,
     ) -> Result<AccessGuardMut<'a, K, [u8]>> {
         #[cfg(feature = "logging")]
@@ -96,17 +100,20 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
             self.mem,
             freed_pages.as_mut(),
         );
-        let (_, mut guard) = operation.insert(key, value.as_slice())?;
+        let (_, mut guard) = operation.insert(key, &value)?;
         guard.set_root_for_drop(self.root.clone());
         Ok(guard)
     }
 
     // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
-    pub(crate) unsafe fn remove(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
+    pub(crate) unsafe fn remove(
+        &mut self,
+        key: &K::RefBaseType<'_>,
+    ) -> Result<Option<AccessGuard<V>>> {
         #[cfg(feature = "logging")]
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
         let mut freed_pages = self.freed_pages.borrow_mut();
-        let mut operation = MutateHelper::new(
+        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             self.root.clone(),
             FreePolicy::Uncommitted,
             self.mem,
@@ -119,9 +126,12 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
     // TODO: remove after verifying that this isn't needed to optimize multimap tables
     // Like remove(), but does not free uncommitted data
     #[allow(dead_code)]
-    pub(crate) fn remove_retain_uncommitted(&mut self, key: &K) -> Result<Option<AccessGuard<V>>> {
+    pub(crate) fn remove_retain_uncommitted(
+        &mut self,
+        key: &K::RefBaseType<'_>,
+    ) -> Result<Option<AccessGuard<V>>> {
         let mut freed_pages = self.freed_pages.borrow_mut();
-        let mut operation = MutateHelper::new(
+        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             self.root.clone(),
             FreePolicy::Never,
             self.mem,
@@ -149,12 +159,16 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> BtreeMut<'a, K, V> {
         Btree::new(self.get_root(), self.mem)
     }
 
-    pub(crate) fn get(&self, key: &K) -> Result<Option<V::View<'_>>> {
+    pub(crate) fn get(&self, key: &K::RefBaseType<'_>) -> Result<Option<V::SelfType<'_>>> {
         self.read_tree().get(key)
     }
 
-    pub(crate) fn range<T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
-        &self,
+    pub(crate) fn range<
+        'a0,
+        T: RangeBounds<KR> + 'a0,
+        KR: Borrow<K::RefBaseType<'a0>> + ?Sized + 'a0,
+    >(
+        &'a0 self,
         range: T,
     ) -> Result<BtreeRangeIter<K, V>> {
         self.read_tree().range(range)
@@ -247,17 +261,17 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         }
     }
 
-    pub(crate) fn get(&self, key: &K) -> Result<Option<V::View<'a>>> {
+    pub(crate) fn get(&self, key: &K::RefBaseType<'_>) -> Result<Option<V::SelfType<'a>>> {
         if let Some((p, _)) = self.root {
             let root_page = self.mem.get_page(p);
-            return Ok(self.get_helper(root_page, key.as_bytes().as_ref()));
+            return Ok(self.get_helper(root_page, K::as_bytes_ref_type(key).as_ref()));
         } else {
             Ok(None)
         }
     }
 
     // Returns the value for the queried key, if present
-    fn get_helper(&self, page: PageImpl<'a>, query: &[u8]) -> Option<V::View<'a>> {
+    fn get_helper(&self, page: PageImpl<'a>, query: &[u8]) -> Option<V::SelfType<'a>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
@@ -275,10 +289,17 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         }
     }
 
-    pub(crate) fn range<T: RangeBounds<KR>, KR: Borrow<K> + 'a>(
+    pub(crate) fn range<
+        'a0,
+        T: RangeBounds<KR> + 'a0,
+        KR: Borrow<K::RefBaseType<'a0>> + ?Sized + 'a0,
+    >(
         &self,
         range: T,
-    ) -> Result<BtreeRangeIter<'a, K, V>> {
+    ) -> Result<BtreeRangeIter<'a, K, V>>
+    where
+        'a: 'a0,
+    {
         Ok(BtreeRangeIter::new(
             range,
             self.root.map(|(p, _)| p),
@@ -287,8 +308,11 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
     }
 
     pub(crate) fn len(&self) -> Result<usize> {
-        let mut iter: BtreeRangeIter<K, V> =
-            BtreeRangeIter::new::<RangeFull, K>(.., self.root.map(|(p, _)| p), self.mem);
+        let mut iter: BtreeRangeIter<K, V> = BtreeRangeIter::new::<RangeFull, K::RefBaseType<'_>>(
+            ..,
+            self.root.map(|(p, _)| p),
+            self.mem,
+        );
         let mut count = 0;
         while iter.next().is_some() {
             count += 1;

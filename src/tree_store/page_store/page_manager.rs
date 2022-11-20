@@ -1739,7 +1739,7 @@ mod test {
     use std::mem::size_of;
     use tempfile::NamedTempFile;
 
-    const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
+    const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 
     #[test]
     fn repair_allocator_no_checksums() {

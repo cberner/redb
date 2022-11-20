@@ -8,7 +8,7 @@ use std::fs::File;
 use std::path::Path;
 
 #[allow(dead_code)]
-const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
+const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 
 pub trait BenchDatabase {
     type W<'db>: BenchWriteTransaction
@@ -117,7 +117,7 @@ impl<'db> BenchReadTransaction for RedbBenchReadTransaction<'db> {
 }
 
 pub struct RedbBenchReader<'txn> {
-    table: redb::ReadOnlyTable<'txn, [u8], [u8]>,
+    table: redb::ReadOnlyTable<'txn, &'static [u8], &'static [u8]>,
 }
 
 impl<'txn> BenchReader for RedbBenchReader<'txn> {
@@ -135,7 +135,7 @@ impl<'txn> BenchReader for RedbBenchReader<'txn> {
 }
 
 pub struct RedbBenchIterator<'a> {
-    iter: redb::RangeIter<'a, [u8], [u8]>,
+    iter: redb::RangeIter<'a, &'static [u8], &'static [u8]>,
 }
 
 impl BenchIterator for RedbBenchIterator<'_> {
@@ -164,7 +164,7 @@ impl<'db> BenchWriteTransaction for RedbBenchWriteTransaction<'db> {
 }
 
 pub struct RedbBenchInserter<'db, 'txn> {
-    table: redb::Table<'db, 'txn, [u8], [u8]>,
+    table: redb::Table<'db, 'txn, &'static [u8], &'static [u8]>,
 }
 
 impl BenchInserter for RedbBenchInserter<'_, '_> {
