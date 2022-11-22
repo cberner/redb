@@ -287,12 +287,7 @@ fn multi_page_kv() {
     let elements = 4;
     let page_size = 4096;
 
-    let db = unsafe {
-        Builder::new()
-            .set_page_size(page_size)
-            .create(tmpfile.path())
-            .unwrap()
-    };
+    let db = unsafe { Builder::new().create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
 
     let mut key = vec![0; page_size + 1];
@@ -1150,15 +1145,9 @@ fn tree_balance() {
     // One for the last table id counter, and one for the "x" -> TableDefinition entry
     let num_internal_entries = 2;
 
-    let key_size = 100;
-    // Set the page size so that exactly 9 keys will fit
-    let page_size = 1024;
-    let db = unsafe {
-        Database::builder()
-            .set_page_size(page_size)
-            .create(tmpfile.path())
-            .unwrap()
-    };
+    // Pages are 4kb, so use a key size such that 9 keys will fit
+    let key_size = 410;
+    let db = unsafe { Database::builder().create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
 
     let elements = (EXPECTED_ORDER / 2).pow(2) as usize - num_internal_entries;
