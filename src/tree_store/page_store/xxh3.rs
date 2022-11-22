@@ -56,6 +56,7 @@ const INIT_ACCUMULATORS: [u64; 8] = [
     PRIME32[2], PRIME64[0], PRIME64[1], PRIME64[2], PRIME64[3], PRIME32[1], PRIME64[4], PRIME32[0],
 ];
 
+#[allow(clippy::needless_return)]
 pub fn hash64_with_seed(data: &[u8], seed: u64) -> u64 {
     if data.len() <= 240 {
         hash64_0to240(data, &DEFAULT_SECRET, seed)
@@ -85,6 +86,7 @@ pub fn hash64_with_seed(data: &[u8], seed: u64) -> u64 {
     }
 }
 
+#[allow(clippy::needless_return)]
 pub fn hash128_with_seed(data: &[u8], seed: u64) -> u128 {
     if data.len() <= 240 {
         hash128_0to240(data, &DEFAULT_SECRET, seed)

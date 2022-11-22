@@ -740,7 +740,7 @@ pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
 
     /// Returns an double-ended iterator over all elements in the table. Values are in ascending
     /// order.
-    fn iter<'a>(&'a self) -> Result<MultimapRangeIter<'a, K, V>> {
+    fn iter(&self) -> Result<MultimapRangeIter<K, V>> {
         self.range(..)
     }
 }
