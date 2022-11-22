@@ -11,7 +11,7 @@ mod utils;
 mod xxh3;
 
 pub(crate) use base::{Page, PageNumber};
-pub(crate) use page_manager::{ChecksumType, TransactionalMemory, DB_HEADER_SIZE};
+pub(crate) use page_manager::{ChecksumType, TransactionalMemory};
 pub use savepoint::Savepoint;
 
 pub(super) use base::{PageImpl, PageMut};
