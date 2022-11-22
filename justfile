@@ -30,6 +30,9 @@ test: pre
 bench bench='lmdb_benchmark': pre
     cargo bench --bench {{bench}}
 
+watch +args='test':
+  cargo watch --clear --exec "{{args}}"
+
 # Nightly version selected from: https://rust-lang.github.io/rustup-components-history/
 NIGHTLY := "nightly-2022-11-01"
 fuzz: pre
