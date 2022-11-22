@@ -488,7 +488,10 @@ impl Builder {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
-            page_size: None,
+            // Default to 4k pages. Benchmarking showed that this was a good default on all platforms,
+            // including MacOS with 16k pages. Therefore, users are not allowed to configure it at the moment.
+            // It is part of the file format, so can be enabled in the future.
+            page_size: Some(4096),
             region_size: None,
             initial_size: None,
             write_strategy: None,
