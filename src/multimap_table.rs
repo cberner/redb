@@ -737,6 +737,12 @@ pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     fn len(&self) -> Result<usize>;
 
     fn is_empty(&self) -> Result<bool>;
+
+    /// Returns an double-ended iterator over all elements in the table. Values are in ascending
+    /// order.
+    fn iter<'a>(&'a self) -> Result<MultimapRangeIter<'a, K, V>> {
+        self.range(..)
+    }
 }
 
 /// A read-only multimap table
