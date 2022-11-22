@@ -291,6 +291,7 @@ fuzz_target!(|config: FuzzConfig| {
     let db = unsafe {
         Database::builder()
             .set_write_strategy(write_strategy)
+            .set_page_size(config.page_size.value)
             .create(redb_file.path())
     };
 

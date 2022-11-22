@@ -79,7 +79,7 @@ const REGION_MAX_DATA_PAGES_OFFSET: usize = REGION_HEADER_PAGES_OFFSET + size_of
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 64;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
-pub(crate) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
+pub(super) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
 
 // God byte flags
 const PRIMARY_BIT: u8 = 1;
@@ -840,7 +840,7 @@ impl TransactionalMemory {
             // TODO: seems like this should be true, not false???
             metadata.set_recovery(false);
 
-            let checksum_type = match write_strategy.unwrap_or_default() {
+            let checksum_type = match write_strategy.unwrap_or(WriteStrategy::Checksum) {
                 WriteStrategy::Checksum => ChecksumType::XXH3_128,
                 WriteStrategy::TwoPhase => ChecksumType::Unused,
             };

@@ -12,5 +12,5 @@ pub(crate) use btree_base::Checksum;
 pub(crate) use btree_base::{LeafAccessor, LeafKeyIter, RawLeafBuilder, BRANCH, LEAF};
 pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeRangeIter};
 pub use page_store::Savepoint;
-pub(crate) use page_store::{Page, PageNumber, TransactionalMemory, DB_HEADER_SIZE};
+pub(crate) use page_store::{Page, PageNumber, TransactionalMemory};
 pub(crate) use table_tree::{FreedTableKey, InternalTableDefinition, TableTree, TableType};

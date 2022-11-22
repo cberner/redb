@@ -1,12 +1,11 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition, RawBtree,
-    TableType, TransactionalMemory, DB_HEADER_SIZE,
+    TableType, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
 use crate::{ReadTransaction, Result, WriteTransaction};
-use std::cmp::max;
 use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -176,17 +175,7 @@ impl Database {
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
     pub unsafe fn create(path: impl AsRef<Path>) -> Result<Database> {
-        let file = if path.as_ref().exists() && File::open(path.as_ref())?.metadata()?.len() > 0 {
-            OpenOptions::new().read(true).write(true).open(path)?
-        } else {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(path)?
-        };
-
-        Database::new(file, None, None, None, None)
+        Self::builder().create(path)
     }
 
     /// Opens an existing redb database.
@@ -440,7 +429,7 @@ impl Database {
 /// Both strategies have security tradeoffs in situations where an attacker has a high degree of
 /// control over the database workload. For example being able to control the exact order of reads
 /// and writes, or being able to crash the database process at will.
-#[derive(Default, Copy, Clone)]
+#[derive(Copy, Clone)]
 pub enum WriteStrategy {
     /// Optimize for minimum write transaction latency by calculating and storing recursive checksums
     /// of database contents, with a single-phase [`WriteTransaction::commit`] that makes a single
@@ -463,7 +452,6 @@ pub enum WriteStrategy {
     /// attacker with an extremely high degree of control over the database's workload, including
     /// the ability to cause the database process to crash, can cause invalid data to be written
     /// with a valid checksum, leaving the database in an invalid, attacker-controlled state.
-    #[default]
     Checksum,
     /// Optimize for maximum write transaction throughput by omitting checksums, with a two-phase
     /// [`WriteTransaction::commit`] that makes two calls to `fsync`.
@@ -493,34 +481,35 @@ pub struct Builder {
     page_size: Option<usize>,
     region_size: Option<usize>,
     initial_size: Option<u64>,
-    write_strategy: WriteStrategy,
+    write_strategy: Option<WriteStrategy>,
 }
 
 impl Builder {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
-            page_size: None,
+            // Default to 4k pages. Benchmarking showed that this was a good default on all platforms,
+            // including MacOS with 16k pages. Therefore, users are not allowed to configure it at the moment.
+            // It is part of the file format, so can be enabled in the future.
+            page_size: Some(4096),
             region_size: None,
             initial_size: None,
-            write_strategy: WriteStrategy::default(),
+            write_strategy: None,
         }
     }
 
     /// Set the internal page size of the database
     ///
     /// Valid values are powers of two, greater than or equal to 512
-    ///
-    /// Larger page sizes will reduce the database file's overhead, but may decrease write performance
-    /// Defaults to the native OS page size
+    #[cfg(any(fuzzing, test))]
     pub fn set_page_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
-        self.page_size = Some(max(size, DB_HEADER_SIZE));
+        self.page_size = Some(std::cmp::max(size, 512));
         self
     }
 
     pub fn set_write_strategy(&mut self, write_strategy: WriteStrategy) -> &mut Self {
-        self.write_strategy = write_strategy;
+        self.write_strategy = Some(write_strategy);
         self
     }
 
@@ -561,7 +550,7 @@ impl Builder {
             self.page_size,
             self.region_size,
             self.initial_size,
-            Some(self.write_strategy),
+            self.write_strategy,
         )
     }
 }
