@@ -53,6 +53,24 @@ impl<const N: usize> Arbitrary<'_> for BinomialDifferenceBoundedUSize<N> {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct PowerOfTwoBetween<const M: u32, const N: u32> {
+    pub value: usize
+}
+
+impl<const M: u32, const N: u32> Arbitrary<'_> for PowerOfTwoBetween<M, N> {
+    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value: u32 = u.int_in_range(M..=N)?;
+        Ok(Self {
+            value: 2usize.pow(value)
+        })
+    }
+
+    fn size_hint(_depth: usize) -> (usize, Option<usize>) {
+        (size_of::<u32>(), Some(size_of::<u32>()))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct BoundedUSize<const N: usize> {
     pub value: usize
 }
@@ -114,6 +132,7 @@ pub(crate) struct FuzzConfig {
     pub multimap_table: bool,
     pub thread0_transactions: Vec<FuzzTransaction>,
     pub thread1_transactions: Vec<FuzzTransaction>,
+    pub page_size: PowerOfTwoBetween<9, 14>,
 }
 
 pub(crate) struct CustomBarrier {
