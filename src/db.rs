@@ -175,17 +175,7 @@ impl Database {
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
     pub unsafe fn create(path: impl AsRef<Path>) -> Result<Database> {
-        let file = if path.as_ref().exists() && File::open(path.as_ref())?.metadata()?.len() > 0 {
-            OpenOptions::new().read(true).write(true).open(path)?
-        } else {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(path)?
-        };
-
-        Database::new(file, None, None, None, None)
+        Self::builder().create(path)
     }
 
     /// Opens an existing redb database.
@@ -439,7 +429,7 @@ impl Database {
 /// Both strategies have security tradeoffs in situations where an attacker has a high degree of
 /// control over the database workload. For example being able to control the exact order of reads
 /// and writes, or being able to crash the database process at will.
-#[derive(Default, Copy, Clone)]
+#[derive(Copy, Clone)]
 pub enum WriteStrategy {
     /// Optimize for minimum write transaction latency by calculating and storing recursive checksums
     /// of database contents, with a single-phase [`WriteTransaction::commit`] that makes a single
@@ -462,7 +452,6 @@ pub enum WriteStrategy {
     /// attacker with an extremely high degree of control over the database's workload, including
     /// the ability to cause the database process to crash, can cause invalid data to be written
     /// with a valid checksum, leaving the database in an invalid, attacker-controlled state.
-    #[default]
     Checksum,
     /// Optimize for maximum write transaction throughput by omitting checksums, with a two-phase
     /// [`WriteTransaction::commit`] that makes two calls to `fsync`.
@@ -492,7 +481,7 @@ pub struct Builder {
     page_size: Option<usize>,
     region_size: Option<usize>,
     initial_size: Option<u64>,
-    write_strategy: WriteStrategy,
+    write_strategy: Option<WriteStrategy>,
 }
 
 impl Builder {
@@ -502,7 +491,7 @@ impl Builder {
             page_size: None,
             region_size: None,
             initial_size: None,
-            write_strategy: WriteStrategy::default(),
+            write_strategy: None,
         }
     }
 
@@ -517,7 +506,7 @@ impl Builder {
     }
 
     pub fn set_write_strategy(&mut self, write_strategy: WriteStrategy) -> &mut Self {
-        self.write_strategy = write_strategy;
+        self.write_strategy = Some(write_strategy);
         self
     }
 
@@ -558,7 +547,7 @@ impl Builder {
             self.page_size,
             self.region_size,
             self.initial_size,
-            Some(self.write_strategy),
+            self.write_strategy,
         )
     }
 }

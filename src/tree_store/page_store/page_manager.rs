@@ -840,7 +840,7 @@ impl TransactionalMemory {
             // TODO: seems like this should be true, not false???
             metadata.set_recovery(false);
 
-            let checksum_type = match write_strategy.unwrap_or_default() {
+            let checksum_type = match write_strategy.unwrap_or(WriteStrategy::Checksum) {
                 WriteStrategy::Checksum => ChecksumType::XXH3_128,
                 WriteStrategy::TwoPhase => ChecksumType::Unused,
             };

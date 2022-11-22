@@ -862,6 +862,8 @@ fn create_open_mismatch() {
     drop(db);
 
     unsafe { Database::create(tmpfile.path()).unwrap() };
+
+    unsafe { Database::builder().create(tmpfile.path()).unwrap() };
 }
 
 #[test]
