@@ -1374,10 +1374,6 @@ impl TransactionalMemory {
 
     // Safety: the caller must ensure that no references to the memory in `page` exist
     pub(crate) unsafe fn free(&self, page: PageNumber) -> Result {
-        // Zero fill the page to ensure that deleted data is not stored in the file
-        let mut mut_page = self.get_page_mut(page);
-        mut_page.memory_mut().fill(0);
-
         let mut metadata = self.lock_metadata();
         let layout = self.layout.lock().unwrap();
         let (mut region_tracker, mut regions) =
@@ -1402,9 +1398,6 @@ impl TransactionalMemory {
     // Safety: the caller must ensure that no references to the memory in `page` exist
     pub(crate) unsafe fn free_if_uncommitted(&self, page: PageNumber) -> Result<bool> {
         if self.allocated_since_commit.lock().unwrap().remove(&page) {
-            // Zero fill the page to ensure that deleted data is not stored in the file
-            let mut mut_page = self.get_page_mut(page);
-            mut_page.memory_mut().fill(0);
             let mut metadata = self.lock_metadata();
             let layout = self.layout.lock().unwrap();
             let (mut region_tracker, mut regions) =
