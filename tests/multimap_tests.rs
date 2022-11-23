@@ -5,6 +5,7 @@ const SLICE_TABLE: MultimapTableDefinition<[u8], [u8]> =
     MultimapTableDefinition::new("slice_to_slice");
 const SLICE_U64_TABLE: MultimapTableDefinition<[u8], u64> =
     MultimapTableDefinition::new("slice_to_u64");
+const U64_TABLE: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("u64");
 
 fn get_vec(table: &impl ReadableMultimapTable<[u8], [u8]>, key: &[u8]) -> Vec<Vec<u8>> {
     let mut result = vec![];
@@ -245,4 +246,31 @@ fn reopen_table() {
         table.insert(&[1], &[1]).unwrap();
     }
     write_txn.commit().unwrap();
+}
+
+#[test]
+fn iter() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            for j in 0..10 {
+                table.insert(&i, &j).unwrap();
+            }
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
+    let mut iter = table.iter().unwrap();
+    for i in 0..10 {
+        let (k, mut values) = iter.next().unwrap();
+        assert_eq!(k, i);
+        for j in 0..10 {
+            assert_eq!(values.next().unwrap(), j);
+        }
+    }
 }

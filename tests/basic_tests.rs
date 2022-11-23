@@ -901,3 +901,26 @@ fn concurrent_write_transactions_block() {
     wtx.commit().unwrap();
     t.join().unwrap();
 }
+
+#[test]
+fn iter() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let mut iter = table.iter().unwrap();
+    for i in 0..10 {
+        let (k, v) = iter.next().unwrap();
+        assert_eq!(i, k);
+        assert_eq!(i, v);
+    }
+}

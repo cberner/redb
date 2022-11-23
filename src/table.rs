@@ -144,6 +144,11 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 
     /// Returns `true` if the table is empty
     fn is_empty(&self) -> Result<bool>;
+
+    /// Returns a double-ended iterator over all elements in the table
+    fn iter(&self) -> Result<RangeIter<K, V>> {
+        self.range::<std::ops::RangeFull, &K>(..)
+    }
 }
 
 /// A read-only table
