@@ -102,8 +102,7 @@ fn range_query() {
     let table = read_txn.open_multimap_table(SLICE_U64_TABLE).unwrap();
     let start = b"0".as_ref();
     let end = b"1".as_ref();
-    // TODO: why does this range need to be a & ?
-    let mut iter = table.range(&start..=&end).unwrap();
+    let mut iter = table.range(start..=end).unwrap();
 
     {
         let (key, mut values) = iter.next().unwrap();

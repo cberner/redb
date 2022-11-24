@@ -757,8 +757,7 @@ fn str_type() {
     let table = read_txn.open_table(definition).unwrap();
     assert_eq!("world", table.get("hello").unwrap().unwrap());
 
-    // TODO: is there a way to avoid having to annotate the return type for RangeFull queries?
-    let mut iter: RangeIter<&str, &str> = table.range::<&str>(..).unwrap();
+    let mut iter = table.iter().unwrap();
     assert_eq!(iter.next().unwrap().1, "world");
     assert!(iter.next().is_none());
 
