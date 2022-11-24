@@ -1,10 +1,11 @@
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::fmt::Debug;
 
 pub trait RedbValue: Debug {
     /// SelfType<'a> must be the same type as Self with all lifetimes replaced with 'a
-    type SelfType<'a>: Debug + 'a
+    type SelfType<'a>: Debug + Borrow<Self::RefBaseType<'a>> + 'a
     where
         Self: 'a;
 
@@ -31,13 +32,7 @@ pub trait RedbValue: Debug {
         Self: 'a;
 
     /// Serialize the value to a slice
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
-    where
-        Self: 'a,
-        Self: 'b;
-
-    /// Serialize the value to a slice
-    fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> Self::AsBytes<'a>
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'a,
         Self: 'b;
@@ -74,15 +69,7 @@ impl RedbValue for () {
         ()
     }
 
-    fn as_bytes<'a, 'b: 'a>(_: &'a Self::SelfType<'b>) -> &'a [u8]
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        &[]
-    }
-
-    fn as_bytes_ref_type<'a, 'b: 'a>(_: &'a Self::RefBaseType<'b>) -> &'a [u8]
+    fn as_bytes<'a, 'b: 'a>(_: &'a Self::RefBaseType<'b>) -> &'a [u8]
     where
         Self: 'a,
         Self: 'b,
@@ -119,15 +106,7 @@ impl RedbValue for [u8] {
         data
     }
 
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        value
-    }
-
-    fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8]
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8]
     where
         Self: 'a,
         Self: 'b,
@@ -168,15 +147,7 @@ impl RedbValue for &[u8] {
         data
     }
 
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        value
-    }
-
-    fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8]
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8]
     where
         Self: 'a,
         Self: 'b,
@@ -217,15 +188,7 @@ impl<const N: usize> RedbValue for &[u8; N] {
         data.try_into().unwrap()
     }
 
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8; N]
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        value
-    }
-
-    fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8; N]
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8; N]
     where
         Self: 'a,
         Self: 'b,
@@ -268,15 +231,7 @@ impl RedbValue for str {
         std::str::from_utf8(data).unwrap()
     }
 
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a str
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        value
-    }
-
-    fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a str
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a str
     where
         Self: 'a,
         Self: 'b,
@@ -319,15 +274,7 @@ impl RedbValue for &str {
         std::str::from_utf8(data).unwrap()
     }
 
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a str
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        value
-    }
-
-    fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a str
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a str
     where
         Self: 'a,
         Self: 'b,
@@ -367,16 +314,6 @@ macro_rules! be_value {
             }
 
             fn as_bytes<'a, 'b: 'a>(
-                value: &'a Self::SelfType<'b>,
-            ) -> [u8; std::mem::size_of::<$t>()]
-            where
-                Self: 'a,
-                Self: 'b,
-            {
-                value.to_le_bytes()
-            }
-
-            fn as_bytes_ref_type<'a, 'b: 'a>(
                 value: &'a Self::RefBaseType<'b>,
             ) -> [u8; std::mem::size_of::<$t>()]
             where

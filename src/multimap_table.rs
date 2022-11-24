@@ -106,15 +106,7 @@ impl RedbValue for DynamicCollection {
         Self::new(data)
     }
 
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        &value.data
-    }
-
-    fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8]
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8]
     where
         Self: 'a,
         Self: 'b,
@@ -411,7 +403,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
         K: 'b,
         V: 'b,
     {
-        let value_bytes = V::as_bytes_ref_type(value.borrow());
+        let value_bytes = V::as_bytes(value.borrow());
         let value_bytes_ref = value_bytes.as_ref();
         let existed = if let Some(v) = self.tree.get(key.borrow())? {
             match v.collection_type() {
@@ -562,9 +554,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                         V::fixed_width(),
                         <() as RedbValue>::fixed_width(),
                     );
-                    if let Some(position) =
-                        accessor.find_key::<V>(V::as_bytes_ref_type(value).as_ref())
-                    {
+                    if let Some(position) = accessor.find_key::<V>(V::as_bytes(value).as_ref()) {
                         let old_num_pairs = accessor.num_pairs();
                         if old_num_pairs == 1 {
                             unsafe { self.tree.remove(key)? };

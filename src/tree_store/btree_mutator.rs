@@ -83,11 +83,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
     ) -> Result<Option<AccessGuard<'a, V>>> {
         let root = { *(*self.root.clone()).borrow() };
         if let Some((p, checksum)) = root {
-            let (deletion_result, found) = self.delete_helper(
-                self.mem.get_page(p),
-                checksum,
-                K::as_bytes_ref_type(key).as_ref(),
-            )?;
+            let (deletion_result, found) =
+                self.delete_helper(self.mem.get_page(p), checksum, K::as_bytes(key).as_ref())?;
             let new_root = match deletion_result {
                 Subtree(page, checksum) => Some((page, checksum)),
                 DeletedLeaf => None,
@@ -127,8 +124,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             let result = self.insert_helper(
                 self.mem.get_page(p),
                 checksum,
-                K::as_bytes_ref_type(key).as_ref(),
-                V::as_bytes_ref_type(value).as_ref(),
+                K::as_bytes(key).as_ref(),
+                V::as_bytes(value).as_ref(),
             )?;
 
             let new_root = if let Some((key, page2, page2_checksum)) = result.additional_sibling {
@@ -143,8 +140,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             };
             (new_root, result.old_value, result.inserted_value)
         } else {
-            let key_bytes = K::as_bytes_ref_type(key);
-            let value_bytes = V::as_bytes_ref_type(value);
+            let key_bytes = K::as_bytes(key);
+            let value_bytes = V::as_bytes(value);
             let key_bytes = key_bytes.as_ref();
             let value_bytes = value_bytes.as_ref();
             let mut builder = LeafBuilder::new(self.mem, 1, K::fixed_width(), V::fixed_width());

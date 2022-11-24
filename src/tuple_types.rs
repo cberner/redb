@@ -1,4 +1,5 @@
 use crate::types::{RedbKey, RedbValue};
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::mem::size_of;
 
@@ -58,13 +59,13 @@ macro_rules! as_bytes_impl {
         if Self::fixed_width().is_some() {
             serialize_tuple_elements_fixed(&[
                 $(
-                    <$t>::as_bytes(&$value.$i).as_ref(),
+                    <$t>::as_bytes($value.$i.borrow()).as_ref(),
                 )+
             ])
         } else {
             serialize_tuple_elements_variable(&[
                 $(
-                    <$t>::as_bytes(&$value.$i).as_ref(),
+                    <$t>::as_bytes($value.$i.borrow()).as_ref(),
                 )+
             ])
         }
@@ -215,15 +216,7 @@ macro_rules! tuple_impl {
                 }
             }
 
-            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
-            where
-                Self: 'a,
-                Self: 'b,
-            {
-                as_bytes_impl!(value, $($t,$i,)+ $t_last, $i_last)
-            }
-
-            fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> Vec<u8>
+            fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> Vec<u8>
             where
                 Self: 'a,
                 Self: 'b,

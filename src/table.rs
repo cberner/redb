@@ -293,15 +293,7 @@ mod test {
                 ReverseKey(data.to_vec())
             }
 
-            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
-            where
-                Self: 'a,
-                Self: 'b,
-            {
-                &value.0
-            }
-
-            fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8]
+            fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8]
             where
                 Self: 'a,
                 Self: 'b,

@@ -44,7 +44,7 @@ impl RedbValue for FreedTableKey {
         }
     }
 
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> [u8; 2 * size_of::<u64>()]
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> [u8; 2 * size_of::<u64>()]
     where
         Self: 'a,
         Self: 'b,
@@ -53,14 +53,6 @@ impl RedbValue for FreedTableKey {
         result[..size_of::<u64>()].copy_from_slice(&value.transaction_id.to_le_bytes());
         result[size_of::<u64>()..].copy_from_slice(&value.pagination_id.to_le_bytes());
         result
-    }
-
-    fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> [u8; 2 * size_of::<u64>()]
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        Self::as_bytes(value)
     }
 
     fn redb_type_name() -> String {
@@ -225,7 +217,7 @@ impl RedbValue for InternalTableDefinition {
         }
     }
 
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> Vec<u8>
     where
         Self: 'a,
         Self: 'b,
@@ -263,14 +255,6 @@ impl RedbValue for InternalTableDefinition {
         result.extend_from_slice(value.value_type.as_bytes());
 
         result
-    }
-
-    fn as_bytes_ref_type<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> Vec<u8>
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        Self::as_bytes(value)
     }
 
     fn redb_type_name() -> String {
