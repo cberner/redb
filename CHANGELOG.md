@@ -1,5 +1,17 @@
 # redb - Changelog
 
+## 0.10.0 - 2022-11-23
+* Remove maximum database size argument from `create()`. Databases are now unbounded in size
+* Reduce address space usage on Windows
+* Remove `set_dynamic_growth()`
+* Add `set_initial_size()` to `Builder`
+* Optimize cleanup of deleted pages. This resolves a performance issue where openning a Database
+  or performing a small transaction, could be slow if the last committed transaction deleted a large
+  number of pages
+* Remove `set_page_size()`. 4kB pages are always used now
+* Add `iter()` method to `Table` and `MultimapTable`
+* Fix various lifetime issues with type that had a lifetime, such as `&str` and `(&[u8], u64)`
+
 ## 0.9.0 - 2022-11-05
 * Add support for dynamic file growth on Windows
 * Add support for tuple types as keys and values
