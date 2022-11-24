@@ -63,7 +63,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
             "Btree(root={:?}): Inserting {:?} with value of length {}",
             &self.root,
             key,
-            V::as_bytes_ref_type(value).as_ref().len()
+            V::as_bytes(value).as_ref().len()
         );
         let mut freed_pages = self.freed_pages.borrow_mut();
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
@@ -264,7 +264,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
     pub(crate) fn get(&self, key: &K::RefBaseType<'_>) -> Result<Option<V::SelfType<'a>>> {
         if let Some((p, _)) = self.root {
             let root_page = self.mem.get_page(p);
-            return Ok(self.get_helper(root_page, K::as_bytes_ref_type(key).as_ref()));
+            return Ok(self.get_helper(root_page, K::as_bytes(key).as_ref()));
         } else {
             Ok(None)
         }

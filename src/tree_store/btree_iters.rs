@@ -226,14 +226,14 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                 Bound::Included(k) => find_iter_left::<K, V>(
                     manager.get_page(root),
                     None,
-                    K::as_bytes_ref_type(k.borrow()).as_ref(),
+                    K::as_bytes(k.borrow()).as_ref(),
                     true,
                     manager,
                 ),
                 Bound::Excluded(k) => find_iter_left::<K, V>(
                     manager.get_page(root),
                     None,
-                    K::as_bytes_ref_type(k.borrow()).as_ref(),
+                    K::as_bytes(k.borrow()).as_ref(),
                     false,
                     manager,
                 ),
@@ -247,14 +247,14 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                 Bound::Included(k) => find_iter_right::<K, V>(
                     manager.get_page(root),
                     None,
-                    K::as_bytes_ref_type(k.borrow()).as_ref(),
+                    K::as_bytes(k.borrow()).as_ref(),
                     true,
                     manager,
                 ),
                 Bound::Excluded(k) => find_iter_right::<K, V>(
                     manager.get_page(root),
                     None,
-                    K::as_bytes_ref_type(k.borrow()).as_ref(),
+                    K::as_bytes(k.borrow()).as_ref(),
                     false,
                     manager,
                 ),
