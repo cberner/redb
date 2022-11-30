@@ -33,25 +33,20 @@ bench bench='lmdb_benchmark': pre
 watch +args='test':
   cargo watch --clear --exec "{{args}}"
 
-# Nightly version selected from: https://rust-lang.github.io/rustup-components-history/
-NIGHTLY := "nightly-2022-11-01"
 fuzz: pre
-    rustup toolchain install {{NIGHTLY}}
-    cargo +{{NIGHTLY}} fuzz run fuzz_redb -- -max_len=1000000
+    cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=1000000
 
 fuzz_ci: pre
-    rustup toolchain install {{NIGHTLY}}
-    cargo +{{NIGHTLY}} fuzz run fuzz_redb -- -max_len=1000000 -max_total_time=60
+    cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=1000000 -max_total_time=60
 
 fuzz_coverage: pre
     #!/usr/bin/env bash
     set -euxo pipefail
-    rustup toolchain install {{NIGHTLY}}
-    RUST_SYSROOT=`cargo +{{NIGHTLY}} rustc -- --print sysroot 2>/dev/null`
+    RUST_SYSROOT=`cargo rustc -- --print sysroot 2>/dev/null`
     LLVM_COV=`find $RUST_SYSROOT -name llvm-cov`
     echo $LLVM_COV
-    rustup component add llvm-tools-preview --toolchain {{NIGHTLY}}
-    cargo +{{NIGHTLY}} fuzz coverage fuzz_redb
+    rustup component add llvm-tools-preview
+    cargo fuzz coverage --sanitizer=none fuzz_redb
     $LLVM_COV show fuzz/target/*/release/fuzz_redb --format html \
           -instr-profile=fuzz/coverage/fuzz_redb/coverage.profdata \
           -ignore-filename-regex='.*(cargo/registry|redb/fuzz|rustc).*' > fuzz/coverage/coverage_report.html
