@@ -204,7 +204,7 @@ impl Database {
             .expect("Tried to repair an empty database");
         if !RawBtree::new(
             Some((root, root_checksum)),
-            str::fixed_width(),
+            <&str>::fixed_width(),
             InternalTableDefinition::fixed_width(),
             mem,
         )

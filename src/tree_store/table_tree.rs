@@ -263,7 +263,7 @@ impl RedbValue for InternalTableDefinition {
 }
 
 pub struct TableNameIter<'a> {
-    inner: BtreeRangeIter<'a, str, InternalTableDefinition>,
+    inner: BtreeRangeIter<'a, &'static str, InternalTableDefinition>,
     table_type: TableType,
 }
 
@@ -273,7 +273,7 @@ impl<'a> Iterator for TableNameIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         for entry in self.inner.by_ref() {
             if InternalTableDefinition::from_bytes(entry.value()).table_type == self.table_type {
-                return Some(str::from_bytes(entry.key()).to_string());
+                return Some(<&str>::from_bytes(entry.key()).to_string());
             }
         }
         None
@@ -281,7 +281,7 @@ impl<'a> Iterator for TableNameIter<'a> {
 }
 
 pub(crate) struct TableTree<'txn> {
-    tree: BtreeMut<'txn, str, InternalTableDefinition>,
+    tree: BtreeMut<'txn, &'static str, InternalTableDefinition>,
     mem: &'txn TransactionalMemory,
     // Cached updates from tables that have been closed. These must be flushed to the btree
     pending_table_updates: HashMap<String, Option<(PageNumber, Checksum)>>,
@@ -448,7 +448,9 @@ impl<'txn> TableTree<'txn> {
 
         for entry in self.tree.range::<RangeFull, &str>(..)? {
             let mut definition = InternalTableDefinition::from_bytes(entry.value());
-            if let Some(updated_root) = self.pending_table_updates.get(str::from_bytes(entry.key()))
+            if let Some(updated_root) = self
+                .pending_table_updates
+                .get(<&str>::from_bytes(entry.key()))
             {
                 definition.table_root = *updated_root;
             }

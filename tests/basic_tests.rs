@@ -62,8 +62,8 @@ fn create_open() {
 
 #[test]
 fn multiple_tables() {
-    let definition1: TableDefinition<[u8], [u8]> = TableDefinition::new("1");
-    let definition2: TableDefinition<[u8], [u8]> = TableDefinition::new("2");
+    let definition1: TableDefinition<&[u8], &[u8]> = TableDefinition::new("1");
+    let definition2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("2");
 
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
@@ -91,10 +91,10 @@ fn list_tables() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = unsafe { Database::create(tmpfile.path()).unwrap() };
 
-    let definition_x: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
-    let definition_y: TableDefinition<[u8], [u8]> = TableDefinition::new("y");
-    let definition_mx: MultimapTableDefinition<[u8], [u8]> = MultimapTableDefinition::new("mx");
-    let definition_my: MultimapTableDefinition<[u8], [u8]> = MultimapTableDefinition::new("my");
+    let definition_x: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
+    let definition_y: TableDefinition<&[u8], &[u8]> = TableDefinition::new("y");
+    let definition_mx: MultimapTableDefinition<&[u8], &[u8]> = MultimapTableDefinition::new("mx");
+    let definition_my: MultimapTableDefinition<&[u8], &[u8]> = MultimapTableDefinition::new("my");
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -894,27 +894,6 @@ fn ref_get_signatures() {
         assert_eq!(iter.next().unwrap().1, &[i + 1]);
     }
     assert!(iter.next().is_none());
-}
-
-#[test]
-fn str_ref() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
-    let definition: TableDefinition<str, [u8]> = TableDefinition::new("x");
-    let ref_definition: TableDefinition<&str, [u8]> = TableDefinition::new("x");
-    let write_txn = db.begin_write().unwrap();
-    {
-        let mut table = write_txn.open_table(ref_definition).unwrap();
-        table.insert("hello", b"world").unwrap();
-        let hello2 = "hello2".to_string();
-        table.insert(hello2.as_str(), b"world").unwrap();
-    }
-    write_txn.commit().unwrap();
-
-    let read_txn = db.begin_read().unwrap();
-    // Check that a &str can be read back as a str
-    let table = read_txn.open_table(definition).unwrap();
-    assert_eq!(table.len().unwrap(), 2);
 }
 
 #[test]

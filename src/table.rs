@@ -63,7 +63,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<
         &mut self,
         key: &'a AK,
         value_length: usize,
-    ) -> Result<AccessGuardMut<K, [u8]>>
+    ) -> Result<AccessGuardMut<K, &[u8]>>
     where
         K: 'b,
         AK: Borrow<K::RefBaseType<'b>> + ?Sized,
@@ -138,7 +138,7 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     /// ```rust
     /// use redb::*;
     /// # use tempfile::NamedTempFile;
-    /// const TABLE: TableDefinition<str, u64> = TableDefinition::new("my_data");
+    /// const TABLE: TableDefinition<&str, u64> = TableDefinition::new("my_data");
     ///
     /// # fn main() -> Result<(), Error> {
     /// # let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
