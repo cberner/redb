@@ -84,7 +84,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
         &mut self,
         key: &K::RefBaseType<'_>,
         value_length: usize,
-    ) -> Result<AccessGuardMut<'a, K, [u8]>> {
+    ) -> Result<AccessGuardMut<'a, K, &[u8]>> {
         #[cfg(feature = "logging")]
         trace!(
             "Btree(root={:?}): Inserting {:?} with {} reserved bytes for the value",
@@ -94,7 +94,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
         );
         let mut freed_pages = self.freed_pages.borrow_mut();
         let value = vec![0u8; value_length];
-        let mut operation = MutateHelper::<K, [u8]>::new(
+        let mut operation = MutateHelper::<K, &[u8]>::new(
             self.root.clone(),
             FreePolicy::Uncommitted,
             self.mem,

@@ -104,7 +104,7 @@ pub struct WriteTransaction<'db> {
     // TODO: change the value type to Vec<PageNumber>
     // The table of freed pages by transaction. FreedTableKey -> binary.
     // The binary blob is a length-prefixed array of PageNumber
-    freed_tree: BtreeMut<'db, FreedTableKey, [u8]>,
+    freed_tree: BtreeMut<'db, FreedTableKey, &'static [u8]>,
     freed_pages: Rc<RefCell<Vec<PageNumber>>>,
     open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
     completed: bool,
@@ -601,7 +601,8 @@ impl<'db> WriteTransaction<'db> {
             .unwrap()
         {
             eprintln!("Master tree:");
-            let master_tree: Btree<str, InternalTableDefinition> = Btree::new(Some(page), self.mem);
+            let master_tree: Btree<&str, InternalTableDefinition> =
+                Btree::new(Some(page), self.mem);
             master_tree.print_debug(true);
         }
     }

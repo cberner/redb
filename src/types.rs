@@ -82,49 +82,6 @@ impl RedbValue for () {
     }
 }
 
-// [u8] is an alias for &[u8], which is why its SelfType is &[u8] instead of [u8]. This allows users to construct TableDefinitions without a lifetime
-// TODO: maybe this is a Bad Idea(tm) and should be removed?
-impl RedbValue for [u8] {
-    type SelfType<'a> = &'a [u8]
-    where
-        Self: 'a;
-    type RefBaseType<'a> = [u8]
-    where
-        Self: 'a;
-    type AsBytes<'a> = &'a [u8]
-    where
-        Self: 'a;
-
-    fn fixed_width() -> Option<usize> {
-        None
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> &'a [u8]
-    where
-        Self: 'a,
-    {
-        data
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8]
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        value
-    }
-
-    fn redb_type_name() -> String {
-        "[u8]".to_string()
-    }
-}
-
-impl RedbKey for [u8] {
-    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        data1.cmp(data2)
-    }
-}
-
 impl RedbValue for &[u8] {
     type SelfType<'a> = &'a [u8]
     where
@@ -207,51 +164,6 @@ impl<const N: usize> RedbKey for &[u8; N] {
     }
 }
 
-// str is an alias for &str, which is why its SelfType is &str instead of str. This allows users to construct TableDefinitions without a lifetime
-// TODO: maybe this is a Bad Idea(tm) and should be removed?
-impl RedbValue for str {
-    type SelfType<'a> = &'a str
-    where
-        Self: 'a;
-    type RefBaseType<'a> = str
-    where
-        Self: 'a;
-    type AsBytes<'a> = &'a str
-    where
-        Self: 'a;
-
-    fn fixed_width() -> Option<usize> {
-        None
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> &'a str
-    where
-        Self: 'a,
-    {
-        std::str::from_utf8(data).unwrap()
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a str
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        value
-    }
-
-    fn redb_type_name() -> String {
-        "str".to_string()
-    }
-}
-
-impl RedbKey for str {
-    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let str1 = str::from_bytes(data1);
-        let str2 = str::from_bytes(data2);
-        str1.cmp(str2)
-    }
-}
-
 impl RedbValue for &str {
     type SelfType<'a> = &'a str
     where
@@ -289,8 +201,8 @@ impl RedbValue for &str {
 
 impl RedbKey for &str {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let str1 = str::from_bytes(data1);
-        let str2 = str::from_bytes(data2);
+        let str1 = Self::from_bytes(data1);
+        let str2 = Self::from_bytes(data2);
         str1.cmp(str2)
     }
 }
