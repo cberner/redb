@@ -59,7 +59,8 @@ fn lmdb_bench(path: &Path) {
     let env = lmdb::Environment::new().open(path).unwrap();
     env.set_map_size(4096 * 1024 * 1024).unwrap();
 
-    let pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let pairs_len = pairs.len();
 
     let db = env.open_db(None).unwrap();
     {
@@ -67,10 +68,9 @@ fn lmdb_bench(path: &Path) {
         let mut txn = env.begin_rw_txn().unwrap();
         {
             for i in 0..ELEMENTS {
-                let (key, value) = &pairs[i % pairs.len()];
-                let mut mut_key = key.clone();
-                mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-                txn.put(db, &mut_key, &value, lmdb::WriteFlags::empty())
+                let (key, value) = &mut pairs[i % pairs_len];
+                key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+                txn.put(db, &key, &value, lmdb::WriteFlags::empty())
                     .unwrap();
             }
         }
@@ -90,10 +90,9 @@ fn lmdb_bench(path: &Path) {
                 let mut checksum = 0u64;
                 let mut expected_checksum = 0u64;
                 for &i in &key_order {
-                    let (key, value) = &pairs[i % pairs.len()];
-                    let mut mut_key = key.clone();
-                    mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-                    let result: &[u8] = txn.get(db, &mut_key).unwrap();
+                    let (key, value) = &mut pairs[i % pairs_len];
+                    key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+                    let result: &[u8] = txn.get(db, &key).unwrap();
                     checksum += result[0] as u64;
                     expected_checksum += value[0] as u64;
                 }
@@ -119,15 +118,15 @@ fn uring_bench(path: &Path) {
         .open(path)
         .unwrap();
 
-    let pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let pairs_len = pairs.len();
 
     let start = SystemTime::now();
     {
         for i in 0..ELEMENTS {
-            let (key, value) = &pairs[i % pairs.len()];
-            let mut mut_key = key.clone();
-            mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-            let s1 = IoSlice::new(&mut_key);
+            let (key, value) = &mut pairs[i % pairs_len];
+            key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+            let s1 = IoSlice::new(key);
             let s2 = IoSlice::new(value);
             assert_eq!(
                 file.write_vectored(&[s1, s2]).unwrap(),
@@ -155,10 +154,9 @@ fn uring_bench(path: &Path) {
             let mut checksum = 0u64;
             let mut expected_checksum = 0u64;
             for (uring_counter, &i) in key_order.iter().enumerate() {
-                let (key, value) = &pairs[i % pairs.len()];
-                let mut mut_key = key.clone();
-                mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-                let offset = i * (mut_key.len() + value.len()) + mut_key.len();
+                let (key, value) = &mut pairs[i % pairs_len];
+                key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+                let offset = i * (key.len() + value.len()) + key.len();
 
                 expected_checksum += value[0] as u64;
 
@@ -207,15 +205,15 @@ fn readwrite_bench(path: &Path) {
         .open(path)
         .unwrap();
 
-    let pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let pairs_len = pairs.len();
 
     let start = SystemTime::now();
     {
         for i in 0..ELEMENTS {
-            let (key, value) = &pairs[i % pairs.len()];
-            let mut mut_key = key.clone();
-            mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-            let s1 = IoSlice::new(&mut_key);
+            let (key, value) = &mut pairs[i % pairs_len];
+            key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+            let s1 = IoSlice::new(key);
             let s2 = IoSlice::new(value);
             assert_eq!(
                 file.write_vectored(&[s1, s2]).unwrap(),
@@ -239,10 +237,9 @@ fn readwrite_bench(path: &Path) {
             let mut expected_checksum = 0u64;
             let mut buffer = vec![0u8; 2000];
             for &i in &key_order {
-                let (key, value) = &pairs[i % pairs.len()];
-                let mut mut_key = key.clone();
-                mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-                let offset = i * (mut_key.len() + value.len()) + mut_key.len();
+                let (key, value) = &mut pairs[i % pairs_len];
+                key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+                let offset = i * (key.len() + value.len()) + key.len();
 
                 file.seek(SeekFrom::Start(offset as u64)).unwrap();
                 file.read_exact(&mut buffer).unwrap();
@@ -286,17 +283,17 @@ fn mmap_bench(path: &Path) {
     assert_ne!(mmap_raw, libc::MAP_FAILED);
     let mmap = unsafe { slice::from_raw_parts_mut(mmap_raw as *mut u8, len as usize) };
 
-    let pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let pairs_len = pairs.len();
 
     let mut write_index = 0;
     let start = SystemTime::now();
     {
         for i in 0..ELEMENTS {
-            let (key, value) = &pairs[i % pairs.len()];
-            let mut mut_key = key.clone();
-            mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-            mmap[write_index..(write_index + mut_key.len())].copy_from_slice(&mut_key);
-            write_index += mut_key.len();
+            let (key, value) = &mut pairs[i % pairs_len];
+            key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+            mmap[write_index..(write_index + key.len())].copy_from_slice(key);
+            write_index += key.len();
             mmap[write_index..(write_index + value.len())].copy_from_slice(value);
             write_index += value.len();
         }
@@ -317,10 +314,9 @@ fn mmap_bench(path: &Path) {
             let mut checksum = 0u64;
             let mut expected_checksum = 0u64;
             for &i in &key_order {
-                let (key, value) = &pairs[i % pairs.len()];
-                let mut mut_key = key.clone();
-                mut_key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-                let offset = i * (mut_key.len() + value.len()) + mut_key.len();
+                let (key, value) = &mut pairs[i % pairs_len];
+                key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+                let offset = i * (key.len() + value.len()) + key.len();
                 let buffer = &mmap[offset..(offset + value.len())];
                 checksum += buffer[0] as u64;
                 expected_checksum += value[0] as u64;
@@ -330,6 +326,124 @@ fn mmap_bench(path: &Path) {
             let duration = end.duration_since(start).unwrap();
             println!(
                 "mmap(): Random read {} items in {}ms",
+                ELEMENTS,
+                duration.as_millis()
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn mmap_anon_bench() {
+    let len: usize = 4 * 1024 * 1024 * 1024;
+
+    let mmap_raw = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            len as libc::size_t,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED | libc::MAP_ANON,
+            0,
+            0,
+        )
+    };
+    assert_ne!(mmap_raw, libc::MAP_FAILED);
+    let mmap = unsafe { slice::from_raw_parts_mut(mmap_raw as *mut u8, len as usize) };
+
+    let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let pairs_len = pairs.len();
+
+    let mut write_index = 0;
+    let start = SystemTime::now();
+    {
+        for i in 0..ELEMENTS {
+            let (key, value) = &mut pairs[i % pairs_len];
+            key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+            mmap[write_index..(write_index + key.len())].copy_from_slice(key);
+            write_index += key.len();
+            mmap[write_index..(write_index + value.len())].copy_from_slice(value);
+            write_index += value.len();
+        }
+    }
+
+    let end = SystemTime::now();
+    let duration = end.duration_since(start).unwrap();
+    print_load_time("mmap(ANON)", duration);
+
+    let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
+    key_order.shuffle(&mut rand::thread_rng());
+
+    {
+        for _ in 0..ITERATIONS {
+            let start = SystemTime::now();
+            let mut checksum = 0u64;
+            let mut expected_checksum = 0u64;
+            for &i in &key_order {
+                let (key, value) = &mut pairs[i % pairs_len];
+                key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+                let offset = i * (key.len() + value.len()) + key.len();
+                let buffer = &mmap[offset..(offset + value.len())];
+                checksum += buffer[0] as u64;
+                expected_checksum += value[0] as u64;
+            }
+            assert_eq!(checksum, expected_checksum);
+            let end = SystemTime::now();
+            let duration = end.duration_since(start).unwrap();
+            println!(
+                "mmap(ANON): Random read {} items in {}ms",
+                ELEMENTS,
+                duration.as_millis()
+            );
+        }
+    }
+}
+
+fn vec_bench() {
+    let len: usize = 4 * 1024 * 1024 * 1024;
+
+    let mut mmap = vec![0; len];
+
+    let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let pairs_len = pairs.len();
+
+    let mut write_index = 0;
+    let start = SystemTime::now();
+    {
+        for i in 0..ELEMENTS {
+            let (key, value) = &mut pairs[i % pairs_len];
+            key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+            mmap[write_index..(write_index + key.len())].copy_from_slice(key);
+            write_index += key.len();
+            mmap[write_index..(write_index + value.len())].copy_from_slice(value);
+            write_index += value.len();
+        }
+    }
+
+    let end = SystemTime::now();
+    let duration = end.duration_since(start).unwrap();
+    print_load_time("vec[]", duration);
+
+    let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
+    key_order.shuffle(&mut rand::thread_rng());
+
+    {
+        for _ in 0..ITERATIONS {
+            let start = SystemTime::now();
+            let mut checksum = 0u64;
+            let mut expected_checksum = 0u64;
+            for &i in &key_order {
+                let (key, value) = &mut pairs[i % pairs_len];
+                key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+                let offset = i * (key.len() + value.len()) + key.len();
+                let buffer = &mmap[offset..(offset + value.len())];
+                checksum += buffer[0] as u64;
+                expected_checksum += value[0] as u64;
+            }
+            assert_eq!(checksum, expected_checksum);
+            let end = SystemTime::now();
+            let duration = end.duration_since(start).unwrap();
+            println!(
+                "vec[]: Random read {} items in {}ms",
                 ELEMENTS,
                 duration.as_millis()
             );
@@ -356,5 +470,7 @@ fn main() {
     {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
         mmap_bench(tmpfile.path());
+        mmap_anon_bench();
     }
+    vec_bench();
 }
