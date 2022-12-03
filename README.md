@@ -17,7 +17,7 @@ use redb::{Database, Error, ReadableTable, TableDefinition};
 const TABLE: TableDefinition<str, u64> = TableDefinition::new("my_data");
 
 fn main() -> Result<(), Error> {
-    let db = unsafe { Database::create("my_db.redb", 1024 * 1024)? };
+    let db = unsafe { Database::create("my_db.redb")? };
     let write_txn = db.begin_write()?;
     {
         let mut table = write_txn.open_table(TABLE)?;
