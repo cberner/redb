@@ -44,7 +44,7 @@ database file.
 | freed root page number                                                                         |
 | freed checksum                                                                                 |
 | freed checksum (cont.)                                                                         |
-| commit id                                                                                      |
+| transaction id                                                                                 |
 | number of full regions                        | data pages in trailing region                  |
 | region tracker page number                                                                     |
 | slot checksum                                                                                  |
