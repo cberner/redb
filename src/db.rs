@@ -332,6 +332,7 @@ impl Database {
             )?;
         }
 
+        mem.begin_writable()?;
         let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
 
         Ok(Database {

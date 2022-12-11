@@ -3,7 +3,8 @@ use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
-use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
+use crate::tree_store::page_store::header::DatabaseHeader;
+use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
 use crate::tree_store::page_store::utils::{get_page_size, is_page_aligned};
@@ -23,39 +24,6 @@ use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-// Database layout:
-//
-// Super-header (header + commit slots)
-// The super-header length is rounded up to the nearest full page size
-//
-// Header (first 64 bytes):
-// 9 bytes: magic number
-// 1 byte: god byte
-// 2 byte: padding
-// 4 bytes: page size
-// Definition of region
-// 4 bytes: region header pages
-// 4 bytes: region max data pages
-//
-// Commit slot 0 (next 128 bytes):
-// 1 byte: version
-// 1 byte: != 0 if root page is non-null
-// 1 byte: != 0 if freed table root page is non-null
-// 1 byte: checksum type
-// 4 bytes: padding
-// 8 bytes: root page
-// 16 bytes: root checksum
-// 8 bytes: freed table root page
-// 16 bytes: freed table root checksum
-// 8 bytes: last committed transaction id
-// 4 bytes: number of full regions
-// 4 bytes: data pages in partial trailing region
-// 8 bytes: region tracker page number
-// 16 bytes: slot checksum
-//
-// Commit slot 1 (next 128 bytes):
-// Same layout as slot 0
-
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
 // because the leaf node format uses 32bit offsets
 const MAX_USABLE_REGION_SPACE: u64 = 4 * 1024 * 1024 * 1024;
@@ -68,41 +36,15 @@ const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
 const NUM_REGIONS: u32 = 1000;
 
 // TODO: set to 1, when version 1.0 is released
-const FILE_FORMAT_VERSION: u8 = 107;
+pub(super) const FILE_FORMAT_VERSION: u8 = 107;
 
 // Inspired by PNG's magic number
+// TODO: deduplicate these constants with header.rs
 const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
-const GOD_BYTE_OFFSET: usize = MAGICNUMBER.len();
-const PAGE_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + 2; // +2 for padding
-const REGION_HEADER_PAGES_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u32>();
-const REGION_MAX_DATA_PAGES_OFFSET: usize = REGION_HEADER_PAGES_OFFSET + size_of::<u32>();
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 64;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
 pub(super) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
-
-// God byte flags
-const PRIMARY_BIT: u8 = 1;
-const RECOVERY_REQUIRED: u8 = 2;
-
-// Structure of each commit slot
-const VERSION_OFFSET: usize = 0;
-const ROOT_NON_NULL_OFFSET: usize = size_of::<u8>();
-const FREED_ROOT_NON_NULL_OFFSET: usize = ROOT_NON_NULL_OFFSET + size_of::<u8>();
-const CHECKSUM_TYPE_OFFSET: usize = FREED_ROOT_NON_NULL_OFFSET + size_of::<u8>();
-const PADDING: usize = 4;
-const ROOT_PAGE_OFFSET: usize = CHECKSUM_TYPE_OFFSET + size_of::<u8>() + PADDING;
-const ROOT_CHECKSUM_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
-const FREED_ROOT_OFFSET: usize = ROOT_CHECKSUM_OFFSET + size_of::<u128>();
-const FREED_ROOT_CHECKSUM_OFFSET: usize = FREED_ROOT_OFFSET + size_of::<u64>();
-const TRANSACTION_ID_OFFSET: usize = FREED_ROOT_CHECKSUM_OFFSET + size_of::<u128>();
-const NUM_FULL_REGIONS_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
-const TRAILING_REGION_DATA_PAGES_OFFSET: usize = NUM_FULL_REGIONS_OFFSET + size_of::<u32>();
-const REGION_TRACKER_PAGE_NUMBER_OFFSET: usize =
-    TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>();
-const SLOT_CHECKSUM_OFFSET: usize =
-    REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size();
-const TRANSACTION_LAST_FIELD: usize = SLOT_CHECKSUM_OFFSET + size_of::<u128>();
 
 fn ceil_log2(x: usize) -> usize {
     if x.is_power_of_two() {
@@ -161,155 +103,33 @@ struct MetadataGuard;
 
 // Safety: MetadataAccessor may only use self.mmap to access the allocator states
 struct MetadataAccessor<'a> {
-    header: &'a mut [u8],
+    header: DatabaseHeader,
     mmap: &'a Mmap,
-    guard: MutexGuard<'a, MetadataGuard>,
+    _guard: MutexGuard<'a, MetadataGuard>,
 }
 
 impl<'a> MetadataAccessor<'a> {
     // Safety: Caller must ensure that no other references to metadata memory exist, or are created
     // during the lifetime 'a
     unsafe fn new(mmap: &'a Mmap, guard: MutexGuard<'a, MetadataGuard>) -> Self {
-        let header = mmap.get_memory_mut(0..DB_HEADER_SIZE);
+        let (header, _) = DatabaseHeader::from_bytes(mmap.get_memory(0..DB_HEADER_SIZE));
         Self {
             header,
             mmap,
-            guard,
+            _guard: guard,
         }
-    }
-
-    fn make_region_layout(&self, num_pages: u32) -> RegionLayout {
-        RegionLayout::new(
-            num_pages,
-            self.get_region_header_pages(),
-            self.get_page_size(),
-        )
-    }
-
-    fn get_primary_layout(&self) -> DatabaseLayout {
-        let trailing_pages = self.primary_slot().get_trailing_region_data_pages();
-        let num_full_regions = self.primary_slot().get_full_regions();
-
-        let full_region = self.make_region_layout(self.get_region_max_data_pages());
-        let trailing_region = trailing_pages.map(|x| self.make_region_layout(x));
-
-        DatabaseLayout::new(num_full_regions, full_region, trailing_region)
-    }
-
-    fn get_secondary_layout(&self) -> DatabaseLayout {
-        let trailing_pages = self.secondary_slot().get_trailing_region_data_pages();
-        let num_full_regions = self.secondary_slot().get_full_regions();
-
-        let full_region = self.make_region_layout(self.get_region_max_data_pages());
-        let trailing_region = trailing_pages.map(|x| self.make_region_layout(x));
-
-        DatabaseLayout::new(num_full_regions, full_region, trailing_region)
-    }
-
-    fn primary_slot(&self) -> TransactionAccessor {
-        let start = if self.header[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
-            TRANSACTION_0_OFFSET
-        } else {
-            TRANSACTION_1_OFFSET
-        };
-        let end = start + TRANSACTION_SIZE;
-
-        let mem = &self.header[start..end];
-        TransactionAccessor::new(mem, &self.guard)
-    }
-
-    fn secondary_slot(&self) -> TransactionAccessor {
-        let start = if self.header[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
-            TRANSACTION_1_OFFSET
-        } else {
-            TRANSACTION_0_OFFSET
-        };
-        let end = start + TRANSACTION_SIZE;
-
-        let mem = &self.header[start..end];
-        TransactionAccessor::new(mem, &self.guard)
-    }
-
-    fn secondary_slot_mut(&mut self) -> TransactionMutator {
-        let start = if self.header[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
-            TRANSACTION_1_OFFSET
-        } else {
-            TRANSACTION_0_OFFSET
-        };
-        let end = start + TRANSACTION_SIZE;
-
-        let mem = &mut self.header[start..end];
-        TransactionMutator::new(mem)
-    }
-
-    fn swap_primary(&mut self) {
-        if self.header[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
-            self.header[GOD_BYTE_OFFSET] |= PRIMARY_BIT;
-        } else {
-            self.header[GOD_BYTE_OFFSET] &= !PRIMARY_BIT;
-        }
-    }
-
-    fn get_magic_number(&self) -> [u8; MAGICNUMBER.len()] {
-        self.header[..MAGICNUMBER.len()].try_into().unwrap()
-    }
-
-    fn set_magic_number(&mut self) {
-        self.header[..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
-    }
-
-    fn get_region_header_pages(&self) -> u32 {
-        u32::from_le_bytes(
-            self.header
-                [REGION_HEADER_PAGES_OFFSET..(REGION_HEADER_PAGES_OFFSET + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        )
-    }
-
-    fn set_region_header_pages(&mut self, pages: u32) {
-        self.header[REGION_HEADER_PAGES_OFFSET..(REGION_HEADER_PAGES_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&pages.to_le_bytes());
     }
 
     fn get_region_max_data_pages(&self) -> u32 {
-        u32::from_le_bytes(
-            self.header
-                [REGION_MAX_DATA_PAGES_OFFSET..(REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        )
-    }
-
-    fn set_region_max_data_pages(&mut self, pages: u32) {
-        self.header
-            [REGION_MAX_DATA_PAGES_OFFSET..(REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&(pages as u32).to_le_bytes());
+        self.header.region_max_data_pages()
     }
 
     fn get_page_size(&self) -> u32 {
-        u32::from_le_bytes(
-            self.header[PAGE_SIZE_OFFSET..(PAGE_SIZE_OFFSET + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        )
-    }
-
-    fn set_page_size(&mut self, page_size: usize) {
-        self.header[PAGE_SIZE_OFFSET..(PAGE_SIZE_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&u32::try_from(page_size).unwrap().to_le_bytes());
+        self.header.page_size()
     }
 
     fn get_recovery_required(&self) -> bool {
-        self.header[GOD_BYTE_OFFSET] & RECOVERY_REQUIRED != 0
-    }
-
-    fn set_recovery(&mut self, required: bool) {
-        if required {
-            self.header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
-        } else {
-            self.header[GOD_BYTE_OFFSET] &= !RECOVERY_REQUIRED;
-        }
+        self.header.recovery_required
     }
 
     fn get_region(&mut self, region: u32, layout: &DatabaseLayout) -> RegionHeaderAccessor {
@@ -367,10 +187,7 @@ impl<'a> MetadataAccessor<'a> {
         layout: &DatabaseLayout,
         tracker_page: PageNumber,
     ) -> Result<(RegionTracker, RegionsAccessor)> {
-        if !self.get_recovery_required() {
-            self.set_recovery(true);
-            self.mmap.flush()?
-        }
+        assert!(self.get_recovery_required());
 
         let page_size = self.get_page_size() as usize;
         let region_pages_start =
@@ -392,7 +209,7 @@ impl<'a> MetadataAccessor<'a> {
         // which does not overlap the above
         let region_accessor = RegionsAccessor {
             mmap: self.mmap,
-            layout: layout.clone(),
+            layout: *layout,
         };
         Ok((RegionTracker::new(mem), region_accessor))
     }
@@ -506,185 +323,6 @@ impl<'a> RegionsAccessor<'a> {
     }
 }
 
-struct TransactionAccessor<'a> {
-    mem: &'a [u8],
-    _guard: &'a MutexGuard<'a, MetadataGuard>,
-}
-
-impl<'a> TransactionAccessor<'a> {
-    fn new(mem: &'a [u8], guard: &'a MutexGuard<'a, MetadataGuard>) -> Self {
-        TransactionAccessor { mem, _guard: guard }
-    }
-
-    fn verify_checksum(&self) -> bool {
-        let checksum = Checksum::from_le_bytes(
-            self.mem[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
-                .try_into()
-                .unwrap(),
-        );
-        self.get_checksum_type()
-            .checksum(&self.mem[..SLOT_CHECKSUM_OFFSET])
-            == checksum
-    }
-
-    fn get_root_page(&self) -> Option<(PageNumber, Checksum)> {
-        if self.mem[ROOT_NON_NULL_OFFSET] == 0 {
-            None
-        } else {
-            let num = PageNumber::from_le_bytes(
-                self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + PageNumber::serialized_size())]
-                    .try_into()
-                    .unwrap(),
-            );
-            let checksum = Checksum::from_le_bytes(
-                self.mem[ROOT_CHECKSUM_OFFSET..(ROOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
-                    .try_into()
-                    .unwrap(),
-            );
-            Some((num, checksum))
-        }
-    }
-
-    fn get_freed_root_page(&self) -> Option<(PageNumber, Checksum)> {
-        if self.mem[FREED_ROOT_NON_NULL_OFFSET] == 0 {
-            None
-        } else {
-            let num = PageNumber::from_le_bytes(
-                self.mem[FREED_ROOT_OFFSET..(FREED_ROOT_OFFSET + PageNumber::serialized_size())]
-                    .try_into()
-                    .unwrap(),
-            );
-            let checksum = Checksum::from_le_bytes(
-                self.mem[FREED_ROOT_CHECKSUM_OFFSET
-                    ..(FREED_ROOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
-                    .try_into()
-                    .unwrap(),
-            );
-            Some((num, checksum))
-        }
-    }
-
-    fn get_checksum_type(&self) -> ChecksumType {
-        ChecksumType::from(self.mem[CHECKSUM_TYPE_OFFSET])
-    }
-
-    fn get_last_committed_transaction_id(&self) -> TransactionId {
-        let id = u64::from_le_bytes(
-            self.mem[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
-                .try_into()
-                .unwrap(),
-        );
-        TransactionId(id)
-    }
-
-    fn get_full_regions(&self) -> u32 {
-        u32::from_le_bytes(
-            self.mem[NUM_FULL_REGIONS_OFFSET..(NUM_FULL_REGIONS_OFFSET + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        )
-    }
-
-    fn get_trailing_region_data_pages(&self) -> Option<u32> {
-        let value = u32::from_le_bytes(
-            self.mem[TRAILING_REGION_DATA_PAGES_OFFSET
-                ..(TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        );
-        if value == 0 {
-            None
-        } else {
-            Some(value)
-        }
-    }
-
-    fn get_region_tracker_page(&self) -> PageNumber {
-        PageNumber::from_le_bytes(
-            self.mem[REGION_TRACKER_PAGE_NUMBER_OFFSET
-                ..(REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size())]
-                .try_into()
-                .unwrap(),
-        )
-    }
-
-    fn get_version(&self) -> u8 {
-        self.mem[VERSION_OFFSET]
-    }
-}
-
-struct TransactionMutator<'a> {
-    mem: &'a mut [u8],
-}
-
-impl<'a> TransactionMutator<'a> {
-    fn new(mem: &'a mut [u8]) -> Self {
-        TransactionMutator { mem }
-    }
-
-    fn set_root_page(&mut self, page_number: Option<(PageNumber, Checksum)>) {
-        if let Some((num, checksum)) = page_number {
-            self.mem[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + PageNumber::serialized_size())]
-                .copy_from_slice(&num.to_le_bytes());
-            self.mem[ROOT_CHECKSUM_OFFSET..(ROOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
-                .copy_from_slice(&checksum.to_le_bytes());
-            self.mem[ROOT_NON_NULL_OFFSET] = 1;
-        } else {
-            self.mem[ROOT_NON_NULL_OFFSET] = 0;
-        }
-    }
-
-    fn set_freed_root(&mut self, page_number: Option<(PageNumber, Checksum)>) {
-        if let Some((num, checksum)) = page_number {
-            self.mem[FREED_ROOT_OFFSET..(FREED_ROOT_OFFSET + PageNumber::serialized_size())]
-                .copy_from_slice(&num.to_le_bytes());
-            self.mem
-                [FREED_ROOT_CHECKSUM_OFFSET..(FREED_ROOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
-                .copy_from_slice(&checksum.to_le_bytes());
-            self.mem[FREED_ROOT_NON_NULL_OFFSET] = 1;
-        } else {
-            self.mem[FREED_ROOT_NON_NULL_OFFSET] = 0;
-        }
-    }
-
-    fn set_checksum_type(&mut self, checksum: ChecksumType) {
-        self.mem[CHECKSUM_TYPE_OFFSET] = checksum.into();
-    }
-
-    fn set_last_committed_transaction_id(&mut self, transaction_id: TransactionId) {
-        self.mem[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
-            .copy_from_slice(&transaction_id.0.to_le_bytes());
-    }
-
-    fn set_data_section_layout(
-        &mut self,
-        full_regions: u32,
-        trailing_region_data_pages: Option<u32>,
-    ) {
-        self.mem[NUM_FULL_REGIONS_OFFSET..(NUM_FULL_REGIONS_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&full_regions.to_le_bytes());
-        self.mem[TRAILING_REGION_DATA_PAGES_OFFSET
-            ..(TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&(trailing_region_data_pages.unwrap_or(0)).to_le_bytes());
-    }
-
-    fn update_checksum(&mut self, checksum_type: ChecksumType) {
-        let checksum = checksum_type.checksum(&self.mem[..SLOT_CHECKSUM_OFFSET]);
-        self.mem[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
-            .copy_from_slice(&checksum.to_le_bytes());
-    }
-
-    fn set_region_tracker_page(&mut self, page_number: PageNumber) {
-        self.mem[REGION_TRACKER_PAGE_NUMBER_OFFSET
-            ..(REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size())]
-            .copy_from_slice(&page_number.to_le_bytes());
-    }
-
-    fn set_version(&mut self, version: u8) {
-        self.mem[VERSION_OFFSET] = version;
-    }
-}
-
 enum AllocationOp {
     Allocate(PageNumber),
     Free(PageNumber),
@@ -693,9 +331,20 @@ enum AllocationOp {
 
 // The current layout for the active transaction.
 // May include uncommitted changes to the database layout, if it grew or shrank
+// TODO: this should probably be merged into InMemoryState
 struct InProgressLayout {
     layout: DatabaseLayout,
     tracker_page: PageNumber,
+}
+
+struct InMemoryState {
+    header: DatabaseHeader,
+}
+
+impl InMemoryState {
+    fn new(header: DatabaseHeader) -> Self {
+        Self { header }
+    }
 }
 
 pub(crate) struct TransactionalMemory {
@@ -709,6 +358,7 @@ pub(crate) struct TransactionalMemory {
     // It would be nice if this was a RefCell<&[u8]> on the metadata. However, that would be
     // self-referential, since we also hold the mmap object
     metadata_guard: Mutex<MetadataGuard>,
+    state: Mutex<InMemoryState>,
     // The current layout for the active transaction.
     // May include uncommitted changes to the database layout, if it grew or shrank
     layout: Mutex<InProgressLayout>,
@@ -738,11 +388,6 @@ impl TransactionalMemory {
         initial_size: Option<u64>,
         write_strategy: Option<WriteStrategy>,
     ) -> Result<Self> {
-        #[allow(clippy::assertions_on_constants)]
-        {
-            assert!(TRANSACTION_LAST_FIELD <= TRANSACTION_SIZE);
-        }
-
         let page_size = requested_page_size.unwrap_or_else(get_page_size);
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
@@ -784,17 +429,32 @@ impl TransactionalMemory {
         let mmap = Mmap::new(file)?;
 
         let mutex = Mutex::new(MetadataGuard {});
-        let mut metadata = unsafe { MetadataAccessor::new(&mmap, mutex.lock().unwrap()) };
 
-        if metadata.get_magic_number() != MAGICNUMBER {
-            // Explicitly zero the header
-            metadata.header.fill(0);
+        // Safety: we own the mmap object and have no other references to this memory
+        let magic_number: [u8; MAGICNUMBER.len()] =
+            unsafe { mmap.get_memory(0..MAGICNUMBER.len()).try_into().unwrap() };
 
+        if magic_number != MAGICNUMBER {
             // Store the page & db size. These are immutable
-            metadata.set_page_size(page_size);
-            metadata.set_region_header_pages(layout.full_region_layout().get_header_pages());
-            metadata.set_region_max_data_pages(layout.full_region_layout().num_pages());
+            let checksum_type = match write_strategy.unwrap_or(WriteStrategy::Checksum) {
+                WriteStrategy::Checksum => ChecksumType::XXH3_128,
+                WriteStrategy::TwoPhase => ChecksumType::Unused,
+            };
+            // TODO: move this to after the allocator is initialized and use the final tracker page number. This has to be here to initialize the page size since the allocator reads that from the file
+            let mut header = DatabaseHeader::new(
+                layout,
+                checksum_type,
+                TransactionId(0),
+                PageNumber::new(0, 0, 0),
+            );
+            // Safety: we own the mmap object and have no other references to this memory
+            unsafe {
+                mmap.get_memory_mut(0..DB_HEADER_SIZE)
+                    .copy_from_slice(&header.to_bytes(false, false));
+            }
 
+            // Safety: we own the mmap object and have no other references to this memory
+            let mut metadata = unsafe { MetadataAccessor::new(&mmap, mutex.lock().unwrap()) };
             // Initialize the zeroth region and allocate the region tracker
             let tracker_page = {
                 let mut region = metadata.get_region_mut(0, &layout);
@@ -835,81 +495,84 @@ impl TransactionalMemory {
                 let max_order = region.allocator_mut().get_max_order();
                 region_tracker.mark_free(max_order, i as u64);
             }
-            // Set the allocator to not dirty, because the allocator initialization above will have
-            // dirtied it
-            // TODO: seems like this should be true, not false???
-            metadata.set_recovery(false);
+            // XXX: hack. We have to drop this early, because it flushes a bad header on drop
+            drop(metadata);
 
-            let checksum_type = match write_strategy.unwrap_or(WriteStrategy::Checksum) {
-                WriteStrategy::Checksum => ChecksumType::XXH3_128,
-                WriteStrategy::TwoPhase => ChecksumType::Unused,
-            };
-            let mut mutator = metadata.secondary_slot_mut();
-            mutator.set_root_page(None);
-            mutator.set_freed_root(None);
-            mutator.set_checksum_type(checksum_type);
-            mutator.set_last_committed_transaction_id(TransactionId(0));
-            mutator.set_data_section_layout(
-                layout.num_full_regions(),
-                layout.trailing_region_layout().map(|x| x.num_pages()),
-            );
-            mutator.set_version(FILE_FORMAT_VERSION);
-            mutator.set_region_tracker_page(tracker_page);
-            drop(mutator);
-            // Make the state we just wrote the primary
-            metadata.swap_primary();
-
-            // Initialize the secondary allocator state
-            let mut mutator = metadata.secondary_slot_mut();
-            mutator.set_root_page(None);
-            mutator.set_freed_root(None);
-            mutator.set_checksum_type(checksum_type);
-            mutator.set_last_committed_transaction_id(TransactionId(0));
-            mutator.set_data_section_layout(
-                layout.num_full_regions(),
-                layout.trailing_region_layout().map(|x| x.num_pages()),
-            );
-            mutator.set_version(FILE_FORMAT_VERSION);
-            mutator.set_region_tracker_page(tracker_page);
-            drop(mutator);
+            header.secondary_slot_mut().region_tracker = tracker_page;
+            header.swap_primary_slot();
+            header.secondary_slot_mut().region_tracker = tracker_page;
+            header.recovery_required = false;
+            // Safety: we own the mmap object and have no other references to this memory. The MetadataAccessor was dropped above
+            unsafe {
+                mmap.get_memory_mut(0..DB_HEADER_SIZE)
+                    .copy_from_slice(&header.to_bytes(false, false));
+            }
 
             mmap.flush()?;
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
-            metadata.set_magic_number();
+            // Safety: we own the mmap object and have no other references to this memory
+            unsafe {
+                mmap.get_memory_mut(0..DB_HEADER_SIZE)
+                    .copy_from_slice(&header.to_bytes(true, false));
+            }
             mmap.flush()?;
         }
+        // Safety: we own the mmap object and have no other references to this memory
+        let header_bytes = unsafe { mmap.get_memory(0..DB_HEADER_SIZE) };
+        let (mut header, repair_info) = DatabaseHeader::from_bytes(header_bytes);
 
         if let Some(requested_strategy) = write_strategy {
             let checksum_type: ChecksumType = requested_strategy.into();
-            assert_eq!(checksum_type, metadata.primary_slot().get_checksum_type());
+            assert_eq!(checksum_type, header.primary_slot().checksum_type);
         }
 
-        let page_size = metadata.get_page_size();
+        let page_size = header.page_size();
         if let Some(size) = requested_page_size {
             assert_eq!(page_size as usize, size);
         }
-        let version = metadata.primary_slot().get_version();
+        let version = header.primary_slot().version;
         if version != FILE_FORMAT_VERSION {
             return Err(Error::Corrupted(format!(
                 "Expected file format version {}, found {}",
                 FILE_FORMAT_VERSION, version
             )));
         }
-        let version = metadata.secondary_slot().get_version();
+        let version = header.secondary_slot().version;
         if version != FILE_FORMAT_VERSION {
             return Err(Error::Corrupted(format!(
                 "Expected file format version {}, found {}",
                 FILE_FORMAT_VERSION, version
             )));
         }
-        let layout = metadata.get_primary_layout();
-        let tracker_page = metadata.primary_slot().get_region_tracker_page();
+
+        let needs_recovery = header.recovery_required;
+        if needs_recovery {
+            if repair_info.primary_corrupted {
+                header.swap_primary_slot();
+            } else {
+                // If the secondary is a valid commit, verify that the primary is newer. This handles an edge case where:
+                // * the primary bit is flipped to the secondary
+                // * a crash occurs during fsync, such that no other data is written out to the secondary. meaning that it contains a valid, but out of date transaction
+                let secondary_newer =
+                    header.secondary_slot().transaction_id > header.primary_slot().transaction_id;
+                if secondary_newer && !repair_info.secondary_corrupted {
+                    header.swap_primary_slot();
+                }
+            }
+            assert!(!repair_info.invalid_magic_number);
+            // Safety: we own the mmap object and have no other references to this memory
+            unsafe {
+                mmap.get_memory_mut(0..DB_HEADER_SIZE)
+                    .copy_from_slice(&header.to_bytes(true, false));
+            }
+            mmap.flush()?;
+        }
+
+        let layout = header.primary_slot().layout;
+        let tracker_page = header.primary_slot().region_tracker;
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
-
-        let needs_recovery = metadata.get_recovery_required();
-        drop(metadata);
 
         Ok(Self {
             allocated_since_commit: Mutex::new(HashSet::new()),
@@ -918,9 +581,10 @@ impl TransactionalMemory {
             mmap,
             metadata_guard: mutex,
             layout: Mutex::new(InProgressLayout {
-                layout: layout.clone(),
+                layout,
                 tracker_page,
             }),
+            state: Mutex::new(InMemoryState::new(header)),
             #[cfg(debug_assertions)]
             open_dirty_pages: Mutex::new(HashSet::new()),
             #[cfg(debug_assertions)]
@@ -934,6 +598,16 @@ impl TransactionalMemory {
         })
     }
 
+    pub(crate) fn begin_writable(&self) -> Result {
+        let mut state = self.state.lock().unwrap();
+        assert!(!state.header.recovery_required);
+        state.header.recovery_required = true;
+        unsafe {
+            self.write_header(&state.header, false);
+        }
+        self.mmap.flush()
+    }
+
     pub(crate) fn needs_repair(&self) -> Result<bool> {
         Ok(self.lock_metadata().get_recovery_required())
     }
@@ -943,41 +617,24 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn checksum_type(&self) -> ChecksumType {
-        self.lock_metadata().primary_slot().get_checksum_type()
+        self.state
+            .lock()
+            .unwrap()
+            .header
+            .primary_slot()
+            .checksum_type
     }
 
     pub(crate) fn repair_primary_corrupted(&self) {
-        let mut metadata = self.lock_metadata();
-        metadata.swap_primary();
+        let mut state = self.state.lock().unwrap();
+        state.header.swap_primary_slot();
         let mut layout = self.layout.lock().unwrap();
-        layout.layout = metadata.get_primary_layout();
-        layout.tracker_page = metadata.primary_slot().get_region_tracker_page();
+        layout.layout = state.header.primary_slot().layout;
+        layout.tracker_page = state.header.primary_slot().region_tracker;
     }
 
     pub(crate) fn begin_repair(&self) -> Result<()> {
         let mut metadata = self.lock_metadata();
-
-        if !metadata.primary_slot().verify_checksum() {
-            metadata.swap_primary();
-            let mut layout = self.layout.lock().unwrap();
-            layout.layout = metadata.get_primary_layout();
-            layout.tracker_page = metadata.primary_slot().get_region_tracker_page();
-            assert!(metadata.primary_slot().verify_checksum());
-        } else {
-            // If the secondary is a valid commit, verify that the primary is newer. This handles an edge case where:
-            // * the primary bit is flipped to the secondary
-            // * a crash occurs during fsync, such that no other data is written out to the secondary. meaning that it contains a valid, but out of date transaction
-            let secondary_newer = metadata
-                .secondary_slot()
-                .get_last_committed_transaction_id()
-                > metadata.primary_slot().get_last_committed_transaction_id();
-            if secondary_newer && metadata.secondary_slot().verify_checksum() {
-                metadata.swap_primary();
-                let mut layout = self.layout.lock().unwrap();
-                layout.layout = metadata.get_primary_layout();
-                layout.tracker_page = metadata.primary_slot().get_region_tracker_page();
-            }
-        }
 
         let layout = self.layout.lock().unwrap();
         let region_tracker_page = layout.tracker_page;
@@ -1031,13 +688,20 @@ impl TransactionalMemory {
         Ok(())
     }
 
+    unsafe fn write_header(&self, header: &DatabaseHeader, swap_primary: bool) {
+        self.mmap
+            .get_memory_mut(0..DB_HEADER_SIZE)
+            .copy_from_slice(&header.to_bytes(true, swap_primary));
+    }
+
     pub(crate) fn end_repair(&mut self) -> Result<()> {
-        let mut metadata = self.lock_metadata();
+        let mut state = self.state.lock().unwrap();
+        unsafe { self.write_header(&state.header, false) };
         self.mmap.flush()?;
 
-        metadata.set_recovery(false);
+        state.header.recovery_required = false;
+        unsafe { self.write_header(&state.header, false) };
         let result = self.mmap.flush();
-        drop(metadata);
         self.needs_recovery = false;
 
         result
@@ -1109,26 +773,22 @@ impl TransactionalMemory {
         assert!(!self.needs_recovery);
 
         let mut metadata = self.lock_metadata();
-        let original_checksum_type = metadata.primary_slot().get_checksum_type();
+        let mut state = self.state.lock().unwrap();
+        let original_checksum_type = state.header.primary_slot().checksum_type;
         let checksum_type = new_checksum_type.unwrap_or(original_checksum_type);
         let mut layout = self.layout.lock().unwrap();
 
         // Trim surplus file space, before finalizing the commit
         let shrunk = self.try_shrink(&mut metadata, &mut layout)?;
 
-        let mut secondary = metadata.secondary_slot_mut();
-        secondary.set_checksum_type(checksum_type);
-        secondary.set_last_committed_transaction_id(transaction_id);
-        secondary.set_root_page(data_root);
-        secondary.set_freed_root(freed_root);
-        secondary.set_data_section_layout(
-            layout.layout.num_full_regions(),
-            layout
-                .layout
-                .trailing_region_layout()
-                .map(|x| x.num_pages()),
-        );
-        secondary.update_checksum(checksum_type);
+        let mut secondary = state.header.secondary_slot_mut();
+        secondary.checksum_type = checksum_type;
+        secondary.transaction_id = transaction_id;
+        secondary.root = data_root;
+        secondary.freed_root = freed_root;
+        secondary.layout = layout.layout;
+        secondary.region_tracker = layout.tracker_page;
+        unsafe { self.write_header(&state.header, false) };
 
         // Use 2-phase commit, if checksums are disabled
         if matches!(checksum_type, ChecksumType::Unused) {
@@ -1139,12 +799,15 @@ impl TransactionalMemory {
             }
         }
 
-        metadata.swap_primary();
+        // Swap the primary bit on-disk
+        unsafe { self.write_header(&state.header, true) };
         if eventual {
             self.mmap.eventual_flush()?;
         } else {
             self.mmap.flush()?;
         }
+        // Only swap the in-memory primary bit after the fsync is successful
+        state.header.swap_primary_slot();
         drop(metadata);
 
         // Safety: try_shrink() only removes unallocated free pages at the end of the database file
@@ -1177,26 +840,20 @@ impl TransactionalMemory {
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
         assert!(!self.needs_recovery);
 
-        let mut metadata = self.lock_metadata();
-        let checksum_type = metadata.primary_slot().get_checksum_type();
+        let mut state = self.state.lock().unwrap();
+        let checksum_type = state.header.primary_slot().checksum_type;
         let layout = self.layout.lock().unwrap();
-        let mut secondary = metadata.secondary_slot_mut();
-        secondary.set_checksum_type(checksum_type);
-        secondary.set_last_committed_transaction_id(transaction_id);
-        secondary.set_root_page(data_root);
-        secondary.set_freed_root(freed_root);
-        secondary.set_data_section_layout(
-            layout.layout.num_full_regions(),
-            layout
-                .layout
-                .trailing_region_layout()
-                .map(|x| x.num_pages()),
-        );
-        secondary.set_region_tracker_page(layout.tracker_page);
-        secondary.update_checksum(checksum_type);
+        let mut secondary = state.header.secondary_slot_mut();
+        secondary.checksum_type = checksum_type;
+        secondary.transaction_id = transaction_id;
+        secondary.root = data_root;
+        secondary.freed_root = freed_root;
+        secondary.layout = layout.layout;
+        secondary.region_tracker = layout.tracker_page;
 
         self.log_since_commit.lock().unwrap().clear();
         self.allocated_since_commit.lock().unwrap().clear();
+        // TODO: maybe we can remove this flag and just update the in-memory DatabaseHeader state?
         self.read_from_secondary.store(true, Ordering::Release);
 
         Ok(())
@@ -1206,16 +863,17 @@ impl TransactionalMemory {
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
         let mut metadata = self.lock_metadata();
+        let state = self.state.lock().unwrap();
         // The layout to restore
         let (restore, restore_tracker_page) = if self.read_from_secondary.load(Ordering::Acquire) {
             (
-                metadata.get_secondary_layout(),
-                metadata.secondary_slot().get_region_tracker_page(),
+                state.header.secondary_slot().layout,
+                state.header.secondary_slot().region_tracker,
             )
         } else {
             (
-                metadata.get_primary_layout(),
-                metadata.primary_slot().get_region_tracker_page(),
+                state.header.primary_slot().layout,
+                state.header.primary_slot().region_tracker,
             )
         };
 
@@ -1335,40 +993,38 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn get_version(&self) -> u8 {
-        let metadata = self.lock_metadata();
+        let state = self.state.lock().unwrap();
         if self.read_from_secondary.load(Ordering::Acquire) {
-            metadata.secondary_slot().get_version()
+            state.header.secondary_slot().version
         } else {
-            metadata.primary_slot().get_version()
+            state.header.primary_slot().version
         }
     }
 
     pub(crate) fn get_data_root(&self) -> Option<(PageNumber, Checksum)> {
-        let metadata = self.lock_metadata();
+        let state = self.state.lock().unwrap();
         if self.read_from_secondary.load(Ordering::Acquire) {
-            metadata.secondary_slot().get_root_page()
+            state.header.secondary_slot().root
         } else {
-            metadata.primary_slot().get_root_page()
+            state.header.primary_slot().root
         }
     }
 
     pub(crate) fn get_freed_root(&self) -> Option<(PageNumber, Checksum)> {
-        let metadata = self.lock_metadata();
+        let state = self.state.lock().unwrap();
         if self.read_from_secondary.load(Ordering::Acquire) {
-            metadata.secondary_slot().get_freed_root_page()
+            state.header.secondary_slot().freed_root
         } else {
-            metadata.primary_slot().get_freed_root_page()
+            state.header.primary_slot().freed_root
         }
     }
 
     pub(crate) fn get_last_committed_transaction_id(&self) -> Result<TransactionId> {
-        let metadata = self.lock_metadata();
+        let state = self.state.lock().unwrap();
         if self.read_from_secondary.load(Ordering::Acquire) {
-            Ok(metadata
-                .secondary_slot()
-                .get_last_committed_transaction_id())
+            Ok(state.header.secondary_slot().transaction_id)
         } else {
-            Ok(metadata.primary_slot().get_last_committed_transaction_id())
+            Ok(state.header.primary_slot().transaction_id)
         }
     }
 
@@ -1719,285 +1375,10 @@ impl Drop for TransactionalMemory {
             }
         }
         if self.mmap.flush().is_ok() && !self.needs_recovery {
-            self.lock_metadata().set_recovery(false);
+            let mut state = self.state.lock().unwrap();
+            state.header.recovery_required = false;
+            unsafe { self.write_header(&state.header, false) };
             let _ = self.mmap.flush();
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::db::TableDefinition;
-    use crate::tree_store::page_store::page_manager::{
-        GOD_BYTE_OFFSET, MAGICNUMBER, PRIMARY_BIT, RECOVERY_REQUIRED, ROOT_CHECKSUM_OFFSET,
-        TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET,
-    };
-    use crate::tree_store::page_store::TransactionalMemory;
-    use crate::{Database, ReadableTable, WriteStrategy};
-    use std::fs::OpenOptions;
-    use std::io::{Read, Seek, SeekFrom, Write};
-    use std::mem::size_of;
-    use tempfile::NamedTempFile;
-
-    const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
-
-    #[test]
-    fn repair_allocator_no_checksums() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::TwoPhase)
-                .create(tmpfile.path())
-                .unwrap()
-        };
-        let write_txn = db.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello", b"world").unwrap();
-        }
-        write_txn.commit().unwrap();
-        let write_txn = db.begin_write().unwrap();
-        let allocated_pages = write_txn.stats().unwrap().allocated_pages();
-        write_txn.abort().unwrap();
-        drop(db);
-
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(tmpfile.path())
-            .unwrap();
-
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        let mut buffer = [0u8; 1];
-        file.read_exact(&mut buffer).unwrap();
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        buffer[0] |= RECOVERY_REQUIRED;
-        file.write_all(&buffer).unwrap();
-
-        assert!(
-            TransactionalMemory::new(file, None, None, None, Some(WriteStrategy::TwoPhase))
-                .unwrap()
-                .needs_repair()
-                .unwrap()
-        );
-
-        let db2 = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::TwoPhase)
-                .create(tmpfile.path())
-                .unwrap()
-        };
-        let write_txn = db2.begin_write().unwrap();
-        assert_eq!(
-            allocated_pages,
-            write_txn.stats().unwrap().allocated_pages()
-        );
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello2", b"world2").unwrap();
-        }
-        write_txn.commit().unwrap();
-    }
-
-    #[test]
-    fn repair_allocator_checksums() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::Checksum)
-                .create(tmpfile.path())
-                .unwrap()
-        };
-        let write_txn = db.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello", b"world").unwrap();
-        }
-        write_txn.commit().unwrap();
-
-        // Start a read to be sure the previous write isn't garbage collected
-        let read_txn = db.begin_read().unwrap();
-
-        let write_txn = db.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello", b"world2").unwrap();
-        }
-        write_txn.commit().unwrap();
-        drop(read_txn);
-        drop(db);
-
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(tmpfile.path())
-            .unwrap();
-
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        let mut buffer = [0u8; 1];
-        file.read_exact(&mut buffer).unwrap();
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        buffer[0] |= RECOVERY_REQUIRED;
-        file.write_all(&buffer).unwrap();
-
-        // Overwrite the primary checksum to simulate a failure during commit
-        let primary_slot_offset = if buffer[0] & PRIMARY_BIT == 0 {
-            TRANSACTION_0_OFFSET
-        } else {
-            TRANSACTION_1_OFFSET
-        };
-        file.seek(SeekFrom::Start(
-            (primary_slot_offset + ROOT_CHECKSUM_OFFSET) as u64,
-        ))
-        .unwrap();
-        file.write_all(&[0; size_of::<u128>()]).unwrap();
-
-        assert!(
-            TransactionalMemory::new(file, None, None, None, Some(WriteStrategy::Checksum))
-                .unwrap()
-                .needs_repair()
-                .unwrap()
-        );
-
-        let db2 = unsafe { Database::create(tmpfile.path()).unwrap() };
-        let write_txn = db2.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            assert_eq!(table.get(b"hello").unwrap().unwrap(), b"world");
-            table.insert(b"hello2", b"world2").unwrap();
-        }
-        write_txn.commit().unwrap();
-    }
-
-    #[test]
-    fn change_write_strategy_to_2pc() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::Checksum)
-                .create(tmpfile.path())
-                .unwrap()
-        };
-        let write_txn = db.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello", b"world").unwrap();
-        }
-        write_txn.commit().unwrap();
-        let write_txn = db.begin_write().unwrap();
-        let allocated_pages = write_txn.stats().unwrap().allocated_pages();
-        write_txn.abort().unwrap();
-        db.set_write_strategy(WriteStrategy::TwoPhase).unwrap();
-        drop(db);
-
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(tmpfile.path())
-            .unwrap();
-
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        let mut buffer = [0u8; 1];
-        file.read_exact(&mut buffer).unwrap();
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        buffer[0] |= RECOVERY_REQUIRED;
-        file.write_all(&buffer).unwrap();
-
-        assert!(
-            TransactionalMemory::new(file, None, None, None, Some(WriteStrategy::TwoPhase))
-                .unwrap()
-                .needs_repair()
-                .unwrap()
-        );
-
-        let db2 = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::TwoPhase)
-                .create(tmpfile.path())
-                .unwrap()
-        };
-        let write_txn = db2.begin_write().unwrap();
-        assert_eq!(
-            allocated_pages,
-            write_txn.stats().unwrap().allocated_pages()
-        );
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello2", b"world2").unwrap();
-        }
-        write_txn.commit().unwrap();
-    }
-
-    #[test]
-    fn repair_insert_reserve_regression() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::Checksum)
-                .create(tmpfile.path())
-                .unwrap()
-        };
-
-        let write_txn = db.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            let mut value = table.insert_reserve(b"hello", 5).unwrap();
-            value.as_mut().copy_from_slice(b"world");
-        }
-        write_txn.commit().unwrap();
-
-        let write_txn = db.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            let mut value = table.insert_reserve(b"hello2", 5).unwrap();
-            value.as_mut().copy_from_slice(b"world");
-        }
-        write_txn.commit().unwrap();
-
-        drop(db);
-
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(tmpfile.path())
-            .unwrap();
-
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        let mut buffer = [0u8; 1];
-        file.read_exact(&mut buffer).unwrap();
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        buffer[0] |= RECOVERY_REQUIRED;
-        file.write_all(&buffer).unwrap();
-
-        assert!(
-            TransactionalMemory::new(file, None, None, None, Some(WriteStrategy::Checksum))
-                .unwrap()
-                .needs_repair()
-                .unwrap()
-        );
-
-        unsafe { Database::open(tmpfile.path()).unwrap() };
-    }
-
-    #[test]
-    fn magic_number() {
-        // Test compliance with some, but not all, provisions recommended by
-        // IETF Memo "Care and Feeding of Magic Numbers"
-
-        // Test that magic number is not valid utf-8
-        assert!(std::str::from_utf8(&MAGICNUMBER).is_err());
-        // Test there is a octet with high-bit set
-        assert!(MAGICNUMBER.iter().any(|x| *x & 0x80 != 0));
-        // Test there is a non-printable ASCII character
-        assert!(MAGICNUMBER.iter().any(|x| *x < 0x20 || *x > 0x7E));
-        // Test there is a printable ASCII character
-        assert!(MAGICNUMBER.iter().any(|x| *x >= 0x20 && *x <= 0x7E));
-        // Test there is a printable ISO-8859 that's non-ASCII printable
-        assert!(MAGICNUMBER.iter().any(|x| *x >= 0xA0));
-        // Test there is a ISO-8859 control character other than 0x09, 0x0A, 0x0C, 0x0D
-        assert!(MAGICNUMBER.iter().any(|x| *x < 0x09
-            || *x == 0x0B
-            || (0x0E <= *x && *x <= 0x1F)
-            || (0x7F <= *x && *x <= 0x9F)));
     }
 }

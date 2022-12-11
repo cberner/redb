@@ -13,7 +13,7 @@ fn round_up_to_multiple_of(value: u64, multiple: u64) -> u64 {
 
 // Regions are laid out starting with the allocator state header, followed by the pages aligned
 // to the next page
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct RegionLayout {
     num_pages: u32,
     // Offset where data pages start
@@ -84,6 +84,10 @@ impl RegionLayout {
         self.num_pages
     }
 
+    pub(super) fn page_size(&self) -> u32 {
+        self.page_size
+    }
+
     pub(super) fn len(&self) -> u64 {
         (self.header_pages as u64) * (self.page_size as u64) + self.usable_bytes()
     }
@@ -93,7 +97,7 @@ impl RegionLayout {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(super) struct DatabaseLayout {
     full_region_layout: RegionLayout,
     num_full_regions: u32,
@@ -213,9 +217,9 @@ impl DatabaseLayout {
     pub(super) fn region_layout(&self, region: u32) -> RegionLayout {
         assert!(region < self.num_regions());
         if region == self.num_full_regions {
-            self.trailing_partial_region.as_ref().unwrap().clone()
+            self.trailing_partial_region.unwrap()
         } else {
-            self.full_region_layout.clone()
+            self.full_region_layout
         }
     }
 }
