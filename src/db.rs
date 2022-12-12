@@ -565,11 +565,28 @@ impl std::fmt::Debug for Database {
 
 #[cfg(test)]
 mod test {
-    #[cfg(unix)]
     use tempfile::NamedTempFile;
 
-    #[cfg(unix)]
     use crate::{Database, TableDefinition};
+
+    #[test]
+    fn small_pages() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+        let db = unsafe {
+            Database::builder()
+                .set_page_size(512)
+                .create(tmpfile.path())
+                .unwrap()
+        };
+
+        let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+        let txn = db.begin_write().unwrap();
+        {
+            txn.open_table(table_definition).unwrap();
+        }
+        txn.commit().unwrap();
+    }
 
     #[test]
     #[cfg(unix)]
