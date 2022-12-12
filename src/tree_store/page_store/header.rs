@@ -123,6 +123,10 @@ impl DatabaseHeader {
         self.page_size
     }
 
+    pub(super) fn region_header_pages(&self) -> u32 {
+        self.region_header_pages
+    }
+
     pub(super) fn region_max_data_pages(&self) -> u32 {
         self.region_max_data_pages
     }
