@@ -4,7 +4,7 @@ use crate::tree_store::{
     Page, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
 };
 use crate::types::{RedbKey, RedbValue};
-use crate::{Result, WriteTransaction};
+use crate::{AccessGuard, Result, WriteTransaction};
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::convert::TryInto;
@@ -258,28 +258,26 @@ impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
 }
 
 impl<'a, V: RedbKey + ?Sized> Iterator for MultimapValueIter<'a, V> {
-    type Item = V::SelfType<'a>;
+    type Item = AccessGuard<'a, V>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.inner {
-            ValueIterState::Subtree(ref mut iter) => iter.next().map(|e| V::from_bytes(e.key())),
-            ValueIterState::InlineLeaf(ref mut iter) => {
-                iter.next_key().map(|key| V::from_bytes(key))
-            }
-        }
+        let bytes = match self.inner {
+            ValueIterState::Subtree(ref mut iter) => iter.next().map(|e| e.key()),
+            ValueIterState::InlineLeaf(ref mut iter) => iter.next_key(),
+        }?;
+        // TODO: optimize out this copy
+        Some(AccessGuard::with_owned_value(bytes.to_vec()))
     }
 }
 
 impl<'a, V: RedbKey + ?Sized> DoubleEndedIterator for MultimapValueIter<'a, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        match self.inner {
-            ValueIterState::Subtree(ref mut iter) => {
-                iter.next_back().map(|e| V::from_bytes(e.key()))
-            }
-            ValueIterState::InlineLeaf(ref mut iter) => {
-                iter.next_key_back().map(|key| V::from_bytes(key))
-            }
-        }
+        let bytes = match self.inner {
+            ValueIterState::Subtree(ref mut iter) => iter.next_back().map(|e| e.key()),
+            ValueIterState::InlineLeaf(ref mut iter) => iter.next_key_back(),
+        }?;
+        // TODO: optimize out this copy
+        Some(AccessGuard::with_owned_value(bytes.to_vec()))
     }
 }
 

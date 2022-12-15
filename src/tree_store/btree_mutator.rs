@@ -232,7 +232,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                     let page_number = page.get_page_number();
                     let existing_value = if found {
                         let copied_value = accessor.entry(position).unwrap().value().to_vec();
-                        Some(AccessGuard::with_owned_value(copied_value, self.mem))
+                        Some(AccessGuard::with_owned_value(copied_value))
                     } else {
                         None
                     };
