@@ -402,10 +402,14 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
     {
         let value_bytes = V::as_bytes(value.borrow());
         let value_bytes_ref = value_bytes.as_ref();
-        let existed = if let Some(v) = self.tree.get(key.borrow())? {
-            match v.collection_type() {
+        let get_result = self.tree.get(key.borrow())?;
+        let existed = if get_result.is_some() {
+            #[allow(clippy::unnecessary_unwrap)]
+            let guard = get_result.unwrap();
+            let collection_type = guard.to_value().collection_type();
+            match collection_type {
                 Inline => {
-                    let leaf_data = v.as_inline();
+                    let leaf_data = guard.to_value().as_inline();
                     let accessor = LeafAccessor::new(
                         leaf_data,
                         V::fixed_width(),
@@ -448,6 +452,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                                 .append(value_bytes_ref, <() as RedbValue>::as_bytes(&()).as_ref());
                         }
                         drop(builder);
+                        drop(guard);
                         let inline_data = DynamicCollection::make_inline_data(&data);
                         unsafe {
                             self.tree
@@ -459,6 +464,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                         page.memory_mut()[..leaf_data.len()].copy_from_slice(leaf_data);
                         let page_number = page.get_page_number();
                         drop(page);
+                        drop(guard);
 
                         // Don't bother computing the checksum, since we're about to modify the tree
                         let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
@@ -483,8 +489,12 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                     found
                 }
                 Subtree => {
-                    let mut subtree: BtreeMut<'_, V, ()> =
-                        BtreeMut::new(Some(v.as_subtree()), self.mem, self.freed_pages.clone());
+                    let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
+                        Some(guard.to_value().as_subtree()),
+                        self.mem,
+                        self.freed_pages.clone(),
+                    );
+                    drop(guard);
                     // Safety: No other references to this table can exist.
                     // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
                     // and we borrow &mut self.
@@ -500,6 +510,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                 }
             }
         } else {
+            drop(get_result);
             let required_inline_bytes = RawLeafBuilder::required_bytes(1, value_bytes_ref.len());
             if required_inline_bytes < self.mem.get_page_size() / 2 {
                 let mut data = vec![0; required_inline_bytes];
@@ -542,118 +553,120 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
     /// Returns `true` if the key-value pair was present
     // TODO: should take a Borrow instead of a &
     pub fn remove(&mut self, key: &K::RefBaseType<'_>, value: &V::RefBaseType<'_>) -> Result<bool> {
-        let existed = if let Some(v) = self.tree.get(key)? {
-            match v.collection_type() {
-                Inline => {
-                    let leaf_data = v.as_inline();
-                    let accessor = LeafAccessor::new(
-                        leaf_data,
-                        V::fixed_width(),
-                        <() as RedbValue>::fixed_width(),
-                    );
-                    if let Some(position) = accessor.find_key::<V>(V::as_bytes(value).as_ref()) {
-                        let old_num_pairs = accessor.num_pairs();
-                        if old_num_pairs == 1 {
-                            unsafe { self.tree.remove(key)? };
-                        } else {
-                            let old_pairs_len = accessor.length_of_pairs(0, old_num_pairs);
-                            let removed_value_len = accessor.entry(position).unwrap().key().len();
-                            let required = RawLeafBuilder::required_bytes(
-                                old_num_pairs - 1,
-                                old_pairs_len - removed_value_len,
-                            );
-                            let mut new_data = vec![0; required];
-                            let new_key_len =
-                                accessor.length_of_keys(0, old_num_pairs) - removed_value_len;
-                            let mut builder = RawLeafBuilder::new(
-                                &mut new_data,
-                                old_num_pairs - 1,
+        let get_result = self.tree.get(key)?;
+        if get_result.is_none() {
+            return Ok(false);
+        }
+        let guard = get_result.unwrap();
+        let v = guard.to_value();
+        let existed = match v.collection_type() {
+            Inline => {
+                let leaf_data = v.as_inline();
+                let accessor = LeafAccessor::new(
+                    leaf_data,
+                    V::fixed_width(),
+                    <() as RedbValue>::fixed_width(),
+                );
+                if let Some(position) = accessor.find_key::<V>(V::as_bytes(value).as_ref()) {
+                    let old_num_pairs = accessor.num_pairs();
+                    if old_num_pairs == 1 {
+                        drop(guard);
+                        unsafe { self.tree.remove(key)? };
+                    } else {
+                        let old_pairs_len = accessor.length_of_pairs(0, old_num_pairs);
+                        let removed_value_len = accessor.entry(position).unwrap().key().len();
+                        let required = RawLeafBuilder::required_bytes(
+                            old_num_pairs - 1,
+                            old_pairs_len - removed_value_len,
+                        );
+                        let mut new_data = vec![0; required];
+                        let new_key_len =
+                            accessor.length_of_keys(0, old_num_pairs) - removed_value_len;
+                        let mut builder = RawLeafBuilder::new(
+                            &mut new_data,
+                            old_num_pairs - 1,
+                            V::fixed_width(),
+                            <() as RedbValue>::fixed_width(),
+                            new_key_len,
+                        );
+                        for i in 0..old_num_pairs {
+                            if i != position {
+                                let entry = accessor.entry(i).unwrap();
+                                builder.append(entry.key(), entry.value());
+                            }
+                        }
+                        drop(builder);
+                        drop(guard);
+
+                        let inline_data = DynamicCollection::make_inline_data(&new_data);
+                        unsafe {
+                            self.tree
+                                .insert(key, &DynamicCollection::new(&inline_data))?
+                        };
+                    }
+                    true
+                } else {
+                    drop(guard);
+                    false
+                }
+            }
+            Subtree => {
+                let mut subtree: BtreeMut<V, ()> =
+                    BtreeMut::new(Some(v.as_subtree()), self.mem, self.freed_pages.clone());
+                drop(guard);
+                // Safety: No other references to this table can exist.
+                // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
+                // and we borrow &mut self.
+                let existed = unsafe { subtree.remove(value)?.is_some() };
+
+                if let Some((new_root, new_checksum)) = subtree.get_root() {
+                    let page = self.mem.get_page(new_root);
+                    match page.memory()[0] {
+                        LEAF => {
+                            let accessor = LeafAccessor::new(
+                                page.memory(),
                                 V::fixed_width(),
                                 <() as RedbValue>::fixed_width(),
-                                new_key_len,
                             );
-                            for i in 0..old_num_pairs {
-                                if i != position {
-                                    let entry = accessor.entry(i).unwrap();
-                                    builder.append(entry.key(), entry.value());
-                                }
-                            }
-                            drop(builder);
-
-                            let inline_data = DynamicCollection::make_inline_data(&new_data);
-                            unsafe {
-                                self.tree
-                                    .insert(key, &DynamicCollection::new(&inline_data))?
-                            };
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                }
-                Subtree => {
-                    let mut subtree: BtreeMut<V, ()> =
-                        BtreeMut::new(Some(v.as_subtree()), self.mem, self.freed_pages.clone());
-                    // Safety: No other references to this table can exist.
-                    // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-                    // and we borrow &mut self.
-                    let existed = unsafe { subtree.remove(value)?.is_some() };
-
-                    if let Some((new_root, new_checksum)) = subtree.get_root() {
-                        let page = self.mem.get_page(new_root);
-                        match page.memory()[0] {
-                            LEAF => {
-                                let accessor = LeafAccessor::new(
-                                    page.memory(),
-                                    V::fixed_width(),
-                                    <() as RedbValue>::fixed_width(),
-                                );
-                                let len = accessor.total_length();
-                                if len < self.mem.get_page_size() / 2 {
-                                    let inline_data =
-                                        DynamicCollection::make_inline_data(&page.memory()[..len]);
-                                    unsafe {
-                                        self.tree
-                                            .insert(key, &DynamicCollection::new(&inline_data))?
-                                    };
-                                    drop(page);
-                                    unsafe {
-                                        if !self.mem.free_if_uncommitted(new_root)? {
-                                            (*self.freed_pages).borrow_mut().push(new_root);
-                                        }
-                                    }
-                                } else {
-                                    let subtree_data = DynamicCollection::make_subtree_data(
-                                        new_root,
-                                        new_checksum,
-                                    );
-                                    unsafe {
-                                        self.tree
-                                            .insert(key, &DynamicCollection::new(&subtree_data))?
-                                    };
-                                }
-                            }
-                            BRANCH => {
+                            let len = accessor.total_length();
+                            if len < self.mem.get_page_size() / 2 {
+                                let inline_data =
+                                    DynamicCollection::make_inline_data(&page.memory()[..len]);
                                 unsafe {
-                                    let subtree_data = DynamicCollection::make_subtree_data(
-                                        new_root,
-                                        new_checksum,
-                                    );
+                                    self.tree
+                                        .insert(key, &DynamicCollection::new(&inline_data))?
+                                };
+                                drop(page);
+                                unsafe {
+                                    if !self.mem.free_if_uncommitted(new_root)? {
+                                        (*self.freed_pages).borrow_mut().push(new_root);
+                                    }
+                                }
+                            } else {
+                                let subtree_data =
+                                    DynamicCollection::make_subtree_data(new_root, new_checksum);
+                                unsafe {
                                     self.tree
                                         .insert(key, &DynamicCollection::new(&subtree_data))?
                                 };
                             }
-                            _ => unreachable!(),
                         }
-                    } else {
-                        unsafe { self.tree.remove(key)? };
+                        BRANCH => {
+                            unsafe {
+                                let subtree_data =
+                                    DynamicCollection::make_subtree_data(new_root, new_checksum);
+                                self.tree
+                                    .insert(key, &DynamicCollection::new(&subtree_data))?
+                            };
+                        }
+                        _ => unreachable!(),
                     }
-
-                    existed
+                } else {
+                    unsafe { self.tree.remove(key)? };
                 }
+
+                existed
             }
-        } else {
-            false
         };
 
         Ok(existed)
@@ -712,7 +725,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<
     fn get<'a>(&'a self, key: impl Borrow<K::RefBaseType<'a>>) -> Result<MultimapValueIter<'a, V>> {
         let iter =
             if let Some(collection) = self.tree.get(key.borrow())? {
-                collection.iter(self.mem)
+                collection.to_value().iter(self.mem)
             } else {
                 MultimapValueIter::new_subtree(
                     BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem),
@@ -804,7 +817,7 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     fn get<'a>(&'a self, key: impl Borrow<K::RefBaseType<'a>>) -> Result<MultimapValueIter<'a, V>> {
         let iter =
             if let Some(collection) = self.tree.get(key.borrow())? {
-                collection.iter(self.mem)
+                collection.to_value().iter(self.mem)
             } else {
                 MultimapValueIter::new_subtree(
                     BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem),

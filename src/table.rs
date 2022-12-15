@@ -92,7 +92,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<
 impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     for Table<'db, 'txn, K, V>
 {
-    fn get<'a, 'b: 'a, AK>(&self, key: &'a AK) -> Result<Option<V::SelfType<'_>>>
+    fn get<'a, 'b: 'a, AK>(&self, key: &'a AK) -> Result<Option<AccessGuard<V>>>
     where
         K: 'b,
         AK: Borrow<K::RefBaseType<'b>> + ?Sized,
@@ -125,7 +125,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for Table<'db, 
 
 pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     /// Returns the value corresponding to the given key
-    fn get<'a, 'b: 'a, AK>(&self, key: &'a AK) -> Result<Option<V::SelfType<'_>>>
+    fn get<'a, 'b: 'a, AK>(&self, key: &'a AK) -> Result<Option<AccessGuard<V>>>
     where
         K: 'b,
         AK: Borrow<K::RefBaseType<'b>> + ?Sized;
@@ -198,7 +198,7 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'txn, K, V>
 impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     for ReadOnlyTable<'txn, K, V>
 {
-    fn get<'a, 'b: 'a, AK>(&self, key: &'a AK) -> Result<Option<V::SelfType<'_>>>
+    fn get<'a, 'b: 'a, AK>(&self, key: &'a AK) -> Result<Option<AccessGuard<V>>>
     where
         K: 'b,
         AK: Borrow<K::RefBaseType<'b>> + ?Sized,

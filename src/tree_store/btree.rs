@@ -155,11 +155,11 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
         )
     }
 
-    fn read_tree(&self) -> Btree<K, V> {
+    fn read_tree(&self) -> Btree<'a, K, V> {
         Btree::new(self.get_root(), self.mem)
     }
 
-    pub(crate) fn get(&self, key: &K::RefBaseType<'_>) -> Result<Option<V::SelfType<'_>>> {
+    pub(crate) fn get(&self, key: &K::RefBaseType<'_>) -> Result<Option<AccessGuard<'_, V>>> {
         self.read_tree().get(key)
     }
 
@@ -261,7 +261,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         }
     }
 
-    pub(crate) fn get(&self, key: &K::RefBaseType<'_>) -> Result<Option<V::SelfType<'a>>> {
+    pub(crate) fn get(&self, key: &K::RefBaseType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
         if let Some((p, _)) = self.root {
             let root_page = self.mem.get_page(p);
             return Ok(self.get_helper(root_page, K::as_bytes(key).as_ref()));
@@ -271,14 +271,16 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
     }
 
     // Returns the value for the queried key, if present
-    fn get_helper(&self, page: PageImpl<'a>, query: &[u8]) -> Option<V::SelfType<'a>> {
+    fn get_helper(&self, page: PageImpl<'a>, query: &[u8]) -> Option<AccessGuard<'a, V>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                 let entry_index = accessor.find_key::<K>(query)?;
                 let (start, end) = accessor.value_range(entry_index).unwrap();
-                Some(V::from_bytes(&page.into_memory()[start..end]))
+                // Safety: free_on_drop is false
+                let guard = unsafe { AccessGuard::new(page, start, end - start, false, self.mem) };
+                Some(guard)
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
