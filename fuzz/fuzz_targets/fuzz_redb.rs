@@ -113,15 +113,15 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
                             } else {
                                 Box::new(local_reference.range(start..end))
                             };
-                        let mut iter: Box<dyn Iterator<Item = (u64, &[u8])>> = if *reversed {
+                        let mut iter: Box<dyn Iterator<Item = (AccessGuard<u64>, AccessGuard<&[u8]>)>> = if *reversed {
                             Box::new(table.range(start..end).unwrap().rev())
                         } else {
                             Box::new(table.range(start..end).unwrap())
                         };
                         while let Some((ref_key, ref_value_len)) = reference_iter.next() {
                             let (key, value) = iter.next().unwrap();
-                            assert_eq!(*ref_key, key);
-                            assert_eq!(*ref_value_len, value.len());
+                            assert_eq!(*ref_key, key.to_value());
+                            assert_eq!(*ref_value_len, value.to_value().len());
                         }
                         assert!(iter.next().is_none());
                     }

@@ -461,8 +461,8 @@ fn regression7() {
         t.remove(&145227).unwrap();
 
         let mut iter = t.range(138763..(138763 + 232359)).unwrap().rev();
-        assert_eq!(iter.next().unwrap().0, 153701);
-        assert_eq!(iter.next().unwrap().0, 146255);
+        assert_eq!(iter.next().unwrap().0.to_value(), 153701);
+        assert_eq!(iter.next().unwrap().0.to_value(), 146255);
         assert!(iter.next().is_none());
     }
     tx.commit().unwrap();
@@ -510,8 +510,8 @@ fn regression8() {
     {
         let t = tx.open_table(table_def).unwrap();
         let mut iter = t.range(118749..142650).unwrap();
-        assert_eq!(iter.next().unwrap().0, 118749);
-        assert_eq!(iter.next().unwrap().0, 130571);
+        assert_eq!(iter.next().unwrap().0.to_value(), 118749);
+        assert_eq!(iter.next().unwrap().0.to_value(), 130571);
         assert!(iter.next().is_none());
     }
     tx.commit().unwrap();
@@ -939,20 +939,20 @@ fn range_query() {
     let mut iter = table.range(3..7).unwrap();
     for i in 3..7u64 {
         let (key, value) = iter.next().unwrap();
-        assert_eq!(i, key);
-        assert_eq!(i, value);
+        assert_eq!(i, key.to_value());
+        assert_eq!(i, value.to_value());
     }
     assert!(iter.next().is_none());
 
     let mut iter = table.range(3..=7).unwrap();
     for i in 3..=7u64 {
         let (key, value) = iter.next().unwrap();
-        assert_eq!(i, key);
-        assert_eq!(i, value);
+        assert_eq!(i, key.to_value());
+        assert_eq!(i, value.to_value());
     }
     assert!(iter.next().is_none());
 
-    let total: u64 = table.range(1..=3).unwrap().map(|(_, v)| v).sum();
+    let total: u64 = table.range(1..=3).unwrap().map(|(_, v)| v.to_value()).sum();
     assert_eq!(total, 6);
 }
 
@@ -974,25 +974,25 @@ fn range_query_reversed() {
     let mut iter = table.range(3..7).unwrap().rev();
     for i in (3..7u64).rev() {
         let (key, value) = iter.next().unwrap();
-        assert_eq!(i, key);
-        assert_eq!(i, value);
+        assert_eq!(i, key.to_value());
+        assert_eq!(i, value.to_value());
     }
     assert!(iter.next().is_none());
 
     // Test reversing multiple times
     let mut iter = table.range(3..7).unwrap();
     let (key, _) = iter.next().unwrap();
-    assert_eq!(3, key);
+    assert_eq!(3, key.to_value());
 
     let mut iter = iter.rev();
     let (key, _) = iter.next().unwrap();
-    assert_eq!(6, key);
+    assert_eq!(6, key.to_value());
     let (key, _) = iter.next().unwrap();
-    assert_eq!(5, key);
+    assert_eq!(5, key.to_value());
 
     let mut iter = iter.rev();
     let (key, _) = iter.next().unwrap();
-    assert_eq!(4, key);
+    assert_eq!(4, key.to_value());
 
     assert!(iter.next().is_none());
 }

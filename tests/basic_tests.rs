@@ -690,7 +690,10 @@ fn u64_type() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(U64_TABLE).unwrap();
-    assert_eq!(2u64, table.range(0..2).unwrap().map(|(_, x)| x).sum());
+    assert_eq!(
+        2u64,
+        table.range(0..2).unwrap().map(|(_, x)| x.to_value()).sum()
+    );
     assert_eq!(1, table.get(&0).unwrap().unwrap());
 }
 
@@ -715,7 +718,7 @@ fn i128_type() {
     assert_eq!(-2, table.get(&-1).unwrap().unwrap());
     let mut iter: RangeIter<i128, i128> = table.range::<i128>(..).unwrap();
     for i in -11..10 {
-        assert_eq!(iter.next().unwrap().1, i);
+        assert_eq!(iter.next().unwrap().1.to_value(), i);
     }
     assert!(iter.next().is_none());
 }
@@ -758,11 +761,11 @@ fn str_type() {
     assert_eq!("world", table.get("hello").unwrap().unwrap());
 
     let mut iter = table.iter().unwrap();
-    assert_eq!(iter.next().unwrap().1, "world");
+    assert_eq!(iter.next().unwrap().1.to_value(), "world");
     assert!(iter.next().is_none());
 
     let mut iter: RangeIter<&str, &str> = table.range("a".."z").unwrap();
-    assert_eq!(iter.next().unwrap().1, "world");
+    assert_eq!(iter.next().unwrap().1.to_value(), "world");
     assert!(iter.next().is_none());
 }
 
@@ -805,7 +808,7 @@ fn array_type() {
     assert_eq!(b"world_123", table.get(hello).unwrap().unwrap());
 
     let mut iter: RangeIter<&[u8; 5], &[u8; 9]> = table.range::<&[u8; 5]>(..).unwrap();
-    assert_eq!(iter.next().unwrap().1, b"world_123");
+    assert_eq!(iter.next().unwrap().1.to_value(), b"world_123");
     assert!(iter.next().is_none());
 }
 
@@ -832,17 +835,17 @@ fn owned_get_signatures() {
 
     let mut iter: RangeIter<u32, u32> = table.range::<u32>(..).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1, i + 1);
+        assert_eq!(iter.next().unwrap().1.to_value(), i + 1);
     }
     assert!(iter.next().is_none());
     let mut iter: RangeIter<u32, u32> = table.range(0..10).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1, i + 1);
+        assert_eq!(iter.next().unwrap().1.to_value(), i + 1);
     }
     assert!(iter.next().is_none());
     let mut iter = table.range::<&u32>(&0..&10).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1, i + 1);
+        assert_eq!(iter.next().unwrap().1.to_value(), i + 1);
     }
     assert!(iter.next().is_none());
 }
@@ -872,26 +875,26 @@ fn ref_get_signatures() {
     let end = vec![10u8];
     let mut iter = table.range::<&[u8]>(..).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1, &[i + 1]);
+        assert_eq!(iter.next().unwrap().1.to_value(), &[i + 1]);
     }
     assert!(iter.next().is_none());
 
     let mut iter = table.range(start.as_slice()..&end).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1, &[i + 1]);
+        assert_eq!(iter.next().unwrap().1.to_value(), &[i + 1]);
     }
     assert!(iter.next().is_none());
     drop(iter);
 
     let mut iter = table.range(start..end).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1, &[i + 1]);
+        assert_eq!(iter.next().unwrap().1.to_value(), &[i + 1]);
     }
     assert!(iter.next().is_none());
 
     let mut iter = table.range([0u8]..[10u8]).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1, &[i + 1]);
+        assert_eq!(iter.next().unwrap().1.to_value(), &[i + 1]);
     }
     assert!(iter.next().is_none());
 }
@@ -935,7 +938,7 @@ fn iter() {
     let mut iter = table.iter().unwrap();
     for i in 0..10 {
         let (k, v) = iter.next().unwrap();
-        assert_eq!(i, k);
-        assert_eq!(i, v);
+        assert_eq!(i, k.to_value());
+        assert_eq!(i, v.to_value());
     }
 }

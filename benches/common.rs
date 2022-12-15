@@ -1,5 +1,5 @@
-use redb::ReadableTable;
 use redb::TableDefinition;
+use redb::{AccessGuard, ReadableTable};
 use rocksdb::{Direction, IteratorMode, TransactionDB, TransactionOptions, WriteOptions};
 use sanakirja::btree::page_unsized;
 use sanakirja::{Commit, RootDb};
@@ -139,10 +139,28 @@ pub struct RedbBenchIterator<'a> {
 }
 
 impl BenchIterator for RedbBenchIterator<'_> {
-    type Output<'a> = &'a [u8] where Self: 'a;
+    type Output<'a> = RedbAccessGuard<'a> where Self: 'a;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
-        self.iter.next()
+        self.iter
+            .next()
+            .map(|(k, v)| (RedbAccessGuard::new(k), RedbAccessGuard::new(v)))
+    }
+}
+
+pub struct RedbAccessGuard<'a> {
+    inner: AccessGuard<'a, &'a [u8]>,
+}
+
+impl<'a> RedbAccessGuard<'a> {
+    fn new(inner: AccessGuard<'a, &'a [u8]>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<'a> AsRef<[u8]> for RedbAccessGuard<'a> {
+    fn as_ref(&self) -> &[u8] {
+        self.inner.to_value()
     }
 }
 
