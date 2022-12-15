@@ -156,7 +156,9 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     /// let read_txn = db.begin_read()?;
     /// let table = read_txn.open_table(TABLE)?;
     /// let mut iter = table.range("a".."c")?;
-    /// assert_eq!(Some(("a", 0)), iter.next());
+    /// let (key, value) = iter.next().unwrap();
+    /// assert_eq!("a", key.to_value());
+    /// assert_eq!(0, value.to_value());
     /// # Ok(())
     /// # }
     /// ```
@@ -232,12 +234,13 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> RangeIter<'a, K, 
 }
 
 impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for RangeIter<'a, K, V> {
-    type Item = (K::SelfType<'a>, V::SelfType<'a>);
+    type Item = (AccessGuard<'a, K>, AccessGuard<'a, V>);
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next() {
-            let key = K::from_bytes(entry.key());
-            let value = V::from_bytes(entry.value());
+            // TODO: optimize out these copies
+            let key = AccessGuard::with_owned_value(entry.key().to_vec());
+            let value = AccessGuard::with_owned_value(entry.value().to_vec());
             Some((key, value))
         } else {
             None
@@ -250,8 +253,9 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterat
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {
-            let key = K::from_bytes(entry.key());
-            let value = V::from_bytes(entry.value());
+            // TODO: optimize out these copies
+            let key = AccessGuard::with_owned_value(entry.key().to_vec());
+            let value = AccessGuard::with_owned_value(entry.value().to_vec());
             Some((key, value))
         } else {
             None
@@ -333,8 +337,8 @@ mod test {
         let mut iter = table.range(start..=end).unwrap();
         for i in (3..=7u8).rev() {
             let (key, value) = iter.next().unwrap();
-            assert_eq!(&[i], key.0.as_slice());
-            assert_eq!(b"value", value);
+            assert_eq!(&[i], key.to_value().0.as_slice());
+            assert_eq!(b"value", value.to_value());
         }
         assert!(iter.next().is_none());
     }
