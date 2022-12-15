@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
+use std::ops::Range;
 use std::rc::Rc;
 use std::{mem, thread};
 
@@ -523,26 +524,33 @@ impl<'a> LeafAccessor<'a> {
         Some(EntryAccessor::new(key, value))
     }
 
+    pub(crate) fn entry_ranges(&self, n: usize) -> Option<(Range<usize>, Range<usize>)> {
+        let key = self.key_start(n)?..self.key_end(n)?;
+        let value = self.value_start(n)?..self.value_end(n)?;
+        Some((key, value))
+    }
+
     pub(super) fn last_entry(&self) -> EntryAccessor<'a> {
         self.entry(self.num_pairs() - 1).unwrap()
     }
 }
 
-pub(crate) struct LeafKeyIter<'a> {
-    data: &'a [u8],
+pub(crate) struct LeafKeyIter {
+    // TODO: this should hold a Page to avoid copying
+    data: Vec<u8>,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
     start_entry: isize, // inclusive
     end_entry: isize,   // inclusive
 }
 
-impl<'a> LeafKeyIter<'a> {
+impl LeafKeyIter {
     pub(crate) fn new(
-        data: &'a [u8],
+        data: Vec<u8>,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
     ) -> Self {
-        let accessor = LeafAccessor::new(data, fixed_key_size, fixed_value_size);
+        let accessor = LeafAccessor::new(&data, fixed_key_size, fixed_value_size);
         let end_entry = isize::try_from(accessor.num_pairs()).unwrap() - 1;
         Self {
             data,
@@ -553,22 +561,22 @@ impl<'a> LeafKeyIter<'a> {
         }
     }
 
-    pub(crate) fn next_key(&mut self) -> Option<&'a [u8]> {
+    pub(crate) fn next_key(&mut self) -> Option<&[u8]> {
         if self.end_entry < self.start_entry {
             return None;
         }
-        let accessor = LeafAccessor::new(self.data, self.fixed_key_size, self.fixed_value_size);
+        let accessor = LeafAccessor::new(&self.data, self.fixed_key_size, self.fixed_value_size);
         self.start_entry += 1;
         accessor
             .entry((self.start_entry - 1).try_into().unwrap())
             .map(|e| e.key())
     }
 
-    pub(crate) fn next_key_back(&mut self) -> Option<&'a [u8]> {
+    pub(crate) fn next_key_back(&mut self) -> Option<&[u8]> {
         if self.end_entry < self.start_entry {
             return None;
         }
-        let accessor = LeafAccessor::new(self.data, self.fixed_key_size, self.fixed_value_size);
+        let accessor = LeafAccessor::new(&self.data, self.fixed_key_size, self.fixed_value_size);
         self.end_entry -= 1;
         accessor
             .entry((self.end_entry + 1).try_into().unwrap())

@@ -127,11 +127,6 @@ impl<'a> PageImpl<'a> {
     pub(crate) fn into_memory(self) -> &'a [u8] {
         self.mem
     }
-
-    // Kind of hacky, but Page::memory() can't return the 'a lifetime, because then PageMut can't implement it
-    pub(crate) fn memory_full_lifetime(&self) -> &'a [u8] {
-        self.mem
-    }
 }
 
 impl<'a> Page for PageImpl<'a> {
@@ -141,6 +136,26 @@ impl<'a> Page for PageImpl<'a> {
 
     fn get_page_number(&self) -> PageNumber {
         self.page_number
+    }
+}
+
+impl<'a> Clone for PageImpl<'a> {
+    fn clone(&self) -> Self {
+        #[cfg(debug_assertions)]
+        {
+            *self
+                .open_pages
+                .lock()
+                .unwrap()
+                .get_mut(&self.page_number)
+                .unwrap() += 1;
+        }
+        Self {
+            mem: self.mem,
+            page_number: self.page_number,
+            #[cfg(debug_assertions)]
+            open_pages: self.open_pages,
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::tree_store::btree_base::{BranchAccessor, EntryAccessor, LeafAccessor};
+use crate::tree_store::btree_base::{BranchAccessor, LeafAccessor};
 use crate::tree_store::btree_base::{BRANCH, LEAF};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
@@ -7,7 +7,7 @@ use crate::types::{RedbKey, RedbValue};
 use std::borrow::Borrow;
 use std::collections::Bound;
 use std::marker::PhantomData;
-use std::ops::RangeBounds;
+use std::ops::{Range, RangeBounds};
 
 #[derive(Debug)]
 pub enum RangeIterState<'a> {
@@ -121,7 +121,7 @@ impl<'a> RangeIterState<'a> {
         }
     }
 
-    fn get_entry(&self) -> Option<EntryAccessor<'a>> {
+    fn get_entry(&self) -> Option<EntryGuard<'a>> {
         match self {
             Leaf {
                 page,
@@ -129,14 +129,38 @@ impl<'a> RangeIterState<'a> {
                 fixed_value_size,
                 entry,
                 ..
-            } => LeafAccessor::new(
-                page.memory_full_lifetime(),
-                *fixed_key_size,
-                *fixed_value_size,
-            )
-            .entry(*entry),
+            } => {
+                let (key, value) =
+                    LeafAccessor::new(page.memory(), *fixed_key_size, *fixed_value_size)
+                        .entry_ranges(*entry)?;
+                Some(EntryGuard::new(page.clone(), key, value))
+            }
             _ => None,
         }
+    }
+}
+
+pub(crate) struct EntryGuard<'a> {
+    page: PageImpl<'a>,
+    key_range: Range<usize>,
+    value_range: Range<usize>,
+}
+
+impl<'a> EntryGuard<'a> {
+    fn new(page: PageImpl<'a>, key_range: Range<usize>, value_range: Range<usize>) -> Self {
+        Self {
+            page,
+            key_range,
+            value_range,
+        }
+    }
+
+    pub(crate) fn key(&self) -> &[u8] {
+        &self.page.memory()[self.key_range.clone()]
+    }
+
+    pub(crate) fn value(&self) -> &[u8] {
+        &self.page.memory()[self.value_range.clone()]
     }
 }
 
@@ -198,7 +222,7 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
     }
 }
 
-pub struct BtreeRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> {
+pub(crate) struct BtreeRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> {
     left: Option<RangeIterState<'a>>, // Exclusive. The previous element returned
     right: Option<RangeIterState<'a>>, // Exclusive. The previous element returned
     include_left: bool,               // left is inclusive, instead of exclusive
@@ -290,7 +314,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
 impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator
     for BtreeRangeIter<'a, K, V>
 {
-    type Item = EntryAccessor<'a>;
+    type Item = EntryGuard<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let (

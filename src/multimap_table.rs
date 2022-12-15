@@ -146,13 +146,13 @@ impl DynamicCollection {
     }
 
     fn iter<'a, V: RedbKey + ?Sized>(
-        &'a self,
+        &self,
         mem: &'a TransactionalMemory,
     ) -> MultimapValueIter<'a, V> {
         match self.collection_type() {
             Inline => {
                 let leaf_iter = LeafKeyIter::new(
-                    self.as_inline(),
+                    self.as_inline().to_vec(),
                     V::fixed_width(),
                     <() as RedbValue>::fixed_width(),
                 );
@@ -168,7 +168,7 @@ impl DynamicCollection {
     }
 
     fn iter_free_on_drop<'a, V: RedbKey + ?Sized>(
-        &'a self,
+        &self,
         pages: Vec<PageNumber>,
         freed_pages: Rc<RefCell<Vec<PageNumber>>>,
         mem: &'a TransactionalMemory,
@@ -176,7 +176,7 @@ impl DynamicCollection {
         match self.collection_type() {
             Inline => {
                 let leaf_iter = LeafKeyIter::new(
-                    self.as_inline(),
+                    self.as_inline().to_vec(),
                     V::fixed_width(),
                     <() as RedbValue>::fixed_width(),
                 );
@@ -209,7 +209,7 @@ impl DynamicCollection {
 
 enum ValueIterState<'a, V: RedbKey + ?Sized + 'a> {
     Subtree(BtreeRangeIter<'a, V, ()>),
-    InlineLeaf(LeafKeyIter<'a>),
+    InlineLeaf(LeafKeyIter),
 }
 
 pub struct MultimapValueIter<'a, V: RedbKey + ?Sized + 'a> {
@@ -246,7 +246,7 @@ impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
         }
     }
 
-    fn new_inline(inner: LeafKeyIter<'a>) -> Self {
+    fn new_inline(inner: LeafKeyIter) -> Self {
         Self {
             inner: ValueIterState::InlineLeaf(inner),
             freed_pages: None,
@@ -261,34 +261,31 @@ impl<'a, V: RedbKey + ?Sized> Iterator for MultimapValueIter<'a, V> {
     type Item = AccessGuard<'a, V>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let bytes = match self.inner {
-            ValueIterState::Subtree(ref mut iter) => iter.next().map(|e| e.key()),
-            ValueIterState::InlineLeaf(ref mut iter) => iter.next_key(),
-        }?;
         // TODO: optimize out this copy
-        Some(AccessGuard::with_owned_value(bytes.to_vec()))
+        let bytes = match self.inner {
+            ValueIterState::Subtree(ref mut iter) => iter.next().map(|e| e.key().to_vec())?,
+            ValueIterState::InlineLeaf(ref mut iter) => iter.next_key()?.to_vec(),
+        };
+        Some(AccessGuard::with_owned_value(bytes))
     }
 }
 
 impl<'a, V: RedbKey + ?Sized> DoubleEndedIterator for MultimapValueIter<'a, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        let bytes = match self.inner {
-            ValueIterState::Subtree(ref mut iter) => iter.next_back().map(|e| e.key()),
-            ValueIterState::InlineLeaf(ref mut iter) => iter.next_key_back(),
-        }?;
         // TODO: optimize out this copy
-        Some(AccessGuard::with_owned_value(bytes.to_vec()))
+        let bytes = match self.inner {
+            ValueIterState::Subtree(ref mut iter) => iter.next_back().map(|e| e.key().to_vec())?,
+            ValueIterState::InlineLeaf(ref mut iter) => iter.next_key_back()?.to_vec(),
+        };
+        Some(AccessGuard::with_owned_value(bytes))
     }
 }
 
 impl<'a, V: RedbKey + ?Sized> Drop for MultimapValueIter<'a, V> {
     fn drop(&mut self) {
         // Drop our references to the pages that are about to be freed
-        let mut dummy_state = ValueIterState::InlineLeaf(LeafKeyIter::new(
-            b"\x01\x00\x00\x00".as_slice(),
-            None,
-            None,
-        ));
+        let mut dummy_state =
+            ValueIterState::InlineLeaf(LeafKeyIter::new(b"\x01\x00\x00\x00".to_vec(), None, None));
         mem::swap(&mut self.inner, &mut dummy_state);
         drop(dummy_state);
         for page in self.free_on_drop.iter() {
@@ -683,7 +680,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                 let mut pages = vec![tmp_page_number];
                 drop(tmp_page);
                 let tmp_page = self.mem.get_page(tmp_page_number);
-                let collection = DynamicCollection::new(&tmp_page.memory_full_lifetime()[..len]);
+                let collection = DynamicCollection::new(&tmp_page.memory()[..len]);
 
                 if matches!(collection.collection_type(), DynamicCollectionType::Subtree) {
                     let root = collection.as_subtree().0;
