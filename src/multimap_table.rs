@@ -327,11 +327,12 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'
 impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> Iterator
     for MultimapRangeIter<'a, K, V>
 {
-    type Item = (K::SelfType<'a>, MultimapValueIter<'a, V>);
+    type Item = (AccessGuard<'a, K>, MultimapValueIter<'a, V>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next()?;
-        let key = K::from_bytes(entry.key());
+        // TODO: optimize out this copy
+        let key = AccessGuard::with_owned_value(entry.key().to_vec());
         let collection = DynamicCollection::from_bytes(entry.value());
         let iter = collection.iter(self.mem);
 
@@ -344,7 +345,8 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> DoubleEndedIterator
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;
-        let key = K::from_bytes(entry.key());
+        // TODO: optimize out this copy
+        let key = AccessGuard::with_owned_value(entry.key().to_vec());
         let collection = DynamicCollection::from_bytes(entry.value());
         let iter = collection.iter(self.mem);
 

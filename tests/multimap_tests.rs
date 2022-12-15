@@ -107,7 +107,7 @@ fn range_query() {
     {
         let (key, mut values) = iter.next().unwrap();
         for i in 0..5 {
-            assert_eq!(b"0", key);
+            assert_eq!(b"0", key.to_value());
             let value = values.next().unwrap();
             assert_eq!(i, value.to_value());
         }
@@ -115,7 +115,7 @@ fn range_query() {
     {
         let (key, mut values) = iter.next().unwrap();
         for i in 5..10 {
-            assert_eq!(b"1", key);
+            assert_eq!(b"1", key.to_value());
             let value = values.next().unwrap();
             assert_eq!(i, value.to_value());
         }
@@ -274,7 +274,7 @@ fn iter() {
     let mut iter = table.iter().unwrap();
     for i in 0..10 {
         let (k, mut values) = iter.next().unwrap();
-        assert_eq!(k, i);
+        assert_eq!(k.to_value(), i);
         for j in 0..10 {
             assert_eq!(values.next().unwrap().to_value(), j);
         }
