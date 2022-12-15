@@ -149,7 +149,7 @@ fn assert_multimap_value_eq(
 ) {
     if let Some(values) = reference {
         for value in values.iter() {
-            assert_eq!(iter.next().unwrap().len(), *value);
+            assert_eq!(iter.next().unwrap().to_value().len(), *value);
         }
     }
     assert!(iter.next().is_none());

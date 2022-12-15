@@ -113,7 +113,7 @@ pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
     offset: usize,
     len: usize,
     on_drop: OnDrop,
-    mem: &'a TransactionalMemory,
+    mem: Option<&'a TransactionalMemory>,
     _value_type: PhantomData<V>,
 }
 
@@ -137,19 +137,19 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
             } else {
                 OnDrop::None
             },
-            mem,
+            mem: Some(mem),
             _value_type: Default::default(),
         }
     }
 
-    pub(super) fn with_owned_value(value: Vec<u8>, mem: &'a TransactionalMemory) -> Self {
+    pub(crate) fn with_owned_value(value: Vec<u8>) -> Self {
         let len = value.len();
         Self {
             page: EitherPage::OwnedMemory(value),
             offset: 0,
             len,
             on_drop: OnDrop::None,
-            mem,
+            mem: None,
             _value_type: Default::default(),
         }
     }
@@ -172,7 +172,7 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
                 position,
                 fixed_key_size,
             },
-            mem,
+            mem: Some(mem),
             _value_type: Default::default(),
         }
     }
@@ -194,7 +194,7 @@ impl<'a, V: RedbValue + ?Sized> Drop for AccessGuard<'a, V> {
                 drop(dummy);
                 // Safety: caller to new() guaranteed that no other references to this page exist
                 unsafe {
-                    self.mem.free(page_number).unwrap();
+                    self.mem.unwrap().free(page_number).unwrap();
                 }
             }
             OnDrop::RemoveEntry {
