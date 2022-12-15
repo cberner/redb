@@ -64,7 +64,7 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
                         match local_reference.get(&key) {
                             Some(reference_len) => {
                                 let value = table.get(&key).unwrap().unwrap();
-                                assert_eq!(value.len(), *reference_len);
+                                assert_eq!(value.to_value().len(), *reference_len);
                             }
                             None => {
                                 assert!(table.get(&key).unwrap().is_none());

@@ -496,7 +496,7 @@ mod test {
         let write_txn = db2.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
-            assert_eq!(table.get(b"hello").unwrap().unwrap(), b"world");
+            assert_eq!(table.get(b"hello").unwrap().unwrap().to_value(), b"world");
             table.insert(b"hello2", b"world2").unwrap();
         }
         write_txn.commit().unwrap();

@@ -75,8 +75,7 @@ fn non_durable_commit_persistence() {
     {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
-            let result = table.get(key).unwrap().unwrap();
-            assert_eq!(result, value);
+            assert_eq!(table.get(key).unwrap().unwrap().to_value(), value);
         }
     }
 }
@@ -108,8 +107,7 @@ fn test_persistence(durability: Durability) {
     {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
-            let result = &table.get(key).unwrap().unwrap();
-            assert_eq!(result, value);
+            assert_eq!(table.get(key).unwrap().unwrap().to_value(), value);
         }
     }
 }
@@ -307,7 +305,7 @@ fn multi_page_kv() {
     for i in 0..elements {
         key[0] = i;
         value[0] = i;
-        assert_eq!(&value, table.get(&key).unwrap().unwrap());
+        assert_eq!(&value, table.get(&key).unwrap().unwrap().to_value());
     }
 
     let txn = db.begin_write().unwrap();
@@ -378,7 +376,7 @@ fn regression() {
 
     let txn = db.begin_read().unwrap();
     let table = txn.open_table(U64_TABLE).unwrap();
-    let v = table.get(&6).unwrap().unwrap();
+    let v = table.get(&6).unwrap().unwrap().to_value();
     assert_eq!(v, 9);
 }
 
@@ -616,11 +614,11 @@ fn regression12() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         t.insert(&0, &0).unwrap();
-        assert_eq!(t.get(&0).unwrap().unwrap(), 0);
+        assert_eq!(t.get(&0).unwrap().unwrap().to_value(), 0);
         drop(t);
 
         let t2 = tx.open_table(table_def).unwrap();
-        assert_eq!(t2.get(&0).unwrap().unwrap(), 0);
+        assert_eq!(t2.get(&0).unwrap().unwrap().to_value(), 0);
     }
     tx.commit().unwrap();
 }
@@ -896,7 +894,10 @@ fn non_durable_read_isolation() {
 
     let read_txn = db.begin_read().unwrap();
     let read_table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", read_table.get(b"hello").unwrap().unwrap());
+    assert_eq!(
+        b"world",
+        read_table.get(b"hello").unwrap().unwrap().to_value()
+    );
 
     let mut write_txn = db.begin_write().unwrap();
     write_txn.set_durability(Durability::None);
@@ -911,11 +912,20 @@ fn non_durable_read_isolation() {
     let read_txn2 = db.begin_read().unwrap();
     let read_table2 = read_txn2.open_table(SLICE_TABLE).unwrap();
     assert!(read_table2.get(b"hello").unwrap().is_none());
-    assert_eq!(b"world2", read_table2.get(b"hello2").unwrap().unwrap());
-    assert_eq!(b"world3", read_table2.get(b"hello3").unwrap().unwrap());
+    assert_eq!(
+        b"world2",
+        read_table2.get(b"hello2").unwrap().unwrap().to_value()
+    );
+    assert_eq!(
+        b"world3",
+        read_table2.get(b"hello3").unwrap().unwrap().to_value()
+    );
     assert_eq!(read_table2.len().unwrap(), 2);
 
-    assert_eq!(b"world", read_table.get(b"hello").unwrap().unwrap());
+    assert_eq!(
+        b"world",
+        read_table.get(b"hello").unwrap().unwrap().to_value()
+    );
     assert!(read_table.get(b"hello2").unwrap().is_none());
     assert!(read_table.get(b"hello3").unwrap().is_none());
     assert_eq!(read_table.len().unwrap(), 1);
@@ -1247,7 +1257,7 @@ fn savepoint() {
 
     let txn = db.begin_read().unwrap();
     let table = txn.open_table(definition).unwrap();
-    assert_eq!(table.get(&0).unwrap().unwrap(), "hello");
+    assert_eq!(table.get(&0).unwrap().unwrap().to_value(), "hello");
 
     // Test that savepoints can be used multiple times
     let mut txn = db.begin_write().unwrap();

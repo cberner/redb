@@ -121,11 +121,11 @@ pub struct RedbBenchReader<'txn> {
 }
 
 impl<'txn> BenchReader for RedbBenchReader<'txn> {
-    type Output<'out> = &'out [u8] where Self: 'out;
+    type Output<'out> = RedbAccessGuard<'out> where Self: 'out;
     type Iterator<'out> = RedbBenchIterator<'out> where Self: 'out;
 
-    fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        self.table.get(key).unwrap()
+    fn get<'a>(&'a self, key: &[u8]) -> Option<Self::Output<'a>> {
+        self.table.get(key).unwrap().map(RedbAccessGuard::new)
     }
 
     fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {

@@ -123,12 +123,6 @@ impl<'a> Drop for PageImpl<'a> {
     }
 }
 
-impl<'a> PageImpl<'a> {
-    pub(crate) fn into_memory(self) -> &'a [u8] {
-        self.mem
-    }
-}
-
 impl<'a> Page for PageImpl<'a> {
     fn memory(&self) -> &[u8] {
         self.mem
