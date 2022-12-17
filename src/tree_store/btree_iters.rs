@@ -162,6 +162,10 @@ impl<'a> EntryGuard<'a> {
     pub(crate) fn value(&self) -> &[u8] {
         &self.page.memory()[self.value_range.clone()]
     }
+
+    pub(crate) fn into_raw(self) -> (PageImpl<'a>, Range<usize>, Range<usize>) {
+        (self.page, self.key_range, self.value_range)
+    }
 }
 
 pub(crate) struct AllPageNumbersBtreeIter<'a> {

@@ -238,9 +238,9 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for Rang
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next() {
-            // TODO: optimize out these copies
-            let key = AccessGuard::with_owned_value(entry.key().to_vec());
-            let value = AccessGuard::with_owned_value(entry.value().to_vec());
+            let (page, key_range, value_range) = entry.into_raw();
+            let key = AccessGuard::with_page(page.clone(), key_range);
+            let value = AccessGuard::with_page(page, value_range);
             Some((key, value))
         } else {
             None
@@ -253,9 +253,9 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterat
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {
-            // TODO: optimize out these copies
-            let key = AccessGuard::with_owned_value(entry.key().to_vec());
-            let value = AccessGuard::with_owned_value(entry.value().to_vec());
+            let (page, key_range, value_range) = entry.into_raw();
+            let key = AccessGuard::with_page(page.clone(), key_range);
+            let value = AccessGuard::with_page(page, value_range);
             Some((key, value))
         } else {
             None

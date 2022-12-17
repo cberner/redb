@@ -143,6 +143,17 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
         }
     }
 
+    pub(crate) fn with_page(page: PageImpl<'a>, range: Range<usize>) -> Self {
+        Self {
+            page: EitherPage::Immutable(page),
+            offset: range.start,
+            len: range.len(),
+            on_drop: OnDrop::None,
+            mem: None,
+            _value_type: Default::default(),
+        }
+    }
+
     pub(crate) fn with_owned_value(value: Vec<u8>) -> Self {
         let len = value.len();
         Self {
