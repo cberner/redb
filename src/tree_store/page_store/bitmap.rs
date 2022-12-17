@@ -170,7 +170,7 @@ impl<'a> BtreeBitmapMut<'a> {
     // Returns the first unset id, and sets it
     pub(crate) fn alloc(&mut self) -> Option<u64> {
         let entry = self.find_first_unset()?;
-        self.set(entry as u64);
+        self.set(entry);
         Some(entry)
     }
 
@@ -288,7 +288,7 @@ impl<'a> U64GroupedBitmap<'a> {
     }
 
     fn data_index_of(&self, bit: usize) -> (usize, usize) {
-        ((bit / 64) as usize * size_of::<u64>(), (bit % 64) as usize)
+        ((bit / 64) * size_of::<u64>(), (bit % 64))
     }
 
     fn count_unset(&self) -> usize {
@@ -364,7 +364,7 @@ impl<'a> U64GroupedBitmapMut<'a> {
     }
 
     fn data_index_of(&self, bit: usize) -> (usize, usize) {
-        ((bit / 64) as usize * size_of::<u64>(), (bit % 64) as usize)
+        ((bit / 64) * size_of::<u64>(), (bit % 64))
     }
 
     fn select_mask(bit: usize) -> u64 {

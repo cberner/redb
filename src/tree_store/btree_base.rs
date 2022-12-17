@@ -1104,18 +1104,14 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
         let start = 4 + key_ptr_size * (i + 1);
         // Last preceding value pointer
         let end = 4 + key_ptr_size * num_pairs + value_ptr_size * i;
-        self.page
-            .memory_mut()
-            .copy_within(start..end, dest as usize);
+        self.page.memory_mut().copy_within(start..end, dest);
         dest += end - start;
         debug_assert_eq!(dest, 4 + key_ptr_size * new_num_pairs + value_ptr_size * i);
 
         // Left shift the trailing value pointers & preceding key data
         let start = 4 + key_ptr_size * num_pairs + value_ptr_size * (i + 1);
         let end = key_start;
-        self.page
-            .memory_mut()
-            .copy_within(start..end, dest as usize);
+        self.page.memory_mut().copy_within(start..end, dest);
         dest += end - start;
 
         let preceding_key_len = key_start - (4 + (key_ptr_size + value_ptr_size) * num_pairs);
@@ -1127,9 +1123,7 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
         // Left shift the trailing key data & preceding value data
         let start = key_end;
         let end = value_start;
-        self.page
-            .memory_mut()
-            .copy_within(start..end, dest as usize);
+        self.page.memory_mut().copy_within(start..end, dest);
         dest += end - start;
 
         // Left shift the trailing value data
@@ -1141,9 +1135,7 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
         );
         let start = value_end;
         let end = last_value_end;
-        self.page
-            .memory_mut()
-            .copy_within(start..end, dest as usize);
+        self.page.memory_mut().copy_within(start..end, dest);
     }
 
     fn update_key_end(&mut self, i: usize, delta: isize) {
@@ -1570,7 +1562,7 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
         checksum: Checksum,
         n: usize,
     ) {
-        assert!(n < self.num_keys as usize);
+        assert!(n < self.num_keys);
         assert_eq!(n, self.keys_written);
         self.keys_written += 1;
         let offset = 8 + size_of::<Checksum>() * (n + 1);

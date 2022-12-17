@@ -348,7 +348,7 @@ fn mmap_anon_bench() {
         )
     };
     assert_ne!(mmap_raw, libc::MAP_FAILED);
-    let mmap = unsafe { slice::from_raw_parts_mut(mmap_raw as *mut u8, len as usize) };
+    let mmap = unsafe { slice::from_raw_parts_mut(mmap_raw as *mut u8, len) };
 
     let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
     let pairs_len = pairs.len();
