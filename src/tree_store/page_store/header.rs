@@ -151,11 +151,7 @@ impl DatabaseHeader {
     pub(super) fn from_bytes(data: &[u8]) -> (Self, HeaderRepairInfo) {
         let invalid_magic_number = data[..MAGICNUMBER.len()] != MAGICNUMBER;
 
-        let primary_slot = if data[GOD_BYTE_OFFSET] & PRIMARY_BIT == 0 {
-            0
-        } else {
-            1
-        };
+        let primary_slot = usize::from(data[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
         let recovery_required = (data[GOD_BYTE_OFFSET] & RECOVERY_REQUIRED) != 0;
         let page_size = get_u32(&data[PAGE_SIZE_OFFSET..]);
         let region_header_pages = get_u32(&data[REGION_HEADER_PAGES_OFFSET..]);

@@ -1152,7 +1152,7 @@ fn tree_balance() {
     let db = unsafe { Database::builder().create(tmpfile.path()).unwrap() };
     let txn = db.begin_write().unwrap();
 
-    let elements = (EXPECTED_ORDER / 2).pow(2) as usize - num_internal_entries;
+    let elements = (EXPECTED_ORDER / 2).pow(2) - num_internal_entries;
 
     {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
