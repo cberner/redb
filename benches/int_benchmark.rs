@@ -58,7 +58,7 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
 fn main() {
     let redb_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        let db = unsafe { redb::Database::create(tmpfile.path()).unwrap() };
+        let db = redb::Database::create(tmpfile.path()).unwrap();
         let table = RedbBenchDatabase::new(&db);
         benchmark(table)
     };

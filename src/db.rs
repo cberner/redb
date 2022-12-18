@@ -148,7 +148,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Display for MultimapTableDefi
 /// # fn main() -> Result<(), Error> {
 /// # let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 /// # let filename = tmpfile.path();
-/// let db = unsafe { Database::create(filename)? };
+/// let db = Database::create(filename)?;
 /// let write_txn = db.begin_write()?;
 /// {
 ///     let mut table = write_txn.open_table(TABLE)?;
@@ -170,20 +170,12 @@ impl Database {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
-    ///
-    /// # Safety
-    ///
-    /// The file referenced by `path` must not be concurrently modified by any other process
-    pub unsafe fn create(path: impl AsRef<Path>) -> Result<Database> {
+    pub fn create(path: impl AsRef<Path>) -> Result<Database> {
         Self::builder().create(path)
     }
 
     /// Opens an existing redb database.
-    ///
-    /// # Safety
-    ///
-    /// The file referenced by `path` must not be concurrently modified by any other process
-    pub unsafe fn open(path: impl AsRef<Path>) -> Result<Database> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Database> {
         Self::builder().open(path)
     }
 
@@ -562,11 +554,7 @@ impl Builder {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
-    ///
-    /// # Safety
-    ///
-    /// The file referenced by `path` must not be concurrently modified by any other process
-    pub unsafe fn create(&self, path: impl AsRef<Path>) -> Result<Database> {
+    pub fn create(&self, path: impl AsRef<Path>) -> Result<Database> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -592,7 +580,11 @@ impl Builder {
     ///
     /// # Safety
     ///
-    /// The file referenced by `path` must not be concurrently modified by any other process
+    /// Caller must ensure that the memory representing the memory-mapped file is not modified externally.
+    /// In particular:
+    /// 1) the file referenced by `path` must not be concurrently modified by any other process
+    /// 2) an I/O failure writing back to disk must not mutate the the memory. You should consider
+    ///    reading this paper before assuming that your OS provides this gaurantee: <https://research.cs.wisc.edu/adsl/Publications/cuttlefs-tos21.pdf>
     pub unsafe fn create_mmapped(&self, path: impl AsRef<Path>) -> Result<Database> {
         let file = OpenOptions::new()
             .read(true)
@@ -613,11 +605,7 @@ impl Builder {
     }
 
     /// Opens an existing redb database.
-    ///
-    /// # Safety
-    ///
-    /// The file referenced by `path` must not be concurrently modified by any other process
-    pub unsafe fn open(&self, path: impl AsRef<Path>) -> Result<Database> {
+    pub fn open(&self, path: impl AsRef<Path>) -> Result<Database> {
         if !path.as_ref().exists() {
             Err(Error::Io(ErrorKind::NotFound.into()))
         } else if File::open(path.as_ref())?.metadata()?.len() > 0 {
@@ -641,7 +629,11 @@ impl Builder {
     ///
     /// # Safety
     ///
-    /// The file referenced by `path` must not be concurrently modified by any other process
+    /// Caller must ensure that the memory representing the memory-mapped file is not modified externally.
+    /// In particular:
+    /// 1) the file referenced by `path` must not be concurrently modified by any other process
+    /// 2) an I/O failure writing back to disk must not mutate the the memory. You should consider
+    ///    reading this paper before assuming that your OS provides this gaurantee: <https://research.cs.wisc.edu/adsl/Publications/cuttlefs-tos21.pdf>
     pub unsafe fn open_mmapped(&self, path: impl AsRef<Path>) -> Result<Database> {
         if !path.as_ref().exists() {
             Err(Error::Io(ErrorKind::NotFound.into()))
@@ -680,12 +672,10 @@ mod test {
     fn small_pages() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-        let db = unsafe {
-            Database::builder()
-                .set_page_size(512)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db = Database::builder()
+            .set_page_size(512)
+            .create(tmpfile.path())
+            .unwrap();
 
         let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
         let txn = db.begin_write().unwrap();
@@ -699,13 +689,11 @@ mod test {
     fn small_pages2() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-        let db = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::TwoPhase)
-                .set_page_size(512)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db = Database::builder()
+            .set_write_strategy(WriteStrategy::TwoPhase)
+            .set_page_size(512)
+            .create(tmpfile.path())
+            .unwrap();
 
         let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
@@ -788,13 +776,11 @@ mod test {
     fn small_pages3() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-        let db = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::Checksum)
-                .set_page_size(1024)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db = Database::builder()
+            .set_write_strategy(WriteStrategy::Checksum)
+            .set_page_size(1024)
+            .create(tmpfile.path())
+            .unwrap();
 
         let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
@@ -827,12 +813,10 @@ mod test {
         let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
         let big_value = vec![0u8; 1024];
 
-        let db = unsafe {
-            Database::builder()
-                .set_region_size(1024 * 1024)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db = Database::builder()
+            .set_region_size(1024 * 1024)
+            .create(tmpfile.path())
+            .unwrap();
 
         let txn = db.begin_write().unwrap();
         {

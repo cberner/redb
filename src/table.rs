@@ -319,7 +319,7 @@ mod test {
         let definition: TableDefinition<ReverseKey, &[u8]> = TableDefinition::new("x");
 
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+        let db = Database::create(tmpfile.path()).unwrap();
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(definition).unwrap();

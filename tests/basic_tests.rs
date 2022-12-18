@@ -8,7 +8,7 @@ const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
 #[test]
 fn len() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
@@ -26,7 +26,7 @@ fn len() {
 #[test]
 fn stored_size() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
@@ -44,7 +44,7 @@ fn stored_size() {
 #[test]
 fn create_open() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
@@ -53,7 +53,7 @@ fn create_open() {
     write_txn.commit().unwrap();
     drop(db);
 
-    let db2 = unsafe { Database::open(tmpfile.path()).unwrap() };
+    let db2 = Database::open(tmpfile.path()).unwrap();
 
     let read_txn = db2.begin_read().unwrap();
     let table = read_txn.open_table(U64_TABLE).unwrap();
@@ -66,7 +66,7 @@ fn multiple_tables() {
     let definition2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("2");
 
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(definition1).unwrap();
@@ -89,7 +89,7 @@ fn multiple_tables() {
 #[test]
 fn list_tables() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let definition_x: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
     let definition_y: TableDefinition<&[u8], &[u8]> = TableDefinition::new("y");
@@ -138,7 +138,7 @@ fn tuple_type_function_lifetime() {
 #[test]
 fn tuple_type_lifetime() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<(&str, u8), (u16, u32)> = TableDefinition::new("table");
 
@@ -159,7 +159,7 @@ fn tuple_type_lifetime() {
 #[test]
 fn tuple2_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<(&str, u8), (u16, u32)> = TableDefinition::new("table");
 
@@ -178,7 +178,7 @@ fn tuple2_type() {
 #[test]
 fn tuple3_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16), (u16, u32)> = TableDefinition::new("table");
 
@@ -200,7 +200,7 @@ fn tuple3_type() {
 #[test]
 fn tuple4_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32), (u16, u32)> =
         TableDefinition::new("table");
@@ -224,7 +224,7 @@ fn tuple4_type() {
 #[allow(clippy::type_complexity)]
 fn tuple5_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32, u64), (u16, u32)> =
         TableDefinition::new("table");
@@ -248,7 +248,7 @@ fn tuple5_type() {
 #[allow(clippy::type_complexity)]
 fn tuple6_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128), (u16, u32)> =
         TableDefinition::new("table");
@@ -276,7 +276,7 @@ fn tuple6_type() {
 #[allow(clippy::type_complexity)]
 fn tuple7_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8), (u16, u32)> =
         TableDefinition::new("table");
@@ -306,7 +306,7 @@ fn tuple7_type() {
 #[allow(clippy::type_complexity)]
 fn tuple8_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8, i16), (u16, u32)> =
         TableDefinition::new("table");
@@ -336,7 +336,7 @@ fn tuple8_type() {
 #[allow(clippy::type_complexity)]
 fn tuple9_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8, i16, i32), (u16, u32)> =
         TableDefinition::new("table");
@@ -366,7 +366,7 @@ fn tuple9_type() {
 #[allow(clippy::type_complexity)]
 fn tuple10_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8, i16, i32, i64), (u16, u32)> =
         TableDefinition::new("table");
@@ -396,7 +396,7 @@ fn tuple10_type() {
 #[allow(clippy::type_complexity)]
 fn tuple11_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<
         (&str, u8, u16, u32, u64, u128, i8, i16, i32, i64, i128),
@@ -428,7 +428,7 @@ fn tuple11_type() {
 #[allow(clippy::type_complexity)]
 fn tuple12_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<
         (&str, u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, &str),
@@ -462,7 +462,7 @@ fn tuple12_type() {
 #[test]
 fn is_empty() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -479,7 +479,7 @@ fn is_empty() {
 #[test]
 fn abort() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -509,7 +509,7 @@ fn abort() {
 #[test]
 fn insert_overwrite() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
@@ -537,7 +537,7 @@ fn insert_overwrite() {
 #[test]
 fn insert_reserve() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let value = b"world";
     let write_txn = db.begin_write().unwrap();
     {
@@ -555,7 +555,7 @@ fn insert_reserve() {
 #[test]
 fn delete() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
@@ -586,7 +586,7 @@ fn delete() {
 #[test]
 fn no_dirty_reads() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
@@ -606,7 +606,7 @@ fn no_dirty_reads() {
 #[test]
 fn read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
@@ -643,7 +643,7 @@ fn read_isolation() {
 #[test]
 fn read_isolation2() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
@@ -679,7 +679,7 @@ fn read_isolation2() {
 #[test]
 fn reopen_table() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
@@ -695,7 +695,7 @@ fn reopen_table() {
 #[test]
 fn u64_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
@@ -716,7 +716,7 @@ fn u64_type() {
 #[test]
 fn i128_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
 
     let definition: TableDefinition<i128, i128> = TableDefinition::new("x");
@@ -742,7 +742,7 @@ fn i128_type() {
 #[test]
 fn f32_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let definition: TableDefinition<u8, f32> = TableDefinition::new("x");
 
@@ -761,7 +761,7 @@ fn f32_type() {
 #[test]
 fn str_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
 
@@ -788,7 +788,7 @@ fn str_type() {
 #[test]
 fn empty_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let definition: TableDefinition<u8, ()> = TableDefinition::new("x");
 
@@ -807,7 +807,7 @@ fn empty_type() {
 #[test]
 fn array_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let definition: TableDefinition<&[u8; 5], &[u8; 9]> = TableDefinition::new("x");
 
@@ -831,7 +831,7 @@ fn array_type() {
 #[test]
 fn owned_get_signatures() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let definition: TableDefinition<u32, u32> = TableDefinition::new("x");
 
@@ -869,7 +869,7 @@ fn owned_get_signatures() {
 #[test]
 fn ref_get_signatures() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
@@ -918,7 +918,7 @@ fn ref_get_signatures() {
 #[test]
 fn concurrent_write_transactions_block() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = sync::Arc::new(unsafe { Database::create(tmpfile.path()).unwrap() });
+    let db = sync::Arc::new(Database::create(tmpfile.path()).unwrap());
     let wtx = db.begin_write().unwrap();
     let (sender, receiver) = sync::mpsc::channel();
 
@@ -939,7 +939,7 @@ fn concurrent_write_transactions_block() {
 #[test]
 fn iter() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = unsafe { Database::create(tmpfile.path()).unwrap() };
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();

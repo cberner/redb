@@ -377,12 +377,10 @@ mod test {
     #[test]
     fn repair_allocator_no_checksums() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::TwoPhase)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db = Database::builder()
+            .set_write_strategy(WriteStrategy::TwoPhase)
+            .create(tmpfile.path())
+            .unwrap();
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
@@ -421,12 +419,10 @@ mod test {
         .needs_repair()
         .unwrap());
 
-        let db2 = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::TwoPhase)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db2 = Database::builder()
+            .set_write_strategy(WriteStrategy::TwoPhase)
+            .create(tmpfile.path())
+            .unwrap();
         let write_txn = db2.begin_write().unwrap();
         assert_eq!(
             allocated_pages,
@@ -442,12 +438,10 @@ mod test {
     #[test]
     fn repair_allocator_checksums() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::Checksum)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db = Database::builder()
+            .set_write_strategy(WriteStrategy::Checksum)
+            .create(tmpfile.path())
+            .unwrap();
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
@@ -506,7 +500,7 @@ mod test {
         .needs_repair()
         .unwrap());
 
-        let db2 = unsafe { Database::create(tmpfile.path()).unwrap() };
+        let db2 = Database::create(tmpfile.path()).unwrap();
         let write_txn = db2.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
@@ -519,12 +513,10 @@ mod test {
     #[test]
     fn change_write_strategy_to_2pc() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::Checksum)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db = Database::builder()
+            .set_write_strategy(WriteStrategy::Checksum)
+            .create(tmpfile.path())
+            .unwrap();
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
@@ -564,12 +556,10 @@ mod test {
         .needs_repair()
         .unwrap());
 
-        let db2 = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::TwoPhase)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db2 = Database::builder()
+            .set_write_strategy(WriteStrategy::TwoPhase)
+            .create(tmpfile.path())
+            .unwrap();
         let write_txn = db2.begin_write().unwrap();
         assert_eq!(
             allocated_pages,
@@ -585,12 +575,10 @@ mod test {
     #[test]
     fn repair_insert_reserve_regression() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = unsafe {
-            Database::builder()
-                .set_write_strategy(WriteStrategy::Checksum)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db = Database::builder()
+            .set_write_strategy(WriteStrategy::Checksum)
+            .create(tmpfile.path())
+            .unwrap();
 
         let write_txn = db.begin_write().unwrap();
         {
@@ -637,7 +625,7 @@ mod test {
         .needs_repair()
         .unwrap());
 
-        unsafe { Database::open(tmpfile.path()).unwrap() };
+        Database::open(tmpfile.path()).unwrap();
     }
 
     #[test]

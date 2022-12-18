@@ -280,28 +280,24 @@ fn main() {
 
     let redb_latency_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
-        let db = unsafe {
-            redb::Database::builder()
-                .set_write_strategy(WriteStrategy::Checksum)
-                .set_read_cache_size(4 * 1024 * 1024 * 1024)
-                .set_write_cache_size(4 * 1024 * 1024 * 1024)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db = redb::Database::builder()
+            .set_write_strategy(WriteStrategy::Checksum)
+            .set_read_cache_size(4 * 1024 * 1024 * 1024)
+            .set_write_cache_size(4 * 1024 * 1024 * 1024)
+            .create(tmpfile.path())
+            .unwrap();
         let table = RedbBenchDatabase::new(&db);
         benchmark(table)
     };
 
     let redb_throughput_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
-        let db = unsafe {
-            redb::Database::builder()
-                .set_write_strategy(WriteStrategy::TwoPhase)
-                .set_read_cache_size(4 * 1024 * 1024 * 1024)
-                .set_write_cache_size(4 * 1024 * 1024 * 1024)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db = redb::Database::builder()
+            .set_write_strategy(WriteStrategy::TwoPhase)
+            .set_read_cache_size(4 * 1024 * 1024 * 1024)
+            .set_write_cache_size(4 * 1024 * 1024 * 1024)
+            .create(tmpfile.path())
+            .unwrap();
         let table = RedbBenchDatabase::new(&db);
         benchmark(table)
     };
