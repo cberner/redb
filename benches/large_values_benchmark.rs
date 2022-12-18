@@ -71,24 +71,20 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
 fn main() {
     let redb_latency_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        let db = unsafe {
-            redb::Database::builder()
-                .set_write_strategy(WriteStrategy::Checksum)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db = redb::Database::builder()
+            .set_write_strategy(WriteStrategy::Checksum)
+            .create(tmpfile.path())
+            .unwrap();
         let table = RedbBenchDatabase::new(&db);
         benchmark(table)
     };
 
     let redb_throughput_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        let db = unsafe {
-            redb::Database::builder()
-                .set_write_strategy(WriteStrategy::TwoPhase)
-                .create(tmpfile.path())
-                .unwrap()
-        };
+        let db = redb::Database::builder()
+            .set_write_strategy(WriteStrategy::TwoPhase)
+            .create(tmpfile.path())
+            .unwrap();
         let table = RedbBenchDatabase::new(&db);
         benchmark(table)
     };

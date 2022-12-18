@@ -3,7 +3,7 @@ use redb::{Database, Error, ReadableTable, TableDefinition};
 const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
 
 fn main() -> Result<(), Error> {
-    let db = unsafe { Database::create("int_keys.redb")? };
+    let db = Database::create("int_keys.redb")?;
     let write_txn = db.begin_write()?;
     {
         let mut table = write_txn.open_table(TABLE)?;
