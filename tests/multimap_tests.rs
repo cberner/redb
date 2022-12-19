@@ -15,7 +15,7 @@ fn get_vec(
     loop {
         let item = iter.next();
         if let Some(item_value) = item {
-            result.push(item_value.to_value().to_string());
+            result.push(item_value.value().to_string());
         } else {
             return result;
         }
@@ -107,24 +107,24 @@ fn range_query() {
     {
         let (key, mut values) = iter.next().unwrap();
         for i in 0..5 {
-            assert_eq!(b"0", key.to_value());
+            assert_eq!(b"0", key.value());
             let value = values.next().unwrap();
-            assert_eq!(i, value.to_value());
+            assert_eq!(i, value.value());
         }
     }
     {
         let (key, mut values) = iter.next().unwrap();
         for i in 5..10 {
-            assert_eq!(b"1", key.to_value());
+            assert_eq!(b"1", key.value());
             let value = values.next().unwrap();
-            assert_eq!(i, value.to_value());
+            assert_eq!(i, value.value());
         }
     }
     assert!(iter.next().is_none());
 
     let mut total: u64 = 0;
     for (_, values) in table.range(&start..=&end).unwrap() {
-        total += values.map(|x| x.to_value()).sum::<u64>();
+        total += values.map(|x| x.value()).sum::<u64>();
     }
     assert_eq!(total, 45);
 }
@@ -173,8 +173,8 @@ fn delete() {
     {
         let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
         let mut iter = table.remove_all("hello").unwrap();
-        assert_eq!("world", iter.next().unwrap().to_value());
-        assert_eq!("world3", iter.next().unwrap().to_value());
+        assert_eq!("world", iter.next().unwrap().value());
+        assert_eq!("world3", iter.next().unwrap().value());
         assert!(iter.next().is_none());
     }
     write_txn.commit().unwrap();
@@ -274,9 +274,9 @@ fn iter() {
     let mut iter = table.iter().unwrap();
     for i in 0..10 {
         let (k, mut values) = iter.next().unwrap();
-        assert_eq!(k.to_value(), i);
+        assert_eq!(k.value(), i);
         for j in 0..10 {
-            assert_eq!(values.next().unwrap().to_value(), j);
+            assert_eq!(values.next().unwrap().value(), j);
         }
     }
 }

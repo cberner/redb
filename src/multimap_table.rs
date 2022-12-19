@@ -54,11 +54,8 @@ impl<'a> LeafKeyIter<'a> {
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
     ) -> Self {
-        let accessor = LeafAccessor::new(
-            data.to_value().as_inline(),
-            fixed_key_size,
-            fixed_value_size,
-        );
+        let accessor =
+            LeafAccessor::new(data.value().as_inline(), fixed_key_size, fixed_value_size);
         let end_entry = isize::try_from(accessor.num_pairs()).unwrap() - 1;
         Self {
             inline_collection: data,
@@ -74,7 +71,7 @@ impl<'a> LeafKeyIter<'a> {
             return None;
         }
         let accessor = LeafAccessor::new(
-            self.inline_collection.to_value().as_inline(),
+            self.inline_collection.value().as_inline(),
             self.fixed_key_size,
             self.fixed_value_size,
         );
@@ -89,7 +86,7 @@ impl<'a> LeafKeyIter<'a> {
             return None;
         }
         let accessor = LeafAccessor::new(
-            self.inline_collection.to_value().as_inline(),
+            self.inline_collection.value().as_inline(),
             self.fixed_key_size,
             self.fixed_value_size,
         );
@@ -209,7 +206,7 @@ impl DynamicCollection {
         collection: AccessGuard<'a, DynamicCollection>,
         mem: &'a TransactionalMemory,
     ) -> MultimapValueIter<'a, V> {
-        match collection.to_value().collection_type() {
+        match collection.value().collection_type() {
             Inline => {
                 let leaf_iter = LeafKeyIter::new(
                     collection,
@@ -219,7 +216,7 @@ impl DynamicCollection {
                 MultimapValueIter::new_inline(leaf_iter)
             }
             Subtree => {
-                let root = collection.to_value().as_subtree().0;
+                let root = collection.value().as_subtree().0;
                 MultimapValueIter::new_subtree(
                     BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., Some(root), mem),
                 )
@@ -233,7 +230,7 @@ impl DynamicCollection {
         freed_pages: Rc<RefCell<Vec<PageNumber>>>,
         mem: &'a TransactionalMemory,
     ) -> MultimapValueIter<'a, V> {
-        match collection.to_value().collection_type() {
+        match collection.value().collection_type() {
             Inline => {
                 let leaf_iter = LeafKeyIter::new(
                     collection,
@@ -243,7 +240,7 @@ impl DynamicCollection {
                 MultimapValueIter::new_inline(leaf_iter)
             }
             Subtree => {
-                let root = collection.to_value().as_subtree().0;
+                let root = collection.value().as_subtree().0;
                 let inner =
                     BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., Some(root), mem);
                 MultimapValueIter::new_subtree_free_on_drop(inner, freed_pages, pages, mem)
@@ -463,10 +460,10 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
         let existed = if get_result.is_some() {
             #[allow(clippy::unnecessary_unwrap)]
             let guard = get_result.unwrap();
-            let collection_type = guard.to_value().collection_type();
+            let collection_type = guard.value().collection_type();
             match collection_type {
                 Inline => {
-                    let leaf_data = guard.to_value().as_inline();
+                    let leaf_data = guard.value().as_inline();
                     let accessor = LeafAccessor::new(
                         leaf_data,
                         V::fixed_width(),
@@ -547,7 +544,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                 }
                 Subtree => {
                     let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
-                        Some(guard.to_value().as_subtree()),
+                        Some(guard.value().as_subtree()),
                         self.mem,
                         self.freed_pages.clone(),
                     );
@@ -615,7 +612,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
             return Ok(false);
         }
         let guard = get_result.unwrap();
-        let v = guard.to_value();
+        let v = guard.value();
         let existed = match v.collection_type() {
             Inline => {
                 let leaf_data = v.as_inline();
@@ -741,7 +738,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
             if let Some(collection) = unsafe { self.tree.remove(key)? } {
                 // TODO: optimize out this copy. The .remove() above should be replaced with
                 // .remove_retain_uncommitted, which should return the PageNumber so we can free it ourselves
-                let value = collection.to_value();
+                let value = collection.value();
                 let collection_bytes = DynamicCollection::as_bytes(&value);
                 let len = collection_bytes.as_ref().len();
                 let mut tmp_page = self.mem.allocate(len)?;
@@ -754,10 +751,10 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                     AccessGuard::with_page(tmp_page, 0..len);
 
                 if matches!(
-                    collection.to_value().collection_type(),
+                    collection.value().collection_type(),
                     DynamicCollectionType::Subtree
                 ) {
-                    let root = collection.to_value().as_subtree().0;
+                    let root = collection.value().as_subtree().0;
                     let all_pages = AllPageNumbersBtreeIter::new(
                         root,
                         V::fixed_width(),

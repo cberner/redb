@@ -75,7 +75,7 @@ fn non_durable_commit_persistence() {
     {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
-            assert_eq!(table.get(key).unwrap().unwrap().to_value(), value);
+            assert_eq!(table.get(key).unwrap().unwrap().value(), value);
         }
     }
 }
@@ -107,7 +107,7 @@ fn test_persistence(durability: Durability) {
     {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
-            assert_eq!(table.get(key).unwrap().unwrap().to_value(), value);
+            assert_eq!(table.get(key).unwrap().unwrap().value(), value);
         }
     }
 }
@@ -305,7 +305,7 @@ fn multi_page_kv() {
     for i in 0..elements {
         key[0] = i;
         value[0] = i;
-        assert_eq!(&value, table.get(&key).unwrap().unwrap().to_value());
+        assert_eq!(&value, table.get(&key).unwrap().unwrap().value());
     }
 
     let txn = db.begin_write().unwrap();
@@ -376,7 +376,7 @@ fn regression() {
 
     let txn = db.begin_read().unwrap();
     let table = txn.open_table(U64_TABLE).unwrap();
-    let v = table.get(&6).unwrap().unwrap().to_value();
+    let v = table.get(&6).unwrap().unwrap().value();
     assert_eq!(v, 9);
 }
 
@@ -459,8 +459,8 @@ fn regression7() {
         t.remove(&145227).unwrap();
 
         let mut iter = t.range(138763..(138763 + 232359)).unwrap().rev();
-        assert_eq!(iter.next().unwrap().0.to_value(), 153701);
-        assert_eq!(iter.next().unwrap().0.to_value(), 146255);
+        assert_eq!(iter.next().unwrap().0.value(), 153701);
+        assert_eq!(iter.next().unwrap().0.value(), 146255);
         assert!(iter.next().is_none());
     }
     tx.commit().unwrap();
@@ -508,8 +508,8 @@ fn regression8() {
     {
         let t = tx.open_table(table_def).unwrap();
         let mut iter = t.range(118749..142650).unwrap();
-        assert_eq!(iter.next().unwrap().0.to_value(), 118749);
-        assert_eq!(iter.next().unwrap().0.to_value(), 130571);
+        assert_eq!(iter.next().unwrap().0.value(), 118749);
+        assert_eq!(iter.next().unwrap().0.value(), 130571);
         assert!(iter.next().is_none());
     }
     tx.commit().unwrap();
@@ -614,11 +614,11 @@ fn regression12() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         t.insert(&0, &0).unwrap();
-        assert_eq!(t.get(&0).unwrap().unwrap().to_value(), 0);
+        assert_eq!(t.get(&0).unwrap().unwrap().value(), 0);
         drop(t);
 
         let t2 = tx.open_table(table_def).unwrap();
-        assert_eq!(t2.get(&0).unwrap().unwrap().to_value(), 0);
+        assert_eq!(t2.get(&0).unwrap().unwrap().value(), 0);
     }
     tx.commit().unwrap();
 }
@@ -670,13 +670,13 @@ fn regression14() {
         let mut iter = t.range(&514043..&(514043 + 514043)).unwrap().rev();
         {
             let (key, mut value_iter) = iter.next().unwrap();
-            assert_eq!(key.to_value(), 776971);
-            assert_eq!(value_iter.next().unwrap().to_value(), &[0; 2230]);
+            assert_eq!(key.value(), 776971);
+            assert_eq!(value_iter.next().unwrap().value(), &[0; 2230]);
         }
         {
             let (key, mut value_iter) = iter.next().unwrap();
-            assert_eq!(key.to_value(), 539749);
-            assert_eq!(value_iter.next().unwrap().to_value(), &[0; 1424]);
+            assert_eq!(key.value(), 539749);
+            assert_eq!(value_iter.next().unwrap().value(), &[0; 1424]);
         }
     }
     tx.abort().unwrap();
@@ -894,10 +894,7 @@ fn non_durable_read_isolation() {
 
     let read_txn = db.begin_read().unwrap();
     let read_table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(
-        b"world",
-        read_table.get(b"hello").unwrap().unwrap().to_value()
-    );
+    assert_eq!(b"world", read_table.get(b"hello").unwrap().unwrap().value());
 
     let mut write_txn = db.begin_write().unwrap();
     write_txn.set_durability(Durability::None);
@@ -914,18 +911,15 @@ fn non_durable_read_isolation() {
     assert!(read_table2.get(b"hello").unwrap().is_none());
     assert_eq!(
         b"world2",
-        read_table2.get(b"hello2").unwrap().unwrap().to_value()
+        read_table2.get(b"hello2").unwrap().unwrap().value()
     );
     assert_eq!(
         b"world3",
-        read_table2.get(b"hello3").unwrap().unwrap().to_value()
+        read_table2.get(b"hello3").unwrap().unwrap().value()
     );
     assert_eq!(read_table2.len().unwrap(), 2);
 
-    assert_eq!(
-        b"world",
-        read_table.get(b"hello").unwrap().unwrap().to_value()
-    );
+    assert_eq!(b"world", read_table.get(b"hello").unwrap().unwrap().value());
     assert!(read_table.get(b"hello2").unwrap().is_none());
     assert!(read_table.get(b"hello3").unwrap().is_none());
     assert_eq!(read_table.len().unwrap(), 1);
@@ -949,20 +943,20 @@ fn range_query() {
     let mut iter = table.range(3..7).unwrap();
     for i in 3..7u64 {
         let (key, value) = iter.next().unwrap();
-        assert_eq!(i, key.to_value());
-        assert_eq!(i, value.to_value());
+        assert_eq!(i, key.value());
+        assert_eq!(i, value.value());
     }
     assert!(iter.next().is_none());
 
     let mut iter = table.range(3..=7).unwrap();
     for i in 3..=7u64 {
         let (key, value) = iter.next().unwrap();
-        assert_eq!(i, key.to_value());
-        assert_eq!(i, value.to_value());
+        assert_eq!(i, key.value());
+        assert_eq!(i, value.value());
     }
     assert!(iter.next().is_none());
 
-    let total: u64 = table.range(1..=3).unwrap().map(|(_, v)| v.to_value()).sum();
+    let total: u64 = table.range(1..=3).unwrap().map(|(_, v)| v.value()).sum();
     assert_eq!(total, 6);
 }
 
@@ -984,25 +978,25 @@ fn range_query_reversed() {
     let mut iter = table.range(3..7).unwrap().rev();
     for i in (3..7u64).rev() {
         let (key, value) = iter.next().unwrap();
-        assert_eq!(i, key.to_value());
-        assert_eq!(i, value.to_value());
+        assert_eq!(i, key.value());
+        assert_eq!(i, value.value());
     }
     assert!(iter.next().is_none());
 
     // Test reversing multiple times
     let mut iter = table.range(3..7).unwrap();
     let (key, _) = iter.next().unwrap();
-    assert_eq!(3, key.to_value());
+    assert_eq!(3, key.value());
 
     let mut iter = iter.rev();
     let (key, _) = iter.next().unwrap();
-    assert_eq!(6, key.to_value());
+    assert_eq!(6, key.value());
     let (key, _) = iter.next().unwrap();
-    assert_eq!(5, key.to_value());
+    assert_eq!(5, key.value());
 
     let mut iter = iter.rev();
     let (key, _) = iter.next().unwrap();
-    assert_eq!(4, key.to_value());
+    assert_eq!(4, key.value());
 
     assert!(iter.next().is_none());
 }
@@ -1257,7 +1251,7 @@ fn savepoint() {
 
     let txn = db.begin_read().unwrap();
     let table = txn.open_table(definition).unwrap();
-    assert_eq!(table.get(&0).unwrap().unwrap().to_value(), "hello");
+    assert_eq!(table.get(&0).unwrap().unwrap().value(), "hello");
 
     // Test that savepoints can be used multiple times
     let mut txn = db.begin_write().unwrap();

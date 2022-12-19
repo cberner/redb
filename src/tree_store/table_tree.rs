@@ -320,7 +320,7 @@ impl<'txn> TableTree<'txn> {
         for (name, table_root) in self.pending_table_updates.drain() {
             // Bypass .get_table() since the table types are dynamic
             // TODO: optimize away this get()
-            let mut definition = self.tree.get(name.as_str()).unwrap().unwrap().to_value();
+            let mut definition = self.tree.get(name.as_str()).unwrap().unwrap().value();
             // No-op if the root has not changed
             if definition.table_root == table_root {
                 continue;
@@ -351,7 +351,7 @@ impl<'txn> TableTree<'txn> {
         table_type: TableType,
     ) -> Result<Option<InternalTableDefinition>> {
         if let Some(guard) = self.tree.get(name)? {
-            let mut definition = guard.to_value();
+            let mut definition = guard.value();
             if definition.get_type() != table_type {
                 return Err(Error::TableTypeMismatch(format!(
                     "{:?} is not of type {:?}",
