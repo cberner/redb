@@ -1,6 +1,7 @@
 use std::env::current_dir;
 use std::mem::size_of;
-use std::{fs, process};
+use std::sync::Arc;
+use std::{fs, process, thread};
 use tempfile::{NamedTempFile, TempDir};
 
 mod common;
@@ -9,7 +10,7 @@ use common::*;
 use redb::WriteStrategy;
 use std::time::{Duration, Instant};
 
-const ITERATIONS: usize = 3;
+const ITERATIONS: usize = 2;
 const ELEMENTS: usize = 1_000_000;
 const KEY_SIZE: usize = 24;
 const VALUE_SIZE: usize = 150;
@@ -56,9 +57,24 @@ fn make_rng() -> fastrand::Rng {
     fastrand::Rng::with_seed(RNG_SEED)
 }
 
-fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
+fn make_rng_shards(shards: usize, elements: usize) -> Vec<fastrand::Rng> {
+    let mut rngs = vec![];
+    let elements_per_shard = elements / shards;
+    for i in 0..shards {
+        let mut rng = make_rng();
+        for _ in 0..(i * elements_per_shard) {
+            gen_pair(&mut rng);
+        }
+        rngs.push(rng);
+    }
+
+    rngs
+}
+
+fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, Duration)> {
     let mut rng = make_rng();
     let mut results = Vec::new();
+    let db = Arc::new(db);
 
     let start = Instant::now();
     let mut txn = db.write_transaction();
@@ -80,7 +96,7 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
         ELEMENTS,
         duration.as_millis()
     );
-    results.push(("bulk load", duration));
+    results.push(("bulk load".to_string(), duration));
 
     let start = Instant::now();
     let writes = 100;
@@ -103,7 +119,7 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
         writes,
         duration.as_millis()
     );
-    results.push(("individual writes", duration));
+    results.push(("individual writes".to_string(), duration));
 
     let start = Instant::now();
     let batch_size = 1000;
@@ -129,7 +145,7 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
         batch_size,
         duration.as_millis()
     );
-    results.push(("batch writes", duration));
+    results.push(("batch writes".to_string(), duration));
 
     let txn = db.read_transaction();
     {
@@ -154,7 +170,7 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
                 ELEMENTS,
                 duration.as_millis()
             );
-            results.push(("random reads", duration));
+            results.push(("random reads".to_string(), duration));
         }
 
         for _ in 0..ITERATIONS {
@@ -183,10 +199,46 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
                 ELEMENTS * num_scan,
                 duration.as_millis()
             );
-            results.push(("random range reads", duration));
+            results.push(("random range reads".to_string(), duration));
         }
     }
     drop(txn);
+
+    for num_threads in [4, 8, 16, 32] {
+        let mut rngs = make_rng_shards(num_threads, ELEMENTS);
+        let start = Instant::now();
+
+        thread::scope(|s| {
+            for _ in 0..num_threads {
+                let db2 = db.clone();
+                let mut rng = rngs.pop().unwrap();
+                s.spawn(move || {
+                    let txn = db2.read_transaction();
+                    let mut checksum = 0u64;
+                    let mut expected_checksum = 0u64;
+                    let reader = txn.get_reader();
+                    for _ in 0..(ELEMENTS / num_threads) {
+                        let (key, value) = gen_pair(&mut rng);
+                        let result = reader.get(&key).unwrap();
+                        checksum += result.as_ref()[0] as u64;
+                        expected_checksum += value[0] as u64;
+                    }
+                    assert_eq!(checksum, expected_checksum);
+                });
+            }
+        });
+
+        let end = Instant::now();
+        let duration = end - start;
+        println!(
+            "{}: Random read ({} threads) {} items in {}ms",
+            T::db_type_name(),
+            num_threads,
+            ELEMENTS,
+            duration.as_millis()
+        );
+        results.push((format!("random reads ({} threads)", num_threads), duration));
+    }
 
     let start = Instant::now();
     let deletes = ELEMENTS / 2;
@@ -210,7 +262,7 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
         deletes,
         duration.as_millis()
     );
-    results.push(("removals", duration));
+    results.push(("removals".to_string(), duration));
 
     results
 }
