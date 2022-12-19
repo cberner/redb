@@ -157,8 +157,8 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     /// let table = read_txn.open_table(TABLE)?;
     /// let mut iter = table.range("a".."c")?;
     /// let (key, value) = iter.next().unwrap();
-    /// assert_eq!("a", key.to_value());
-    /// assert_eq!(0, value.to_value());
+    /// assert_eq!("a", key.value());
+    /// assert_eq!(0, value.value());
     /// # Ok(())
     /// # }
     /// ```
@@ -337,8 +337,8 @@ mod test {
         let mut iter = table.range(start..=end).unwrap();
         for i in (3..=7u8).rev() {
             let (key, value) = iter.next().unwrap();
-            assert_eq!(&[i], key.to_value().0.as_slice());
-            assert_eq!(b"value", value.to_value());
+            assert_eq!(&[i], key.value().0.as_slice());
+            assert_eq!(b"value", value.value());
         }
         assert!(iter.next().is_none());
     }

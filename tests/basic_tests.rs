@@ -57,7 +57,7 @@ fn create_open() {
 
     let read_txn = db2.begin_read().unwrap();
     let table = read_txn.open_table(U64_TABLE).unwrap();
-    assert_eq!(1, table.get(&0).unwrap().unwrap().to_value());
+    assert_eq!(1, table.get(&0).unwrap().unwrap().value());
 }
 
 #[test]
@@ -81,9 +81,9 @@ fn multiple_tables() {
     let table = read_txn.open_table(definition1).unwrap();
     let table2 = read_txn.open_table(definition2).unwrap();
     assert_eq!(table.len().unwrap(), 1);
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
     assert_eq!(table2.len().unwrap(), 1);
-    assert_eq!(b"world2", table2.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world2", table2.get(b"hello").unwrap().unwrap().value());
 }
 
 #[test]
@@ -153,10 +153,7 @@ fn tuple_type_lifetime() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(table_def).unwrap();
-    assert_eq!(
-        table.get(&("hello", 5)).unwrap().unwrap().to_value(),
-        (0, 123)
-    );
+    assert_eq!(table.get(&("hello", 5)).unwrap().unwrap().value(), (0, 123));
 }
 
 #[test]
@@ -175,10 +172,7 @@ fn tuple2_type() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(table_def).unwrap();
-    assert_eq!(
-        table.get(&("hello", 5)).unwrap().unwrap().to_value(),
-        (0, 123)
-    );
+    assert_eq!(table.get(&("hello", 5)).unwrap().unwrap().value(), (0, 123));
 }
 
 #[test]
@@ -198,7 +192,7 @@ fn tuple3_type() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(table_def).unwrap();
     assert_eq!(
-        table.get(&("hello", 5, 6)).unwrap().unwrap().to_value(),
+        table.get(&("hello", 5, 6)).unwrap().unwrap().value(),
         (0, 123)
     );
 }
@@ -221,7 +215,7 @@ fn tuple4_type() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(table_def).unwrap();
     assert_eq!(
-        table.get(&("hello", 5, 6, 7)).unwrap().unwrap().to_value(),
+        table.get(&("hello", 5, 6, 7)).unwrap().unwrap().value(),
         (0, 123)
     );
 }
@@ -245,11 +239,7 @@ fn tuple5_type() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(table_def).unwrap();
     assert_eq!(
-        table
-            .get(&("hello", 5, 6, 7, 8))
-            .unwrap()
-            .unwrap()
-            .to_value(),
+        table.get(&("hello", 5, 6, 7, 8)).unwrap().unwrap().value(),
         (0, 123)
     );
 }
@@ -277,7 +267,7 @@ fn tuple6_type() {
             .get(&("hello", 5, 6, 7, 8, 9))
             .unwrap()
             .unwrap()
-            .to_value(),
+            .value(),
         (0, 123)
     );
 }
@@ -307,7 +297,7 @@ fn tuple7_type() {
             .get(&("hello", 5, 6, 7, 8, 9, -1))
             .unwrap()
             .unwrap()
-            .to_value(),
+            .value(),
         (0, 123)
     );
 }
@@ -337,7 +327,7 @@ fn tuple8_type() {
             .get(&("hello", 5, 6, 7, 8, 9, -1, -2))
             .unwrap()
             .unwrap()
-            .to_value(),
+            .value(),
         (0, 123)
     );
 }
@@ -367,7 +357,7 @@ fn tuple9_type() {
             .get(&("hello", 5, 6, 7, 8, 9, -1, -2, -3))
             .unwrap()
             .unwrap()
-            .to_value(),
+            .value(),
         (0, 123)
     );
 }
@@ -397,7 +387,7 @@ fn tuple10_type() {
             .get(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4))
             .unwrap()
             .unwrap()
-            .to_value(),
+            .value(),
         (0, 123)
     );
 }
@@ -429,7 +419,7 @@ fn tuple11_type() {
             .get(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4, -5))
             .unwrap()
             .unwrap()
-            .to_value(),
+            .value(),
         (0, 123)
     );
 }
@@ -464,7 +454,7 @@ fn tuple12_type() {
             .get(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4, -5, "end"))
             .unwrap()
             .unwrap()
-            .to_value(),
+            .value(),
         (0, 123)
     );
 }
@@ -495,7 +485,7 @@ fn abort() {
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
         table.insert(b"hello", b"aborted").unwrap();
-        assert_eq!(b"aborted", table.get(b"hello").unwrap().unwrap().to_value());
+        assert_eq!(b"aborted", table.get(b"hello").unwrap().unwrap().value());
     }
     write_txn.abort().unwrap();
 
@@ -512,7 +502,7 @@ fn abort() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
     assert_eq!(table.len().unwrap(), 1);
 }
 
@@ -529,22 +519,19 @@ fn insert_overwrite() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
 
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
         let old_value = table.insert(b"hello", b"replaced").unwrap();
-        assert_eq!(old_value.unwrap().to_value(), b"world");
+        assert_eq!(old_value.unwrap().value(), b"world");
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(
-        b"replaced",
-        table.get(b"hello").unwrap().unwrap().to_value()
-    );
+    assert_eq!(b"replaced", table.get(b"hello").unwrap().unwrap().value());
 }
 
 #[test]
@@ -562,7 +549,7 @@ fn insert_reserve() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(value, table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(value, table.get(b"hello").unwrap().unwrap().value());
 }
 
 #[test]
@@ -579,16 +566,13 @@ fn delete() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
     assert_eq!(table.len().unwrap(), 2);
 
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        assert_eq!(
-            b"world",
-            table.remove(b"hello").unwrap().unwrap().to_value()
-        );
+        assert_eq!(b"world", table.remove(b"hello").unwrap().unwrap().value());
         assert!(table.remove(b"hello").unwrap().is_none());
     }
     write_txn.commit().unwrap();
@@ -616,7 +600,7 @@ fn no_dirty_reads() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
 }
 
 #[test]
@@ -632,7 +616,7 @@ fn read_isolation() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -646,17 +630,11 @@ fn read_isolation() {
     let read_txn2 = db.begin_read().unwrap();
     let table2 = read_txn2.open_table(SLICE_TABLE).unwrap();
     assert!(table2.get(b"hello").unwrap().is_none());
-    assert_eq!(
-        b"world2",
-        table2.get(b"hello2").unwrap().unwrap().to_value()
-    );
-    assert_eq!(
-        b"world3",
-        table2.get(b"hello3").unwrap().unwrap().to_value()
-    );
+    assert_eq!(b"world2", table2.get(b"hello2").unwrap().unwrap().value());
+    assert_eq!(b"world3", table2.get(b"hello3").unwrap().unwrap().value());
     assert_eq!(table2.len().unwrap(), 2);
 
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
     assert!(table.get(b"hello2").unwrap().is_none());
     assert!(table.get(b"hello3").unwrap().is_none());
     assert_eq!(table.len().unwrap(), 1);
@@ -676,7 +654,7 @@ fn read_isolation2() {
     let write_txn = db.begin_write().unwrap();
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
     {
         let mut write_table = write_txn.open_table(SLICE_TABLE).unwrap();
         write_table.remove(b"hello").unwrap();
@@ -688,17 +666,11 @@ fn read_isolation2() {
     let read_txn2 = db.begin_read().unwrap();
     let table2 = read_txn2.open_table(SLICE_TABLE).unwrap();
     assert!(table2.get(b"hello").unwrap().is_none());
-    assert_eq!(
-        b"world2",
-        table2.get(b"hello2").unwrap().unwrap().to_value()
-    );
-    assert_eq!(
-        b"world3",
-        table2.get(b"hello3").unwrap().unwrap().to_value()
-    );
+    assert_eq!(b"world2", table2.get(b"hello2").unwrap().unwrap().value());
+    assert_eq!(b"world3", table2.get(b"hello3").unwrap().unwrap().value());
     assert_eq!(table2.len().unwrap(), 2);
 
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().to_value());
+    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
     assert!(table.get(b"hello2").unwrap().is_none());
     assert!(table.get(b"hello3").unwrap().is_none());
     assert_eq!(table.len().unwrap(), 1);
@@ -736,9 +708,9 @@ fn u64_type() {
     let table = read_txn.open_table(U64_TABLE).unwrap();
     assert_eq!(
         2u64,
-        table.range(0..2).unwrap().map(|(_, x)| x.to_value()).sum()
+        table.range(0..2).unwrap().map(|(_, x)| x.value()).sum()
     );
-    assert_eq!(1, table.get(&0).unwrap().unwrap().to_value());
+    assert_eq!(1, table.get(&0).unwrap().unwrap().value());
 }
 
 #[test]
@@ -759,10 +731,10 @@ fn i128_type() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(definition).unwrap();
-    assert_eq!(-2, table.get(&-1).unwrap().unwrap().to_value());
+    assert_eq!(-2, table.get(&-1).unwrap().unwrap().value());
     let mut iter: RangeIter<i128, i128> = table.range::<i128>(..).unwrap();
     for i in -11..10 {
-        assert_eq!(iter.next().unwrap().1.to_value(), i);
+        assert_eq!(iter.next().unwrap().1.value(), i);
     }
     assert!(iter.next().is_none());
 }
@@ -783,7 +755,7 @@ fn f32_type() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(definition).unwrap();
-    assert_eq!(0.3, table.get(&0).unwrap().unwrap().to_value());
+    assert_eq!(0.3, table.get(&0).unwrap().unwrap().value());
 }
 
 #[test]
@@ -802,14 +774,14 @@ fn str_type() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(definition).unwrap();
-    assert_eq!("world", table.get("hello").unwrap().unwrap().to_value());
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
 
     let mut iter = table.iter().unwrap();
-    assert_eq!(iter.next().unwrap().1.to_value(), "world");
+    assert_eq!(iter.next().unwrap().1.value(), "world");
     assert!(iter.next().is_none());
 
     let mut iter: RangeIter<&str, &str> = table.range("a".."z").unwrap();
-    assert_eq!(iter.next().unwrap().1.to_value(), "world");
+    assert_eq!(iter.next().unwrap().1.value(), "world");
     assert!(iter.next().is_none());
 }
 
@@ -849,10 +821,10 @@ fn array_type() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(definition).unwrap();
     let hello = b"hello";
-    assert_eq!(b"world_123", table.get(hello).unwrap().unwrap().to_value());
+    assert_eq!(b"world_123", table.get(hello).unwrap().unwrap().value());
 
     let mut iter: RangeIter<&[u8; 5], &[u8; 9]> = table.range::<&[u8; 5]>(..).unwrap();
-    assert_eq!(iter.next().unwrap().1.to_value(), b"world_123");
+    assert_eq!(iter.next().unwrap().1.value(), b"world_123");
     assert!(iter.next().is_none());
 }
 
@@ -875,21 +847,21 @@ fn owned_get_signatures() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(definition).unwrap();
 
-    assert_eq!(2, table.get(&1).unwrap().unwrap().to_value());
+    assert_eq!(2, table.get(&1).unwrap().unwrap().value());
 
     let mut iter: RangeIter<u32, u32> = table.range::<u32>(..).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.to_value(), i + 1);
+        assert_eq!(iter.next().unwrap().1.value(), i + 1);
     }
     assert!(iter.next().is_none());
     let mut iter: RangeIter<u32, u32> = table.range(0..10).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.to_value(), i + 1);
+        assert_eq!(iter.next().unwrap().1.value(), i + 1);
     }
     assert!(iter.next().is_none());
     let mut iter = table.range::<&u32>(&0..&10).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.to_value(), i + 1);
+        assert_eq!(iter.next().unwrap().1.value(), i + 1);
     }
     assert!(iter.next().is_none());
 }
@@ -911,34 +883,34 @@ fn ref_get_signatures() {
     let table = read_txn.open_table(SLICE_TABLE).unwrap();
 
     let zero = vec![0u8];
-    assert_eq!(&[1], table.get(&[0]).unwrap().unwrap().to_value());
-    assert_eq!(&[1], table.get(b"\0").unwrap().unwrap().to_value());
-    assert_eq!(&[1], table.get(&zero).unwrap().unwrap().to_value());
+    assert_eq!(&[1], table.get(&[0]).unwrap().unwrap().value());
+    assert_eq!(&[1], table.get(b"\0").unwrap().unwrap().value());
+    assert_eq!(&[1], table.get(&zero).unwrap().unwrap().value());
 
     let start = vec![0u8];
     let end = vec![10u8];
     let mut iter = table.range::<&[u8]>(..).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.to_value(), &[i + 1]);
+        assert_eq!(iter.next().unwrap().1.value(), &[i + 1]);
     }
     assert!(iter.next().is_none());
 
     let mut iter = table.range(start.as_slice()..&end).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.to_value(), &[i + 1]);
+        assert_eq!(iter.next().unwrap().1.value(), &[i + 1]);
     }
     assert!(iter.next().is_none());
     drop(iter);
 
     let mut iter = table.range(start..end).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.to_value(), &[i + 1]);
+        assert_eq!(iter.next().unwrap().1.value(), &[i + 1]);
     }
     assert!(iter.next().is_none());
 
     let mut iter = table.range([0u8]..[10u8]).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.to_value(), &[i + 1]);
+        assert_eq!(iter.next().unwrap().1.value(), &[i + 1]);
     }
     assert!(iter.next().is_none());
 }
@@ -982,7 +954,7 @@ fn iter() {
     let mut iter = table.iter().unwrap();
     for i in 0..10 {
         let (k, v) = iter.next().unwrap();
-        assert_eq!(i, k.to_value());
-        assert_eq!(i, v.to_value());
+        assert_eq!(i, k.value());
+        assert_eq!(i, v.value());
     }
 }

@@ -64,7 +64,7 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
                         match local_reference.get(&key) {
                             Some(reference_len) => {
                                 let value = table.get(&key).unwrap().unwrap();
-                                assert_eq!(value.to_value().len(), *reference_len);
+                                assert_eq!(value.value().len(), *reference_len);
                             }
                             None => {
                                 assert!(table.get(&key).unwrap().is_none());
@@ -90,7 +90,7 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
                         match local_reference.remove(&key) {
                             Some(reference_len) => {
                                 let value = table.remove(&key)?;
-                                assert_eq!(value.unwrap().to_value().len(), reference_len);
+                                assert_eq!(value.unwrap().value().len(), reference_len);
                             }
                             None => {
                                 assert!(table.remove(&key).unwrap().is_none());
@@ -120,8 +120,8 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
                         };
                         while let Some((ref_key, ref_value_len)) = reference_iter.next() {
                             let (key, value) = iter.next().unwrap();
-                            assert_eq!(*ref_key, key.to_value());
-                            assert_eq!(*ref_value_len, value.to_value().len());
+                            assert_eq!(*ref_key, key.value());
+                            assert_eq!(*ref_value_len, value.value().len());
                         }
                         assert!(iter.next().is_none());
                     }
@@ -146,7 +146,7 @@ fn assert_multimap_value_eq(
 ) {
     if let Some(values) = reference {
         for value in values.iter() {
-            assert_eq!(iter.next().unwrap().to_value().len(), *value);
+            assert_eq!(iter.next().unwrap().value().len(), *value);
         }
     }
     assert!(iter.next().is_none());
@@ -257,7 +257,7 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
                         };
                         while let Some((ref_key, ref_values)) = reference_iter.next() {
                             let (key, value_iter) = iter.next().unwrap();
-                            assert_eq!(*ref_key, key.to_value());
+                            assert_eq!(*ref_key, key.value());
                             assert_multimap_value_eq(value_iter, Some(ref_values));
                         }
                         assert!(iter.next().is_none());

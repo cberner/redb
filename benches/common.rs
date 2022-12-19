@@ -160,7 +160,7 @@ impl<'a> RedbAccessGuard<'a> {
 
 impl<'a> AsRef<[u8]> for RedbAccessGuard<'a> {
     fn as_ref(&self) -> &[u8] {
-        self.inner.to_value()
+        self.inner.value()
     }
 }
 
