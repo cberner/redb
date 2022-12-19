@@ -1,7 +1,7 @@
 use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, LeafKeyIter,
-    Page, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
+    AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, Page,
+    PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{AccessGuard, Result, WriteTransaction};
@@ -37,6 +37,66 @@ pub(crate) fn parse_subtree_roots<T: Page>(
             result
         }
         _ => unreachable!(),
+    }
+}
+
+pub(crate) struct LeafKeyIter<'a> {
+    inline_collection: AccessGuard<'a, DynamicCollection>,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    start_entry: isize, // inclusive
+    end_entry: isize,   // inclusive
+}
+
+impl<'a> LeafKeyIter<'a> {
+    fn new(
+        data: AccessGuard<'a, DynamicCollection>,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+    ) -> Self {
+        let accessor = LeafAccessor::new(
+            data.to_value().as_inline(),
+            fixed_key_size,
+            fixed_value_size,
+        );
+        let end_entry = isize::try_from(accessor.num_pairs()).unwrap() - 1;
+        Self {
+            inline_collection: data,
+            fixed_key_size,
+            fixed_value_size,
+            start_entry: 0,
+            end_entry,
+        }
+    }
+
+    fn next_key(&mut self) -> Option<&[u8]> {
+        if self.end_entry < self.start_entry {
+            return None;
+        }
+        let accessor = LeafAccessor::new(
+            self.inline_collection.to_value().as_inline(),
+            self.fixed_key_size,
+            self.fixed_value_size,
+        );
+        self.start_entry += 1;
+        accessor
+            .entry((self.start_entry - 1).try_into().unwrap())
+            .map(|e| e.key())
+    }
+
+    fn next_key_back(&mut self) -> Option<&[u8]> {
+        if self.end_entry < self.start_entry {
+            return None;
+        }
+        let accessor = LeafAccessor::new(
+            self.inline_collection.to_value().as_inline(),
+            self.fixed_key_size,
+            self.fixed_value_size,
+        );
+        self.end_entry -= 1;
+        accessor
+            .entry((self.end_entry + 1).try_into().unwrap())
+            .map(|e| e.key())
     }
 }
 
@@ -146,20 +206,20 @@ impl DynamicCollection {
     }
 
     fn iter<'a, V: RedbKey + ?Sized>(
-        &self,
+        collection: AccessGuard<'a, DynamicCollection>,
         mem: &'a TransactionalMemory,
     ) -> MultimapValueIter<'a, V> {
-        match self.collection_type() {
+        match collection.to_value().collection_type() {
             Inline => {
                 let leaf_iter = LeafKeyIter::new(
-                    self.as_inline().to_vec(),
+                    collection,
                     V::fixed_width(),
                     <() as RedbValue>::fixed_width(),
                 );
                 MultimapValueIter::new_inline(leaf_iter)
             }
             Subtree => {
-                let root = self.as_subtree().0;
+                let root = collection.to_value().as_subtree().0;
                 MultimapValueIter::new_subtree(
                     BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., Some(root), mem),
                 )
@@ -168,22 +228,22 @@ impl DynamicCollection {
     }
 
     fn iter_free_on_drop<'a, V: RedbKey + ?Sized>(
-        &self,
+        collection: AccessGuard<'a, DynamicCollection>,
         pages: Vec<PageNumber>,
         freed_pages: Rc<RefCell<Vec<PageNumber>>>,
         mem: &'a TransactionalMemory,
     ) -> MultimapValueIter<'a, V> {
-        match self.collection_type() {
+        match collection.to_value().collection_type() {
             Inline => {
                 let leaf_iter = LeafKeyIter::new(
-                    self.as_inline().to_vec(),
+                    collection,
                     V::fixed_width(),
                     <() as RedbValue>::fixed_width(),
                 );
                 MultimapValueIter::new_inline(leaf_iter)
             }
             Subtree => {
-                let root = self.as_subtree().0;
+                let root = collection.to_value().as_subtree().0;
                 let inner =
                     BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., Some(root), mem);
                 MultimapValueIter::new_subtree_free_on_drop(inner, freed_pages, pages, mem)
@@ -209,11 +269,11 @@ impl DynamicCollection {
 
 enum ValueIterState<'a, V: RedbKey + ?Sized + 'a> {
     Subtree(BtreeRangeIter<'a, V, ()>),
-    InlineLeaf(LeafKeyIter),
+    InlineLeaf(LeafKeyIter<'a>),
 }
 
 pub struct MultimapValueIter<'a, V: RedbKey + ?Sized + 'a> {
-    inner: ValueIterState<'a, V>,
+    inner: Option<ValueIterState<'a, V>>,
     freed_pages: Option<Rc<RefCell<Vec<PageNumber>>>>,
     free_on_drop: Vec<PageNumber>,
     mem: Option<&'a TransactionalMemory>,
@@ -223,7 +283,7 @@ pub struct MultimapValueIter<'a, V: RedbKey + ?Sized + 'a> {
 impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
     fn new_subtree(inner: BtreeRangeIter<'a, V, ()>) -> Self {
         Self {
-            inner: ValueIterState::Subtree(inner),
+            inner: Some(ValueIterState::Subtree(inner)),
             freed_pages: None,
             free_on_drop: vec![],
             mem: None,
@@ -238,7 +298,7 @@ impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
         mem: &'a TransactionalMemory,
     ) -> Self {
         Self {
-            inner: ValueIterState::Subtree(inner),
+            inner: Some(ValueIterState::Subtree(inner)),
             freed_pages: Some(freed_pages),
             free_on_drop: pages,
             mem: Some(mem),
@@ -246,9 +306,9 @@ impl<'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, V> {
         }
     }
 
-    fn new_inline(inner: LeafKeyIter) -> Self {
+    fn new_inline(inner: LeafKeyIter<'a>) -> Self {
         Self {
-            inner: ValueIterState::InlineLeaf(inner),
+            inner: Some(ValueIterState::InlineLeaf(inner)),
             freed_pages: None,
             free_on_drop: vec![],
             mem: None,
@@ -262,7 +322,7 @@ impl<'a, V: RedbKey + ?Sized> Iterator for MultimapValueIter<'a, V> {
 
     fn next(&mut self) -> Option<Self::Item> {
         // TODO: optimize out this copy
-        let bytes = match self.inner {
+        let bytes = match self.inner.as_mut().unwrap() {
             ValueIterState::Subtree(ref mut iter) => iter.next().map(|e| e.key().to_vec())?,
             ValueIterState::InlineLeaf(ref mut iter) => iter.next_key()?.to_vec(),
         };
@@ -273,7 +333,7 @@ impl<'a, V: RedbKey + ?Sized> Iterator for MultimapValueIter<'a, V> {
 impl<'a, V: RedbKey + ?Sized> DoubleEndedIterator for MultimapValueIter<'a, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         // TODO: optimize out this copy
-        let bytes = match self.inner {
+        let bytes = match self.inner.as_mut().unwrap() {
             ValueIterState::Subtree(ref mut iter) => iter.next_back().map(|e| e.key().to_vec())?,
             ValueIterState::InlineLeaf(ref mut iter) => iter.next_key_back()?.to_vec(),
         };
@@ -284,10 +344,7 @@ impl<'a, V: RedbKey + ?Sized> DoubleEndedIterator for MultimapValueIter<'a, V> {
 impl<'a, V: RedbKey + ?Sized> Drop for MultimapValueIter<'a, V> {
     fn drop(&mut self) {
         // Drop our references to the pages that are about to be freed
-        let mut dummy_state =
-            ValueIterState::InlineLeaf(LeafKeyIter::new(b"\x01\x00\x00\x00".to_vec(), None, None));
-        mem::swap(&mut self.inner, &mut dummy_state);
-        drop(dummy_state);
+        drop(mem::take(&mut self.inner));
         for page in self.free_on_drop.iter() {
             // TODO: make free_if_uncommitted not return a Result by moving the dirtying of the allocator state into the open method of the TransactionMemory
             unsafe {
@@ -328,10 +385,10 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> Iterator
 
     fn next(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next()?;
-        // TODO: optimize out this copy
         let key = AccessGuard::with_owned_value(entry.key().to_vec());
-        let collection = DynamicCollection::from_bytes(entry.value());
-        let iter = collection.iter(self.mem);
+        let (page, _, value_range) = entry.into_raw();
+        let collection = AccessGuard::with_page(page, value_range);
+        let iter = DynamicCollection::iter(collection, self.mem);
 
         Some((key, iter))
     }
@@ -342,10 +399,10 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> DoubleEndedIterator
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;
-        // TODO: optimize out this copy
         let key = AccessGuard::with_owned_value(entry.key().to_vec());
-        let collection = DynamicCollection::from_bytes(entry.value());
-        let iter = collection.iter(self.mem);
+        let (page, _, value_range) = entry.into_raw();
+        let collection = AccessGuard::with_page(page, value_range);
+        let iter = DynamicCollection::iter(collection, self.mem);
 
         Some((key, iter))
     }
@@ -693,10 +750,14 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                 let mut pages = vec![tmp_page_number];
                 drop(tmp_page);
                 let tmp_page = self.mem.get_page(tmp_page_number);
-                let collection = DynamicCollection::new(&tmp_page.memory()[..len]);
+                let collection: AccessGuard<DynamicCollection> =
+                    AccessGuard::with_page(tmp_page, 0..len);
 
-                if matches!(collection.collection_type(), DynamicCollectionType::Subtree) {
-                    let root = collection.as_subtree().0;
+                if matches!(
+                    collection.to_value().collection_type(),
+                    DynamicCollectionType::Subtree
+                ) {
+                    let root = collection.to_value().as_subtree().0;
                     let all_pages = AllPageNumbersBtreeIter::new(
                         root,
                         V::fixed_width(),
@@ -707,7 +768,12 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                         pages.push(page);
                     }
                 }
-                collection.iter_free_on_drop(pages, self.freed_pages.clone(), self.mem)
+                DynamicCollection::iter_free_on_drop(
+                    collection,
+                    pages,
+                    self.freed_pages.clone(),
+                    self.mem,
+                )
             } else {
                 MultimapValueIter::new_subtree(
                     BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem),
@@ -725,7 +791,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<
     fn get<'a>(&'a self, key: impl Borrow<K::RefBaseType<'a>>) -> Result<MultimapValueIter<'a, V>> {
         let iter =
             if let Some(collection) = self.tree.get(key.borrow())? {
-                collection.to_value().iter(self.mem)
+                DynamicCollection::iter(collection, self.mem)
             } else {
                 MultimapValueIter::new_subtree(
                     BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem),
@@ -817,7 +883,7 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     fn get<'a>(&'a self, key: impl Borrow<K::RefBaseType<'a>>) -> Result<MultimapValueIter<'a, V>> {
         let iter =
             if let Some(collection) = self.tree.get(key.borrow())? {
-                collection.to_value().iter(self.mem)
+                DynamicCollection::iter(collection, self.mem)
             } else {
                 MultimapValueIter::new_subtree(
                     BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem),
