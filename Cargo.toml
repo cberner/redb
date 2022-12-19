@@ -48,6 +48,10 @@ logging = ["log"]
 debug = true
 
 [[bench]]
+name = "atomics_benchmark"
+harness = false
+
+[[bench]]
 name = "userspace_cache_benchmark"
 harness = false
 
