@@ -100,7 +100,7 @@ impl PagedCachedFile {
     }
 
     const fn lock_stripes() -> usize {
-        128
+        131
     }
 
     #[inline]
