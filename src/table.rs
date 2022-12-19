@@ -1,5 +1,6 @@
 use crate::tree_store::{
-    AccessGuardMut, Btree, BtreeMut, BtreeRangeIter, Checksum, PageNumber, TransactionalMemory,
+    AccessGuardMut, Btree, BtreeMut, BtreeRangeIter, Checksum, PageHint, PageNumber,
+    TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Result;
@@ -187,10 +188,11 @@ pub struct ReadOnlyTable<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'txn, K, V> {
     pub(crate) fn new(
         root_page: Option<(PageNumber, Checksum)>,
+        hint: PageHint,
         mem: &'txn TransactionalMemory,
     ) -> ReadOnlyTable<'txn, K, V> {
         ReadOnlyTable {
-            tree: Btree::new(root_page, mem),
+            tree: Btree::new(root_page, hint, mem),
         }
     }
 }

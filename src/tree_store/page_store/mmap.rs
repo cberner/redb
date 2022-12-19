@@ -15,7 +15,7 @@ use unix::*;
 #[cfg(windows)]
 mod windows;
 use crate::transaction_tracker::TransactionId;
-use crate::tree_store::page_store::base::{PageHack, PageHackMut, PhysicalStorage};
+use crate::tree_store::page_store::base::{PageHack, PageHackMut, PageHint, PhysicalStorage};
 #[cfg(windows)]
 use windows::*;
 
@@ -155,7 +155,7 @@ impl PhysicalStorage for Mmap {
         Ok(())
     }
 
-    unsafe fn read(&self, offset: u64, len: usize) -> Result<PageHack> {
+    unsafe fn read(&self, offset: u64, len: usize, _hint: PageHint) -> Result<PageHack> {
         let offset: usize = offset.try_into().unwrap();
         assert!(offset + len <= self.len());
         self.check_fsync_failure()?;

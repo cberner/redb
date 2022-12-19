@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
-    Btree, BtreeMut, FreedTableKey, InternalTableDefinition, PageNumber, TableTree, TableType,
-    TransactionalMemory,
+    Btree, BtreeMut, FreedTableKey, InternalTableDefinition, PageHint, PageNumber, TableTree,
+    TableType, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{
@@ -603,7 +603,7 @@ impl<'db> WriteTransaction<'db> {
         {
             eprintln!("Master tree:");
             let master_tree: Btree<&str, InternalTableDefinition> =
-                Btree::new(Some(page), self.mem);
+                Btree::new(Some(page), PageHint::None, self.mem);
             master_tree.print_debug(true);
         }
     }
@@ -651,7 +651,11 @@ impl<'db> ReadTransaction<'db> {
             .get_table::<K, V>(definition.name(), TableType::Normal)?
             .ok_or_else(|| Error::TableDoesNotExist(definition.name().to_string()))?;
 
-        Ok(ReadOnlyTable::new(header.get_root(), self.db.get_memory()))
+        Ok(ReadOnlyTable::new(
+            header.get_root(),
+            PageHint::Clean,
+            self.db.get_memory(),
+        ))
     }
 
     /// Open the given table
@@ -666,6 +670,7 @@ impl<'db> ReadTransaction<'db> {
 
         Ok(ReadOnlyMultimapTable::new(
             header.get_root(),
+            PageHint::Clean,
             self.db.get_memory(),
         ))
     }

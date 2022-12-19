@@ -1,7 +1,7 @@
 use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, Page,
-    PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
+    PageHint, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{AccessGuard, Result, WriteTransaction};
@@ -863,10 +863,11 @@ pub struct ReadOnlyMultimapTable<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized>
 impl<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'txn, K, V> {
     pub(crate) fn new(
         root_page: Option<(PageNumber, Checksum)>,
+        hint: PageHint,
         mem: &'txn TransactionalMemory,
     ) -> ReadOnlyMultimapTable<'txn, K, V> {
         ReadOnlyMultimapTable {
-            tree: Btree::new(root_page, mem),
+            tree: Btree::new(root_page, hint, mem),
             mem,
             _value_type: Default::default(),
         }

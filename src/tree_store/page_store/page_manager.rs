@@ -1,7 +1,7 @@
 use crate::db::WriteStrategy;
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::Checksum;
-use crate::tree_store::page_store::base::PhysicalStorage;
+use crate::tree_store::page_store::base::{PageHint, PhysicalStorage};
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
@@ -955,7 +955,12 @@ impl TransactionalMemory {
         Ok(())
     }
 
+    // TODO: make all callers explicitly provide a hint
     pub(crate) fn get_page(&self, page_number: PageNumber) -> PageImpl {
+        self.get_page_extended(page_number, PageHint::None)
+    }
+
+    pub(crate) fn get_page_extended(&self, page_number: PageNumber, hint: PageHint) -> PageImpl {
         // We must not retrieve an immutable reference to a page which already has a mutable ref to it
         #[cfg(debug_assertions)]
         {
@@ -980,7 +985,11 @@ impl TransactionalMemory {
             self.page_size,
         );
         // TODO: propagate error
-        let mem = unsafe { self.storage.read(range.start as u64, range.len()).unwrap() };
+        let mem = unsafe {
+            self.storage
+                .read(range.start as u64, range.len(), hint)
+                .unwrap()
+        };
 
         PageImpl {
             mem,

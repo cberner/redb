@@ -1,5 +1,5 @@
 use crate::transaction_tracker::TransactionId;
-use crate::tree_store::page_store::base::{PageHack, PageHackMut, PhysicalStorage};
+use crate::tree_store::page_store::base::{PageHack, PageHackMut, PageHint, PhysicalStorage};
 use crate::tree_store::page_store::file_lock::LockedFile;
 use crate::{Error, Result};
 use std::collections::BTreeMap;
@@ -204,13 +204,12 @@ impl PhysicalStorage for PagedCachedFile {
     }
 
     // Caller must explicitly invalidate overlapping regions that are read
-    unsafe fn read(&self, offset: u64, len: usize) -> Result<PageHack> {
+    unsafe fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<PageHack> {
         self.check_fsync_failure()?;
         debug_assert_eq!(0, offset % self.page_size);
         self.reads_total.fetch_add(1, Ordering::AcqRel);
 
-        // TODO: allow caller to hint that the page being read is known to be clean, so that this can be skipped
-        {
+        if !matches!(hint, PageHint::Clean) {
             let lock = self.write_buffer.lock().unwrap();
             if let Some(cached) = lock.get(&offset) {
                 self.reads_hits.fetch_add(1, Ordering::Release);
