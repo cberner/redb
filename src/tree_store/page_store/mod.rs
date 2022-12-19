@@ -13,7 +13,7 @@ mod utils;
 #[allow(dead_code)]
 mod xxh3;
 
-pub(crate) use base::{Page, PageNumber};
+pub(crate) use base::{Page, PageHint, PageNumber};
 pub(crate) use page_manager::{ChecksumType, TransactionalMemory};
 pub use savepoint::Savepoint;
 

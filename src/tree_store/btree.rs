@@ -4,7 +4,7 @@ use crate::tree_store::btree_base::{
 };
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
-use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageNumber};
+use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageHint, PageNumber};
 use crate::types::{RedbKey, RedbValue};
 use crate::{AccessGuard, Result};
 #[cfg(feature = "logging")]
@@ -156,7 +156,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
     }
 
     fn read_tree(&self) -> Btree<'a, K, V> {
-        Btree::new(self.get_root(), self.mem)
+        Btree::new(self.get_root(), PageHint::None, self.mem)
     }
 
     pub(crate) fn get(&self, key: &K::RefBaseType<'_>) -> Result<Option<AccessGuard<'_, V>>> {
@@ -247,15 +247,21 @@ impl<'a> RawBtree<'a> {
 pub(crate) struct Btree<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     mem: &'a TransactionalMemory,
     root: Option<(PageNumber, Checksum)>,
+    hint: PageHint,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
 impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
-    pub(crate) fn new(root: Option<(PageNumber, Checksum)>, mem: &'a TransactionalMemory) -> Self {
+    pub(crate) fn new(
+        root: Option<(PageNumber, Checksum)>,
+        hint: PageHint,
+        mem: &'a TransactionalMemory,
+    ) -> Self {
         Self {
             mem,
             root,
+            hint,
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -263,7 +269,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
 
     pub(crate) fn get(&self, key: &K::RefBaseType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
         if let Some((p, _)) = self.root {
-            let root_page = self.mem.get_page(p);
+            let root_page = self.mem.get_page_extended(p, self.hint);
             return Ok(self.get_helper(root_page, K::as_bytes(key).as_ref()));
         } else {
             Ok(None)
@@ -285,7 +291,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let (_, child_page) = accessor.child_for_key::<K>(query);
-                self.get_helper(self.mem.get_page(child_page), query)
+                self.get_helper(self.mem.get_page_extended(child_page, self.hint), query)
             }
             _ => unreachable!(),
         }

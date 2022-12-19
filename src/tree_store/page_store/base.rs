@@ -236,6 +236,12 @@ impl<'a> Drop for PageMut<'a> {
     }
 }
 
+#[derive(Copy, Clone)]
+pub(crate) enum PageHint {
+    None,
+    Clean,
+}
+
 // TODO simplify this trait. It leaks a lot of details of the two implementations
 pub(super) trait PhysicalStorage: Send + Sync {
     /// SAFETY: Caller must ensure that the values passed to this method are monotonically increasing
@@ -262,7 +268,7 @@ pub(super) trait PhysicalStorage: Send + Sync {
     //
     // Safety: caller must ensure that [start, end) does not alias any existing references returned
     // from .write()
-    unsafe fn read(&self, offset: u64, len: usize) -> Result<PageHack>;
+    unsafe fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<PageHack>;
 
     // Safety: caller must ensure that [start, end) does not alias any existing references returned
     // from .read() or .write()
