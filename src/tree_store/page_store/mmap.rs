@@ -1,3 +1,4 @@
+use crate::tree_store::page_store::file_lock::FileLock;
 use crate::{Error, Result};
 use std::fs::File;
 use std::io;

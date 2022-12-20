@@ -1,6 +1,7 @@
 mod base;
 mod bitmap;
 mod buddy_allocator;
+mod file_lock;
 mod header;
 mod layout;
 mod mmap;
