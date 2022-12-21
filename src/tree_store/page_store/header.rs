@@ -407,12 +407,19 @@ mod test {
         buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
 
-        assert!(
-            TransactionalMemory::new(file, None, None, None, Some(WriteStrategy::TwoPhase))
-                .unwrap()
-                .needs_repair()
-                .unwrap()
-        );
+        assert!(TransactionalMemory::new(
+            file,
+            false,
+            None,
+            None,
+            None,
+            0,
+            0,
+            Some(WriteStrategy::TwoPhase)
+        )
+        .unwrap()
+        .needs_repair()
+        .unwrap());
 
         let db2 = unsafe {
             Database::builder()
@@ -485,12 +492,19 @@ mod test {
         .unwrap();
         file.write_all(&[0; size_of::<u128>()]).unwrap();
 
-        assert!(
-            TransactionalMemory::new(file, None, None, None, Some(WriteStrategy::Checksum))
-                .unwrap()
-                .needs_repair()
-                .unwrap()
-        );
+        assert!(TransactionalMemory::new(
+            file,
+            false,
+            None,
+            None,
+            None,
+            0,
+            0,
+            Some(WriteStrategy::Checksum)
+        )
+        .unwrap()
+        .needs_repair()
+        .unwrap());
 
         let db2 = unsafe { Database::create(tmpfile.path()).unwrap() };
         let write_txn = db2.begin_write().unwrap();
@@ -536,12 +550,19 @@ mod test {
         buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
 
-        assert!(
-            TransactionalMemory::new(file, None, None, None, Some(WriteStrategy::TwoPhase))
-                .unwrap()
-                .needs_repair()
-                .unwrap()
-        );
+        assert!(TransactionalMemory::new(
+            file,
+            false,
+            None,
+            None,
+            None,
+            0,
+            0,
+            Some(WriteStrategy::TwoPhase)
+        )
+        .unwrap()
+        .needs_repair()
+        .unwrap());
 
         let db2 = unsafe {
             Database::builder()
@@ -602,12 +623,19 @@ mod test {
         buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
 
-        assert!(
-            TransactionalMemory::new(file, None, None, None, Some(WriteStrategy::Checksum))
-                .unwrap()
-                .needs_repair()
-                .unwrap()
-        );
+        assert!(TransactionalMemory::new(
+            file,
+            false,
+            None,
+            None,
+            None,
+            0,
+            0,
+            Some(WriteStrategy::Checksum),
+        )
+        .unwrap()
+        .needs_repair()
+        .unwrap());
 
         unsafe { Database::open(tmpfile.path()).unwrap() };
     }

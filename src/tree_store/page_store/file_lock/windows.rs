@@ -1,77 +1,44 @@
 #![allow(clippy::upper_case_acronyms)]
 
 use crate::{Error, Result};
-use std::ffi::c_void;
 use std::fs::File;
 use std::io;
+use std::os::windows::fs::FileExt;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::io::RawHandle;
 
-#[repr(C)]
-struct OVERLAPPED {
-    internal: usize,
-    internal_high: usize,
-    anonymous: OVERLAPPED_0,
-    event: RawHandle,
-}
-
-#[repr(C)]
-union OVERLAPPED_0 {
-    pub anonymous: OVERLAPPED_0_0,
-    pub pointer: *mut c_void,
-}
-
-#[derive(Copy, Clone)]
-#[repr(C)]
-struct OVERLAPPED_0_0 {
-    offset: u32,
-    offset_high: u32,
-}
-
-const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x00000002;
-const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x00000001;
 const ERROR_LOCK_VIOLATION: i32 = 0x21;
 const ERROR_IO_PENDING: i32 = 997;
 
 extern "system" {
-    /// <https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex>
-    fn LockFileEx(
+    /// <https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfile>
+    fn LockFile(
         file: RawHandle,
-        flags: u32,
-        _reserved: u32,
+        offset_low: u32,
+        offset_high: u32,
         length_low: u32,
         length_high: u32,
-        overlapped: *mut OVERLAPPED,
     ) -> i32;
 
-    /// <https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-unlockfileex>
-    fn UnlockFileEx(
+    /// <https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-unlockfile>
+    fn UnlockFile(
         file: RawHandle,
-        _reserved: u32,
+        offset_low: u32,
+        offset_high: u32,
         length_low: u32,
         length_high: u32,
-        overlapped: *mut OVERLAPPED,
     ) -> i32;
 }
 
-pub(crate) struct FileLock {
-    handle: RawHandle,
-    overlapped: OVERLAPPED,
+pub(crate) struct LockedFile {
+    file: File,
 }
 
-impl FileLock {
-    pub(crate) fn new(file: &File) -> Result<Self> {
+impl LockedFile {
+    pub(crate) fn new(file: File) -> Result<Self> {
         let handle = file.as_raw_handle();
-        let overlapped = unsafe {
-            let mut overlapped = std::mem::zeroed();
-            let result = LockFileEx(
-                handle,
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                u32::MAX,
-                u32::MAX,
-                &mut overlapped,
-            );
+        unsafe {
+            let result = LockFile(handle, 0, 0, u32::MAX, u32::MAX);
 
             if result == 0 {
                 let err = io::Error::last_os_error();
@@ -83,16 +50,45 @@ impl FileLock {
                     Err(Error::Io(err))
                 };
             }
-
-            overlapped
         };
 
-        Ok(Self { handle, overlapped })
+        Ok(Self { file })
+    }
+
+    pub(crate) fn read(&self, mut offset: u64, len: usize) -> Result<Vec<u8>> {
+        let mut buffer = vec![0; len];
+        let mut data_offset = 0;
+        while data_offset < buffer.len() {
+            let read = self
+                .file
+                .seek_read(&mut buffer[data_offset..], offset)
+                .map_err(Error::from)?;
+            offset += read as u64;
+            data_offset += read;
+        }
+        Ok(buffer)
+    }
+
+    pub(crate) fn write(&self, mut offset: u64, data: &[u8]) -> Result {
+        let mut data_offset = 0;
+        while data_offset < data.len() {
+            let written = self
+                .file
+                .seek_write(&data[data_offset..], offset)
+                .map_err(Error::from)?;
+            offset += written as u64;
+            data_offset += written;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn file(&self) -> &File {
+        &self.file
     }
 }
 
-impl Drop for FileLock {
+impl Drop for LockedFile {
     fn drop(&mut self) {
-        unsafe { UnlockFileEx(self.handle, 0, u32::MAX, u32::MAX, &mut self.overlapped) };
+        unsafe { UnlockFile(self.file.as_raw_handle(), 0, 0, u32::MAX, u32::MAX) };
     }
 }

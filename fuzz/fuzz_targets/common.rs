@@ -130,6 +130,7 @@ pub(crate) struct FuzzTransaction {
 pub(crate) struct FuzzConfig {
     pub use_checksums: bool,
     pub multimap_table: bool,
+    pub use_mmap: bool,
     pub thread0_transactions: Vec<FuzzTransaction>,
     pub thread1_transactions: Vec<FuzzTransaction>,
     pub page_size: PowerOfTwoBetween<9, 14>,
