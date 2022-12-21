@@ -184,14 +184,7 @@ impl Database {
     ///
     /// The file referenced by `path` must not be concurrently modified by any other process
     pub unsafe fn open(path: impl AsRef<Path>) -> Result<Database> {
-        if !path.as_ref().exists() {
-            Err(Error::Io(ErrorKind::NotFound.into()))
-        } else if File::open(path.as_ref())?.metadata()?.len() > 0 {
-            let file = OpenOptions::new().read(true).write(true).open(path)?;
-            Database::new(file, None, None, None, None)
-        } else {
-            Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
-        }
+        Self::builder().open(path)
     }
 
     pub(crate) fn get_memory(&self) -> &TransactionalMemory {
@@ -248,19 +241,31 @@ impl Database {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new(
         file: File,
+        use_mmap: bool,
         page_size: Option<usize>,
         region_size: Option<usize>,
         initial_size: Option<u64>,
+        read_cache_size_bytes: usize,
+        write_cache_size_bytes: usize,
         write_strategy: Option<WriteStrategy>,
     ) -> Result<Self> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
         #[cfg(feature = "logging")]
         info!("Opening database {:?}", &file_path);
-        let mut mem =
-            TransactionalMemory::new(file, page_size, region_size, initial_size, write_strategy)?;
+        let mut mem = TransactionalMemory::new(
+            file,
+            use_mmap,
+            page_size,
+            region_size,
+            initial_size,
+            read_cache_size_bytes,
+            write_cache_size_bytes,
+            write_strategy,
+        )?;
         if mem.needs_repair()? {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
@@ -482,6 +487,8 @@ pub struct Builder {
     page_size: Option<usize>,
     region_size: Option<usize>,
     initial_size: Option<u64>,
+    read_cache_size_bytes: usize,
+    write_cache_size_bytes: usize,
     write_strategy: Option<WriteStrategy>,
 }
 
@@ -495,6 +502,10 @@ impl Builder {
             page_size: Some(4096),
             region_size: None,
             initial_size: None,
+            // TODO: Default should probably take into account the total system memory
+            read_cache_size_bytes: 1024 * 1024 * 1024,
+            // TODO: Default should probably take into account the total system memory
+            write_cache_size_bytes: 100 * 1024 * 1024,
             write_strategy: None,
         }
     }
@@ -511,6 +522,22 @@ impl Builder {
 
     pub fn set_write_strategy(&mut self, write_strategy: WriteStrategy) -> &mut Self {
         self.write_strategy = Some(write_strategy);
+        self
+    }
+
+    /// Set the amount of memory (in bytes) used for caching data that has been read
+    ///
+    /// This setting is ignored when calling create_mmapped()/open_mmapped()
+    pub fn set_read_cache_size(&mut self, bytes: usize) -> &mut Self {
+        self.read_cache_size_bytes = bytes;
+        self
+    }
+
+    /// Set the amount of memory (in bytes) used for caching data that has been written
+    ///
+    /// This setting is ignored when calling create_mmapped()/open_mmapped()
+    pub fn set_write_cache_size(&mut self, bytes: usize) -> &mut Self {
+        self.write_cache_size_bytes = bytes;
         self
     }
 
@@ -548,11 +575,91 @@ impl Builder {
 
         Database::new(
             file,
+            false,
             self.page_size,
             self.region_size,
             self.initial_size,
+            self.read_cache_size_bytes,
+            self.write_cache_size_bytes,
             self.write_strategy,
         )
+    }
+
+    /// Opens the specified file as a redb database using the mmap backend.
+    /// * if the file does not exist, or is an empty file, a new database will be initialized in it
+    /// * if the file is a valid redb database, it will be opened
+    /// * otherwise this function will return an error
+    ///
+    /// # Safety
+    ///
+    /// The file referenced by `path` must not be concurrently modified by any other process
+    pub unsafe fn create_mmapped(&self, path: impl AsRef<Path>) -> Result<Database> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)?;
+
+        Database::new(
+            file,
+            true,
+            self.page_size,
+            self.region_size,
+            self.initial_size,
+            self.read_cache_size_bytes,
+            self.write_cache_size_bytes,
+            self.write_strategy,
+        )
+    }
+
+    /// Opens an existing redb database.
+    ///
+    /// # Safety
+    ///
+    /// The file referenced by `path` must not be concurrently modified by any other process
+    pub unsafe fn open(&self, path: impl AsRef<Path>) -> Result<Database> {
+        if !path.as_ref().exists() {
+            Err(Error::Io(ErrorKind::NotFound.into()))
+        } else if File::open(path.as_ref())?.metadata()?.len() > 0 {
+            let file = OpenOptions::new().read(true).write(true).open(path)?;
+            Database::new(
+                file,
+                false,
+                None,
+                None,
+                self.initial_size,
+                self.read_cache_size_bytes,
+                self.write_cache_size_bytes,
+                None,
+            )
+        } else {
+            Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
+        }
+    }
+
+    /// Opens an existing redb database using the mmap backend.
+    ///
+    /// # Safety
+    ///
+    /// The file referenced by `path` must not be concurrently modified by any other process
+    pub unsafe fn open_mmapped(&self, path: impl AsRef<Path>) -> Result<Database> {
+        if !path.as_ref().exists() {
+            Err(Error::Io(ErrorKind::NotFound.into()))
+        } else if File::open(path.as_ref())?.metadata()?.len() > 0 {
+            let file = OpenOptions::new().read(true).write(true).open(path)?;
+            Database::new(
+                file,
+                true,
+                None,
+                None,
+                self.initial_size,
+                self.read_cache_size_bytes,
+                self.write_cache_size_bytes,
+                None,
+            )
+        } else {
+            Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
+        }
     }
 }
 
@@ -567,7 +674,7 @@ impl std::fmt::Debug for Database {
 mod test {
     use tempfile::NamedTempFile;
 
-    use crate::{Database, TableDefinition};
+    use crate::{Database, Durability, ReadableTable, TableDefinition, WriteStrategy};
 
     #[test]
     fn small_pages() {
@@ -586,6 +693,131 @@ mod test {
             txn.open_table(table_definition).unwrap();
         }
         txn.commit().unwrap();
+    }
+
+    #[test]
+    fn small_pages2() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+        let db = unsafe {
+            Database::builder()
+                .set_write_strategy(WriteStrategy::TwoPhase)
+                .set_page_size(512)
+                .create(tmpfile.path())
+                .unwrap()
+        };
+
+        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+        let tx = db.begin_write().unwrap();
+        let savepoint0 = tx.savepoint().unwrap();
+        {
+            tx.open_table(table_def).unwrap();
+        }
+        tx.commit().unwrap();
+
+        let mut tx = db.begin_write().unwrap();
+        let savepoint1 = tx.savepoint().unwrap();
+        tx.restore_savepoint(&savepoint0).unwrap();
+        tx.set_durability(Durability::None);
+        {
+            let mut t = tx.open_table(table_def).unwrap();
+            t.insert_reserve(&660503, 489).unwrap().as_mut().fill(0xFF);
+            assert!(t.remove(&291295).unwrap().is_none());
+        }
+        tx.commit().unwrap();
+
+        let mut tx = db.begin_write().unwrap();
+        tx.restore_savepoint(&savepoint0).unwrap();
+        {
+            tx.open_table(table_def).unwrap();
+        }
+        tx.commit().unwrap();
+
+        let mut tx = db.begin_write().unwrap();
+        let savepoint2 = tx.savepoint().unwrap();
+        drop(savepoint0);
+        tx.restore_savepoint(&savepoint2).unwrap();
+        {
+            let mut t = tx.open_table(table_def).unwrap();
+            assert!(t.get(&2059).unwrap().is_none());
+            assert!(t.remove(&145227).unwrap().is_none());
+            assert!(t.remove(&145227).unwrap().is_none());
+        }
+        tx.commit().unwrap();
+
+        let mut tx = db.begin_write().unwrap();
+        let savepoint3 = tx.savepoint().unwrap();
+        drop(savepoint1);
+        tx.restore_savepoint(&savepoint3).unwrap();
+        {
+            tx.open_table(table_def).unwrap();
+        }
+        tx.commit().unwrap();
+
+        let mut tx = db.begin_write().unwrap();
+        let savepoint4 = tx.savepoint().unwrap();
+        drop(savepoint2);
+        tx.restore_savepoint(&savepoint3).unwrap();
+        tx.set_durability(Durability::None);
+        {
+            let mut t = tx.open_table(table_def).unwrap();
+            assert!(t.remove(&207936).unwrap().is_none());
+        }
+        tx.abort().unwrap();
+
+        let mut tx = db.begin_write().unwrap();
+        let savepoint5 = tx.savepoint().unwrap();
+        drop(savepoint3);
+        assert!(tx.restore_savepoint(&savepoint4).is_err());
+        {
+            tx.open_table(table_def).unwrap();
+        }
+        tx.commit().unwrap();
+
+        let mut tx = db.begin_write().unwrap();
+        tx.restore_savepoint(&savepoint5).unwrap();
+        tx.set_durability(Durability::None);
+        {
+            tx.open_table(table_def).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn small_pages3() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+        let db = unsafe {
+            Database::builder()
+                .set_write_strategy(WriteStrategy::Checksum)
+                .set_page_size(1024)
+                .create(tmpfile.path())
+                .unwrap()
+        };
+
+        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+        let mut tx = db.begin_write().unwrap();
+        let _savepoint0 = tx.savepoint().unwrap();
+        tx.set_durability(Durability::None);
+        {
+            let mut t = tx.open_table(table_def).unwrap();
+            let value = vec![0; 306];
+            t.insert(&539717, &value).unwrap();
+        }
+        tx.abort().unwrap();
+
+        let mut tx = db.begin_write().unwrap();
+        let savepoint1 = tx.savepoint().unwrap();
+        tx.restore_savepoint(&savepoint1).unwrap();
+        tx.set_durability(Durability::None);
+        {
+            let mut t = tx.open_table(table_def).unwrap();
+            let value = vec![0; 2008];
+            t.insert(&784384, &value).unwrap();
+        }
+        tx.abort().unwrap();
     }
 
     #[test]

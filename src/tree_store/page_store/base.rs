@@ -1,10 +1,16 @@
+use crate::transaction_tracker::TransactionId;
+use crate::tree_store::page_store::cached_file::WritablePage;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
+use crate::Result;
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
+#[cfg(not(debug_assertions))]
+use std::marker::PhantomData;
 use std::ops::Range;
+use std::sync::Arc;
 #[cfg(debug_assertions)]
 use std::sync::Mutex;
 
@@ -59,6 +65,7 @@ impl PageNumber {
         }
     }
 
+    // TODO: should return a u64 so that this works with large files on 32bit platforms
     pub(crate) fn address_range(
         &self,
         data_section_offset: usize,
@@ -97,11 +104,53 @@ pub(crate) trait Page {
     fn get_page_number(&self) -> PageNumber;
 }
 
+// TODO: remove this in favor of multiple Page implementations
+#[derive(Clone)]
+pub(super) enum PageHack<'a> {
+    Ref(&'a [u8]),
+    ArcMem(Arc<Vec<u8>>),
+}
+
+impl<'a> AsRef<[u8]> for PageHack<'a> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            PageHack::Ref(x) => x,
+            PageHack::ArcMem(x) => x,
+        }
+    }
+}
+
+// TODO: remove this in favor of multiple Page implementations
+pub(super) enum PageHackMut<'a> {
+    Ref(&'a mut [u8]),
+    Writable(WritablePage<'a>),
+}
+
+impl<'a> AsRef<[u8]> for PageHackMut<'a> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            PageHackMut::Ref(x) => x,
+            PageHackMut::Writable(x) => x.mem(),
+        }
+    }
+}
+
+impl<'a> AsMut<[u8]> for PageHackMut<'a> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        match self {
+            PageHackMut::Ref(x) => x,
+            PageHackMut::Writable(x) => x.mem_mut(),
+        }
+    }
+}
+
 pub struct PageImpl<'a> {
-    pub(super) mem: &'a [u8],
+    pub(super) mem: PageHack<'a>,
     pub(super) page_number: PageNumber,
     #[cfg(debug_assertions)]
     pub(super) open_pages: &'a Mutex<HashMap<PageNumber, u64>>,
+    #[cfg(not(debug_assertions))]
+    pub(super) _debug_lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a> Debug for PageImpl<'a> {
@@ -125,7 +174,7 @@ impl<'a> Drop for PageImpl<'a> {
 
 impl<'a> Page for PageImpl<'a> {
     fn memory(&self) -> &[u8] {
-        self.mem
+        self.mem.as_ref()
     }
 
     fn get_page_number(&self) -> PageNumber {
@@ -145,30 +194,34 @@ impl<'a> Clone for PageImpl<'a> {
                 .unwrap() += 1;
         }
         Self {
-            mem: self.mem,
+            mem: self.mem.clone(),
             page_number: self.page_number,
             #[cfg(debug_assertions)]
             open_pages: self.open_pages,
+            #[cfg(not(debug_assertions))]
+            _debug_lifetime: Default::default(),
         }
     }
 }
 
 pub(crate) struct PageMut<'a> {
-    pub(super) mem: &'a mut [u8],
+    pub(super) mem: PageHackMut<'a>,
     pub(super) page_number: PageNumber,
     #[cfg(debug_assertions)]
     pub(super) open_pages: &'a Mutex<HashSet<PageNumber>>,
+    #[cfg(not(debug_assertions))]
+    pub(super) _debug_lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a> PageMut<'a> {
     pub(crate) fn memory_mut(&mut self) -> &mut [u8] {
-        self.mem
+        self.mem.as_mut()
     }
 }
 
 impl<'a> Page for PageMut<'a> {
     fn memory(&self) -> &[u8] {
-        self.mem
+        self.mem.as_ref()
     }
 
     fn get_page_number(&self) -> PageNumber {
@@ -181,4 +234,46 @@ impl<'a> Drop for PageMut<'a> {
     fn drop(&mut self) {
         assert!(self.open_pages.lock().unwrap().remove(&self.page_number));
     }
+}
+
+// TODO simplify this trait. It leaks a lot of details of the two implementations
+pub(super) trait PhysicalStorage: Send + Sync {
+    /// SAFETY: Caller must ensure that the values passed to this method are monotonically increasing
+    // TODO: Remove this method and replace it with a call that returns an accessor that uses Arc to reference count the mmaps
+    unsafe fn mark_transaction(&self, id: TransactionId);
+
+    /// SAFETY: Caller must ensure that all references, from get_memory() or get_memory_mut(), created
+    /// before the matching (same value) call to mark_transaction() have been dropped
+    unsafe fn gc(&self, oldest_live_id: TransactionId) -> Result;
+
+    /// SAFETY: if `new_len < len()`, caller must ensure that no references to
+    /// memory in `new_len..len()` exist
+    unsafe fn resize(&self, new_len: u64) -> Result;
+
+    fn flush(&self) -> Result;
+
+    fn eventual_flush(&self) -> Result;
+
+    // Make writes visible to readers, but does not guarantee any durability
+    fn write_barrier(&self) -> Result;
+
+    // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
+    // Doing so will not cause UB, but is a logic error.
+    //
+    // Safety: caller must ensure that [start, end) does not alias any existing references returned
+    // from .write()
+    unsafe fn read(&self, offset: u64, len: usize) -> Result<PageHack>;
+
+    // Safety: caller must ensure that [start, end) does not alias any existing references returned
+    // from .read() or .write()
+    unsafe fn write(&self, offset: u64, len: usize) -> Result<PageHackMut>;
+
+    // Read directly from the file, ignoring any cached data
+    fn read_direct(&self, offset: u64, len: usize) -> Result<Vec<u8>>;
+
+    // Discard pending writes to the given range
+    fn cancel_pending_write(&self, offset: u64, len: usize);
+
+    // Invalidate any caching of the given range. After this call overlapping reads of the range are allowed
+    fn invalidate_cache(&self, offset: u64, len: usize);
 }

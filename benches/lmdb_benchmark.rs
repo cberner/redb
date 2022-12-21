@@ -283,6 +283,8 @@ fn main() {
         let db = unsafe {
             redb::Database::builder()
                 .set_write_strategy(WriteStrategy::Checksum)
+                .set_read_cache_size(4 * 1024 * 1024 * 1024)
+                .set_write_cache_size(4 * 1024 * 1024 * 1024)
                 .create(tmpfile.path())
                 .unwrap()
         };
@@ -295,6 +297,8 @@ fn main() {
         let db = unsafe {
             redb::Database::builder()
                 .set_write_strategy(WriteStrategy::TwoPhase)
+                .set_read_cache_size(4 * 1024 * 1024 * 1024)
+                .set_write_cache_size(4 * 1024 * 1024 * 1024)
                 .create(tmpfile.path())
                 .unwrap()
         };

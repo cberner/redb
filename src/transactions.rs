@@ -15,10 +15,10 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::ops::RangeFull;
-use std::panic;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::{panic, thread};
 
 /// Informational storage stats about the database
 #[derive(Debug)]
@@ -216,6 +216,7 @@ impl<'db> WriteTransaction<'db> {
         let allocated_since_savepoint = self
             .mem
             .pages_allocated_since_raw_state(savepoint.get_regional_allocator_states());
+
         let mut freed_pages = vec![];
         for page in allocated_since_savepoint {
             if self.mem.uncommitted(page) {
@@ -611,7 +612,7 @@ impl<'db> WriteTransaction<'db> {
 impl<'a> Drop for WriteTransaction<'a> {
     fn drop(&mut self) {
         *self.live_write_transaction = None;
-        if !self.completed {
+        if !self.completed && !thread::panicking() {
             #[allow(unused_variables)]
             if let Err(error) = self.abort_inner() {
                 #[cfg(feature = "logging")]

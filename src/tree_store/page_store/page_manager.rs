@@ -1,8 +1,10 @@
 use crate::db::WriteStrategy;
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::Checksum;
+use crate::tree_store::page_store::base::PhysicalStorage;
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
+use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::header::DatabaseHeader;
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::mmap::Mmap;
@@ -245,20 +247,17 @@ impl Allocators {
         }
     }
 
-    fn from_bytes(header: &DatabaseHeader, mmap: &Mmap) -> Self {
+    fn from_bytes(header: &DatabaseHeader, storage: &dyn PhysicalStorage) -> Result<Self> {
         let page_size = header.page_size() as usize;
         let region_header_size = header.region_header_pages() as usize * page_size;
         let region_size = header.region_max_data_pages() as usize * page_size + region_header_size;
-        // Safety: we have a mutable reference to the Mmap, so no one else can have a reference this memory
-        let region_tracker = unsafe {
-            mmap.get_memory(header.primary_slot().region_tracker.address_range(
-                page_size,
-                region_size as u64,
-                region_header_size,
-                page_size,
-            ))
-            .to_vec()
-        };
+        let range = header.primary_slot().region_tracker.address_range(
+            page_size,
+            region_size as u64,
+            region_header_size,
+            page_size,
+        );
+        let region_tracker = storage.read_direct(range.start as u64, range.len())?;
         let mut region_headers = vec![];
         let layout = header.primary_slot().layout;
         for i in 0..layout.num_regions() {
@@ -266,34 +265,41 @@ impl Allocators {
             let len = layout.region_layout(i).data_section().start;
             let absolute = base..(base + len);
 
-            // Safety: we have a mutable reference to the Mmap, so no one else can have a reference this memory
-            let mem = unsafe { mmap.get_memory(absolute).to_vec() };
+            let mem = storage.read_direct(absolute.start as u64, absolute.len())?;
             region_headers.push(mem);
         }
 
-        Self {
+        Ok(Self {
             region_header_size,
             region_tracker,
             region_headers,
-        }
+        })
     }
 
-    fn flush_to(&self, region_tracker_page: PageNumber, layout: DatabaseLayout, mmap: &mut Mmap) {
+    fn flush_to(
+        &self,
+        region_tracker_page: PageNumber,
+        layout: DatabaseLayout,
+        storage: &mut Box<dyn PhysicalStorage>,
+    ) -> Result {
         let page_size = layout.full_region_layout().page_size() as usize;
         let region_header_size =
             layout.full_region_layout().get_header_pages() as usize * page_size;
         let region_size =
             layout.full_region_layout().num_pages() as usize * page_size + region_header_size;
         // Safety: we have a mutable reference to the Mmap, so no one else can have a reference this memory
-        let region_tracker_bytes = unsafe {
-            mmap.get_memory_mut(region_tracker_page.address_range(
+        let mut region_tracker_bytes = unsafe {
+            let range = region_tracker_page.address_range(
                 page_size,
                 region_size as u64,
                 region_header_size,
                 page_size,
-            ))
+            );
+            storage.write(range.start as u64, range.len())?
         };
-        region_tracker_bytes.copy_from_slice(&self.region_tracker);
+        region_tracker_bytes
+            .as_mut()
+            .copy_from_slice(&self.region_tracker);
 
         assert_eq!(self.region_headers.len(), layout.num_regions() as usize);
         for i in 0..layout.num_regions() {
@@ -301,10 +307,13 @@ impl Allocators {
             let len = layout.region_layout(i).data_section().start;
             let absolute = base..(base + len);
 
-            // Safety: we have a mutable reference to the Mmap, so no one else can have a reference this memory
-            let mem = unsafe { mmap.get_memory_mut(absolute) };
-            mem.copy_from_slice(&self.region_headers[i as usize]);
+            // Safety: we have a mutable reference to the storage, so no one else can have a reference this memory
+            let mut mem = unsafe { storage.write(absolute.start as u64, absolute.len())? };
+            mem.as_mut()
+                .copy_from_slice(&self.region_headers[i as usize]);
         }
+
+        Ok(())
     }
 
     fn resize_to(&mut self, new_layout: DatabaseLayout) {
@@ -383,9 +392,9 @@ struct InMemoryState {
 }
 
 impl InMemoryState {
-    fn from_bytes(header: DatabaseHeader, mmap: &mut Mmap) -> Self {
-        let allocators = Allocators::from_bytes(&header, mmap);
-        Self { header, allocators }
+    fn from_bytes(header: DatabaseHeader, file: &dyn PhysicalStorage) -> Result<Self> {
+        let allocators = Allocators::from_bytes(&header, file)?;
+        Ok(Self { header, allocators })
     }
 
     fn get_region(&self, region: u32) -> RegionHeaderAccessor {
@@ -407,7 +416,8 @@ pub(crate) struct TransactionalMemory {
     log_since_commit: Mutex<Vec<AllocationOp>>,
     // True if the allocator state was corrupted when the file was opened
     needs_recovery: bool,
-    mmap: Mmap,
+    // TODO: should be a compile-time type parameter
+    storage: Box<dyn PhysicalStorage>,
     state: Mutex<InMemoryState>,
     // The current layout for the active transaction.
     // May include uncommitted changes to the database layout, if it grew or shrank
@@ -428,14 +438,20 @@ pub(crate) struct TransactionalMemory {
     db_header_size: usize,
     #[allow(dead_code)]
     pages_are_os_page_aligned: bool,
+    #[allow(dead_code)]
+    use_mmap: bool,
 }
 
 impl TransactionalMemory {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         file: File,
+        use_mmap: bool,
         requested_page_size: Option<usize>,
         requested_region_size: Option<usize>,
         initial_size: Option<u64>,
+        read_cache_size_bytes: usize,
+        write_cache_size_bytes: usize,
         write_strategy: Option<WriteStrategy>,
     ) -> Result<Self> {
         let page_size = requested_page_size.unwrap_or_else(get_page_size);
@@ -476,11 +492,21 @@ impl TransactionalMemory {
             }
         }
 
-        let mut mmap = Mmap::new(file)?;
+        let mut storage: Box<dyn PhysicalStorage> = if use_mmap {
+            Box::new(Mmap::new(file)?)
+        } else {
+            Box::new(PagedCachedFile::new(
+                file.try_clone().unwrap(),
+                page_size as u64,
+                read_cache_size_bytes,
+                write_cache_size_bytes,
+            )?)
+        };
 
-        // Safety: we own the mmap object and have no other references to this memory
-        let magic_number: [u8; MAGICNUMBER.len()] =
-            unsafe { mmap.get_memory(0..MAGICNUMBER.len()).try_into().unwrap() };
+        let magic_number: [u8; MAGICNUMBER.len()] = storage
+            .read_direct(0, MAGICNUMBER.len())?
+            .try_into()
+            .unwrap();
 
         if magic_number != MAGICNUMBER {
             let mut allocators = Allocators::new(layout);
@@ -507,26 +533,29 @@ impl TransactionalMemory {
                 DatabaseHeader::new(layout, checksum_type, TransactionId(0), tracker_page);
 
             header.recovery_required = false;
-            // Safety: we own the mmap object and have no other references to this memory
+            // Safety: we own the storage object and have no other references to this memory
             unsafe {
-                mmap.get_memory_mut(0..DB_HEADER_SIZE)
+                storage
+                    .write(0, DB_HEADER_SIZE)?
+                    .as_mut()
                     .copy_from_slice(&header.to_bytes(false, false));
             }
-            allocators.flush_to(tracker_page, layout, &mut mmap);
+            allocators.flush_to(tracker_page, layout, &mut storage)?;
 
-            mmap.flush()?;
+            storage.flush()?;
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
-            // Safety: we own the mmap object and have no other references to this memory
+            // Safety: we own the storage object and have no other references to this memory
             unsafe {
-                mmap.get_memory_mut(0..DB_HEADER_SIZE)
+                storage
+                    .write(0, DB_HEADER_SIZE)?
+                    .as_mut()
                     .copy_from_slice(&header.to_bytes(true, false));
             }
-            mmap.flush()?;
+            storage.flush()?;
         }
-        // Safety: we own the mmap object and have no other references to this memory
-        let header_bytes = unsafe { mmap.get_memory(0..DB_HEADER_SIZE) };
-        let (mut header, repair_info) = DatabaseHeader::from_bytes(header_bytes);
+        let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
+        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes);
 
         if let Some(requested_strategy) = write_strategy {
             let checksum_type: ChecksumType = requested_strategy.into();
@@ -567,12 +596,14 @@ impl TransactionalMemory {
                 }
             }
             assert!(!repair_info.invalid_magic_number);
-            // Safety: we own the mmap object and have no other references to this memory
+            // Safety: we own the storage object and have no other references to this memory
             unsafe {
-                mmap.get_memory_mut(0..DB_HEADER_SIZE)
+                storage
+                    .write(0, DB_HEADER_SIZE)?
+                    .as_mut()
                     .copy_from_slice(&header.to_bytes(true, false));
             }
-            mmap.flush()?;
+            storage.flush()?;
         }
 
         let layout = header.primary_slot().layout;
@@ -580,13 +611,13 @@ impl TransactionalMemory {
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
 
-        let state = InMemoryState::from_bytes(header, &mut mmap);
+        let state = InMemoryState::from_bytes(header, storage.as_ref())?;
 
         Ok(Self {
             allocated_since_commit: Mutex::new(HashSet::new()),
             log_since_commit: Mutex::new(vec![]),
             needs_recovery,
-            mmap,
+            storage,
             layout: Mutex::new(InProgressLayout {
                 layout,
                 tracker_page,
@@ -602,6 +633,7 @@ impl TransactionalMemory {
             region_header_with_padding_size: region_header_size,
             db_header_size: layout.superheader_bytes(),
             pages_are_os_page_aligned: is_page_aligned(page_size.try_into().unwrap()),
+            use_mmap,
         })
     }
 
@@ -610,9 +642,9 @@ impl TransactionalMemory {
         assert!(!state.header.recovery_required);
         state.header.recovery_required = true;
         unsafe {
-            self.write_header(&state.header, false);
+            self.write_header(&state.header, false)?;
         }
-        self.mmap.flush()
+        self.storage.flush()
     }
 
     pub(crate) fn needs_repair(&self) -> Result<bool> {
@@ -677,20 +709,23 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    unsafe fn write_header(&self, header: &DatabaseHeader, swap_primary: bool) {
-        self.mmap
-            .get_memory_mut(0..DB_HEADER_SIZE)
+    unsafe fn write_header(&self, header: &DatabaseHeader, swap_primary: bool) -> Result {
+        self.storage
+            .write(0, DB_HEADER_SIZE)?
+            .as_mut()
             .copy_from_slice(&header.to_bytes(true, swap_primary));
+
+        Ok(())
     }
 
     pub(crate) fn end_repair(&mut self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
-        unsafe { self.write_header(&state.header, false) };
-        self.mmap.flush()?;
+        unsafe { self.write_header(&state.header, false)? };
+        self.storage.flush()?;
 
         state.header.recovery_required = false;
-        unsafe { self.write_header(&state.header, false) };
-        let result = self.mmap.flush();
+        unsafe { self.write_header(&state.header, false)? };
+        let result = self.storage.flush();
         self.needs_recovery = false;
 
         result
@@ -771,23 +806,23 @@ impl TransactionalMemory {
         secondary.freed_root = freed_root;
         secondary.layout = layout.layout;
         secondary.region_tracker = layout.tracker_page;
-        unsafe { self.write_header(&state.header, false) };
+        unsafe { self.write_header(&state.header, false)? };
 
         // Use 2-phase commit, if checksums are disabled
         if matches!(checksum_type, ChecksumType::Unused) {
             if eventual {
-                self.mmap.eventual_flush()?;
+                self.storage.eventual_flush()?;
             } else {
-                self.mmap.flush()?;
+                self.storage.flush()?;
             }
         }
 
         // Swap the primary bit on-disk
-        unsafe { self.write_header(&state.header, true) };
+        unsafe { self.write_header(&state.header, true)? };
         if eventual {
-            self.mmap.eventual_flush()?;
+            self.storage.eventual_flush()?;
         } else {
-            self.mmap.flush()?;
+            self.storage.flush()?;
         }
         // Only swap the in-memory primary bit after the fsync is successful
         state.header.swap_primary_slot();
@@ -797,7 +832,7 @@ impl TransactionalMemory {
         // shrunked layout to the primary
         if shrunk {
             unsafe {
-                self.mmap.resize(layout.layout.len().try_into().unwrap())?;
+                self.storage.resize(layout.layout.len())?;
             }
         }
 
@@ -835,6 +870,7 @@ impl TransactionalMemory {
 
         self.log_since_commit.lock().unwrap().clear();
         self.allocated_since_commit.lock().unwrap().clear();
+        self.storage.write_barrier()?;
         // TODO: maybe we can remove this flag and just update the in-memory DatabaseHeader state?
         self.read_from_secondary.store(true, Ordering::Release);
 
@@ -871,6 +907,15 @@ impl TransactionalMemory {
                         page_number.page_index as u64,
                         page_number.page_order as usize,
                     );
+
+                    let address = page_number.address_range(
+                        self.db_header_size,
+                        self.region_size,
+                        self.region_header_with_padding_size,
+                        self.page_size,
+                    );
+                    self.storage
+                        .cancel_pending_write(address.start as u64, address.len());
                 }
                 AllocationOp::Free(page_number) | AllocationOp::FreeUncommitted(page_number) => {
                     let region_index = page_number.region;
@@ -903,7 +948,7 @@ impl TransactionalMemory {
             // Safety: we've rollbacked the transaction, so any data in that was written into
             // space that was grown during this transaction no longer exists
             unsafe {
-                self.mmap.resize(layout.layout.len().try_into().unwrap())?;
+                self.storage.resize(layout.layout.len())?;
             }
         }
 
@@ -928,20 +973,22 @@ impl TransactionalMemory {
         }
 
         // Safety: we asserted that no mutable references are open
-        let mem = unsafe {
-            self.mmap.get_memory(page_number.address_range(
-                self.db_header_size,
-                self.region_size,
-                self.region_header_with_padding_size,
-                self.page_size,
-            ))
-        };
+        let range = page_number.address_range(
+            self.db_header_size,
+            self.region_size,
+            self.region_header_with_padding_size,
+            self.page_size,
+        );
+        // TODO: propagate error
+        let mem = unsafe { self.storage.read(range.start as u64, range.len()).unwrap() };
 
         PageImpl {
             mem,
             page_number,
             #[cfg(debug_assertions)]
             open_pages: &self.read_page_ref_counts,
+            #[cfg(not(debug_assertions))]
+            _debug_lifetime: Default::default(),
         }
     }
 
@@ -963,13 +1010,19 @@ impl TransactionalMemory {
             self.region_header_with_padding_size,
             self.page_size,
         );
-        let mem = self.mmap.get_memory_mut(address_range);
+        // TODO: propagate error
+        let mem = self
+            .storage
+            .write(address_range.start as u64, address_range.len())
+            .unwrap();
 
         PageMut {
             mem,
             page_number,
             #[cfg(debug_assertions)]
             open_pages: &self.open_dirty_pages,
+            #[cfg(not(debug_assertions))]
+            _debug_lifetime: Default::default(),
         }
     }
 
@@ -1027,6 +1080,17 @@ impl TransactionalMemory {
             .unwrap()
             .push(AllocationOp::Free(page));
 
+        let address_range = page.address_range(
+            self.db_header_size,
+            self.region_size,
+            self.region_header_with_padding_size,
+            self.page_size,
+        );
+        self.storage
+            .invalidate_cache(address_range.start as u64, address_range.len());
+        self.storage
+            .cancel_pending_write(address_range.start as u64, address_range.len());
+
         Ok(())
     }
 
@@ -1050,6 +1114,17 @@ impl TransactionalMemory {
                 .unwrap()
                 .push(AllocationOp::FreeUncommitted(page));
 
+            let address_range = page.address_range(
+                self.db_header_size,
+                self.region_size,
+                self.region_header_with_padding_size,
+                self.page_size,
+            );
+            self.storage
+                .invalidate_cache(address_range.start as u64, address_range.len());
+            self.storage
+                .cancel_pending_write(address_range.start as u64, address_range.len());
+
             Ok(true)
         } else {
             Ok(false)
@@ -1062,11 +1137,11 @@ impl TransactionalMemory {
     }
 
     pub(crate) unsafe fn mark_transaction(&self, id: TransactionId) {
-        self.mmap.mark_transaction(id)
+        self.storage.mark_transaction(id)
     }
 
     pub(crate) unsafe fn mmap_gc(&self, oldest_live_id: TransactionId) -> Result {
-        self.mmap.gc(oldest_live_id)
+        self.storage.gc(oldest_live_id)
     }
 
     fn allocate_helper(
@@ -1199,9 +1274,9 @@ impl TransactionalMemory {
         assert_eq!(new_layout.superheader_pages(), layout.superheader_pages());
         assert_eq!(new_layout.superheader_bytes(), self.db_header_size);
 
-        // Safety: We're growing the mmap
+        // Safety: We're growing the storage
         unsafe {
-            self.mmap.resize(new_layout.len().try_into().unwrap())?;
+            self.storage.resize(new_layout.len())?;
         }
         state.allocators.resize_to(new_layout);
         *layout = new_layout;
@@ -1250,17 +1325,22 @@ impl TransactionalMemory {
 
         // Safety:
         // The address range we're returning was just allocated, so no other references exist
-        let mem = unsafe { self.mmap.get_memory_mut(address_range) };
-        debug_assert!(mem.len() >= allocation_size);
+        #[allow(unused_mut)]
+        let mut mem = unsafe {
+            self.storage
+                .write(address_range.start as u64, address_range.len())?
+        };
+        debug_assert!(mem.as_ref().len() >= allocation_size);
 
+        // TODO: move this into the mmap implementation
         #[cfg(unix)]
-        {
-            let len = mem.len();
+        if self.use_mmap {
+            let len = mem.as_ref().len();
             // If this is a large page, hint that it should be paged in
             if self.pages_are_os_page_aligned && len > self.page_size {
                 let result = unsafe {
                     libc::madvise(
-                        mem.as_mut_ptr() as *mut libc::c_void,
+                        mem.as_mut().as_mut_ptr() as *mut libc::c_void,
                         len as libc::size_t,
                         libc::MADV_WILLNEED,
                     )
@@ -1276,6 +1356,8 @@ impl TransactionalMemory {
             page_number,
             #[cfg(debug_assertions)]
             open_pages: &self.open_dirty_pages,
+            #[cfg(not(debug_assertions))]
+            _debug_lifetime: Default::default(),
         })
     }
 
@@ -1318,16 +1400,22 @@ impl Drop for TransactionalMemory {
             }
         }
         let mut state = self.state.lock().unwrap();
-        state.allocators.flush_to(
-            state.header.primary_slot().region_tracker,
-            state.header.primary_slot().layout,
-            &mut self.mmap,
-        );
+        if state
+            .allocators
+            .flush_to(
+                state.header.primary_slot().region_tracker,
+                state.header.primary_slot().layout,
+                &mut self.storage,
+            )
+            .is_err()
+        {
+            eprintln!("Failure while flushing allocator state. Repair required at restart.");
+        }
 
-        if self.mmap.flush().is_ok() && !self.needs_recovery {
+        if self.storage.flush().is_ok() && !self.needs_recovery {
             state.header.recovery_required = false;
-            unsafe { self.write_header(&state.header, false) };
-            let _ = self.mmap.flush();
+            let _ = unsafe { self.write_header(&state.header, false) };
+            let _ = self.storage.flush();
         }
     }
 }
