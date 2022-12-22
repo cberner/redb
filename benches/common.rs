@@ -547,6 +547,7 @@ pub struct SanakirjaBenchDatabase<'a> {
 }
 
 impl<'a> SanakirjaBenchDatabase<'a> {
+    #[allow(dead_code)]
     pub fn new(db: &'a sanakirja::Env) -> Self {
         let mut txn = sanakirja::Env::mut_txn_begin(db).unwrap();
         let table =
