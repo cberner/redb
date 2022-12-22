@@ -1,5 +1,15 @@
 # redb - Changelog
 
+## 0.11.0 - 2022-12-26
+* Remove `[u8]` and `str` type support. Use `&[u8]` and `&str` instead.
+* Change `get()`, `range()` and several other methods to return `AccessGuard`.
+* Rename `AccessGuard::to_value()` to `value()`
+* Add a non-mmap based backend which is now the default. This makes `Database::create()` and
+  `Database::open()` safe, but has worse performance in some cases. The mmap backend is available
+  via `create_mmapped()`/`open_mmapped()`. There is no difference in the file format, so applications
+  can switch from one backend to the other.
+* Better handling of fsync failures
+
 ## 0.10.0 - 2022-11-23
 * Remove maximum database size argument from `create()`. Databases are now unbounded in size
 * Reduce address space usage on Windows
