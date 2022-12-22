@@ -44,6 +44,17 @@ impl Mmap {
 
         let address = mmap.base_addr();
 
+        // Try to flush any pages in the page cache that are out of sync with disk.
+        // See here for why: <https://github.com/cberner/redb/issues/450>
+        #[cfg(unix)]
+        unsafe {
+            libc::posix_madvise(
+                address as *mut libc::c_void,
+                len.try_into().unwrap(),
+                libc::POSIX_MADV_DONTNEED,
+            );
+        }
+
         let mapping = Self {
             file: lock,
             old_mmaps: Mutex::new(vec![]),
@@ -134,6 +145,22 @@ impl PhysicalStorage for Mmap {
         let res = self.mmap.lock().unwrap().flush();
         if res.is_err() {
             self.set_fsync_failed(true);
+            #[cfg(unix)]
+            {
+                // Acquire lock on mmap to ensure that a resize doesn't occur
+                let lock = self.mmap.lock().unwrap();
+                let ptr = self.current_ptr.load(Ordering::Acquire);
+                // Try to flush any pages in the page cache that are out of sync with disk.
+                // See here for why: <https://github.com/cberner/redb/issues/450>
+                unsafe {
+                    libc::posix_madvise(
+                        ptr as *mut libc::c_void,
+                        self.len(),
+                        libc::POSIX_MADV_DONTNEED,
+                    );
+                }
+                drop(lock);
+            }
         }
 
         res
@@ -145,6 +172,22 @@ impl PhysicalStorage for Mmap {
         let res = self.mmap.lock().unwrap().eventual_flush();
         if res.is_err() {
             self.set_fsync_failed(true);
+            #[cfg(unix)]
+            {
+                // Acquire lock on mmap to ensure that a resize doesn't occur
+                let lock = self.mmap.lock().unwrap();
+                let ptr = self.current_ptr.load(Ordering::Acquire);
+                // Try to flush any pages in the page cache that are out of sync with disk.
+                // See here for why: <https://github.com/cberner/redb/issues/450>
+                unsafe {
+                    libc::posix_madvise(
+                        ptr as *mut libc::c_void,
+                        self.len(),
+                        libc::POSIX_MADV_DONTNEED,
+                    );
+                }
+                drop(lock);
+            }
         }
 
         res

@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io;
 use std::mem;
 use std::ops::{DerefMut, Index, IndexMut};
-#[cfg(all(target_os = "macos", not(fuzzing)))]
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::slice::SliceIndex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -83,6 +83,13 @@ impl PagedCachedFile {
         }
 
         let lock = LockedFile::new(file)?;
+
+        // Try to flush any pages in the page cache that are out of sync with disk.
+        // See here for why: <https://github.com/cberner/redb/issues/450>
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::posix_fadvise64(lock.file().as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
+        }
 
         Ok(Self {
             file: lock,
@@ -167,6 +174,17 @@ impl PhysicalStorage for PagedCachedFile {
             let res = self.file.file().sync_data().map_err(Error::from);
             if res.is_err() {
                 self.set_fsync_failed(true);
+                // Try to flush any pages in the page cache that are out of sync with disk.
+                // See here for why: <https://github.com/cberner/redb/issues/450>
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    libc::posix_fadvise64(
+                        self.file.file().as_raw_fd(),
+                        0,
+                        0,
+                        libc::POSIX_FADV_DONTNEED,
+                    );
+                }
                 return res;
             }
         }
