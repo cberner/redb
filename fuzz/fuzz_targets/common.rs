@@ -7,6 +7,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 
 // Limit values to 10MiB
+const MAX_CACHE_SIZE: usize = 100_000_000;
 const MAX_VALUE_SIZE: usize = 10_000_000;
 const KEY_SPACE: u64 = 1_000_000;
 pub const MAX_SAVEPOINTS: usize = 3;
@@ -131,6 +132,8 @@ pub(crate) struct FuzzConfig {
     pub use_checksums: bool,
     pub multimap_table: bool,
     pub use_mmap: bool,
+    pub read_cache_size: BoundedUSize<MAX_CACHE_SIZE>,
+    pub write_cache_size: BoundedUSize<MAX_CACHE_SIZE>,
     pub thread0_transactions: Vec<FuzzTransaction>,
     pub thread1_transactions: Vec<FuzzTransaction>,
     pub page_size: PowerOfTwoBetween<9, 14>,

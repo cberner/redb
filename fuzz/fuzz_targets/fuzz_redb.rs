@@ -295,6 +295,8 @@ fuzz_target!(|config: FuzzConfig| {
         Database::builder()
             .set_write_strategy(write_strategy)
             .set_page_size(config.page_size.value)
+            .set_read_cache_size(config.read_cache_size.value)
+            .set_write_cache_size(config.write_cache_size.value)
             .create(redb_file.path())
     };
 
