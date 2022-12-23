@@ -253,8 +253,11 @@ impl PhysicalStorage for PagedCachedFile {
         let mut removed = 0;
         if cache_size + len > self.max_read_cache_bytes {
             while removed < len {
-                let (_, v) = write_lock.pop_first().unwrap();
-                removed += v.len();
+                if let Some((_, v)) = write_lock.pop_first() {
+                    removed += v.len();
+                } else {
+                    break;
+                }
             }
         }
         if removed > 0 {
