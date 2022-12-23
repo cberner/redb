@@ -807,6 +807,45 @@ mod test {
     }
 
     #[test]
+    fn small_pages4() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+        let db = Database::builder()
+            .set_write_strategy(WriteStrategy::Checksum)
+            .set_read_cache_size(1024 * 1024)
+            .set_write_cache_size(0)
+            .set_page_size(1024)
+            .create(tmpfile.path())
+            .unwrap();
+
+        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+        let tx = db.begin_write().unwrap();
+        {
+            tx.open_table(table_def).unwrap();
+        }
+        tx.commit().unwrap();
+
+        let tx = db.begin_write().unwrap();
+        {
+            let mut t = tx.open_table(table_def).unwrap();
+            assert!(t.get(&131072).unwrap().is_none());
+            let value = vec![0xFF; 1130];
+            t.insert(&42394, &value).unwrap();
+            t.insert_reserve(&744037, 3645).unwrap().as_mut().fill(0xFF);
+            assert!(t.get(&0).unwrap().is_none());
+        }
+        tx.abort().unwrap();
+
+        let tx = db.begin_write().unwrap();
+        {
+            let mut t = tx.open_table(table_def).unwrap();
+            t.insert_reserve(&118749, 734).unwrap().as_mut().fill(0xFF);
+        }
+        tx.abort().unwrap();
+    }
+
+    #[test]
     #[cfg(unix)]
     fn dynamic_shrink() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();

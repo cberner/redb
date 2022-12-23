@@ -299,7 +299,6 @@ impl PhysicalStorage for PagedCachedFile {
                 // assert_eq!(len, removed.len());
                 self.read_cache_bytes
                     .fetch_sub(removed.len(), Ordering::AcqRel);
-                assert_eq!(removed.len(), len);
                 Some(Arc::try_unwrap(removed).unwrap())
             } else {
                 None

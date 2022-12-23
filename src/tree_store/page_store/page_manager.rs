@@ -915,6 +915,8 @@ impl TransactionalMemory {
                         self.page_size,
                     );
                     self.storage
+                        .invalidate_cache(address.start as u64, address.len());
+                    self.storage
                         .cancel_pending_write(address.start as u64, address.len());
                 }
                 AllocationOp::Free(page_number) | AllocationOp::FreeUncommitted(page_number) => {
