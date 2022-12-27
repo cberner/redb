@@ -3,7 +3,9 @@ use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::fmt::Debug;
 
-pub trait RedbValue: Debug {
+pub trait Sealed {}
+
+pub trait RedbValue: Debug + Sealed {
     /// SelfType<'a> must be the same type as Self with all lifetimes replaced with 'a
     type SelfType<'a>: Debug + Borrow<Self::RefBaseType<'a>> + 'a
     where
@@ -82,6 +84,8 @@ impl RedbValue for () {
     }
 }
 
+impl Sealed for () {}
+
 impl RedbValue for &[u8] {
     type SelfType<'a> = &'a [u8]
     where
@@ -116,6 +120,8 @@ impl RedbValue for &[u8] {
         "[u8]".to_string()
     }
 }
+
+impl Sealed for &[u8] {}
 
 impl RedbKey for &[u8] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
@@ -158,6 +164,8 @@ impl<const N: usize> RedbValue for &[u8; N] {
     }
 }
 
+impl<const N: usize> Sealed for &[u8; N] {}
+
 impl<const N: usize> RedbKey for &[u8; N] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         data1.cmp(data2)
@@ -199,6 +207,8 @@ impl RedbValue for &str {
     }
 }
 
+impl Sealed for &str {}
+
 impl RedbKey for &str {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         let str1 = Self::from_bytes(data1);
@@ -239,6 +249,8 @@ macro_rules! be_value {
                 stringify!($t).to_string()
             }
         }
+
+        impl Sealed for $t {}
     };
 }
 

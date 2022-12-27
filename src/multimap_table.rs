@@ -3,7 +3,7 @@ use crate::tree_store::{
     AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, Page,
     PageHint, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
 };
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{RedbKey, RedbValue, Sealed};
 use crate::{AccessGuard, Result, WriteTransaction};
 use std::borrow::Borrow;
 use std::cell::RefCell;
@@ -175,6 +175,8 @@ impl RedbValue for DynamicCollection {
         "redb::DynamicCollection".to_string()
     }
 }
+
+impl Sealed for DynamicCollection {}
 
 impl DynamicCollection {
     fn new(data: &[u8]) -> &Self {

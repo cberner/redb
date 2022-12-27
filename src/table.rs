@@ -267,7 +267,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterat
 
 #[cfg(test)]
 mod test {
-    use crate::types::{RedbKey, RedbValue};
+    use crate::types::{RedbKey, RedbValue, Sealed};
     use crate::{Database, ReadableTable, TableDefinition};
     use std::cmp::Ordering;
     use tempfile::NamedTempFile;
@@ -311,6 +311,8 @@ mod test {
                 "ReverseKey".to_string()
             }
         }
+
+        impl Sealed for ReverseKey {}
 
         impl RedbKey for ReverseKey {
             fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
