@@ -37,6 +37,38 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<
         self.tree.print_debug(include_values);
     }
 
+    /// Removes and returns the first key-value pair in the table
+    pub fn pop_first(&mut self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+        // TODO: optimize this
+        let first = self.iter()?.next();
+        if let Some((ref key, _)) = first {
+            let owned_key = K::as_bytes(key.value().borrow()).as_ref().to_vec();
+            drop(first);
+            let key = K::from_bytes(&owned_key);
+            let value = self.remove(&key)?.unwrap();
+            drop(key);
+            Ok(Some((AccessGuard::with_owned_value(owned_key), value)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Removes and returns the last key-value pair in the table
+    pub fn pop_last(&mut self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+        // TODO: optimize this
+        let first = self.iter()?.rev().next();
+        if let Some((ref key, _)) = first {
+            let owned_key = K::as_bytes(key.value().borrow()).as_ref().to_vec();
+            drop(first);
+            let key = K::from_bytes(&owned_key);
+            let value = self.remove(&key)?.unwrap();
+            drop(key);
+            Ok(Some((AccessGuard::with_owned_value(owned_key), value)))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Insert mapping of the given key to the given value
     ///
     /// Returns the old value, if the key was present in the table

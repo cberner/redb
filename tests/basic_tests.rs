@@ -24,6 +24,42 @@ fn len() {
 }
 
 #[test]
+fn pop() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table.insert(b"a", b"world").unwrap();
+        table.insert(b"b", b"world2").unwrap();
+        table.insert(b"c", b"world3").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        {
+            let (key, value) = table.pop_first().unwrap().unwrap();
+            assert_eq!(key.value(), b"a");
+            assert_eq!(value.value(), b"world");
+        }
+        {
+            let (key, value) = table.pop_last().unwrap().unwrap();
+            assert_eq!(key.value(), b"c");
+            assert_eq!(value.value(), b"world3");
+        }
+        {
+            let (key, value) = table.pop_last().unwrap().unwrap();
+            assert_eq!(key.value(), b"b");
+            assert_eq!(value.value(), b"world2");
+        }
+        assert!(table.pop_last().unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
 fn stored_size() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
