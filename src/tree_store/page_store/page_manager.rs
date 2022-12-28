@@ -1362,6 +1362,12 @@ impl TransactionalMemory {
             }
         }
 
+        #[cfg(debug_assertions)]
+        {
+            // Poison the memory in debug mode to help detect uninitialized reads
+            mem.as_mut().fill(0xFF);
+        }
+
         Ok(PageMut {
             mem,
             page_number,
