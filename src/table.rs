@@ -1,5 +1,5 @@
 use crate::tree_store::{
-    AccessGuardMut, Btree, BtreeMut, BtreeRangeIter, Checksum, PageHint, PageNumber,
+    AccessGuardMut, Btree, BtreeDrain, BtreeMut, BtreeRangeIter, Checksum, PageHint, PageNumber,
     TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
@@ -67,6 +67,21 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<
         } else {
             Ok(None)
         }
+    }
+
+    pub fn drain<'a, KR>(
+        &'a mut self,
+        range: impl RangeBounds<KR> + Clone + 'a,
+    ) -> Result<Drain<'a, K, V>>
+    where
+        K: 'a,
+        // TODO: we should not require Clone here
+        KR: Borrow<K::RefBaseType<'a>> + ?Sized + Clone + 'a,
+    {
+        // Safety: No other references to this table can exist.
+        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
+        // and we borrow &mut self.
+        unsafe { self.tree.drain(range).map(Drain::new) }
     }
 
     /// Insert mapping of the given key to the given value
@@ -254,6 +269,40 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
 
     fn is_empty(&self) -> Result<bool> {
         self.len().map(|x| x == 0)
+    }
+}
+
+pub struct Drain<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> {
+    inner: BtreeDrain<'a, K, V>,
+}
+
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Drain<'a, K, V> {
+    fn new(inner: BtreeDrain<'a, K, V>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for Drain<'a, K, V> {
+    type Item = (AccessGuard<'a, K>, AccessGuard<'a, V>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let entry = self.inner.next()?;
+        let (page, key_range, value_range) = entry.into_raw();
+        let key = AccessGuard::with_page(page.clone(), key_range);
+        let value = AccessGuard::with_page(page, value_range);
+        Some((key, value))
+    }
+}
+
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterator
+    for Drain<'a, K, V>
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let entry = self.inner.next_back()?;
+        let (page, key_range, value_range) = entry.into_raw();
+        let key = AccessGuard::with_page(page.clone(), key_range);
+        let value = AccessGuard::with_page(page, value_range);
+        Some((key, value))
     }
 }
 

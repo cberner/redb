@@ -5,9 +5,11 @@ use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::PageNumber;
 use crate::types::{RedbKey, RedbValue};
 use std::borrow::Borrow;
+use std::cell::RefCell;
 use std::collections::Bound;
 use std::marker::PhantomData;
 use std::ops::{Range, RangeBounds};
+use std::rc::Rc;
 
 #[derive(Debug)]
 pub enum RangeIterState<'a> {
@@ -221,6 +223,65 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
             self.next = state.next(false, self.manager);
             if once {
                 return Some(value);
+            }
+        }
+    }
+}
+
+pub(crate) struct BtreeDrain<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> {
+    inner: BtreeRangeIter<'a, K, V>,
+    free_on_drop: Vec<PageNumber>,
+    master_free_list: Rc<RefCell<Vec<PageNumber>>>,
+    mem: &'a TransactionalMemory,
+}
+
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeDrain<'a, K, V> {
+    // Safety: caller must ensure that there are no references to free_on_drop pages, other than those
+    // within `inner`
+    pub(crate) unsafe fn new(
+        inner: BtreeRangeIter<'a, K, V>,
+        free_on_drop: Vec<PageNumber>,
+        master_free_list: Rc<RefCell<Vec<PageNumber>>>,
+        mem: &'a TransactionalMemory,
+    ) -> Self {
+        Self {
+            inner,
+            free_on_drop,
+            master_free_list,
+            mem,
+        }
+    }
+}
+
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for BtreeDrain<'a, K, V> {
+    type Item = EntryGuard<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+}
+
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterator
+    for BtreeDrain<'a, K, V>
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back()
+    }
+}
+
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Drop for BtreeDrain<'a, K, V> {
+    fn drop(&mut self) {
+        // Ensure that the iter is entirely consumed, so that it doesn't have any references to the pages
+        // to be freed
+        while self.inner.next().is_some() {
+            // no-op
+        }
+
+        for page in self.free_on_drop.drain(..) {
+            // Safety: Caller guaranteed that there are no other references to these pages,
+            // and we just consumed all of ours in the loop above.
+            if unsafe { !self.mem.free_if_uncommitted(page).unwrap() } {
+                self.master_free_list.borrow_mut().push(page);
             }
         }
     }

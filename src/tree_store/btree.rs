@@ -2,6 +2,7 @@ use crate::tree_store::btree_base::{
     branch_checksum, leaf_checksum, BranchAccessor, Checksum, FreePolicy, LeafAccessor, BRANCH,
     LEAF,
 };
+use crate::tree_store::btree_iters::BtreeDrain;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageHint, PageNumber};
@@ -170,6 +171,42 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
         range: T,
     ) -> Result<BtreeRangeIter<K, V>> {
         self.read_tree().range(range)
+    }
+
+    // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
+    pub(crate) unsafe fn drain<
+        'a0,
+        T: RangeBounds<KR> + Clone + 'a0,
+        // TODO: we shouldn't require Clone
+        KR: Borrow<K::RefBaseType<'a0>> + ?Sized + Clone + 'a0,
+    >(
+        &'a0 mut self,
+        range: T,
+    ) -> Result<BtreeDrain<K, V>> {
+        let iter = self.range(range.clone())?;
+        let return_iter = self.range(range)?;
+        let mut free_on_drop = vec![];
+        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
+            self.root.clone(),
+            FreePolicy::Never,
+            self.mem,
+            &mut free_on_drop,
+        );
+        for entry in iter {
+            // TODO: optimize so that we don't have to call safe_delete in a loop
+            assert!(operation
+                .safe_delete(K::from_bytes(entry.key()).borrow())?
+                .is_some());
+        }
+
+        let result = BtreeDrain::new(
+            return_iter,
+            free_on_drop,
+            self.freed_pages.clone(),
+            self.mem,
+        );
+
+        Ok(result)
     }
 
     pub(crate) fn len(&self) -> Result<usize> {
