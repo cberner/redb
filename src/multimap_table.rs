@@ -345,10 +345,9 @@ impl<'a, V: RedbKey + ?Sized> Drop for MultimapValueIter<'a, V> {
         // Drop our references to the pages that are about to be freed
         drop(mem::take(&mut self.inner));
         for page in self.free_on_drop.iter() {
-            // TODO: make free_if_uncommitted not return a Result by moving the dirtying of the allocator state into the open method of the TransactionMemory
             unsafe {
                 // Safety: we have a &mut on the transaction
-                if !self.mem.unwrap().free_if_uncommitted(*page).unwrap() {
+                if !self.mem.unwrap().free_if_uncommitted(*page) {
                     (*self.freed_pages.as_ref().unwrap())
                         .borrow_mut()
                         .push(*page);
@@ -694,7 +693,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                                 };
                                 drop(page);
                                 unsafe {
-                                    if !self.mem.free_if_uncommitted(new_root)? {
+                                    if !self.mem.free_if_uncommitted(new_root) {
                                         (*self.freed_pages).borrow_mut().push(new_root);
                                     }
                                 }

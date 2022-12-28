@@ -222,7 +222,7 @@ impl<'db> WriteTransaction<'db> {
             if self.mem.uncommitted(page) {
                 // Safety: The page is uncommitted and we have a &mut on the transaction
                 unsafe {
-                    self.mem.free(page)?;
+                    self.mem.free(page);
                 }
             } else {
                 freed_pages.push(page);
@@ -519,7 +519,7 @@ impl<'db> WriteTransaction<'db> {
                 // Safety: we free only pages that were marked to be freed before the oldest live transaction,
                 // therefore no one can have a reference to this page still
                 unsafe {
-                    self.mem.free(page)?;
+                    self.mem.free(page);
                 }
             }
         }

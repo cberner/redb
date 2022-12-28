@@ -61,19 +61,17 @@ impl FreePolicy {
         page: PageNumber,
         freed: &mut Vec<PageNumber>,
         mem: &TransactionalMemory,
-    ) -> Result {
+    ) {
         match self {
             FreePolicy::Never => {
                 freed.push(page);
             }
             FreePolicy::Uncommitted => {
-                if !mem.free_if_uncommitted(page)? {
+                if !mem.free_if_uncommitted(page) {
                     freed.push(page);
                 }
             }
         }
-
-        Ok(())
     }
 
     pub(crate) fn free_on_drop(&self, page: PageNumber, mem: &TransactionalMemory) -> bool {
@@ -206,7 +204,7 @@ impl<'a, V: RedbValue + ?Sized> Drop for AccessGuard<'a, V> {
                 drop(dummy);
                 // Safety: caller to new() guaranteed that no other references to this page exist
                 unsafe {
-                    self.mem.unwrap().free(page_number).unwrap();
+                    self.mem.unwrap().free(page_number);
                 }
             }
             OnDrop::RemoveEntry {
