@@ -1,5 +1,4 @@
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocatorMut;
-use crate::tree_store::page_store::page_manager::DB_HEADER_SIZE;
 use crate::Result;
 use std::ops::Range;
 
@@ -194,21 +193,10 @@ impl DatabaseLayout {
         (self.num_full_regions as u64) * self.full_region_layout.usable_bytes() + trailing
     }
 
-    // TODO: remove this method
-    pub(super) fn superheader_pages(&self) -> u32 {
-        assert!(self.full_region_layout.page_size as usize >= DB_HEADER_SIZE);
-        1
-    }
-
-    // TODO: remove this method
-    pub(super) fn superheader_bytes(&self) -> usize {
-        (self.superheader_pages() * self.full_region_layout.page_size) as usize
-    }
-
     pub(super) fn region_base_address(&self, region: u32) -> u64 {
         assert!(region < self.num_regions());
-
-        (self.superheader_bytes() as u64) + (region as u64) * self.full_region_layout.len()
+        (self.full_region_layout.page_size() as u64)
+            + (region as u64) * self.full_region_layout.len()
     }
 
     pub(super) fn region_layout(&self, region: u32) -> RegionLayout {
