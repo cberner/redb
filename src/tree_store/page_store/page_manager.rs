@@ -204,7 +204,7 @@ struct InProgressLayout {
 }
 
 struct Allocators {
-    region_header_size: usize,
+    region_header_size: u32,
     region_tracker: Vec<u8>,
     region_headers: Vec<Vec<u8>>,
 }
@@ -225,10 +225,15 @@ impl Allocators {
         );
         let mut region_tracker = RegionTracker::new(&mut region_tracker_bytes);
         let mut region_headers = vec![];
-        let region_header_size = layout.full_region_layout().data_section().start;
+        let region_header_size: u32 = layout
+            .full_region_layout()
+            .data_section()
+            .start
+            .try_into()
+            .unwrap();
         for i in 0..layout.num_regions() {
             let region_layout = layout.region_layout(i);
-            let mut region_header_bytes = vec![0; region_header_size];
+            let mut region_header_bytes = vec![0; region_header_size as usize];
             let mut region = RegionHeaderMutator::new(&mut region_header_bytes);
             region.initialize(
                 region_layout.num_pages(),
@@ -248,24 +253,30 @@ impl Allocators {
     }
 
     fn from_bytes(header: &DatabaseHeader, storage: &dyn PhysicalStorage) -> Result<Self> {
-        let page_size = header.page_size() as usize;
-        let region_header_size = header.region_header_pages() as usize * page_size;
-        let region_size = header.region_max_data_pages() as usize * page_size + region_header_size;
+        let page_size = header.page_size();
+        let region_header_size = header.region_header_pages() * page_size;
+        let region_size =
+            header.region_max_data_pages() as u64 * page_size as u64 + region_header_size as u64;
         let range = header.primary_slot().region_tracker.address_range(
             page_size,
-            region_size as u64,
+            region_size,
             region_header_size,
             page_size,
         );
-        let region_tracker = storage.read_direct(range.start as u64, range.len())?;
+        let len: usize = (range.end - range.start).try_into().unwrap();
+        let region_tracker = storage.read_direct(range.start, len)?;
         let mut region_headers = vec![];
         let layout = header.primary_slot().layout;
         for i in 0..layout.num_regions() {
             let base = layout.region_base_address(i);
-            let len = layout.region_layout(i).data_section().start;
-            let absolute = base..(base + len);
+            let len: usize = layout
+                .region_layout(i)
+                .data_section()
+                .start
+                .try_into()
+                .unwrap();
 
-            let mem = storage.read_direct(absolute.start as u64, absolute.len())?;
+            let mem = storage.read_direct(base, len)?;
             region_headers.push(mem);
         }
 
@@ -282,20 +293,20 @@ impl Allocators {
         layout: DatabaseLayout,
         storage: &mut Box<dyn PhysicalStorage>,
     ) -> Result {
-        let page_size = layout.full_region_layout().page_size() as usize;
-        let region_header_size =
-            layout.full_region_layout().get_header_pages() as usize * page_size;
-        let region_size =
-            layout.full_region_layout().num_pages() as usize * page_size + region_header_size;
+        let page_size = layout.full_region_layout().page_size();
+        let region_header_size = layout.full_region_layout().get_header_pages() * page_size;
+        let region_size = layout.full_region_layout().num_pages() as u64 * page_size as u64
+            + region_header_size as u64;
         // Safety: we have a mutable reference to the Mmap, so no one else can have a reference this memory
         let mut region_tracker_bytes = unsafe {
             let range = region_tracker_page.address_range(
                 page_size,
-                region_size as u64,
+                region_size,
                 region_header_size,
                 page_size,
             );
-            storage.write(range.start as u64, range.len())?
+            let len: usize = (range.end - range.start).try_into().unwrap();
+            storage.write(range.start, len)?
         };
         region_tracker_bytes
             .as_mut()
@@ -304,11 +315,15 @@ impl Allocators {
         assert_eq!(self.region_headers.len(), layout.num_regions() as usize);
         for i in 0..layout.num_regions() {
             let base = layout.region_base_address(i);
-            let len = layout.region_layout(i).data_section().start;
-            let absolute = base..(base + len);
+            let len: usize = layout
+                .region_layout(i)
+                .data_section()
+                .start
+                .try_into()
+                .unwrap();
 
             // Safety: we have a mutable reference to the storage, so no one else can have a reference this memory
-            let mut mem = unsafe { storage.write(absolute.start as u64, absolute.len())? };
+            let mut mem = unsafe { storage.write(base, len)? };
             mem.as_mut()
                 .copy_from_slice(&self.region_headers[i as usize]);
         }
@@ -371,7 +386,7 @@ impl Allocators {
                 } else {
                     // brand new region
                     // TODO: check that region_tracker has enough space and grow it if needed
-                    let mut new_region_bytes = vec![0; self.region_header_size];
+                    let mut new_region_bytes = vec![0; self.region_header_size as usize];
                     let mut region = RegionHeaderMutator::new(&mut new_region_bytes);
                     region.initialize(
                         new_region.num_pages(),
@@ -430,12 +445,12 @@ pub(crate) struct TransactionalMemory {
     read_page_ref_counts: Mutex<HashMap<PageNumber, u64>>,
     // Indicates that a non-durable commit has been made, so reads should be served from the secondary meta page
     read_from_secondary: AtomicBool,
-    page_size: usize,
+    page_size: u32,
     // We store these separately from the layout because they're static, and accessed on the get_page()
     // code path where there is no locking
     region_size: u64,
-    region_header_with_padding_size: usize,
-    db_header_size: usize,
+    region_header_with_padding_size: u32,
+    db_header_size: u32,
     #[allow(dead_code)]
     pages_are_os_page_aligned: bool,
     #[allow(dead_code)]
@@ -609,9 +624,16 @@ impl TransactionalMemory {
         let layout = header.primary_slot().layout;
         let tracker_page = header.primary_slot().region_tracker;
         let region_size = layout.full_region_layout().len();
-        let region_header_size = layout.full_region_layout().data_section().start;
+        let region_header_size: u32 = layout
+            .full_region_layout()
+            .data_section()
+            .start
+            .try_into()
+            .unwrap();
 
         let state = InMemoryState::from_bytes(header, storage.as_ref())?;
+
+        assert!(page_size as usize >= DB_HEADER_SIZE);
 
         Ok(Self {
             allocated_since_commit: Mutex::new(HashSet::new()),
@@ -628,10 +650,11 @@ impl TransactionalMemory {
             #[cfg(debug_assertions)]
             read_page_ref_counts: Mutex::new(HashMap::new()),
             read_from_secondary: AtomicBool::new(false),
-            page_size: page_size as usize,
+            page_size,
             region_size,
             region_header_with_padding_size: region_header_size,
-            db_header_size: layout.superheader_bytes(),
+            // TODO: remove this field. It is redundant
+            db_header_size: page_size,
             pages_are_os_page_aligned: is_page_aligned(page_size.try_into().unwrap()),
             use_mmap,
         })
@@ -914,10 +937,9 @@ impl TransactionalMemory {
                         self.region_header_with_padding_size,
                         self.page_size,
                     );
-                    self.storage
-                        .invalidate_cache(address.start as u64, address.len());
-                    self.storage
-                        .cancel_pending_write(address.start as u64, address.len());
+                    let len: usize = (address.end - address.start).try_into().unwrap();
+                    self.storage.invalidate_cache(address.start, len);
+                    self.storage.cancel_pending_write(address.start, len);
                 }
                 AllocationOp::Free(page_number) | AllocationOp::FreeUncommitted(page_number) => {
                     let region_index = page_number.region;
@@ -986,12 +1008,9 @@ impl TransactionalMemory {
             self.region_header_with_padding_size,
             self.page_size,
         );
+        let len: usize = (range.end - range.start).try_into().unwrap();
         // TODO: propagate error
-        let mem = unsafe {
-            self.storage
-                .read(range.start as u64, range.len(), hint)
-                .unwrap()
-        };
+        let mem = unsafe { self.storage.read(range.start, len, hint).unwrap() };
 
         PageImpl {
             mem,
@@ -1021,11 +1040,11 @@ impl TransactionalMemory {
             self.region_header_with_padding_size,
             self.page_size,
         );
-        // TODO: propagate error
-        let mem = self
-            .storage
-            .write(address_range.start as u64, address_range.len())
+        let len: usize = (address_range.end - address_range.start)
+            .try_into()
             .unwrap();
+        // TODO: propagate error
+        let mem = self.storage.write(address_range.start, len).unwrap();
 
         PageMut {
             mem,
@@ -1097,10 +1116,11 @@ impl TransactionalMemory {
             self.region_header_with_padding_size,
             self.page_size,
         );
-        self.storage
-            .invalidate_cache(address_range.start as u64, address_range.len());
-        self.storage
-            .cancel_pending_write(address_range.start as u64, address_range.len());
+        let len: usize = (address_range.end - address_range.start)
+            .try_into()
+            .unwrap();
+        self.storage.invalidate_cache(address_range.start, len);
+        self.storage.cancel_pending_write(address_range.start, len);
 
         Ok(())
     }
@@ -1131,10 +1151,11 @@ impl TransactionalMemory {
                 self.region_header_with_padding_size,
                 self.page_size,
             );
-            self.storage
-                .invalidate_cache(address_range.start as u64, address_range.len());
-            self.storage
-                .cancel_pending_write(address_range.start as u64, address_range.len());
+            let len: usize = (address_range.end - address_range.start)
+                .try_into()
+                .unwrap();
+            self.storage.invalidate_cache(address_range.start, len);
+            self.storage.cancel_pending_write(address_range.start, len);
 
             Ok(true)
         } else {
@@ -1228,12 +1249,10 @@ impl TransactionalMemory {
         let new_layout = DatabaseLayout::calculate(
             new_usable_bytes,
             state.header.region_max_data_pages(),
-            self.page_size.try_into().unwrap(),
+            self.page_size,
         )?;
         state.allocators.resize_to(new_layout);
         assert!(new_layout.len() <= layout.len());
-        assert_eq!(new_layout.superheader_pages(), layout.superheader_pages());
-        assert_eq!(new_layout.superheader_bytes(), self.db_header_size);
 
         // TODO: try to shrink the region tracker and relocate it to a lower region, if it's in the last one
 
@@ -1279,11 +1298,9 @@ impl TransactionalMemory {
         let new_layout = DatabaseLayout::calculate(
             next_desired_size,
             state.header.region_max_data_pages(),
-            self.page_size.try_into().unwrap(),
+            self.page_size,
         )?;
         assert!(new_layout.len() >= layout.len());
-        assert_eq!(new_layout.superheader_pages(), layout.superheader_pages());
-        assert_eq!(new_layout.superheader_bytes(), self.db_header_size);
 
         // Safety: We're growing the storage
         unsafe {
@@ -1295,7 +1312,7 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn allocate(&self, allocation_size: usize) -> Result<PageMut> {
-        let required_pages = (allocation_size + self.page_size - 1) / self.page_size;
+        let required_pages = (allocation_size + self.get_page_size() - 1) / self.get_page_size();
         let required_order = ceil_log2(required_pages);
 
         let mut state = self.state.lock().unwrap();
@@ -1333,14 +1350,14 @@ impl TransactionalMemory {
             self.region_header_with_padding_size,
             self.page_size,
         );
+        let len: usize = (address_range.end - address_range.start)
+            .try_into()
+            .unwrap();
 
         // Safety:
         // The address range we're returning was just allocated, so no other references exist
         #[allow(unused_mut)]
-        let mut mem = unsafe {
-            self.storage
-                .write(address_range.start as u64, address_range.len())?
-        };
+        let mut mem = unsafe { self.storage.write(address_range.start, len)? };
         debug_assert!(mem.as_ref().len() >= allocation_size);
 
         // TODO: move this into the mmap implementation
@@ -1348,7 +1365,7 @@ impl TransactionalMemory {
         if self.use_mmap {
             let len = mem.as_ref().len();
             // If this is a large page, hint that it should be paged in
-            if self.pages_are_os_page_aligned && len > self.page_size {
+            if self.pages_are_os_page_aligned && len > self.get_page_size() {
                 let result = unsafe {
                     libc::madvise(
                         mem.as_mut().as_mut_ptr() as *mut libc::c_void,
@@ -1391,7 +1408,7 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn get_page_size(&self) -> usize {
-        self.page_size
+        self.page_size.try_into().unwrap()
     }
 }
 
