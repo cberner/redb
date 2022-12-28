@@ -5,7 +5,7 @@ use crate::tree_store::page_store::base::{PageHint, PhysicalStorage};
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
-use crate::tree_store::page_store::header::DatabaseHeader;
+use crate::tree_store::page_store::header::{DatabaseHeader, DB_HEADER_SIZE, MAGICNUMBER};
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
@@ -40,14 +40,6 @@ const NUM_REGIONS: u32 = 1000;
 
 // TODO: set to 1, when version 1.0 is released
 pub(super) const FILE_FORMAT_VERSION: u8 = 107;
-
-// Inspired by PNG's magic number
-// TODO: deduplicate these constants with header.rs
-const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
-const TRANSACTION_SIZE: usize = 128;
-const TRANSACTION_0_OFFSET: usize = 64;
-const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
-pub(super) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
 
 fn ceil_log2(x: usize) -> usize {
     if x.is_power_of_two() {
