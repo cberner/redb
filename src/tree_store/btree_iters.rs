@@ -280,7 +280,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Drop for BtreeDra
         for page in self.free_on_drop.drain(..) {
             // Safety: Caller guaranteed that there are no other references to these pages,
             // and we just consumed all of ours in the loop above.
-            if unsafe { !self.mem.free_if_uncommitted(page).unwrap() } {
+            if unsafe { !self.mem.free_if_uncommitted(page) } {
                 self.master_free_list.borrow_mut().push(page);
             }
         }

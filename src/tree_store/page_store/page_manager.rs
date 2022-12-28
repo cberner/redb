@@ -1090,7 +1090,7 @@ impl TransactionalMemory {
     }
 
     // Safety: the caller must ensure that no references to the memory in `page` exist
-    pub(crate) unsafe fn free(&self, page: PageNumber) -> Result {
+    pub(crate) unsafe fn free(&self, page: PageNumber) {
         let mut state = self.state.lock().unwrap();
         let region_index = page.region;
         // Free in the regional allocator
@@ -1118,13 +1118,11 @@ impl TransactionalMemory {
             .unwrap();
         self.storage.invalidate_cache(address_range.start, len);
         self.storage.cancel_pending_write(address_range.start, len);
-
-        Ok(())
     }
 
     // Frees the page if it was allocated since the last commit. Returns true, if the page was freed
     // Safety: the caller must ensure that no references to the memory in `page` exist
-    pub(crate) unsafe fn free_if_uncommitted(&self, page: PageNumber) -> Result<bool> {
+    pub(crate) unsafe fn free_if_uncommitted(&self, page: PageNumber) -> bool {
         if self.allocated_since_commit.lock().unwrap().remove(&page) {
             let mut state = self.state.lock().unwrap();
             // Free in the regional allocator
@@ -1154,9 +1152,9 @@ impl TransactionalMemory {
             self.storage.invalidate_cache(address_range.start, len);
             self.storage.cancel_pending_write(address_range.start, len);
 
-            Ok(true)
+            true
         } else {
-            Ok(false)
+            false
         }
     }
 
