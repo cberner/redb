@@ -737,21 +737,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
         let iter =
-            if let Some(collection) = unsafe { self.tree.remove(key)? } {
-                // TODO: optimize out this copy. The .remove() above should be replaced with
-                // .remove_retain_uncommitted, which should return the PageNumber so we can free it ourselves
-                let value = collection.value();
-                let collection_bytes = DynamicCollection::as_bytes(&value);
-                let len = collection_bytes.as_ref().len();
-                let mut tmp_page = self.mem.allocate(len)?;
-                let tmp_page_number = tmp_page.get_page_number();
-                tmp_page.memory_mut()[..len].copy_from_slice(collection_bytes.as_ref());
-                let mut pages = vec![tmp_page_number];
-                drop(tmp_page);
-                let tmp_page = self.mem.get_page(tmp_page_number);
-                let collection: AccessGuard<DynamicCollection> =
-                    AccessGuard::with_page(tmp_page, 0..len);
-
+            if let Some((collection, mut pages)) = self.tree.remove_retain_uncommitted(key)? {
                 if matches!(
                     collection.value().collection_type(),
                     DynamicCollectionType::Subtree
