@@ -450,7 +450,6 @@ pub(crate) struct TransactionalMemory {
     // code path where there is no locking
     region_size: u64,
     region_header_with_padding_size: u32,
-    db_header_size: u32,
     #[allow(dead_code)]
     pages_are_os_page_aligned: bool,
     #[allow(dead_code)]
@@ -653,8 +652,6 @@ impl TransactionalMemory {
             page_size,
             region_size,
             region_header_with_padding_size: region_header_size,
-            // TODO: remove this field. It is redundant
-            db_header_size: page_size,
             pages_are_os_page_aligned: is_page_aligned(page_size.try_into().unwrap()),
             use_mmap,
         })
@@ -932,7 +929,7 @@ impl TransactionalMemory {
                     );
 
                     let address = page_number.address_range(
-                        self.db_header_size,
+                        self.page_size,
                         self.region_size,
                         self.region_header_with_padding_size,
                         self.page_size,
@@ -1003,7 +1000,7 @@ impl TransactionalMemory {
 
         // Safety: we asserted that no mutable references are open
         let range = page_number.address_range(
-            self.db_header_size,
+            self.page_size,
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
@@ -1035,7 +1032,7 @@ impl TransactionalMemory {
         }
 
         let address_range = page_number.address_range(
-            self.db_header_size,
+            self.page_size,
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
@@ -1111,7 +1108,7 @@ impl TransactionalMemory {
             .push(AllocationOp::Free(page));
 
         let address_range = page.address_range(
-            self.db_header_size,
+            self.page_size,
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
@@ -1146,7 +1143,7 @@ impl TransactionalMemory {
                 .push(AllocationOp::FreeUncommitted(page));
 
             let address_range = page.address_range(
-                self.db_header_size,
+                self.page_size,
                 self.region_size,
                 self.region_header_with_padding_size,
                 self.page_size,
@@ -1345,7 +1342,7 @@ impl TransactionalMemory {
         }
 
         let address_range = page_number.address_range(
-            self.db_header_size,
+            self.page_size,
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
