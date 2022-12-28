@@ -70,10 +70,9 @@ impl RegionLayout {
         }
     }
 
-    pub(super) fn data_section(&self) -> Range<usize> {
-        let usable: usize = self.usable_bytes().try_into().unwrap();
-        let header_bytes: usize = (self.header_pages * self.page_size).try_into().unwrap();
-        header_bytes..(header_bytes + usable)
+    pub(super) fn data_section(&self) -> Range<u64> {
+        let header_bytes = self.header_pages as u64 * self.page_size as u64;
+        header_bytes..(header_bytes + self.usable_bytes())
     }
 
     pub(super) fn get_header_pages(&self) -> u32 {
@@ -183,7 +182,7 @@ impl DatabaseLayout {
 
     pub(super) fn len(&self) -> u64 {
         let last = self.num_regions() - 1;
-        (self.region_base_address(last) as u64) + self.region_layout(last).len()
+        self.region_base_address(last) + self.region_layout(last).len()
     }
 
     pub(super) fn usable_bytes(&self) -> u64 {
@@ -206,12 +205,10 @@ impl DatabaseLayout {
         (self.superheader_pages() * self.full_region_layout.page_size) as usize
     }
 
-    pub(super) fn region_base_address(&self, region: u32) -> usize {
+    pub(super) fn region_base_address(&self, region: u32) -> u64 {
         assert!(region < self.num_regions());
 
-        ((self.superheader_bytes() as u64) + (region as u64) * self.full_region_layout.len())
-            .try_into()
-            .unwrap()
+        (self.superheader_bytes() as u64) + (region as u64) * self.full_region_layout.len()
     }
 
     pub(super) fn region_layout(&self, region: u32) -> RegionLayout {

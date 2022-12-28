@@ -65,25 +65,23 @@ impl PageNumber {
         }
     }
 
-    // TODO: should return a u64 so that this works with large files on 32bit platforms
     pub(crate) fn address_range(
         &self,
-        data_section_offset: usize,
+        data_section_offset: u32,
         region_size: u64,
-        region_pages_start: usize,
-        page_size: usize,
-    ) -> Range<usize> {
-        let regional_start =
-            region_pages_start + self.page_index as usize * self.page_size_bytes(page_size);
+        region_pages_start: u32,
+        page_size: u32,
+    ) -> Range<u64> {
+        let regional_start = region_pages_start + self.page_index * self.page_size_bytes(page_size);
         debug_assert!((regional_start as u64) < region_size);
-        let region_base: usize = ((self.region as u64) * region_size).try_into().unwrap();
-        let start = data_section_offset + region_base + regional_start;
-        let end = start + self.page_size_bytes(page_size);
+        let region_base = (self.region as u64) * region_size;
+        let start = data_section_offset as u64 + region_base + regional_start as u64;
+        let end = start + self.page_size_bytes(page_size) as u64;
         start..end
     }
 
-    pub(crate) fn page_size_bytes(&self, page_size: usize) -> usize {
-        let pages = 1usize << self.page_order;
+    pub(crate) fn page_size_bytes(&self, page_size: u32) -> u32 {
+        let pages = 1u32 << self.page_order;
         pages * page_size
     }
 }
