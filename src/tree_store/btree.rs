@@ -141,11 +141,11 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
     }
 
     #[allow(dead_code)]
-    pub(crate) fn print_debug(&self, include_values: bool) {
+    pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.read_tree().print_debug(include_values)
     }
 
-    pub(crate) fn stats(&self) -> BtreeStats {
+    pub(crate) fn stats(&self) -> Result<BtreeStats> {
         btree_stats(
             self.get_root().map(|(p, _)| p),
             self.mem,
@@ -236,18 +236,22 @@ impl<'a> RawBtree<'a> {
         }
     }
 
-    pub(crate) fn verify_checksum(&self) -> bool {
+    pub(crate) fn verify_checksum(&self) -> Result<bool> {
         if let Some((root, checksum)) = self.root {
             self.verify_checksum_helper(root, checksum)
         } else {
-            true
+            Ok(true)
         }
     }
 
-    fn verify_checksum_helper(&self, page_number: PageNumber, expected_checksum: Checksum) -> bool {
-        let page = self.mem.get_page(page_number);
+    fn verify_checksum_helper(
+        &self,
+        page_number: PageNumber,
+        expected_checksum: Checksum,
+    ) -> Result<bool> {
+        let page = self.mem.get_page(page_number)?;
         let node_mem = page.memory();
-        match node_mem[0] {
+        Ok(match node_mem[0] {
             LEAF => {
                 expected_checksum
                     == leaf_checksum(
@@ -261,21 +265,21 @@ impl<'a> RawBtree<'a> {
                 if expected_checksum
                     != branch_checksum(&page, self.fixed_key_size, self.mem.checksum_type())
                 {
-                    return false;
+                    return Ok(false);
                 }
                 let accessor = BranchAccessor::new(&page, self.fixed_key_size);
                 for i in 0..accessor.count_children() {
                     if !self.verify_checksum_helper(
                         accessor.child_page(i).unwrap(),
                         accessor.child_checksum(i).unwrap(),
-                    ) {
-                        return false;
+                    )? {
+                        return Ok(false);
                     }
                 }
                 true
             }
             _ => unreachable!(),
-        }
+        })
     }
 }
 
@@ -304,29 +308,33 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
 
     pub(crate) fn get(&self, key: &K::RefBaseType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
         if let Some((p, _)) = self.root {
-            let root_page = self.mem.get_page_extended(p, self.hint);
-            return Ok(self.get_helper(root_page, K::as_bytes(key).as_ref()));
+            let root_page = self.mem.get_page_extended(p, self.hint)?;
+            self.get_helper(root_page, K::as_bytes(key).as_ref())
         } else {
             Ok(None)
         }
     }
 
     // Returns the value for the queried key, if present
-    fn get_helper(&self, page: PageImpl<'a>, query: &[u8]) -> Option<AccessGuard<'a, V>> {
+    fn get_helper(&self, page: PageImpl<'a>, query: &[u8]) -> Result<Option<AccessGuard<'a, V>>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-                let entry_index = accessor.find_key::<K>(query)?;
-                let (start, end) = accessor.value_range(entry_index).unwrap();
-                // Safety: free_on_drop is false
-                let guard = unsafe { AccessGuard::new(page, start, end - start, false, self.mem) };
-                Some(guard)
+                if let Some(entry_index) = accessor.find_key::<K>(query) {
+                    let (start, end) = accessor.value_range(entry_index).unwrap();
+                    // Safety: free_on_drop is false
+                    let guard =
+                        unsafe { AccessGuard::new(page, start, end - start, false, self.mem) };
+                    Ok(Some(guard))
+                } else {
+                    Ok(None)
+                }
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let (_, child_page) = accessor.child_for_key::<K>(query);
-                self.get_helper(self.mem.get_page_extended(child_page, self.hint), query)
+                self.get_helper(self.mem.get_page_extended(child_page, self.hint)?, query)
             }
             _ => unreachable!(),
         }
@@ -343,11 +351,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
     where
         'a: 'a0,
     {
-        Ok(BtreeRangeIter::new(
-            range,
-            self.root.map(|(p, _)| p),
-            self.mem,
-        ))
+        BtreeRangeIter::new(range, self.root.map(|(p, _)| p), self.mem)
     }
 
     pub(crate) fn len(&self) -> Result<usize> {
@@ -355,7 +359,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
             ..,
             self.root.map(|(p, _)| p),
             self.mem,
-        );
+        )?;
         let mut count = 0;
         while iter.next().is_some() {
             count += 1;
@@ -364,9 +368,9 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn print_debug(&self, include_values: bool) {
+    pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         if let Some((p, _)) = self.root {
-            let mut pages = vec![self.mem.get_page(p)];
+            let mut pages = vec![self.mem.get_page(p)?];
             while !pages.is_empty() {
                 let mut next_children = vec![];
                 for page in pages.drain(..) {
@@ -382,7 +386,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                             let accessor = BranchAccessor::new(&page, K::fixed_width());
                             for i in 0..accessor.count_children() {
                                 let child = accessor.child_page(i).unwrap();
-                                next_children.push(self.mem.get_page(child));
+                                next_children.push(self.mem.get_page(child)?);
                             }
                             accessor.print_node::<K>();
                         }
@@ -395,6 +399,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
                 pages = next_children;
             }
         }
+
+        Ok(())
     }
 }
 
@@ -403,18 +409,18 @@ pub(crate) fn btree_stats(
     mem: &TransactionalMemory,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
-) -> BtreeStats {
+) -> Result<BtreeStats> {
     if let Some(root) = root {
         stats_helper(root, mem, fixed_key_size, fixed_value_size)
     } else {
-        BtreeStats {
+        Ok(BtreeStats {
             tree_height: 0,
             leaf_pages: 0,
             branch_pages: 0,
             stored_leaf_bytes: 0,
             metadata_bytes: 0,
             fragmented_bytes: 0,
-        }
+        })
     }
 }
 
@@ -423,8 +429,8 @@ fn stats_helper(
     mem: &TransactionalMemory,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
-) -> BtreeStats {
-    let page = mem.get_page(page_number);
+) -> Result<BtreeStats> {
+    let page = mem.get_page(page_number)?;
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -432,14 +438,14 @@ fn stats_helper(
             let leaf_bytes = accessor.length_of_pairs(0, accessor.num_pairs());
             let overhead_bytes = accessor.total_length() - leaf_bytes;
             let fragmented_bytes = page.memory().len() - accessor.total_length();
-            BtreeStats {
+            Ok(BtreeStats {
                 tree_height: 1,
                 leaf_pages: 1,
                 branch_pages: 0,
                 stored_leaf_bytes: leaf_bytes,
                 metadata_bytes: overhead_bytes,
                 fragmented_bytes,
-            }
+            })
         }
         BRANCH => {
             let accessor = BranchAccessor::new(&page, fixed_key_size);
@@ -451,7 +457,7 @@ fn stats_helper(
             let mut fragmented_bytes = page.memory().len() - accessor.total_length();
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
-                    let stats = stats_helper(child, mem, fixed_key_size, fixed_value_size);
+                    let stats = stats_helper(child, mem, fixed_key_size, fixed_value_size)?;
                     max_child_height = max(max_child_height, stats.tree_height);
                     leaf_pages += stats.leaf_pages;
                     branch_pages += stats.branch_pages;
@@ -461,14 +467,14 @@ fn stats_helper(
                 }
             }
 
-            BtreeStats {
+            Ok(BtreeStats {
                 tree_height: max_child_height + 1,
                 leaf_pages,
                 branch_pages,
                 stored_leaf_bytes,
                 metadata_bytes,
                 fragmented_bytes,
-            }
+            })
         }
         _ => unreachable!(),
     }

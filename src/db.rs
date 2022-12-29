@@ -183,7 +183,7 @@ impl Database {
         &self.mem
     }
 
-    fn verify_primary_checksums(mem: &TransactionalMemory) -> bool {
+    fn verify_primary_checksums(mem: &TransactionalMemory) -> Result<bool> {
         let (root, root_checksum) = mem
             .get_data_root()
             .expect("Tried to repair an empty database");
@@ -193,9 +193,9 @@ impl Database {
             InternalTableDefinition::fixed_width(),
             mem,
         )
-        .verify_checksum()
+        .verify_checksum()?
         {
-            return false;
+            return Ok(false);
         }
 
         if let Some((freed_root, freed_checksum)) = mem.get_freed_root() {
@@ -205,15 +205,15 @@ impl Database {
                 None,
                 mem,
             )
-            .verify_checksum()
+            .verify_checksum()?
             {
-                return false;
+                return Ok(false);
             }
         }
 
         // Iterate over all other tables
         let iter: BtreeRangeIter<&str, InternalTableDefinition> =
-            BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem);
+            BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
         for entry in iter {
             let definition = InternalTableDefinition::from_bytes(entry.value());
             if let Some((table_root, table_checksum)) = definition.get_root() {
@@ -223,14 +223,14 @@ impl Database {
                     definition.get_fixed_value_size(),
                     mem,
                 )
-                .verify_checksum()
+                .verify_checksum()?
                 {
-                    return false;
+                    return Ok(false);
                 }
             }
         }
 
-        true
+        Ok(true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -262,9 +262,9 @@ impl Database {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
 
-            if mem.needs_checksum_verification()? && !Self::verify_primary_checksums(&mem) {
+            if mem.needs_checksum_verification()? && !Self::verify_primary_checksums(&mem)? {
                 mem.repair_primary_corrupted();
-                assert!(Self::verify_primary_checksums(&mem));
+                assert!(Self::verify_primary_checksums(&mem)?);
             }
 
             mem.begin_repair()?;
@@ -275,12 +275,12 @@ impl Database {
 
             // Repair the allocator state
             // All pages in the master table
-            let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, &mem);
+            let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, &mem)?;
             mem.mark_pages_allocated(master_pages_iter)?;
 
             // Iterate over all other tables
             let iter: BtreeRangeIter<&str, InternalTableDefinition> =
-                BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), &mem);
+                BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), &mem)?;
 
             // Chain all the other tables to the master table iter
             for entry in iter {
@@ -291,7 +291,7 @@ impl Database {
                         definition.get_fixed_key_size(),
                         definition.get_fixed_value_size(),
                         &mem,
-                    );
+                    )?;
                     mem.mark_pages_allocated(table_pages_iter)?;
 
                     // Multimap tables may have additional subtrees in their values
@@ -301,9 +301,9 @@ impl Database {
                             definition.get_fixed_key_size(),
                             definition.get_fixed_value_size(),
                             &mem,
-                        );
+                        )?;
                         for table_page in table_pages_iter {
-                            let page = mem.get_page(table_page);
+                            let page = mem.get_page(table_page)?;
                             let mut subtree_roots = parse_subtree_roots(
                                 &page,
                                 definition.get_fixed_key_size(),

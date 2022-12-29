@@ -207,8 +207,8 @@ impl DynamicCollection {
     fn iter<'a, V: RedbKey + ?Sized>(
         collection: AccessGuard<'a, DynamicCollection>,
         mem: &'a TransactionalMemory,
-    ) -> MultimapValueIter<'a, V> {
-        match collection.value().collection_type() {
+    ) -> Result<MultimapValueIter<'a, V>> {
+        Ok(match collection.value().collection_type() {
             Inline => {
                 let leaf_iter = LeafKeyIter::new(
                     collection,
@@ -220,10 +220,10 @@ impl DynamicCollection {
             Subtree => {
                 let root = collection.value().as_subtree().0;
                 MultimapValueIter::new_subtree(
-                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., Some(root), mem),
+                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., Some(root), mem)?,
                 )
             }
-        }
+        })
     }
 
     fn iter_free_on_drop<'a, V: RedbKey + ?Sized>(
@@ -231,8 +231,8 @@ impl DynamicCollection {
         pages: Vec<PageNumber>,
         freed_pages: Rc<RefCell<Vec<PageNumber>>>,
         mem: &'a TransactionalMemory,
-    ) -> MultimapValueIter<'a, V> {
-        match collection.value().collection_type() {
+    ) -> Result<MultimapValueIter<'a, V>> {
+        Ok(match collection.value().collection_type() {
             Inline => {
                 let leaf_iter = LeafKeyIter::new(
                     collection,
@@ -244,10 +244,10 @@ impl DynamicCollection {
             Subtree => {
                 let root = collection.value().as_subtree().0;
                 let inner =
-                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., Some(root), mem);
+                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., Some(root), mem)?;
                 MultimapValueIter::new_subtree_free_on_drop(inner, freed_pages, pages, mem)
             }
-        }
+        })
     }
 
     fn make_inline_data(data: &[u8]) -> Vec<u8> {
@@ -386,7 +386,8 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> Iterator
         let key = AccessGuard::with_owned_value(entry.key().to_vec());
         let (page, _, value_range) = entry.into_raw();
         let collection = AccessGuard::with_page(page, value_range);
-        let iter = DynamicCollection::iter(collection, self.mem);
+        // TODO: propagate error
+        let iter = DynamicCollection::iter(collection, self.mem).unwrap();
 
         Some((key, iter))
     }
@@ -400,7 +401,8 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> DoubleEndedIterator
         let key = AccessGuard::with_owned_value(entry.key().to_vec());
         let (page, _, value_range) = entry.into_raw();
         let collection = AccessGuard::with_page(page, value_range);
-        let iter = DynamicCollection::iter(collection, self.mem);
+        // TODO: propagate error
+        let iter = DynamicCollection::iter(collection, self.mem).unwrap();
 
         Some((key, iter))
     }
@@ -439,8 +441,8 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
     }
 
     #[allow(dead_code)]
-    pub(crate) fn print_debug(&self, include_values: bool) {
-        self.tree.print_debug(include_values);
+    pub(crate) fn print_debug(&self, include_values: bool) -> Result {
+        self.tree.print_debug(include_values)
     }
 
     /// Add the given value to the mapping of the key
@@ -675,7 +677,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                 let existed = unsafe { subtree.remove(value)?.is_some() };
 
                 if let Some((new_root, new_checksum)) = subtree.get_root() {
-                    let page = self.mem.get_page(new_root);
+                    let page = self.mem.get_page(new_root)?;
                     match page.memory()[0] {
                         LEAF => {
                             let accessor = LeafAccessor::new(
@@ -747,7 +749,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                         V::fixed_width(),
                         <() as RedbValue>::fixed_width(),
                         self.mem,
-                    );
+                    )?;
                     for page in all_pages {
                         pages.push(page);
                     }
@@ -757,10 +759,10 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                     pages,
                     self.freed_pages.clone(),
                     self.mem,
-                )
+                )?
             } else {
                 MultimapValueIter::new_subtree(
-                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem),
+                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem)?,
                 )
             };
 
@@ -775,10 +777,10 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<
     fn get<'a>(&'a self, key: impl Borrow<K::RefBaseType<'a>>) -> Result<MultimapValueIter<'a, V>> {
         let iter =
             if let Some(collection) = self.tree.get(key.borrow())? {
-                DynamicCollection::iter(collection, self.mem)
+                DynamicCollection::iter(collection, self.mem)?
             } else {
                 MultimapValueIter::new_subtree(
-                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem),
+                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem)?,
                 )
             };
 
@@ -868,10 +870,10 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     fn get<'a>(&'a self, key: impl Borrow<K::RefBaseType<'a>>) -> Result<MultimapValueIter<'a, V>> {
         let iter =
             if let Some(collection) = self.tree.get(key.borrow())? {
-                DynamicCollection::iter(collection, self.mem)
+                DynamicCollection::iter(collection, self.mem)?
             } else {
                 MultimapValueIter::new_subtree(
-                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem),
+                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem)?,
                 )
             };
 

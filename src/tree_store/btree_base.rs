@@ -263,23 +263,23 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> AccessGuardMut<'a, K, V> {
     // because the checksums will have been calculated with the values during .insert_reserve(),
     // but the user is given a mutable reference and will have modified the value, which invalidates
     // the checksum.
-    fn finalize_checksum(&mut self, page_number: PageNumber) -> Checksum {
+    fn finalize_checksum(&mut self, page_number: PageNumber) -> Result<Checksum> {
         if page_number == self.page.get_page_number() {
             assert_eq!(LEAF, self.page.memory()[0]);
-            self.checksum_helper(&self.page)
+            Ok(self.checksum_helper(&self.page))
         } else {
             // Safe because we're the only one with mutable access, and this is a dirty page so
             // no readers can have a reference to it
             assert!(self.mem.uncommitted(page_number));
-            let mut page = unsafe { self.mem.get_page_mut(page_number) };
+            let mut page = unsafe { self.mem.get_page_mut(page_number)? };
             assert_eq!(BRANCH, page.memory()[0]);
             let accessor = BranchAccessor::new(&page, K::fixed_width());
             let (child_index, child_page) = accessor.child_for_key::<K>(&self.key);
-            let child_checksum = self.finalize_checksum(child_page);
+            let child_checksum = self.finalize_checksum(child_page)?;
             drop(accessor);
             let mut mutator = BranchMutator::new(&mut page);
             mutator.write_child_page(child_index, child_page, child_checksum);
-            self.checksum_helper(&page)
+            Ok(self.checksum_helper(&page))
         }
     }
 
@@ -313,7 +313,9 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for AccessGuardMut<'a,
         if self.root.borrow().is_none() {
             return;
         }
-        let new_checksum = self.finalize_checksum((self.root.clone()).borrow().unwrap().0);
+        let new_checksum = self
+            .finalize_checksum((self.root.clone()).borrow().unwrap().0)
+            .unwrap();
         let mut borrow = self.root.borrow_mut();
         let (_, root_checksum_ref) = borrow.as_mut().unwrap();
         *root_checksum_ref = new_checksum;

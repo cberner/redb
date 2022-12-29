@@ -398,7 +398,7 @@ impl<'txn> TableTree<'txn> {
                     K::fixed_width(),
                     V::fixed_width(),
                     self.mem,
-                );
+                )?;
                 let mut freed_pages = self.freed_pages.borrow_mut();
                 for page_number in iter {
                     freed_pages.push(page_number);
@@ -440,7 +440,7 @@ impl<'txn> TableTree<'txn> {
     }
 
     pub fn stats(&self) -> Result<DatabaseStats> {
-        let master_tree_stats = self.tree.stats();
+        let master_tree_stats = self.tree.stats()?;
         let mut max_subtree_height = 0;
         let mut total_stored_bytes = 0;
         // Count the master tree leaf pages as branches, since they point to the data trees
@@ -464,7 +464,7 @@ impl<'txn> TableTree<'txn> {
                 self.mem,
                 definition.fixed_key_size,
                 definition.fixed_value_size,
-            );
+            )?;
             max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
             total_stored_bytes += subtree_stats.stored_leaf_bytes;
             total_metadata_bytes += subtree_stats.metadata_bytes;

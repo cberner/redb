@@ -573,7 +573,7 @@ impl<'db> WriteTransaction<'db> {
     pub fn stats(&self) -> Result<DatabaseStats> {
         let table_tree = self.table_tree.borrow();
         let data_tree_stats = table_tree.stats()?;
-        let freed_tree_stats = self.freed_tree.stats();
+        let freed_tree_stats = self.freed_tree.stats()?;
         let total_metadata_bytes = data_tree_stats.metadata_bytes()
             + freed_tree_stats.metadata_bytes
             + freed_tree_stats.stored_leaf_bytes;
@@ -593,7 +593,7 @@ impl<'db> WriteTransaction<'db> {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn print_debug(&self) {
+    pub(crate) fn print_debug(&self) -> Result {
         // Flush any pending updates to make sure we get the latest root
         if let Some(page) = self
             .table_tree
@@ -604,8 +604,10 @@ impl<'db> WriteTransaction<'db> {
             eprintln!("Master tree:");
             let master_tree: Btree<&str, InternalTableDefinition> =
                 Btree::new(Some(page), PageHint::None, self.mem);
-            master_tree.print_debug(true);
+            master_tree.print_debug(true)?;
         }
+
+        Ok(())
     }
 }
 

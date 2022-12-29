@@ -84,12 +84,12 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
         let root = { *(*self.root.clone()).borrow() };
         if let Some((p, checksum)) = root {
             let (deletion_result, found) =
-                self.delete_helper(self.mem.get_page(p), checksum, K::as_bytes(key).as_ref())?;
+                self.delete_helper(self.mem.get_page(p)?, checksum, K::as_bytes(key).as_ref())?;
             let new_root = match deletion_result {
                 Subtree(page, checksum) => Some((page, checksum)),
                 DeletedLeaf => None,
                 PartialLeaf { deleted_pair } => {
-                    let page = self.mem.get_page(p);
+                    let page = self.mem.get_page(p)?;
                     let accessor =
                         LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                     let mut builder = LeafBuilder::new(
@@ -122,7 +122,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
         let root = { *(*self.root.clone()).borrow() };
         let (new_root, old_value, guard) = if let Some((p, checksum)) = root {
             let result = self.insert_helper(
-                self.mem.get_page(p),
+                self.mem.get_page(p)?,
                 checksum,
                 K::as_bytes(key).as_ref(),
                 V::as_bytes(value).as_ref(),
@@ -237,7 +237,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         None
                     };
                     drop(page);
-                    let mut page_mut = self.mem.get_page_mut(page_number);
+                    let mut page_mut = self.mem.get_page_mut(page_number)?;
                     let mut mutator =
                         LeafMutator::new(&mut page_mut, K::fixed_width(), V::fixed_width());
                     mutator.insert(position, found, key, value);
@@ -375,7 +375,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
                 let child_checksum = accessor.child_checksum(child_index).unwrap();
                 let sub_result =
-                    self.insert_helper(self.mem.get_page(child_page), child_checksum, key, value)?;
+                    self.insert_helper(self.mem.get_page(child_page)?, child_checksum, key, value)?;
 
                 if sub_result.additional_sibling.is_none() {
                     // Check fast-path if no children were added / changed. Generally, this can only happen
@@ -396,7 +396,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                         drop(page);
                         // Safety: Since the page is uncommitted, no other transactions could have it open
                         // and we just dropped our reference to it, on the line above
-                        let mut mutpage = self.mem.get_page_mut(page_number);
+                        let mut mutpage = self.mem.get_page_mut(page_number)?;
                         let mut mutator = BranchMutator::new(&mut mutpage);
                         mutator.write_child_page(
                             child_index,
@@ -517,7 +517,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             drop(page);
             // Safety: caller guaranteed that no other references to uncommitted data exist,
             // and we just dropped the reference to page
-            let page_mut = self.mem.get_page_mut(page_number);
+            let page_mut = self.mem.get_page_mut(page_number)?;
 
             // TODO: optimize this!
             // hack to get the checksum after removal
@@ -632,7 +632,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
         let (child_index, child_page_number) = accessor.child_for_key::<K>(key);
         let child_checksum = accessor.child_checksum(child_index).unwrap();
         let (result, found) =
-            self.delete_helper(self.mem.get_page(child_page_number), child_checksum, key)?;
+            self.delete_helper(self.mem.get_page(child_page_number)?, child_checksum, key)?;
         if found.is_none() {
             return Ok((Subtree(original_page_number, checksum), None));
         }
@@ -641,7 +641,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 drop(page);
                 // Safety: Caller guarantees there are no references to uncommitted pages,
                 // and we just dropped our reference to it on the line above
-                let mut mutpage = self.mem.get_page_mut(original_page_number);
+                let mut mutpage = self.mem.get_page_mut(original_page_number)?;
                 let mut mutator = BranchMutator::new(&mut mutpage);
                 mutator.write_child_page(child_index, new_child, new_child_checksum);
                 (original_page_number, self.checksum_helper(&mutpage))
@@ -691,7 +691,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 self.finalize_branch_builder(builder)?
             }
             PartialLeaf { deleted_pair } => {
-                let partial_child_page = self.mem.get_page(child_page_number);
+                let partial_child_page = self.mem.get_page(child_page_number)?;
                 let partial_child_accessor = LeafAccessor::new(
                     partial_child_page.memory(),
                     K::fixed_width(),
@@ -701,7 +701,9 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
 
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 debug_assert!(merge_with < accessor.count_children());
-                let merge_with_page = self.mem.get_page(accessor.child_page(merge_with).unwrap());
+                let merge_with_page = self
+                    .mem
+                    .get_page(accessor.child_page(merge_with).unwrap())?;
                 let merge_with_accessor =
                     LeafAccessor::new(merge_with_page.memory(), K::fixed_width(), V::fixed_width());
 
@@ -802,7 +804,9 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
             }
             DeletedBranch(only_grandchild, grandchild_checksum) => {
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
-                let merge_with_page = self.mem.get_page(accessor.child_page(merge_with).unwrap());
+                let merge_with_page = self
+                    .mem
+                    .get_page(accessor.child_page(merge_with).unwrap())?;
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
                 debug_assert!(merge_with < accessor.count_children());
                 for i in 0..accessor.count_children() {
@@ -867,11 +871,13 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
                 result
             }
             PartialBranch(partial_child, ..) => {
-                let partial_child_page = self.mem.get_page(partial_child);
+                let partial_child_page = self.mem.get_page(partial_child)?;
                 let partial_child_accessor =
                     BranchAccessor::new(&partial_child_page, K::fixed_width());
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
-                let merge_with_page = self.mem.get_page(accessor.child_page(merge_with).unwrap());
+                let merge_with_page = self
+                    .mem
+                    .get_page(accessor.child_page(merge_with).unwrap())?;
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
                 debug_assert!(merge_with < accessor.count_children());
                 for i in 0..accessor.count_children() {
