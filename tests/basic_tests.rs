@@ -2,7 +2,8 @@ use redb::{Database, MultimapTableDefinition, RangeIter, ReadableTable, TableDef
 use std::sync;
 use tempfile::NamedTempFile;
 
-const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
+const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice");
+const STR_TABLE: TableDefinition<&str, &str> = TableDefinition::new("x");
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
 
 #[test]
@@ -11,15 +12,15 @@ fn len() {
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
-        table.insert(b"hello2", b"world2").unwrap();
-        table.insert(b"hi", b"world").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+        table.insert("hello2", "world2").unwrap();
+        table.insert("hi", "world").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE).unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
     assert_eq!(table.len().unwrap(), 3);
 }
 
@@ -29,30 +30,30 @@ fn pop() {
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"a", b"world").unwrap();
-        table.insert(b"b", b"world2").unwrap();
-        table.insert(b"c", b"world3").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("a", "world").unwrap();
+        table.insert("b", "world2").unwrap();
+        table.insert("c", "world3").unwrap();
     }
     write_txn.commit().unwrap();
 
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
         {
             let (key, value) = table.pop_first().unwrap().unwrap();
-            assert_eq!(key.value(), b"a");
-            assert_eq!(value.value(), b"world");
+            assert_eq!(key.value(), "a");
+            assert_eq!(value.value(), "world");
         }
         {
             let (key, value) = table.pop_last().unwrap().unwrap();
-            assert_eq!(key.value(), b"c");
-            assert_eq!(value.value(), b"world3");
+            assert_eq!(key.value(), "c");
+            assert_eq!(value.value(), "world3");
         }
         {
             let (key, value) = table.pop_last().unwrap().unwrap();
-            assert_eq!(key.value(), b"b");
-            assert_eq!(value.value(), b"world2");
+            assert_eq!(key.value(), "b");
+            assert_eq!(value.value(), "world2");
         }
         assert!(table.pop_last().unwrap().is_none());
     }
@@ -112,8 +113,8 @@ fn stored_size() {
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
     }
     write_txn.commit().unwrap();
 
@@ -145,8 +146,8 @@ fn create_open() {
 
 #[test]
 fn multiple_tables() {
-    let definition1: TableDefinition<&[u8], &[u8]> = TableDefinition::new("1");
-    let definition2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("2");
+    let definition1: TableDefinition<&str, &str> = TableDefinition::new("1");
+    let definition2: TableDefinition<&str, &str> = TableDefinition::new("2");
 
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
@@ -155,8 +156,8 @@ fn multiple_tables() {
         let mut table = write_txn.open_table(definition1).unwrap();
         let mut table2 = write_txn.open_table(definition2).unwrap();
 
-        table.insert(b"hello", b"world").unwrap();
-        table2.insert(b"hello", b"world2").unwrap();
+        table.insert("hello", "world").unwrap();
+        table2.insert("hello", "world2").unwrap();
     }
     write_txn.commit().unwrap();
 
@@ -164,9 +165,9 @@ fn multiple_tables() {
     let table = read_txn.open_table(definition1).unwrap();
     let table2 = read_txn.open_table(definition2).unwrap();
     assert_eq!(table.len().unwrap(), 1);
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
     assert_eq!(table2.len().unwrap(), 1);
-    assert_eq!(b"world2", table2.get(b"hello").unwrap().unwrap().value());
+    assert_eq!("world2", table2.get("hello").unwrap().unwrap().value());
 }
 
 #[test]
@@ -549,13 +550,13 @@ fn is_empty() {
 
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE).unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
     assert!(!table.is_empty().unwrap());
 }
 
@@ -566,26 +567,26 @@ fn abort() {
 
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"aborted").unwrap();
-        assert_eq!(b"aborted", table.get(b"hello").unwrap().unwrap().value());
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "aborted").unwrap();
+        assert_eq!("aborted", table.get("hello").unwrap().unwrap().value());
     }
     write_txn.abort().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE);
+    let table = read_txn.open_table(STR_TABLE);
     assert!(table.is_err());
 
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
     assert_eq!(table.len().unwrap(), 1);
 }
 
@@ -595,44 +596,44 @@ fn insert_overwrite() {
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        assert!(table.insert(b"hello", b"world").unwrap().is_none());
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(table.insert("hello", "world").unwrap().is_none());
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
 
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        let old_value = table.insert(b"hello", b"replaced").unwrap();
-        assert_eq!(old_value.unwrap().value(), b"world");
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        let old_value = table.insert("hello", "replaced").unwrap();
+        assert_eq!(old_value.unwrap().value(), "world");
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"replaced", table.get(b"hello").unwrap().unwrap().value());
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("replaced", table.get("hello").unwrap().unwrap().value());
 }
 
 #[test]
 fn insert_reserve() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
-    let value = b"world";
+    let value = "world";
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        let mut reserved = table.insert_reserve(b"hello", value.len()).unwrap();
-        reserved.as_mut().copy_from_slice(value);
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        let mut reserved = table.insert_reserve("hello", value.len()).unwrap();
+        reserved.as_mut().copy_from_slice(value.as_bytes());
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(value, table.get(b"hello").unwrap().unwrap().value());
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(value, table.get("hello").unwrap().unwrap().value());
 }
 
 #[test]
@@ -641,28 +642,28 @@ fn delete() {
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
-        table.insert(b"hello2", b"world").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+        table.insert("hello2", "world").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
     assert_eq!(table.len().unwrap(), 2);
 
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        assert_eq!(b"world", table.remove(b"hello").unwrap().unwrap().value());
-        assert!(table.remove(b"hello").unwrap().is_none());
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        assert_eq!("world", table.remove("hello").unwrap().unwrap().value());
+        assert!(table.remove("hello").unwrap().is_none());
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert!(table.get(b"hello").unwrap().is_none());
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert!(table.get("hello").unwrap().is_none());
     assert_eq!(table.len().unwrap(), 1);
 }
 
@@ -672,18 +673,18 @@ fn no_dirty_reads() {
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
     }
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE);
+    let table = read_txn.open_table(STR_TABLE);
     assert!(table.is_err());
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
 }
 
 #[test]
@@ -692,34 +693,34 @@ fn read_isolation() {
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
 
     let write_txn = db.begin_write().unwrap();
     {
-        let mut write_table = write_txn.open_table(SLICE_TABLE).unwrap();
-        write_table.remove(b"hello").unwrap();
-        write_table.insert(b"hello2", b"world2").unwrap();
-        write_table.insert(b"hello3", b"world3").unwrap();
+        let mut write_table = write_txn.open_table(STR_TABLE).unwrap();
+        write_table.remove("hello").unwrap();
+        write_table.insert("hello2", "world2").unwrap();
+        write_table.insert("hello3", "world3").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn2 = db.begin_read().unwrap();
-    let table2 = read_txn2.open_table(SLICE_TABLE).unwrap();
-    assert!(table2.get(b"hello").unwrap().is_none());
-    assert_eq!(b"world2", table2.get(b"hello2").unwrap().unwrap().value());
-    assert_eq!(b"world3", table2.get(b"hello3").unwrap().unwrap().value());
+    let table2 = read_txn2.open_table(STR_TABLE).unwrap();
+    assert!(table2.get("hello").unwrap().is_none());
+    assert_eq!("world2", table2.get("hello2").unwrap().unwrap().value());
+    assert_eq!("world3", table2.get("hello3").unwrap().unwrap().value());
     assert_eq!(table2.len().unwrap(), 2);
 
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
-    assert!(table.get(b"hello2").unwrap().is_none());
-    assert!(table.get(b"hello3").unwrap().is_none());
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+    assert!(table.get("hello2").unwrap().is_none());
+    assert!(table.get("hello3").unwrap().is_none());
     assert_eq!(table.len().unwrap(), 1);
 }
 
@@ -729,33 +730,33 @@ fn read_isolation2() {
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
     }
     write_txn.commit().unwrap();
 
     let write_txn = db.begin_write().unwrap();
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
     {
-        let mut write_table = write_txn.open_table(SLICE_TABLE).unwrap();
-        write_table.remove(b"hello").unwrap();
-        write_table.insert(b"hello2", b"world2").unwrap();
-        write_table.insert(b"hello3", b"world3").unwrap();
+        let mut write_table = write_txn.open_table(STR_TABLE).unwrap();
+        write_table.remove("hello").unwrap();
+        write_table.insert("hello2", "world2").unwrap();
+        write_table.insert("hello3", "world3").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn2 = db.begin_read().unwrap();
-    let table2 = read_txn2.open_table(SLICE_TABLE).unwrap();
-    assert!(table2.get(b"hello").unwrap().is_none());
-    assert_eq!(b"world2", table2.get(b"hello2").unwrap().unwrap().value());
-    assert_eq!(b"world3", table2.get(b"hello3").unwrap().unwrap().value());
+    let table2 = read_txn2.open_table(STR_TABLE).unwrap();
+    assert!(table2.get("hello").unwrap().is_none());
+    assert_eq!("world2", table2.get("hello2").unwrap().unwrap().value());
+    assert_eq!("world3", table2.get("hello3").unwrap().unwrap().value());
     assert_eq!(table2.len().unwrap(), 2);
 
-    assert_eq!(b"world", table.get(b"hello").unwrap().unwrap().value());
-    assert!(table.get(b"hello2").unwrap().is_none());
-    assert!(table.get(b"hello3").unwrap().is_none());
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+    assert!(table.get("hello2").unwrap().is_none());
+    assert!(table.get("hello3").unwrap().is_none());
     assert_eq!(table.len().unwrap(), 1);
 }
 
@@ -957,7 +958,7 @@ fn ref_get_signatures() {
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..10u8 {
-            table.insert(&[i], &[i + 1]).unwrap();
+            table.insert([i].as_slice(), [i + 1].as_slice()).unwrap();
         }
     }
     write_txn.commit().unwrap();
@@ -966,9 +967,9 @@ fn ref_get_signatures() {
     let table = read_txn.open_table(SLICE_TABLE).unwrap();
 
     let zero = vec![0u8];
-    assert_eq!(&[1], table.get(&[0]).unwrap().unwrap().value());
-    assert_eq!(&[1], table.get(b"\0").unwrap().unwrap().value());
-    assert_eq!(&[1], table.get(&zero).unwrap().unwrap().value());
+    assert_eq!(&[1], table.get([0].as_slice()).unwrap().unwrap().value());
+    assert_eq!(&[1], table.get(b"\0".as_slice()).unwrap().unwrap().value());
+    assert_eq!(&[1], table.get(zero.as_slice()).unwrap().unwrap().value());
 
     let start = vec![0u8];
     let end = vec![10u8];
@@ -985,15 +986,15 @@ fn ref_get_signatures() {
     assert!(iter.next().is_none());
     drop(iter);
 
-    let mut iter = table.range(start..end).unwrap();
+    let mut iter = table.range(start.as_slice()..end.as_slice()).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1.value(), &[i + 1]);
     }
     assert!(iter.next().is_none());
 
-    let mut iter = table.range([0u8]..[10u8]).unwrap();
-    for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.value(), &[i + 1]);
+    let mut iter = table.range([0u8].as_slice()..[10u8].as_slice()).unwrap();
+    for i in 0..10u8 {
+        assert_eq!(iter.next().unwrap().1.value(), [i + 1].as_slice());
     }
     assert!(iter.next().is_none());
 }

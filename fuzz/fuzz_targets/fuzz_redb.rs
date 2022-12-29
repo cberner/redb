@@ -75,7 +75,7 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
                         let key = key.value;
                         let value_size = value_size.value as usize;
                         let value = vec![0xFF; value_size];
-                        table.insert(&key, &value)?;
+                        table.insert(&key, value.as_slice())?;
                         local_reference.insert(key, value_size);
                     }
                     FuzzOperation::InsertReserve { key, value_size } => {
@@ -206,7 +206,7 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
                     FuzzOperation::Insert { key, value_size } => {
                         let key = key.value;
                         let value_size = value_size.value as usize;
-                        table.insert(&key, &vec![0xFFu8; value_size])?;
+                        table.insert(&key, vec![0xFFu8; value_size].as_slice())?;
                         local_reference.entry(key).or_default().insert(value_size);
                     }
                     FuzzOperation::InsertReserve { .. } => {
@@ -227,7 +227,7 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
                         if local_reference.entry(key).or_default().is_empty() {
                             local_reference.remove(&key);
                         }
-                        let existed = table.remove(&key, &value)?;
+                        let existed = table.remove(&key, value.as_slice())?;
                         assert_eq!(reference_existed, existed);
                     }
                     FuzzOperation::Len {} => {
@@ -251,9 +251,9 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
                                 Box::new(local_reference.range(start..end))
                             };
                         let mut iter: Box<dyn Iterator<Item = (AccessGuard<u64>, MultimapValueIter<&[u8]>)>> = if *reversed {
-                            Box::new(table.range(&start..&end).unwrap().rev())
+                            Box::new(table.range(start..end).unwrap().rev())
                         } else {
-                            Box::new(table.range(&start..&end).unwrap())
+                            Box::new(table.range(start..end).unwrap())
                         };
                         while let Some((ref_key, ref_values)) = reference_iter.next() {
                             let (key, value_iter) = iter.next().unwrap();

@@ -191,12 +191,6 @@ macro_rules! tuple_impl {
             )
             where
                 Self: 'a;
-            type RefBaseType<'a> = (
-                $(<$t>::SelfType<'a>,)+
-                <$t_last>::SelfType<'a>,
-            )
-            where
-                Self: 'a;
             type AsBytes<'a> = Vec<u8>
             where
                 Self: 'a;
@@ -216,7 +210,7 @@ macro_rules! tuple_impl {
                 }
             }
 
-            fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> Vec<u8>
+            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
             where
                 Self: 'a,
                 Self: 'b,

@@ -709,7 +709,7 @@ mod test {
     use crate::{Database, TableDefinition};
     use tempfile::NamedTempFile;
 
-    const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
+    const X: TableDefinition<&str, &str> = TableDefinition::new("x");
 
     #[test]
     fn transaction_id_persistence() {
@@ -718,7 +718,7 @@ mod test {
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello", b"world").unwrap();
+            table.insert("hello", "world").unwrap();
         }
         let first_txn_id = write_txn.transaction_id;
         write_txn.commit().unwrap();

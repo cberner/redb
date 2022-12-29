@@ -790,7 +790,7 @@ mod test {
         {
             let mut t = tx.open_table(table_def).unwrap();
             let value = vec![0; 306];
-            t.insert(&539717, &value).unwrap();
+            t.insert(&539717, value.as_slice()).unwrap();
         }
         tx.abort().unwrap();
 
@@ -801,7 +801,7 @@ mod test {
         {
             let mut t = tx.open_table(table_def).unwrap();
             let value = vec![0; 2008];
-            t.insert(&784384, &value).unwrap();
+            t.insert(&784384, value.as_slice()).unwrap();
         }
         tx.abort().unwrap();
     }
@@ -831,7 +831,7 @@ mod test {
             let mut t = tx.open_table(table_def).unwrap();
             assert!(t.get(&131072).unwrap().is_none());
             let value = vec![0xFF; 1130];
-            t.insert(&42394, &value).unwrap();
+            t.insert(&42394, value.as_slice()).unwrap();
             t.insert_reserve(&744037, 3645).unwrap().as_mut().fill(0xFF);
             assert!(t.get(&0).unwrap().is_none());
         }
@@ -861,7 +861,7 @@ mod test {
         {
             let mut table = txn.open_table(table_definition).unwrap();
             for i in 0..2048 {
-                table.insert(&i, &big_value).unwrap();
+                table.insert(&i, big_value.as_slice()).unwrap();
             }
         }
         txn.commit().unwrap();
@@ -881,13 +881,13 @@ mod test {
         let txn = db.begin_write().unwrap();
         {
             let mut table = txn.open_table(table_definition).unwrap();
-            table.insert(&0, &[]).unwrap();
+            table.insert(0, [].as_slice()).unwrap();
         }
         txn.commit().unwrap();
         let txn = db.begin_write().unwrap();
         {
             let mut table = txn.open_table(table_definition).unwrap();
-            table.remove(&0).unwrap();
+            table.remove(0).unwrap();
         }
         txn.commit().unwrap();
         let txn = db.begin_write().unwrap();

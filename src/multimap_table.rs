@@ -145,9 +145,6 @@ impl RedbValue for DynamicCollection {
     type SelfType<'a> = &'a DynamicCollection
     where
         Self: 'a;
-    type RefBaseType<'a> = &'a DynamicCollection
-    where
-        Self: 'a;
     type AsBytes<'a> = &'a [u8]
     where
         Self: 'a;
@@ -163,7 +160,7 @@ impl RedbValue for DynamicCollection {
         Self::new(data)
     }
 
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> &'a [u8]
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
     where
         Self: 'a,
         Self: 'b,
@@ -219,9 +216,11 @@ impl DynamicCollection {
             }
             Subtree => {
                 let root = collection.value().as_subtree().0;
-                MultimapValueIter::new_subtree(
-                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., Some(root), mem)?,
-                )
+                MultimapValueIter::new_subtree(BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    ..,
+                    Some(root),
+                    mem,
+                )?)
             }
         })
     }
@@ -244,7 +243,7 @@ impl DynamicCollection {
             Subtree => {
                 let root = collection.value().as_subtree().0;
                 let inner =
-                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., Some(root), mem)?;
+                    BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(.., Some(root), mem)?;
                 MultimapValueIter::new_subtree_free_on_drop(inner, freed_pages, pages, mem)
             }
         })
@@ -448,14 +447,14 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
     /// Add the given value to the mapping of the key
     ///
     /// Returns `true` if the key-value pair was present
-    pub fn insert<'a, 'b: 'a>(
+    pub fn insert<'a>(
         &mut self,
-        key: &'a (impl Borrow<K::RefBaseType<'b>> + ?Sized),
-        value: &'a (impl Borrow<V::RefBaseType<'a>> + ?Sized),
+        key: impl Borrow<K::SelfType<'a>>,
+        value: impl Borrow<V::SelfType<'a>>,
     ) -> Result<bool>
     where
-        K: 'b,
-        V: 'b,
+        K: 'a,
+        V: 'a,
     {
         let value_bytes = V::as_bytes(value.borrow());
         let value_bytes_ref = value_bytes.as_ref();
@@ -608,9 +607,16 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
     /// Removes the given key-value pair
     ///
     /// Returns `true` if the key-value pair was present
-    // TODO: should take a Borrow instead of a &
-    pub fn remove(&mut self, key: &K::RefBaseType<'_>, value: &V::RefBaseType<'_>) -> Result<bool> {
-        let get_result = self.tree.get(key)?;
+    pub fn remove<'a>(
+        &mut self,
+        key: impl Borrow<K::SelfType<'a>>,
+        value: impl Borrow<V::SelfType<'a>>,
+    ) -> Result<bool>
+    where
+        K: 'a,
+        V: 'a,
+    {
+        let get_result = self.tree.get(key.borrow())?;
         if get_result.is_none() {
             return Ok(false);
         }
@@ -624,11 +630,12 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                     V::fixed_width(),
                     <() as RedbValue>::fixed_width(),
                 );
-                if let Some(position) = accessor.find_key::<V>(V::as_bytes(value).as_ref()) {
+                if let Some(position) = accessor.find_key::<V>(V::as_bytes(value.borrow()).as_ref())
+                {
                     let old_num_pairs = accessor.num_pairs();
                     if old_num_pairs == 1 {
                         drop(guard);
-                        unsafe { self.tree.remove(key)? };
+                        unsafe { self.tree.remove(key.borrow())? };
                     } else {
                         let old_pairs_len = accessor.length_of_pairs(0, old_num_pairs);
                         let removed_value_len = accessor.entry(position).unwrap().key().len();
@@ -658,7 +665,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                         let inline_data = DynamicCollection::make_inline_data(&new_data);
                         unsafe {
                             self.tree
-                                .insert(key, &DynamicCollection::new(&inline_data))?
+                                .insert(key.borrow(), &DynamicCollection::new(&inline_data))?
                         };
                     }
                     true
@@ -674,7 +681,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                 // Safety: No other references to this table can exist.
                 // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
                 // and we borrow &mut self.
-                let existed = unsafe { subtree.remove(value)?.is_some() };
+                let existed = unsafe { subtree.remove(value.borrow())?.is_some() };
 
                 if let Some((new_root, new_checksum)) = subtree.get_root() {
                     let page = self.mem.get_page(new_root)?;
@@ -690,8 +697,10 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                                 let inline_data =
                                     DynamicCollection::make_inline_data(&page.memory()[..len]);
                                 unsafe {
-                                    self.tree
-                                        .insert(key, &DynamicCollection::new(&inline_data))?
+                                    self.tree.insert(
+                                        key.borrow(),
+                                        &DynamicCollection::new(&inline_data),
+                                    )?
                                 };
                                 drop(page);
                                 unsafe {
@@ -703,8 +712,10 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                                 let subtree_data =
                                     DynamicCollection::make_subtree_data(new_root, new_checksum);
                                 unsafe {
-                                    self.tree
-                                        .insert(key, &DynamicCollection::new(&subtree_data))?
+                                    self.tree.insert(
+                                        key.borrow(),
+                                        &DynamicCollection::new(&subtree_data),
+                                    )?
                                 };
                             }
                         }
@@ -713,13 +724,13 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
                                 let subtree_data =
                                     DynamicCollection::make_subtree_data(new_root, new_checksum);
                                 self.tree
-                                    .insert(key, &DynamicCollection::new(&subtree_data))?
+                                    .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?
                             };
                         }
                         _ => unreachable!(),
                     }
                 } else {
-                    unsafe { self.tree.remove(key)? };
+                    unsafe { self.tree.remove(key.borrow())? };
                 }
 
                 existed
@@ -732,39 +743,47 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn>
     /// Removes all values for the given key
     ///
     /// Returns an iterator over the removed values. Values are in ascending order.
-    // TODO: should take a Borrow instead of a &
-    pub fn remove_all(&mut self, key: &K::RefBaseType<'_>) -> Result<MultimapValueIter<V>> {
+    pub fn remove_all<'a>(
+        &mut self,
+        key: impl Borrow<K::SelfType<'a>>,
+    ) -> Result<MultimapValueIter<V>>
+    where
+        K: 'a,
+    {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
-        let iter =
-            if let Some((collection, mut pages)) = self.tree.remove_retain_uncommitted(key)? {
-                if matches!(
-                    collection.value().collection_type(),
-                    DynamicCollectionType::Subtree
-                ) {
-                    let root = collection.value().as_subtree().0;
-                    let all_pages = AllPageNumbersBtreeIter::new(
-                        root,
-                        V::fixed_width(),
-                        <() as RedbValue>::fixed_width(),
-                        self.mem,
-                    )?;
-                    for page in all_pages {
-                        pages.push(page);
-                    }
-                }
-                DynamicCollection::iter_free_on_drop(
-                    collection,
-                    pages,
-                    self.freed_pages.clone(),
+        let iter = if let Some((collection, mut pages)) =
+            self.tree.remove_retain_uncommitted(key.borrow())?
+        {
+            if matches!(
+                collection.value().collection_type(),
+                DynamicCollectionType::Subtree
+            ) {
+                let root = collection.value().as_subtree().0;
+                let all_pages = AllPageNumbersBtreeIter::new(
+                    root,
+                    V::fixed_width(),
+                    <() as RedbValue>::fixed_width(),
                     self.mem,
-                )?
-            } else {
-                MultimapValueIter::new_subtree(
-                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem)?,
-                )
-            };
+                )?;
+                for page in all_pages {
+                    pages.push(page);
+                }
+            }
+            DynamicCollection::iter_free_on_drop(
+                collection,
+                pages,
+                self.freed_pages.clone(),
+                self.mem,
+            )?
+        } else {
+            MultimapValueIter::new_subtree(BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                ..,
+                None,
+                self.mem,
+            )?)
+        };
 
         Ok(iter)
     }
@@ -774,24 +793,29 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<
     for MultimapTable<'db, 'txn, K, V>
 {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
-    fn get<'a>(&'a self, key: impl Borrow<K::RefBaseType<'a>>) -> Result<MultimapValueIter<'a, V>> {
-        let iter =
-            if let Some(collection) = self.tree.get(key.borrow())? {
-                DynamicCollection::iter(collection, self.mem)?
-            } else {
-                MultimapValueIter::new_subtree(
-                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem)?,
-                )
-            };
+    fn get<'a>(&'a self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValueIter<'a, V>> {
+        let iter = if let Some(collection) = self.tree.get(key.borrow())? {
+            DynamicCollection::iter(collection, self.mem)?
+        } else {
+            MultimapValueIter::new_subtree(BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                ..,
+                None,
+                self.mem,
+            )?)
+        };
 
         Ok(iter)
     }
 
     /// Returns a double-ended iterator over a range of elements in the table
-    fn range<'a, T: RangeBounds<&'a K::RefBaseType<'a>> + 'a>(
+    fn range<'a, KR>(
         &'a self,
-        range: T,
-    ) -> Result<MultimapRangeIter<'a, K, V>> {
+        range: impl RangeBounds<KR> + 'a,
+    ) -> Result<MultimapRangeIter<'a, K, V>>
+    where
+        K: 'a,
+        KR: Borrow<K::SelfType<'a>> + ?Sized + 'a,
+    {
         let inner = self.tree.range(range)?;
         Ok(MultimapRangeIter::new(inner, self.mem))
     }
@@ -799,7 +823,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<
     /// Returns the number of key-value pairs in the table
     fn len(&self) -> Result<usize> {
         let mut count = 0;
-        for (_, mut values) in self.range(..)? {
+        for (_, mut values) in self.iter()? {
             while values.next().is_some() {
                 count += 1;
             }
@@ -821,15 +845,17 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Drop for MultimapTable
 
 pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
-    fn get<'a>(&'a self, key: impl Borrow<K::RefBaseType<'a>>) -> Result<MultimapValueIter<'a, V>>
+    fn get<'a>(&'a self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValueIter<'a, V>>
     where
         K: 'a;
 
-    // TODO: Take a KR: Borrow<K>, just like Table::range
-    fn range<'a, T: RangeBounds<&'a K::RefBaseType<'a>> + 'a>(
+    fn range<'a, KR>(
         &'a self,
-        range: T,
-    ) -> Result<MultimapRangeIter<'a, K, V>>;
+        range: impl RangeBounds<KR> + 'a,
+    ) -> Result<MultimapRangeIter<'a, K, V>>
+    where
+        K: 'a,
+        KR: Borrow<K::SelfType<'a>> + ?Sized + 'a;
 
     fn len(&self) -> Result<usize>;
 
@@ -838,7 +864,7 @@ pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     /// Returns an double-ended iterator over all elements in the table. Values are in ascending
     /// order.
     fn iter(&self) -> Result<MultimapRangeIter<K, V>> {
-        self.range(..)
+        self.range::<K::SelfType<'_>>(..)
     }
 }
 
@@ -867,30 +893,35 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadableMultimapTable<K, V>
     for ReadOnlyMultimapTable<'txn, K, V>
 {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
-    fn get<'a>(&'a self, key: impl Borrow<K::RefBaseType<'a>>) -> Result<MultimapValueIter<'a, V>> {
-        let iter =
-            if let Some(collection) = self.tree.get(key.borrow())? {
-                DynamicCollection::iter(collection, self.mem)?
-            } else {
-                MultimapValueIter::new_subtree(
-                    BtreeRangeIter::new::<RangeFull, &V::RefBaseType<'_>>(.., None, self.mem)?,
-                )
-            };
+    fn get<'a>(&'a self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValueIter<'a, V>> {
+        let iter = if let Some(collection) = self.tree.get(key.borrow())? {
+            DynamicCollection::iter(collection, self.mem)?
+        } else {
+            MultimapValueIter::new_subtree(BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                ..,
+                None,
+                self.mem,
+            )?)
+        };
 
         Ok(iter)
     }
 
-    fn range<'a, T: RangeBounds<&'a K::RefBaseType<'a>> + 'a>(
+    fn range<'a, KR>(
         &'a self,
-        range: T,
-    ) -> Result<MultimapRangeIter<'a, K, V>> {
+        range: impl RangeBounds<KR> + 'a,
+    ) -> Result<MultimapRangeIter<'a, K, V>>
+    where
+        K: 'a,
+        KR: Borrow<K::SelfType<'a>> + ?Sized + 'a,
+    {
         let inner = self.tree.range(range)?;
         Ok(MultimapRangeIter::new(inner, self.mem))
     }
 
     fn len(&self) -> Result<usize> {
         let mut count = 0;
-        for (_, mut values) in self.range(..)? {
+        for (_, mut values) in self.iter()? {
             while values.next().is_some() {
                 count += 1;
             }

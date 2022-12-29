@@ -69,7 +69,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
 
     pub(crate) fn safe_delete(
         &mut self,
-        key: &K::RefBaseType<'_>,
+        key: &K::SelfType<'_>,
     ) -> Result<Option<AccessGuard<'a, V>>> {
         assert_eq!(self.free_policy, FreePolicy::Never);
         // Safety: we asserted that the free policy is Never
@@ -79,7 +79,7 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
     // Safety: caller must ensure that no references to uncommitted pages in this table exist
     pub(crate) unsafe fn delete(
         &mut self,
-        key: &K::RefBaseType<'_>,
+        key: &K::SelfType<'_>,
     ) -> Result<Option<AccessGuard<'a, V>>> {
         let root = { *(*self.root.clone()).borrow() };
         if let Some((p, checksum)) = root {
@@ -116,8 +116,8 @@ impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K,
     #[allow(clippy::type_complexity)]
     pub(crate) unsafe fn insert(
         &mut self,
-        key: &K::RefBaseType<'_>,
-        value: &V::RefBaseType<'_>,
+        key: &K::SelfType<'_>,
+        value: &V::SelfType<'_>,
     ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMut<'a, K, V>)> {
         let root = { *(*self.root.clone()).borrow() };
         let (new_root, old_value, guard) = if let Some((p, checksum)) = root {

@@ -12,8 +12,9 @@ use redb::{
 
 const ELEMENTS: usize = 100;
 
-const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
-const SLICE_TABLE2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("y");
+const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice");
+const SLICE_TABLE2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice2");
+const STR_TABLE: TableDefinition<&str, &str> = TableDefinition::new("x");
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
 
 /// Returns pairs of key, value
@@ -58,7 +59,7 @@ fn non_durable_commit_persistence() {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..ELEMENTS {
             let (key, value) = &pairs[i % pairs.len()];
-            table.insert(key, value).unwrap();
+            table.insert(key.as_slice(), value.as_slice()).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -75,7 +76,7 @@ fn non_durable_commit_persistence() {
     {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
-            assert_eq!(table.get(key).unwrap().unwrap().value(), value);
+            assert_eq!(table.get(key.as_slice()).unwrap().unwrap().value(), value);
         }
     }
 }
@@ -91,7 +92,7 @@ fn test_persistence(durability: Durability) {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..ELEMENTS {
             let (key, value) = &pairs[i % pairs.len()];
-            table.insert(key, value).unwrap();
+            table.insert(key.as_slice(), value.as_slice()).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -107,7 +108,7 @@ fn test_persistence(durability: Durability) {
     {
         for i in &key_order {
             let (key, value) = &pairs[*i % pairs.len()];
-            assert_eq!(table.get(key).unwrap().unwrap().value(), value);
+            assert_eq!(table.get(key.as_slice()).unwrap().unwrap().value(), value);
         }
     }
 }
@@ -131,13 +132,13 @@ fn free() {
     {
         let _table = txn.open_table(SLICE_TABLE).unwrap();
         let mut table = txn.open_table(SLICE_TABLE2).unwrap();
-        table.insert(&[], &[]).unwrap();
+        table.insert([].as_slice(), [].as_slice()).unwrap();
     }
     txn.commit().unwrap();
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(SLICE_TABLE2).unwrap();
-        table.remove(&[]).unwrap();
+        table.remove([].as_slice()).unwrap();
     }
     txn.commit().unwrap();
     let txn = db.begin_write().unwrap();
@@ -159,7 +160,7 @@ fn free() {
         for i in 0..num_writes {
             let mut mut_key = key.clone();
             mut_key.extend_from_slice(&i.to_le_bytes());
-            table.insert(&mut_key, &value).unwrap();
+            table.insert(mut_key.as_slice(), value.as_slice()).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -174,7 +175,7 @@ fn free() {
                 for i in chunk {
                     let mut mut_key = key.clone();
                     mut_key.extend_from_slice(&(*i as u64).to_le_bytes());
-                    table.remove(&mut_key).unwrap();
+                    table.remove(mut_key.as_slice()).unwrap();
                 }
             }
             txn.commit().unwrap();
@@ -202,7 +203,7 @@ fn large_values() {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..5 {
             key[0] = i;
-            table.insert(&key, &value).unwrap();
+            table.insert(key.as_slice(), value.as_slice()).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -212,7 +213,7 @@ fn large_values() {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..5 {
             key[0] = i;
-            table.remove(&key).unwrap();
+            table.remove(key.as_slice()).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -231,7 +232,7 @@ fn large_keys() {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..100 {
             key[0] = i;
-            table.insert(&key, &value).unwrap();
+            table.insert(key.as_slice(), value.as_slice()).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -241,7 +242,7 @@ fn large_keys() {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..100 {
             key[0] = i;
-            table.remove(&key).unwrap();
+            table.remove(key.as_slice()).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -258,7 +259,7 @@ fn dynamic_growth() {
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(table_definition).unwrap();
-        table.insert(&0, &big_value).unwrap();
+        table.insert(&0, big_value.as_slice()).unwrap();
     }
     txn.commit().unwrap();
 
@@ -269,7 +270,7 @@ fn dynamic_growth() {
     {
         let mut table = txn.open_table(table_definition).unwrap();
         for i in 0..2048 {
-            table.insert(&i, &big_value).unwrap();
+            table.insert(&i, big_value.as_slice()).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -295,7 +296,7 @@ fn multi_page_kv() {
         for i in 0..elements {
             key[0] = i;
             value[0] = i;
-            table.insert(&key, &value).unwrap();
+            table.insert(key.as_slice(), value.as_slice()).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -305,7 +306,7 @@ fn multi_page_kv() {
     for i in 0..elements {
         key[0] = i;
         value[0] = i;
-        assert_eq!(&value, table.get(&key).unwrap().unwrap().value());
+        assert_eq!(&value, table.get(key.as_slice()).unwrap().unwrap().value());
     }
 
     let txn = db.begin_write().unwrap();
@@ -313,7 +314,7 @@ fn multi_page_kv() {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..elements {
             key[0] = i;
-            table.remove(&key).unwrap();
+            table.remove(key.as_slice()).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -388,15 +389,15 @@ fn regression2() {
     let db = Database::create(tmpfile.path()).unwrap();
     let tx = db.begin_write().unwrap();
 
-    let a_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new("a");
-    let b_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new("b");
-    let c_def: TableDefinition<&[u8], &[u8]> = TableDefinition::new("c");
+    let a_def: TableDefinition<&str, &str> = TableDefinition::new("a");
+    let b_def: TableDefinition<&str, &str> = TableDefinition::new("b");
+    let c_def: TableDefinition<&str, &str> = TableDefinition::new("c");
 
     let _c = tx.open_table(c_def).unwrap();
     let b = tx.open_table(b_def).unwrap();
     let mut a = tx.open_table(a_def).unwrap();
-    a.insert(b"hi", b"1").unwrap();
-    assert!(b.get(b"hi").unwrap().is_none());
+    a.insert("hi", "1").unwrap();
+    assert!(b.get("hi").unwrap().is_none());
 }
 
 #[test]
@@ -411,12 +412,12 @@ fn regression3() {
         let mut t = tx.open_table(SLICE_TABLE).unwrap();
         let big_value = vec![0u8; 1000];
         for i in 0..20u8 {
-            t.insert(&[i], &big_value).unwrap();
+            t.insert([i].as_slice(), big_value.as_slice()).unwrap();
         }
         for i in (10..20u8).rev() {
-            t.remove(&[i]).unwrap();
+            t.remove([i].as_slice()).unwrap();
             for j in 0..i {
-                assert!(t.get(&[j]).unwrap().is_some());
+                assert!(t.get([j].as_slice()).unwrap().is_some());
             }
         }
     }
@@ -435,7 +436,7 @@ fn regression7() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let big_value = vec![0u8; 4063];
-        t.insert(&35723, &big_value).unwrap();
+        t.insert(&35723, big_value.as_slice()).unwrap();
         t.remove(&145278).unwrap();
         t.remove(&145227).unwrap();
     }
@@ -446,15 +447,15 @@ fn regression7() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let v = vec![0u8; 47];
-        t.insert(&66469, &v).unwrap();
+        t.insert(&66469, v.as_slice()).unwrap();
         let v = vec![0u8; 2414];
-        t.insert(&146255, &v).unwrap();
+        t.insert(&146255, v.as_slice()).unwrap();
         let v = vec![0u8; 159];
-        t.insert(&153701, &v).unwrap();
+        t.insert(&153701, v.as_slice()).unwrap();
         let v = vec![0u8; 1186];
-        t.insert(&145227, &v).unwrap();
+        t.insert(&145227, v.as_slice()).unwrap();
         let v = vec![0u8; 223];
-        t.insert(&118749, &v).unwrap();
+        t.insert(&118749, v.as_slice()).unwrap();
 
         t.remove(&145227).unwrap();
 
@@ -479,9 +480,9 @@ fn regression8() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let v = vec![0u8; 1186];
-        t.insert(&145227, &v).unwrap();
+        t.insert(&145227, v.as_slice()).unwrap();
         let v = vec![0u8; 1585];
-        t.insert(&565922, &v).unwrap();
+        t.insert(&565922, v.as_slice()).unwrap();
     }
     tx.commit().unwrap();
 
@@ -489,9 +490,9 @@ fn regression8() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let v = vec![0u8; 2040];
-        t.insert(&94937, &v).unwrap();
+        t.insert(&94937, v.as_slice()).unwrap();
         let v = vec![0u8; 2058];
-        t.insert(&130571, &v).unwrap();
+        t.insert(&130571, v.as_slice()).unwrap();
         t.remove(&145227).unwrap();
     }
     tx.commit().unwrap();
@@ -500,7 +501,7 @@ fn regression8() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let v = vec![0u8; 947];
-        t.insert(&118749, &v).unwrap();
+        t.insert(&118749, v.as_slice()).unwrap();
     }
     tx.commit().unwrap();
 
@@ -527,7 +528,7 @@ fn regression9() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let v = vec![0u8; 118665];
-        t.insert(&452, &v).unwrap();
+        t.insert(&452, v.as_slice()).unwrap();
         t.len().unwrap();
     }
     tx.commit().unwrap();
@@ -545,7 +546,7 @@ fn regression10() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let v = vec![0u8; 1043];
-        t.insert(&118749, &v).unwrap();
+        t.insert(&118749, v.as_slice()).unwrap();
     }
     tx.commit().unwrap();
 
@@ -553,7 +554,7 @@ fn regression10() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let v = vec![0u8; 952];
-        t.insert(&118757, &v).unwrap();
+        t.insert(&118757, v.as_slice()).unwrap();
     }
     tx.abort().unwrap();
 
@@ -577,13 +578,13 @@ fn regression11() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let v = vec![0u8; 1204];
-        t.insert(&118749, &v).unwrap();
+        t.insert(&118749, v.as_slice()).unwrap();
         let v = vec![0u8; 2062];
-        t.insert(&153697, &v).unwrap();
+        t.insert(&153697, v.as_slice()).unwrap();
         let v = vec![0u8; 2980];
-        t.insert(&110557, &v).unwrap();
+        t.insert(&110557, v.as_slice()).unwrap();
         let v = vec![0u8; 1999];
-        t.insert(&677853, &v).unwrap();
+        t.insert(&677853, v.as_slice()).unwrap();
     }
     tx.commit().unwrap();
 
@@ -591,9 +592,9 @@ fn regression11() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let v = vec![0u8; 691];
-        t.insert(&103591, &v).unwrap();
+        t.insert(&103591, v.as_slice()).unwrap();
         let v = vec![0u8; 952];
-        t.insert(&118757, &v).unwrap();
+        t.insert(&118757, v.as_slice()).unwrap();
     }
     tx.abort().unwrap();
 
@@ -636,9 +637,9 @@ fn regression13() {
     {
         let mut t = tx.open_multimap_table(table_def).unwrap();
         let value = vec![0; 1026];
-        t.insert(&539717, &value).unwrap();
+        t.insert(&539717, value.as_slice()).unwrap();
         let value = vec![0; 530];
-        t.insert(&539717, &value).unwrap();
+        t.insert(&539717, value.as_slice()).unwrap();
     }
     tx.abort().unwrap();
 }
@@ -656,7 +657,7 @@ fn regression14() {
     {
         let mut t = tx.open_multimap_table(table_def).unwrap();
         let value = vec![0; 1424];
-        t.insert(&539749, &value).unwrap();
+        t.insert(&539749, value.as_slice()).unwrap();
     }
     tx.commit().unwrap();
 
@@ -665,9 +666,9 @@ fn regression14() {
     {
         let mut t = tx.open_multimap_table(table_def).unwrap();
         let value = vec![0; 2230];
-        t.insert(&776971, &value).unwrap();
+        t.insert(&776971, value.as_slice()).unwrap();
 
-        let mut iter = t.range(&514043..&(514043 + 514043)).unwrap().rev();
+        let mut iter = t.range(514043..(514043 + 514043)).unwrap().rev();
         {
             let (key, mut value_iter) = iter.next().unwrap();
             assert_eq!(key.value(), 776971);
@@ -698,7 +699,7 @@ fn regression17() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let value = vec![0; 4578];
-        t.insert(&671325, &value).unwrap();
+        t.insert(&671325, value.as_slice()).unwrap();
 
         let mut value = t.insert_reserve(&723904, 2246).unwrap();
         value.as_mut().fill(0xFF);
@@ -790,7 +791,7 @@ fn regression19() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let value = vec![0xFF; 100];
-        t.insert(&1, &value).unwrap();
+        t.insert(&1, value.as_slice()).unwrap();
     }
     tx.commit().unwrap();
 
@@ -799,7 +800,7 @@ fn regression19() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let value = vec![0xFF; 101];
-        t.insert(&1, &value).unwrap();
+        t.insert(&1, value.as_slice()).unwrap();
     }
     tx.commit().unwrap();
 
@@ -807,7 +808,7 @@ fn regression19() {
     {
         let mut t = tx.open_table(table_def).unwrap();
         let value = vec![0xFF; 102];
-        t.insert(&1, &value).unwrap();
+        t.insert(&1, value.as_slice()).unwrap();
     }
     tx.commit().unwrap();
 
@@ -873,41 +874,41 @@ fn non_durable_read_isolation() {
     let mut write_txn = db.begin_write().unwrap();
     write_txn.set_durability(Durability::None);
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let read_table = read_txn.open_table(SLICE_TABLE).unwrap();
-    assert_eq!(b"world", read_table.get(b"hello").unwrap().unwrap().value());
+    let read_table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", read_table.get("hello").unwrap().unwrap().value());
 
     let mut write_txn = db.begin_write().unwrap();
     write_txn.set_durability(Durability::None);
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.remove(b"hello").unwrap();
-        table.insert(b"hello2", b"world2").unwrap();
-        table.insert(b"hello3", b"world3").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.remove("hello").unwrap();
+        table.insert("hello2", "world2").unwrap();
+        table.insert("hello3", "world3").unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn2 = db.begin_read().unwrap();
-    let read_table2 = read_txn2.open_table(SLICE_TABLE).unwrap();
-    assert!(read_table2.get(b"hello").unwrap().is_none());
+    let read_table2 = read_txn2.open_table(STR_TABLE).unwrap();
+    assert!(read_table2.get("hello").unwrap().is_none());
     assert_eq!(
-        b"world2",
-        read_table2.get(b"hello2").unwrap().unwrap().value()
+        "world2",
+        read_table2.get("hello2").unwrap().unwrap().value()
     );
     assert_eq!(
-        b"world3",
-        read_table2.get(b"hello3").unwrap().unwrap().value()
+        "world3",
+        read_table2.get("hello3").unwrap().unwrap().value()
     );
     assert_eq!(read_table2.len().unwrap(), 2);
 
-    assert_eq!(b"world", read_table.get(b"hello").unwrap().unwrap().value());
-    assert!(read_table.get(b"hello2").unwrap().is_none());
-    assert!(read_table.get(b"hello3").unwrap().is_none());
+    assert_eq!("world", read_table.get("hello").unwrap().unwrap().value());
+    assert!(read_table.get("hello2").unwrap().is_none());
+    assert!(read_table.get("hello3").unwrap().is_none());
     assert_eq!(read_table.len().unwrap(), 1);
 }
 
@@ -993,8 +994,8 @@ fn alias_table() {
     let db = Database::create(tmpfile.path()).unwrap();
 
     let write_txn = db.begin_write().unwrap();
-    let table = write_txn.open_table(SLICE_TABLE).unwrap();
-    let result = write_txn.open_table(SLICE_TABLE);
+    let table = write_txn.open_table(STR_TABLE).unwrap();
+    let result = write_txn.open_table(STR_TABLE);
     assert!(matches!(
         result.err().unwrap(),
         Error::TableAlreadyOpen(_, _)
@@ -1007,26 +1008,26 @@ fn delete_table() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let y_def: MultimapTableDefinition<&[u8], &[u8]> = MultimapTableDefinition::new("y");
+    let y_def: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("y");
 
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
         let mut multitable = write_txn.open_multimap_table(y_def).unwrap();
-        multitable.insert(b"hello2", b"world2").unwrap();
+        multitable.insert("hello2", "world2").unwrap();
     }
     write_txn.commit().unwrap();
 
     let write_txn = db.begin_write().unwrap();
-    assert!(write_txn.delete_table(SLICE_TABLE).unwrap());
-    assert!(!write_txn.delete_table(SLICE_TABLE).unwrap());
+    assert!(write_txn.delete_table(STR_TABLE).unwrap());
+    assert!(!write_txn.delete_table(STR_TABLE).unwrap());
     assert!(write_txn.delete_multimap_table(y_def).unwrap());
     assert!(!write_txn.delete_multimap_table(y_def).unwrap());
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let result = read_txn.open_table(SLICE_TABLE);
+    let result = read_txn.open_table(STR_TABLE);
     assert!(result.is_err());
     let result = read_txn.open_multimap_table(y_def);
     assert!(result.is_err());
@@ -1039,12 +1040,12 @@ fn dropped_write() {
 
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(b"hello", b"world").unwrap();
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
     }
     drop(write_txn);
     let read_txn = db.begin_read().unwrap();
-    let result = read_txn.open_table(SLICE_TABLE);
+    let result = read_txn.open_table(STR_TABLE);
     assert!(matches!(result, Err(Error::TableDoesNotExist(_))));
 }
 
@@ -1058,7 +1059,7 @@ fn non_page_size_multiple() {
     let value = vec![0u8; 1];
     {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
-        table.insert(&key, &value).unwrap();
+        table.insert(key.as_slice(), value.as_slice()).unwrap();
     }
     txn.commit().unwrap();
 
@@ -1149,7 +1150,7 @@ fn tree_balance() {
         for i in (0..elements).rev() {
             let mut key = vec![0u8; key_size];
             key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-            table.insert(&key, b"").unwrap();
+            table.insert(key.as_slice(), b"".as_slice()).unwrap();
         }
     }
     txn.commit().unwrap();
@@ -1170,7 +1171,7 @@ fn tree_balance() {
         for i in 0..(elements - reduce_to) {
             let mut key = vec![0u8; key_size];
             key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-            table.remove(&key).unwrap();
+            table.remove(key.as_slice()).unwrap();
         }
     }
     txn.commit().unwrap();
