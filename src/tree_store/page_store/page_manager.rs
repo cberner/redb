@@ -969,11 +969,15 @@ impl TransactionalMemory {
     }
 
     // TODO: make all callers explicitly provide a hint
-    pub(crate) fn get_page(&self, page_number: PageNumber) -> PageImpl {
+    pub(crate) fn get_page(&self, page_number: PageNumber) -> Result<PageImpl> {
         self.get_page_extended(page_number, PageHint::None)
     }
 
-    pub(crate) fn get_page_extended(&self, page_number: PageNumber, hint: PageHint) -> PageImpl {
+    pub(crate) fn get_page_extended(
+        &self,
+        page_number: PageNumber,
+        hint: PageHint,
+    ) -> Result<PageImpl> {
         // We must not retrieve an immutable reference to a page which already has a mutable ref to it
         #[cfg(debug_assertions)]
         {
@@ -998,21 +1002,20 @@ impl TransactionalMemory {
             self.page_size,
         );
         let len: usize = (range.end - range.start).try_into().unwrap();
-        // TODO: propagate error
-        let mem = unsafe { self.storage.read(range.start, len, hint).unwrap() };
+        let mem = unsafe { self.storage.read(range.start, len, hint)? };
 
-        PageImpl {
+        Ok(PageImpl {
             mem,
             page_number,
             #[cfg(debug_assertions)]
             open_pages: &self.read_page_ref_counts,
             #[cfg(not(debug_assertions))]
             _debug_lifetime: Default::default(),
-        }
+        })
     }
 
     // Safety: the caller must ensure that no references to the memory in `page` exist
-    pub(crate) unsafe fn get_page_mut(&self, page_number: PageNumber) -> PageMut {
+    pub(crate) unsafe fn get_page_mut(&self, page_number: PageNumber) -> Result<PageMut> {
         #[cfg(debug_assertions)]
         {
             assert!(!self
@@ -1032,17 +1035,16 @@ impl TransactionalMemory {
         let len: usize = (address_range.end - address_range.start)
             .try_into()
             .unwrap();
-        // TODO: propagate error
-        let mem = self.storage.write(address_range.start, len).unwrap();
+        let mem = self.storage.write(address_range.start, len)?;
 
-        PageMut {
+        Ok(PageMut {
             mem,
             page_number,
             #[cfg(debug_assertions)]
             open_pages: &self.open_dirty_pages,
             #[cfg(not(debug_assertions))]
             _debug_lifetime: Default::default(),
-        }
+        })
     }
 
     pub(crate) fn get_version(&self) -> u8 {

@@ -4,6 +4,7 @@ use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::PageNumber;
 use crate::types::{RedbKey, RedbValue};
+use crate::Result;
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::Bound;
@@ -37,7 +38,11 @@ impl<'a> RangeIterState<'a> {
         }
     }
 
-    fn next(self, reverse: bool, manager: &'a TransactionalMemory) -> Option<RangeIterState> {
+    fn next(
+        self,
+        reverse: bool,
+        manager: &'a TransactionalMemory,
+    ) -> Result<Option<RangeIterState>> {
         match self {
             Leaf {
                 page,
@@ -50,15 +55,15 @@ impl<'a> RangeIterState<'a> {
                 let direction = if reverse { -1 } else { 1 };
                 let next_entry = isize::try_from(entry).unwrap() + direction;
                 if 0 <= next_entry && next_entry < accessor.num_pairs().try_into().unwrap() {
-                    Some(Leaf {
+                    Ok(Some(Leaf {
                         page,
                         fixed_key_size,
                         fixed_value_size,
                         entry: next_entry.try_into().unwrap(),
                         parent,
-                    })
+                    }))
                 } else {
-                    parent.map(|x| *x)
+                    Ok(parent.map(|x| *x))
                 }
             }
             Internal {
@@ -70,7 +75,7 @@ impl<'a> RangeIterState<'a> {
             } => {
                 let accessor = BranchAccessor::new(&page, fixed_key_size);
                 let child_page = accessor.child_page(child).unwrap();
-                let child_page = manager.get_page(child_page);
+                let child_page = manager.get_page(child_page)?;
                 let direction = if reverse { -1 } else { 1 };
                 let next_child = isize::try_from(child).unwrap() + direction;
                 if 0 <= next_child && next_child < accessor.count_children().try_into().unwrap() {
@@ -94,13 +99,13 @@ impl<'a> RangeIterState<'a> {
                         } else {
                             0
                         };
-                        Some(Leaf {
+                        Ok(Some(Leaf {
                             page: child_page,
                             fixed_key_size,
                             fixed_value_size,
                             entry,
                             parent,
-                        })
+                        }))
                     }
                     BRANCH => {
                         let child_accessor = BranchAccessor::new(&child_page, fixed_key_size);
@@ -109,13 +114,13 @@ impl<'a> RangeIterState<'a> {
                         } else {
                             0
                         };
-                        Some(Internal {
+                        Ok(Some(Internal {
                             page: child_page,
                             fixed_key_size,
                             fixed_value_size,
                             child,
                             parent,
-                        })
+                        }))
                     }
                     _ => unreachable!(),
                 }
@@ -181,8 +186,8 @@ impl<'a> AllPageNumbersBtreeIter<'a> {
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
         manager: &'a TransactionalMemory,
-    ) -> Self {
-        let root_page = manager.get_page(root);
+    ) -> Result<Self> {
+        let root_page = manager.get_page(root)?;
         let node_mem = root_page.memory();
         let start = match node_mem[0] {
             LEAF => Leaf {
@@ -201,10 +206,10 @@ impl<'a> AllPageNumbersBtreeIter<'a> {
             },
             _ => unreachable!(),
         };
-        Self {
+        Ok(Self {
             next: Some(start),
             manager,
-        }
+        })
     }
 }
 
@@ -220,7 +225,8 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
                 Leaf { entry, .. } => entry == 0,
                 Internal { child, .. } => child == 0,
             };
-            self.next = state.next(false, self.manager);
+            // TODO: propagate this error
+            self.next = state.next(false, self.manager).unwrap();
             if once {
                 return Some(value);
             }
@@ -306,54 +312,54 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
         query_range: T,
         table_root: Option<PageNumber>,
         manager: &'a TransactionalMemory,
-    ) -> Self
+    ) -> Result<Self>
     where
         'a: 'a0,
     {
         if let Some(root) = table_root {
             let (include_left, left) = match query_range.start_bound() {
                 Bound::Included(k) => find_iter_left::<K, V>(
-                    manager.get_page(root),
+                    manager.get_page(root)?,
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     true,
                     manager,
-                ),
+                )?,
                 Bound::Excluded(k) => find_iter_left::<K, V>(
-                    manager.get_page(root),
+                    manager.get_page(root)?,
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     false,
                     manager,
-                ),
+                )?,
                 Bound::Unbounded => {
                     let state =
-                        find_iter_unbounded::<K, V>(manager.get_page(root), None, false, manager);
+                        find_iter_unbounded::<K, V>(manager.get_page(root)?, None, false, manager)?;
                     (true, state)
                 }
             };
             let (include_right, right) = match query_range.end_bound() {
                 Bound::Included(k) => find_iter_right::<K, V>(
-                    manager.get_page(root),
+                    manager.get_page(root)?,
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     true,
                     manager,
-                ),
+                )?,
                 Bound::Excluded(k) => find_iter_right::<K, V>(
-                    manager.get_page(root),
+                    manager.get_page(root)?,
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     false,
                     manager,
-                ),
+                )?,
                 Bound::Unbounded => {
                     let state =
-                        find_iter_unbounded::<K, V>(manager.get_page(root), None, true, manager);
+                        find_iter_unbounded::<K, V>(manager.get_page(root)?, None, true, manager)?;
                     (true, state)
                 }
             };
-            Self {
+            Ok(Self {
                 left,
                 right,
                 include_left,
@@ -361,9 +367,9 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                 manager,
                 _key_type: Default::default(),
                 _value_type: Default::default(),
-            }
+            })
         } else {
-            Self {
+            Ok(Self {
                 left: None,
                 right: None,
                 include_left: false,
@@ -371,7 +377,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeRangeIter<'a
                 manager,
                 _key_type: Default::default(),
                 _value_type: Default::default(),
-            }
+            })
         }
     }
 }
@@ -405,7 +411,8 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator
 
         loop {
             if !self.include_left {
-                self.left = self.left.take()?.next(false, self.manager);
+                // TODO: propagate this error
+                self.left = self.left.take()?.next(false, self.manager).unwrap();
             }
             // Return None if the next state is None
             self.left.as_ref()?;
@@ -466,7 +473,8 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterat
 
         loop {
             if !self.include_right {
-                self.right = self.right.take()?.next(true, self.manager);
+                // TODO: propagate this error
+                self.right = self.right.take()?.next(true, self.manager).unwrap();
             }
             // Return None if the next state is None
             self.right.as_ref()?;
@@ -505,19 +513,19 @@ fn find_iter_unbounded<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     mut parent: Option<Box<RangeIterState<'a>>>,
     reverse: bool,
     manager: &'a TransactionalMemory,
-) -> Option<RangeIterState<'a>> {
+) -> Result<Option<RangeIterState<'a>>> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
             let entry = if reverse { accessor.num_pairs() - 1 } else { 0 };
-            Some(Leaf {
+            Ok(Some(Leaf {
                 page,
                 fixed_key_size: K::fixed_width(),
                 fixed_value_size: V::fixed_width(),
                 entry,
                 parent,
-            })
+            }))
         }
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
@@ -527,7 +535,7 @@ fn find_iter_unbounded<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                 0
             };
             let child_page_number = accessor.child_page(child_index).unwrap();
-            let child_page = manager.get_page(child_page_number);
+            let child_page = manager.get_page(child_page_number)?;
             let direction = if reverse { -1isize } else { 1 };
             parent = Some(Box::new(Internal {
                 page,
@@ -552,7 +560,7 @@ fn find_iter_left<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     query: &[u8],
     include_query: bool,
     manager: &'a TransactionalMemory,
-) -> (bool, Option<RangeIterState<'a>>) {
+) -> Result<(bool, Option<RangeIterState<'a>>)> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -573,12 +581,12 @@ fn find_iter_left<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                 entry: position,
                 parent,
             };
-            (include, Some(result))
+            Ok((include, Some(result)))
         }
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
-            let child_page = manager.get_page(child_page_number);
+            let child_page = manager.get_page(child_page_number)?;
             if child_index < accessor.count_children() - 1 {
                 parent = Some(Box::new(Internal {
                     page,
@@ -600,7 +608,7 @@ fn find_iter_right<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
     query: &[u8],
     include_query: bool,
     manager: &'a TransactionalMemory,
-) -> (bool, Option<RangeIterState<'a>>) {
+) -> Result<(bool, Option<RangeIterState<'a>>)> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -621,12 +629,12 @@ fn find_iter_right<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
                 entry: position,
                 parent,
             };
-            (include, Some(result))
+            Ok((include, Some(result)))
         }
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
-            let child_page = manager.get_page(child_page_number);
+            let child_page = manager.get_page(child_page_number)?;
             if child_index > 0 && accessor.child_page(child_index - 1).is_some() {
                 parent = Some(Box::new(Internal {
                     page,

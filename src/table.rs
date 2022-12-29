@@ -33,8 +33,8 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<
     }
 
     #[allow(dead_code)]
-    pub(crate) fn print_debug(&self, include_values: bool) {
-        self.tree.print_debug(include_values);
+    pub(crate) fn print_debug(&self, include_values: bool) -> Result {
+        self.tree.print_debug(include_values)
     }
 
     /// Removes and returns the first key-value pair in the table
