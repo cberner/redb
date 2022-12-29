@@ -87,13 +87,13 @@ fn range_query() {
     {
         let mut table = write_txn.open_multimap_table(SLICE_U64_TABLE).unwrap();
         for i in 0..5 {
-            table.insert(b"0", &i).unwrap();
+            table.insert(b"0".as_slice(), &i).unwrap();
         }
         for i in 5..10 {
-            table.insert(b"1", &i).unwrap();
+            table.insert(b"1".as_slice(), &i).unwrap();
         }
         for i in 10..15 {
-            table.insert(b"2", &i).unwrap();
+            table.insert(b"2".as_slice(), &i).unwrap();
         }
     }
     write_txn.commit().unwrap();
@@ -123,7 +123,7 @@ fn range_query() {
     assert!(iter.next().is_none());
 
     let mut total: u64 = 0;
-    for (_, values) in table.range(&start..=&end).unwrap() {
+    for (_, values) in table.range(start..=end).unwrap() {
         total += values.map(|x| x.value()).sum::<u64>();
     }
     assert_eq!(total, 45);
@@ -227,7 +227,7 @@ fn efficient_storage() {
         let mut table = write_txn.open_multimap_table(table_def).unwrap();
         let big_key = [0u8; 1000];
         for i in 0..entries {
-            table.insert(&big_key, &i).unwrap();
+            table.insert(big_key.as_slice(), &i).unwrap();
         }
     }
     assert!(write_txn.stats().unwrap().stored_bytes() <= expected_max_size);

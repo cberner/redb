@@ -21,9 +21,6 @@ impl RedbValue for FreedTableKey {
     type SelfType<'a> = FreedTableKey
     where
         Self: 'a;
-    type RefBaseType<'a> = FreedTableKey
-    where
-        Self: 'a;
     type AsBytes<'a> = [u8; 2 * size_of::<u64>()]
     where
         Self: 'a;
@@ -44,7 +41,7 @@ impl RedbValue for FreedTableKey {
         }
     }
 
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> [u8; 2 * size_of::<u64>()]
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> [u8; 2 * size_of::<u64>()]
     where
         Self: 'a,
         Self: 'b,
@@ -131,7 +128,6 @@ impl InternalTableDefinition {
 
 impl RedbValue for InternalTableDefinition {
     type SelfType<'a> = InternalTableDefinition;
-    type RefBaseType<'a> = InternalTableDefinition;
     type AsBytes<'a> = Vec<u8>;
 
     fn fixed_width() -> Option<usize> {
@@ -219,7 +215,7 @@ impl RedbValue for InternalTableDefinition {
         }
     }
 
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::RefBaseType<'b>) -> Vec<u8>
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
     where
         Self: 'a,
         Self: 'b,
@@ -324,7 +320,7 @@ impl<'txn> TableTree<'txn> {
         for (name, table_root) in self.pending_table_updates.drain() {
             // Bypass .get_table() since the table types are dynamic
             // TODO: optimize away this get()
-            let mut definition = self.tree.get(name.as_str()).unwrap().unwrap().value();
+            let mut definition = self.tree.get(&name.as_str()).unwrap().unwrap().value();
             // No-op if the root has not changed
             if definition.table_root == table_root {
                 continue;
@@ -332,7 +328,7 @@ impl<'txn> TableTree<'txn> {
             definition.table_root = table_root;
             // Safety: References into the master table are never returned to the user
             unsafe {
-                self.tree.insert(name.as_str(), &definition)?;
+                self.tree.insert(&name.as_str(), &definition)?;
             }
         }
         Ok(self.tree.get_root())
@@ -354,7 +350,7 @@ impl<'txn> TableTree<'txn> {
         name: &str,
         table_type: TableType,
     ) -> Result<Option<InternalTableDefinition>> {
-        if let Some(guard) = self.tree.get(name)? {
+        if let Some(guard) = self.tree.get(&name)? {
             let mut definition = guard.value();
             if definition.get_type() != table_type {
                 return Err(Error::TableTypeMismatch(format!(
@@ -408,7 +404,7 @@ impl<'txn> TableTree<'txn> {
             self.pending_table_updates.remove(name);
 
             // Safety: References into the master table are never returned to the user
-            let found = unsafe { self.tree.remove(name)?.is_some() };
+            let found = unsafe { self.tree.remove(&name)?.is_some() };
             return Ok(found);
         }
 
@@ -435,7 +431,7 @@ impl<'txn> TableTree<'txn> {
             value_type: V::redb_type_name(),
         };
         // Safety: References into the master table are never returned to the user
-        unsafe { self.tree.insert(name, &table)? };
+        unsafe { self.tree.insert(&name, &table)? };
         Ok(table)
     }
 

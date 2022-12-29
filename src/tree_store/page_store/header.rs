@@ -372,7 +372,7 @@ mod test {
     use std::mem::size_of;
     use tempfile::NamedTempFile;
 
-    const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
+    const X: TableDefinition<&str, &str> = TableDefinition::new("x");
 
     #[test]
     fn repair_allocator_no_checksums() {
@@ -384,7 +384,7 @@ mod test {
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello", b"world").unwrap();
+            table.insert("hello", "world").unwrap();
         }
         write_txn.commit().unwrap();
         let write_txn = db.begin_write().unwrap();
@@ -430,7 +430,7 @@ mod test {
         );
         {
             let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello2", b"world2").unwrap();
+            table.insert("hello2", "world2").unwrap();
         }
         write_txn.commit().unwrap();
     }
@@ -445,7 +445,7 @@ mod test {
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello", b"world").unwrap();
+            table.insert("hello", "world").unwrap();
         }
         write_txn.commit().unwrap();
 
@@ -455,7 +455,7 @@ mod test {
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello", b"world2").unwrap();
+            table.insert("hello", "world2").unwrap();
         }
         write_txn.commit().unwrap();
         drop(read_txn);
@@ -504,8 +504,8 @@ mod test {
         let write_txn = db2.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
-            assert_eq!(table.get(b"hello").unwrap().unwrap().value(), b"world");
-            table.insert(b"hello2", b"world2").unwrap();
+            assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+            table.insert("hello2", "world2").unwrap();
         }
         write_txn.commit().unwrap();
     }
@@ -520,7 +520,7 @@ mod test {
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello", b"world").unwrap();
+            table.insert("hello", "world").unwrap();
         }
         write_txn.commit().unwrap();
         let write_txn = db.begin_write().unwrap();
@@ -567,7 +567,7 @@ mod test {
         );
         {
             let mut table = write_txn.open_table(X).unwrap();
-            table.insert(b"hello2", b"world2").unwrap();
+            table.insert("hello2", "world2").unwrap();
         }
         write_txn.commit().unwrap();
     }
@@ -583,7 +583,7 @@ mod test {
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
-            let mut value = table.insert_reserve(b"hello", 5).unwrap();
+            let mut value = table.insert_reserve("hello", 5).unwrap();
             value.as_mut().copy_from_slice(b"world");
         }
         write_txn.commit().unwrap();
@@ -591,7 +591,7 @@ mod test {
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
-            let mut value = table.insert_reserve(b"hello2", 5).unwrap();
+            let mut value = table.insert_reserve("hello2", 5).unwrap();
             value.as_mut().copy_from_slice(b"world");
         }
         write_txn.commit().unwrap();
