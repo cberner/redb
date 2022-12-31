@@ -39,7 +39,7 @@ const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
 const NUM_REGIONS: u32 = 1000;
 
 // TODO: set to 1, when version 1.0 is released
-pub(super) const FILE_FORMAT_VERSION: u8 = 107;
+pub(crate) const FILE_FORMAT_VERSION: u8 = 107;
 
 fn ceil_log2(x: usize) -> usize {
     if x.is_power_of_two() {
@@ -573,18 +573,24 @@ impl TransactionalMemory {
             assert_eq!(page_size as usize, size);
         }
         let version = header.primary_slot().version;
-        if version != FILE_FORMAT_VERSION {
+        if version > FILE_FORMAT_VERSION {
             return Err(Error::Corrupted(format!(
                 "Expected file format version {}, found {}",
                 FILE_FORMAT_VERSION, version
             )));
         }
+        if version < FILE_FORMAT_VERSION {
+            return Err(Error::UpgradeRequired(version));
+        }
         let version = header.secondary_slot().version;
-        if version != FILE_FORMAT_VERSION {
+        if version > FILE_FORMAT_VERSION {
             return Err(Error::Corrupted(format!(
                 "Expected file format version {}, found {}",
                 FILE_FORMAT_VERSION, version
             )));
+        }
+        if version < FILE_FORMAT_VERSION {
+            return Err(Error::UpgradeRequired(version));
         }
 
         let needs_recovery = header.recovery_required;
