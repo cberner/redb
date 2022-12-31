@@ -14,7 +14,7 @@ mod utils;
 mod xxh3;
 
 pub(crate) use base::{Page, PageHint, PageNumber};
-pub(crate) use page_manager::{ChecksumType, TransactionalMemory};
+pub(crate) use page_manager::{ChecksumType, TransactionalMemory, FILE_FORMAT_VERSION};
 pub use savepoint::Savepoint;
 
 pub(super) use base::{PageImpl, PageMut};

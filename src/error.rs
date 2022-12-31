@@ -1,3 +1,4 @@
+use crate::tree_store::FILE_FORMAT_VERSION;
 use std::fmt::{Display, Formatter};
 use std::sync::PoisonError;
 use std::{io, panic};
@@ -8,6 +9,7 @@ pub enum Error {
     /// This savepoint is invalid because an older savepoint was restored after it was created
     InvalidSavepoint,
     Corrupted(String),
+    UpgradeRequired(u8),
     TableTypeMismatch(String),
     TableDoesNotExist(String),
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
@@ -34,6 +36,9 @@ impl Display for Error {
         match self {
             Error::Corrupted(msg) => {
                 write!(f, "DB corrupted: {}", msg)
+            }
+            Error::UpgradeRequired(actual) => {
+                write!(f, "Manual upgrade required. Expected file format version {}, but file is version {}", FILE_FORMAT_VERSION, actual)
             }
             Error::TableTypeMismatch(msg) => {
                 write!(f, "{}", msg)
