@@ -3,14 +3,21 @@ use std::fmt::{Display, Formatter};
 use std::sync::PoisonError;
 use std::{io, panic};
 
+/// Possibles errors in `redb` crate
 #[derive(Debug)]
 pub enum Error {
+    /// The Database is already open. Cannot acquire lock.
     DatabaseAlreadyOpen,
     /// This savepoint is invalid because an older savepoint was restored after it was created
     InvalidSavepoint,
+    /// The Database is corrupted contained string provide corruption information.
+    /// May occurs if current version is greater than [FILE_FORMAT_VERSION]
     Corrupted(String),
+    /// Database manual upgrade required `u8` represent the current version that is less than [FILE_FORMAT_VERSION]
     UpgradeRequired(u8),
+    /// Table types didn't match, see `String` for details.
     TableTypeMismatch(String),
+    /// While opening database the Given table name does not match any tables in database
     TableDoesNotExist(String),
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
