@@ -475,6 +475,7 @@ pub enum WriteStrategy {
     TwoPhase,
 }
 
+/// Configuration builder of a redb [Database].
 pub struct Builder {
     page_size: Option<usize>,
     region_size: Option<usize>,
@@ -485,6 +486,13 @@ pub struct Builder {
 }
 
 impl Builder {
+    /// Construct a new [Builder] with sensible defaults.
+    ///
+    /// ## Defaults
+    ///
+    /// - `read_cache_size_bytes`: 1Gib = 1024 * 1024 * 1024 bytes
+    /// - `write_cache_size_bytes`: 100MiB Kib = 100 * 1024 * 1024 bytes
+    /// - `write_strategy`: [WriteStrategy::Checksum]
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -505,6 +513,10 @@ impl Builder {
     /// Set the internal page size of the database
     ///
     /// Valid values are powers of two, greater than or equal to 512
+    ///
+    /// ## Defaults
+    ///
+    /// Default to 4 Kib pages.
     #[cfg(any(fuzzing, test))]
     pub fn set_page_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
@@ -512,6 +524,13 @@ impl Builder {
         self
     }
 
+    /// Customization of the write strategy of a redb database.
+    ///
+    /// See [WriteStrategy] for details.
+    ///
+    /// ## Defaults
+    ///
+    /// Internally defaults to [WriteStrategy::Checksum]
     pub fn set_write_strategy(&mut self, write_strategy: WriteStrategy) -> &mut Self {
         self.write_strategy = Some(write_strategy);
         self
@@ -519,7 +538,11 @@ impl Builder {
 
     /// Set the amount of memory (in bytes) used for caching data that has been read
     ///
-    /// This setting is ignored when calling create_mmapped()/open_mmapped()
+    /// This setting is ignored when calling `create_mmapped()`/`open_mmapped()`
+    ///
+    /// ## Defaults
+    ///
+    /// Defaults to 1Gib = 1024 * 1024 * 1024 bytes
     pub fn set_read_cache_size(&mut self, bytes: usize) -> &mut Self {
         self.read_cache_size_bytes = bytes;
         self
@@ -527,7 +550,11 @@ impl Builder {
 
     /// Set the amount of memory (in bytes) used for caching data that has been written
     ///
-    /// This setting is ignored when calling create_mmapped()/open_mmapped()
+    /// This setting is ignored when calling `create_mmapped()`/`open_mmapped()`
+    ///
+    /// ## Defaults
+    ///
+    /// Defaults to 100MiB Kib = 100 * 1024 * 1024 bytes
     pub fn set_write_cache_size(&mut self, bytes: usize) -> &mut Self {
         self.write_cache_size_bytes = bytes;
         self
@@ -605,6 +632,13 @@ impl Builder {
     }
 
     /// Opens an existing redb database.
+    ///
+    /// ## Errors
+    ///
+    /// - [ErrorKind::NotFound] if `path` does not exist
+    /// - [ErrorKind::InvalidData] if `path` but is not what we expect
+    /// - Other [ErrorKind] could be expected since this function uses
+    ///   `std::fs::OpenOptions::open` and io related functions.
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database> {
         if !path.as_ref().exists() {
             Err(Error::Io(ErrorKind::NotFound.into()))
