@@ -47,6 +47,11 @@ pub struct TableDefinition<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 }
 
 impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> TableDefinition<'a, K, V> {
+    /// Construct a new table with given `name`
+    ///
+    /// ## Invariant
+    ///
+    /// `name` shall not be empty.
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
         Self {
@@ -56,6 +61,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> TableDefinition<'a, K, V> {
         }
     }
 
+    /// Returns a reference of the `name` of the current `TableDefinition`.
     pub fn name(&self) -> &str {
         self.name
     }
@@ -475,6 +481,7 @@ pub enum WriteStrategy {
     TwoPhase,
 }
 
+/// Configuration builder of a redb [Database].
 pub struct Builder {
     page_size: Option<usize>,
     region_size: Option<usize>,
@@ -485,6 +492,13 @@ pub struct Builder {
 }
 
 impl Builder {
+    /// Construct a new [Builder] with sensible defaults.
+    ///
+    /// ## Defaults
+    ///
+    /// - `read_cache_size_bytes`: 1GiB
+    /// - `write_cache_size_bytes`: 100MiB
+    /// - `write_strategy`: [WriteStrategy::Checksum]
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -505,6 +519,10 @@ impl Builder {
     /// Set the internal page size of the database
     ///
     /// Valid values are powers of two, greater than or equal to 512
+    ///
+    /// ## Defaults
+    ///
+    /// Default to 4 Kib pages.
     #[cfg(any(fuzzing, test))]
     pub fn set_page_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
@@ -512,6 +530,9 @@ impl Builder {
         self
     }
 
+    /// Set the write strategy of the database.
+    ///
+    /// See [WriteStrategy] for details.
     pub fn set_write_strategy(&mut self, write_strategy: WriteStrategy) -> &mut Self {
         self.write_strategy = Some(write_strategy);
         self
@@ -519,7 +540,7 @@ impl Builder {
 
     /// Set the amount of memory (in bytes) used for caching data that has been read
     ///
-    /// This setting is ignored when calling create_mmapped()/open_mmapped()
+    /// This setting is ignored when calling `create_mmapped()`/`open_mmapped()`
     pub fn set_read_cache_size(&mut self, bytes: usize) -> &mut Self {
         self.read_cache_size_bytes = bytes;
         self
@@ -527,7 +548,7 @@ impl Builder {
 
     /// Set the amount of memory (in bytes) used for caching data that has been written
     ///
-    /// This setting is ignored when calling create_mmapped()/open_mmapped()
+    /// This setting is ignored when calling `create_mmapped()`/`open_mmapped()`
     pub fn set_write_cache_size(&mut self, bytes: usize) -> &mut Self {
         self.write_cache_size_bytes = bytes;
         self
