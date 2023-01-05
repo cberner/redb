@@ -47,6 +47,11 @@ pub struct TableDefinition<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 }
 
 impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> TableDefinition<'a, K, V> {
+    /// Construct a new table with given `name`
+    ///
+    /// ## Invariant
+    ///
+    /// `name` shall not be empty.
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
         Self {
@@ -56,6 +61,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> TableDefinition<'a, K, V> {
         }
     }
 
+    /// Returns a reference of the `name` of the current `TableDefinition`.
     pub fn name(&self) -> &str {
         self.name
     }
