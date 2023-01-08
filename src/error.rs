@@ -10,14 +10,13 @@ pub enum Error {
     DatabaseAlreadyOpen,
     /// This savepoint is invalid because an older savepoint was restored after it was created
     InvalidSavepoint,
-    /// The Database is corrupted contained string provide corruption information.
-    /// May occurs if current version is greater than [FILE_FORMAT_VERSION]
+    /// The Database is corrupted
     Corrupted(String),
-    /// Database manual upgrade required `u8` represent the current version that is less than [FILE_FORMAT_VERSION]
+    /// The database file is in an old file format and must be manually upgraded
     UpgradeRequired(u8),
-    /// Table types didn't match, see `String` for details.
+    /// Table types didn't match.
     TableTypeMismatch(String),
-    /// While opening database the Given table name does not match any tables in database
+    /// Table name does not match any table in database
     TableDoesNotExist(String),
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
