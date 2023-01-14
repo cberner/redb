@@ -365,6 +365,14 @@ the database to a savepoint the root of the b-tree is restored, and the snapshot
 is diff'ed against the currently allocated pages to determine which have been allocated since the savepoint
 was created. These pages are then queued to be freed, completing the rollback.
 
+# File backends
+
+redb has two "backends" for interacting with the file on disk. The first, the "mmap backend", is
+used via the `Builder::create_mmapped()` API. This is an unsafe API because of the semantics of `mmap()`. However,
+it can be faster for some use cases and it allows the OS to manage all caching of redb data.
+The second backend, the "userspace backend", is entirely safe and has a user configurable cache
+which it uses to cache ranges of the underlying `File`. This backend is used via the `Builder::create()` API.
+
 # Assumptions about underlying media
 redb is designed to be safe even in the event of power failure or on poorly behaved media.
 Therefore, we make only a few assumptions about the guarantees provided by the underlying filesystem:
