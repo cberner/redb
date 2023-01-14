@@ -73,6 +73,51 @@ impl RedbValue for () {
 
 impl Sealed for () {}
 
+impl<T: RedbValue> RedbValue for Option<T> {
+    type SelfType<'a> = Option<T::SelfType<'a>>
+    where
+        Self: 'a;
+    type AsBytes<'a> = Vec<u8>
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        T::fixed_width().map(|x| x + 1)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Option<T::SelfType<'a>>
+    where
+        Self: 'a,
+    {
+        match data[0] {
+            0 => None,
+            1 => Some(T::from_bytes(&data[1..])),
+            _ => unreachable!(),
+        }
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        let mut result = vec![];
+        if let Some(x) = value {
+            result.push(1);
+            result.extend_from_slice(T::as_bytes(x).as_ref());
+        } else {
+            result.push(0);
+        }
+        result
+    }
+
+    fn redb_type_name() -> String {
+        format!("Option<{}>", T::redb_type_name())
+    }
+}
+
+impl<T: RedbValue> Sealed for Option<T> {}
+
 impl RedbValue for &[u8] {
     type SelfType<'a> = &'a [u8]
     where

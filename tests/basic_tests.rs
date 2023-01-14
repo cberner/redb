@@ -889,6 +889,27 @@ fn empty_type() {
 }
 
 #[test]
+fn option_type() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u8, Option<u32>> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(0, None).unwrap();
+        table.insert(1, Some(1)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(table.get(0).unwrap().unwrap().value(), None);
+    assert_eq!(table.get(1).unwrap().unwrap().value(), Some(1));
+}
+
+#[test]
 fn array_type() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
