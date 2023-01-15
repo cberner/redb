@@ -2,7 +2,7 @@ use crate::tree_store::btree::btree_stats;
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
-use crate::types::{RedbKey, RedbValue, Sealed};
+use crate::types::{RedbKey, RedbValue, Sealed, TypeName};
 use crate::{DatabaseStats, Error, Result};
 use std::cell::RefCell;
 use std::cmp::max;
@@ -52,8 +52,8 @@ impl RedbValue for FreedTableKey {
         result
     }
 
-    fn redb_type_name() -> String {
-        "FreedTableKey".to_string()
+    fn redb_type_name() -> TypeName {
+        TypeName::internal("redb::FreedTableKey")
     }
 }
 
@@ -106,8 +106,8 @@ pub(crate) struct InternalTableDefinition {
     fixed_value_size: Option<usize>,
     key_alignment: usize,
     value_alignment: usize,
-    key_type: String,
-    value_type: String,
+    key_type: TypeName,
+    value_type: TypeName,
 }
 
 impl InternalTableDefinition {
@@ -221,11 +221,9 @@ impl RedbValue for InternalTableDefinition {
                 .unwrap(),
         ) as usize;
         offset += size_of::<u32>();
-        let key_type = std::str::from_utf8(&data[offset..(offset + key_type_len)])
-            .unwrap()
-            .to_string();
+        let key_type = TypeName::from_bytes(&data[offset..(offset + key_type_len)]);
         offset += key_type_len;
-        let value_type = std::str::from_utf8(&data[offset..]).unwrap().to_string();
+        let value_type = TypeName::from_bytes(&data[offset..]);
 
         InternalTableDefinition {
             table_root,
@@ -270,19 +268,16 @@ impl RedbValue for InternalTableDefinition {
         }
         result.extend_from_slice(&u32::try_from(value.key_alignment).unwrap().to_le_bytes());
         result.extend_from_slice(&u32::try_from(value.value_alignment).unwrap().to_le_bytes());
-        result.extend_from_slice(
-            &u32::try_from(value.key_type.as_bytes().len())
-                .unwrap()
-                .to_le_bytes(),
-        );
-        result.extend_from_slice(value.key_type.as_bytes());
-        result.extend_from_slice(value.value_type.as_bytes());
+        let key_type_bytes = value.key_type.to_bytes();
+        result.extend_from_slice(&u32::try_from(key_type_bytes.len()).unwrap().to_le_bytes());
+        result.extend_from_slice(&key_type_bytes);
+        result.extend_from_slice(&value.value_type.to_bytes());
 
         result
     }
 
-    fn redb_type_name() -> String {
-        "InternalTableDefinition".to_string()
+    fn redb_type_name() -> TypeName {
+        TypeName::internal("redb::InternalTableDefinition")
     }
 }
 
@@ -390,10 +385,10 @@ impl<'txn> TableTree<'txn> {
                 return Err(Error::TableTypeMismatch(format!(
                     "{} is of type Table<{}, {}> not Table<{}, {}>",
                     name,
-                    &definition.key_type,
-                    &definition.value_type,
-                    K::redb_type_name(),
-                    V::redb_type_name()
+                    definition.key_type.name(),
+                    definition.value_type.name(),
+                    K::redb_type_name().name(),
+                    V::redb_type_name().name()
                 )));
             }
             if definition.get_key_alignment() != K::ALIGNMENT {
@@ -544,6 +539,7 @@ impl<'txn> TableTree<'txn> {
 #[cfg(test)]
 mod test {
     use crate::tree_store::{InternalTableDefinition, TableType};
+    use crate::types::TypeName;
     use crate::RedbValue;
 
     #[test]
@@ -555,8 +551,8 @@ mod test {
             fixed_value_size: Some(5),
             key_alignment: 6,
             value_alignment: 7,
-            key_type: "Key".to_string(),
-            value_type: "Value".to_string(),
+            key_type: TypeName::new("test::Key"),
+            value_type: TypeName::new("test::Value"),
         };
         let y = InternalTableDefinition::from_bytes(InternalTableDefinition::as_bytes(&x).as_ref());
         assert_eq!(x, y);
