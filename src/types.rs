@@ -2,6 +2,74 @@ use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::fmt::Debug;
 
+#[derive(Eq, PartialEq, Clone, Debug)]
+enum TypeClassification {
+    Internal,
+    UserDefined,
+}
+
+impl TypeClassification {
+    fn to_byte(&self) -> u8 {
+        match self {
+            TypeClassification::Internal => 1,
+            TypeClassification::UserDefined => 2,
+        }
+    }
+
+    fn from_byte(value: u8) -> Self {
+        match value {
+            1 => TypeClassification::Internal,
+            2 => TypeClassification::UserDefined,
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[derive(Eq, PartialEq, Debug, Clone)]
+pub struct TypeName {
+    classification: TypeClassification,
+    name: String,
+}
+
+impl TypeName {
+    /// It is recommended that `name` be prefixed with the crate name to minimize the chance of
+    /// it coliding with another user defined type
+    pub fn new(name: &str) -> Self {
+        Self {
+            classification: TypeClassification::UserDefined,
+            name: name.to_string(),
+        }
+    }
+
+    pub(crate) fn internal(name: &str) -> Self {
+        Self {
+            classification: TypeClassification::Internal,
+            name: name.to_string(),
+        }
+    }
+
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        let mut result = Vec::with_capacity(self.name.as_bytes().len() + 1);
+        result.push(self.classification.to_byte());
+        result.extend_from_slice(self.name.as_bytes());
+        result
+    }
+
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
+        let classification = TypeClassification::from_byte(bytes[0]);
+        let name = std::str::from_utf8(&bytes[1..]).unwrap().to_string();
+
+        Self {
+            classification,
+            name,
+        }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 pub trait Sealed {}
 
 pub trait RedbValue: Debug + Sealed {
@@ -33,7 +101,7 @@ pub trait RedbValue: Debug + Sealed {
         Self: 'b;
 
     /// Globally unique identifier for this type
-    fn redb_type_name() -> String;
+    fn redb_type_name() -> TypeName;
 }
 
 pub trait RedbKey: RedbValue {
@@ -69,8 +137,8 @@ impl RedbValue for () {
         &[]
     }
 
-    fn redb_type_name() -> String {
-        "()".to_string()
+    fn redb_type_name() -> TypeName {
+        TypeName::internal("()")
     }
 }
 
@@ -113,8 +181,8 @@ impl<T: RedbValue> RedbValue for Option<T> {
         result
     }
 
-    fn redb_type_name() -> String {
-        format!("Option<{}>", T::redb_type_name())
+    fn redb_type_name() -> TypeName {
+        TypeName::internal(&format!("Option<{}>", T::redb_type_name().name()))
     }
 }
 
@@ -147,8 +215,8 @@ impl RedbValue for &[u8] {
         value
     }
 
-    fn redb_type_name() -> String {
-        "[u8]".to_string()
+    fn redb_type_name() -> TypeName {
+        TypeName::internal("&[u8]")
     }
 }
 
@@ -187,8 +255,8 @@ impl<const N: usize> RedbValue for &[u8; N] {
         value
     }
 
-    fn redb_type_name() -> String {
-        format!("[u8;{}]", N)
+    fn redb_type_name() -> TypeName {
+        TypeName::internal(&format!("[u8;{}]", N))
     }
 }
 
@@ -227,8 +295,8 @@ impl RedbValue for &str {
         value
     }
 
-    fn redb_type_name() -> String {
-        "str".to_string()
+    fn redb_type_name() -> TypeName {
+        TypeName::internal("&str")
     }
 }
 
@@ -269,8 +337,8 @@ macro_rules! be_value {
                 value.to_le_bytes()
             }
 
-            fn redb_type_name() -> String {
-                stringify!($t).to_string()
+            fn redb_type_name() -> TypeName {
+                TypeName::internal(stringify!($t))
             }
         }
 

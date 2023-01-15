@@ -344,7 +344,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterat
 
 #[cfg(test)]
 mod test {
-    use crate::types::{RedbKey, RedbValue, Sealed};
+    use crate::types::{RedbKey, RedbValue, Sealed, TypeName};
     use crate::{Database, ReadableTable, TableDefinition};
     use std::cmp::Ordering;
     use tempfile::NamedTempFile;
@@ -381,8 +381,8 @@ mod test {
                 &value.0
             }
 
-            fn redb_type_name() -> String {
-                "ReverseKey".to_string()
+            fn redb_type_name() -> TypeName {
+                TypeName::new("test::ReverseKey")
             }
         }
 

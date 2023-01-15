@@ -1,4 +1,4 @@
-use crate::types::{RedbKey, RedbValue, Sealed};
+use crate::types::{RedbKey, RedbValue, Sealed, TypeName};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::mem::size_of;
@@ -77,14 +77,14 @@ macro_rules! redb_type_name_impl {
         {
             let mut result = String::new();
             result.push('(');
-            result.push_str(&<$head>::redb_type_name());
+            result.push_str(&<$head>::redb_type_name().name());
             $(
                 result.push(',');
-                result.push_str(&<$tail>::redb_type_name());
+                result.push_str(&<$tail>::redb_type_name().name());
             )+
             result.push(')');
 
-            result
+            TypeName::internal(&result)
         }
     };
 }
@@ -218,7 +218,7 @@ macro_rules! tuple_impl {
                 as_bytes_impl!(value, $($t,$i,)+ $t_last, $i_last)
             }
 
-            fn redb_type_name() -> String {
+            fn redb_type_name() -> TypeName {
                 redb_type_name_impl!($($t,)+ $t_last)
             }
         }

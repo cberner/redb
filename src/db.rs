@@ -84,8 +84,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Display for TableDefinition
             f,
             "{}<{}, {}>",
             self.name,
-            K::redb_type_name(),
-            V::redb_type_name()
+            K::redb_type_name().name(),
+            V::redb_type_name().name()
         )
     }
 }
@@ -134,8 +134,8 @@ impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> Display for MultimapTableDefi
             f,
             "{}<{}, {}>",
             self.name,
-            K::redb_type_name(),
-            V::redb_type_name()
+            K::redb_type_name().name(),
+            V::redb_type_name().name()
         )
     }
 }
