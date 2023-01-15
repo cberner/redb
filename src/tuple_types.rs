@@ -72,15 +72,15 @@ macro_rules! as_bytes_impl {
     }};
 }
 
-macro_rules! redb_type_name_impl {
+macro_rules! type_name_impl {
     ( $head:ty $(,$tail:ty)+ ) => {
         {
             let mut result = String::new();
             result.push('(');
-            result.push_str(&<$head>::redb_type_name().name());
+            result.push_str(&<$head>::type_name().name());
             $(
                 result.push(',');
-                result.push_str(&<$tail>::redb_type_name().name());
+                result.push_str(&<$tail>::type_name().name());
             )+
             result.push(')');
 
@@ -218,8 +218,8 @@ macro_rules! tuple_impl {
                 as_bytes_impl!(value, $($t,$i,)+ $t_last, $i_last)
             }
 
-            fn redb_type_name() -> TypeName {
-                redb_type_name_impl!($($t,)+ $t_last)
+            fn type_name() -> TypeName {
+                type_name_impl!($($t,)+ $t_last)
             }
         }
 

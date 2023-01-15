@@ -168,7 +168,7 @@ impl RedbValue for DynamicCollection {
         &value.data
     }
 
-    fn redb_type_name() -> TypeName {
+    fn type_name() -> TypeName {
         TypeName::internal("redb::DynamicCollection")
     }
 }

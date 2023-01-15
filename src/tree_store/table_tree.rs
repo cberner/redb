@@ -52,7 +52,7 @@ impl RedbValue for FreedTableKey {
         result
     }
 
-    fn redb_type_name() -> TypeName {
+    fn type_name() -> TypeName {
         TypeName::internal("redb::FreedTableKey")
     }
 }
@@ -276,7 +276,7 @@ impl RedbValue for InternalTableDefinition {
         result
     }
 
-    fn redb_type_name() -> TypeName {
+    fn type_name() -> TypeName {
         TypeName::internal("redb::InternalTableDefinition")
     }
 }
@@ -379,16 +379,14 @@ impl<'txn> TableTree<'txn> {
                     name, table_type
                 )));
             }
-            if definition.key_type != K::redb_type_name()
-                || definition.value_type != V::redb_type_name()
-            {
+            if definition.key_type != K::type_name() || definition.value_type != V::type_name() {
                 return Err(Error::TableTypeMismatch(format!(
                     "{} is of type Table<{}, {}> not Table<{}, {}>",
                     name,
                     definition.key_type.name(),
                     definition.value_type.name(),
-                    K::redb_type_name().name(),
-                    V::redb_type_name().name()
+                    K::type_name().name(),
+                    V::type_name().name()
                 )));
             }
             if definition.get_key_alignment() != K::ALIGNMENT {
@@ -482,8 +480,8 @@ impl<'txn> TableTree<'txn> {
             fixed_value_size: V::fixed_width(),
             key_alignment: K::ALIGNMENT,
             value_alignment: V::ALIGNMENT,
-            key_type: K::redb_type_name(),
-            value_type: V::redb_type_name(),
+            key_type: K::type_name(),
+            value_type: V::type_name(),
         };
         // Safety: References into the master table are never returned to the user
         unsafe { self.tree.insert(&name, &table)? };

@@ -381,7 +381,7 @@ mod test {
                 &value.0
             }
 
-            fn redb_type_name() -> TypeName {
+            fn type_name() -> TypeName {
                 TypeName::new("test::ReverseKey")
             }
         }
