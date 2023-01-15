@@ -70,9 +70,7 @@ impl TypeName {
     }
 }
 
-pub trait Sealed {}
-
-pub trait RedbValue: Debug + Sealed {
+pub trait RedbValue: Debug {
     const ALIGNMENT: usize = 1;
 
     /// SelfType<'a> must be the same type as Self with all lifetimes replaced with 'a
@@ -142,8 +140,6 @@ impl RedbValue for () {
     }
 }
 
-impl Sealed for () {}
-
 impl<T: RedbValue> RedbValue for Option<T> {
     const ALIGNMENT: usize = T::ALIGNMENT;
     type SelfType<'a> = Option<T::SelfType<'a>>
@@ -186,8 +182,6 @@ impl<T: RedbValue> RedbValue for Option<T> {
     }
 }
 
-impl<T: RedbValue> Sealed for Option<T> {}
-
 impl RedbValue for &[u8] {
     type SelfType<'a> = &'a [u8]
     where
@@ -219,8 +213,6 @@ impl RedbValue for &[u8] {
         TypeName::internal("&[u8]")
     }
 }
-
-impl Sealed for &[u8] {}
 
 impl RedbKey for &[u8] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
@@ -260,8 +252,6 @@ impl<const N: usize> RedbValue for &[u8; N] {
     }
 }
 
-impl<const N: usize> Sealed for &[u8; N] {}
-
 impl<const N: usize> RedbKey for &[u8; N] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         data1.cmp(data2)
@@ -299,8 +289,6 @@ impl RedbValue for &str {
         TypeName::internal("&str")
     }
 }
-
-impl Sealed for &str {}
 
 impl RedbKey for &str {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
@@ -341,8 +329,6 @@ macro_rules! be_value {
                 TypeName::internal(stringify!($t))
             }
         }
-
-        impl Sealed for $t {}
     };
 }
 

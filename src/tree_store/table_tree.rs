@@ -2,7 +2,7 @@ use crate::tree_store::btree::btree_stats;
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
-use crate::types::{RedbKey, RedbValue, Sealed, TypeName};
+use crate::types::{RedbKey, RedbValue, TypeName};
 use crate::{DatabaseStats, Error, Result};
 use std::cell::RefCell;
 use std::cmp::max;
@@ -69,8 +69,6 @@ impl RedbKey for FreedTableKey {
         }
     }
 }
-
-impl Sealed for FreedTableKey {}
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub(crate) enum TableType {
@@ -280,8 +278,6 @@ impl RedbValue for InternalTableDefinition {
         TypeName::internal("redb::InternalTableDefinition")
     }
 }
-
-impl Sealed for InternalTableDefinition {}
 
 pub struct TableNameIter<'a> {
     inner: BtreeRangeIter<'a, &'static str, InternalTableDefinition>,

@@ -1,4 +1,4 @@
-use crate::types::{RedbKey, RedbValue, Sealed, TypeName};
+use crate::types::{RedbKey, RedbValue, TypeName};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::mem::size_of;
@@ -222,8 +222,6 @@ macro_rules! tuple_impl {
                 type_name_impl!($($t,)+ $t_last)
             }
         }
-
-        impl<$($t: RedbValue,)+ $t_last: RedbValue> Sealed for ($($t,)+ $t_last) {}
 
         impl<$($t: RedbKey,)+ $t_last: RedbKey> RedbKey for ($($t,)+ $t_last) {
             fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
