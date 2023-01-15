@@ -101,7 +101,7 @@ pub trait RedbValue: Debug + Sealed {
         Self: 'b;
 
     /// Globally unique identifier for this type
-    fn redb_type_name() -> TypeName;
+    fn type_name() -> TypeName;
 }
 
 pub trait RedbKey: RedbValue {
@@ -137,7 +137,7 @@ impl RedbValue for () {
         &[]
     }
 
-    fn redb_type_name() -> TypeName {
+    fn type_name() -> TypeName {
         TypeName::internal("()")
     }
 }
@@ -181,8 +181,8 @@ impl<T: RedbValue> RedbValue for Option<T> {
         result
     }
 
-    fn redb_type_name() -> TypeName {
-        TypeName::internal(&format!("Option<{}>", T::redb_type_name().name()))
+    fn type_name() -> TypeName {
+        TypeName::internal(&format!("Option<{}>", T::type_name().name()))
     }
 }
 
@@ -215,7 +215,7 @@ impl RedbValue for &[u8] {
         value
     }
 
-    fn redb_type_name() -> TypeName {
+    fn type_name() -> TypeName {
         TypeName::internal("&[u8]")
     }
 }
@@ -255,7 +255,7 @@ impl<const N: usize> RedbValue for &[u8; N] {
         value
     }
 
-    fn redb_type_name() -> TypeName {
+    fn type_name() -> TypeName {
         TypeName::internal(&format!("[u8;{}]", N))
     }
 }
@@ -295,7 +295,7 @@ impl RedbValue for &str {
         value
     }
 
-    fn redb_type_name() -> TypeName {
+    fn type_name() -> TypeName {
         TypeName::internal("&str")
     }
 }
@@ -337,7 +337,7 @@ macro_rules! be_value {
                 value.to_le_bytes()
             }
 
-            fn redb_type_name() -> TypeName {
+            fn type_name() -> TypeName {
                 TypeName::internal(stringify!($t))
             }
         }
