@@ -98,12 +98,14 @@ impl From<u8> for TableType {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub(crate) struct InternalTableDefinition {
     table_root: Option<(PageNumber, Checksum)>,
     table_type: TableType,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
+    key_alignment: usize,
+    value_alignment: usize,
     key_type: String,
     value_type: String,
 }
@@ -119,6 +121,14 @@ impl InternalTableDefinition {
 
     pub(crate) fn get_fixed_value_size(&self) -> Option<usize> {
         self.fixed_value_size
+    }
+
+    pub(crate) fn get_key_alignment(&self) -> usize {
+        self.key_alignment
+    }
+
+    pub(crate) fn get_value_alignment(&self) -> usize {
+        self.value_alignment
     }
 
     pub(crate) fn get_type(&self) -> TableType {
@@ -192,6 +202,18 @@ impl RedbValue for InternalTableDefinition {
             None
         };
         offset += size_of::<u32>();
+        let key_alignment = u32::from_le_bytes(
+            data[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        offset += size_of::<u32>();
+        let value_alignment = u32::from_le_bytes(
+            data[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        offset += size_of::<u32>();
 
         let key_type_len = u32::from_le_bytes(
             data[offset..(offset + size_of::<u32>())]
@@ -210,6 +232,8 @@ impl RedbValue for InternalTableDefinition {
             table_type,
             fixed_key_size,
             fixed_value_size,
+            key_alignment,
+            value_alignment,
             key_type,
             value_type,
         }
@@ -244,6 +268,8 @@ impl RedbValue for InternalTableDefinition {
             result.push(0);
             result.extend_from_slice(&[0; size_of::<u32>()])
         }
+        result.extend_from_slice(&u32::try_from(value.key_alignment).unwrap().to_le_bytes());
+        result.extend_from_slice(&u32::try_from(value.value_alignment).unwrap().to_le_bytes());
         result.extend_from_slice(
             &u32::try_from(value.key_type.as_bytes().len())
                 .unwrap()
@@ -370,6 +396,38 @@ impl<'txn> TableTree<'txn> {
                     V::redb_type_name()
                 )));
             }
+            if definition.get_key_alignment() != K::ALIGNMENT {
+                return Err(Error::Corrupted(format!(
+                    "{:?} key alignment {} does not match {}",
+                    name,
+                    K::ALIGNMENT,
+                    definition.key_alignment
+                )));
+            }
+            if definition.get_value_alignment() != V::ALIGNMENT {
+                return Err(Error::Corrupted(format!(
+                    "{:?} value alignment {} does not match {}",
+                    name,
+                    V::ALIGNMENT,
+                    definition.value_alignment
+                )));
+            }
+            if definition.get_fixed_key_size() != K::fixed_width() {
+                return Err(Error::Corrupted(format!(
+                    "{:?} key width {:?} does not match {:?}",
+                    name,
+                    K::fixed_width(),
+                    definition.get_fixed_key_size()
+                )));
+            }
+            if definition.get_fixed_value_size() != V::fixed_width() {
+                return Err(Error::Corrupted(format!(
+                    "{:?} value width {:?} does not match {:?}",
+                    name,
+                    V::fixed_width(),
+                    definition.get_fixed_value_size()
+                )));
+            }
 
             if let Some(updated_root) = self.pending_table_updates.get(name) {
                 definition.table_root = *updated_root;
@@ -427,6 +485,8 @@ impl<'txn> TableTree<'txn> {
             table_type,
             fixed_key_size: K::fixed_width(),
             fixed_value_size: V::fixed_width(),
+            key_alignment: K::ALIGNMENT,
+            value_alignment: V::ALIGNMENT,
             key_type: K::redb_type_name(),
             value_type: V::redb_type_name(),
         };
@@ -478,5 +538,27 @@ impl<'txn> TableTree<'txn> {
             fragmented_bytes: total_fragmented,
             page_size: self.mem.get_page_size(),
         })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::tree_store::{InternalTableDefinition, TableType};
+    use crate::RedbValue;
+
+    #[test]
+    fn round_trip() {
+        let x = InternalTableDefinition {
+            table_root: None,
+            table_type: TableType::Multimap,
+            fixed_key_size: None,
+            fixed_value_size: Some(5),
+            key_alignment: 6,
+            value_alignment: 7,
+            key_type: "Key".to_string(),
+            value_type: "Value".to_string(),
+        };
+        let y = InternalTableDefinition::from_bytes(InternalTableDefinition::as_bytes(&x).as_ref());
+        assert_eq!(x, y);
     }
 }

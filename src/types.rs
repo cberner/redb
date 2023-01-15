@@ -5,6 +5,8 @@ use std::fmt::Debug;
 pub trait Sealed {}
 
 pub trait RedbValue: Debug + Sealed {
+    const ALIGNMENT: usize = 1;
+
     /// SelfType<'a> must be the same type as Self with all lifetimes replaced with 'a
     type SelfType<'a>: Debug + 'a
     where
@@ -19,6 +21,7 @@ pub trait RedbValue: Debug + Sealed {
 
     /// Deserializes data
     /// Implementations may return a view over data, or an owned type
+    // TODO: implement guarantee that data is aligned to Self::ALIGNMENT
     fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
     where
         Self: 'a;
@@ -74,6 +77,7 @@ impl RedbValue for () {
 impl Sealed for () {}
 
 impl<T: RedbValue> RedbValue for Option<T> {
+    const ALIGNMENT: usize = T::ALIGNMENT;
     type SelfType<'a> = Option<T::SelfType<'a>>
     where
         Self: 'a;
@@ -82,7 +86,7 @@ impl<T: RedbValue> RedbValue for Option<T> {
         Self: 'a;
 
     fn fixed_width() -> Option<usize> {
-        T::fixed_width().map(|x| x + 1)
+        T::fixed_width().map(|x| x + T::ALIGNMENT)
     }
 
     fn from_bytes<'a>(data: &'a [u8]) -> Option<T::SelfType<'a>>
@@ -91,7 +95,7 @@ impl<T: RedbValue> RedbValue for Option<T> {
     {
         match data[0] {
             0 => None,
-            1 => Some(T::from_bytes(&data[1..])),
+            1 => Some(T::from_bytes(&data[T::ALIGNMENT..])),
             _ => unreachable!(),
         }
     }
@@ -101,12 +105,10 @@ impl<T: RedbValue> RedbValue for Option<T> {
         Self: 'a,
         Self: 'b,
     {
-        let mut result = vec![];
+        let mut result = vec![0; T::ALIGNMENT];
         if let Some(x) = value {
-            result.push(1);
+            result[0] = 1;
             result.extend_from_slice(T::as_bytes(x).as_ref());
-        } else {
-            result.push(0);
         }
         result
     }
