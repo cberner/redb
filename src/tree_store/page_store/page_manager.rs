@@ -39,7 +39,7 @@ const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
 const NUM_REGIONS: u32 = 1000;
 
 // TODO: set to 1, when version 1.0 is released
-pub(crate) const FILE_FORMAT_VERSION: u8 = 107;
+pub(crate) const FILE_FORMAT_VERSION: u8 = 108;
 
 fn ceil_log2(x: usize) -> usize {
     if x.is_power_of_two() {
