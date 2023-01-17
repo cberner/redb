@@ -69,6 +69,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<
         }
     }
 
+    /// Removes the specified range and returns the removed entries in an iterator
     pub fn drain<'a, KR>(
         &'a mut self,
         range: impl RangeBounds<KR> + Clone + 'a,
