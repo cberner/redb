@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io;
 use std::mem;
 use std::ops::{DerefMut, Index, IndexMut};
-#[cfg(unix)]
+#[cfg(all(unix, not(fuzzing)))]
 use std::os::unix::io::AsRawFd;
 use std::slice::SliceIndex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -194,6 +194,7 @@ impl PhysicalStorage for PagedCachedFile {
 
     fn eventual_flush(&self) -> Result {
         self.check_fsync_failure()?;
+
         #[cfg(not(target_os = "macos"))]
         {
             self.flush()
@@ -204,11 +205,11 @@ impl PhysicalStorage for PagedCachedFile {
             let code = unsafe { libc::fcntl(self.file.file().as_raw_fd(), libc::F_BARRIERFSYNC) };
             if code == -1 {
                 self.set_fsync_failed(true);
-                Err(io::Error::last_os_error().into())
-            } else {
-                Ok(())
+                return Err(io::Error::last_os_error().into());
             }
         }
+
+        Ok(())
     }
 
     // Make writes visible to readers, but does not guarantee any durability

@@ -117,11 +117,10 @@ impl MmapInner {
             //       Investigate switching to `write()`
             let code = unsafe { libc::fcntl(self.fd, libc::F_BARRIERFSYNC) };
             if code == -1 {
-                Err(io::Error::last_os_error().into())
-            } else {
-                Ok(())
+                return Err(io::Error::last_os_error().into());
             }
         }
+        Ok(())
     }
 }
 
