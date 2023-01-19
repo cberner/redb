@@ -75,7 +75,7 @@ jobs:
 
       - name: Fuzzer
         run: just fuzz_ci
-        if: startsWith(matrix.os, 'ubuntu')
+        if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
 
       - name: Run tests
         run: just build test
