@@ -197,7 +197,7 @@ impl PhysicalStorage for PagedCachedFile {
 
         #[cfg(not(target_os = "macos"))]
         {
-            self.flush()
+            self.flush()?;
         }
         #[cfg(all(target_os = "macos", not(fuzzing)))]
         {

@@ -109,7 +109,7 @@ impl MmapInner {
     pub(super) fn eventual_flush(&self) -> Result {
         #[cfg(not(target_os = "macos"))]
         {
-            self.flush()
+            self.flush()?;
         }
         #[cfg(all(target_os = "macos", not(fuzzing)))]
         {
