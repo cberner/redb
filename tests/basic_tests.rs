@@ -938,6 +938,31 @@ fn array_type() {
 }
 
 #[test]
+fn range_lifetime() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+
+    let mut iter = {
+        let start = "hello".to_string();
+        table.range::<&str>(start.as_str()..).unwrap()
+    };
+    assert_eq!(iter.next().unwrap().1.value(), "world");
+    assert!(iter.next().is_none());
+}
+
+#[test]
 fn custom_ordering() {
     #[derive(Debug)]
     struct ReverseKey(Vec<u8>);

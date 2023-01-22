@@ -147,10 +147,13 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
         self.tree.get(key.borrow())
     }
 
-    fn range<'a, KR>(&'a self, range: impl RangeBounds<KR> + 'a) -> Result<RangeIter<'a, K, V>>
+    fn range<'a: 'b, 'b, KR>(
+        &'a self,
+        range: impl RangeBounds<KR> + 'b,
+    ) -> Result<RangeIter<'a, K, V>>
     where
         K: 'a,
-        KR: Borrow<K::SelfType<'a>> + ?Sized + 'a,
+        KR: Borrow<K::SelfType<'b>> + ?Sized + 'b,
     {
         self.tree.range(range).map(RangeIter::new)
     }
@@ -208,10 +211,13 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     /// # Ok(())
     /// # }
     /// ```
-    fn range<'a, KR>(&'a self, range: impl RangeBounds<KR> + 'a) -> Result<RangeIter<'a, K, V>>
+    fn range<'a: 'b, 'b, KR>(
+        &'a self,
+        range: impl RangeBounds<KR> + 'b,
+    ) -> Result<RangeIter<'a, K, V>>
     where
         K: 'a,
-        KR: Borrow<K::SelfType<'a>> + ?Sized + 'a;
+        KR: Borrow<K::SelfType<'b>> + ?Sized + 'b;
 
     /// Returns the number of entries in the table
     fn len(&self) -> Result<usize>;
@@ -252,10 +258,13 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
         self.tree.get(key.borrow())
     }
 
-    fn range<'a, KR>(&'a self, range: impl RangeBounds<KR> + 'a) -> Result<RangeIter<'a, K, V>>
+    fn range<'a: 'b, 'b, KR>(
+        &'a self,
+        range: impl RangeBounds<KR> + 'b,
+    ) -> Result<RangeIter<'a, K, V>>
     where
         K: 'a,
-        KR: Borrow<K::SelfType<'a>> + ?Sized + 'a,
+        KR: Borrow<K::SelfType<'b>> + ?Sized + 'b,
     {
         self.tree.range(range).map(RangeIter::new)
     }
