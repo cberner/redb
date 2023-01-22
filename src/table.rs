@@ -70,14 +70,14 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<
     }
 
     /// Removes the specified range and returns the removed entries in an iterator
-    pub fn drain<'a, KR>(
+    pub fn drain<'a: 'b, 'b, KR>(
         &'a mut self,
-        range: impl RangeBounds<KR> + Clone + 'a,
+        range: impl RangeBounds<KR> + Clone + 'b,
     ) -> Result<Drain<'a, K, V>>
     where
         K: 'a,
         // TODO: we should not require Clone here
-        KR: Borrow<K::SelfType<'a>> + ?Sized + Clone + 'a,
+        KR: Borrow<K::SelfType<'b>> + ?Sized + Clone + 'b,
     {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
