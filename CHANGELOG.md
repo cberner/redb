@@ -1,5 +1,15 @@
 # redb - Changelog
 
+## 0.12.0 - 2023-01-21
+* Add `pop_first()` and `pop_last()` to `Table`
+* Add `drain()` to `Table`
+* Add support for `Option<T>` as a value type
+* Add support for user defined key and value types. Users must implement `RedbKey` and/or `RedbValue`
+* Change `get()`, `insert()`, `remove()`...etc to take arguments of type `impl Borrow<SelfType>`
+* Return `Error::UpgradeRequired` when opening a file with an outdated file format
+* Improve support for 32bit platforms
+* Performance optimizations
+
 ## 0.11.0 - 2022-12-26
 * Remove `[u8]` and `str` type support. Use `&[u8]` and `&str` instead.
 * Change `get()`, `range()` and several other methods to return `AccessGuard`.
