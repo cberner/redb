@@ -185,7 +185,10 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
     >(
         &'a0 mut self,
         range: T,
-    ) -> Result<BtreeDrain<K, V>> {
+    ) -> Result<BtreeDrain<'a, K, V>>
+    where
+        'a: 'a0,
+    {
         let iter = self.range(range.clone())?;
         let return_iter = self.range(range)?;
         let mut free_on_drop = vec![];
