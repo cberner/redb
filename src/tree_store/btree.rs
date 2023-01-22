@@ -169,7 +169,10 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
     >(
         &'a0 self,
         range: T,
-    ) -> Result<BtreeRangeIter<K, V>> {
+    ) -> Result<BtreeRangeIter<'a, K, V>>
+    where
+        'a: 'a0,
+    {
         self.read_tree().range(range)
     }
 
