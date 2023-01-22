@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition, RawBtree,
-    TableType, TransactionalMemory,
+    TableType, TransactionalMemory, PAGE_SIZE,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Error;
@@ -249,7 +249,7 @@ impl Database {
     fn new(
         file: File,
         use_mmap: bool,
-        page_size: Option<usize>,
+        page_size: usize,
         region_size: Option<usize>,
         initial_size: Option<u64>,
         read_cache_size_bytes: usize,
@@ -489,7 +489,7 @@ pub enum WriteStrategy {
 
 /// Configuration builder of a redb [Database].
 pub struct Builder {
-    page_size: Option<usize>,
+    page_size: usize,
     region_size: Option<usize>,
     initial_size: Option<u64>,
     read_cache_size_bytes: usize,
@@ -511,7 +511,7 @@ impl Builder {
             // Default to 4k pages. Benchmarking showed that this was a good default on all platforms,
             // including MacOS with 16k pages. Therefore, users are not allowed to configure it at the moment.
             // It is part of the file format, so can be enabled in the future.
-            page_size: Some(4096),
+            page_size: PAGE_SIZE,
             region_size: None,
             initial_size: None,
             // TODO: Default should probably take into account the total system memory
@@ -532,7 +532,7 @@ impl Builder {
     #[cfg(any(fuzzing, test))]
     pub fn set_page_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
-        self.page_size = Some(std::cmp::max(size, 512));
+        self.page_size = std::cmp::max(size, 512);
         self
     }
 
@@ -640,7 +640,7 @@ impl Builder {
             Database::new(
                 file,
                 false,
-                None,
+                self.page_size,
                 None,
                 self.initial_size,
                 self.read_cache_size_bytes,
@@ -669,7 +669,7 @@ impl Builder {
             Database::new(
                 file,
                 true,
-                None,
+                self.page_size,
                 None,
                 self.initial_size,
                 self.read_cache_size_bytes,

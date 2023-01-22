@@ -72,6 +72,8 @@ const SLOT_CHECKSUM_OFFSET: usize =
     REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size();
 const TRANSACTION_LAST_FIELD: usize = SLOT_CHECKSUM_OFFSET + size_of::<u128>();
 
+pub(crate) const PAGE_SIZE: usize = 4096;
+
 fn get_u32(data: &[u8]) -> u32 {
     u32::from_le_bytes(data[..size_of::<u32>()].try_into().unwrap())
 }
@@ -362,8 +364,8 @@ impl TransactionHeader {
 mod test {
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::header::{
-        GOD_BYTE_OFFSET, MAGICNUMBER, PRIMARY_BIT, RECOVERY_REQUIRED, ROOT_CHECKSUM_OFFSET,
-        TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET,
+        GOD_BYTE_OFFSET, MAGICNUMBER, PAGE_SIZE, PRIMARY_BIT, RECOVERY_REQUIRED,
+        ROOT_CHECKSUM_OFFSET, TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET,
     };
     use crate::tree_store::page_store::TransactionalMemory;
     use crate::{Database, ReadableTable, WriteStrategy};
@@ -408,7 +410,7 @@ mod test {
         assert!(TransactionalMemory::new(
             file,
             false,
-            None,
+            PAGE_SIZE,
             None,
             None,
             0,
@@ -489,7 +491,7 @@ mod test {
         assert!(TransactionalMemory::new(
             file,
             false,
-            None,
+            PAGE_SIZE,
             None,
             None,
             0,
@@ -545,7 +547,7 @@ mod test {
         assert!(TransactionalMemory::new(
             file,
             false,
-            None,
+            PAGE_SIZE,
             None,
             None,
             0,
@@ -614,7 +616,7 @@ mod test {
         assert!(TransactionalMemory::new(
             file,
             false,
-            None,
+            PAGE_SIZE,
             None,
             None,
             0,

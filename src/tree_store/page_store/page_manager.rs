@@ -9,7 +9,7 @@ use crate::tree_store::page_store::header::{DatabaseHeader, DB_HEADER_SIZE, MAGI
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
-use crate::tree_store::page_store::utils::{get_page_size, is_page_aligned};
+use crate::tree_store::page_store::utils::is_page_aligned;
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
 use crate::tree_store::PageNumber;
 use crate::Error;
@@ -453,14 +453,13 @@ impl TransactionalMemory {
     pub(crate) fn new(
         file: File,
         use_mmap: bool,
-        requested_page_size: Option<usize>,
+        page_size: usize,
         requested_region_size: Option<usize>,
         initial_size: Option<u64>,
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
         write_strategy: Option<WriteStrategy>,
     ) -> Result<Self> {
-        let page_size = requested_page_size.unwrap_or_else(get_page_size);
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
         let region_size = requested_region_size
@@ -568,10 +567,7 @@ impl TransactionalMemory {
             assert_eq!(checksum_type, header.primary_slot().checksum_type);
         }
 
-        let page_size = header.page_size();
-        if let Some(size) = requested_page_size {
-            assert_eq!(page_size as usize, size);
-        }
+        assert_eq!(header.page_size() as usize, page_size);
         let version = header.primary_slot().version;
         if version > FILE_FORMAT_VERSION {
             return Err(Error::Corrupted(format!(
@@ -630,7 +626,7 @@ impl TransactionalMemory {
 
         let state = InMemoryState::from_bytes(header, storage.as_ref())?;
 
-        assert!(page_size as usize >= DB_HEADER_SIZE);
+        assert!(page_size >= DB_HEADER_SIZE);
 
         Ok(Self {
             allocated_since_commit: Mutex::new(HashSet::new()),
@@ -647,10 +643,10 @@ impl TransactionalMemory {
             #[cfg(debug_assertions)]
             read_page_ref_counts: Mutex::new(HashMap::new()),
             read_from_secondary: AtomicBool::new(false),
-            page_size,
+            page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,
-            pages_are_os_page_aligned: is_page_aligned(page_size.try_into().unwrap()),
+            pages_are_os_page_aligned: is_page_aligned(page_size),
             use_mmap,
         })
     }
