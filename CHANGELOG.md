@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 0.12.1 - 2023-01-22
+* Fix `open()` on platforms with OS page size != 4KiB
+* Relax lifetime requirements on argument to `range()` and `drain()`
+
 ## 0.12.0 - 2023-01-21
 * Add `pop_first()` and `pop_last()` to `Table`
 * Add `drain()` to `Table`
