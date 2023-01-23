@@ -1,6 +1,6 @@
 use crate::tree_store::{
-    AccessGuardMut, Btree, BtreeDrain, BtreeMut, BtreeRangeIter, Checksum, PageHint, PageNumber,
-    TransactionalMemory,
+    AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeMut, BtreeRangeIter, Checksum,
+    PageHint, PageNumber, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::Result;
@@ -83,6 +83,28 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
         // and we borrow &mut self.
         unsafe { self.tree.drain(range).map(Drain::new) }
+    }
+
+    /// Applies `predicate` to all key-value pairs in the specified range. All entries for which
+    /// `predicate` evaluates to `true` are removed and returned in an iterator
+    pub fn drain_filter<'a: 'b, 'b, KR, F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+        &'a mut self,
+        range: impl RangeBounds<KR> + Clone + 'b,
+        predicate: F,
+    ) -> Result<DrainFilter<'a, K, V, F>>
+    where
+        K: 'a,
+        // TODO: we should not require Clone here
+        KR: Borrow<K::SelfType<'b>> + ?Sized + Clone + 'b,
+    {
+        // Safety: No other references to this table can exist.
+        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
+        // and we borrow &mut self.
+        unsafe {
+            self.tree
+                .drain_filter(range, predicate)
+                .map(DrainFilter::new)
+        }
     }
 
     /// Insert mapping of the given key to the given value
@@ -302,6 +324,61 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for Drai
 
 impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterator
     for Drain<'a, K, V>
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let entry = self.inner.next_back()?;
+        let (page, key_range, value_range) = entry.into_raw();
+        let key = AccessGuard::with_page(page.clone(), key_range);
+        let value = AccessGuard::with_page(page, value_range);
+        Some((key, value))
+    }
+}
+
+pub struct DrainFilter<
+    'a,
+    K: RedbKey + ?Sized + 'a,
+    V: RedbValue + ?Sized + 'a,
+    F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+> {
+    inner: BtreeDrainFilter<'a, K, V, F>,
+}
+
+impl<
+        'a,
+        K: RedbKey + ?Sized + 'a,
+        V: RedbValue + ?Sized + 'a,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    > DrainFilter<'a, K, V, F>
+{
+    fn new(inner: BtreeDrainFilter<'a, K, V, F>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<
+        'a,
+        K: RedbKey + ?Sized + 'a,
+        V: RedbValue + ?Sized + 'a,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    > Iterator for DrainFilter<'a, K, V, F>
+{
+    type Item = (AccessGuard<'a, K>, AccessGuard<'a, V>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let entry = self.inner.next()?;
+        let (page, key_range, value_range) = entry.into_raw();
+        let key = AccessGuard::with_page(page.clone(), key_range);
+        let value = AccessGuard::with_page(page, value_range);
+        Some((key, value))
+    }
+}
+
+impl<
+        'a,
+        K: RedbKey + ?Sized + 'a,
+        V: RedbValue + ?Sized + 'a,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    > DoubleEndedIterator for DrainFilter<'a, K, V, F>
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;

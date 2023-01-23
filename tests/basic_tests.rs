@@ -112,6 +112,61 @@ fn drain() {
 }
 
 #[test]
+fn drain_filter() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+        // Test draining uncommitted data
+        drop(table.drain_filter(0..10, |k, _| k < 5).unwrap());
+        for i in 0..5 {
+            table.insert(&i, &i).unwrap();
+        }
+        assert_eq!(table.len().unwrap(), 10);
+
+        // Test matching on the value
+        drop(table.drain_filter(0..10, |_, v| v < 5).unwrap());
+        for i in 0..5 {
+            table.insert(&i, &i).unwrap();
+        }
+        assert_eq!(table.len().unwrap(), 10);
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 10);
+        for (i, (k, v)) in table.drain_filter(0.., |x, _| x < 5).unwrap().enumerate() {
+            assert_eq!(i as u64, k.value());
+            assert_eq!(i as u64, v.value());
+        }
+        assert_eq!(table.len().unwrap(), 5);
+        let mut i = 5u64;
+        for (k, v) in table.range(0..10).unwrap() {
+            assert_eq!(i, k.value());
+            assert_eq!(i, v.value());
+            i += 1;
+        }
+    }
+    write_txn.abort().unwrap();
+
+    // Check that dropping the iter early works too
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 10);
+        drop(table.drain_filter(0.., |x, _| x < 5).unwrap());
+        assert_eq!(table.len().unwrap(), 5);
+    }
+    write_txn.abort().unwrap();
+}
+
+#[test]
 fn stored_size() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
@@ -982,6 +1037,31 @@ fn drain_lifetime() {
     let mut iter = {
         let start = "hello".to_string();
         table.drain::<&str>(start.as_str()..).unwrap()
+    };
+    assert_eq!(iter.next().unwrap().1.value(), "world");
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn drain_filter_lifetime() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let mut table = txn.open_table(definition).unwrap();
+
+    let mut iter = {
+        let start = "hello".to_string();
+        table.drain_filter(start.as_str().., |_, _| true).unwrap()
     };
     assert_eq!(iter.next().unwrap().1.value(), "world");
     assert!(iter.next().is_none());
