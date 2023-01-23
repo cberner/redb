@@ -10,7 +10,9 @@ pub use btree_base::AccessGuard;
 pub(crate) use btree_base::AccessGuardMut;
 pub(crate) use btree_base::Checksum;
 pub(crate) use btree_base::{LeafAccessor, RawLeafBuilder, BRANCH, LEAF};
-pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeDrain, BtreeRangeIter};
+pub(crate) use btree_iters::{
+    AllPageNumbersBtreeIter, BtreeDrain, BtreeDrainFilter, BtreeRangeIter,
+};
 pub use page_store::Savepoint;
 pub(crate) use page_store::{
     Page, PageHint, PageNumber, TransactionalMemory, FILE_FORMAT_VERSION, PAGE_SIZE,

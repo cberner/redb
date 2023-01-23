@@ -5,7 +5,7 @@ use crate::tree_store::btree_base::{
 use crate::tree_store::btree_iters::BtreeDrain;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
-use crate::tree_store::{AccessGuardMut, BtreeRangeIter, PageHint, PageNumber};
+use crate::tree_store::{AccessGuardMut, BtreeDrainFilter, BtreeRangeIter, PageHint, PageNumber};
 use crate::types::{RedbKey, RedbValue};
 use crate::{AccessGuard, Result};
 #[cfg(feature = "logging")]
@@ -207,6 +207,50 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
 
         let result = BtreeDrain::new(
             return_iter,
+            free_on_drop,
+            self.freed_pages.clone(),
+            self.mem,
+        );
+
+        Ok(result)
+    }
+
+    // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
+    pub(crate) unsafe fn drain_filter<
+        'a0,
+        T: RangeBounds<KR> + Clone + 'a0,
+        // TODO: we shouldn't require Clone
+        KR: Borrow<K::SelfType<'a0>> + ?Sized + Clone + 'a0,
+        F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    >(
+        &'a0 mut self,
+        range: T,
+        predicate: F,
+    ) -> Result<BtreeDrainFilter<'a, K, V, F>>
+    where
+        'a: 'a0,
+    {
+        let iter = self.range(range.clone())?;
+        let return_iter = self.range(range)?;
+        let mut free_on_drop = vec![];
+        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
+            self.root.clone(),
+            FreePolicy::Never,
+            self.mem,
+            &mut free_on_drop,
+        );
+        for entry in iter {
+            // TODO: optimize so that we don't have to call safe_delete in a loop
+            if predicate(K::from_bytes(entry.key()), V::from_bytes(entry.value())) {
+                assert!(operation
+                    .safe_delete(K::from_bytes(entry.key()).borrow())?
+                    .is_some());
+            }
+        }
+
+        let result = BtreeDrainFilter::new(
+            return_iter,
+            predicate,
             free_on_drop,
             self.freed_pages.clone(),
             self.mem,

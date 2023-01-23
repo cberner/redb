@@ -293,6 +293,109 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Drop for BtreeDra
     }
 }
 
+pub(crate) struct BtreeDrainFilter<
+    'a,
+    K: RedbKey + ?Sized + 'a,
+    V: RedbValue + ?Sized + 'a,
+    F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+> {
+    inner: BtreeRangeIter<'a, K, V>,
+    predicate: F,
+    free_on_drop: Vec<PageNumber>,
+    master_free_list: Rc<RefCell<Vec<PageNumber>>>,
+    mem: &'a TransactionalMemory,
+}
+
+impl<
+        'a,
+        K: RedbKey + ?Sized + 'a,
+        V: RedbValue + ?Sized + 'a,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    > BtreeDrainFilter<'a, K, V, F>
+{
+    // Safety: caller must ensure that there are no references to free_on_drop pages, other than those
+    // within `inner`
+    pub(crate) unsafe fn new(
+        inner: BtreeRangeIter<'a, K, V>,
+        predicate: F,
+        free_on_drop: Vec<PageNumber>,
+        master_free_list: Rc<RefCell<Vec<PageNumber>>>,
+        mem: &'a TransactionalMemory,
+    ) -> Self {
+        Self {
+            inner,
+            predicate,
+            free_on_drop,
+            master_free_list,
+            mem,
+        }
+    }
+}
+
+impl<
+        'a,
+        K: RedbKey + ?Sized + 'a,
+        V: RedbValue + ?Sized + 'a,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    > Iterator for BtreeDrainFilter<'a, K, V, F>
+{
+    type Item = EntryGuard<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut item = self.inner.next();
+        while let Some(ref entry) = item {
+            if (self.predicate)(K::from_bytes(entry.key()), V::from_bytes(entry.value())) {
+                break;
+            }
+            item = self.inner.next();
+        }
+        item
+    }
+}
+
+impl<
+        'a,
+        K: RedbKey + ?Sized + 'a,
+        V: RedbValue + ?Sized + 'a,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    > DoubleEndedIterator for BtreeDrainFilter<'a, K, V, F>
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let mut item = self.inner.next_back();
+        while let Some(ref entry) = item {
+            if (self.predicate)(K::from_bytes(entry.key()), V::from_bytes(entry.value())) {
+                break;
+            }
+            item = self.inner.next_back();
+        }
+        item
+    }
+}
+
+impl<
+        'a,
+        K: RedbKey + ?Sized + 'a,
+        V: RedbValue + ?Sized + 'a,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    > Drop for BtreeDrainFilter<'a, K, V, F>
+{
+    fn drop(&mut self) {
+        // Ensure that the iter is entirely consumed, so that it doesn't have any references to the pages
+        // to be freed
+        while self.inner.next().is_some() {
+            // no-op
+        }
+
+        for page in self.free_on_drop.drain(..) {
+            // Safety: Caller guaranteed that there are no other references to these pages,
+            // and we just consumed all of ours in the loop above.
+            if unsafe { !self.mem.free_if_uncommitted(page) } {
+                self.master_free_list.borrow_mut().push(page);
+            }
+        }
+    }
+}
+
 pub(crate) struct BtreeRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> {
     left: Option<RangeIterState<'a>>, // Exclusive. The previous element returned
     right: Option<RangeIterState<'a>>, // Exclusive. The previous element returned
