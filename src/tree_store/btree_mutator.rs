@@ -28,7 +28,7 @@ enum DeletionResult {
     DeletedBranch(PageNumber, Checksum),
 }
 
-struct InsertionResult<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+struct InsertionResult<'a, K: RedbKey, V: RedbValue> {
     // the new root page
     new_root: PageNumber,
     // checksum of the root page
@@ -41,7 +41,7 @@ struct InsertionResult<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     old_value: Option<AccessGuard<'a, V>>,
 }
 
-pub(crate) struct MutateHelper<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub(crate) struct MutateHelper<'a, 'b, K: RedbKey, V: RedbValue> {
     root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
     free_policy: FreePolicy,
     mem: &'a TransactionalMemory,
@@ -50,7 +50,7 @@ pub(crate) struct MutateHelper<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Size
     _value_type: PhantomData<V>,
 }
 
-impl<'a, 'b, K: RedbKey + ?Sized, V: RedbValue + ?Sized> MutateHelper<'a, 'b, K, V> {
+impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
     pub(crate) fn new(
         root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
         free_policy: FreePolicy,

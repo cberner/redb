@@ -107,7 +107,7 @@ impl<'a> EitherPage<'a> {
     }
 }
 
-pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
+pub struct AccessGuard<'a, V: RedbValue> {
     page: EitherPage<'a>,
     offset: usize,
     len: usize,
@@ -116,7 +116,7 @@ pub struct AccessGuard<'a, V: RedbValue + ?Sized> {
     _value_type: PhantomData<V>,
 }
 
-impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
+impl<'a, V: RedbValue> AccessGuard<'a, V> {
     // Safety: if free_on_drop is true, caller must guarantee that no other references to page exist,
     // and that no references will be created until this AccessGuard is dropped
     pub(super) unsafe fn new(
@@ -192,7 +192,7 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
     }
 }
 
-impl<'a, V: RedbValue + ?Sized> Drop for AccessGuard<'a, V> {
+impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
     fn drop(&mut self) {
         match self.on_drop {
             OnDrop::None => {}
@@ -221,7 +221,7 @@ impl<'a, V: RedbValue + ?Sized> Drop for AccessGuard<'a, V> {
     }
 }
 
-pub struct AccessGuardMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub struct AccessGuardMut<'a, K: RedbKey, V: RedbValue> {
     root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
     key: Vec<u8>,
     mem: &'a TransactionalMemory,
@@ -234,7 +234,7 @@ pub struct AccessGuardMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> AccessGuardMut<'a, K, V> {
+impl<'a, K: RedbKey, V: RedbValue> AccessGuardMut<'a, K, V> {
     pub(crate) fn new(
         key: &[u8],
         page: PageMut<'a>,
@@ -300,13 +300,13 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> AccessGuardMut<'a, K, V> {
 }
 
 // TODO: this should return a RedbValue typed reference
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> AsMut<[u8]> for AccessGuardMut<'a, K, V> {
+impl<'a, K: RedbKey, V: RedbValue> AsMut<[u8]> for AccessGuardMut<'a, K, V> {
     fn as_mut(&mut self) -> &mut [u8] {
         &mut self.page.memory_mut()[self.offset..(self.offset + self.len)]
     }
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for AccessGuardMut<'a, K, V> {
+impl<'a, K: RedbKey, V: RedbValue> Drop for AccessGuardMut<'a, K, V> {
     fn drop(&mut self) {
         // Was dropped before being returned to the user, so no clean up needed
         if self.root.borrow().is_none() {
@@ -367,10 +367,7 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
-    pub(super) fn print_node<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
-        &self,
-        include_value: bool,
-    ) {
+    pub(super) fn print_node<K: RedbKey, V: RedbValue>(&self, include_value: bool) {
         let mut i = 0;
         while let Some(entry) = self.entry(i) {
             eprint!(" key_{}={:?}", i, K::from_bytes(entry.key()));
@@ -381,7 +378,7 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
-    pub(crate) fn position<K: RedbKey + ?Sized>(&self, query: &[u8]) -> (usize, bool) {
+    pub(crate) fn position<K: RedbKey>(&self, query: &[u8]) -> (usize, bool) {
         // inclusive
         let mut min_entry = 0;
         // inclusive. Start past end, since it might be positioned beyond the end of the leaf
@@ -405,7 +402,7 @@ impl<'a> LeafAccessor<'a> {
         (min_entry, false)
     }
 
-    pub(crate) fn find_key<K: RedbKey + ?Sized>(&self, query: &[u8]) -> Option<usize> {
+    pub(crate) fn find_key<K: RedbKey>(&self, query: &[u8]) -> Option<usize> {
         let (entry, found) = self.position::<K>(query);
         if found {
             Some(entry)
@@ -1168,7 +1165,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         }
     }
 
-    pub(super) fn print_node<K: RedbKey + ?Sized>(&self) {
+    pub(super) fn print_node<K: RedbKey>(&self) {
         eprint!(
             "Internal[ (page={:?}), child_0={:?}",
             self.page.get_page_number(),
@@ -1189,7 +1186,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         self.key_end(self.num_keys() - 1)
     }
 
-    pub(super) fn child_for_key<K: RedbKey + ?Sized>(&self, query: &[u8]) -> (usize, PageNumber) {
+    pub(super) fn child_for_key<K: RedbKey>(&self, query: &[u8]) -> (usize, PageNumber) {
         let mut min_child = 0; // inclusive
         let mut max_child = self.num_keys(); // inclusive
         while min_child < max_child {

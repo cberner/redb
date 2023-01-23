@@ -11,13 +11,13 @@ use std::ops::RangeBounds;
 use std::rc::Rc;
 
 /// A table containing key-value mappings
-pub struct Table<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> {
+pub struct Table<'db, 'txn, K: RedbKey + 'txn, V: RedbValue + 'txn> {
     name: String,
     transaction: &'txn WriteTransaction<'db>,
     tree: BtreeMut<'txn, K, V>,
 }
 
-impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<'db, 'txn, K, V> {
+impl<'db, 'txn, K: RedbKey + 'txn, V: RedbValue + 'txn> Table<'db, 'txn, K, V> {
     pub(crate) fn new(
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
@@ -77,7 +77,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<
     where
         K: 'a,
         // TODO: we should not require Clone here
-        KR: Borrow<K::SelfType<'b>> + ?Sized + Clone + 'b,
+        KR: Borrow<K::SelfType<'b>> + Clone + 'b,
     {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
@@ -95,7 +95,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<
     where
         K: 'a,
         // TODO: we should not require Clone here
-        KR: Borrow<K::SelfType<'b>> + ?Sized + Clone + 'b,
+        KR: Borrow<K::SelfType<'b>> + Clone + 'b,
     {
         // Safety: No other references to this table can exist.
         // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
@@ -159,9 +159,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbValue + ?Sized + 'txn> Table<
     }
 }
 
-impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
-    for Table<'db, 'txn, K, V>
-{
+impl<'db, 'txn, K: RedbKey, V: RedbValue> ReadableTable<K, V> for Table<'db, 'txn, K, V> {
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
     where
         K: 'a,
@@ -175,7 +173,7 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     ) -> Result<RangeIter<'a, K, V>>
     where
         K: 'a,
-        KR: Borrow<K::SelfType<'b>> + ?Sized + 'b,
+        KR: Borrow<K::SelfType<'b>> + 'b,
     {
         self.tree.range(range).map(RangeIter::new)
     }
@@ -189,13 +187,13 @@ impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     }
 }
 
-impl<'db, 'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Drop for Table<'db, 'txn, K, V> {
+impl<'db, 'txn, K: RedbKey, V: RedbValue> Drop for Table<'db, 'txn, K, V> {
     fn drop(&mut self) {
         self.transaction.close_table(&self.name, &mut self.tree);
     }
 }
 
-pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub trait ReadableTable<K: RedbKey, V: RedbValue> {
     /// Returns the value corresponding to the given key
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
     where
@@ -239,7 +237,7 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     ) -> Result<RangeIter<'a, K, V>>
     where
         K: 'a,
-        KR: Borrow<K::SelfType<'b>> + ?Sized + 'b;
+        KR: Borrow<K::SelfType<'b>> + 'b;
 
     /// Returns the number of entries in the table
     fn len(&self) -> Result<usize>;
@@ -254,11 +252,11 @@ pub trait ReadableTable<K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
 }
 
 /// A read-only table
-pub struct ReadOnlyTable<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub struct ReadOnlyTable<'txn, K: RedbKey, V: RedbValue> {
     tree: Btree<'txn, K, V>,
 }
 
-impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'txn, K, V> {
+impl<'txn, K: RedbKey, V: RedbValue> ReadOnlyTable<'txn, K, V> {
     pub(crate) fn new(
         root_page: Option<(PageNumber, Checksum)>,
         hint: PageHint,
@@ -270,9 +268,7 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadOnlyTable<'txn, K, V>
     }
 }
 
-impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
-    for ReadOnlyTable<'txn, K, V>
-{
+impl<'txn, K: RedbKey, V: RedbValue> ReadableTable<K, V> for ReadOnlyTable<'txn, K, V> {
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
     where
         K: 'a,
@@ -286,7 +282,7 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     ) -> Result<RangeIter<'a, K, V>>
     where
         K: 'a,
-        KR: Borrow<K::SelfType<'b>> + ?Sized + 'b,
+        KR: Borrow<K::SelfType<'b>> + 'b,
     {
         self.tree.range(range).map(RangeIter::new)
     }
@@ -300,17 +296,17 @@ impl<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized> ReadableTable<K, V>
     }
 }
 
-pub struct Drain<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> {
+pub struct Drain<'a, K: RedbKey + 'a, V: RedbValue + 'a> {
     inner: BtreeDrain<'a, K, V>,
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Drain<'a, K, V> {
+impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Drain<'a, K, V> {
     fn new(inner: BtreeDrain<'a, K, V>) -> Self {
         Self { inner }
     }
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for Drain<'a, K, V> {
+impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Iterator for Drain<'a, K, V> {
     type Item = (AccessGuard<'a, K>, AccessGuard<'a, V>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -322,9 +318,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for Drai
     }
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterator
-    for Drain<'a, K, V>
-{
+impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> DoubleEndedIterator for Drain<'a, K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;
         let (page, key_range, value_range) = entry.into_raw();
@@ -336,8 +330,8 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterat
 
 pub struct DrainFilter<
     'a,
-    K: RedbKey + ?Sized + 'a,
-    V: RedbValue + ?Sized + 'a,
+    K: RedbKey + 'a,
+    V: RedbValue + 'a,
     F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
 > {
     inner: BtreeDrainFilter<'a, K, V, F>,
@@ -345,8 +339,8 @@ pub struct DrainFilter<
 
 impl<
         'a,
-        K: RedbKey + ?Sized + 'a,
-        V: RedbValue + ?Sized + 'a,
+        K: RedbKey + 'a,
+        V: RedbValue + 'a,
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > DrainFilter<'a, K, V, F>
 {
@@ -357,8 +351,8 @@ impl<
 
 impl<
         'a,
-        K: RedbKey + ?Sized + 'a,
-        V: RedbValue + ?Sized + 'a,
+        K: RedbKey + 'a,
+        V: RedbValue + 'a,
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > Iterator for DrainFilter<'a, K, V, F>
 {
@@ -375,8 +369,8 @@ impl<
 
 impl<
         'a,
-        K: RedbKey + ?Sized + 'a,
-        V: RedbValue + ?Sized + 'a,
+        K: RedbKey + 'a,
+        V: RedbValue + 'a,
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > DoubleEndedIterator for DrainFilter<'a, K, V, F>
 {
@@ -389,17 +383,17 @@ impl<
     }
 }
 
-pub struct RangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> {
+pub struct RangeIter<'a, K: RedbKey + 'a, V: RedbValue + 'a> {
     inner: BtreeRangeIter<'a, K, V>,
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> RangeIter<'a, K, V> {
+impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> RangeIter<'a, K, V> {
     fn new(inner: BtreeRangeIter<'a, K, V>) -> Self {
         Self { inner }
     }
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for RangeIter<'a, K, V> {
+impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Iterator for RangeIter<'a, K, V> {
     type Item = (AccessGuard<'a, K>, AccessGuard<'a, V>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -414,9 +408,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> Iterator for Rang
     }
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> DoubleEndedIterator
-    for RangeIter<'a, K, V>
-{
+impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> DoubleEndedIterator for RangeIter<'a, K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {
             let (page, key_range, value_range) = entry.into_raw();

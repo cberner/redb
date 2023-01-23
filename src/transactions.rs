@@ -284,7 +284,7 @@ impl<'db> WriteTransaction<'db> {
     /// Open the given table
     ///
     /// The table will be created if it does not exist
-    pub fn open_table<'txn, K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub fn open_table<'txn, K: RedbKey, V: RedbValue>(
         &'txn self,
         definition: TableDefinition<K, V>,
     ) -> Result<Table<'db, 'txn, K, V>> {
@@ -318,7 +318,7 @@ impl<'db> WriteTransaction<'db> {
     /// Open the given table
     ///
     /// The table will be created if it does not exist
-    pub fn open_multimap_table<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
+    pub fn open_multimap_table<'txn, K: RedbKey, V: RedbKey>(
         &'txn self,
         definition: MultimapTableDefinition<K, V>,
     ) -> Result<MultimapTable<'db, 'txn, K, V>> {
@@ -349,7 +349,7 @@ impl<'db> WriteTransaction<'db> {
         ))
     }
 
-    pub(crate) fn close_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub(crate) fn close_table<K: RedbKey, V: RedbValue>(
         &self,
         name: &str,
         table: &mut BtreeMut<K, V>,
@@ -363,7 +363,7 @@ impl<'db> WriteTransaction<'db> {
     /// Delete the given table
     ///
     /// Returns a bool indicating whether the table existed
-    pub fn delete_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub fn delete_table<K: RedbKey, V: RedbValue>(
         &self,
         definition: TableDefinition<K, V>,
     ) -> Result<bool> {
@@ -378,7 +378,7 @@ impl<'db> WriteTransaction<'db> {
     /// Delete the given table
     ///
     /// Returns a bool indicating whether the table existed
-    pub fn delete_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
+    pub fn delete_multimap_table<K: RedbKey, V: RedbKey>(
         &self,
         definition: MultimapTableDefinition<K, V>,
     ) -> Result<bool> {
@@ -644,7 +644,7 @@ impl<'db> ReadTransaction<'db> {
     }
 
     /// Open the given table
-    pub fn open_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub fn open_table<K: RedbKey, V: RedbValue>(
         &self,
         definition: TableDefinition<K, V>,
     ) -> Result<ReadOnlyTable<K, V>> {
@@ -661,7 +661,7 @@ impl<'db> ReadTransaction<'db> {
     }
 
     /// Open the given table
-    pub fn open_multimap_table<K: RedbKey + ?Sized, V: RedbKey + ?Sized>(
+    pub fn open_multimap_table<K: RedbKey, V: RedbKey>(
         &self,
         definition: MultimapTableDefinition<K, V>,
     ) -> Result<ReadOnlyMultimapTable<K, V>> {
