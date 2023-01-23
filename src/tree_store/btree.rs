@@ -26,7 +26,7 @@ pub(crate) struct BtreeStats {
     pub(crate) fragmented_bytes: usize,
 }
 
-pub(crate) struct BtreeMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub(crate) struct BtreeMut<'a, K: RedbKey, V: RedbValue> {
     mem: &'a TransactionalMemory,
     root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
     freed_pages: Rc<RefCell<Vec<PageNumber>>>,
@@ -34,7 +34,7 @@ pub(crate) struct BtreeMut<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V> {
+impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
     pub(crate) fn new(
         root: Option<(PageNumber, Checksum)>,
         mem: &'a TransactionalMemory,
@@ -162,11 +162,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
         self.read_tree().get(key)
     }
 
-    pub(crate) fn range<
-        'a0,
-        T: RangeBounds<KR> + 'a0,
-        KR: Borrow<K::SelfType<'a0>> + ?Sized + 'a0,
-    >(
+    pub(crate) fn range<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
         &'a0 self,
         range: T,
     ) -> Result<BtreeRangeIter<'a, K, V>>
@@ -181,7 +177,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
         'a0,
         T: RangeBounds<KR> + Clone + 'a0,
         // TODO: we shouldn't require Clone
-        KR: Borrow<K::SelfType<'a0>> + ?Sized + Clone + 'a0,
+        KR: Borrow<K::SelfType<'a0>> + Clone + 'a0,
     >(
         &'a0 mut self,
         range: T,
@@ -220,7 +216,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbValue + ?Sized + 'a> BtreeMut<'a, K, V
         'a0,
         T: RangeBounds<KR> + Clone + 'a0,
         // TODO: we shouldn't require Clone
-        KR: Borrow<K::SelfType<'a0>> + ?Sized + Clone + 'a0,
+        KR: Borrow<K::SelfType<'a0>> + Clone + 'a0,
         F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     >(
         &'a0 mut self,
@@ -333,7 +329,7 @@ impl<'a> RawBtree<'a> {
     }
 }
 
-pub(crate) struct Btree<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
+pub(crate) struct Btree<'a, K: RedbKey, V: RedbValue> {
     mem: &'a TransactionalMemory,
     root: Option<(PageNumber, Checksum)>,
     hint: PageHint,
@@ -341,7 +337,7 @@ pub(crate) struct Btree<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> {
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
+impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
     pub(crate) fn new(
         root: Option<(PageNumber, Checksum)>,
         hint: PageHint,
@@ -390,11 +386,7 @@ impl<'a, K: RedbKey + ?Sized, V: RedbValue + ?Sized> Btree<'a, K, V> {
         }
     }
 
-    pub(crate) fn range<
-        'a0,
-        T: RangeBounds<KR> + 'a0,
-        KR: Borrow<K::SelfType<'a0>> + ?Sized + 'a0,
-    >(
+    pub(crate) fn range<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
         &self,
         range: T,
     ) -> Result<BtreeRangeIter<'a, K, V>>

@@ -362,7 +362,7 @@ impl<'txn> TableTree<'txn> {
     }
 
     // root_page: the root of the master table
-    pub(crate) fn get_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub(crate) fn get_table<K: RedbKey, V: RedbValue>(
         &self,
         name: &str,
         table_type: TableType,
@@ -429,7 +429,7 @@ impl<'txn> TableTree<'txn> {
     }
 
     // root_page: the root of the master table
-    pub(crate) fn delete_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub(crate) fn delete_table<K: RedbKey, V: RedbValue>(
         &mut self,
         name: &str,
         table_type: TableType,
@@ -460,7 +460,7 @@ impl<'txn> TableTree<'txn> {
 
     // Returns a tuple of the table id and the new root page
     // root_page: the root of the master table
-    pub(crate) fn get_or_create_table<K: RedbKey + ?Sized, V: RedbValue + ?Sized>(
+    pub(crate) fn get_or_create_table<K: RedbKey, V: RedbValue>(
         &mut self,
         name: &str,
         table_type: TableType,
