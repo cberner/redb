@@ -1,6 +1,6 @@
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "wasi"))]
 mod unix;
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "wasi"))]
 pub(super) use unix::LockedFile;
 
 #[cfg(windows)]
