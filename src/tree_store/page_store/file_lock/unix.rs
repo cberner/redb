@@ -3,14 +3,10 @@ use std::fs::File;
 use std::io;
 
 #[cfg(unix)]
-use std::os::unix::fs::FileExt;
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
+use std::os::unix::{fs::FileExt, io::AsRawFd};
 
 #[cfg(target_os = "wasi")]
-use std::os::wasi::fs::FileExt;
-#[cfg(target_os = "wasi")]
-use std::os::wasi::io::AsRawFd;
+use std::os::wasi::{fs::FileExt, io::AsRawFd};
 
 pub(crate) struct LockedFile {
     file: File,

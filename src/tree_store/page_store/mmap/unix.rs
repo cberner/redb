@@ -2,6 +2,7 @@ use super::*;
 
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
+
 #[cfg(target_os = "wasi")]
 use std::os::wasi::io::{AsRawFd, RawFd};
 
