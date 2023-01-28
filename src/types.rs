@@ -248,7 +248,7 @@ impl<const N: usize> RedbValue for &[u8; N] {
     }
 
     fn type_name() -> TypeName {
-        TypeName::internal(&format!("[u8;{}]", N))
+        TypeName::internal(&format!("[u8;{N}]"))
     }
 }
 

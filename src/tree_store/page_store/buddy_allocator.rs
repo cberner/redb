@@ -302,11 +302,7 @@ impl<'a> BuddyAllocatorMut<'a> {
                     if !allocator.get(page) {
                         let buddy = buddy_page(page);
                         let buddy_allocated = allocator.get(buddy);
-                        assert!(
-                            buddy_allocated,
-                            "order={} page={} buddy={}",
-                            order, page, buddy
-                        );
+                        assert!(buddy_allocated, "order={order} page={page} buddy={buddy}",);
                     }
                 }
             }

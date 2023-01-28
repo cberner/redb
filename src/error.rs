@@ -41,25 +41,25 @@ impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Corrupted(msg) => {
-                write!(f, "DB corrupted: {}", msg)
+                write!(f, "DB corrupted: {msg}")
             }
             Error::UpgradeRequired(actual) => {
-                write!(f, "Manual upgrade required. Expected file format version {}, but file is version {}", FILE_FORMAT_VERSION, actual)
+                write!(f, "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION}, but file is version {actual}")
             }
             Error::TableTypeMismatch(msg) => {
-                write!(f, "{}", msg)
+                write!(f, "{msg}")
             }
             Error::TableDoesNotExist(table) => {
-                write!(f, "Table '{}' does not exist", table)
+                write!(f, "Table '{table}' does not exist")
             }
             Error::TableAlreadyOpen(name, location) => {
-                write!(f, "Table '{}' already opened at: {}", name, location)
+                write!(f, "Table '{name}' already opened at: {location}")
             }
             Error::Io(err) => {
-                write!(f, "I/O error: {}", err)
+                write!(f, "I/O error: {err}")
             }
             Error::LockPoisoned(location) => {
-                write!(f, "Poisoned internal lock: {}", location)
+                write!(f, "Poisoned internal lock: {location}")
             }
             Error::DatabaseAlreadyOpen => {
                 write!(f, "Database already open. Cannot acquire lock.")

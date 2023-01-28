@@ -28,7 +28,7 @@ mod unix {
 
     fn human_readable_bytes(bytes: usize) -> String {
         if bytes < 1024 {
-            format!("{}B", bytes)
+            format!("{bytes}B")
         } else if bytes < 1024 * 1024 {
             format!("{}KiB", bytes / 1024)
         } else if bytes < 1024 * 1024 * 1024 {
@@ -436,7 +436,7 @@ mod unix {
 
         let end = SystemTime::now();
         let duration = end.duration_since(start).unwrap();
-        print_load_time(&format!("mmap() threads={}", threads), duration);
+        print_load_time(&format!("mmap() threads={threads}"), duration);
 
         {
             let duration = warmup_mmap_read(
@@ -596,7 +596,7 @@ mod unix {
 
         let end = SystemTime::now();
         let duration = end.duration_since(start).unwrap();
-        print_load_time(&format!("userspace cached threads={}", threads), duration);
+        print_load_time(&format!("userspace cached threads={threads}"), duration);
 
         {
             let duration =

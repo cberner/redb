@@ -271,6 +271,7 @@ fn tuple_type_function_lifetime() {
     }
 
     #[allow(dead_code)]
+    #[allow(clippy::needless_lifetimes)]
     fn insert_explicit_lifetime<'a>(table: &mut redb::Table<(&'a str, u8), u64>) {
         table
             .insert(&(String::from("hello").as_str(), 8), &1)

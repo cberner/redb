@@ -473,7 +473,7 @@ mod test {
     fn random_pattern() {
         let seed = rand::thread_rng().gen();
         // Print the seed to debug for reproducibility, in case this test fails
-        println!("seed={}", seed);
+        println!("seed={seed}");
         let mut rng = StdRng::seed_from_u64(seed);
 
         let num_pages = rng.gen_range(2..10000);

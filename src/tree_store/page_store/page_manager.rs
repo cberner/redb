@@ -571,8 +571,7 @@ impl TransactionalMemory {
         let version = header.primary_slot().version;
         if version > FILE_FORMAT_VERSION {
             return Err(Error::Corrupted(format!(
-                "Expected file format version {}, found {}",
-                FILE_FORMAT_VERSION, version
+                "Expected file format version {FILE_FORMAT_VERSION}, found {version}",
             )));
         }
         if version < FILE_FORMAT_VERSION {
@@ -581,8 +580,7 @@ impl TransactionalMemory {
         let version = header.secondary_slot().version;
         if version > FILE_FORMAT_VERSION {
             return Err(Error::Corrupted(format!(
-                "Expected file format version {}, found {}",
-                FILE_FORMAT_VERSION, version
+                "Expected file format version {FILE_FORMAT_VERSION}, found {version}",
             )));
         }
         if version < FILE_FORMAT_VERSION {
@@ -985,8 +983,7 @@ impl TransactionalMemory {
         {
             debug_assert!(
                 !self.open_dirty_pages.lock().unwrap().contains(&page_number),
-                "{:?}",
-                page_number
+                "{page_number:?}",
             );
             *(self
                 .read_page_ref_counts

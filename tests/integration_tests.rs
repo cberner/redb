@@ -1158,12 +1158,7 @@ fn tree_balance() {
     let expected = expected_height(elements + num_internal_entries);
     let txn = db.begin_write().unwrap();
     let height = txn.stats().unwrap().tree_height();
-    assert!(
-        height <= expected,
-        "height={} expected={}",
-        height,
-        expected
-    );
+    assert!(height <= expected, "height={height} expected={expected}",);
 
     let reduce_to = EXPECTED_ORDER / 2 - num_internal_entries;
     {
@@ -1180,12 +1175,7 @@ fn tree_balance() {
     let txn = db.begin_write().unwrap();
     let height = txn.stats().unwrap().tree_height();
     txn.abort().unwrap();
-    assert!(
-        height <= expected,
-        "height={} expected={}",
-        height,
-        expected
-    );
+    assert!(height <= expected, "height={height} expected={expected}",);
 }
 
 #[test]
@@ -1196,8 +1186,7 @@ fn database_lock() {
     let result2 = Database::open(tmpfile.path());
     assert!(
         matches!(result2, Err(Error::DatabaseAlreadyOpen)),
-        "{:?}",
-        result2
+        "{result2:?}",
     );
     drop(result);
     let result = Database::open(tmpfile.path());
