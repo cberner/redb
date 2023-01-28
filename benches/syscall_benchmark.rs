@@ -18,7 +18,7 @@ const ELEMENTS: usize = 100_000;
 
 fn human_readable_bytes(bytes: usize) -> String {
     if bytes < 1024 {
-        format!("{}B", bytes)
+        format!("{bytes}B")
     } else if bytes < 1024 * 1024 {
         format!("{}KiB", bytes / 1024)
     } else if bytes < 1024 * 1024 * 1024 {

@@ -237,7 +237,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, Duration)> {
             ELEMENTS,
             duration.as_millis()
         );
-        results.push((format!("random reads ({} threads)", num_threads), duration));
+        results.push((format!("random reads ({num_threads} threads)"), duration));
     }
 
     let start = Instant::now();

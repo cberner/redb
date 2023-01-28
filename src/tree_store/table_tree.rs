@@ -371,8 +371,7 @@ impl<'txn> TableTree<'txn> {
             let mut definition = guard.value();
             if definition.get_type() != table_type {
                 return Err(Error::TableTypeMismatch(format!(
-                    "{:?} is not of type {:?}",
-                    name, table_type
+                    "{name:?} is not of type {table_type:?}",
                 )));
             }
             if definition.key_type != K::type_name() || definition.value_type != V::type_name() {
