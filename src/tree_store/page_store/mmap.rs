@@ -46,7 +46,7 @@ impl Mmap {
 
         // Try to flush any pages in the page cache that are out of sync with disk.
         // See here for why: <https://github.com/cberner/redb/issues/450>
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "android")))]
         unsafe {
             libc::posix_madvise(
                 address as *mut libc::c_void,
@@ -145,7 +145,7 @@ impl PhysicalStorage for Mmap {
         let res = self.mmap.lock().unwrap().flush();
         if res.is_err() {
             self.set_fsync_failed(true);
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "android")))]
             {
                 // Acquire lock on mmap to ensure that a resize doesn't occur
                 let lock = self.mmap.lock().unwrap();
@@ -172,7 +172,7 @@ impl PhysicalStorage for Mmap {
         let res = self.mmap.lock().unwrap().eventual_flush();
         if res.is_err() {
             self.set_fsync_failed(true);
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "android")))]
             {
                 // Acquire lock on mmap to ensure that a resize doesn't occur
                 let lock = self.mmap.lock().unwrap();
