@@ -128,7 +128,7 @@ impl<'a> RangeIterState<'a> {
         }
     }
 
-    fn get_entry(&self) -> Option<EntryGuard<'a>> {
+    fn get_entry<K: RedbKey, V: RedbValue>(&self) -> Option<EntryGuard<'a, K, V>> {
         match self {
             Leaf {
                 page,
@@ -147,27 +147,35 @@ impl<'a> RangeIterState<'a> {
     }
 }
 
-pub(crate) struct EntryGuard<'a> {
+pub(crate) struct EntryGuard<'a, K: RedbKey, V: RedbValue> {
     page: PageImpl<'a>,
     key_range: Range<usize>,
     value_range: Range<usize>,
+    _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
 }
 
-impl<'a> EntryGuard<'a> {
+impl<'a, K: RedbKey, V: RedbValue> EntryGuard<'a, K, V> {
     fn new(page: PageImpl<'a>, key_range: Range<usize>, value_range: Range<usize>) -> Self {
         Self {
             page,
             key_range,
             value_range,
+            _key_type: Default::default(),
+            _value_type: Default::default(),
         }
     }
 
-    pub(crate) fn key(&self) -> &[u8] {
-        &self.page.memory()[self.key_range.clone()]
+    pub(crate) fn key_data(&self) -> Vec<u8> {
+        self.page.memory()[self.key_range.clone()].to_vec()
     }
 
-    pub(crate) fn value(&self) -> &[u8] {
-        &self.page.memory()[self.value_range.clone()]
+    pub(crate) fn key(&self) -> K::SelfType<'_> {
+        K::from_bytes(&self.page.memory()[self.key_range.clone()])
+    }
+
+    pub(crate) fn value(&self) -> V::SelfType<'_> {
+        V::from_bytes(&self.page.memory()[self.value_range.clone()])
     }
 
     pub(crate) fn into_raw(self) -> (PageImpl<'a>, Range<usize>, Range<usize>) {
@@ -260,7 +268,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeDrain<'a, K, V> {
 }
 
 impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Iterator for BtreeDrain<'a, K, V> {
-    type Item = EntryGuard<'a>;
+    type Item = EntryGuard<'a, K, V>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next()
@@ -337,12 +345,12 @@ impl<
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > Iterator for BtreeDrainFilter<'a, K, V, F>
 {
-    type Item = EntryGuard<'a>;
+    type Item = EntryGuard<'a, K, V>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut item = self.inner.next();
         while let Some(ref entry) = item {
-            if (self.predicate)(K::from_bytes(entry.key()), V::from_bytes(entry.value())) {
+            if (self.predicate)(entry.key(), entry.value()) {
                 break;
             }
             item = self.inner.next();
@@ -361,7 +369,7 @@ impl<
     fn next_back(&mut self) -> Option<Self::Item> {
         let mut item = self.inner.next_back();
         while let Some(ref entry) = item {
-            if (self.predicate)(K::from_bytes(entry.key()), V::from_bytes(entry.value())) {
+            if (self.predicate)(entry.key(), entry.value()) {
                 break;
             }
             item = self.inner.next_back();
@@ -480,7 +488,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeRangeIter<'a, K, V> {
 }
 
 impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Iterator for BtreeRangeIter<'a, K, V> {
-    type Item = EntryGuard<'a>;
+    type Item = EntryGuard<'a, K, V>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let (
@@ -534,7 +542,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Iterator for BtreeRangeIter<'a, K, 
             }
 
             self.include_left = false;
-            if self.left.as_ref().unwrap().get_entry().is_some() {
+            if self.left.as_ref().unwrap().get_entry::<K, V>().is_some() {
                 return self.left.as_ref().map(|s| s.get_entry().unwrap());
             }
         }
@@ -594,7 +602,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> DoubleEndedIterator for BtreeRangeI
             }
 
             self.include_right = false;
-            if self.right.as_ref().unwrap().get_entry().is_some() {
+            if self.right.as_ref().unwrap().get_entry::<K, V>().is_some() {
                 return self.right.as_ref().map(|s| s.get_entry().unwrap());
             }
         }

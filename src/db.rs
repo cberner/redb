@@ -232,7 +232,7 @@ impl Database {
         let iter: BtreeRangeIter<&str, InternalTableDefinition> =
             BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
         for entry in iter {
-            let definition = InternalTableDefinition::from_bytes(entry.value());
+            let definition = entry.value();
             if let Some((table_root, table_checksum)) = definition.get_root() {
                 if !RawBtree::new(
                     Some((table_root, table_checksum)),
@@ -301,7 +301,7 @@ impl Database {
 
             // Chain all the other tables to the master table iter
             for entry in iter {
-                let definition = InternalTableDefinition::from_bytes(entry.value());
+                let definition = entry.value();
                 if let Some((table_root, _)) = definition.get_root() {
                     let table_pages_iter = AllPageNumbersBtreeIter::new(
                         table_root,
