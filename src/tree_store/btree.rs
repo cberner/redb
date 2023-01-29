@@ -67,8 +67,9 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
             V::as_bytes(value).as_ref().len()
         );
         let mut freed_pages = self.freed_pages.borrow_mut();
+        let mut root = self.root.borrow_mut();
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
-            self.root.clone(),
+            &mut root,
             FreePolicy::Uncommitted,
             self.mem,
             freed_pages.as_mut(),
@@ -94,9 +95,10 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
             value_length
         );
         let mut freed_pages = self.freed_pages.borrow_mut();
+        let mut root = self.root.borrow_mut();
         let value = vec![0u8; value_length];
         let mut operation = MutateHelper::<K, &[u8]>::new(
-            self.root.clone(),
+            &mut root,
             FreePolicy::Uncommitted,
             self.mem,
             freed_pages.as_mut(),
@@ -114,8 +116,9 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         #[cfg(feature = "logging")]
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
         let mut freed_pages = self.freed_pages.borrow_mut();
+        let mut root = self.root.borrow_mut();
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
-            self.root.clone(),
+            &mut root,
             FreePolicy::Uncommitted,
             self.mem,
             freed_pages.as_mut(),
@@ -130,12 +133,9 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         key: &K::SelfType<'_>,
     ) -> Result<Option<(AccessGuard<V>, Vec<PageNumber>)>> {
         let mut freed_pages = vec![];
-        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
-            self.root.clone(),
-            FreePolicy::Never,
-            self.mem,
-            &mut freed_pages,
-        );
+        let mut root = self.root.borrow_mut();
+        let mut operation: MutateHelper<'_, '_, K, V> =
+            MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut freed_pages);
         let result = operation.safe_delete(key)?;
         Ok(result.map(|x| (x, freed_pages)))
     }
@@ -188,12 +188,9 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         let iter = self.range(range.clone())?;
         let return_iter = self.range(range)?;
         let mut free_on_drop = vec![];
-        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
-            self.root.clone(),
-            FreePolicy::Never,
-            self.mem,
-            &mut free_on_drop,
-        );
+        let mut root = self.root.borrow_mut();
+        let mut operation: MutateHelper<'_, '_, K, V> =
+            MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut free_on_drop);
         for entry in iter {
             // TODO: optimize so that we don't have to call safe_delete in a loop
             assert!(operation
@@ -229,12 +226,9 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         let iter = self.range(range.clone())?;
         let return_iter = self.range(range)?;
         let mut free_on_drop = vec![];
-        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
-            self.root.clone(),
-            FreePolicy::Never,
-            self.mem,
-            &mut free_on_drop,
-        );
+        let mut root = self.root.borrow_mut();
+        let mut operation: MutateHelper<'_, '_, K, V> =
+            MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut free_on_drop);
         for entry in iter {
             // TODO: optimize so that we don't have to call safe_delete in a loop
             if predicate(K::from_bytes(entry.key()), V::from_bytes(entry.value())) {
