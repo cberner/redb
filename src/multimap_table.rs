@@ -6,13 +6,12 @@ use crate::tree_store::{
 use crate::types::{RedbKey, RedbValue, TypeName};
 use crate::{AccessGuard, Result, WriteTransaction};
 use std::borrow::Borrow;
-use std::cell::RefCell;
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::mem;
 use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 pub(crate) fn parse_subtree_roots<T: Page>(
     page: &T,
@@ -226,7 +225,7 @@ impl DynamicCollection {
     fn iter_free_on_drop<'a, V: RedbKey>(
         collection: AccessGuard<'a, &'static DynamicCollection>,
         pages: Vec<PageNumber>,
-        freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+        freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         mem: &'a TransactionalMemory,
     ) -> Result<MultimapValueIter<'a, V>> {
         Ok(match collection.value().collection_type() {
@@ -270,7 +269,7 @@ enum ValueIterState<'a, V: RedbKey + 'static> {
 
 pub struct MultimapValueIter<'a, V: RedbKey + 'static> {
     inner: Option<ValueIterState<'a, V>>,
-    freed_pages: Option<Rc<RefCell<Vec<PageNumber>>>>,
+    freed_pages: Option<Arc<Mutex<Vec<PageNumber>>>>,
     free_on_drop: Vec<PageNumber>,
     mem: Option<&'a TransactionalMemory>,
     _value_type: PhantomData<V>,
@@ -289,7 +288,7 @@ impl<'a, V: RedbKey + 'static> MultimapValueIter<'a, V> {
 
     fn new_subtree_free_on_drop(
         inner: BtreeRangeIter<'a, V, ()>,
-        freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+        freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         pages: Vec<PageNumber>,
         mem: &'a TransactionalMemory,
     ) -> Self {
@@ -341,17 +340,17 @@ impl<'a, V: RedbKey + 'static> Drop for MultimapValueIter<'a, V> {
     fn drop(&mut self) {
         // Drop our references to the pages that are about to be freed
         drop(mem::take(&mut self.inner));
-        for page in self.free_on_drop.iter() {
-            unsafe {
-                // Safety: we have a &mut on the transaction
-                if !self.mem.unwrap().free_if_uncommitted(*page) {
-                    (*self.freed_pages.as_ref().unwrap())
-                        .borrow_mut()
-                        .push(*page);
+        if !self.free_on_drop.is_empty() {
+            let mut freed_pages = self.freed_pages.as_ref().unwrap().lock().unwrap();
+            for page in self.free_on_drop.iter() {
+                unsafe {
+                    // Safety: we have a &mut on the transaction
+                    if !self.mem.unwrap().free_if_uncommitted(*page) {
+                        freed_pages.push(*page);
+                    }
                 }
             }
         }
-        if !self.free_on_drop.is_empty() {}
     }
 }
 
@@ -412,7 +411,7 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> DoubleEndedIterator
 pub struct MultimapTable<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> {
     name: String,
     transaction: &'txn WriteTransaction<'db>,
-    freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+    freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     tree: BtreeMut<'txn, K, &'static DynamicCollection>,
     mem: &'db TransactionalMemory,
     _value_type: PhantomData<V>,
@@ -422,7 +421,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
     pub(crate) fn new(
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
-        freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+        freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         mem: &'db TransactionalMemory,
         transaction: &'txn WriteTransaction<'db>,
     ) -> MultimapTable<'db, 'txn, K, V> {
@@ -702,7 +701,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                                 drop(page);
                                 unsafe {
                                     if !self.mem.free_if_uncommitted(new_root) {
-                                        (*self.freed_pages).borrow_mut().push(new_root);
+                                        (*self.freed_pages).lock().unwrap().push(new_root);
                                     }
                                 }
                             } else {

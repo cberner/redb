@@ -2,12 +2,11 @@ use crate::tree_store::page_store::{ChecksumType, Page, PageImpl, PageMut, Trans
 use crate::tree_store::{page_store, PageNumber};
 use crate::types::{RedbKey, RedbValue};
 use crate::Result;
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::{mem, thread};
 
 pub(crate) const LEAF: u8 = 1;
@@ -222,7 +221,7 @@ impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
 }
 
 pub struct AccessGuardMut<'a, K: RedbKey, V: RedbValue> {
-    root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
+    root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
     key: Vec<u8>,
     mem: &'a TransactionalMemory,
     page: PageMut<'a>,
@@ -243,7 +242,7 @@ impl<'a, K: RedbKey, V: RedbValue> AccessGuardMut<'a, K, V> {
         mem: &'a TransactionalMemory,
     ) -> Self {
         AccessGuardMut {
-            root: Rc::new(RefCell::new(None)),
+            root: Arc::new(Mutex::new(None)),
             key: key.to_vec(),
             mem,
             page,
@@ -254,7 +253,7 @@ impl<'a, K: RedbKey, V: RedbValue> AccessGuardMut<'a, K, V> {
         }
     }
 
-    pub(crate) fn set_root_for_drop(&mut self, root: Rc<RefCell<Option<(PageNumber, Checksum)>>>) {
+    pub(crate) fn set_root_for_drop(&mut self, root: Arc<Mutex<Option<(PageNumber, Checksum)>>>) {
         self.root = root;
     }
 
@@ -309,13 +308,13 @@ impl<'a, K: RedbKey, V: RedbValue> AsMut<[u8]> for AccessGuardMut<'a, K, V> {
 impl<'a, K: RedbKey, V: RedbValue> Drop for AccessGuardMut<'a, K, V> {
     fn drop(&mut self) {
         // Was dropped before being returned to the user, so no clean up needed
-        if self.root.borrow().is_none() {
+        if self.root.lock().unwrap().is_none() {
             return;
         }
         let new_checksum = self
-            .finalize_checksum((self.root.clone()).borrow().unwrap().0)
+            .finalize_checksum((self.root.clone()).lock().unwrap().unwrap().0)
             .unwrap();
-        let mut borrow = self.root.borrow_mut();
+        let mut borrow = self.root.lock().unwrap();
         let (_, root_checksum_ref) = borrow.as_mut().unwrap();
         *root_checksum_ref = new_checksum;
     }

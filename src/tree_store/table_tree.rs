@@ -4,12 +4,11 @@ use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue, TypeName};
 use crate::{DatabaseStats, Error, Result};
-use std::cell::RefCell;
 use std::cmp::max;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::ops::RangeFull;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub(crate) struct FreedTableKey {
@@ -302,14 +301,14 @@ pub(crate) struct TableTree<'txn> {
     mem: &'txn TransactionalMemory,
     // Cached updates from tables that have been closed. These must be flushed to the btree
     pending_table_updates: HashMap<String, Option<(PageNumber, Checksum)>>,
-    freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+    freed_pages: Arc<Mutex<Vec<PageNumber>>>,
 }
 
 impl<'txn> TableTree<'txn> {
     pub(crate) fn new(
         master_root: Option<(PageNumber, Checksum)>,
         mem: &'txn TransactionalMemory,
-        freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+        freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     ) -> Self {
         Self {
             tree: BtreeMut::new(master_root, mem, freed_pages.clone()),
@@ -441,7 +440,7 @@ impl<'txn> TableTree<'txn> {
                     V::fixed_width(),
                     self.mem,
                 )?;
-                let mut freed_pages = self.freed_pages.borrow_mut();
+                let mut freed_pages = self.freed_pages.lock().unwrap();
                 for page_number in iter {
                     freed_pages.push(page_number);
                 }
