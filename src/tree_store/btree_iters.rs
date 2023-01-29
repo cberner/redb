@@ -6,11 +6,10 @@ use crate::tree_store::PageNumber;
 use crate::types::{RedbKey, RedbValue};
 use crate::Result;
 use std::borrow::Borrow;
-use std::cell::RefCell;
 use std::collections::Bound;
 use std::marker::PhantomData;
 use std::ops::{Range, RangeBounds};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub enum RangeIterState<'a> {
@@ -245,7 +244,7 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
 pub(crate) struct BtreeDrain<'a, K: RedbKey + 'a, V: RedbValue + 'a> {
     inner: BtreeRangeIter<'a, K, V>,
     free_on_drop: Vec<PageNumber>,
-    master_free_list: Rc<RefCell<Vec<PageNumber>>>,
+    master_free_list: Arc<Mutex<Vec<PageNumber>>>,
     mem: &'a TransactionalMemory,
 }
 
@@ -255,7 +254,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeDrain<'a, K, V> {
     pub(crate) unsafe fn new(
         inner: BtreeRangeIter<'a, K, V>,
         free_on_drop: Vec<PageNumber>,
-        master_free_list: Rc<RefCell<Vec<PageNumber>>>,
+        master_free_list: Arc<Mutex<Vec<PageNumber>>>,
         mem: &'a TransactionalMemory,
     ) -> Self {
         Self {
@@ -289,11 +288,12 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Drop for BtreeDrain<'a, K, V> {
             // no-op
         }
 
+        let mut master_free_list = self.master_free_list.lock().unwrap();
         for page in self.free_on_drop.drain(..) {
             // Safety: Caller guaranteed that there are no other references to these pages,
             // and we just consumed all of ours in the loop above.
             if unsafe { !self.mem.free_if_uncommitted(page) } {
-                self.master_free_list.borrow_mut().push(page);
+                master_free_list.push(page);
             }
         }
     }
@@ -308,7 +308,7 @@ pub(crate) struct BtreeDrainFilter<
     inner: BtreeRangeIter<'a, K, V>,
     predicate: F,
     free_on_drop: Vec<PageNumber>,
-    master_free_list: Rc<RefCell<Vec<PageNumber>>>,
+    master_free_list: Arc<Mutex<Vec<PageNumber>>>,
     mem: &'a TransactionalMemory,
 }
 
@@ -325,7 +325,7 @@ impl<
         inner: BtreeRangeIter<'a, K, V>,
         predicate: F,
         free_on_drop: Vec<PageNumber>,
-        master_free_list: Rc<RefCell<Vec<PageNumber>>>,
+        master_free_list: Arc<Mutex<Vec<PageNumber>>>,
         mem: &'a TransactionalMemory,
     ) -> Self {
         Self {
@@ -392,11 +392,12 @@ impl<
             // no-op
         }
 
+        let mut master_free_list = self.master_free_list.lock().unwrap();
         for page in self.free_on_drop.drain(..) {
             // Safety: Caller guaranteed that there are no other references to these pages,
             // and we just consumed all of ours in the loop above.
             if unsafe { !self.mem.free_if_uncommitted(page) } {
-                self.master_free_list.borrow_mut().push(page);
+                master_free_list.push(page);
             }
         }
     }

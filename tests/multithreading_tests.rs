@@ -31,3 +31,34 @@ fn len() {
     let table = read_txn.open_table(TABLE).unwrap();
     assert_eq!(table.len().unwrap(), 3);
 }
+
+#[test]
+fn multithreaded_insert() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    const DEF1: TableDefinition<&str, &str> = TableDefinition::new("x");
+    const DEF2: TableDefinition<&str, &str> = TableDefinition::new("y");
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table1 = write_txn.open_table(DEF1).unwrap();
+        let mut table2 = write_txn.open_table(DEF2).unwrap();
+
+        thread::scope(|s| {
+            s.spawn(|| {
+                table2.insert("hello", "world").unwrap();
+                table2.insert("hello2", "world2").unwrap();
+            });
+        });
+
+        table1.insert("hello", "world").unwrap();
+        table1.insert("hello2", "world2").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(DEF1).unwrap();
+    assert_eq!(table.len().unwrap(), 2);
+    let table = read_txn.open_table(DEF2).unwrap();
+    assert_eq!(table.len().unwrap(), 2);
+}

@@ -10,14 +10,12 @@ use crate::{
 };
 #[cfg(feature = "logging")]
 use log::{info, warn};
-use std::cell::RefCell;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::ops::RangeFull;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{panic, thread};
 
 /// Informational storage stats about the database
@@ -100,13 +98,13 @@ pub struct WriteTransaction<'db> {
     transaction_tracker: Arc<Mutex<TransactionTracker>>,
     mem: &'db TransactionalMemory,
     transaction_id: TransactionId,
-    table_tree: RefCell<TableTree<'db>>,
+    table_tree: RwLock<TableTree<'db>>,
     // TODO: change the value type to Vec<PageNumber>
     // The table of freed pages by transaction. FreedTableKey -> binary.
     // The binary blob is a length-prefixed array of PageNumber
-    freed_tree: BtreeMut<'db, FreedTableKey, &'static [u8]>,
-    freed_pages: Rc<RefCell<Vec<PageNumber>>>,
-    open_tables: RefCell<HashMap<String, &'static panic::Location<'static>>>,
+    freed_tree: Mutex<BtreeMut<'db, FreedTableKey, &'static [u8]>>,
+    freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+    open_tables: Mutex<HashMap<String, &'static panic::Location<'static>>>,
     completed: bool,
     dirty: AtomicBool,
     durability: Durability,
@@ -129,20 +127,24 @@ impl<'db> WriteTransaction<'db> {
 
         let root_page = db.get_memory().get_data_root();
         let freed_root = db.get_memory().get_freed_root();
-        let freed_pages = Rc::new(RefCell::new(vec![]));
+        let freed_pages = Arc::new(Mutex::new(vec![]));
         Ok(Self {
             db,
             transaction_tracker: db.transaction_tracker(),
             mem: db.get_memory(),
             transaction_id,
-            table_tree: RefCell::new(TableTree::new(
+            table_tree: RwLock::new(TableTree::new(
                 root_page,
                 db.get_memory(),
                 freed_pages.clone(),
             )),
-            freed_tree: BtreeMut::new(freed_root, db.get_memory(), freed_pages.clone()),
+            freed_tree: Mutex::new(BtreeMut::new(
+                freed_root,
+                db.get_memory(),
+                freed_pages.clone(),
+            )),
             freed_pages,
-            open_tables: RefCell::new(Default::default()),
+            open_tables: Mutex::new(Default::default()),
             completed: false,
             dirty: AtomicBool::new(false),
             durability: Durability::Immediate,
@@ -228,8 +230,8 @@ impl<'db> WriteTransaction<'db> {
                 freed_pages.push(page);
             }
         }
-        *self.freed_pages.borrow_mut() = freed_pages;
-        self.table_tree = RefCell::new(TableTree::new(
+        *self.freed_pages.lock().unwrap() = freed_pages;
+        self.table_tree = RwLock::new(TableTree::new(
             savepoint.get_root(),
             self.mem,
             self.freed_pages.clone(),
@@ -239,6 +241,8 @@ impl<'db> WriteTransaction<'db> {
         // We assume below that PageNumber is length 8
         let oldest_unprocessed_transaction = if let Some(entry) = self
             .freed_tree
+            .lock()
+            .unwrap()
             .range::<RangeFull, FreedTableKey>(..)?
             .next()
         {
@@ -247,7 +251,7 @@ impl<'db> WriteTransaction<'db> {
             self.transaction_id.0
         };
 
-        self.freed_tree = BtreeMut::new(
+        let mut freed_tree = BtreeMut::new(
             savepoint.get_freed_root(),
             self.mem,
             self.freed_pages.clone(),
@@ -257,13 +261,15 @@ impl<'db> WriteTransaction<'db> {
             pagination_id: 0,
         };
         let mut to_remove = vec![];
-        for entry in self.freed_tree.range(..lookup_key)? {
+        for entry in freed_tree.range(..lookup_key)? {
             to_remove.push(entry.key());
         }
         for key in to_remove {
             // Safety: all references to the freed table above have already been dropped.
-            unsafe { self.freed_tree.remove(&key)? };
+            unsafe { freed_tree.remove(&key)? };
         }
+
+        *self.freed_tree.lock().unwrap() = freed_tree;
 
         // Invalidate all savepoints that are newer than the one being applied to prevent the user
         // from later trying to restore a savepoint "on another timeline"
@@ -290,7 +296,7 @@ impl<'db> WriteTransaction<'db> {
     ) -> Result<Table<'db, 'txn, K, V>> {
         #[cfg(feature = "logging")]
         info!("Opening table: {}", definition);
-        if let Some(location) = self.open_tables.borrow().get(definition.name()) {
+        if let Some(location) = self.open_tables.lock().unwrap().get(definition.name()) {
             return Err(Error::TableAlreadyOpen(
                 definition.name().to_string(),
                 location,
@@ -298,12 +304,14 @@ impl<'db> WriteTransaction<'db> {
         }
         self.dirty.store(true, Ordering::Release);
         self.open_tables
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .insert(definition.name().to_string(), panic::Location::caller());
 
         let internal_table = self
             .table_tree
-            .borrow_mut()
+            .write()
+            .unwrap()
             .get_or_create_table::<K, V>(definition.name(), TableType::Normal)?;
 
         Ok(Table::new(
@@ -324,7 +332,7 @@ impl<'db> WriteTransaction<'db> {
     ) -> Result<MultimapTable<'db, 'txn, K, V>> {
         #[cfg(feature = "logging")]
         info!("Opening multimap table: {}", definition);
-        if let Some(location) = self.open_tables.borrow().get(definition.name()) {
+        if let Some(location) = self.open_tables.lock().unwrap().get(definition.name()) {
             return Err(Error::TableAlreadyOpen(
                 definition.name().to_string(),
                 location,
@@ -332,12 +340,14 @@ impl<'db> WriteTransaction<'db> {
         }
         self.dirty.store(true, Ordering::Release);
         self.open_tables
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .insert(definition.name().to_string(), panic::Location::caller());
 
         let internal_table = self
             .table_tree
-            .borrow_mut()
+            .write()
+            .unwrap()
             .get_or_create_table::<K, V>(definition.name(), TableType::Multimap)?;
 
         Ok(MultimapTable::new(
@@ -354,9 +364,10 @@ impl<'db> WriteTransaction<'db> {
         name: &str,
         table: &mut BtreeMut<K, V>,
     ) {
-        self.open_tables.borrow_mut().remove(name).unwrap();
+        self.open_tables.lock().unwrap().remove(name).unwrap();
         self.table_tree
-            .borrow_mut()
+            .write()
+            .unwrap()
             .stage_update_table_root(name, table.get_root());
     }
 
@@ -371,7 +382,8 @@ impl<'db> WriteTransaction<'db> {
         info!("Deleting table: {}", definition);
         self.dirty.store(true, Ordering::Release);
         self.table_tree
-            .borrow_mut()
+            .write()
+            .unwrap()
             .delete_table::<K, V>(definition.name(), TableType::Normal)
     }
 
@@ -386,14 +398,16 @@ impl<'db> WriteTransaction<'db> {
         info!("Deleting multimap table: {}", definition);
         self.dirty.store(true, Ordering::Release);
         self.table_tree
-            .borrow_mut()
+            .write()
+            .unwrap()
             .delete_table::<K, V>(definition.name(), TableType::Multimap)
     }
 
     /// List all the tables
     pub fn list_tables(&self) -> Result<impl Iterator<Item = String> + '_> {
         self.table_tree
-            .borrow()
+            .read()
+            .unwrap()
             .list_tables(TableType::Normal)
             .map(|x| x.into_iter())
     }
@@ -401,7 +415,8 @@ impl<'db> WriteTransaction<'db> {
     /// List all the multimap tables
     pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String> + '_> {
         self.table_tree
-            .borrow()
+            .read()
+            .unwrap()
             .list_tables(TableType::Multimap)
             .map(|x| x.into_iter())
     }
@@ -411,7 +426,10 @@ impl<'db> WriteTransaction<'db> {
     /// All writes performed in this transaction will be visible to future transactions, and are
     /// durable as consistent with the [`Durability`] level set by [`Self::set_durability`]
     pub fn commit(mut self) -> Result {
-        self.table_tree.borrow_mut().flush_table_root_updates()?;
+        self.table_tree
+            .write()
+            .unwrap()
+            .flush_table_root_updates()?;
         self.commit_inner()
     }
 
@@ -447,7 +465,7 @@ impl<'db> WriteTransaction<'db> {
     fn abort_inner(&mut self) -> Result {
         #[cfg(feature = "logging")]
         info!("Aborting transaction id={:?}", self.transaction_id);
-        self.table_tree.borrow_mut().clear_table_root_updates();
+        self.table_tree.write().unwrap().clear_table_root_updates();
         self.mem.rollback_uncommitted_writes()?;
         self.completed = true;
         #[cfg(feature = "logging")]
@@ -469,12 +487,16 @@ impl<'db> WriteTransaction<'db> {
             self.mem.mmap_gc(oldest_live_read)?;
         }
 
-        let root = self.table_tree.borrow_mut().flush_table_root_updates()?;
+        let root = self
+            .table_tree
+            .write()
+            .unwrap()
+            .flush_table_root_updates()?;
 
         self.process_freed_pages(oldest_live_read)?;
         self.store_freed_pages()?;
 
-        let freed_root = self.freed_tree.get_root();
+        let freed_root = self.freed_tree.lock().unwrap().get_root();
 
         self.mem
             .commit(root, freed_root, self.transaction_id, eventual, None)?;
@@ -483,13 +505,17 @@ impl<'db> WriteTransaction<'db> {
 
     // Commit without a durability guarantee
     pub(crate) fn non_durable_commit(&mut self) -> Result {
-        let root = self.table_tree.borrow_mut().flush_table_root_updates()?;
+        let root = self
+            .table_tree
+            .write()
+            .unwrap()
+            .flush_table_root_updates()?;
 
         // Store all freed pages for a future commit(), since we can't free pages during a
         // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
         self.store_freed_pages()?;
 
-        let freed_root = self.freed_tree.get_root();
+        let freed_root = self.freed_tree.lock().unwrap().get_root();
 
         self.mem
             .non_durable_commit(root, freed_root, self.transaction_id)?;
@@ -507,7 +533,8 @@ impl<'db> WriteTransaction<'db> {
         };
 
         let mut to_remove = vec![];
-        for entry in self.freed_tree.range(..lookup_key)? {
+        let mut freed_tree = self.freed_tree.lock().unwrap();
+        for entry in freed_tree.range(..lookup_key)? {
             to_remove.push(entry.key());
             let value = entry.value();
             let length: usize = u64::from_le_bytes(value[..size_of::<u64>()].try_into().unwrap())
@@ -527,7 +554,7 @@ impl<'db> WriteTransaction<'db> {
         // Remove all the old transactions
         for key in to_remove {
             // Safety: all references to the freed table above have already been dropped.
-            unsafe { self.freed_tree.remove(&key)? };
+            unsafe { freed_tree.remove(&key)? };
         }
 
         Ok(())
@@ -537,7 +564,8 @@ impl<'db> WriteTransaction<'db> {
         assert_eq!(PageNumber::serialized_size(), 8); // We assume below that PageNumber is length 8
 
         let mut pagination_counter = 0u64;
-        while !self.freed_pages.borrow().is_empty() {
+        let mut freed_tree = self.freed_tree.lock().unwrap();
+        while !self.freed_pages.lock().unwrap().is_empty() {
             let chunk_size = 100;
             let buffer_size = size_of::<u64>() + 8 * chunk_size;
             let key = FreedTableKey {
@@ -547,17 +575,13 @@ impl<'db> WriteTransaction<'db> {
             // Safety: The freed table is only accessed from the writer, so only this function
             // is using it. The only reference retrieved, access_guard, is dropped before the next call
             // to this method
-            let mut access_guard = unsafe { self.freed_tree.insert_reserve(&key, buffer_size)? };
+            let mut access_guard = unsafe { freed_tree.insert_reserve(&key, buffer_size)? };
 
-            let len = self.freed_pages.borrow().len();
+            let mut freed_pages = self.freed_pages.lock().unwrap();
+            let len = freed_pages.len();
             access_guard.as_mut()[..8]
                 .copy_from_slice(&min(len as u64, chunk_size as u64).to_le_bytes());
-            for (i, page) in self
-                .freed_pages
-                .borrow_mut()
-                .drain(len - min(len, chunk_size)..)
-                .enumerate()
-            {
+            for (i, page) in freed_pages.drain(len - min(len, chunk_size)..).enumerate() {
                 access_guard.as_mut()[(i + 1) * 8..(i + 2) * 8]
                     .copy_from_slice(&page.to_le_bytes());
             }
@@ -571,9 +595,9 @@ impl<'db> WriteTransaction<'db> {
 
     /// Retrieves information about storage usage in the database
     pub fn stats(&self) -> Result<DatabaseStats> {
-        let table_tree = self.table_tree.borrow();
+        let table_tree = self.table_tree.read().unwrap();
         let data_tree_stats = table_tree.stats()?;
-        let freed_tree_stats = self.freed_tree.stats()?;
+        let freed_tree_stats = self.freed_tree.lock().unwrap().stats()?;
         let total_metadata_bytes = data_tree_stats.metadata_bytes()
             + freed_tree_stats.metadata_bytes
             + freed_tree_stats.stored_leaf_bytes;
@@ -597,7 +621,8 @@ impl<'db> WriteTransaction<'db> {
         // Flush any pending updates to make sure we get the latest root
         if let Some(page) = self
             .table_tree
-            .borrow_mut()
+            .write()
+            .unwrap()
             .flush_table_root_updates()
             .unwrap()
         {

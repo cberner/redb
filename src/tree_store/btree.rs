@@ -11,11 +11,10 @@ use crate::{AccessGuard, Result};
 #[cfg(feature = "logging")]
 use log::trace;
 use std::borrow::Borrow;
-use std::cell::RefCell;
 use std::cmp::max;
 use std::marker::PhantomData;
 use std::ops::{RangeBounds, RangeFull};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 pub(crate) struct BtreeStats {
     pub(crate) tree_height: usize,
@@ -28,8 +27,8 @@ pub(crate) struct BtreeStats {
 
 pub(crate) struct BtreeMut<'a, K: RedbKey, V: RedbValue> {
     mem: &'a TransactionalMemory,
-    root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
-    freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+    root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
+    freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
@@ -38,11 +37,11 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
     pub(crate) fn new(
         root: Option<(PageNumber, Checksum)>,
         mem: &'a TransactionalMemory,
-        freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+        freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     ) -> Self {
         Self {
             mem,
-            root: Rc::new(RefCell::new(root)),
+            root: Arc::new(Mutex::new(root)),
             freed_pages,
             _key_type: Default::default(),
             _value_type: Default::default(),
@@ -50,7 +49,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
     }
 
     pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
-        *(*self.root).borrow()
+        *(*self.root).lock().unwrap()
     }
 
     // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
@@ -66,8 +65,8 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
             key,
             V::as_bytes(value).as_ref().len()
         );
-        let mut freed_pages = self.freed_pages.borrow_mut();
-        let mut root = self.root.borrow_mut();
+        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut root = self.root.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             &mut root,
             FreePolicy::Uncommitted,
@@ -94,8 +93,8 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
             key,
             value_length
         );
-        let mut freed_pages = self.freed_pages.borrow_mut();
-        let mut root = self.root.borrow_mut();
+        let mut root = self.root.lock().unwrap();
+        let mut freed_pages = self.freed_pages.lock().unwrap();
         let value = vec![0u8; value_length];
         let mut operation = MutateHelper::<K, &[u8]>::new(
             &mut root,
@@ -115,8 +114,8 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
     ) -> Result<Option<AccessGuard<V>>> {
         #[cfg(feature = "logging")]
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
-        let mut freed_pages = self.freed_pages.borrow_mut();
-        let mut root = self.root.borrow_mut();
+        let mut root = self.root.lock().unwrap();
+        let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             &mut root,
             FreePolicy::Uncommitted,
@@ -133,7 +132,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         key: &K::SelfType<'_>,
     ) -> Result<Option<(AccessGuard<V>, Vec<PageNumber>)>> {
         let mut freed_pages = vec![];
-        let mut root = self.root.borrow_mut();
+        let mut root = self.root.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> =
             MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut freed_pages);
         let result = operation.safe_delete(key)?;
@@ -188,7 +187,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         let iter = self.range(range.clone())?;
         let return_iter = self.range(range)?;
         let mut free_on_drop = vec![];
-        let mut root = self.root.borrow_mut();
+        let mut root = self.root.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> =
             MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut free_on_drop);
         for entry in iter {
@@ -224,7 +223,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         let iter = self.range(range.clone())?;
         let return_iter = self.range(range)?;
         let mut free_on_drop = vec![];
-        let mut root = self.root.borrow_mut();
+        let mut root = self.root.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> =
             MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut free_on_drop);
         for entry in iter {

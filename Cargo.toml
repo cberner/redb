@@ -50,6 +50,10 @@ name = "atomics_benchmark"
 harness = false
 
 [[bench]]
+name = "multithreaded_insert_benchmark"
+harness = false
+
+[[bench]]
 name = "userspace_cache_benchmark"
 harness = false
 

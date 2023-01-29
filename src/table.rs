@@ -6,9 +6,8 @@ use crate::types::{RedbKey, RedbValue};
 use crate::Result;
 use crate::{AccessGuard, WriteTransaction};
 use std::borrow::Borrow;
-use std::cell::RefCell;
 use std::ops::RangeBounds;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 /// A table containing key-value mappings
 pub struct Table<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
@@ -21,7 +20,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     pub(crate) fn new(
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
-        freed_pages: Rc<RefCell<Vec<PageNumber>>>,
+        freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         mem: &'db TransactionalMemory,
         transaction: &'txn WriteTransaction<'db>,
     ) -> Table<'db, 'txn, K, V> {
