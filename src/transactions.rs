@@ -242,7 +242,7 @@ impl<'db> WriteTransaction<'db> {
             .range::<RangeFull, FreedTableKey>(..)?
             .next()
         {
-            FreedTableKey::from_bytes(entry.key()).transaction_id
+            entry.key().transaction_id
         } else {
             self.transaction_id.0
         };
@@ -258,7 +258,7 @@ impl<'db> WriteTransaction<'db> {
         };
         let mut to_remove = vec![];
         for entry in self.freed_tree.range(..lookup_key)? {
-            to_remove.push(FreedTableKey::from_bytes(entry.key()));
+            to_remove.push(entry.key());
         }
         for key in to_remove {
             // Safety: all references to the freed table above have already been dropped.
@@ -508,7 +508,7 @@ impl<'db> WriteTransaction<'db> {
 
         let mut to_remove = vec![];
         for entry in self.freed_tree.range(..lookup_key)? {
-            to_remove.push(FreedTableKey::from_bytes(entry.key()));
+            to_remove.push(entry.key());
             let value = entry.value();
             let length: usize = u64::from_le_bytes(value[..size_of::<u64>()].try_into().unwrap())
                 .try_into()

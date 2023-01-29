@@ -193,9 +193,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
             MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut free_on_drop);
         for entry in iter {
             // TODO: optimize so that we don't have to call safe_delete in a loop
-            assert!(operation
-                .safe_delete(K::from_bytes(entry.key()).borrow())?
-                .is_some());
+            assert!(operation.safe_delete(entry.key().borrow())?.is_some());
         }
 
         let result = BtreeDrain::new(
@@ -231,10 +229,8 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
             MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut free_on_drop);
         for entry in iter {
             // TODO: optimize so that we don't have to call safe_delete in a loop
-            if predicate(K::from_bytes(entry.key()), V::from_bytes(entry.value())) {
-                assert!(operation
-                    .safe_delete(K::from_bytes(entry.key()).borrow())?
-                    .is_some());
+            if predicate(entry.key(), entry.value()) {
+                assert!(operation.safe_delete(entry.key().borrow())?.is_some());
             }
         }
 

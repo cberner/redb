@@ -319,7 +319,7 @@ impl<'a, V: RedbKey + 'static> Iterator for MultimapValueIter<'a, V> {
     fn next(&mut self) -> Option<Self::Item> {
         // TODO: optimize out this copy
         let bytes = match self.inner.as_mut().unwrap() {
-            ValueIterState::Subtree(ref mut iter) => iter.next().map(|e| e.key().to_vec())?,
+            ValueIterState::Subtree(ref mut iter) => iter.next().map(|e| e.key_data())?,
             ValueIterState::InlineLeaf(ref mut iter) => iter.next_key()?.to_vec(),
         };
         Some(AccessGuard::with_owned_value(bytes))
@@ -330,7 +330,7 @@ impl<'a, V: RedbKey + 'static> DoubleEndedIterator for MultimapValueIter<'a, V> 
     fn next_back(&mut self) -> Option<Self::Item> {
         // TODO: optimize out this copy
         let bytes = match self.inner.as_mut().unwrap() {
-            ValueIterState::Subtree(ref mut iter) => iter.next_back().map(|e| e.key().to_vec())?,
+            ValueIterState::Subtree(ref mut iter) => iter.next_back().map(|e| e.key_data())?,
             ValueIterState::InlineLeaf(ref mut iter) => iter.next_key_back()?.to_vec(),
         };
         Some(AccessGuard::with_owned_value(bytes))
@@ -381,7 +381,7 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> Iterator for MultimapRangeI
 
     fn next(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next()?;
-        let key = AccessGuard::with_owned_value(entry.key().to_vec());
+        let key = AccessGuard::with_owned_value(entry.key_data());
         let (page, _, value_range) = entry.into_raw();
         let collection = AccessGuard::with_page(page, value_range);
         // TODO: propagate error
@@ -396,7 +396,7 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> DoubleEndedIterator
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;
-        let key = AccessGuard::with_owned_value(entry.key().to_vec());
+        let key = AccessGuard::with_owned_value(entry.key_data());
         let (page, _, value_range) = entry.into_raw();
         let collection = AccessGuard::with_page(page, value_range);
         // TODO: propagate error
