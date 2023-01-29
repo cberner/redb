@@ -9,10 +9,8 @@ use crate::tree_store::page_store::{ChecksumType, Page, PageImpl};
 use crate::tree_store::{AccessGuardMut, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
 use crate::{AccessGuard, Result};
-use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::marker::PhantomData;
-use std::rc::Rc;
 
 #[derive(Debug)]
 enum DeletionResult {
@@ -42,7 +40,7 @@ struct InsertionResult<'a, K: RedbKey, V: RedbValue> {
 }
 
 pub(crate) struct MutateHelper<'a, 'b, K: RedbKey, V: RedbValue> {
-    root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
+    root: &'b mut Option<(PageNumber, Checksum)>,
     free_policy: FreePolicy,
     mem: &'a TransactionalMemory,
     freed: &'b mut Vec<PageNumber>,
@@ -52,7 +50,7 @@ pub(crate) struct MutateHelper<'a, 'b, K: RedbKey, V: RedbValue> {
 
 impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
     pub(crate) fn new(
-        root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
+        root: &'b mut Option<(PageNumber, Checksum)>,
         free_policy: FreePolicy,
         mem: &'a TransactionalMemory,
         freed: &'b mut Vec<PageNumber>,
@@ -81,8 +79,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
         &mut self,
         key: &K::SelfType<'_>,
     ) -> Result<Option<AccessGuard<'a, V>>> {
-        let root = { *(*self.root.clone()).borrow() };
-        if let Some((p, checksum)) = root {
+        if let Some((p, checksum)) = *self.root {
             let (deletion_result, found) =
                 self.delete_helper(self.mem.get_page(p)?, checksum, K::as_bytes(key).as_ref())?;
             let new_root = match deletion_result {
@@ -105,7 +102,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                 PartialBranch(page_number, checksum) => Some((page_number, checksum)),
                 DeletedBranch(remaining_child, checksum) => Some((remaining_child, checksum)),
             };
-            *self.root.borrow_mut() = new_root;
+            *self.root = new_root;
             Ok(found)
         } else {
             Ok(None)
@@ -119,8 +116,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
     ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMut<'a, K, V>)> {
-        let root = { *(*self.root.clone()).borrow() };
-        let (new_root, old_value, guard) = if let Some((p, checksum)) = root {
+        let (new_root, old_value, guard) = if let Some((p, checksum)) = *self.root {
             let result = self.insert_helper(
                 self.mem.get_page(p)?,
                 checksum,
@@ -156,7 +152,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
 
             ((page_num, checksum), None, guard)
         };
-        *self.root.borrow_mut() = Some(new_root);
+        *self.root = Some(new_root);
         Ok((old_value, guard))
     }
 
