@@ -2,7 +2,7 @@ use crate::tree_store::btree::btree_stats;
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
-use crate::types::{RedbKey, RedbValue, TypeName};
+use crate::types::{AlignedSlice, RedbKey, RedbValue, TypeName};
 use crate::{DatabaseStats, Error, Result};
 use std::cell::RefCell;
 use std::cmp::max;
@@ -29,12 +29,13 @@ impl RedbValue for FreedTableKey {
         Some(2 * size_of::<u64>())
     }
 
-    fn from_bytes<'a>(data: &'a [u8]) -> Self
+    fn from_bytes<'a>(data: AlignedSlice<'a, 1>) -> Self
     where
         Self: 'a,
     {
-        let transaction_id = u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap());
-        let pagination_id = u64::from_le_bytes(data[size_of::<u64>()..].try_into().unwrap());
+        let transaction_id =
+            u64::from_le_bytes(data.data()[..size_of::<u64>()].try_into().unwrap());
+        let pagination_id = u64::from_le_bytes(data.data()[size_of::<u64>()..].try_into().unwrap());
         Self {
             transaction_id,
             pagination_id,
@@ -58,7 +59,7 @@ impl RedbValue for FreedTableKey {
 }
 
 impl RedbKey for FreedTableKey {
-    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+    fn compare(data1: AlignedSlice<1>, data2: AlignedSlice<1>) -> std::cmp::Ordering {
         let value1 = Self::from_bytes(data1);
         let value2 = Self::from_bytes(data2);
 
@@ -142,10 +143,11 @@ impl RedbValue for InternalTableDefinition {
         None
     }
 
-    fn from_bytes<'a>(data: &'a [u8]) -> Self
+    fn from_bytes<'a>(data: AlignedSlice<'a, 1>) -> Self
     where
         Self: 'a,
     {
+        let data = data.data();
         debug_assert!(data.len() > 22);
         let mut offset = 0;
         let table_type = TableType::from(data[offset]);
@@ -438,7 +440,9 @@ impl<'txn> TableTree<'txn> {
                 let iter = AllPageNumbersBtreeIter::new(
                     table_root,
                     K::fixed_width(),
+                    K::ALIGNMENT,
                     V::fixed_width(),
+                    V::ALIGNMENT,
                     self.mem,
                 )?;
                 let mut freed_pages = self.freed_pages.borrow_mut();
@@ -504,7 +508,9 @@ impl<'txn> TableTree<'txn> {
                 definition.table_root.map(|(p, _)| p),
                 self.mem,
                 definition.fixed_key_size,
+                definition.key_alignment,
                 definition.fixed_value_size,
+                definition.value_alignment,
             )?;
             max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
             total_stored_bytes += subtree_stats.stored_leaf_bytes;
@@ -529,7 +535,7 @@ impl<'txn> TableTree<'txn> {
 #[cfg(test)]
 mod test {
     use crate::tree_store::{InternalTableDefinition, TableType};
-    use crate::types::TypeName;
+    use crate::types::{AsAlignedSlice, TypeName};
     use crate::RedbValue;
 
     #[test]
@@ -544,7 +550,8 @@ mod test {
             key_type: TypeName::new("test::Key"),
             value_type: TypeName::new("test::Value"),
         };
-        let y = InternalTableDefinition::from_bytes(InternalTableDefinition::as_bytes(&x).as_ref());
+        let bytes = InternalTableDefinition::as_bytes(&x);
+        let y = InternalTableDefinition::from_bytes(bytes.as_aligned());
         assert_eq!(x, y);
     }
 }

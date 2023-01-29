@@ -2,7 +2,7 @@ use crate::tree_store::{
     AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeMut, BtreeRangeIter, Checksum,
     PageHint, PageNumber, TransactionalMemory,
 };
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{AsAlignedSlice, RedbKey, RedbValue};
 use crate::Result;
 use crate::{AccessGuard, WriteTransaction};
 use std::borrow::Borrow;
@@ -42,9 +42,9 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
         // TODO: optimize this
         let first = self.iter()?.next();
         if let Some((ref key, _)) = first {
-            let owned_key = K::as_bytes(key.value().borrow()).as_ref().to_vec();
+            let owned_key = K::as_bytes(key.value().borrow()).as_aligned().to_vec();
             drop(first);
-            let key = K::from_bytes(&owned_key);
+            let key = K::from_bytes(owned_key.as_aligned());
             let value = self.remove(&key)?.unwrap();
             drop(key);
             Ok(Some((AccessGuard::with_owned_value(owned_key), value)))
@@ -58,9 +58,9 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
         // TODO: optimize this
         let first = self.iter()?.rev().next();
         if let Some((ref key, _)) = first {
-            let owned_key = K::as_bytes(key.value().borrow()).as_ref().to_vec();
+            let owned_key = K::as_bytes(key.value().borrow()).as_aligned().to_vec();
             drop(first);
-            let key = K::from_bytes(&owned_key);
+            let key = K::from_bytes(owned_key.as_aligned());
             let value = self.remove(&key)?.unwrap();
             drop(key);
             Ok(Some((AccessGuard::with_owned_value(owned_key), value)))

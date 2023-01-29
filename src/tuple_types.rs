@@ -1,4 +1,4 @@
-use crate::types::{RedbKey, RedbValue, TypeName};
+use crate::types::{AlignedSlice, AsAlignedSlice, RedbKey, RedbValue, TypeName};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::mem::size_of;
@@ -35,7 +35,7 @@ fn parse_lens<const N: usize>(data: &[u8]) -> [usize; N] {
 }
 
 fn not_equal<T: RedbKey>(data1: &[u8], data2: &[u8]) -> Option<Ordering> {
-    match T::compare(data1, data2) {
+    match T::compare(AlignedSlice::new(data1), AlignedSlice::new(data2)) {
         Ordering::Less => Some(Ordering::Less),
         Ordering::Equal => None,
         Ordering::Greater => Some(Ordering::Greater),
@@ -59,13 +59,13 @@ macro_rules! as_bytes_impl {
         if Self::fixed_width().is_some() {
             serialize_tuple_elements_fixed(&[
                 $(
-                    <$t>::as_bytes($value.$i.borrow()).as_ref(),
+                    <$t>::as_bytes($value.$i.borrow()).as_aligned().data(),
                 )+
             ])
         } else {
             serialize_tuple_elements_variable(&[
                 $(
-                    <$t>::as_bytes($value.$i.borrow()).as_ref(),
+                    <$t>::as_bytes($value.$i.borrow()).as_aligned().data(),
                 )+
             ])
         }
@@ -97,10 +97,10 @@ macro_rules! from_bytes_variable_impl {
             let mut offset = $i_last * size_of::<u32>();
             $(
                 let len = lens[$i];
-                let $v = <$t>::from_bytes(&$data[offset..(offset + len)]);
+                let $v = <$t>::from_bytes(AlignedSlice::new(&$data[offset..(offset + len)]));
                 offset += len;
             )+
-            let $v_last = <$t_last>::from_bytes(&$data[offset..]);
+            let $v_last = <$t_last>::from_bytes(AlignedSlice::new(&$data[offset..]));
             ($(
                 $v,
             )+
@@ -116,7 +116,7 @@ macro_rules! from_bytes_fixed_impl {
             let mut offset = 0;
             $(
                 let len = <$t>::fixed_width().unwrap();
-                let $v = <$t>::from_bytes(&$data[offset..(offset + len)]);
+                let $v = <$t>::from_bytes(AlignedSlice::new(&$data[offset..(offset + len)]));
                 #[allow(unused_assignments)]
                 {
                     offset += len;
@@ -152,7 +152,7 @@ macro_rules! compare_variable_impl {
                 offset1 += len1;
             )+
 
-            <$t_last>::compare(&$data0[offset0..], &$data1[offset1..])
+            <$t_last>::compare(AlignedSlice::new(&$data0[offset0..]), AlignedSlice::new(&$data1[offset1..]))
         }
     };
 }
@@ -199,14 +199,14 @@ macro_rules! tuple_impl {
                 fixed_width_impl!($($t,)+ $t_last)
             }
 
-            fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+            fn from_bytes<'a>(data: AlignedSlice<'a, 1>) -> Self::SelfType<'a>
             where
                 Self: 'a,
             {
                 if Self::fixed_width().is_some() {
-                    from_bytes_fixed_impl!(data $(,$t,$v)+, $t_last, $v_last)
+                    from_bytes_fixed_impl!(data.data() $(,$t,$v)+, $t_last, $v_last)
                 } else {
-                    from_bytes_variable_impl!(data $(,$t,$v,$i)+ | $t_last, $v_last, $i_last)
+                    from_bytes_variable_impl!(data.data() $(,$t,$v,$i)+ | $t_last, $v_last, $i_last)
                 }
             }
 
@@ -224,11 +224,11 @@ macro_rules! tuple_impl {
         }
 
         impl<$($t: RedbKey,)+ $t_last: RedbKey> RedbKey for ($($t,)+ $t_last) {
-            fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+            fn compare(data1: AlignedSlice<1>, data2: AlignedSlice<1>) -> Ordering {
                 if Self::fixed_width().is_some() {
-                    compare_fixed_impl!(data1, data2, $($t,)+ $t_last)
+                    compare_fixed_impl!(data1.data(), data2.data(), $($t,)+ $t_last)
                 } else {
-                    compare_variable_impl!(data1, data2 $(,$t,$i)+ | $t_last, $i_last)
+                    compare_variable_impl!(data1.data(), data2.data() $(,$t,$i)+ | $t_last, $i_last)
                 }
             }
         }

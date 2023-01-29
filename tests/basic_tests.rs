@@ -1,5 +1,5 @@
 use redb::{
-    Database, MultimapTableDefinition, RangeIter, ReadableTable, RedbKey, RedbValue,
+    AlignedSlice, Database, MultimapTableDefinition, RangeIter, ReadableTable, RedbKey, RedbValue,
     TableDefinition, TypeName,
 };
 use std::cmp::Ordering;
@@ -1085,11 +1085,11 @@ fn custom_ordering() {
             None
         }
 
-        fn from_bytes<'a>(data: &'a [u8]) -> ReverseKey
+        fn from_bytes<'a>(data: AlignedSlice<'a, 1>) -> ReverseKey
         where
             Self: 'a,
         {
-            ReverseKey(data.to_vec())
+            ReverseKey(data.data().to_vec())
         }
 
         fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
@@ -1106,8 +1106,8 @@ fn custom_ordering() {
     }
 
     impl RedbKey for ReverseKey {
-        fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-            data2.cmp(data1)
+        fn compare(data1: AlignedSlice<1>, data2: AlignedSlice<1>) -> Ordering {
+            data2.data().cmp(data1.data())
         }
     }
 

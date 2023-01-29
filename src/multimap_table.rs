@@ -3,7 +3,7 @@ use crate::tree_store::{
     AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, Page,
     PageHint, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
 };
-use crate::types::{RedbKey, RedbValue, TypeName};
+use crate::types::{AlignedSlice, AsAlignedSlice, RedbKey, RedbValue, TypeName};
 use crate::{AccessGuard, Result, WriteTransaction};
 use std::borrow::Borrow;
 use std::cell::RefCell;
@@ -17,7 +17,9 @@ use std::rc::Rc;
 pub(crate) fn parse_subtree_roots<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
+    key_alignment: usize,
     fixed_value_size: Option<usize>,
+    value_alignment: usize,
 ) -> Vec<PageNumber> {
     match page.memory()[0] {
         BRANCH => {
@@ -25,10 +27,16 @@ pub(crate) fn parse_subtree_roots<T: Page>(
         }
         LEAF => {
             let mut result = vec![];
-            let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+            let accessor = LeafAccessor::new(
+                page.memory(),
+                fixed_key_size,
+                key_alignment,
+                fixed_value_size,
+                value_alignment,
+            );
             for i in 0..accessor.num_pairs() {
-                let entry = accessor.entry(i).unwrap();
-                let collection = <&DynamicCollection>::from_bytes(entry.value());
+                let value = accessor.value::<1>(i).unwrap();
+                let collection = <&DynamicCollection>::from_bytes(value);
                 if matches!(collection.collection_type(), DynamicCollectionType::Subtree) {
                     result.push(collection.as_subtree().0);
                 }
@@ -40,59 +48,62 @@ pub(crate) fn parse_subtree_roots<T: Page>(
     }
 }
 
-pub(crate) struct LeafKeyIter<'a> {
+pub(crate) struct LeafKeyIter<'a, V: RedbKey> {
     inline_collection: AccessGuard<'a, &'static DynamicCollection>,
-    fixed_key_size: Option<usize>,
-    fixed_value_size: Option<usize>,
     start_entry: isize, // inclusive
     end_entry: isize,   // inclusive
+    _value_type: PhantomData<V>,
 }
 
-impl<'a> LeafKeyIter<'a> {
-    fn new(
-        data: AccessGuard<'a, &'static DynamicCollection>,
-        fixed_key_size: Option<usize>,
-        fixed_value_size: Option<usize>,
-    ) -> Self {
-        let accessor =
-            LeafAccessor::new(data.value().as_inline(), fixed_key_size, fixed_value_size);
+impl<'a, V: RedbKey> LeafKeyIter<'a, V> {
+    fn new(data: AccessGuard<'a, &'static DynamicCollection>) -> Self {
+        let accessor = LeafAccessor::new(
+            data.value().as_inline(),
+            V::fixed_width(),
+            V::ALIGNMENT,
+            <() as RedbValue>::fixed_width(),
+            <() as RedbValue>::ALIGNMENT,
+        );
         let end_entry = isize::try_from(accessor.num_pairs()).unwrap() - 1;
         Self {
             inline_collection: data,
-            fixed_key_size,
-            fixed_value_size,
             start_entry: 0,
             end_entry,
+            _value_type: Default::default(),
         }
     }
 
-    fn next_key(&mut self) -> Option<&[u8]> {
+    fn next_key(&mut self) -> Option<AlignedSlice<1>> {
         if self.end_entry < self.start_entry {
             return None;
         }
         let accessor = LeafAccessor::new(
             self.inline_collection.value().as_inline(),
-            self.fixed_key_size,
-            self.fixed_value_size,
+            V::fixed_width(),
+            V::ALIGNMENT,
+            <() as RedbValue>::fixed_width(),
+            <() as RedbValue>::ALIGNMENT,
         );
         self.start_entry += 1;
         accessor
-            .entry((self.start_entry - 1).try_into().unwrap())
+            .entry::<1, 1>((self.start_entry - 1).try_into().unwrap())
             .map(|e| e.key())
     }
 
-    fn next_key_back(&mut self) -> Option<&[u8]> {
+    fn next_key_back(&mut self) -> Option<AlignedSlice<1>> {
         if self.end_entry < self.start_entry {
             return None;
         }
         let accessor = LeafAccessor::new(
             self.inline_collection.value().as_inline(),
-            self.fixed_key_size,
-            self.fixed_value_size,
+            V::fixed_width(),
+            V::ALIGNMENT,
+            <() as RedbValue>::fixed_width(),
+            <() as RedbValue>::ALIGNMENT,
         );
         self.end_entry -= 1;
         accessor
-            .entry((self.end_entry + 1).try_into().unwrap())
+            .entry::<1, 1>((self.end_entry + 1).try_into().unwrap())
             .map(|e| e.key())
     }
 }
@@ -153,11 +164,11 @@ impl RedbValue for &DynamicCollection {
         None
     }
 
-    fn from_bytes<'a>(data: &'a [u8]) -> &'a DynamicCollection
+    fn from_bytes<'a>(data: AlignedSlice<'a, 1>) -> &'a DynamicCollection
     where
         Self: 'a,
     {
-        DynamicCollection::new(data)
+        DynamicCollection::new(data.data())
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
@@ -205,11 +216,7 @@ impl DynamicCollection {
     ) -> Result<MultimapValueIter<'a, V>> {
         Ok(match collection.value().collection_type() {
             Inline => {
-                let leaf_iter = LeafKeyIter::new(
-                    collection,
-                    V::fixed_width(),
-                    <() as RedbValue>::fixed_width(),
-                );
+                let leaf_iter = LeafKeyIter::new(collection);
                 MultimapValueIter::new_inline(leaf_iter)
             }
             Subtree => {
@@ -231,11 +238,7 @@ impl DynamicCollection {
     ) -> Result<MultimapValueIter<'a, V>> {
         Ok(match collection.value().collection_type() {
             Inline => {
-                let leaf_iter = LeafKeyIter::new(
-                    collection,
-                    V::fixed_width(),
-                    <() as RedbValue>::fixed_width(),
-                );
+                let leaf_iter = LeafKeyIter::new(collection);
                 MultimapValueIter::new_inline(leaf_iter)
             }
             Subtree => {
@@ -257,7 +260,7 @@ impl DynamicCollection {
     fn make_subtree_data(root: PageNumber, checksum: Checksum) -> Vec<u8> {
         let mut result = vec![Subtree.into()];
         result.extend_from_slice(&root.to_le_bytes());
-        result.extend_from_slice(Checksum::as_bytes(&checksum).as_ref());
+        result.extend_from_slice(Checksum::as_bytes(&checksum).as_aligned().data());
 
         result
     }
@@ -265,7 +268,7 @@ impl DynamicCollection {
 
 enum ValueIterState<'a, V: RedbKey + 'static> {
     Subtree(BtreeRangeIter<'a, V, ()>),
-    InlineLeaf(LeafKeyIter<'a>),
+    InlineLeaf(LeafKeyIter<'a, V>),
 }
 
 pub struct MultimapValueIter<'a, V: RedbKey + 'static> {
@@ -302,7 +305,7 @@ impl<'a, V: RedbKey + 'static> MultimapValueIter<'a, V> {
         }
     }
 
-    fn new_inline(inner: LeafKeyIter<'a>) -> Self {
+    fn new_inline(inner: LeafKeyIter<'a, V>) -> Self {
         Self {
             inner: Some(ValueIterState::InlineLeaf(inner)),
             freed_pages: None,
@@ -454,7 +457,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
         V: 'a,
     {
         let value_bytes = V::as_bytes(value.borrow());
-        let value_bytes_ref = value_bytes.as_ref();
+        let value_bytes_ref = value_bytes.as_aligned();
         let get_result = self.tree.get(key.borrow())?;
         let existed = if get_result.is_some() {
             #[allow(clippy::unnecessary_unwrap)]
@@ -466,7 +469,9 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                     let accessor = LeafAccessor::new(
                         leaf_data,
                         V::fixed_width(),
+                        V::ALIGNMENT,
                         <() as RedbValue>::fixed_width(),
+                        <() as RedbValue>::ALIGNMENT,
                     );
                     let (position, found) = accessor.position::<V>(value_bytes_ref);
                     if found {
@@ -474,12 +479,17 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                     }
 
                     let new_pairs = accessor.num_pairs() + 1;
-                    let new_pair_bytes =
-                        accessor.length_of_pairs(0, accessor.num_pairs()) + value_bytes_ref.len();
+                    let new_value_bytes = accessor.length_of_values(0, accessor.num_pairs());
+                    assert_eq!(0, new_value_bytes);
                     let new_key_bytes =
                         accessor.length_of_keys(0, accessor.num_pairs()) + value_bytes_ref.len();
-                    let required_inline_bytes =
-                        RawLeafBuilder::required_bytes(new_pairs, new_pair_bytes);
+                    let required_inline_bytes = RawLeafBuilder::required_bytes(
+                        new_pairs,
+                        new_key_bytes,
+                        new_value_bytes,
+                        V::ALIGNMENT,
+                        <() as RedbValue>::ALIGNMENT,
+                    );
 
                     if required_inline_bytes < self.mem.get_page_size() / 2 {
                         let mut data = vec![0; required_inline_bytes];
@@ -487,22 +497,24 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                             &mut data,
                             new_pairs,
                             V::fixed_width(),
+                            V::ALIGNMENT,
                             <() as RedbValue>::fixed_width(),
+                            <() as RedbValue>::ALIGNMENT,
                             new_key_bytes,
                         );
                         for i in 0..accessor.num_pairs() {
                             if i == position {
                                 builder.append(
-                                    value_bytes_ref,
-                                    <() as RedbValue>::as_bytes(&()).as_ref(),
+                                    value_bytes_ref.data(),
+                                    <() as RedbValue>::as_bytes(&()),
                                 );
                             }
-                            let entry = accessor.entry(i).unwrap();
-                            builder.append(entry.key(), entry.value());
+                            let entry = accessor.entry::<1, 1>(i).unwrap();
+                            builder.append(entry.key().data(), entry.value().data());
                         }
                         if position == accessor.num_pairs() {
                             builder
-                                .append(value_bytes_ref, <() as RedbValue>::as_bytes(&()).as_ref());
+                                .append(value_bytes_ref.data(), <() as RedbValue>::as_bytes(&()));
                         }
                         drop(builder);
                         drop(guard);
@@ -564,17 +576,25 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
             }
         } else {
             drop(get_result);
-            let required_inline_bytes = RawLeafBuilder::required_bytes(1, value_bytes_ref.len());
+            let required_inline_bytes = RawLeafBuilder::required_bytes(
+                1,
+                value_bytes_ref.len(),
+                0,
+                V::ALIGNMENT,
+                <() as RedbValue>::ALIGNMENT,
+            );
             if required_inline_bytes < self.mem.get_page_size() / 2 {
                 let mut data = vec![0; required_inline_bytes];
                 let mut builder = RawLeafBuilder::new(
                     &mut data,
                     1,
                     V::fixed_width(),
+                    V::ALIGNMENT,
                     <() as RedbValue>::fixed_width(),
+                    <() as RedbValue>::ALIGNMENT,
                     value_bytes_ref.len(),
                 );
-                builder.append(value_bytes_ref, <() as RedbValue>::as_bytes(&()).as_ref());
+                builder.append(value_bytes_ref.data(), <() as RedbValue>::as_bytes(&()));
                 drop(builder);
                 let inline_data = DynamicCollection::make_inline_data(&data);
                 unsafe {
@@ -625,20 +645,28 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                 let accessor = LeafAccessor::new(
                     leaf_data,
                     V::fixed_width(),
+                    V::ALIGNMENT,
                     <() as RedbValue>::fixed_width(),
+                    <() as RedbValue>::ALIGNMENT,
                 );
-                if let Some(position) = accessor.find_key::<V>(V::as_bytes(value.borrow()).as_ref())
+                if let Some(position) =
+                    accessor.find_key::<V>(V::as_bytes(value.borrow()).as_aligned())
                 {
                     let old_num_pairs = accessor.num_pairs();
                     if old_num_pairs == 1 {
                         drop(guard);
                         unsafe { self.tree.remove(key.borrow())? };
                     } else {
-                        let old_pairs_len = accessor.length_of_pairs(0, old_num_pairs);
-                        let removed_value_len = accessor.entry(position).unwrap().key().len();
+                        let old_keys_len = accessor.length_of_pairs(0, old_num_pairs);
+                        assert_eq!(0, accessor.length_of_values(0, old_num_pairs));
+                        let removed_value_len =
+                            accessor.entry::<1, 1>(position).unwrap().key().len();
                         let required = RawLeafBuilder::required_bytes(
                             old_num_pairs - 1,
-                            old_pairs_len - removed_value_len,
+                            old_keys_len - removed_value_len,
+                            0,
+                            V::ALIGNMENT,
+                            <() as RedbValue>::ALIGNMENT,
                         );
                         let mut new_data = vec![0; required];
                         let new_key_len =
@@ -647,13 +675,15 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                             &mut new_data,
                             old_num_pairs - 1,
                             V::fixed_width(),
+                            V::ALIGNMENT,
                             <() as RedbValue>::fixed_width(),
+                            <() as RedbValue>::ALIGNMENT,
                             new_key_len,
                         );
                         for i in 0..old_num_pairs {
                             if i != position {
-                                let entry = accessor.entry(i).unwrap();
-                                builder.append(entry.key(), entry.value());
+                                let entry = accessor.entry::<1, 1>(i).unwrap();
+                                builder.append(entry.key().data(), entry.value().data());
                             }
                         }
                         drop(builder);
@@ -687,7 +717,9 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                             let accessor = LeafAccessor::new(
                                 page.memory(),
                                 V::fixed_width(),
+                                V::ALIGNMENT,
                                 <() as RedbValue>::fixed_width(),
+                                <() as RedbValue>::ALIGNMENT,
                             );
                             let len = accessor.total_length();
                             if len < self.mem.get_page_size() / 2 {
@@ -761,7 +793,9 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                 let all_pages = AllPageNumbersBtreeIter::new(
                     root,
                     V::fixed_width(),
+                    V::ALIGNMENT,
                     <() as RedbValue>::fixed_width(),
+                    <() as RedbValue>::ALIGNMENT,
                     self.mem,
                 )?;
                 for page in all_pages {

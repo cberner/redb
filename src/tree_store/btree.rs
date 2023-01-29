@@ -6,7 +6,7 @@ use crate::tree_store::btree_iters::BtreeDrain;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeDrainFilter, BtreeRangeIter, PageHint, PageNumber};
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{AlignedSlice, AsAlignedSlice, RedbKey, RedbValue};
 use crate::{AccessGuard, Result};
 #[cfg(feature = "logging")]
 use log::trace;
@@ -64,7 +64,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
             "Btree(root={:?}): Inserting {:?} with value of length {}",
             &self.root,
             key,
-            V::as_bytes(value).as_ref().len()
+            V::as_bytes(value).as_aligned().len()
         );
         let mut freed_pages = self.freed_pages.borrow_mut();
         let mut root = self.root.borrow_mut();
@@ -150,7 +150,9 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
             self.get_root().map(|(p, _)| p),
             self.mem,
             K::fixed_width(),
+            K::ALIGNMENT,
             V::fixed_width(),
+            V::ALIGNMENT,
         )
     }
 
@@ -254,21 +256,27 @@ pub(crate) struct RawBtree<'a> {
     mem: &'a TransactionalMemory,
     root: Option<(PageNumber, Checksum)>,
     fixed_key_size: Option<usize>,
+    key_alignment: usize,
     fixed_value_size: Option<usize>,
+    value_alignment: usize,
 }
 
 impl<'a> RawBtree<'a> {
     pub(crate) fn new(
         root: Option<(PageNumber, Checksum)>,
         fixed_key_size: Option<usize>,
+        key_alignment: usize,
         fixed_value_size: Option<usize>,
+        value_alignment: usize,
         mem: &'a TransactionalMemory,
     ) -> Self {
         Self {
             mem,
             root,
             fixed_key_size,
+            key_alignment,
             fixed_value_size,
+            value_alignment,
         }
     }
 
@@ -293,17 +301,24 @@ impl<'a> RawBtree<'a> {
                     == leaf_checksum(
                         &page,
                         self.fixed_key_size,
+                        self.key_alignment,
                         self.fixed_value_size,
+                        self.value_alignment,
                         self.mem.checksum_type(),
                     )
             }
             BRANCH => {
                 if expected_checksum
-                    != branch_checksum(&page, self.fixed_key_size, self.mem.checksum_type())
+                    != branch_checksum(
+                        &page,
+                        self.fixed_key_size,
+                        self.key_alignment,
+                        self.mem.checksum_type(),
+                    )
                 {
                     return Ok(false);
                 }
-                let accessor = BranchAccessor::new(&page, self.fixed_key_size);
+                let accessor = BranchAccessor::new(&page, self.fixed_key_size, self.key_alignment);
                 for i in 0..accessor.count_children() {
                     if !self.verify_checksum_helper(
                         accessor.child_page(i).unwrap(),
@@ -345,18 +360,28 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
     pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
         if let Some((p, _)) = self.root {
             let root_page = self.mem.get_page_extended(p, self.hint)?;
-            self.get_helper(root_page, K::as_bytes(key).as_ref())
+            self.get_helper(root_page, K::as_bytes(key).as_aligned())
         } else {
             Ok(None)
         }
     }
 
     // Returns the value for the queried key, if present
-    fn get_helper(&self, page: PageImpl<'a>, query: &[u8]) -> Result<Option<AccessGuard<'a, V>>> {
+    fn get_helper(
+        &self,
+        page: PageImpl<'a>,
+        query: AlignedSlice<1>,
+    ) -> Result<Option<AccessGuard<'a, V>>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                let accessor = LeafAccessor::new(
+                    page.memory(),
+                    K::fixed_width(),
+                    K::ALIGNMENT,
+                    V::fixed_width(),
+                    V::ALIGNMENT,
+                );
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
                     let (start, end) = accessor.value_range(entry_index).unwrap();
                     // Safety: free_on_drop is false
@@ -368,7 +393,7 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
                 }
             }
             BRANCH => {
-                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let accessor = BranchAccessor::new(&page, K::fixed_width(), K::ALIGNMENT);
                 let (_, child_page) = accessor.child_for_key::<K>(query);
                 self.get_helper(self.mem.get_page_extended(child_page, self.hint)?, query)
             }
@@ -410,12 +435,19 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
                     match node_mem[0] {
                         LEAF => {
                             eprint!("Leaf[ (page={:?})", page.get_page_number());
-                            LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width())
-                                .print_node::<K, V>(include_values);
+                            LeafAccessor::new(
+                                page.memory(),
+                                K::fixed_width(),
+                                K::ALIGNMENT,
+                                V::fixed_width(),
+                                V::ALIGNMENT,
+                            )
+                            .print_node::<K, V>(include_values);
                             eprint!("]");
                         }
                         BRANCH => {
-                            let accessor = BranchAccessor::new(&page, K::fixed_width());
+                            let accessor =
+                                BranchAccessor::new(&page, K::fixed_width(), K::ALIGNMENT);
                             for i in 0..accessor.count_children() {
                                 let child = accessor.child_page(i).unwrap();
                                 next_children.push(self.mem.get_page(child)?);
@@ -440,10 +472,19 @@ pub(crate) fn btree_stats(
     root: Option<PageNumber>,
     mem: &TransactionalMemory,
     fixed_key_size: Option<usize>,
+    key_alignment: usize,
     fixed_value_size: Option<usize>,
+    value_alignment: usize,
 ) -> Result<BtreeStats> {
     if let Some(root) = root {
-        stats_helper(root, mem, fixed_key_size, fixed_value_size)
+        stats_helper(
+            root,
+            mem,
+            fixed_key_size,
+            key_alignment,
+            fixed_value_size,
+            value_alignment,
+        )
     } else {
         Ok(BtreeStats {
             tree_height: 0,
@@ -460,13 +501,21 @@ fn stats_helper(
     page_number: PageNumber,
     mem: &TransactionalMemory,
     fixed_key_size: Option<usize>,
+    key_alignment: usize,
     fixed_value_size: Option<usize>,
+    value_alignment: usize,
 ) -> Result<BtreeStats> {
     let page = mem.get_page(page_number)?;
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+            let accessor = LeafAccessor::new(
+                page.memory(),
+                fixed_key_size,
+                key_alignment,
+                fixed_value_size,
+                value_alignment,
+            );
             let leaf_bytes = accessor.length_of_pairs(0, accessor.num_pairs());
             let overhead_bytes = accessor.total_length() - leaf_bytes;
             let fragmented_bytes = page.memory().len() - accessor.total_length();
@@ -480,7 +529,7 @@ fn stats_helper(
             })
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&page, fixed_key_size);
+            let accessor = BranchAccessor::new(&page, fixed_key_size, key_alignment);
             let mut max_child_height = 0;
             let mut leaf_pages = 0;
             let mut branch_pages = 1;
@@ -489,7 +538,14 @@ fn stats_helper(
             let mut fragmented_bytes = page.memory().len() - accessor.total_length();
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
-                    let stats = stats_helper(child, mem, fixed_key_size, fixed_value_size)?;
+                    let stats = stats_helper(
+                        child,
+                        mem,
+                        fixed_key_size,
+                        key_alignment,
+                        fixed_value_size,
+                        value_alignment,
+                    )?;
                     max_child_height = max(max_child_height, stats.tree_height);
                     leaf_pages += stats.leaf_pages;
                     branch_pages += stats.branch_pages;

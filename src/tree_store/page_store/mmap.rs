@@ -16,6 +16,7 @@ use unix::*;
 mod windows;
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::page_store::base::{PageHack, PageHackMut, PageHint, PhysicalStorage};
+use crate::types::MAX_ALIGNMENT;
 #[cfg(windows)]
 use windows::*;
 
@@ -43,6 +44,7 @@ impl Mmap {
         let mmap = MmapInner::create_mapping(lock.file(), len)?;
 
         let address = mmap.base_addr();
+        assert_eq!(0, address as usize % MAX_ALIGNMENT);
 
         // Try to flush any pages in the page cache that are out of sync with disk.
         // See here for why: <https://github.com/cberner/redb/issues/450>

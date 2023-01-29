@@ -2,6 +2,129 @@ use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::fmt::Debug;
 
+pub(crate) const MAX_ALIGNMENT: usize = 16;
+
+#[derive(Clone)]
+pub struct AlignedVec<const N: usize> {
+    aligned_start: usize,
+    data: Vec<u8>,
+}
+
+impl<const N: usize> AlignedVec<N> {
+    pub fn new() -> Self {
+        Self::from_slice(&[])
+    }
+
+    /// Construct a new AlignedVec from the given slice
+    pub fn from_slice(slice: &[u8]) -> Self {
+        let mut data = Vec::with_capacity(N + slice.len());
+        let remainder = data.as_ptr() as usize % N;
+        let aligned_start = if remainder > 0 {
+            let padding = N - remainder;
+            data.resize(padding, 0);
+            padding
+        } else {
+            0
+        };
+        data.extend_from_slice(slice);
+
+        Self {
+            aligned_start,
+            data,
+        }
+    }
+
+    /// The length in bytes
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Returns true if vec has length 0
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
+impl<const N: usize> Default for AlignedVec<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> AsAlignedSlice<N> for AlignedVec<N> {
+    fn as_aligned(&self) -> AlignedSlice<N> {
+        AlignedSlice::new(&self.data[self.aligned_start..])
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct AlignedSlice<'a, const N: usize> {
+    data: &'a [u8],
+}
+
+impl<'a, const N: usize> AlignedSlice<'a, N> {
+    /// Constructs a new AlignedSlice. `data` must start and end at a multiple of `N` bytes
+    pub fn new(data: &'a [u8]) -> Self {
+        assert_eq!(0, data.as_ptr() as usize % N);
+        assert_eq!(0, data.len() % N);
+        Self { data }
+    }
+
+    /// Returns a slice which is aligned to a multiple of `N` bytes
+    pub fn data(&self) -> &'a [u8] {
+        self.data
+    }
+
+    /// The length in bytes
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Returns true if slice has length 0
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Returns an owned `AlignedVec` with the same alignment
+    pub fn to_vec(&self) -> AlignedVec<N> {
+        AlignedVec::from_slice(self.data)
+    }
+}
+
+pub trait AsAlignedSlice<const N: usize> {
+    fn as_aligned(&self) -> AlignedSlice<N>;
+}
+
+impl AsAlignedSlice<1> for &[u8] {
+    fn as_aligned(&self) -> AlignedSlice<1> {
+        AlignedSlice::new(self)
+    }
+}
+
+impl AsAlignedSlice<1> for Vec<u8> {
+    fn as_aligned(&self) -> AlignedSlice<1> {
+        AlignedSlice::new(self.as_slice())
+    }
+}
+
+impl<const N: usize> AsAlignedSlice<1> for [u8; N] {
+    fn as_aligned(&self) -> AlignedSlice<1> {
+        AlignedSlice::new(self.as_slice())
+    }
+}
+
+impl<const N: usize> AsAlignedSlice<1> for &[u8; N] {
+    fn as_aligned(&self) -> AlignedSlice<1> {
+        AlignedSlice::new(self.as_slice())
+    }
+}
+
+impl AsAlignedSlice<1> for &str {
+    fn as_aligned(&self) -> AlignedSlice<1> {
+        AlignedSlice::new(self.as_bytes())
+    }
+}
+
 #[derive(Eq, PartialEq, Clone, Debug)]
 enum TypeClassification {
     Internal,
@@ -71,6 +194,8 @@ impl TypeName {
 }
 
 pub trait RedbValue: Debug {
+    /// Required alignment of the byte representation of this type. Must be a power of 2.
+    /// Note: Currently only ALIGNMENT = 1 is supported
     const ALIGNMENT: usize = 1;
 
     /// SelfType<'a> must be the same type as Self with all lifetimes replaced with 'a
@@ -78,7 +203,7 @@ pub trait RedbValue: Debug {
     where
         Self: 'a;
 
-    type AsBytes<'a>: AsRef<[u8]> + 'a
+    type AsBytes<'a>: AsAlignedSlice<1> + 'a
     where
         Self: 'a;
 
@@ -88,7 +213,7 @@ pub trait RedbValue: Debug {
     /// Deserializes data
     /// Implementations may return a view over data, or an owned type
     // TODO: implement guarantee that data is aligned to Self::ALIGNMENT
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    fn from_bytes<'a>(data: AlignedSlice<'a, 1>) -> Self::SelfType<'a>
     where
         Self: 'a;
 
@@ -104,7 +229,7 @@ pub trait RedbValue: Debug {
 
 pub trait RedbKey: RedbValue {
     /// Compare data1 with data2
-    fn compare(data1: &[u8], data2: &[u8]) -> Ordering;
+    fn compare(data1: AlignedSlice<1>, data2: AlignedSlice<1>) -> Ordering;
 }
 
 impl RedbValue for () {
@@ -120,7 +245,7 @@ impl RedbValue for () {
     }
 
     #[allow(clippy::unused_unit)]
-    fn from_bytes<'a>(_data: &'a [u8]) -> ()
+    fn from_bytes<'a>(_data: AlignedSlice<'a, 1>) -> ()
     where
         Self: 'a,
     {
@@ -153,13 +278,15 @@ impl<T: RedbValue> RedbValue for Option<T> {
         T::fixed_width().map(|x| x + T::ALIGNMENT)
     }
 
-    fn from_bytes<'a>(data: &'a [u8]) -> Option<T::SelfType<'a>>
+    fn from_bytes<'a>(data: AlignedSlice<'a, 1>) -> Option<T::SelfType<'a>>
     where
         Self: 'a,
     {
-        match data[0] {
+        match data.data()[0] {
             0 => None,
-            1 => Some(T::from_bytes(&data[T::ALIGNMENT..])),
+            1 => Some(T::from_bytes(AlignedSlice::new(
+                &data.data()[T::ALIGNMENT..],
+            ))),
             _ => unreachable!(),
         }
     }
@@ -172,7 +299,7 @@ impl<T: RedbValue> RedbValue for Option<T> {
         let mut result = vec![0; T::ALIGNMENT];
         if let Some(x) = value {
             result[0] = 1;
-            result.extend_from_slice(T::as_bytes(x).as_ref());
+            result.extend_from_slice(T::as_bytes(x).as_aligned().data());
         }
         result
     }
@@ -194,11 +321,11 @@ impl RedbValue for &[u8] {
         None
     }
 
-    fn from_bytes<'a>(data: &'a [u8]) -> &'a [u8]
+    fn from_bytes<'a>(data: AlignedSlice<'a, 1>) -> &'a [u8]
     where
         Self: 'a,
     {
-        data
+        data.data()
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
@@ -215,8 +342,8 @@ impl RedbValue for &[u8] {
 }
 
 impl RedbKey for &[u8] {
-    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        data1.cmp(data2)
+    fn compare(data1: AlignedSlice<1>, data2: AlignedSlice<1>) -> Ordering {
+        data1.data().cmp(data2.data())
     }
 }
 
@@ -232,11 +359,11 @@ impl<const N: usize> RedbValue for &[u8; N] {
         Some(N)
     }
 
-    fn from_bytes<'a>(data: &'a [u8]) -> &'a [u8; N]
+    fn from_bytes<'a>(data: AlignedSlice<'a, 1>) -> &'a [u8; N]
     where
         Self: 'a,
     {
-        data.try_into().unwrap()
+        data.data().try_into().unwrap()
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8; N]
@@ -253,8 +380,8 @@ impl<const N: usize> RedbValue for &[u8; N] {
 }
 
 impl<const N: usize> RedbKey for &[u8; N] {
-    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        data1.cmp(data2)
+    fn compare(data1: AlignedSlice<1>, data2: AlignedSlice<1>) -> Ordering {
+        data1.data().cmp(data2.data())
     }
 }
 
@@ -270,11 +397,11 @@ impl RedbValue for &str {
         None
     }
 
-    fn from_bytes<'a>(data: &'a [u8]) -> &'a str
+    fn from_bytes<'a>(data: AlignedSlice<'a, 1>) -> &'a str
     where
         Self: 'a,
     {
-        std::str::from_utf8(data).unwrap()
+        std::str::from_utf8(data.data()).unwrap()
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a str
@@ -291,7 +418,7 @@ impl RedbValue for &str {
 }
 
 impl RedbKey for &str {
-    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+    fn compare(data1: AlignedSlice<1>, data2: AlignedSlice<1>) -> Ordering {
         let str1 = Self::from_bytes(data1);
         let str2 = Self::from_bytes(data2);
         str1.cmp(str2)
@@ -308,11 +435,11 @@ macro_rules! be_value {
                 Some(std::mem::size_of::<$t>())
             }
 
-            fn from_bytes<'a>(data: &'a [u8]) -> $t
+            fn from_bytes<'a>(data: AlignedSlice<'a, 1>) -> $t
             where
                 Self: 'a,
             {
-                <$t>::from_le_bytes(data.try_into().unwrap())
+                <$t>::from_le_bytes(data.data().try_into().unwrap())
             }
 
             fn as_bytes<'a, 'b: 'a>(
@@ -337,7 +464,7 @@ macro_rules! be_impl {
         be_value!($t);
 
         impl RedbKey for $t {
-            fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+            fn compare(data1: AlignedSlice<1>, data2: AlignedSlice<1>) -> Ordering {
                 Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
             }
         }

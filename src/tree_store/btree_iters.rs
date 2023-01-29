@@ -3,7 +3,7 @@ use crate::tree_store::btree_base::{BRANCH, LEAF};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::PageNumber;
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{AlignedSlice, AlignedVec, AsAlignedSlice, RedbKey, RedbValue};
 use crate::Result;
 use std::borrow::Borrow;
 use std::cell::RefCell;
@@ -17,14 +17,18 @@ pub enum RangeIterState<'a> {
     Leaf {
         page: PageImpl<'a>,
         fixed_key_size: Option<usize>,
+        key_alignment: usize,
         fixed_value_size: Option<usize>,
+        value_alignment: usize,
         entry: usize,
         parent: Option<Box<RangeIterState<'a>>>,
     },
     Internal {
         page: PageImpl<'a>,
         fixed_key_size: Option<usize>,
+        key_alignment: usize,
         fixed_value_size: Option<usize>,
+        value_alignment: usize,
         child: usize,
         parent: Option<Box<RangeIterState<'a>>>,
     },
@@ -47,18 +51,28 @@ impl<'a> RangeIterState<'a> {
             Leaf {
                 page,
                 fixed_key_size,
+                key_alignment,
                 fixed_value_size,
+                value_alignment,
                 entry,
                 parent,
             } => {
-                let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+                let accessor = LeafAccessor::new(
+                    page.memory(),
+                    fixed_key_size,
+                    key_alignment,
+                    fixed_value_size,
+                    value_alignment,
+                );
                 let direction = if reverse { -1 } else { 1 };
                 let next_entry = isize::try_from(entry).unwrap() + direction;
                 if 0 <= next_entry && next_entry < accessor.num_pairs().try_into().unwrap() {
                     Ok(Some(Leaf {
                         page,
                         fixed_key_size,
+                        key_alignment,
                         fixed_value_size,
+                        value_alignment,
                         entry: next_entry.try_into().unwrap(),
                         parent,
                     }))
@@ -69,11 +83,13 @@ impl<'a> RangeIterState<'a> {
             Internal {
                 page,
                 fixed_key_size,
+                key_alignment,
                 fixed_value_size,
+                value_alignment,
                 child,
                 mut parent,
             } => {
-                let accessor = BranchAccessor::new(&page, fixed_key_size);
+                let accessor = BranchAccessor::new(&page, fixed_key_size, key_alignment);
                 let child_page = accessor.child_page(child).unwrap();
                 let child_page = manager.get_page(child_page)?;
                 let direction = if reverse { -1 } else { 1 };
@@ -82,7 +98,9 @@ impl<'a> RangeIterState<'a> {
                     parent = Some(Box::new(Internal {
                         page,
                         fixed_key_size,
+                        key_alignment,
                         fixed_value_size,
+                        value_alignment,
                         child: next_child.try_into().unwrap(),
                         parent,
                     }));
@@ -92,7 +110,9 @@ impl<'a> RangeIterState<'a> {
                         let child_accessor = LeafAccessor::new(
                             child_page.memory(),
                             fixed_key_size,
+                            key_alignment,
                             fixed_value_size,
+                            value_alignment,
                         );
                         let entry = if reverse {
                             child_accessor.num_pairs() - 1
@@ -102,13 +122,16 @@ impl<'a> RangeIterState<'a> {
                         Ok(Some(Leaf {
                             page: child_page,
                             fixed_key_size,
+                            key_alignment,
                             fixed_value_size,
+                            value_alignment,
                             entry,
                             parent,
                         }))
                     }
                     BRANCH => {
-                        let child_accessor = BranchAccessor::new(&child_page, fixed_key_size);
+                        let child_accessor =
+                            BranchAccessor::new(&child_page, fixed_key_size, key_alignment);
                         let child = if reverse {
                             child_accessor.count_children() - 1
                         } else {
@@ -117,7 +140,9 @@ impl<'a> RangeIterState<'a> {
                         Ok(Some(Internal {
                             page: child_page,
                             fixed_key_size,
+                            key_alignment,
                             fixed_value_size,
+                            value_alignment,
                             child,
                             parent,
                         }))
@@ -133,13 +158,20 @@ impl<'a> RangeIterState<'a> {
             Leaf {
                 page,
                 fixed_key_size,
+                key_alignment,
                 fixed_value_size,
+                value_alignment,
                 entry,
                 ..
             } => {
-                let (key, value) =
-                    LeafAccessor::new(page.memory(), *fixed_key_size, *fixed_value_size)
-                        .entry_ranges(*entry)?;
+                let (key, value) = LeafAccessor::new(
+                    page.memory(),
+                    *fixed_key_size,
+                    *key_alignment,
+                    *fixed_value_size,
+                    *value_alignment,
+                )
+                .entry_ranges(*entry)?;
                 Some(EntryGuard::new(page.clone(), key, value))
             }
             _ => None,
@@ -166,16 +198,20 @@ impl<'a, K: RedbKey, V: RedbValue> EntryGuard<'a, K, V> {
         }
     }
 
-    pub(crate) fn key_data(&self) -> Vec<u8> {
-        self.page.memory()[self.key_range.clone()].to_vec()
+    pub(crate) fn key_data(&self) -> AlignedVec<1> {
+        AlignedVec::from_slice(&self.page.memory()[self.key_range.clone()])
     }
 
     pub(crate) fn key(&self) -> K::SelfType<'_> {
-        K::from_bytes(&self.page.memory()[self.key_range.clone()])
+        K::from_bytes(AlignedSlice::new(
+            &self.page.memory()[self.key_range.clone()],
+        ))
     }
 
     pub(crate) fn value(&self) -> V::SelfType<'_> {
-        V::from_bytes(&self.page.memory()[self.value_range.clone()])
+        V::from_bytes(AlignedSlice::new(
+            &self.page.memory()[self.value_range.clone()],
+        ))
     }
 
     pub(crate) fn into_raw(self) -> (PageImpl<'a>, Range<usize>, Range<usize>) {
@@ -192,7 +228,9 @@ impl<'a> AllPageNumbersBtreeIter<'a> {
     pub(crate) fn new(
         root: PageNumber,
         fixed_key_size: Option<usize>,
+        key_alignment: usize,
         fixed_value_size: Option<usize>,
+        value_alignment: usize,
         manager: &'a TransactionalMemory,
     ) -> Result<Self> {
         let root_page = manager.get_page(root)?;
@@ -201,14 +239,18 @@ impl<'a> AllPageNumbersBtreeIter<'a> {
             LEAF => Leaf {
                 page: root_page,
                 fixed_key_size,
+                key_alignment,
                 fixed_value_size,
+                value_alignment,
                 entry: 0,
                 parent: None,
             },
             BRANCH => Internal {
                 page: root_page,
                 fixed_key_size,
+                key_alignment,
                 fixed_value_size,
+                value_alignment,
                 child: 0,
                 parent: None,
             },
@@ -426,14 +468,14 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeRangeIter<'a, K, V> {
                 Bound::Included(k) => find_iter_left::<K, V>(
                     manager.get_page(root)?,
                     None,
-                    K::as_bytes(k.borrow()).as_ref(),
+                    K::as_bytes(k.borrow()).as_aligned(),
                     true,
                     manager,
                 )?,
                 Bound::Excluded(k) => find_iter_left::<K, V>(
                     manager.get_page(root)?,
                     None,
-                    K::as_bytes(k.borrow()).as_ref(),
+                    K::as_bytes(k.borrow()).as_aligned(),
                     false,
                     manager,
                 )?,
@@ -447,14 +489,14 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeRangeIter<'a, K, V> {
                 Bound::Included(k) => find_iter_right::<K, V>(
                     manager.get_page(root)?,
                     None,
-                    K::as_bytes(k.borrow()).as_ref(),
+                    K::as_bytes(k.borrow()).as_aligned(),
                     true,
                     manager,
                 )?,
                 Bound::Excluded(k) => find_iter_right::<K, V>(
                     manager.get_page(root)?,
                     None,
-                    K::as_bytes(k.borrow()).as_ref(),
+                    K::as_bytes(k.borrow()).as_aligned(),
                     false,
                     manager,
                 )?,
@@ -618,18 +660,26 @@ fn find_iter_unbounded<'a, K: RedbKey, V: RedbValue>(
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+            let accessor = LeafAccessor::new(
+                page.memory(),
+                K::fixed_width(),
+                K::ALIGNMENT,
+                V::fixed_width(),
+                V::ALIGNMENT,
+            );
             let entry = if reverse { accessor.num_pairs() - 1 } else { 0 };
             Ok(Some(Leaf {
                 page,
                 fixed_key_size: K::fixed_width(),
+                key_alignment: K::ALIGNMENT,
                 fixed_value_size: V::fixed_width(),
+                value_alignment: V::ALIGNMENT,
                 entry,
                 parent,
             }))
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&page, K::fixed_width());
+            let accessor = BranchAccessor::new(&page, K::fixed_width(), K::ALIGNMENT);
             let child_index = if reverse {
                 accessor.count_children() - 1
             } else {
@@ -641,7 +691,9 @@ fn find_iter_unbounded<'a, K: RedbKey, V: RedbValue>(
             parent = Some(Box::new(Internal {
                 page,
                 fixed_key_size: K::fixed_width(),
+                key_alignment: K::ALIGNMENT,
                 fixed_value_size: V::fixed_width(),
+                value_alignment: V::ALIGNMENT,
                 child: (isize::try_from(child_index).unwrap() + direction)
                     .try_into()
                     .unwrap(),
@@ -658,14 +710,20 @@ fn find_iter_unbounded<'a, K: RedbKey, V: RedbValue>(
 fn find_iter_left<'a, K: RedbKey, V: RedbValue>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
-    query: &[u8],
+    query: AlignedSlice<1>,
     include_query: bool,
     manager: &'a TransactionalMemory,
 ) -> Result<(bool, Option<RangeIterState<'a>>)> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+            let accessor = LeafAccessor::new(
+                page.memory(),
+                K::fixed_width(),
+                K::ALIGNMENT,
+                V::fixed_width(),
+                V::ALIGNMENT,
+            );
             let (mut position, found) = accessor.position::<K>(query);
             let include = if position < accessor.num_pairs() {
                 include_query || !found
@@ -678,21 +736,25 @@ fn find_iter_left<'a, K: RedbKey, V: RedbValue>(
             let result = Leaf {
                 page,
                 fixed_key_size: K::fixed_width(),
+                key_alignment: K::ALIGNMENT,
                 fixed_value_size: V::fixed_width(),
+                value_alignment: V::ALIGNMENT,
                 entry: position,
                 parent,
             };
             Ok((include, Some(result)))
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&page, K::fixed_width());
+            let accessor = BranchAccessor::new(&page, K::fixed_width(), K::ALIGNMENT);
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
             let child_page = manager.get_page(child_page_number)?;
             if child_index < accessor.count_children() - 1 {
                 parent = Some(Box::new(Internal {
                     page,
                     fixed_key_size: K::fixed_width(),
+                    key_alignment: K::ALIGNMENT,
                     fixed_value_size: V::fixed_width(),
+                    value_alignment: V::ALIGNMENT,
                     child: child_index + 1,
                     parent,
                 }));
@@ -706,14 +768,20 @@ fn find_iter_left<'a, K: RedbKey, V: RedbValue>(
 fn find_iter_right<'a, K: RedbKey, V: RedbValue>(
     page: PageImpl<'a>,
     mut parent: Option<Box<RangeIterState<'a>>>,
-    query: &[u8],
+    query: AlignedSlice<1>,
     include_query: bool,
     manager: &'a TransactionalMemory,
 ) -> Result<(bool, Option<RangeIterState<'a>>)> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+            let accessor = LeafAccessor::new(
+                page.memory(),
+                K::fixed_width(),
+                K::ALIGNMENT,
+                V::fixed_width(),
+                V::ALIGNMENT,
+            );
             let (mut position, found) = accessor.position::<K>(query);
             let include = if position < accessor.num_pairs() {
                 include_query && found
@@ -726,21 +794,25 @@ fn find_iter_right<'a, K: RedbKey, V: RedbValue>(
             let result = Leaf {
                 page,
                 fixed_key_size: K::fixed_width(),
+                key_alignment: K::ALIGNMENT,
                 fixed_value_size: V::fixed_width(),
+                value_alignment: V::ALIGNMENT,
                 entry: position,
                 parent,
             };
             Ok((include, Some(result)))
         }
         BRANCH => {
-            let accessor = BranchAccessor::new(&page, K::fixed_width());
+            let accessor = BranchAccessor::new(&page, K::fixed_width(), K::ALIGNMENT);
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
             let child_page = manager.get_page(child_page_number)?;
             if child_index > 0 && accessor.child_page(child_index - 1).is_some() {
                 parent = Some(Box::new(Internal {
                     page,
                     fixed_key_size: K::fixed_width(),
+                    key_alignment: K::ALIGNMENT,
                     fixed_value_size: V::fixed_width(),
+                    value_alignment: V::ALIGNMENT,
                     child: child_index - 1,
                     parent,
                 }));

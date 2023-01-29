@@ -1,6 +1,6 @@
 use crate::tree_store::page_store::{ChecksumType, Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::{page_store, PageNumber};
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{AlignedSlice, AlignedVec, AsAlignedSlice, RedbKey, RedbValue};
 use crate::Result;
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -18,10 +18,18 @@ pub(crate) type Checksum = u128;
 pub(super) fn leaf_checksum<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
+    key_alignment: usize,
     fixed_value_size: Option<usize>,
+    value_alignment: usize,
     checksum: ChecksumType,
 ) -> Checksum {
-    let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+    let accessor = LeafAccessor::new(
+        page.memory(),
+        fixed_key_size,
+        key_alignment,
+        fixed_value_size,
+        value_alignment,
+    );
     // TODO: during verification, the page could be corrupted, so this needs to be safe on
     // arbitrary data
     let end = accessor.value_end(accessor.num_pairs() - 1).unwrap();
@@ -34,9 +42,10 @@ pub(super) fn leaf_checksum<T: Page>(
 pub(super) fn branch_checksum<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
+    key_alignment: usize,
     checksum: ChecksumType,
 ) -> Checksum {
-    let accessor = BranchAccessor::new(page, fixed_key_size);
+    let accessor = BranchAccessor::new(page, fixed_key_size, key_alignment);
     // TODO: during verification, the page could be corrupted, so this needs to be safe on
     // arbitrary data
     let end = accessor.key_end(accessor.num_keys() - 1);
@@ -88,13 +97,14 @@ enum OnDrop {
     RemoveEntry {
         position: usize,
         fixed_key_size: Option<usize>,
+        key_alignment: usize,
     },
 }
 
 enum EitherPage<'a> {
     Immutable(PageImpl<'a>),
     Mutable(PageMut<'a>),
-    OwnedMemory(Vec<u8>),
+    OwnedMemory(AlignedVec<1>),
 }
 
 impl<'a> EitherPage<'a> {
@@ -102,7 +112,7 @@ impl<'a> EitherPage<'a> {
         match self {
             EitherPage::Immutable(page) => page.memory(),
             EitherPage::Mutable(page) => page.memory(),
-            EitherPage::OwnedMemory(mem) => mem.as_slice(),
+            EitherPage::OwnedMemory(mem) => mem.as_aligned().data(),
         }
     }
 }
@@ -152,7 +162,7 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
         }
     }
 
-    pub(crate) fn with_owned_value(value: Vec<u8>) -> Self {
+    pub(crate) fn with_owned_value(value: AlignedVec<1>) -> Self {
         let len = value.len();
         Self {
             page: EitherPage::OwnedMemory(value),
@@ -172,6 +182,7 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
         len: usize,
         position: usize,
         fixed_key_size: Option<usize>,
+        key_alignment: usize,
         mem: &'a TransactionalMemory,
     ) -> Self {
         Self {
@@ -181,6 +192,7 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
             on_drop: OnDrop::RemoveEntry {
                 position,
                 fixed_key_size,
+                key_alignment,
             },
             mem: Some(mem),
             _value_type: Default::default(),
@@ -188,7 +200,9 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
     }
 
     pub fn value(&self) -> V::SelfType<'_> {
-        V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+        V::from_bytes(AlignedSlice::new(
+            &self.page.memory()[self.offset..(self.offset + self.len)],
+        ))
     }
 }
 
@@ -198,7 +212,7 @@ impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
             OnDrop::None => {}
             OnDrop::Free(page_number) => {
                 // Drop our reference to the page, so that it can be freed
-                let mut dummy = EitherPage::OwnedMemory(vec![]);
+                let mut dummy = EitherPage::OwnedMemory(AlignedVec::new());
                 mem::swap(&mut self.page, &mut dummy);
                 drop(dummy);
                 // Safety: caller to new() guaranteed that no other references to this page exist
@@ -209,9 +223,16 @@ impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
             OnDrop::RemoveEntry {
                 position,
                 fixed_key_size,
+                key_alignment,
             } => {
                 if let EitherPage::Mutable(ref mut mut_page) = self.page {
-                    let mut mutator = LeafMutator::new(mut_page, fixed_key_size, V::fixed_width());
+                    let mut mutator = LeafMutator::new(
+                        mut_page,
+                        fixed_key_size,
+                        key_alignment,
+                        V::fixed_width(),
+                        V::ALIGNMENT,
+                    );
                     mutator.remove(position);
                 } else if !thread::panicking() {
                     unreachable!();
@@ -223,7 +244,7 @@ impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
 
 pub struct AccessGuardMut<'a, K: RedbKey, V: RedbValue> {
     root: Rc<RefCell<Option<(PageNumber, Checksum)>>>,
-    key: Vec<u8>,
+    key: AlignedVec<1>,
     mem: &'a TransactionalMemory,
     page: PageMut<'a>,
     offset: usize,
@@ -236,7 +257,7 @@ pub struct AccessGuardMut<'a, K: RedbKey, V: RedbValue> {
 
 impl<'a, K: RedbKey, V: RedbValue> AccessGuardMut<'a, K, V> {
     pub(crate) fn new(
-        key: &[u8],
+        key: AlignedSlice<1>,
         page: PageMut<'a>,
         offset: usize,
         len: usize,
@@ -272,8 +293,8 @@ impl<'a, K: RedbKey, V: RedbValue> AccessGuardMut<'a, K, V> {
             assert!(self.mem.uncommitted(page_number));
             let mut page = unsafe { self.mem.get_page_mut(page_number)? };
             assert_eq!(BRANCH, page.memory()[0]);
-            let accessor = BranchAccessor::new(&page, K::fixed_width());
-            let (child_index, child_page) = accessor.child_for_key::<K>(&self.key);
+            let accessor = BranchAccessor::new(&page, K::fixed_width(), K::ALIGNMENT);
+            let (child_index, child_page) = accessor.child_for_key::<K>(self.key.as_aligned());
             let child_checksum = self.finalize_checksum(child_page)?;
             drop(accessor);
             let mut mutator = BranchMutator::new(&mut page);
@@ -290,10 +311,17 @@ impl<'a, K: RedbKey, V: RedbValue> AccessGuardMut<'a, K, V> {
             LEAF => leaf_checksum(
                 page,
                 K::fixed_width(),
+                K::ALIGNMENT,
                 V::fixed_width(),
+                V::ALIGNMENT,
                 self.mem.checksum_type(),
             ),
-            BRANCH => branch_checksum(page, K::fixed_width(), self.mem.checksum_type()),
+            BRANCH => branch_checksum(
+                page,
+                K::fixed_width(),
+                K::ALIGNMENT,
+                self.mem.checksum_type(),
+            ),
             _ => unreachable!(),
         }
     }
@@ -322,23 +350,23 @@ impl<'a, K: RedbKey, V: RedbValue> Drop for AccessGuardMut<'a, K, V> {
 }
 
 // Provides a simple zero-copy way to access entries
-pub struct EntryAccessor<'a> {
-    key: &'a [u8],
-    value: &'a [u8],
+pub struct EntryAccessor<'a, const K: usize, const V: usize> {
+    key: AlignedSlice<'a, K>,
+    value: AlignedSlice<'a, V>,
 }
 
-impl<'a> EntryAccessor<'a> {
-    fn new(key: &'a [u8], value: &'a [u8]) -> Self {
+impl<'a, const K: usize, const V: usize> EntryAccessor<'a, K, V> {
+    fn new(key: AlignedSlice<'a, K>, value: AlignedSlice<'a, V>) -> Self {
         EntryAccessor { key, value }
     }
 }
 
-impl<'a: 'b, 'b> EntryAccessor<'a> {
-    pub(crate) fn key(&'b self) -> &'a [u8] {
+impl<'a: 'b, 'b, const K: usize, const V: usize> EntryAccessor<'a, K, V> {
+    pub(crate) fn key(&'b self) -> AlignedSlice<'a, K> {
         self.key
     }
 
-    pub(crate) fn value(&'b self) -> &'a [u8] {
+    pub(crate) fn value(&'b self) -> AlignedSlice<'a, V> {
         self.value
     }
 }
@@ -347,7 +375,9 @@ impl<'a: 'b, 'b> EntryAccessor<'a> {
 pub(crate) struct LeafAccessor<'a> {
     page: &'a [u8],
     fixed_key_size: Option<usize>,
+    key_alignment: usize,
     fixed_value_size: Option<usize>,
+    value_alignment: usize,
     num_pairs: usize,
 }
 
@@ -355,14 +385,18 @@ impl<'a> LeafAccessor<'a> {
     pub(crate) fn new(
         page: &'a [u8],
         fixed_key_size: Option<usize>,
+        key_alignment: usize,
         fixed_value_size: Option<usize>,
+        value_alignment: usize,
     ) -> Self {
         debug_assert_eq!(page[0], LEAF);
         let num_pairs = u16::from_le_bytes(page[2..4].try_into().unwrap()) as usize;
         LeafAccessor {
             page,
             fixed_key_size,
+            key_alignment,
             fixed_value_size,
+            value_alignment,
             num_pairs,
         }
     }
@@ -378,7 +412,7 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
-    pub(crate) fn position<K: RedbKey>(&self, query: &[u8]) -> (usize, bool) {
+    pub(crate) fn position<K: RedbKey>(&self, query: AlignedSlice<1>) -> (usize, bool) {
         // inclusive
         let mut min_entry = 0;
         // inclusive. Start past end, since it might be positioned beyond the end of the leaf
@@ -402,7 +436,7 @@ impl<'a> LeafAccessor<'a> {
         (min_entry, false)
     }
 
-    pub(crate) fn find_key<K: RedbKey>(&self, query: &[u8]) -> Option<usize> {
+    pub(crate) fn find_key<K: RedbKey>(&self, query: AlignedSlice<1>) -> Option<usize> {
         let (entry, found) = self.position::<K>(query);
         if found {
             Some(entry)
@@ -420,7 +454,7 @@ impl<'a> LeafAccessor<'a> {
             offset += size_of::<u32>() * self.num_pairs;
         }
 
-        offset
+        next_multiple_of(offset, self.key_alignment)
     }
 
     fn key_start(&self, n: usize) -> Option<usize> {
@@ -451,6 +485,7 @@ impl<'a> LeafAccessor<'a> {
     fn value_start(&self, n: usize) -> Option<usize> {
         if n == 0 {
             self.key_end(self.num_pairs() - 1)
+                .map(|x| next_multiple_of(x, self.value_alignment))
         } else {
             self.value_end(n - 1)
         }
@@ -497,7 +532,7 @@ impl<'a> LeafAccessor<'a> {
         self.length_of_values(start, end) + self.length_of_keys(start, end)
     }
 
-    fn length_of_values(&self, start: usize, end: usize) -> usize {
+    pub(crate) fn length_of_values(&self, start: usize, end: usize) -> usize {
         if end == 0 {
             return 0;
         }
@@ -521,14 +556,25 @@ impl<'a> LeafAccessor<'a> {
         self.value_end(self.num_pairs() - 1).unwrap()
     }
 
-    fn key_unchecked(&self, n: usize) -> &[u8] {
-        &self.page[self.key_start(n).unwrap()..self.key_end(n).unwrap()]
+    fn key_unchecked(&self, n: usize) -> AlignedSlice<1> {
+        AlignedSlice::new(&self.page[self.key_start(n).unwrap()..self.key_end(n).unwrap()])
     }
 
-    pub(crate) fn entry(&self, n: usize) -> Option<EntryAccessor<'a>> {
+    pub(crate) fn entry<const K: usize, const V: usize>(
+        &self,
+        n: usize,
+    ) -> Option<EntryAccessor<'a, K, V>> {
         let key = &self.page[self.key_start(n)?..self.key_end(n)?];
         let value = &self.page[self.value_start(n)?..self.value_end(n)?];
-        Some(EntryAccessor::new(key, value))
+        Some(EntryAccessor::new(
+            AlignedSlice::new(key),
+            AlignedSlice::new(value),
+        ))
+    }
+
+    pub(crate) fn value<const V: usize>(&self, n: usize) -> Option<AlignedSlice<'a, V>> {
+        let value = &self.page[self.value_start(n)?..self.value_end(n)?];
+        Some(AlignedSlice::new(value))
     }
 
     pub(crate) fn entry_ranges(&self, n: usize) -> Option<(Range<usize>, Range<usize>)> {
@@ -537,42 +583,43 @@ impl<'a> LeafAccessor<'a> {
         Some((key, value))
     }
 
-    pub(super) fn last_entry(&self) -> EntryAccessor<'a> {
+    pub(super) fn last_entry<const K: usize, const V: usize>(&self) -> EntryAccessor<'a, K, V> {
         self.entry(self.num_pairs() - 1).unwrap()
     }
 }
 
-pub(super) struct LeafBuilder<'a, 'b> {
-    pairs: Vec<(&'a [u8], &'a [u8])>,
-    fixed_key_size: Option<usize>,
-    fixed_value_size: Option<usize>,
+pub(super) struct LeafBuilder<'a, 'b, K: RedbKey, V: RedbValue> {
+    pairs: Vec<(AlignedSlice<'a, 1>, AlignedSlice<'a, 1>)>,
     total_key_bytes: usize,
     total_value_bytes: usize,
     mem: &'b TransactionalMemory,
+    _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
 }
 
-impl<'a, 'b> LeafBuilder<'a, 'b> {
-    pub(super) fn required_bytes(num_pairs: usize, keys_values_bytes: usize) -> usize {
-        RawLeafBuilder::required_bytes(num_pairs, keys_values_bytes)
+impl<'a, 'b, K: RedbKey, V: RedbValue> LeafBuilder<'a, 'b, K, V> {
+    pub(super) fn required_bytes(num_pairs: usize, keys_bytes: usize, value_bytes: usize) -> usize {
+        RawLeafBuilder::required_bytes(
+            num_pairs,
+            keys_bytes,
+            value_bytes,
+            K::ALIGNMENT,
+            V::ALIGNMENT,
+        )
     }
 
-    pub(super) fn new(
-        mem: &'b TransactionalMemory,
-        capacity: usize,
-        fixed_key_size: Option<usize>,
-        fixed_value_size: Option<usize>,
-    ) -> Self {
+    pub(super) fn new(mem: &'b TransactionalMemory, capacity: usize) -> Self {
         Self {
             pairs: Vec::with_capacity(capacity),
-            fixed_key_size,
-            fixed_value_size,
             total_key_bytes: 0,
             total_value_bytes: 0,
             mem,
+            _key_type: Default::default(),
+            _value_type: Default::default(),
         }
     }
 
-    pub(super) fn push(&mut self, key: &'a [u8], value: &'a [u8]) {
+    pub(super) fn push(&mut self, key: AlignedSlice<'a, 1>, value: AlignedSlice<'a, 1>) {
         self.total_key_bytes += key.len();
         self.total_value_bytes += value.len();
         self.pairs.push((key, value))
@@ -589,7 +636,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
                     continue;
                 }
             }
-            let entry = accessor.entry(i).unwrap();
+            let entry = accessor.entry::<1, 1>(i).unwrap();
             self.push(entry.key(), entry.value());
         }
     }
@@ -597,12 +644,13 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
     pub(super) fn should_split(&self) -> bool {
         let required_size = Self::required_bytes(
             self.pairs.len(),
-            self.total_key_bytes + self.total_value_bytes,
+            self.total_key_bytes,
+            self.total_value_bytes,
         );
         required_size > self.mem.get_page_size() && self.pairs.len() > 1
     }
 
-    pub(super) fn build_split(self) -> Result<(PageMut<'b>, &'a [u8], PageMut<'b>)> {
+    pub(super) fn build_split(self) -> Result<(PageMut<'b>, AlignedSlice<'a, 1>, PageMut<'b>)> {
         let total_size = self.total_key_bytes + self.total_value_bytes;
         let mut division = 0;
         let mut first_split_key_bytes = 0;
@@ -617,36 +665,39 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         }
 
         let required_size =
-            Self::required_bytes(division, first_split_key_bytes + first_split_value_bytes);
+            Self::required_bytes(division, first_split_key_bytes, first_split_value_bytes);
         let mut page1 = self.mem.allocate(required_size)?;
         let mut builder = RawLeafBuilder::new(
             page1.memory_mut(),
             division,
-            self.fixed_key_size,
-            self.fixed_value_size,
+            K::fixed_width(),
+            K::ALIGNMENT,
+            V::fixed_width(),
+            V::ALIGNMENT,
             first_split_key_bytes,
         );
         for (key, value) in self.pairs.iter().take(division) {
-            builder.append(key, value);
+            builder.append(key.data(), value.data());
         }
         drop(builder);
 
         let required_size = Self::required_bytes(
             self.pairs.len() - division,
-            self.total_key_bytes + self.total_value_bytes
-                - first_split_key_bytes
-                - first_split_value_bytes,
+            self.total_key_bytes - first_split_key_bytes,
+            self.total_value_bytes - first_split_value_bytes,
         );
         let mut page2 = self.mem.allocate(required_size)?;
         let mut builder = RawLeafBuilder::new(
             page2.memory_mut(),
             self.pairs.len() - division,
-            self.fixed_key_size,
-            self.fixed_value_size,
+            K::fixed_width(),
+            K::ALIGNMENT,
+            V::fixed_width(),
+            V::ALIGNMENT,
             self.total_key_bytes - first_split_key_bytes,
         );
         for (key, value) in self.pairs[division..].iter() {
-            builder.append(key, value);
+            builder.append(key.data(), value.data());
         }
         drop(builder);
 
@@ -656,24 +707,28 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
     pub(super) fn build(self) -> Result<PageMut<'b>> {
         let required_size = Self::required_bytes(
             self.pairs.len(),
-            self.total_key_bytes + self.total_value_bytes,
+            self.total_key_bytes,
+            self.total_value_bytes,
         );
         let mut page = self.mem.allocate(required_size)?;
         let mut builder = RawLeafBuilder::new(
             page.memory_mut(),
             self.pairs.len(),
-            self.fixed_key_size,
-            self.fixed_value_size,
+            K::fixed_width(),
+            K::ALIGNMENT,
+            V::fixed_width(),
+            V::ALIGNMENT,
             self.total_key_bytes,
         );
         for (key, value) in self.pairs {
-            builder.append(key, value);
+            builder.append(key.data(), value.data());
         }
         drop(builder);
         Ok(page)
     }
 }
 
+// TODO: merge this class with LeafBuilder?
 // Note the caller is responsible for ensuring that the buffer is large enough
 // and rewriting all fields if any dynamically sized fields are written
 // Layout is:
@@ -684,26 +739,39 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
 // 4 bytes: key_end
 // (optional) repeating (num_entries times):
 // 4 bytes: value_end
+// (optional) n bytes: padding to key_alignment
 // repeating (num_entries times):
 // * n bytes: key data
+// (optional) n bytes: padding to value_alignment
 // repeating (num_entries times):
 // * n bytes: value data
 pub(crate) struct RawLeafBuilder<'a> {
     page: &'a mut [u8],
     fixed_key_size: Option<usize>,
+    key_alignment: usize,
     fixed_value_size: Option<usize>,
+    value_alignment: usize,
     num_pairs: usize,
     provisioned_key_bytes: usize,
     pairs_written: usize, // used for debugging
 }
 
 impl<'a> RawLeafBuilder<'a> {
-    pub(crate) fn required_bytes(num_pairs: usize, keys_values_bytes: usize) -> usize {
+    pub(crate) fn required_bytes(
+        num_pairs: usize,
+        keys_bytes: usize,
+        value_bytes: usize,
+        key_alignment: usize,
+        value_alignment: usize,
+    ) -> usize {
         // Page id & header;
         let mut result = 4;
         // key & value lengths
         result += num_pairs * 2 * size_of::<u32>();
-        result += keys_values_bytes;
+        result = next_multiple_of(result, key_alignment);
+        result += keys_bytes;
+        result = next_multiple_of(result, value_alignment);
+        result += value_bytes;
 
         result
     }
@@ -712,7 +780,9 @@ impl<'a> RawLeafBuilder<'a> {
         page: &'a mut [u8],
         num_pairs: usize,
         fixed_key_size: Option<usize>,
+        key_alignment: usize,
         fixed_value_size: Option<usize>,
+        value_alignment: usize,
         key_bytes: usize,
     ) -> Self {
         page[0] = LEAF;
@@ -728,7 +798,9 @@ impl<'a> RawLeafBuilder<'a> {
         RawLeafBuilder {
             page,
             fixed_key_size,
+            key_alignment,
             fixed_value_size,
+            value_alignment,
             num_pairs,
             provisioned_key_bytes: key_bytes,
             pairs_written: 0,
@@ -737,7 +809,7 @@ impl<'a> RawLeafBuilder<'a> {
 
     fn value_end(&self, n: usize) -> usize {
         if let Some(fixed) = self.fixed_value_size {
-            return self.key_section_start() + self.provisioned_key_bytes + fixed * (n + 1);
+            return self.value_section_start() + fixed * (n + 1);
         }
         let mut offset = 4 + size_of::<u32>() * n;
         if self.fixed_key_size.is_none() {
@@ -759,7 +831,14 @@ impl<'a> RawLeafBuilder<'a> {
             offset += size_of::<u32>() * self.num_pairs;
         }
 
-        offset
+        next_multiple_of(offset, self.key_alignment)
+    }
+
+    fn value_section_start(&self) -> usize {
+        next_multiple_of(
+            self.key_section_start() + self.provisioned_key_bytes,
+            self.value_alignment,
+        )
     }
 
     fn key_end(&self, n: usize) -> usize {
@@ -781,7 +860,7 @@ impl<'a> RawLeafBuilder<'a> {
             self.key_end(self.pairs_written - 1)
         };
         let value_offset = if self.pairs_written == 0 {
-            self.key_section_start() + self.provisioned_key_bytes
+            self.value_section_start()
         } else {
             self.value_end(self.pairs_written - 1)
         };
@@ -827,33 +906,48 @@ impl<'a> Drop for RawLeafBuilder<'a> {
 pub(super) struct LeafMutator<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
     fixed_key_size: Option<usize>,
+    key_alignment: usize,
     fixed_value_size: Option<usize>,
+    value_alignment: usize,
 }
 
 impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
     pub(super) fn new(
         page: &'b mut PageMut<'a>,
         fixed_key_size: Option<usize>,
+        key_alignment: usize,
         fixed_value_size: Option<usize>,
+        value_alignment: usize,
     ) -> Self {
         assert_eq!(page.memory_mut()[0], LEAF);
         Self {
             page,
             fixed_key_size,
+            key_alignment,
             fixed_value_size,
+            value_alignment,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn sufficient_insert_inplace_space(
         page: &'_ PageImpl<'_>,
         position: usize,
         overwrite: bool,
         fixed_key_size: Option<usize>,
+        key_alignment: usize,
         fixed_value_size: Option<usize>,
+        value_alignment: usize,
         new_key: &[u8],
         new_value: &[u8],
     ) -> bool {
-        let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+        let accessor = LeafAccessor::new(
+            page.memory(),
+            fixed_key_size,
+            key_alignment,
+            fixed_value_size,
+            value_alignment,
+        );
         if overwrite {
             let remaining = page.memory().len() - accessor.total_length();
             let required_delta = isize::try_from(new_key.len() + new_value.len()).unwrap()
@@ -884,7 +978,9 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
         let accessor = LeafAccessor::new(
             self.page.memory(),
             self.fixed_key_size,
+            self.key_alignment,
             self.fixed_value_size,
+            self.value_alignment,
         );
         let required_delta = if overwrite {
             isize::try_from(key.len() + value.len()).unwrap()
@@ -1022,7 +1118,9 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
         let accessor = LeafAccessor::new(
             self.page.memory(),
             self.fixed_key_size,
+            self.key_alignment,
             self.fixed_value_size,
+            self.value_alignment,
         );
         let num_pairs = accessor.num_pairs();
         assert!(i < num_pairs);
@@ -1126,7 +1224,9 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
         let accessor = LeafAccessor::new(
             self.page.memory(),
             self.fixed_key_size,
+            self.key_alignment,
             self.fixed_value_size,
+            self.value_alignment,
         );
         let num_pairs = accessor.num_pairs();
         drop(accessor);
@@ -1150,17 +1250,19 @@ pub(super) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
     num_keys: usize,
     fixed_key_size: Option<usize>,
+    key_alignment: usize,
     _page_lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
-    pub(super) fn new(page: &'b T, fixed_key_size: Option<usize>) -> Self {
+    pub(super) fn new(page: &'b T, fixed_key_size: Option<usize>, key_alignment: usize) -> Self {
         debug_assert_eq!(page.memory()[0], BRANCH);
         let num_keys = u16::from_le_bytes(page.memory()[2..4].try_into().unwrap()) as usize;
         BranchAccessor {
             page,
             num_keys,
             fixed_key_size,
+            key_alignment,
             _page_lifetime: Default::default(),
         }
     }
@@ -1186,7 +1288,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         self.key_end(self.num_keys() - 1)
     }
 
-    pub(super) fn child_for_key<K: RedbKey>(&self, query: &[u8]) -> (usize, PageNumber) {
+    pub(super) fn child_for_key<K: RedbKey>(&self, query: AlignedSlice<1>) -> (usize, PageNumber) {
         let mut min_child = 0; // inclusive
         let mut max_child = self.num_keys(); // inclusive
         while min_child < max_child {
@@ -1209,12 +1311,14 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
     }
 
     fn key_section_start(&self) -> usize {
-        if self.fixed_key_size.is_none() {
+        let unaligned = if self.fixed_key_size.is_none() {
             8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
                 + size_of::<u32>() * self.num_keys()
         } else {
             8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
-        }
+        };
+
+        next_multiple_of(unaligned, self.key_alignment)
     }
 
     fn key_offset(&self, n: usize) -> usize {
@@ -1239,13 +1343,14 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         ) as usize
     }
 
-    pub(super) fn key(&self, n: usize) -> Option<&[u8]> {
+    pub(super) fn key<const N: usize>(&self, n: usize) -> Option<AlignedSlice<N>> {
+        assert_eq!(N, self.key_alignment);
         if n >= self.num_keys() {
             return None;
         }
         let offset = self.key_offset(n);
         let end = self.key_end(n);
-        Some(&self.page.memory()[offset..end])
+        Some(AlignedSlice::new(&self.page.memory()[offset..end]))
     }
 
     pub(super) fn count_children(&self) -> usize {
@@ -1284,26 +1389,22 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
     }
 }
 
-pub(super) struct BranchBuilder<'a, 'b> {
+pub(super) struct BranchBuilder<'a, 'b, K: RedbKey> {
     children: Vec<(PageNumber, Checksum)>,
-    keys: Vec<&'a [u8]>,
+    keys: Vec<AlignedSlice<'a, 1>>,
     total_key_bytes: usize,
-    fixed_key_size: Option<usize>,
     mem: &'b TransactionalMemory,
+    _key_type: PhantomData<K>,
 }
 
-impl<'a, 'b> BranchBuilder<'a, 'b> {
-    pub(super) fn new(
-        mem: &'b TransactionalMemory,
-        child_capacity: usize,
-        fixed_key_size: Option<usize>,
-    ) -> Self {
+impl<'a, 'b, K: RedbKey> BranchBuilder<'a, 'b, K> {
+    pub(super) fn new(mem: &'b TransactionalMemory, child_capacity: usize) -> Self {
         Self {
             children: Vec::with_capacity(child_capacity),
             keys: Vec::with_capacity(child_capacity - 1),
             total_key_bytes: 0,
-            fixed_key_size,
             mem,
+            _key_type: Default::default(),
         }
     }
 
@@ -1315,7 +1416,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         self.children.push((child, checksum));
     }
 
-    pub(super) fn push_key(&mut self, key: &'a [u8]) {
+    pub(super) fn push_key(&mut self, key: AlignedSlice<'a, 1>) {
         self.keys.push(key);
         self.total_key_bytes += key.len();
     }
@@ -1327,7 +1428,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
             self.push_child(child, checksum);
         }
         for i in 0..(accessor.count_children() - 1) {
-            self.push_key(accessor.key(i).unwrap());
+            self.push_key(accessor.key::<1>(i).unwrap());
         }
     }
 
@@ -1344,14 +1445,16 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         let size = RawBranchBuilder::required_bytes(
             self.keys.len(),
             self.total_key_bytes,
-            self.fixed_key_size,
+            K::fixed_width(),
+            K::ALIGNMENT,
         );
         let mut page = self.mem.allocate(size)?;
-        let mut builder = RawBranchBuilder::new(&mut page, self.keys.len(), self.fixed_key_size);
+        let mut builder =
+            RawBranchBuilder::new(&mut page, self.keys.len(), K::fixed_width(), K::ALIGNMENT);
         builder.write_first_page(self.children[0].0, self.children[0].1);
         for i in 1..self.children.len() {
             let key = &self.keys[i - 1];
-            builder.write_nth_key(key.as_ref(), self.children[i].0, self.children[i].1, i - 1);
+            builder.write_nth_key(key.data(), self.children[i].0, self.children[i].1, i - 1);
         }
         drop(builder);
 
@@ -1362,28 +1465,35 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         let size = RawBranchBuilder::required_bytes(
             self.keys.len(),
             self.total_key_bytes,
-            self.fixed_key_size,
+            K::fixed_width(),
+            K::ALIGNMENT,
         );
         size > self.mem.get_page_size() && self.keys.len() >= 3
     }
 
-    pub(super) fn build_split(self) -> Result<(PageMut<'b>, &'a [u8], PageMut<'b>)> {
+    pub(super) fn build_split(self) -> Result<(PageMut<'b>, AlignedSlice<'a, 1>, PageMut<'b>)> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
         assert!(self.keys.len() >= 3);
         let division = self.keys.len() / 2;
         let first_split_key_len: usize = self.keys.iter().take(division).map(|k| k.len()).sum();
         let division_key = self.keys[division];
-        let second_split_key_len = self.total_key_bytes - first_split_key_len - division_key.len();
+        let second_split_key_len =
+            self.total_key_bytes - first_split_key_len - division_key.data().len();
 
-        let size =
-            RawBranchBuilder::required_bytes(division, first_split_key_len, self.fixed_key_size);
+        let size = RawBranchBuilder::required_bytes(
+            division,
+            first_split_key_len,
+            K::fixed_width(),
+            K::ALIGNMENT,
+        );
         let mut page1 = self.mem.allocate(size)?;
-        let mut builder = RawBranchBuilder::new(&mut page1, division, self.fixed_key_size);
+        let mut builder =
+            RawBranchBuilder::new(&mut page1, division, K::fixed_width(), K::ALIGNMENT);
         builder.write_first_page(self.children[0].0, self.children[0].1);
         for i in 0..division {
             let key = &self.keys[i];
             builder.write_nth_key(
-                key.as_ref(),
+                key.data(),
                 self.children[i + 1].0,
                 self.children[i + 1].1,
                 i,
@@ -1394,19 +1504,21 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         let size = RawBranchBuilder::required_bytes(
             self.keys.len() - division - 1,
             second_split_key_len,
-            self.fixed_key_size,
+            K::fixed_width(),
+            K::ALIGNMENT,
         );
         let mut page2 = self.mem.allocate(size)?;
         let mut builder = RawBranchBuilder::new(
             &mut page2,
             self.keys.len() - division - 1,
-            self.fixed_key_size,
+            K::fixed_width(),
+            K::ALIGNMENT,
         );
         builder.write_first_page(self.children[division + 1].0, self.children[division + 1].1);
         for i in (division + 1)..self.keys.len() {
             let key = &self.keys[i];
             builder.write_nth_key(
-                key.as_ref(),
+                key.data(),
                 self.children[i + 1].0,
                 self.children[i + 1].1,
                 i - division - 1,
@@ -1431,11 +1543,13 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
 // 8 bytes: page number
 // (optional) repeating (num_keys times):
 // * 4 bytes: key end. Ending offset of the key, exclusive
+// (optional) n bytes: padding to key_alignment
 // repeating (num_keys times):
 // * n bytes: key data
 pub(super) struct RawBranchBuilder<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
     fixed_key_size: Option<usize>,
+    key_alignment: usize,
     num_keys: usize,
     keys_written: usize, // used for debugging
 }
@@ -1445,17 +1559,16 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
         num_keys: usize,
         size_of_keys: usize,
         fixed_key_size: Option<usize>,
+        key_alignment: usize,
     ) -> usize {
-        if fixed_key_size.is_none() {
-            let fixed_size = 8
-                + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1)
-                + size_of::<u32>() * num_keys;
-            size_of_keys + fixed_size
+        let fixed_size = if fixed_key_size.is_none() {
+            8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1)
+                + size_of::<u32>() * num_keys
         } else {
-            let fixed_size =
-                8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1);
-            size_of_keys + fixed_size
-        }
+            8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1)
+        };
+
+        size_of_keys + next_multiple_of(fixed_size, key_alignment)
     }
 
     // Caller MUST write num_keys values
@@ -1463,6 +1576,7 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
         page: &'b mut PageMut<'a>,
         num_keys: usize,
         fixed_key_size: Option<usize>,
+        key_alignment: usize,
     ) -> Self {
         assert!(num_keys > 0);
         page.memory_mut()[0] = BRANCH;
@@ -1481,6 +1595,7 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
         RawBranchBuilder {
             page,
             fixed_key_size,
+            key_alignment,
             num_keys,
             keys_written: 0,
         }
@@ -1502,7 +1617,7 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
             offset += size_of::<u32>() * self.num_keys;
         }
 
-        offset
+        next_multiple_of(offset, self.key_alignment)
     }
 
     fn key_end(&self, n: usize) -> usize {
@@ -1597,5 +1712,23 @@ impl<'a: 'b, 'b> BranchMutator<'a, 'b> {
             8 + size_of::<Checksum>() * (self.num_keys() + 1) + PageNumber::serialized_size() * i;
         self.page.memory_mut()[offset..(offset + PageNumber::serialized_size())]
             .copy_from_slice(&page_number.to_le_bytes());
+    }
+}
+
+pub(super) fn next_multiple_of(value: usize, multiple: usize) -> usize {
+    ((value + multiple - 1) / multiple) * multiple
+}
+
+#[cfg(test)]
+mod test {
+    use crate::tree_store::btree_base::next_multiple_of;
+
+    #[test]
+    fn multiple() {
+        let x = 11;
+        assert_eq!(0, next_multiple_of(0, x));
+        for i in 1..=x {
+            assert_eq!(x, next_multiple_of(i, x));
+        }
     }
 }

@@ -3,7 +3,7 @@ use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition, RawBtree,
     TableType, TransactionalMemory, PAGE_SIZE,
 };
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{RedbKey, RedbValue, MAX_ALIGNMENT};
 use crate::Error;
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Display, Formatter};
@@ -59,7 +59,11 @@ impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> TableDefinition<'a, K, V>
         assert!(!name.is_empty());
         // Custom alignment is not currently supported
         assert!(K::ALIGNMENT == 1);
+        assert!(K::ALIGNMENT.is_power_of_two());
+        assert!(K::ALIGNMENT <= MAX_ALIGNMENT);
         assert!(V::ALIGNMENT == 1);
+        assert!(V::ALIGNMENT.is_power_of_two());
+        assert!(V::ALIGNMENT <= MAX_ALIGNMENT);
         Self {
             name,
             _key_type: PhantomData,
@@ -112,7 +116,11 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableDefinition<'a,
         assert!(!name.is_empty());
         // Custom alignment is not currently supported
         assert!(K::ALIGNMENT == 1);
+        assert!(K::ALIGNMENT.is_power_of_two());
+        assert!(K::ALIGNMENT <= MAX_ALIGNMENT);
         assert!(V::ALIGNMENT == 1);
+        assert!(V::ALIGNMENT.is_power_of_two());
+        assert!(V::ALIGNMENT <= MAX_ALIGNMENT);
         Self {
             name,
             _key_type: PhantomData,
@@ -207,7 +215,9 @@ impl Database {
         if !RawBtree::new(
             Some((root, root_checksum)),
             <&str>::fixed_width(),
+            <&str>::ALIGNMENT,
             InternalTableDefinition::fixed_width(),
+            InternalTableDefinition::ALIGNMENT,
             mem,
         )
         .verify_checksum()?
@@ -219,7 +229,9 @@ impl Database {
             if !RawBtree::new(
                 Some((freed_root, freed_checksum)),
                 FreedTableKey::fixed_width(),
+                FreedTableKey::ALIGNMENT,
                 None,
+                1,
                 mem,
             )
             .verify_checksum()?
@@ -237,7 +249,9 @@ impl Database {
                 if !RawBtree::new(
                     Some((table_root, table_checksum)),
                     definition.get_fixed_key_size(),
+                    definition.get_key_alignment(),
                     definition.get_fixed_value_size(),
+                    definition.get_value_alignment(),
                     mem,
                 )
                 .verify_checksum()?
@@ -292,7 +306,7 @@ impl Database {
 
             // Repair the allocator state
             // All pages in the master table
-            let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, &mem)?;
+            let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, 1, None, 1, &mem)?;
             mem.mark_pages_allocated(master_pages_iter)?;
 
             // Iterate over all other tables
@@ -306,7 +320,9 @@ impl Database {
                     let table_pages_iter = AllPageNumbersBtreeIter::new(
                         table_root,
                         definition.get_fixed_key_size(),
+                        definition.get_key_alignment(),
                         definition.get_fixed_value_size(),
+                        definition.get_value_alignment(),
                         &mem,
                     )?;
                     mem.mark_pages_allocated(table_pages_iter)?;
@@ -316,7 +332,9 @@ impl Database {
                         let table_pages_iter = AllPageNumbersBtreeIter::new(
                             table_root,
                             definition.get_fixed_key_size(),
+                            definition.get_key_alignment(),
                             definition.get_fixed_value_size(),
+                            definition.get_value_alignment(),
                             &mem,
                         )?;
                         for table_page in table_pages_iter {
@@ -324,7 +342,9 @@ impl Database {
                             let mut subtree_roots = parse_subtree_roots(
                                 &page,
                                 definition.get_fixed_key_size(),
+                                definition.get_key_alignment(),
                                 definition.get_fixed_value_size(),
+                                definition.get_value_alignment(),
                             );
                             mem.mark_pages_allocated(subtree_roots.drain(..))?;
                         }
