@@ -72,17 +72,18 @@ impl PageNumber {
         region_pages_start: u32,
         page_size: u32,
     ) -> Range<u64> {
-        let regional_start = region_pages_start + self.page_index * self.page_size_bytes(page_size);
-        debug_assert!((regional_start as u64) < region_size);
+        let regional_start = (region_pages_start as u64)
+            + (self.page_index as u64) * self.page_size_bytes(page_size);
+        debug_assert!(regional_start < region_size);
         let region_base = (self.region as u64) * region_size;
-        let start = data_section_offset as u64 + region_base + regional_start as u64;
-        let end = start + self.page_size_bytes(page_size) as u64;
+        let start = data_section_offset as u64 + region_base + regional_start;
+        let end = start + self.page_size_bytes(page_size);
         start..end
     }
 
-    pub(crate) fn page_size_bytes(&self, page_size: u32) -> u32 {
-        let pages = 1u32 << self.page_order;
-        pages * page_size
+    pub(crate) fn page_size_bytes(&self, page_size: u32) -> u64 {
+        let pages = 1u64 << self.page_order;
+        pages * (page_size as u64)
     }
 }
 
@@ -280,4 +281,25 @@ pub(super) trait PhysicalStorage: Send + Sync {
 
     // Invalidate any caching of the given range. After this call overlapping reads of the range are allowed
     fn invalidate_cache(&self, offset: u64, len: usize);
+}
+
+#[cfg(test)]
+mod test {
+    use crate::tree_store::PageNumber;
+
+    #[test]
+    fn last_page() {
+        let region_data_size = 2u64.pow(32);
+        let page_size = 4096;
+        let pages_per_region = region_data_size / page_size;
+        let region_header_size = 2u64.pow(16);
+        let last_page_index = pages_per_region - 1;
+        let page_number = PageNumber::new(1, last_page_index.try_into().unwrap(), 0);
+        page_number.address_range(
+            4096,
+            region_data_size + region_header_size,
+            region_header_size.try_into().unwrap(),
+            page_size.try_into().unwrap(),
+        );
+    }
 }
