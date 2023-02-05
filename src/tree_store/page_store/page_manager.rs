@@ -250,9 +250,9 @@ impl Allocators {
         let region_size =
             header.region_max_data_pages() as u64 * page_size as u64 + region_header_size as u64;
         let range = header.primary_slot().region_tracker.address_range(
-            page_size,
+            page_size as u64,
             region_size,
-            region_header_size,
+            region_header_size as u64,
             page_size,
         );
         let len: usize = (range.end - range.start).try_into().unwrap();
@@ -286,13 +286,14 @@ impl Allocators {
         storage: &mut Box<dyn PhysicalStorage>,
     ) -> Result {
         let page_size = layout.full_region_layout().page_size();
-        let region_header_size = layout.full_region_layout().get_header_pages() * page_size;
-        let region_size = layout.full_region_layout().num_pages() as u64 * page_size as u64
-            + region_header_size as u64;
+        let region_header_size =
+            (layout.full_region_layout().get_header_pages() * page_size) as u64;
+        let region_size =
+            layout.full_region_layout().num_pages() as u64 * page_size as u64 + region_header_size;
         // Safety: we have a mutable reference to the Mmap, so no one else can have a reference this memory
         let mut region_tracker_bytes = unsafe {
             let range = region_tracker_page.address_range(
-                page_size,
+                page_size as u64,
                 region_size,
                 region_header_size,
                 page_size,
@@ -441,7 +442,7 @@ pub(crate) struct TransactionalMemory {
     // We store these separately from the layout because they're static, and accessed on the get_page()
     // code path where there is no locking
     region_size: u64,
-    region_header_with_padding_size: u32,
+    region_header_with_padding_size: u64,
     #[allow(dead_code)]
     pages_are_os_page_aligned: bool,
     #[allow(dead_code)]
@@ -615,12 +616,7 @@ impl TransactionalMemory {
         let layout = header.primary_slot().layout;
         let tracker_page = header.primary_slot().region_tracker;
         let region_size = layout.full_region_layout().len();
-        let region_header_size: u32 = layout
-            .full_region_layout()
-            .data_section()
-            .start
-            .try_into()
-            .unwrap();
+        let region_header_size = layout.full_region_layout().data_section().start;
 
         let state = InMemoryState::from_bytes(header, storage.as_ref())?;
 
@@ -921,7 +917,7 @@ impl TransactionalMemory {
                     );
 
                     let address = page_number.address_range(
-                        self.page_size,
+                        self.page_size as u64,
                         self.region_size,
                         self.region_header_with_padding_size,
                         self.page_size,
@@ -995,7 +991,7 @@ impl TransactionalMemory {
 
         // Safety: we asserted that no mutable references are open
         let range = page_number.address_range(
-            self.page_size,
+            self.page_size as u64,
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
@@ -1026,7 +1022,7 @@ impl TransactionalMemory {
         }
 
         let address_range = page_number.address_range(
-            self.page_size,
+            self.page_size as u64,
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
@@ -1101,7 +1097,7 @@ impl TransactionalMemory {
             .push(AllocationOp::Free(page));
 
         let address_range = page.address_range(
-            self.page_size,
+            self.page_size as u64,
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
@@ -1134,7 +1130,7 @@ impl TransactionalMemory {
                 .push(AllocationOp::FreeUncommitted(page));
 
             let address_range = page.address_range(
-                self.page_size,
+                self.page_size as u64,
                 self.region_size,
                 self.region_header_with_padding_size,
                 self.page_size,
@@ -1333,7 +1329,7 @@ impl TransactionalMemory {
         }
 
         let address_range = page_number.address_range(
-            self.page_size,
+            self.page_size as u64,
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,

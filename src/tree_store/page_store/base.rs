@@ -67,16 +67,16 @@ impl PageNumber {
 
     pub(crate) fn address_range(
         &self,
-        data_section_offset: u32,
+        data_section_offset: u64,
         region_size: u64,
-        region_pages_start: u32,
+        region_pages_start: u64,
         page_size: u32,
     ) -> Range<u64> {
-        let regional_start = (region_pages_start as u64)
-            + (self.page_index as u64) * self.page_size_bytes(page_size);
+        let regional_start =
+            region_pages_start + (self.page_index as u64) * self.page_size_bytes(page_size);
         debug_assert!(regional_start < region_size);
         let region_base = (self.region as u64) * region_size;
-        let start = data_section_offset as u64 + region_base + regional_start;
+        let start = data_section_offset + region_base + regional_start;
         let end = start + self.page_size_bytes(page_size);
         start..end
     }
@@ -298,7 +298,7 @@ mod test {
         page_number.address_range(
             4096,
             region_data_size + region_header_size,
-            region_header_size.try_into().unwrap(),
+            region_header_size,
             page_size.try_into().unwrap(),
         );
     }
