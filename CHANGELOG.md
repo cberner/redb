@@ -1,5 +1,12 @@
 # redb - Changelog
 
+## 0.13.0 - 2023-02-05
+* Fix a major data corruption issue that was introduced in version 0.12.0. It caused databases
+  greater than ~4GB to become irrecoverably corrupted due to an integer overflow in `PageNumber::address_range`
+  that was introduced by commit `b2c44a824d1ba69f526a1a75c56ae8484bae7248`
+* Add `drain_filter()` to `Table`
+* Make key and value type bounds more clear for tables
+
 ## 0.12.1 - 2023-01-22
 * Fix `open()` on platforms with OS page size != 4KiB
 * Relax lifetime requirements on argument to `range()` and `drain()`
