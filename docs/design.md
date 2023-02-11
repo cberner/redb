@@ -238,7 +238,7 @@ Allocated pages may be of two types: b-tree branch pages, or b-tree leaf pages. 
 --------------------------------------------------------------------------------------------------
 | child page number (repeated num_keys + 1 times)                                                |
 --------------------------------------------------------------------------------------------------
-| (optional) key end (repeated num_keys times) | ... more key ends                               |
+| (optional) key end (repeated num_keys times) | alignment padding                               |
 ==================================================================================================
 | Key data                                                                                       |
 ==================================================================================================
@@ -252,6 +252,8 @@ Allocated pages may be of two types: b-tree branch pages, or b-tree leaf pages. 
 `page number` is an array of child page numbers
 
 `key_end` is an array of ending offsets for the keys. It is optional, MUST NOT be stored for fixed width key types
+
+`alignment padding` optional padding so that the key data begins at a multiple of the key type's required alignment
 
 ### Leaf page:
 * 1 byte: type
@@ -270,9 +272,9 @@ Allocated pages may be of two types: b-tree branch pages, or b-tree leaf pages. 
 ==================================================================================================
 | type     | padding   | number of entries      | (optional) key end (repeated entries times)    |
 --------------------------------------------------------------------------------------------------
-| (optional) value end (repeated entries times) | .. more key/value ends                         |
+| (optional) value end (repeated entries times) | (optional) key alignment padding               |
 ==================================================================================================
-| Key data                                                                                       |
+| Key data                                      | (optional) value alignment padding             |
 ==================================================================================================
 | Value data                                                                                     |
 ==================================================================================================
@@ -285,6 +287,10 @@ Allocated pages may be of two types: b-tree branch pages, or b-tree leaf pages. 
 `key_end` is an array of ending offsets for the keys. It is optional, MUST NOT be stored for fixed width key types
 
 `value_end` is an array of ending offsets for the values. It is optional, MUST NOT be stored for fixed width value types
+
+`key alignment padding` optional padding so that the key data begins at a multiple of the key type's required alignment
+
+`value alignment padding` optional padding so that the value data begins at a multiple of the value type's required alignment
 
 # Commit strategies
 
