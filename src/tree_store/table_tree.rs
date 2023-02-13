@@ -10,6 +10,10 @@ use std::mem::size_of;
 use std::ops::RangeFull;
 use std::sync::{Arc, Mutex};
 
+// Forward compatibility feature in case alignment can be supported in the future
+// See https://github.com/cberner/redb/issues/360
+const ALIGNMENT: usize = 1;
+
 #[derive(Debug)]
 pub(crate) struct FreedTableKey {
     pub(crate) transaction_id: u64,
@@ -383,20 +387,16 @@ impl<'txn> TableTree<'txn> {
                     V::type_name().name()
                 )));
             }
-            if definition.get_key_alignment() != K::ALIGNMENT {
+            if definition.get_key_alignment() != ALIGNMENT {
                 return Err(Error::Corrupted(format!(
                     "{:?} key alignment {} does not match {}",
-                    name,
-                    K::ALIGNMENT,
-                    definition.key_alignment
+                    name, ALIGNMENT, definition.key_alignment
                 )));
             }
-            if definition.get_value_alignment() != V::ALIGNMENT {
+            if definition.get_value_alignment() != ALIGNMENT {
                 return Err(Error::Corrupted(format!(
                     "{:?} value alignment {} does not match {}",
-                    name,
-                    V::ALIGNMENT,
-                    definition.value_alignment
+                    name, ALIGNMENT, definition.value_alignment
                 )));
             }
             if definition.get_fixed_key_size() != K::fixed_width() {
@@ -472,8 +472,8 @@ impl<'txn> TableTree<'txn> {
             table_type,
             fixed_key_size: K::fixed_width(),
             fixed_value_size: V::fixed_width(),
-            key_alignment: K::ALIGNMENT,
-            value_alignment: V::ALIGNMENT,
+            key_alignment: ALIGNMENT,
+            value_alignment: ALIGNMENT,
             key_type: K::type_name(),
             value_type: V::type_name(),
         };
