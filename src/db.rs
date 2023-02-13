@@ -57,9 +57,6 @@ impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> TableDefinition<'a, K, V>
     /// `name` must not be empty.
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
-        // Custom alignment is not currently supported
-        assert!(K::ALIGNMENT == 1);
-        assert!(V::ALIGNMENT == 1);
         Self {
             name,
             _key_type: PhantomData,
@@ -110,9 +107,6 @@ pub struct MultimapTableDefinition<'a, K: RedbKey + 'static, V: RedbKey + 'stati
 impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableDefinition<'a, K, V> {
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
-        // Custom alignment is not currently supported
-        assert!(K::ALIGNMENT == 1);
-        assert!(V::ALIGNMENT == 1);
         Self {
             name,
             _key_type: PhantomData,
