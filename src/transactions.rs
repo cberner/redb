@@ -703,7 +703,6 @@ impl<'db> ReadTransaction<'db> {
     }
 
     /// List all the tables
-    // TODO: should return an iterator of &str, once GATs are available
     pub fn list_tables(&self) -> Result<impl Iterator<Item = String>> {
         self.tree
             .list_tables(TableType::Normal)
@@ -711,7 +710,6 @@ impl<'db> ReadTransaction<'db> {
     }
 
     /// List all the multimap tables
-    // TODO: should return an iterator of &str, once GATs are available
     pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String>> {
         self.tree
             .list_tables(TableType::Multimap)
