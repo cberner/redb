@@ -76,13 +76,3 @@ harness = false
 [[bench]]
 name = "mmap_page_size_benchmark"
 harness = false
-
-[package.metadata.maturin]
-requires-python = ">= 3.7"
-classifier = ["Development Status :: 4 - Beta",
-    "License :: OSI Approved :: MIT License",
-    "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Rust"]
