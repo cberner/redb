@@ -472,7 +472,7 @@ pub enum WriteStrategy {
     /// 3. Flip the god byte primary bit to activate the newly updated commit slot
     /// 4. Call `fsync` to ensure the write to the god byte has been persisted
     ///
-    /// When opening the database after a crash, the got byte primary bit will always point to the
+    /// When opening the database after a crash, the god byte primary bit will always point to the
     /// most recent valid commit.
     ///
     /// This write strategy avoids calculating checksums, which increases write throughput, but
