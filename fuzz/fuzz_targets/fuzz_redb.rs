@@ -284,21 +284,12 @@ fuzz_target!(|config: FuzzConfig| {
     } else {
         WriteStrategy::TwoPhase
     };
-    let db = if config.use_mmap {
-        unsafe {
-            Database::builder()
-                .set_write_strategy(write_strategy)
-                .set_page_size(config.page_size.value)
-                .create_mmapped(redb_file.path())
-        }
-    } else {
-        Database::builder()
+    let db = Database::builder()
             .set_write_strategy(write_strategy)
             .set_page_size(config.page_size.value)
             .set_read_cache_size(config.read_cache_size.value)
             .set_write_cache_size(config.write_cache_size.value)
-            .create(redb_file.path())
-    };
+            .create(redb_file.path());
 
     let db = Arc::new(db.unwrap());
 

@@ -33,7 +33,7 @@ fn main() {
 
     {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        let db = unsafe { Database::builder().create_mmapped(tmpfile.path()).unwrap() };
+        let db = Database::builder().create(tmpfile.path()).unwrap();
 
         let start = Instant::now();
         let write_txn = db.begin_write().unwrap();
@@ -63,7 +63,7 @@ fn main() {
 
     {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        let db = unsafe { Database::builder().create_mmapped(tmpfile.path()).unwrap() };
+        let db = Database::builder().create(tmpfile.path()).unwrap();
 
         let start = Instant::now();
         let write_txn = db.begin_write().unwrap();

@@ -63,17 +63,6 @@ fn main() {
         benchmark(table)
     };
 
-    let redb_mmap_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        let db = unsafe {
-            redb::Database::builder()
-                .create_mmapped(tmpfile.path())
-                .unwrap()
-        };
-        let table = RedbBenchDatabase::new(&db);
-        benchmark(table)
-    };
-
     let lmdb_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
         let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
@@ -112,7 +101,6 @@ fn main() {
 
     for results in [
         redb_results,
-        redb_mmap_results,
         lmdb_results,
         rocksdb_results,
         sled_results,
@@ -125,15 +113,7 @@ fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_width(100);
-    table.set_header([
-        "",
-        "redb",
-        "redb-mmap",
-        "lmdb",
-        "rocksdb",
-        "sled",
-        "sanakirja",
-    ]);
+    table.set_header(["", "redb", "lmdb", "rocksdb", "sled", "sanakirja"]);
     for row in rows {
         table.add_row(row);
     }

@@ -5,7 +5,6 @@ mod cached_file;
 mod file_lock;
 mod header;
 mod layout;
-mod mmap;
 mod page_manager;
 mod region;
 mod savepoint;

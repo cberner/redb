@@ -247,7 +247,6 @@ impl Database {
     #[allow(clippy::too_many_arguments)]
     fn new(
         file: File,
-        use_mmap: bool,
         page_size: usize,
         region_size: Option<usize>,
         initial_size: Option<u64>,
@@ -261,7 +260,6 @@ impl Database {
         info!("Opening database {:?}", &file_path);
         let mut mem = TransactionalMemory::new(
             file,
-            use_mmap,
             page_size,
             region_size,
             initial_size,
@@ -544,16 +542,12 @@ impl Builder {
     }
 
     /// Set the amount of memory (in bytes) used for caching data that has been read
-    ///
-    /// This setting is ignored when calling `create_mmapped()`/`open_mmapped()`
     pub fn set_read_cache_size(&mut self, bytes: usize) -> &mut Self {
         self.read_cache_size_bytes = bytes;
         self
     }
 
     /// Set the amount of memory (in bytes) used for caching data that has been written
-    ///
-    /// This setting is ignored when calling `create_mmapped()`/`open_mmapped()`
     pub fn set_write_cache_size(&mut self, bytes: usize) -> &mut Self {
         self.write_cache_size_bytes = bytes;
         self
@@ -589,38 +583,6 @@ impl Builder {
 
         Database::new(
             file,
-            false,
-            self.page_size,
-            self.region_size,
-            self.initial_size,
-            self.read_cache_size_bytes,
-            self.write_cache_size_bytes,
-            self.write_strategy,
-        )
-    }
-
-    /// Opens the specified file as a redb database using the mmap backend.
-    /// * if the file does not exist, or is an empty file, a new database will be initialized in it
-    /// * if the file is a valid redb database, it will be opened
-    /// * otherwise this function will return an error
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure that the memory representing the memory-mapped file is not modified externally.
-    /// In particular:
-    /// 1) the file referenced by `path` must not be concurrently modified by any other process
-    /// 2) an I/O failure writing back to disk must not mutate the the memory. You should consider
-    ///    reading this paper before assuming that your OS provides this gaurantee: <https://research.cs.wisc.edu/adsl/Publications/cuttlefs-tos21.pdf>
-    pub unsafe fn create_mmapped(&self, path: impl AsRef<Path>) -> Result<Database> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path)?;
-
-        Database::new(
-            file,
-            true,
             self.page_size,
             self.region_size,
             self.initial_size,
@@ -638,36 +600,6 @@ impl Builder {
             let file = OpenOptions::new().read(true).write(true).open(path)?;
             Database::new(
                 file,
-                false,
-                self.page_size,
-                None,
-                self.initial_size,
-                self.read_cache_size_bytes,
-                self.write_cache_size_bytes,
-                None,
-            )
-        } else {
-            Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
-        }
-    }
-
-    /// Opens an existing redb database using the mmap backend.
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure that the memory representing the memory-mapped file is not modified externally.
-    /// In particular:
-    /// 1) the file referenced by `path` must not be concurrently modified by any other process
-    /// 2) an I/O failure writing back to disk must not mutate the the memory. You should consider
-    ///    reading this paper before assuming that your OS provides this gaurantee: <https://research.cs.wisc.edu/adsl/Publications/cuttlefs-tos21.pdf>
-    pub unsafe fn open_mmapped(&self, path: impl AsRef<Path>) -> Result<Database> {
-        if !path.as_ref().exists() {
-            Err(Error::Io(ErrorKind::NotFound.into()))
-        } else if File::open(path.as_ref())?.metadata()?.len() > 0 {
-            let file = OpenOptions::new().read(true).write(true).open(path)?;
-            Database::new(
-                file,
-                true,
                 self.page_size,
                 None,
                 self.initial_size,

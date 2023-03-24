@@ -131,7 +131,6 @@ pub(crate) struct FuzzTransaction {
 pub(crate) struct FuzzConfig {
     pub use_checksums: bool,
     pub multimap_table: bool,
-    pub use_mmap: bool,
     pub read_cache_size: BoundedUSize<MAX_CACHE_SIZE>,
     pub write_cache_size: BoundedUSize<MAX_CACHE_SIZE>,
     pub thread0_transactions: Vec<FuzzTransaction>,

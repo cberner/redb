@@ -302,30 +302,6 @@ fn main() {
         benchmark(table)
     };
 
-    let redb_mmap_latency_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
-        let db = unsafe {
-            redb::Database::builder()
-                .set_write_strategy(WriteStrategy::Checksum)
-                .create_mmapped(tmpfile.path())
-                .unwrap()
-        };
-        let table = RedbBenchDatabase::new(&db);
-        benchmark(table)
-    };
-
-    let redb_mmap_throughput_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
-        let db = unsafe {
-            redb::Database::builder()
-                .set_write_strategy(WriteStrategy::TwoPhase)
-                .create_mmapped(tmpfile.path())
-                .unwrap()
-        };
-        let table = RedbBenchDatabase::new(&db);
-        benchmark(table)
-    };
-
     let lmdb_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
         let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
@@ -367,8 +343,6 @@ fn main() {
     for results in [
         redb_latency_results,
         redb_throughput_results,
-        redb_mmap_latency_results,
-        redb_mmap_throughput_results,
         lmdb_results,
         rocksdb_results,
         sled_results,
@@ -385,8 +359,6 @@ fn main() {
         "",
         "redb (1PC+C)",
         "redb (2PC)",
-        "redb (mmap-1PC+C)",
-        "redb (mmap-2PC)",
         "lmdb",
         "rocksdb",
         "sled",
