@@ -120,11 +120,6 @@ impl<'db> WriteTransaction<'db> {
         info!("Beginning write transaction id={:?}", transaction_id);
         *live_write_transaction = Some(transaction_id);
 
-        // SAFETY: this id came from increment_transaction_id() which generates monotonic ids
-        unsafe {
-            db.get_memory().mark_transaction(transaction_id);
-        }
-
         let root_page = db.get_memory().get_data_root();
         let freed_root = db.get_memory().get_freed_root();
         let freed_pages = Arc::new(Mutex::new(vec![]));
@@ -480,12 +475,6 @@ impl<'db> WriteTransaction<'db> {
             .unwrap()
             .oldest_live_read_transaction()
             .unwrap_or(self.transaction_id);
-
-        // SAFETY: durable_commit() is called from commit() which takes ownership of self,
-        // and oldest_live_read tracks the oldest read transaction that is in progress
-        unsafe {
-            self.mem.mmap_gc(oldest_live_read)?;
-        }
 
         let root = self
             .table_tree

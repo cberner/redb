@@ -1,5 +1,4 @@
-use crate::transaction_tracker::TransactionId;
-use crate::tree_store::page_store::base::{PageHack, PageHackMut, PageHint, PhysicalStorage};
+use crate::tree_store::page_store::base::{PageHack, PageHackMut, PageHint};
 use crate::tree_store::page_store::file_lock::LockedFile;
 use crate::{Error, Result};
 use std::collections::BTreeMap;
@@ -145,20 +144,9 @@ impl PagedCachedFile {
 
         Ok(())
     }
-}
-
-impl PhysicalStorage for PagedCachedFile {
-    unsafe fn mark_transaction(&self, _id: TransactionId) {
-        // no-op
-    }
-
-    unsafe fn gc(&self, _oldest_live_id: TransactionId) -> Result {
-        // no-op
-        Ok(())
-    }
 
     // Caller should invalidate all cached pages that are no longer valid
-    unsafe fn resize(&self, len: u64) -> Result {
+    pub(super) unsafe fn resize(&self, len: u64) -> Result {
         // TODO: be more fine-grained about this invalidation
         for slot in 0..self.read_cache.len() {
             let cache = mem::take(&mut *self.read_cache[slot].write().unwrap());
@@ -171,7 +159,7 @@ impl PhysicalStorage for PagedCachedFile {
         self.file.file().set_len(len).map_err(Error::from)
     }
 
-    fn flush(&self) -> Result {
+    pub(super) fn flush(&self) -> Result {
         self.check_fsync_failure()?;
         self.flush_write_buffer()?;
         // Disable fsync when fuzzing, since it doesn't test crash consistency
@@ -198,7 +186,7 @@ impl PhysicalStorage for PagedCachedFile {
         Ok(())
     }
 
-    fn eventual_flush(&self) -> Result {
+    pub(super) fn eventual_flush(&self) -> Result {
         self.check_fsync_failure()?;
 
         #[cfg(not(target_os = "macos"))]
@@ -219,17 +207,19 @@ impl PhysicalStorage for PagedCachedFile {
     }
 
     // Make writes visible to readers, but does not guarantee any durability
-    fn write_barrier(&self) -> Result {
+    pub(super) fn write_barrier(&self) -> Result {
         self.flush_write_buffer()
     }
 
-    fn read_direct(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
+    // Read directly from the file, ignoring any cached data
+    pub(super) fn read_direct(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
         self.check_fsync_failure()?;
         self.file.read(offset, len)
     }
 
-    // Caller must explicitly invalidate overlapping regions that are read
-    unsafe fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<PageHack> {
+    // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
+    // Doing so will not cause UB, but is a logic error.
+    pub(super) unsafe fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<PageHack> {
         self.check_fsync_failure()?;
         debug_assert_eq!(0, offset % self.page_size);
         #[cfg(feature = "cache_metrics")]
@@ -277,13 +267,16 @@ impl PhysicalStorage for PagedCachedFile {
         Ok(PageHack::ArcMem(buffer))
     }
 
-    fn cancel_pending_write(&self, offset: u64, _len: usize) {
+    // Discard pending writes to the given range
+    pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
         assert_eq!(0, offset % self.page_size);
         self.write_buffer.lock().unwrap().remove(&offset);
     }
 
-    // Invalidating a cached region in subsections is permitted, as long as all subsections are invalidated
-    fn invalidate_cache(&self, offset: u64, _len: usize) {
+    // Invalidate any caching of the given range. After this call overlapping reads of the range are allowed
+    //
+    // NOTE: Invalidating a cached region in subsections is permitted, as long as all subsections are invalidated
+    pub(super) fn invalidate_cache(&self, offset: u64, _len: usize) {
         let cache_slot: usize = (offset % self.read_cache.len() as u64).try_into().unwrap();
         let mut lock = self.read_cache[cache_slot].write().unwrap();
         if let Some(removed) = lock.remove(&offset) {
@@ -296,7 +289,7 @@ impl PhysicalStorage for PagedCachedFile {
         }
     }
 
-    unsafe fn write(&self, offset: u64, len: usize) -> Result<PageHackMut> {
+    pub(super) unsafe fn write(&self, offset: u64, len: usize) -> Result<PageHackMut> {
         self.check_fsync_failure()?;
         assert_eq!(0, offset % self.page_size);
         let mut lock = self.write_buffer.lock().unwrap();

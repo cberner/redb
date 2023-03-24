@@ -1,7 +1,7 @@
 use crate::db::WriteStrategy;
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::Checksum;
-use crate::tree_store::page_store::base::{PageHint, PhysicalStorage};
+use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
@@ -241,7 +241,7 @@ impl Allocators {
         }
     }
 
-    fn from_bytes(header: &DatabaseHeader, storage: &dyn PhysicalStorage) -> Result<Self> {
+    fn from_bytes(header: &DatabaseHeader, storage: &PagedCachedFile) -> Result<Self> {
         let page_size = header.page_size();
         let region_header_size = header.region_header_pages() * page_size;
         let region_size =
@@ -280,7 +280,7 @@ impl Allocators {
         &self,
         region_tracker_page: PageNumber,
         layout: DatabaseLayout,
-        storage: &mut Box<dyn PhysicalStorage>,
+        storage: &mut PagedCachedFile,
     ) -> Result {
         let page_size = layout.full_region_layout().page_size();
         let region_header_size =
@@ -397,7 +397,7 @@ struct InMemoryState {
 }
 
 impl InMemoryState {
-    fn from_bytes(header: DatabaseHeader, file: &dyn PhysicalStorage) -> Result<Self> {
+    fn from_bytes(header: DatabaseHeader, file: &PagedCachedFile) -> Result<Self> {
         let allocators = Allocators::from_bytes(&header, file)?;
         Ok(Self { header, allocators })
     }
@@ -421,8 +421,7 @@ pub(crate) struct TransactionalMemory {
     log_since_commit: Mutex<Vec<AllocationOp>>,
     // True if the allocator state was corrupted when the file was opened
     needs_recovery: bool,
-    // TODO: should be a compile-time type parameter
-    storage: Box<dyn PhysicalStorage>,
+    storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
     // The current layout for the active transaction.
     // May include uncommitted changes to the database layout, if it grew or shrank
@@ -492,12 +491,12 @@ impl TransactionalMemory {
             }
         }
 
-        let mut storage: Box<dyn PhysicalStorage> = Box::new(PagedCachedFile::new(
+        let mut storage = PagedCachedFile::new(
             file.try_clone().unwrap(),
             page_size as u64,
             read_cache_size_bytes,
             write_cache_size_bytes,
-        )?);
+        )?;
 
         let magic_number: [u8; MAGICNUMBER.len()] = storage
             .read_direct(0, MAGICNUMBER.len())?
@@ -608,7 +607,7 @@ impl TransactionalMemory {
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
 
-        let state = InMemoryState::from_bytes(header, storage.as_ref())?;
+        let state = InMemoryState::from_bytes(header, &storage)?;
 
         assert!(page_size >= DB_HEADER_SIZE);
 
@@ -1139,14 +1138,6 @@ impl TransactionalMemory {
     // Page has not been committed
     pub(crate) fn uncommitted(&self, page: PageNumber) -> bool {
         self.allocated_since_commit.lock().unwrap().contains(&page)
-    }
-
-    pub(crate) unsafe fn mark_transaction(&self, id: TransactionId) {
-        self.storage.mark_transaction(id)
-    }
-
-    pub(crate) unsafe fn mmap_gc(&self, oldest_live_id: TransactionId) -> Result {
-        self.storage.gc(oldest_live_id)
     }
 
     fn allocate_helper(
