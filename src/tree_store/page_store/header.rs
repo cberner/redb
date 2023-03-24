@@ -409,7 +409,6 @@ mod test {
 
         assert!(TransactionalMemory::new(
             file,
-            false,
             PAGE_SIZE,
             None,
             None,
@@ -490,7 +489,6 @@ mod test {
 
         assert!(TransactionalMemory::new(
             file,
-            false,
             PAGE_SIZE,
             None,
             None,
@@ -546,7 +544,6 @@ mod test {
 
         assert!(TransactionalMemory::new(
             file,
-            false,
             PAGE_SIZE,
             None,
             None,
@@ -615,7 +612,6 @@ mod test {
 
         assert!(TransactionalMemory::new(
             file,
-            false,
             PAGE_SIZE,
             None,
             None,

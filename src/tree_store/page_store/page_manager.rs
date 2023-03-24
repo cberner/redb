@@ -7,7 +7,6 @@ use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::header::{DatabaseHeader, DB_HEADER_SIZE, MAGICNUMBER};
 use crate::tree_store::page_store::layout::DatabaseLayout;
-use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
 use crate::tree_store::page_store::utils::is_page_aligned;
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
@@ -21,8 +20,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fs::File;
-#[cfg(unix)]
-use std::io;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -445,15 +442,12 @@ pub(crate) struct TransactionalMemory {
     region_header_with_padding_size: u64,
     #[allow(dead_code)]
     pages_are_os_page_aligned: bool,
-    #[allow(dead_code)]
-    use_mmap: bool,
 }
 
 impl TransactionalMemory {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         file: File,
-        use_mmap: bool,
         page_size: usize,
         requested_region_size: Option<usize>,
         initial_size: Option<u64>,
@@ -498,16 +492,12 @@ impl TransactionalMemory {
             }
         }
 
-        let mut storage: Box<dyn PhysicalStorage> = if use_mmap {
-            Box::new(Mmap::new(file)?)
-        } else {
-            Box::new(PagedCachedFile::new(
-                file.try_clone().unwrap(),
-                page_size as u64,
-                read_cache_size_bytes,
-                write_cache_size_bytes,
-            )?)
-        };
+        let mut storage: Box<dyn PhysicalStorage> = Box::new(PagedCachedFile::new(
+            file.try_clone().unwrap(),
+            page_size as u64,
+            read_cache_size_bytes,
+            write_cache_size_bytes,
+        )?);
 
         let magic_number: [u8; MAGICNUMBER.len()] = storage
             .read_direct(0, MAGICNUMBER.len())?
@@ -641,7 +631,6 @@ impl TransactionalMemory {
             region_size,
             region_header_with_padding_size: region_header_size,
             pages_are_os_page_aligned: is_page_aligned(page_size),
-            use_mmap,
         })
     }
 
@@ -1343,25 +1332,6 @@ impl TransactionalMemory {
         #[allow(unused_mut)]
         let mut mem = unsafe { self.storage.write(address_range.start, len)? };
         debug_assert!(mem.as_ref().len() >= allocation_size);
-
-        // TODO: move this into the mmap implementation
-        #[cfg(unix)]
-        if self.use_mmap {
-            let len = mem.as_ref().len();
-            // If this is a large page, hint that it should be paged in
-            if self.pages_are_os_page_aligned && len > self.get_page_size() {
-                let result = unsafe {
-                    libc::madvise(
-                        mem.as_mut().as_mut_ptr() as *mut libc::c_void,
-                        len as libc::size_t,
-                        libc::MADV_WILLNEED,
-                    )
-                };
-                if result != 0 {
-                    return Err(io::Error::last_os_error().into());
-                }
-            }
-        }
 
         #[cfg(debug_assertions)]
         {
