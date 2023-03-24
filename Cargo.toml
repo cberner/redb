@@ -41,6 +41,8 @@ io-uring = "0.5.1"
 python = ["pyo3"]
 # Enables log messages
 logging = ["log"]
+# Enable cache hit metrics
+cache_metrics = []
 
 [profile.bench]
 debug = true
