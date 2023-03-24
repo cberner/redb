@@ -6,8 +6,6 @@
     clippy::cast_sign_loss
 )]
 
-extern crate core;
-
 pub use db::{Builder, Database, MultimapTableDefinition, TableDefinition, WriteStrategy};
 pub use error::Error;
 pub use multimap_table::{
