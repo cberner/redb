@@ -320,6 +320,8 @@ impl<'a> RawBtree<'a> {
 
 pub(crate) struct Btree<'a, K: RedbKey, V: RedbValue> {
     mem: &'a TransactionalMemory,
+    // Cache of the root page to avoid repeated lookups
+    cached_root: Option<PageImpl<'a>>,
     root: Option<(PageNumber, Checksum)>,
     hint: PageHint,
     _key_type: PhantomData<K>,
@@ -332,8 +334,13 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
         hint: PageHint,
         mem: &'a TransactionalMemory,
     ) -> Self {
+        let cached_root = root.map(|(root, _)| {
+            // TODO: propagate error
+            mem.get_page_extended(root, hint).unwrap()
+        });
         Self {
             mem,
+            cached_root,
             root,
             hint,
             _key_type: Default::default(),
@@ -342,9 +349,8 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
     }
 
     pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
-        if let Some((p, _)) = self.root {
-            let root_page = self.mem.get_page_extended(p, self.hint)?;
-            self.get_helper(root_page, K::as_bytes(key).as_ref())
+        if let Some(ref root_page) = self.cached_root {
+            self.get_helper(root_page.clone(), K::as_bytes(key).as_ref())
         } else {
             Ok(None)
         }
