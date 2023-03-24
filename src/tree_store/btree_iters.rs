@@ -249,9 +249,7 @@ pub(crate) struct BtreeDrain<'a, K: RedbKey + 'a, V: RedbValue + 'a> {
 }
 
 impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeDrain<'a, K, V> {
-    // Safety: caller must ensure that there are no references to free_on_drop pages, other than those
-    // within `inner`
-    pub(crate) unsafe fn new(
+    pub(crate) fn new(
         inner: BtreeRangeIter<'a, K, V>,
         free_on_drop: Vec<PageNumber>,
         master_free_list: Arc<Mutex<Vec<PageNumber>>>,
@@ -290,9 +288,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Drop for BtreeDrain<'a, K, V> {
 
         let mut master_free_list = self.master_free_list.lock().unwrap();
         for page in self.free_on_drop.drain(..) {
-            // Safety: Caller guaranteed that there are no other references to these pages,
-            // and we just consumed all of ours in the loop above.
-            if unsafe { !self.mem.free_if_uncommitted(page) } {
+            if !self.mem.free_if_uncommitted(page) {
                 master_free_list.push(page);
             }
         }
@@ -319,9 +315,7 @@ impl<
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > BtreeDrainFilter<'a, K, V, F>
 {
-    // Safety: caller must ensure that there are no references to free_on_drop pages, other than those
-    // within `inner`
-    pub(crate) unsafe fn new(
+    pub(crate) fn new(
         inner: BtreeRangeIter<'a, K, V>,
         predicate: F,
         free_on_drop: Vec<PageNumber>,
@@ -394,9 +388,7 @@ impl<
 
         let mut master_free_list = self.master_free_list.lock().unwrap();
         for page in self.free_on_drop.drain(..) {
-            // Safety: Caller guaranteed that there are no other references to these pages,
-            // and we just consumed all of ours in the loop above.
-            if unsafe { !self.mem.free_if_uncommitted(page) } {
+            if !self.mem.free_if_uncommitted(page) {
                 master_free_list.push(page);
             }
         }

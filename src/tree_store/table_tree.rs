@@ -346,10 +346,7 @@ impl<'txn> TableTree<'txn> {
                 continue;
             }
             definition.table_root = table_root;
-            // Safety: References into the master table are never returned to the user
-            unsafe {
-                self.tree.insert(&name.as_str(), &definition)?;
-            }
+            self.tree.insert(&name.as_str(), &definition)?;
         }
         Ok(self.tree.get_root())
     }
@@ -448,8 +445,7 @@ impl<'txn> TableTree<'txn> {
 
             self.pending_table_updates.remove(name);
 
-            // Safety: References into the master table are never returned to the user
-            let found = unsafe { self.tree.remove(&name)?.is_some() };
+            let found = self.tree.remove(&name)?.is_some();
             return Ok(found);
         }
 
@@ -477,8 +473,7 @@ impl<'txn> TableTree<'txn> {
             key_type: K::type_name(),
             value_type: V::type_name(),
         };
-        // Safety: References into the master table are never returned to the user
-        unsafe { self.tree.insert(&name, &table)? };
+        self.tree.insert(&name, &table)?;
         Ok(table)
     }
 

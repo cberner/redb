@@ -287,8 +287,7 @@ impl Allocators {
             (layout.full_region_layout().get_header_pages() * page_size) as u64;
         let region_size =
             layout.full_region_layout().num_pages() as u64 * page_size as u64 + region_header_size;
-        // Safety: we have a mutable reference to the Mmap, so no one else can have a reference this memory
-        let mut region_tracker_bytes = unsafe {
+        let mut region_tracker_bytes = {
             let range = region_tracker_page.address_range(
                 page_size as u64,
                 region_size,
@@ -312,8 +311,7 @@ impl Allocators {
                 .try_into()
                 .unwrap();
 
-            // Safety: we have a mutable reference to the storage, so no one else can have a reference this memory
-            let mut mem = unsafe { storage.write(base, len)? };
+            let mut mem = storage.write(base, len)?;
             mem.as_mut()
                 .copy_from_slice(&self.region_headers[i as usize]);
         }
@@ -528,25 +526,19 @@ impl TransactionalMemory {
                 DatabaseHeader::new(layout, checksum_type, TransactionId(0), tracker_page);
 
             header.recovery_required = false;
-            // Safety: we own the storage object and have no other references to this memory
-            unsafe {
-                storage
-                    .write(0, DB_HEADER_SIZE)?
-                    .as_mut()
-                    .copy_from_slice(&header.to_bytes(false, false));
-            }
+            storage
+                .write(0, DB_HEADER_SIZE)?
+                .as_mut()
+                .copy_from_slice(&header.to_bytes(false, false));
             allocators.flush_to(tracker_page, layout, &mut storage)?;
 
             storage.flush()?;
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
-            // Safety: we own the storage object and have no other references to this memory
-            unsafe {
-                storage
-                    .write(0, DB_HEADER_SIZE)?
-                    .as_mut()
-                    .copy_from_slice(&header.to_bytes(true, false));
-            }
+            storage
+                .write(0, DB_HEADER_SIZE)?
+                .as_mut()
+                .copy_from_slice(&header.to_bytes(true, false));
             storage.flush()?;
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
@@ -592,13 +584,10 @@ impl TransactionalMemory {
                 }
             }
             assert!(!repair_info.invalid_magic_number);
-            // Safety: we own the storage object and have no other references to this memory
-            unsafe {
-                storage
-                    .write(0, DB_HEADER_SIZE)?
-                    .as_mut()
-                    .copy_from_slice(&header.to_bytes(true, false));
-            }
+            storage
+                .write(0, DB_HEADER_SIZE)?
+                .as_mut()
+                .copy_from_slice(&header.to_bytes(true, false));
             storage.flush()?;
         }
 
@@ -637,9 +626,7 @@ impl TransactionalMemory {
         let mut state = self.state.lock().unwrap();
         assert!(!state.header.recovery_required);
         state.header.recovery_required = true;
-        unsafe {
-            self.write_header(&state.header, false)?;
-        }
+        self.write_header(&state.header, false)?;
         self.storage.flush()
     }
 
@@ -705,7 +692,7 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    unsafe fn write_header(&self, header: &DatabaseHeader, swap_primary: bool) -> Result {
+    fn write_header(&self, header: &DatabaseHeader, swap_primary: bool) -> Result {
         self.storage
             .write(0, DB_HEADER_SIZE)?
             .as_mut()
@@ -716,11 +703,11 @@ impl TransactionalMemory {
 
     pub(crate) fn end_repair(&mut self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
-        unsafe { self.write_header(&state.header, false)? };
+        self.write_header(&state.header, false)?;
         self.storage.flush()?;
 
         state.header.recovery_required = false;
-        unsafe { self.write_header(&state.header, false)? };
+        self.write_header(&state.header, false)?;
         let result = self.storage.flush();
         self.needs_recovery = false;
 
@@ -802,7 +789,7 @@ impl TransactionalMemory {
         secondary.freed_root = freed_root;
         secondary.layout = layout.layout;
         secondary.region_tracker = layout.tracker_page;
-        unsafe { self.write_header(&state.header, false)? };
+        self.write_header(&state.header, false)?;
 
         // Use 2-phase commit, if checksums are disabled
         if matches!(checksum_type, ChecksumType::Unused) {
@@ -814,7 +801,7 @@ impl TransactionalMemory {
         }
 
         // Swap the primary bit on-disk
-        unsafe { self.write_header(&state.header, true)? };
+        self.write_header(&state.header, true)?;
         if eventual {
             self.storage.eventual_flush()?;
         } else {
@@ -823,13 +810,8 @@ impl TransactionalMemory {
         // Only swap the in-memory primary bit after the fsync is successful
         state.header.swap_primary_slot();
 
-        // Safety: try_shrink() only removes unallocated free pages at the end of the database file
-        // references to unallocated pages are not allowed to exist, and we've now promoted the
-        // shrunked layout to the primary
         if shrunk {
-            unsafe {
-                self.storage.resize(layout.layout.len())?;
-            }
+            self.storage.resize(layout.layout.len())?;
         }
 
         self.log_since_commit.lock().unwrap().clear();
@@ -942,11 +924,8 @@ impl TransactionalMemory {
                 layout: restore,
                 tracker_page: restore_tracker_page,
             };
-            // Safety: we've rollbacked the transaction, so any data in that was written into
-            // space that was grown during this transaction no longer exists
-            unsafe {
-                self.storage.resize(layout.layout.len())?;
-            }
+
+            self.storage.resize(layout.layout.len())?;
         }
 
         Ok(())
@@ -977,7 +956,6 @@ impl TransactionalMemory {
                 .or_default()) += 1;
         }
 
-        // Safety: we asserted that no mutable references are open
         let range = page_number.address_range(
             self.page_size as u64,
             self.region_size,
@@ -985,7 +963,7 @@ impl TransactionalMemory {
             self.page_size,
         );
         let len: usize = (range.end - range.start).try_into().unwrap();
-        let mem = unsafe { self.storage.read(range.start, len, hint)? };
+        let mem = self.storage.read(range.start, len, hint)?;
 
         Ok(PageImpl {
             mem,
@@ -997,8 +975,8 @@ impl TransactionalMemory {
         })
     }
 
-    // Safety: the caller must ensure that no references to the memory in `page` exist
-    pub(crate) unsafe fn get_page_mut(&self, page_number: PageNumber) -> Result<PageMut> {
+    // NOTE: the caller must ensure that the read cache has been invalidated or stale reads my occur
+    pub(crate) fn get_page_mut(&self, page_number: PageNumber) -> Result<PageMut> {
         #[cfg(debug_assertions)]
         {
             assert!(!self
@@ -1066,8 +1044,7 @@ impl TransactionalMemory {
         }
     }
 
-    // Safety: the caller must ensure that no references to the memory in `page` exist
-    pub(crate) unsafe fn free(&self, page: PageNumber) {
+    pub(crate) fn free(&self, page: PageNumber) {
         let mut state = self.state.lock().unwrap();
         let region_index = page.region;
         // Free in the regional allocator
@@ -1098,8 +1075,7 @@ impl TransactionalMemory {
     }
 
     // Frees the page if it was allocated since the last commit. Returns true, if the page was freed
-    // Safety: the caller must ensure that no references to the memory in `page` exist
-    pub(crate) unsafe fn free_if_uncommitted(&self, page: PageNumber) -> bool {
+    pub(crate) fn free_if_uncommitted(&self, page: PageNumber) -> bool {
         if self.allocated_since_commit.lock().unwrap().remove(&page) {
             let mut state = self.state.lock().unwrap();
             // Free in the regional allocator
@@ -1266,10 +1242,8 @@ impl TransactionalMemory {
         )?;
         assert!(new_layout.len() >= layout.len());
 
-        // Safety: We're growing the storage
-        unsafe {
-            self.storage.resize(new_layout.len())?;
-        }
+        self.storage.resize(new_layout.len())?;
+
         state.allocators.resize_to(new_layout);
         *layout = new_layout;
         Ok(())
@@ -1318,10 +1292,8 @@ impl TransactionalMemory {
             .try_into()
             .unwrap();
 
-        // Safety:
-        // The address range we're returning was just allocated, so no other references exist
         #[allow(unused_mut)]
-        let mut mem = unsafe { self.storage.write(address_range.start, len)? };
+        let mut mem = self.storage.write(address_range.start, len)?;
         debug_assert!(mem.as_ref().len() >= allocation_size);
 
         #[cfg(debug_assertions)]
@@ -1393,7 +1365,7 @@ impl Drop for TransactionalMemory {
 
         if self.storage.flush().is_ok() && !self.needs_recovery {
             state.header.recovery_required = false;
-            let _ = unsafe { self.write_header(&state.header, false) };
+            let _ = self.write_header(&state.header, false);
             let _ = self.storage.flush();
         }
     }

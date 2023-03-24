@@ -217,10 +217,7 @@ impl<'db> WriteTransaction<'db> {
         let mut freed_pages = vec![];
         for page in allocated_since_savepoint {
             if self.mem.uncommitted(page) {
-                // Safety: The page is uncommitted and we have a &mut on the transaction
-                unsafe {
-                    self.mem.free(page);
-                }
+                self.mem.free(page);
             } else {
                 freed_pages.push(page);
             }
@@ -260,8 +257,7 @@ impl<'db> WriteTransaction<'db> {
             to_remove.push(entry.key());
         }
         for key in to_remove {
-            // Safety: all references to the freed table above have already been dropped.
-            unsafe { freed_tree.remove(&key)? };
+            freed_tree.remove(&key)?;
         }
 
         *self.freed_tree.lock().unwrap() = freed_tree;
@@ -532,18 +528,13 @@ impl<'db> WriteTransaction<'db> {
             // 1..=length because the array is length prefixed
             for i in 1..=length {
                 let page = PageNumber::from_le_bytes(value[i * 8..(i + 1) * 8].try_into().unwrap());
-                // Safety: we free only pages that were marked to be freed before the oldest live transaction,
-                // therefore no one can have a reference to this page still
-                unsafe {
-                    self.mem.free(page);
-                }
+                self.mem.free(page);
             }
         }
 
         // Remove all the old transactions
         for key in to_remove {
-            // Safety: all references to the freed table above have already been dropped.
-            unsafe { freed_tree.remove(&key)? };
+            freed_tree.remove(&key)?;
         }
 
         Ok(())
@@ -561,10 +552,7 @@ impl<'db> WriteTransaction<'db> {
                 transaction_id: self.transaction_id.0,
                 pagination_id: pagination_counter,
             };
-            // Safety: The freed table is only accessed from the writer, so only this function
-            // is using it. The only reference retrieved, access_guard, is dropped before the next call
-            // to this method
-            let mut access_guard = unsafe { freed_tree.insert_reserve(&key, buffer_size)? };
+            let mut access_guard = freed_tree.insert_reserve(&key, buffer_size)?;
 
             let mut freed_pages = self.freed_pages.lock().unwrap();
             let len = freed_pages.len();

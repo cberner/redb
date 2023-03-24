@@ -343,11 +343,8 @@ impl<'a, V: RedbKey + 'static> Drop for MultimapValueIter<'a, V> {
         if !self.free_on_drop.is_empty() {
             let mut freed_pages = self.freed_pages.as_ref().unwrap().lock().unwrap();
             for page in self.free_on_drop.iter() {
-                unsafe {
-                    // Safety: we have a &mut on the transaction
-                    if !self.mem.unwrap().free_if_uncommitted(*page) {
-                        freed_pages.push(*page);
-                    }
+                if !self.mem.unwrap().free_if_uncommitted(*page) {
+                    freed_pages.push(*page);
                 }
             }
         }
@@ -506,10 +503,8 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                         drop(builder);
                         drop(guard);
                         let inline_data = DynamicCollection::make_inline_data(&data);
-                        unsafe {
-                            self.tree
-                                .insert(key.borrow(), &DynamicCollection::new(&inline_data))?
-                        };
+                        self.tree
+                            .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                     } else {
                         // convert into a subtree
                         let mut page = self.mem.allocate(leaf_data.len())?;
@@ -524,18 +519,13 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                             self.mem,
                             self.freed_pages.clone(),
                         );
-                        // Safety: No other references to this table can exist.
-                        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-                        // and we borrow &mut self.
-                        let existed = unsafe { subtree.insert(value.borrow(), &())?.is_some() };
+                        let existed = subtree.insert(value.borrow(), &())?.is_some();
                         assert_eq!(existed, found);
                         let (new_root, new_checksum) = subtree.get_root().unwrap();
                         let subtree_data =
                             DynamicCollection::make_subtree_data(new_root, new_checksum);
-                        unsafe {
-                            self.tree
-                                .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?
-                        };
+                        self.tree
+                            .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                     }
 
                     found
@@ -547,16 +537,11 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                         self.freed_pages.clone(),
                     );
                     drop(guard);
-                    // Safety: No other references to this table can exist.
-                    // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-                    // and we borrow &mut self.
-                    let existed = unsafe { subtree.insert(value.borrow(), &())?.is_some() };
+                    let existed = subtree.insert(value.borrow(), &())?.is_some();
                     let (new_root, new_checksum) = subtree.get_root().unwrap();
                     let subtree_data = DynamicCollection::make_subtree_data(new_root, new_checksum);
-                    unsafe {
-                        self.tree
-                            .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?
-                    };
+                    self.tree
+                        .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
 
                     existed
                 }
@@ -576,23 +561,16 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                 builder.append(value_bytes_ref, <() as RedbValue>::as_bytes(&()).as_ref());
                 drop(builder);
                 let inline_data = DynamicCollection::make_inline_data(&data);
-                unsafe {
-                    self.tree
-                        .insert(key.borrow(), &DynamicCollection::new(&inline_data))?
-                };
+                self.tree
+                    .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
             } else {
                 let mut subtree: BtreeMut<'_, V, ()> =
                     BtreeMut::new(None, self.mem, self.freed_pages.clone());
-                // Safety: No other references to this table can exist.
-                // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-                // and we borrow &mut self.
-                unsafe { subtree.insert(value.borrow(), &())? };
+                subtree.insert(value.borrow(), &())?;
                 let (new_root, new_checksum) = subtree.get_root().unwrap();
                 let subtree_data = DynamicCollection::make_subtree_data(new_root, new_checksum);
-                unsafe {
-                    self.tree
-                        .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?
-                };
+                self.tree
+                    .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
             }
             false
         };
@@ -631,7 +609,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                     let old_num_pairs = accessor.num_pairs();
                     if old_num_pairs == 1 {
                         drop(guard);
-                        unsafe { self.tree.remove(key.borrow())? };
+                        self.tree.remove(key.borrow())?;
                     } else {
                         let old_pairs_len = accessor.length_of_pairs(0, old_num_pairs);
                         let removed_value_len = accessor.entry(position).unwrap().key().len();
@@ -659,10 +637,8 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                         drop(guard);
 
                         let inline_data = DynamicCollection::make_inline_data(&new_data);
-                        unsafe {
-                            self.tree
-                                .insert(key.borrow(), &DynamicCollection::new(&inline_data))?
-                        };
+                        self.tree
+                            .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                     }
                     true
                 } else {
@@ -674,10 +650,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                 let mut subtree: BtreeMut<V, ()> =
                     BtreeMut::new(Some(v.as_subtree()), self.mem, self.freed_pages.clone());
                 drop(guard);
-                // Safety: No other references to this table can exist.
-                // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-                // and we borrow &mut self.
-                let existed = unsafe { subtree.remove(value.borrow())?.is_some() };
+                let existed = subtree.remove(value.borrow())?.is_some();
 
                 if let Some((new_root, new_checksum)) = subtree.get_root() {
                     let page = self.mem.get_page(new_root)?;
@@ -692,41 +665,29 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                             if len < self.mem.get_page_size() / 2 {
                                 let inline_data =
                                     DynamicCollection::make_inline_data(&page.memory()[..len]);
-                                unsafe {
-                                    self.tree.insert(
-                                        key.borrow(),
-                                        &DynamicCollection::new(&inline_data),
-                                    )?
-                                };
+                                self.tree
+                                    .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                                 drop(page);
-                                unsafe {
-                                    if !self.mem.free_if_uncommitted(new_root) {
-                                        (*self.freed_pages).lock().unwrap().push(new_root);
-                                    }
+                                if !self.mem.free_if_uncommitted(new_root) {
+                                    (*self.freed_pages).lock().unwrap().push(new_root);
                                 }
                             } else {
                                 let subtree_data =
                                     DynamicCollection::make_subtree_data(new_root, new_checksum);
-                                unsafe {
-                                    self.tree.insert(
-                                        key.borrow(),
-                                        &DynamicCollection::new(&subtree_data),
-                                    )?
-                                };
+                                self.tree
+                                    .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                             }
                         }
                         BRANCH => {
-                            unsafe {
-                                let subtree_data =
-                                    DynamicCollection::make_subtree_data(new_root, new_checksum);
-                                self.tree
-                                    .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?
-                            };
+                            let subtree_data =
+                                DynamicCollection::make_subtree_data(new_root, new_checksum);
+                            self.tree
+                                .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                         }
                         _ => unreachable!(),
                     }
                 } else {
-                    unsafe { self.tree.remove(key.borrow())? };
+                    self.tree.remove(key.borrow())?;
                 }
 
                 existed

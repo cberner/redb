@@ -65,20 +65,16 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
         }
     }
 
+    // TODO: can we remove this method now that delete is safe?
     pub(crate) fn safe_delete(
         &mut self,
         key: &K::SelfType<'_>,
     ) -> Result<Option<AccessGuard<'a, V>>> {
         assert_eq!(self.free_policy, FreePolicy::Never);
-        // Safety: we asserted that the free policy is Never
-        unsafe { self.delete(key) }
+        self.delete(key)
     }
 
-    // Safety: caller must ensure that no references to uncommitted pages in this table exist
-    pub(crate) unsafe fn delete(
-        &mut self,
-        key: &K::SelfType<'_>,
-    ) -> Result<Option<AccessGuard<'a, V>>> {
+    pub(crate) fn delete(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
         if let Some((p, checksum)) = *self.root {
             let (deletion_result, found) =
                 self.delete_helper(self.mem.get_page(p)?, checksum, K::as_bytes(key).as_ref())?;
@@ -109,9 +105,8 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
         }
     }
 
-    // Safety: caller must ensure that no references to uncommitted pages in this tree exist
     #[allow(clippy::type_complexity)]
-    pub(crate) unsafe fn insert(
+    pub(crate) fn insert(
         &mut self,
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
@@ -156,8 +151,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
         Ok((old_value, guard))
     }
 
-    // Safety: caller must ensure that no references to uncommitted pages in this table exist
-    unsafe fn insert_helper(
+    fn insert_helper(
         &mut self,
         page: PageImpl<'a>,
         page_checksum: Checksum,
@@ -390,8 +384,6 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                     } else if self.mem.uncommitted(page.get_page_number()) {
                         let page_number = page.get_page_number();
                         drop(page);
-                        // Safety: Since the page is uncommitted, no other transactions could have it open
-                        // and we just dropped our reference to it, on the line above
                         let mut mutpage = self.mem.get_page_mut(page_number)?;
                         let mut mutator = BranchMutator::new(&mut mutpage);
                         mutator.write_child_page(
@@ -474,8 +466,6 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                 // Free the original page, since we've replaced it
                 let page_number = page.get_page_number();
                 drop(page);
-                // Safety: If the page is uncommitted, no other transactions can have references to it,
-                // and we just dropped ours on the line above
                 self.free_policy
                     .conditional_free(page_number, self.freed, self.mem);
 
@@ -485,8 +475,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
         })
     }
 
-    // Safety: caller must ensure that no references to uncommitted pages in this table exist
-    unsafe fn delete_leaf_helper(
+    fn delete_leaf_helper(
         &mut self,
         page: PageImpl<'a>,
         checksum: Checksum,
@@ -511,8 +500,6 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
             let (start, end) = accessor.value_range(position).unwrap();
             let page_number = page.get_page_number();
             drop(page);
-            // Safety: caller guaranteed that no other references to uncommitted data exist,
-            // and we just dropped the reference to page
             let page_mut = self.mem.get_page_mut(page_number)?;
 
             // TODO: optimize this!
@@ -616,8 +603,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
         }
     }
 
-    // Safety: caller must ensure that no references to uncommitted pages in this table exist
-    unsafe fn delete_branch_helper(
+    fn delete_branch_helper(
         &mut self,
         page: PageImpl<'a>,
         checksum: Checksum,
@@ -635,8 +621,6 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
         if let Subtree(new_child, new_child_checksum) = result {
             let (result_page, result_checksum) = if self.mem.uncommitted(original_page_number) {
                 drop(page);
-                // Safety: Caller guarantees there are no references to uncommitted pages,
-                // and we just dropped our reference to it on the line above
                 let mut mutpage = self.mem.get_page_mut(original_page_number)?;
                 let mut mutator = BranchMutator::new(&mut mutpage);
                 mutator.write_child_page(child_index, new_child, new_child_checksum);
@@ -952,9 +936,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
 
     // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
     // If key is not found, guaranteed not to modify the tree
-    //
-    // Safety: caller must ensure that no references to uncommitted pages in this table exist
-    unsafe fn delete_helper(
+    fn delete_helper(
         &mut self,
         page: PageImpl<'a>,
         checksum: Checksum,

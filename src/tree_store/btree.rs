@@ -52,8 +52,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         *(*self.root).lock().unwrap()
     }
 
-    // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
-    pub(crate) unsafe fn insert(
+    pub(crate) fn insert(
         &mut self,
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
@@ -79,9 +78,8 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
 
     /// Reserve space to insert a key-value pair
     /// The returned reference will have length equal to value_length
-    // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
     // TODO: return type should be V, not [u8]
-    pub(crate) unsafe fn insert_reserve(
+    pub(crate) fn insert_reserve(
         &mut self,
         key: &K::SelfType<'_>,
         value_length: usize,
@@ -107,11 +105,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         Ok(guard)
     }
 
-    // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
-    pub(crate) unsafe fn remove(
-        &mut self,
-        key: &K::SelfType<'_>,
-    ) -> Result<Option<AccessGuard<V>>> {
+    pub(crate) fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<V>>> {
         #[cfg(feature = "logging")]
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
         let mut root = self.root.lock().unwrap();
@@ -171,8 +165,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         self.read_tree().range(range)
     }
 
-    // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
-    pub(crate) unsafe fn drain<
+    pub(crate) fn drain<
         'a0,
         T: RangeBounds<KR> + Clone + 'a0,
         // TODO: we shouldn't require Clone
@@ -205,8 +198,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         Ok(result)
     }
 
-    // Safety: caller must ensure that no uncommitted data is accessed within this tree, from other references
-    pub(crate) unsafe fn drain_filter<
+    pub(crate) fn drain_filter<
         'a0,
         T: RangeBounds<KR> + Clone + 'a0,
         // TODO: we shouldn't require Clone
@@ -365,8 +357,7 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
                     let (start, end) = accessor.value_range(entry_index).unwrap();
                     // Safety: free_on_drop is false
-                    let guard =
-                        unsafe { AccessGuard::new(page, start, end - start, false, self.mem) };
+                    let guard = AccessGuard::new(page, start, end - start, false, self.mem);
                     Ok(Some(guard))
                 } else {
                     Ok(None)
