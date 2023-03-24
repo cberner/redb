@@ -298,7 +298,7 @@ impl Allocators {
             storage.write(range.start, len)?
         };
         region_tracker_bytes
-            .as_mut()
+            .mem_mut()
             .copy_from_slice(&self.region_tracker);
 
         assert_eq!(self.region_headers.len(), layout.num_regions() as usize);
@@ -312,7 +312,7 @@ impl Allocators {
                 .unwrap();
 
             let mut mem = storage.write(base, len)?;
-            mem.as_mut()
+            mem.mem_mut()
                 .copy_from_slice(&self.region_headers[i as usize]);
         }
 
@@ -528,7 +528,7 @@ impl TransactionalMemory {
             header.recovery_required = false;
             storage
                 .write(0, DB_HEADER_SIZE)?
-                .as_mut()
+                .mem_mut()
                 .copy_from_slice(&header.to_bytes(false, false));
             allocators.flush_to(tracker_page, layout, &mut storage)?;
 
@@ -537,7 +537,7 @@ impl TransactionalMemory {
             // to ensure that it's crash safe
             storage
                 .write(0, DB_HEADER_SIZE)?
-                .as_mut()
+                .mem_mut()
                 .copy_from_slice(&header.to_bytes(true, false));
             storage.flush()?;
         }
@@ -586,7 +586,7 @@ impl TransactionalMemory {
             assert!(!repair_info.invalid_magic_number);
             storage
                 .write(0, DB_HEADER_SIZE)?
-                .as_mut()
+                .mem_mut()
                 .copy_from_slice(&header.to_bytes(true, false));
             storage.flush()?;
         }
@@ -695,7 +695,7 @@ impl TransactionalMemory {
     fn write_header(&self, header: &DatabaseHeader, swap_primary: bool) -> Result {
         self.storage
             .write(0, DB_HEADER_SIZE)?
-            .as_mut()
+            .mem_mut()
             .copy_from_slice(&header.to_bytes(true, swap_primary));
 
         Ok(())
@@ -1294,12 +1294,12 @@ impl TransactionalMemory {
 
         #[allow(unused_mut)]
         let mut mem = self.storage.write(address_range.start, len)?;
-        debug_assert!(mem.as_ref().len() >= allocation_size);
+        debug_assert!(mem.mem().len() >= allocation_size);
 
         #[cfg(debug_assertions)]
         {
             // Poison the memory in debug mode to help detect uninitialized reads
-            mem.as_mut().fill(0xFF);
+            mem.mem_mut().fill(0xFF);
         }
 
         Ok(PageMut {

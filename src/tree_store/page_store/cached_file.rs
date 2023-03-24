@@ -1,4 +1,4 @@
-use crate::tree_store::page_store::base::{PageHack, PageHackMut, PageHint};
+use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::file_lock::LockedFile;
 use crate::{Error, Result};
 use std::collections::BTreeMap;
@@ -219,7 +219,7 @@ impl PagedCachedFile {
 
     // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
     // Doing so will not cause UB, but is a logic error.
-    pub(super) fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<PageHack> {
+    pub(super) fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<Arc<Vec<u8>>> {
         self.check_fsync_failure()?;
         debug_assert_eq!(0, offset % self.page_size);
         #[cfg(feature = "cache_metrics")]
@@ -231,7 +231,7 @@ impl PagedCachedFile {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
                 debug_assert_eq!(cached.len(), len);
-                return Ok(PageHack::ArcMem(cached.clone()));
+                return Ok(cached.clone());
             }
         }
 
@@ -242,7 +242,7 @@ impl PagedCachedFile {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
                 debug_assert_eq!(cached.len(), len);
-                return Ok(PageHack::ArcMem(cached.clone()));
+                return Ok(cached.clone());
             }
         }
 
@@ -264,7 +264,7 @@ impl PagedCachedFile {
             self.read_cache_bytes.fetch_sub(removed, Ordering::AcqRel);
         }
 
-        Ok(PageHack::ArcMem(buffer))
+        Ok(buffer)
     }
 
     // Discard pending writes to the given range
@@ -289,7 +289,7 @@ impl PagedCachedFile {
         }
     }
 
-    pub(super) fn write(&self, offset: u64, len: usize) -> Result<PageHackMut> {
+    pub(super) fn write(&self, offset: u64, len: usize) -> Result<WritablePage> {
         self.check_fsync_failure()?;
         assert_eq!(0, offset % self.page_size);
         let mut lock = self.write_buffer.lock().unwrap();
@@ -334,10 +334,10 @@ impl PagedCachedFile {
                 self.read_direct(offset, len)?
             }
         };
-        Ok(PageHackMut::Writable(WritablePage {
+        Ok(WritablePage {
             buffer: &self.write_buffer,
             offset,
             data,
-        }))
+        })
     }
 }

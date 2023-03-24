@@ -101,43 +101,8 @@ pub(crate) trait Page {
     fn get_page_number(&self) -> PageNumber;
 }
 
-// TODO: remove this in favor of multiple Page implementations
-#[derive(Clone)]
-pub(super) enum PageHack {
-    ArcMem(Arc<Vec<u8>>),
-}
-
-impl AsRef<[u8]> for PageHack {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            PageHack::ArcMem(x) => x,
-        }
-    }
-}
-
-// TODO: remove this in favor of multiple Page implementations
-pub(super) enum PageHackMut<'a> {
-    Writable(WritablePage<'a>),
-}
-
-impl<'a> AsRef<[u8]> for PageHackMut<'a> {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            PageHackMut::Writable(x) => x.mem(),
-        }
-    }
-}
-
-impl<'a> AsMut<[u8]> for PageHackMut<'a> {
-    fn as_mut(&mut self) -> &mut [u8] {
-        match self {
-            PageHackMut::Writable(x) => x.mem_mut(),
-        }
-    }
-}
-
 pub struct PageImpl<'a> {
-    pub(super) mem: PageHack,
+    pub(super) mem: Arc<Vec<u8>>,
     pub(super) page_number: PageNumber,
     #[cfg(debug_assertions)]
     pub(super) open_pages: &'a Mutex<HashMap<PageNumber, u64>>,
@@ -197,7 +162,7 @@ impl<'a> Clone for PageImpl<'a> {
 }
 
 pub(crate) struct PageMut<'a> {
-    pub(super) mem: PageHackMut<'a>,
+    pub(super) mem: WritablePage<'a>,
     pub(super) page_number: PageNumber,
     #[cfg(debug_assertions)]
     pub(super) open_pages: &'a Mutex<HashSet<PageNumber>>,
@@ -207,13 +172,13 @@ pub(crate) struct PageMut<'a> {
 
 impl<'a> PageMut<'a> {
     pub(crate) fn memory_mut(&mut self) -> &mut [u8] {
-        self.mem.as_mut()
+        self.mem.mem_mut()
     }
 }
 
 impl<'a> Page for PageMut<'a> {
     fn memory(&self) -> &[u8] {
-        self.mem.as_ref()
+        self.mem.mem()
     }
 
     fn get_page_number(&self) -> PageNumber {
