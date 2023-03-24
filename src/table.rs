@@ -78,10 +78,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
         // TODO: we should not require Clone here
         KR: Borrow<K::SelfType<'b>> + Clone + 'b,
     {
-        // Safety: No other references to this table can exist.
-        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-        // and we borrow &mut self.
-        unsafe { self.tree.drain(range).map(Drain::new) }
+        self.tree.drain(range).map(Drain::new)
     }
 
     /// Applies `predicate` to all key-value pairs in the specified range. All entries for which
@@ -96,14 +93,9 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
         // TODO: we should not require Clone here
         KR: Borrow<K::SelfType<'b>> + Clone + 'b,
     {
-        // Safety: No other references to this table can exist.
-        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-        // and we borrow &mut self.
-        unsafe {
-            self.tree
-                .drain_filter(range, predicate)
-                .map(DrainFilter::new)
-        }
+        self.tree
+            .drain_filter(range, predicate)
+            .map(DrainFilter::new)
     }
 
     /// Insert mapping of the given key to the given value
@@ -118,10 +110,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
         K: 'a,
         V: 'a,
     {
-        // Safety: No other references to this table can exist.
-        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-        // and we borrow &mut self.
-        unsafe { self.tree.insert(key.borrow(), value.borrow()) }
+        self.tree.insert(key.borrow(), value.borrow())
     }
 
     /// Reserve space to insert a key-value pair
@@ -135,10 +124,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     where
         K: 'a,
     {
-        // Safety: No other references to this table can exist.
-        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-        // and we borrow &mut self.
-        unsafe { self.tree.insert_reserve(key.borrow(), value_length) }
+        self.tree.insert_reserve(key.borrow(), value_length)
     }
 
     /// Removes the given key
@@ -151,10 +137,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     where
         K: 'a,
     {
-        // Safety: No other references to this table can exist.
-        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-        // and we borrow &mut self.
-        unsafe { self.tree.remove(key.borrow()) }
+        self.tree.remove(key.borrow())
     }
 }
 
@@ -213,7 +196,7 @@ pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static> {
     /// # fn main() -> Result<(), Error> {
     /// # let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     /// # let filename = tmpfile.path();
-    /// let db = unsafe { Database::create(filename)? };
+    /// let db = Database::create(filename)?;
     /// let write_txn = db.begin_write()?;
     /// {
     ///     let mut table = write_txn.open_table(TABLE)?;

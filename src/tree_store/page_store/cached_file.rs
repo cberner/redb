@@ -146,7 +146,7 @@ impl PagedCachedFile {
     }
 
     // Caller should invalidate all cached pages that are no longer valid
-    pub(super) unsafe fn resize(&self, len: u64) -> Result {
+    pub(super) fn resize(&self, len: u64) -> Result {
         // TODO: be more fine-grained about this invalidation
         for slot in 0..self.read_cache.len() {
             let cache = mem::take(&mut *self.read_cache[slot].write().unwrap());
@@ -219,7 +219,7 @@ impl PagedCachedFile {
 
     // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
     // Doing so will not cause UB, but is a logic error.
-    pub(super) unsafe fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<PageHack> {
+    pub(super) fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<PageHack> {
         self.check_fsync_failure()?;
         debug_assert_eq!(0, offset % self.page_size);
         #[cfg(feature = "cache_metrics")]
@@ -289,7 +289,7 @@ impl PagedCachedFile {
         }
     }
 
-    pub(super) unsafe fn write(&self, offset: u64, len: usize) -> Result<PageHackMut> {
+    pub(super) fn write(&self, offset: u64, len: usize) -> Result<PageHackMut> {
         self.check_fsync_failure()?;
         assert_eq!(0, offset % self.page_size);
         let mut lock = self.write_buffer.lock().unwrap();

@@ -54,8 +54,7 @@ pub(crate) enum FreePolicy {
 }
 
 impl FreePolicy {
-    // Safety: Caller must ensure there are no references to page, unless self is FreePolicy::Never
-    pub(crate) unsafe fn conditional_free(
+    pub(crate) fn conditional_free(
         &self,
         page: PageNumber,
         freed: &mut Vec<PageNumber>,
@@ -116,9 +115,7 @@ pub struct AccessGuard<'a, V: RedbValue> {
 }
 
 impl<'a, V: RedbValue> AccessGuard<'a, V> {
-    // Safety: if free_on_drop is true, caller must guarantee that no other references to page exist,
-    // and that no references will be created until this AccessGuard is dropped
-    pub(super) unsafe fn new(
+    pub(super) fn new(
         page: PageImpl<'a>,
         offset: usize,
         len: usize,
@@ -163,9 +160,7 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
         }
     }
 
-    // Safety: if free_on_drop is true, caller must guarantee that no other references to page exist,
-    // and that no references will be created until this AccessGuard is dropped
-    pub(super) unsafe fn remove_on_drop(
+    pub(super) fn remove_on_drop(
         page: PageMut<'a>,
         offset: usize,
         len: usize,
@@ -200,10 +195,7 @@ impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
                 let mut dummy = EitherPage::OwnedMemory(vec![]);
                 mem::swap(&mut self.page, &mut dummy);
                 drop(dummy);
-                // Safety: caller to new() guaranteed that no other references to this page exist
-                unsafe {
-                    self.mem.unwrap().free(page_number);
-                }
+                self.mem.unwrap().free(page_number);
             }
             OnDrop::RemoveEntry {
                 position,
@@ -266,10 +258,9 @@ impl<'a, K: RedbKey, V: RedbValue> AccessGuardMut<'a, K, V> {
             assert_eq!(LEAF, self.page.memory()[0]);
             Ok(self.checksum_helper(&self.page))
         } else {
-            // Safe because we're the only one with mutable access, and this is a dirty page so
-            // no readers can have a reference to it
             assert!(self.mem.uncommitted(page_number));
-            let mut page = unsafe { self.mem.get_page_mut(page_number)? };
+            // This is a dirty page so it can't be read cached
+            let mut page = self.mem.get_page_mut(page_number)?;
             assert_eq!(BRANCH, page.memory()[0]);
             let accessor = BranchAccessor::new(&page, K::fixed_width());
             let (child_index, child_page) = accessor.child_for_key::<K>(&self.key);
