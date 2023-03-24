@@ -10,7 +10,9 @@ use std::ops::{DerefMut, Index, IndexMut};
 #[cfg(any(target_os = "linux", all(unix, not(fuzzing))))]
 use std::os::unix::io::AsRawFd;
 use std::slice::SliceIndex;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+#[cfg(feature = "cache_metrics")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 pub(super) struct WritablePage<'a> {
@@ -62,7 +64,9 @@ pub(super) struct PagedCachedFile {
     read_cache_bytes: AtomicUsize,
     max_write_buffer_bytes: usize,
     write_buffer_bytes: AtomicUsize,
+    #[cfg(feature = "cache_metrics")]
     reads_total: AtomicU64,
+    #[cfg(feature = "cache_metrics")]
     reads_hits: AtomicU64,
     fsync_failed: AtomicBool,
     read_cache: Vec<RwLock<BTreeMap<u64, Arc<Vec<u8>>>>>,
@@ -98,7 +102,9 @@ impl PagedCachedFile {
             read_cache_bytes: AtomicUsize::new(0),
             max_write_buffer_bytes,
             write_buffer_bytes: AtomicUsize::new(0),
+            #[cfg(feature = "cache_metrics")]
             reads_total: Default::default(),
+            #[cfg(feature = "cache_metrics")]
             reads_hits: Default::default(),
             fsync_failed: Default::default(),
             read_cache,
@@ -226,11 +232,13 @@ impl PhysicalStorage for PagedCachedFile {
     unsafe fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<PageHack> {
         self.check_fsync_failure()?;
         debug_assert_eq!(0, offset % self.page_size);
+        #[cfg(feature = "cache_metrics")]
         self.reads_total.fetch_add(1, Ordering::AcqRel);
 
         if !matches!(hint, PageHint::Clean) {
             let lock = self.write_buffer.lock().unwrap();
             if let Some(cached) = lock.get(&offset) {
+                #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
                 debug_assert_eq!(cached.len(), len);
                 return Ok(PageHack::ArcMem(cached.clone()));
@@ -241,6 +249,7 @@ impl PhysicalStorage for PagedCachedFile {
         {
             let read_lock = self.read_cache[cache_slot].read().unwrap();
             if let Some(cached) = read_lock.get(&offset) {
+                #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
                 debug_assert_eq!(cached.len(), len);
                 return Ok(PageHack::ArcMem(cached.clone()));
