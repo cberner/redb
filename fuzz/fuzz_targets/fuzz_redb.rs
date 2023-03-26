@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use redb::{AccessGuard, Database, Durability, Error, MultimapTableDefinition, MultimapValueIter, ReadableMultimapTable, ReadableTable, TableDefinition, WriteStrategy};
+use redb::{AccessGuard, Database, Durability, Error, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, TableDefinition, WriteStrategy};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -141,7 +141,7 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
 }
 
 fn assert_multimap_value_eq(
-    mut iter: MultimapValueIter<&[u8]>,
+    mut iter: MultimapValue<&[u8]>,
     reference: Option<&BTreeSet<usize>>,
 ) {
     if let Some(values) = reference {
@@ -250,7 +250,7 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
                             } else {
                                 Box::new(local_reference.range(start..end))
                             };
-                        let mut iter: Box<dyn Iterator<Item = (AccessGuard<u64>, MultimapValueIter<&[u8]>)>> = if *reversed {
+                        let mut iter: Box<dyn Iterator<Item = (AccessGuard<u64>, MultimapValue<&[u8]>)>> = if *reversed {
                             Box::new(table.range(start..end).unwrap().rev())
                         } else {
                             Box::new(table.range(start..end).unwrap())
