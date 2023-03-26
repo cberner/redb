@@ -1,5 +1,16 @@
 # redb - Changelog
 
+## 0.14.0 - 2023-03-26
+* Remove `Builder::create_mmapped()` and `Builder::open_mmapped()`. The mmap backend has been removed
+  because it was infeasible to prove that it was sound. This makes the redb API entirely safe,
+  and the remaining `File` based backed is within a factor of ~2x on all workloads that I've benchmarked
+* Make `Table` implement `Send`. It is now possible to insert into multiple `Table`s concurrently
+* Expose `AccessGuardMut`, `Drain` and `DrainFilter` in the public API
+* Rename `RangeIter` to `Range`
+* Rename`MultimapRangeIter` to `MultimapRange`
+* Rename `MultimapValueIter` to `MultimapValue`
+* Performance optimizations
+
 ## 0.13.0 - 2023-02-05
 * Fix a major data corruption issue that was introduced in version 0.12.0. It caused databases
   greater than ~4GB to become irrecoverably corrupted due to an integer overflow in `PageNumber::address_range`
