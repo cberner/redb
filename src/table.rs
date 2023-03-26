@@ -293,6 +293,7 @@ impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Drain<'a, K, V> {
 }
 
 impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Iterator for Drain<'a, K, V> {
+    // TODO: probably needs to be a Result
     type Item = (AccessGuard<'a, K>, AccessGuard<'a, V>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -342,6 +343,7 @@ impl<
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > Iterator for DrainFilter<'a, K, V, F>
 {
+    // TODO: probably needs to be a Result
     type Item = (AccessGuard<'a, K>, AccessGuard<'a, V>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -380,6 +382,7 @@ impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> RangeIter<'a, K, V> {
 }
 
 impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Iterator for RangeIter<'a, K, V> {
+    // TODO: this probably needs to return a Result
     type Item = (AccessGuard<'a, K>, AccessGuard<'a, V>);
 
     fn next(&mut self) -> Option<Self::Item> {
