@@ -12,9 +12,9 @@ pub use multimap_table::{
     MultimapRangeIter, MultimapTable, MultimapValueIter, ReadOnlyMultimapTable,
     ReadableMultimapTable,
 };
-pub use table::{RangeIter, ReadOnlyTable, ReadableTable, Table};
+pub use table::{Drain, DrainFilter, RangeIter, ReadOnlyTable, ReadableTable, Table};
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
-pub use tree_store::{AccessGuard, Savepoint};
+pub use tree_store::{AccessGuard, AccessGuardMut, Savepoint};
 pub use types::{RedbKey, RedbValue, TypeName};
 
 type Result<T = (), E = Error> = std::result::Result<T, E>;
