@@ -6,9 +6,8 @@ mod page_store;
 mod table_tree;
 
 pub(crate) use btree::{Btree, BtreeMut, RawBtree};
-pub use btree_base::AccessGuard;
-pub(crate) use btree_base::AccessGuardMut;
 pub(crate) use btree_base::Checksum;
+pub use btree_base::{AccessGuard, AccessGuardMut};
 pub(crate) use btree_base::{LeafAccessor, RawLeafBuilder, BRANCH, LEAF};
 pub(crate) use btree_iters::{
     AllPageNumbersBtreeIter, BtreeDrain, BtreeDrainFilter, BtreeRangeIter,
