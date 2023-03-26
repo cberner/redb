@@ -313,6 +313,7 @@ impl<'a, V: RedbKey + 'static> MultimapValueIter<'a, V> {
 }
 
 impl<'a, V: RedbKey + 'static> Iterator for MultimapValueIter<'a, V> {
+    // TODO: this probably needs to return a Result
     type Item = AccessGuard<'a, V>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -373,6 +374,7 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapRangeIter<'a, K, V>
 }
 
 impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> Iterator for MultimapRangeIter<'a, K, V> {
+    // TODO: this probably needs to return a Result
     type Item = (AccessGuard<'a, K>, MultimapValueIter<'a, V>);
 
     fn next(&mut self) -> Option<Self::Item> {
