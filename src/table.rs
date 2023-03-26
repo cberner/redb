@@ -151,15 +151,12 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V
         self.tree.get(key.borrow())
     }
 
-    fn range<'a: 'b, 'b, KR>(
-        &'a self,
-        range: impl RangeBounds<KR> + 'b,
-    ) -> Result<RangeIter<'a, K, V>>
+    fn range<'a: 'b, 'b, KR>(&'a self, range: impl RangeBounds<KR> + 'b) -> Result<Range<'a, K, V>>
     where
         K: 'a,
         KR: Borrow<K::SelfType<'b>> + 'b,
     {
-        self.tree.range(range).map(RangeIter::new)
+        self.tree.range(range).map(Range::new)
     }
 
     fn len(&self) -> Result<usize> {
@@ -215,10 +212,7 @@ pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static> {
     /// # Ok(())
     /// # }
     /// ```
-    fn range<'a: 'b, 'b, KR>(
-        &'a self,
-        range: impl RangeBounds<KR> + 'b,
-    ) -> Result<RangeIter<'a, K, V>>
+    fn range<'a: 'b, 'b, KR>(&'a self, range: impl RangeBounds<KR> + 'b) -> Result<Range<'a, K, V>>
     where
         K: 'a,
         KR: Borrow<K::SelfType<'b>> + 'b;
@@ -230,7 +224,7 @@ pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static> {
     fn is_empty(&self) -> Result<bool>;
 
     /// Returns a double-ended iterator over all elements in the table
-    fn iter(&self) -> Result<RangeIter<K, V>> {
+    fn iter(&self) -> Result<Range<K, V>> {
         self.range::<K::SelfType<'_>>(..)
     }
 }
@@ -262,15 +256,12 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V>
         self.tree.get(key.borrow())
     }
 
-    fn range<'a: 'b, 'b, KR>(
-        &'a self,
-        range: impl RangeBounds<KR> + 'b,
-    ) -> Result<RangeIter<'a, K, V>>
+    fn range<'a: 'b, 'b, KR>(&'a self, range: impl RangeBounds<KR> + 'b) -> Result<Range<'a, K, V>>
     where
         K: 'a,
         KR: Borrow<K::SelfType<'b>> + 'b,
     {
-        self.tree.range(range).map(RangeIter::new)
+        self.tree.range(range).map(Range::new)
     }
 
     fn len(&self) -> Result<usize> {
@@ -371,17 +362,17 @@ impl<
     }
 }
 
-pub struct RangeIter<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
+pub struct Range<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
     inner: BtreeRangeIter<'a, K, V>,
 }
 
-impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> RangeIter<'a, K, V> {
+impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Range<'a, K, V> {
     fn new(inner: BtreeRangeIter<'a, K, V>) -> Self {
         Self { inner }
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Iterator for RangeIter<'a, K, V> {
+impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Iterator for Range<'a, K, V> {
     // TODO: this probably needs to return a Result
     type Item = (AccessGuard<'a, K>, AccessGuard<'a, V>);
 
@@ -397,7 +388,7 @@ impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Iterator for RangeIter<'a
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> DoubleEndedIterator for RangeIter<'a, K, V> {
+impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> DoubleEndedIterator for Range<'a, K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.inner.next_back() {
             let (page, key_range, value_range) = entry.into_raw();

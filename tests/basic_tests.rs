@@ -1,6 +1,6 @@
 use redb::{
-    Database, MultimapTableDefinition, RangeIter, ReadableTable, RedbKey, RedbValue,
-    TableDefinition, TypeName,
+    Database, MultimapTableDefinition, Range, ReadableTable, RedbKey, RedbValue, TableDefinition,
+    TypeName,
 };
 use std::cmp::Ordering;
 use std::sync;
@@ -876,7 +876,7 @@ fn i128_type() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(definition).unwrap();
     assert_eq!(-2, table.get(&-1).unwrap().unwrap().value());
-    let mut iter: RangeIter<i128, i128> = table.range::<i128>(..).unwrap();
+    let mut iter: Range<i128, i128> = table.range::<i128>(..).unwrap();
     for i in -11..10 {
         assert_eq!(iter.next().unwrap().1.value(), i);
     }
@@ -924,7 +924,7 @@ fn str_type() {
     assert_eq!(iter.next().unwrap().1.value(), "world");
     assert!(iter.next().is_none());
 
-    let mut iter: RangeIter<&str, &str> = table.range("a".."z").unwrap();
+    let mut iter: Range<&str, &str> = table.range("a".."z").unwrap();
     assert_eq!(iter.next().unwrap().1.value(), "world");
     assert!(iter.next().is_none());
 }
@@ -988,7 +988,7 @@ fn array_type() {
     let hello = b"hello";
     assert_eq!(b"world_123", table.get(hello).unwrap().unwrap().value());
 
-    let mut iter: RangeIter<&[u8; 5], &[u8; 9]> = table.range::<&[u8; 5]>(..).unwrap();
+    let mut iter: Range<&[u8; 5], &[u8; 9]> = table.range::<&[u8; 5]>(..).unwrap();
     assert_eq!(iter.next().unwrap().1.value(), b"world_123");
     assert!(iter.next().is_none());
 }
@@ -1159,12 +1159,12 @@ fn owned_get_signatures() {
 
     assert_eq!(2, table.get(&1).unwrap().unwrap().value());
 
-    let mut iter: RangeIter<u32, u32> = table.range::<u32>(..).unwrap();
+    let mut iter: Range<u32, u32> = table.range::<u32>(..).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1.value(), i + 1);
     }
     assert!(iter.next().is_none());
-    let mut iter: RangeIter<u32, u32> = table.range(0..10).unwrap();
+    let mut iter: Range<u32, u32> = table.range(0..10).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1.value(), i + 1);
     }

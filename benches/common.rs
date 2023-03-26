@@ -135,7 +135,7 @@ impl<'txn> BenchReader for RedbBenchReader<'txn> {
 }
 
 pub struct RedbBenchIterator<'a> {
-    iter: redb::RangeIter<'a, &'static [u8], &'static [u8]>,
+    iter: redb::Range<'a, &'static [u8], &'static [u8]>,
 }
 
 impl BenchIterator for RedbBenchIterator<'_> {
