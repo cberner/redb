@@ -1,6 +1,6 @@
 use redb::{
-    Database, MultimapTableDefinition, Range, ReadableTable, RedbKey, RedbValue, TableDefinition,
-    TypeName,
+    Database, MultimapTableDefinition, MultimapTableHandle, Range, ReadableTable, RedbKey,
+    RedbValue, TableDefinition, TableHandle, TypeName,
 };
 use std::cmp::Ordering;
 use std::sync;
@@ -247,15 +247,31 @@ fn list_tables() {
         write_txn.open_multimap_table(definition_my).unwrap();
     }
 
-    let tables: Vec<String> = write_txn.list_tables().unwrap().collect();
-    let multimap_tables: Vec<String> = write_txn.list_multimap_tables().unwrap().collect();
+    let tables: Vec<String> = write_txn
+        .list_tables()
+        .unwrap()
+        .map(|h| h.name().to_string())
+        .collect();
+    let multimap_tables: Vec<String> = write_txn
+        .list_multimap_tables()
+        .unwrap()
+        .map(|h| h.name().to_string())
+        .collect();
     assert_eq!(tables, &["x", "y"]);
     assert_eq!(multimap_tables, &["mx", "my"]);
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let tables: Vec<String> = read_txn.list_tables().unwrap().collect();
-    let multimap_tables: Vec<String> = read_txn.list_multimap_tables().unwrap().collect();
+    let tables: Vec<String> = read_txn
+        .list_tables()
+        .unwrap()
+        .map(|h| h.name().to_string())
+        .collect();
+    let multimap_tables: Vec<String> = read_txn
+        .list_multimap_tables()
+        .unwrap()
+        .map(|h| h.name().to_string())
+        .collect();
     assert_eq!(tables, &["x", "y"]);
     assert_eq!(multimap_tables, &["mx", "my"]);
 }

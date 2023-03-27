@@ -42,9 +42,41 @@ pub trait TableHandle {
     fn name(&self) -> &str;
 }
 
+pub struct UntypedTableHandle {
+    name: String,
+}
+
+impl UntypedTableHandle {
+    pub(crate) fn new(name: String) -> Self {
+        Self { name }
+    }
+}
+
+impl TableHandle for UntypedTableHandle {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 pub trait MultimapTableHandle {
     // Returns the name of the multimap table
     fn name(&self) -> &str;
+}
+
+pub struct UntypedMultimapTableHandle {
+    name: String,
+}
+
+impl UntypedMultimapTableHandle {
+    pub(crate) fn new(name: String) -> Self {
+        Self { name }
+    }
+}
+
+impl MultimapTableHandle for UntypedMultimapTableHandle {
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Defines the name and types of a table

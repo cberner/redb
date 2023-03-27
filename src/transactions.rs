@@ -7,6 +7,7 @@ use crate::types::{RedbKey, RedbValue};
 use crate::{
     Database, Error, MultimapTable, MultimapTableDefinition, MultimapTableHandle,
     ReadOnlyMultimapTable, ReadOnlyTable, Result, Savepoint, Table, TableDefinition, TableHandle,
+    UntypedMultimapTableHandle, UntypedTableHandle,
 };
 #[cfg(feature = "logging")]
 use log::{info, warn};
@@ -395,21 +396,23 @@ impl<'db> WriteTransaction<'db> {
     }
 
     /// List all the tables
-    pub fn list_tables(&self) -> Result<impl Iterator<Item = String> + '_> {
+    pub fn list_tables(&self) -> Result<impl Iterator<Item = UntypedTableHandle> + '_> {
         self.table_tree
             .read()
             .unwrap()
             .list_tables(TableType::Normal)
-            .map(|x| x.into_iter())
+            .map(|x| x.into_iter().map(UntypedTableHandle::new))
     }
 
     /// List all the multimap tables
-    pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String> + '_> {
+    pub fn list_multimap_tables(
+        &self,
+    ) -> Result<impl Iterator<Item = UntypedMultimapTableHandle> + '_> {
         self.table_tree
             .read()
             .unwrap()
             .list_tables(TableType::Multimap)
-            .map(|x| x.into_iter())
+            .map(|x| x.into_iter().map(UntypedMultimapTableHandle::new))
     }
 
     /// Commit the transaction
@@ -680,17 +683,17 @@ impl<'db> ReadTransaction<'db> {
     }
 
     /// List all the tables
-    pub fn list_tables(&self) -> Result<impl Iterator<Item = String>> {
+    pub fn list_tables(&self) -> Result<impl Iterator<Item = UntypedTableHandle>> {
         self.tree
             .list_tables(TableType::Normal)
-            .map(|x| x.into_iter())
+            .map(|x| x.into_iter().map(UntypedTableHandle::new))
     }
 
     /// List all the multimap tables
-    pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = String>> {
+    pub fn list_multimap_tables(&self) -> Result<impl Iterator<Item = UntypedMultimapTableHandle>> {
         self.tree
             .list_tables(TableType::Multimap)
-            .map(|x| x.into_iter())
+            .map(|x| x.into_iter().map(UntypedMultimapTableHandle::new))
     }
 }
 
