@@ -8,7 +8,6 @@ use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::header::{DatabaseHeader, DB_HEADER_SIZE, MAGICNUMBER};
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
-use crate::tree_store::page_store::utils::is_page_aligned;
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
 use crate::tree_store::PageNumber;
 use crate::Error;
@@ -437,8 +436,6 @@ pub(crate) struct TransactionalMemory {
     // code path where there is no locking
     region_size: u64,
     region_header_with_padding_size: u64,
-    #[allow(dead_code)]
-    pages_are_os_page_aligned: bool,
 }
 
 impl TransactionalMemory {
@@ -618,7 +615,6 @@ impl TransactionalMemory {
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,
-            pages_are_os_page_aligned: is_page_aligned(page_size),
         })
     }
 
