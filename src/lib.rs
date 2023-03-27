@@ -6,7 +6,10 @@
     clippy::cast_sign_loss
 )]
 
-pub use db::{Builder, Database, MultimapTableDefinition, TableDefinition, WriteStrategy};
+pub use db::{
+    Builder, Database, MultimapTableDefinition, MultimapTableHandle, TableDefinition, TableHandle,
+    WriteStrategy,
+};
 pub use error::Error;
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, ReadOnlyMultimapTable, ReadableMultimapTable,

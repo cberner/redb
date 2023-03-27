@@ -37,6 +37,16 @@ impl AtomicTransactionId {
     }
 }
 
+pub trait TableHandle {
+    // Returns the name of the table
+    fn name(&self) -> &str;
+}
+
+pub trait MultimapTableHandle {
+    // Returns the name of the multimap table
+    fn name(&self) -> &str;
+}
+
 /// Defines the name and types of a table
 ///
 /// A [`TableDefinition`] should be opened for use by calling [`ReadTransaction::open_table`] or [`WriteTransaction::open_table`]
@@ -63,9 +73,10 @@ impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> TableDefinition<'a, K, V>
             _value_type: PhantomData,
         }
     }
+}
 
-    /// Returns a reference of the `name` of the current `TableDefinition`.
-    pub fn name(&self) -> &str {
+impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> TableHandle for TableDefinition<'a, K, V> {
+    fn name(&self) -> &str {
         self.name
     }
 }
@@ -113,8 +124,12 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableDefinition<'a,
             _value_type: PhantomData,
         }
     }
+}
 
-    pub fn name(&self) -> &str {
+impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableHandle
+    for MultimapTableDefinition<'a, K, V>
+{
+    fn name(&self) -> &str {
         self.name
     }
 }
