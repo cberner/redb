@@ -8,7 +8,6 @@ mod layout;
 mod page_manager;
 mod region;
 mod savepoint;
-mod utils;
 #[allow(dead_code)]
 mod xxh3;
 
