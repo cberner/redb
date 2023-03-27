@@ -74,7 +74,3 @@ harness = false
 [[bench]]
 name = "syscall_benchmark"
 harness = false
-
-[[bench]]
-name = "mmap_page_size_benchmark"
-harness = false
