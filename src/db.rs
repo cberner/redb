@@ -554,7 +554,6 @@ impl Builder {
     }
 
     #[cfg(test)]
-    #[cfg(unix)]
     fn set_region_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
         self.region_size = Some(size);
@@ -804,7 +803,6 @@ mod test {
     }
 
     #[test]
-    #[cfg(unix)]
     fn dynamic_shrink() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
