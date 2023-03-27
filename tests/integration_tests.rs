@@ -1034,6 +1034,36 @@ fn delete_table() {
 }
 
 #[test]
+fn delete_all_tables() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let x_def: TableDefinition<&str, &str> = TableDefinition::new("x");
+    let y_def: TableDefinition<&str, &str> = TableDefinition::new("y");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(x_def).unwrap();
+        table.insert("hello", "world").unwrap();
+        let mut table = write_txn.open_table(y_def).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    assert_eq!(2, read_txn.list_tables().unwrap().count());
+
+    let write_txn = db.begin_write().unwrap();
+    for table in write_txn.list_tables().unwrap() {
+        write_txn.delete_table(table).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    assert_eq!(0, read_txn.list_tables().unwrap().count());
+}
+
+#[test]
 fn dropped_write() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = Database::create(tmpfile.path()).unwrap();

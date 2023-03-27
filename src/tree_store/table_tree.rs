@@ -361,8 +361,7 @@ impl<'txn> TableTree<'txn> {
         Ok(iter.collect())
     }
 
-    // root_page: the root of the master table
-    pub(crate) fn get_table<K: RedbKey, V: RedbValue>(
+    pub(crate) fn get_table_untyped(
         &self,
         name: &str,
         table_type: TableType,
@@ -372,16 +371,6 @@ impl<'txn> TableTree<'txn> {
             if definition.get_type() != table_type {
                 return Err(Error::TableTypeMismatch(format!(
                     "{name:?} is not of type {table_type:?}",
-                )));
-            }
-            if definition.key_type != K::type_name() || definition.value_type != V::type_name() {
-                return Err(Error::TableTypeMismatch(format!(
-                    "{} is of type Table<{}, {}> not Table<{}, {}>",
-                    name,
-                    definition.key_type.name(),
-                    definition.value_type.name(),
-                    K::type_name().name(),
-                    V::type_name().name()
                 )));
             }
             if definition.get_key_alignment() != ALIGNMENT {
@@ -396,22 +385,6 @@ impl<'txn> TableTree<'txn> {
                     name, ALIGNMENT, definition.value_alignment
                 )));
             }
-            if definition.get_fixed_key_size() != K::fixed_width() {
-                return Err(Error::Corrupted(format!(
-                    "{:?} key width {:?} does not match {:?}",
-                    name,
-                    K::fixed_width(),
-                    definition.get_fixed_key_size()
-                )));
-            }
-            if definition.get_fixed_value_size() != V::fixed_width() {
-                return Err(Error::Corrupted(format!(
-                    "{:?} value width {:?} does not match {:?}",
-                    name,
-                    V::fixed_width(),
-                    definition.get_fixed_value_size()
-                )));
-            }
 
             if let Some(updated_root) = self.pending_table_updates.get(name) {
                 definition.table_root = *updated_root;
@@ -424,17 +397,56 @@ impl<'txn> TableTree<'txn> {
     }
 
     // root_page: the root of the master table
-    pub(crate) fn delete_table<K: RedbKey, V: RedbValue>(
-        &mut self,
+    pub(crate) fn get_table<K: RedbKey, V: RedbValue>(
+        &self,
         name: &str,
         table_type: TableType,
-    ) -> Result<bool> {
-        if let Some(definition) = self.get_table::<K, V>(name, table_type)? {
+    ) -> Result<Option<InternalTableDefinition>> {
+        Ok(
+            if let Some(definition) = self.get_table_untyped(name, table_type)? {
+                // Do additional checks on the types to be sure they match
+                if definition.key_type != K::type_name() || definition.value_type != V::type_name()
+                {
+                    return Err(Error::TableTypeMismatch(format!(
+                        "{} is of type Table<{}, {}> not Table<{}, {}>",
+                        name,
+                        definition.key_type.name(),
+                        definition.value_type.name(),
+                        K::type_name().name(),
+                        V::type_name().name()
+                    )));
+                }
+                if definition.get_fixed_key_size() != K::fixed_width() {
+                    return Err(Error::Corrupted(format!(
+                        "{:?} key width {:?} does not match {:?}",
+                        name,
+                        K::fixed_width(),
+                        definition.get_fixed_key_size()
+                    )));
+                }
+                if definition.get_fixed_value_size() != V::fixed_width() {
+                    return Err(Error::Corrupted(format!(
+                        "{:?} value width {:?} does not match {:?}",
+                        name,
+                        V::fixed_width(),
+                        definition.get_fixed_value_size()
+                    )));
+                }
+                Some(definition)
+            } else {
+                None
+            },
+        )
+    }
+
+    // root_page: the root of the master table
+    pub(crate) fn delete_table(&mut self, name: &str, table_type: TableType) -> Result<bool> {
+        if let Some(definition) = self.get_table_untyped(name, table_type)? {
             if let Some((table_root, _)) = definition.get_root() {
                 let iter = AllPageNumbersBtreeIter::new(
                     table_root,
-                    K::fixed_width(),
-                    V::fixed_width(),
+                    definition.fixed_key_size,
+                    definition.fixed_value_size,
                     self.mem,
                 )?;
                 let mut freed_pages = self.freed_pages.lock().unwrap();
