@@ -1,5 +1,6 @@
 use redb::{
-    Database, Error, ReadableTable, RedbKey, RedbValue, Table, TableDefinition, WriteTransaction,
+    Database, Error, ReadableTable, RedbKey, RedbValue, Table, TableDefinition, TableHandle,
+    WriteTransaction,
 };
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};

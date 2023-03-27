@@ -5,8 +5,8 @@ use crate::tree_store::{
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{
-    Database, Error, MultimapTable, MultimapTableDefinition, ReadOnlyMultimapTable, ReadOnlyTable,
-    Result, Savepoint, Table, TableDefinition,
+    Database, Error, MultimapTable, MultimapTableDefinition, MultimapTableHandle,
+    ReadOnlyMultimapTable, ReadOnlyTable, Result, Savepoint, Table, TableDefinition, TableHandle,
 };
 #[cfg(feature = "logging")]
 use log::{info, warn};
