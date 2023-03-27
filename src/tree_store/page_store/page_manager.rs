@@ -1144,20 +1144,11 @@ impl TransactionalMemory {
         }
     }
 
-    // Safety: caller must guarantee that no references to free pages at the end of the last region exist
-    #[cfg_attr(windows, allow(unreachable_code))]
-    #[cfg_attr(windows, allow(unused_variables))]
     fn try_shrink(
         &self,
         state: &mut InMemoryState,
         in_progress_layout: &mut InProgressLayout,
     ) -> Result<bool> {
-        // TODO: enable shrinking on Windows
-        #[cfg(windows)]
-        {
-            return Ok(false);
-        }
-
         let (layout, tracker_page) = (
             &mut in_progress_layout.layout,
             &mut in_progress_layout.tracker_page,
