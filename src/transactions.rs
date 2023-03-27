@@ -366,33 +366,27 @@ impl<'db> WriteTransaction<'db> {
     /// Delete the given table
     ///
     /// Returns a bool indicating whether the table existed
-    pub fn delete_table<K: RedbKey + 'static, V: RedbValue + 'static>(
-        &self,
-        definition: TableDefinition<K, V>,
-    ) -> Result<bool> {
+    pub fn delete_table(&self, definition: impl TableHandle) -> Result<bool> {
         #[cfg(feature = "logging")]
-        info!("Deleting table: {}", definition);
+        info!("Deleting table: {}", definition.name());
         self.dirty.store(true, Ordering::Release);
         self.table_tree
             .write()
             .unwrap()
-            .delete_table::<K, V>(definition.name(), TableType::Normal)
+            .delete_table(definition.name(), TableType::Normal)
     }
 
     /// Delete the given table
     ///
     /// Returns a bool indicating whether the table existed
-    pub fn delete_multimap_table<K: RedbKey + 'static, V: RedbKey + 'static>(
-        &self,
-        definition: MultimapTableDefinition<K, V>,
-    ) -> Result<bool> {
+    pub fn delete_multimap_table(&self, definition: impl MultimapTableHandle) -> Result<bool> {
         #[cfg(feature = "logging")]
-        info!("Deleting multimap table: {}", definition);
+        info!("Deleting multimap table: {}", definition.name());
         self.dirty.store(true, Ordering::Release);
         self.table_tree
             .write()
             .unwrap()
-            .delete_table::<K, V>(definition.name(), TableType::Multimap)
+            .delete_table(definition.name(), TableType::Multimap)
     }
 
     /// List all the tables

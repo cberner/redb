@@ -42,6 +42,7 @@ pub trait TableHandle {
     fn name(&self) -> &str;
 }
 
+#[derive(Clone)]
 pub struct UntypedTableHandle {
     name: String,
 }
@@ -63,6 +64,7 @@ pub trait MultimapTableHandle {
     fn name(&self) -> &str;
 }
 
+#[derive(Clone)]
 pub struct UntypedMultimapTableHandle {
     name: String,
 }
