@@ -6,7 +6,7 @@ use crate::tree_store::btree_iters::BtreeDrain;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{AccessGuardMut, BtreeDrainFilter, BtreeRangeIter, PageHint, PageNumber};
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
 use crate::{AccessGuard, Result};
 #[cfg(feature = "logging")]
 use log::trace;
@@ -74,35 +74,6 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         );
         let (old_value, _) = operation.insert(key, value)?;
         Ok(old_value)
-    }
-
-    /// Reserve space to insert a key-value pair
-    /// The returned reference will have length equal to value_length
-    // TODO: return type should be V, not [u8]
-    pub(crate) fn insert_reserve(
-        &mut self,
-        key: &K::SelfType<'_>,
-        value_length: usize,
-    ) -> Result<AccessGuardMut<'a, K, &[u8]>> {
-        #[cfg(feature = "logging")]
-        trace!(
-            "Btree(root={:?}): Inserting {:?} with {} reserved bytes for the value",
-            &self.root,
-            key,
-            value_length
-        );
-        let mut root = self.root.lock().unwrap();
-        let mut freed_pages = self.freed_pages.lock().unwrap();
-        let value = vec![0u8; value_length];
-        let mut operation = MutateHelper::<K, &[u8]>::new(
-            &mut root,
-            FreePolicy::Uncommitted,
-            self.mem,
-            freed_pages.as_mut(),
-        );
-        let (_, mut guard) = operation.insert(key, &value.as_slice())?;
-        guard.set_root_for_drop(self.root.clone());
-        Ok(guard)
     }
 
     pub(crate) fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<V>>> {
@@ -238,6 +209,37 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
 
     pub(crate) fn len(&self) -> Result<usize> {
         self.read_tree().len()
+    }
+}
+
+impl<'a, K: RedbKey + 'a, V: RedbValueMutInPlace + 'a> BtreeMut<'a, K, V> {
+    /// Reserve space to insert a key-value pair
+    /// The returned reference will have length equal to value_length
+    pub(crate) fn insert_reserve(
+        &mut self,
+        key: &K::SelfType<'_>,
+        value_length: usize,
+    ) -> Result<AccessGuardMut<'a, K, V>> {
+        #[cfg(feature = "logging")]
+        trace!(
+            "Btree(root={:?}): Inserting {:?} with {} reserved bytes for the value",
+            &self.root,
+            key,
+            value_length
+        );
+        let mut root = self.root.lock().unwrap();
+        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut value = vec![0u8; value_length];
+        V::initialize(&mut value);
+        let mut operation = MutateHelper::<K, V>::new(
+            &mut root,
+            FreePolicy::Uncommitted,
+            self.mem,
+            freed_pages.as_mut(),
+        );
+        let (_, mut guard) = operation.insert(key, &V::from_bytes(&value))?;
+        guard.set_root_for_drop(self.root.clone());
+        Ok(guard)
     }
 }
 
