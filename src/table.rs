@@ -2,7 +2,7 @@ use crate::tree_store::{
     AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeMut, BtreeRangeIter, Checksum,
     PageHint, PageNumber, TransactionalMemory,
 };
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
 use crate::Result;
 use crate::{AccessGuard, WriteTransaction};
 use std::borrow::Borrow;
@@ -113,20 +113,6 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
         self.tree.insert(key.borrow(), value.borrow())
     }
 
-    /// Reserve space to insert a key-value pair
-    /// The returned reference will have length equal to value_length
-    // TODO: return type should be V, not [u8]
-    pub fn insert_reserve<'a>(
-        &mut self,
-        key: impl Borrow<K::SelfType<'a>>,
-        value_length: usize,
-    ) -> Result<AccessGuardMut<K, &[u8]>>
-    where
-        K: 'a,
-    {
-        self.tree.insert_reserve(key.borrow(), value_length)
-    }
-
     /// Removes the given key
     ///
     /// Returns the old value, if the key was present in the table
@@ -138,6 +124,21 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
         K: 'a,
     {
         self.tree.remove(key.borrow())
+    }
+}
+
+impl<'db, 'txn, K: RedbKey + 'static, V: RedbValueMutInPlace + 'static> Table<'db, 'txn, K, V> {
+    /// Reserve space to insert a key-value pair
+    /// The returned reference will have length equal to value_length
+    pub fn insert_reserve<'a>(
+        &mut self,
+        key: impl Borrow<K::SelfType<'a>>,
+        value_length: usize,
+    ) -> Result<AccessGuardMut<K, V>>
+    where
+        K: 'a,
+    {
+        self.tree.insert_reserve(key.borrow(), value_length)
     }
 }
 

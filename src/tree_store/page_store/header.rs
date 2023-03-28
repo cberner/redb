@@ -579,9 +579,11 @@ mod test {
             .create(tmpfile.path())
             .unwrap();
 
+        let def: TableDefinition<&str, &[u8]> = TableDefinition::new("x");
+
         let write_txn = db.begin_write().unwrap();
         {
-            let mut table = write_txn.open_table(X).unwrap();
+            let mut table = write_txn.open_table(def).unwrap();
             let mut value = table.insert_reserve("hello", 5).unwrap();
             value.as_mut().copy_from_slice(b"world");
         }
@@ -589,7 +591,7 @@ mod test {
 
         let write_txn = db.begin_write().unwrap();
         {
-            let mut table = write_txn.open_table(X).unwrap();
+            let mut table = write_txn.open_table(def).unwrap();
             let mut value = table.insert_reserve("hello2", 5).unwrap();
             value.as_mut().copy_from_slice(b"world");
         }
