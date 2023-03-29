@@ -16,4 +16,6 @@ pub use page_store::Savepoint;
 pub(crate) use page_store::{
     Page, PageHint, PageNumber, TransactionalMemory, FILE_FORMAT_VERSION, PAGE_SIZE,
 };
-pub(crate) use table_tree::{FreedTableKey, InternalTableDefinition, TableTree, TableType};
+pub(crate) use table_tree::{
+    FreedPageList, FreedTableKey, InternalTableDefinition, TableTree, TableType,
+};
