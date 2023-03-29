@@ -838,12 +838,12 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadOnlyMultimapTable<'tx
         root_page: Option<(PageNumber, Checksum)>,
         hint: PageHint,
         mem: &'txn TransactionalMemory,
-    ) -> ReadOnlyMultimapTable<'txn, K, V> {
-        ReadOnlyMultimapTable {
-            tree: Btree::new(root_page, hint, mem),
+    ) -> Result<ReadOnlyMultimapTable<'txn, K, V>> {
+        Ok(ReadOnlyMultimapTable {
+            tree: Btree::new(root_page, hint, mem)?,
             mem,
             _value_type: Default::default(),
-        }
+        })
     }
 }
 
