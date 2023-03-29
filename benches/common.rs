@@ -142,9 +142,10 @@ impl BenchIterator for RedbBenchIterator<'_> {
     type Output<'a> = RedbAccessGuard<'a> where Self: 'a;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
-        self.iter
-            .next()
-            .map(|(k, v)| (RedbAccessGuard::new(k), RedbAccessGuard::new(v)))
+        self.iter.next().map(|item| {
+            let (k, v) = item.unwrap();
+            (RedbAccessGuard::new(k), RedbAccessGuard::new(v))
+        })
     }
 }
 

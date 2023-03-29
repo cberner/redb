@@ -156,7 +156,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
             MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut free_on_drop);
         for entry in iter {
             // TODO: optimize so that we don't have to call safe_delete in a loop
-            assert!(operation.safe_delete(entry.key().borrow())?.is_some());
+            assert!(operation.safe_delete(entry?.key().borrow())?.is_some());
         }
 
         let result = BtreeDrain::new(
@@ -191,6 +191,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
             MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut free_on_drop);
         for entry in iter {
             // TODO: optimize so that we don't have to call safe_delete in a loop
+            let entry = entry?;
             if predicate(entry.key(), entry.value()) {
                 assert!(operation.safe_delete(entry.key().borrow())?.is_some());
             }
@@ -386,13 +387,14 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
     }
 
     pub(crate) fn len(&self) -> Result<usize> {
-        let mut iter: BtreeRangeIter<K, V> = BtreeRangeIter::new::<RangeFull, K::SelfType<'_>>(
+        let iter: BtreeRangeIter<K, V> = BtreeRangeIter::new::<RangeFull, K::SelfType<'_>>(
             ..,
             self.root.map(|(p, _)| p),
             self.mem,
         )?;
         let mut count = 0;
-        while iter.next().is_some() {
+        for v in iter {
+            v?;
             count += 1;
         }
         Ok(count)

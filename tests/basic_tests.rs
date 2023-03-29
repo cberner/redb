@@ -86,13 +86,15 @@ fn drain() {
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
         assert_eq!(table.len().unwrap(), 10);
-        for (i, (k, v)) in table.drain(0..5).unwrap().enumerate() {
+        for (i, item) in table.drain(0..5).unwrap().enumerate() {
+            let (k, v) = item.unwrap();
             assert_eq!(i as u64, k.value());
             assert_eq!(i as u64, v.value());
         }
         assert_eq!(table.len().unwrap(), 5);
         let mut i = 5u64;
-        for (k, v) in table.range(0..10).unwrap() {
+        for item in table.range(0..10).unwrap() {
+            let (k, v) = item.unwrap();
             assert_eq!(i, k.value());
             assert_eq!(i, v.value());
             i += 1;
@@ -141,13 +143,15 @@ fn drain_filter() {
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
         assert_eq!(table.len().unwrap(), 10);
-        for (i, (k, v)) in table.drain_filter(0.., |x, _| x < 5).unwrap().enumerate() {
+        for (i, item) in table.drain_filter(0.., |x, _| x < 5).unwrap().enumerate() {
+            let (k, v) = item.unwrap();
             assert_eq!(i as u64, k.value());
             assert_eq!(i as u64, v.value());
         }
         assert_eq!(table.len().unwrap(), 5);
         let mut i = 5u64;
-        for (k, v) in table.range(0..10).unwrap() {
+        for item in table.range(0..10).unwrap() {
+            let (k, v) = item.unwrap();
             assert_eq!(i, k.value());
             assert_eq!(i, v.value());
             i += 1;
@@ -872,7 +876,11 @@ fn u64_type() {
     let table = read_txn.open_table(U64_TABLE).unwrap();
     assert_eq!(
         2u64,
-        table.range(0..2).unwrap().map(|(_, x)| x.value()).sum()
+        table
+            .range(0..2)
+            .unwrap()
+            .map(|item| item.unwrap().1.value())
+            .sum()
     );
     assert_eq!(1, table.get(&0).unwrap().unwrap().value());
 }
@@ -898,7 +906,7 @@ fn i128_type() {
     assert_eq!(-2, table.get(&-1).unwrap().unwrap().value());
     let mut iter: Range<i128, i128> = table.range::<i128>(..).unwrap();
     for i in -11..10 {
-        assert_eq!(iter.next().unwrap().1.value(), i);
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), i);
     }
     assert!(iter.next().is_none());
 }
@@ -941,11 +949,11 @@ fn str_type() {
     assert_eq!("world", table.get("hello").unwrap().unwrap().value());
 
     let mut iter = table.iter().unwrap();
-    assert_eq!(iter.next().unwrap().1.value(), "world");
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
     assert!(iter.next().is_none());
 
     let mut iter: Range<&str, &str> = table.range("a".."z").unwrap();
-    assert_eq!(iter.next().unwrap().1.value(), "world");
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
     assert!(iter.next().is_none());
 }
 
@@ -1009,7 +1017,7 @@ fn array_type() {
     assert_eq!(b"world_123", table.get(hello).unwrap().unwrap().value());
 
     let mut iter: Range<&[u8; 5], &[u8; 9]> = table.range::<&[u8; 5]>(..).unwrap();
-    assert_eq!(iter.next().unwrap().1.value(), b"world_123");
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), b"world_123");
     assert!(iter.next().is_none());
 }
 
@@ -1034,7 +1042,7 @@ fn range_lifetime() {
         let start = "hello".to_string();
         table.range::<&str>(start.as_str()..).unwrap()
     };
-    assert_eq!(iter.next().unwrap().1.value(), "world");
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
     assert!(iter.next().is_none());
 }
 
@@ -1059,7 +1067,7 @@ fn drain_lifetime() {
         let start = "hello".to_string();
         table.drain::<&str>(start.as_str()..).unwrap()
     };
-    assert_eq!(iter.next().unwrap().1.value(), "world");
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
     assert!(iter.next().is_none());
 }
 
@@ -1084,7 +1092,7 @@ fn drain_filter_lifetime() {
         let start = "hello".to_string();
         table.drain_filter(start.as_str().., |_, _| true).unwrap()
     };
-    assert_eq!(iter.next().unwrap().1.value(), "world");
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
     assert!(iter.next().is_none());
 }
 
@@ -1151,7 +1159,7 @@ fn custom_ordering() {
     let end = ReverseKey(vec![3u8]);
     let mut iter = table.range(start..=end).unwrap();
     for i in (3..=7u8).rev() {
-        let (key, value) = iter.next().unwrap();
+        let (key, value) = iter.next().unwrap().unwrap();
         assert_eq!(&[i], key.value().0.as_slice());
         assert_eq!("value", value.value());
     }
@@ -1181,17 +1189,17 @@ fn owned_get_signatures() {
 
     let mut iter: Range<u32, u32> = table.range::<u32>(..).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.value(), i + 1);
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), i + 1);
     }
     assert!(iter.next().is_none());
     let mut iter: Range<u32, u32> = table.range(0..10).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.value(), i + 1);
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), i + 1);
     }
     assert!(iter.next().is_none());
     let mut iter = table.range::<&u32>(&0..&10).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.value(), i + 1);
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), i + 1);
     }
     assert!(iter.next().is_none());
 }
@@ -1221,26 +1229,26 @@ fn ref_get_signatures() {
     let end = vec![10u8];
     let mut iter = table.range::<&[u8]>(..).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.value(), &[i + 1]);
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), &[i + 1]);
     }
     assert!(iter.next().is_none());
 
     let mut iter = table.range(start.as_slice()..&end).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.value(), &[i + 1]);
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), &[i + 1]);
     }
     assert!(iter.next().is_none());
     drop(iter);
 
     let mut iter = table.range(start.as_slice()..end.as_slice()).unwrap();
     for i in 0..10 {
-        assert_eq!(iter.next().unwrap().1.value(), &[i + 1]);
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), &[i + 1]);
     }
     assert!(iter.next().is_none());
 
     let mut iter = table.range([0u8].as_slice()..[10u8].as_slice()).unwrap();
     for i in 0..10u8 {
-        assert_eq!(iter.next().unwrap().1.value(), [i + 1].as_slice());
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), [i + 1].as_slice());
     }
     assert!(iter.next().is_none());
 }
@@ -1283,7 +1291,7 @@ fn iter() {
     let table = read_txn.open_table(U64_TABLE).unwrap();
     let mut iter = table.iter().unwrap();
     for i in 0..10 {
-        let (k, v) = iter.next().unwrap();
+        let (k, v) = iter.next().unwrap().unwrap();
         assert_eq!(i, k.value());
         assert_eq!(i, v.value());
     }

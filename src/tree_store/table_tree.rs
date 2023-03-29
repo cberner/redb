@@ -383,12 +383,19 @@ pub struct TableNameIter<'a> {
 }
 
 impl<'a> Iterator for TableNameIter<'a> {
-    type Item = String;
+    type Item = Result<String>;
 
     fn next(&mut self) -> Option<Self::Item> {
         for entry in self.inner.by_ref() {
-            if entry.value().table_type == self.table_type {
-                return Some(entry.key().to_string());
+            match entry {
+                Ok(entry) => {
+                    if entry.value().table_type == self.table_type {
+                        return Some(Ok(entry.key().to_string()));
+                    }
+                }
+                Err(err) => {
+                    return Some(Err(err));
+                }
             }
         }
         None
@@ -453,7 +460,11 @@ impl<'txn> TableTree<'txn> {
             inner: iter,
             table_type,
         };
-        Ok(iter.collect())
+        let mut result = vec![];
+        for table in iter {
+            result.push(table?);
+        }
+        Ok(result)
     }
 
     pub(crate) fn get_table_untyped(
@@ -597,6 +608,7 @@ impl<'txn> TableTree<'txn> {
         let mut total_fragmented = master_tree_stats.fragmented_bytes;
 
         for entry in self.tree.range::<RangeFull, &str>(..)? {
+            let entry = entry?;
             let mut definition = entry.value();
             if let Some(updated_root) = self.pending_table_updates.get(entry.key()) {
                 definition.table_root = *updated_root;

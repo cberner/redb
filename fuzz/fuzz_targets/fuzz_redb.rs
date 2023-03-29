@@ -114,9 +114,9 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
                                 Box::new(local_reference.range(start..end))
                             };
                         let mut iter: Box<dyn Iterator<Item = (AccessGuard<u64>, AccessGuard<&[u8]>)>> = if *reversed {
-                            Box::new(table.range(start..end).unwrap().rev())
+                            Box::new(table.range(start..end).unwrap().map(|x| x.unwrap()).rev())
                         } else {
-                            Box::new(table.range(start..end).unwrap())
+                            Box::new(table.range(start..end).unwrap().map(|x| x.unwrap()))
                         };
                         while let Some((ref_key, ref_value_len)) = reference_iter.next() {
                             let (key, value) = iter.next().unwrap();
@@ -146,7 +146,7 @@ fn assert_multimap_value_eq(
 ) {
     if let Some(values) = reference {
         for value in values.iter() {
-            assert_eq!(iter.next().unwrap().value().len(), *value);
+            assert_eq!(iter.next().unwrap().unwrap().value().len(), *value);
         }
     }
     assert!(iter.next().is_none());
@@ -251,9 +251,9 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
                                 Box::new(local_reference.range(start..end))
                             };
                         let mut iter: Box<dyn Iterator<Item = (AccessGuard<u64>, MultimapValue<&[u8]>)>> = if *reversed {
-                            Box::new(table.range(start..end).unwrap().rev())
+                            Box::new(table.range(start..end).unwrap().map(|x| x.unwrap()).rev())
                         } else {
-                            Box::new(table.range(start..end).unwrap())
+                            Box::new(table.range(start..end).unwrap().map(|x| x.unwrap()))
                         };
                         while let Some((ref_key, ref_values)) = reference_iter.next() {
                             let (key, value_iter) = iter.next().unwrap();

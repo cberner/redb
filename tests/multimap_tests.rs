@@ -15,7 +15,7 @@ fn get_vec(
     loop {
         let item = iter.next();
         if let Some(item_value) = item {
-            result.push(item_value.value().to_string());
+            result.push(item_value.unwrap().value().to_string());
         } else {
             return result;
         }
@@ -105,26 +105,27 @@ fn range_query() {
     let mut iter = table.range(start..=end).unwrap();
 
     {
-        let (key, mut values) = iter.next().unwrap();
+        let (key, mut values) = iter.next().unwrap().unwrap();
         for i in 0..5 {
             assert_eq!(b"0", key.value());
-            let value = values.next().unwrap();
+            let value = values.next().unwrap().unwrap();
             assert_eq!(i, value.value());
         }
     }
     {
-        let (key, mut values) = iter.next().unwrap();
+        let (key, mut values) = iter.next().unwrap().unwrap();
         for i in 5..10 {
             assert_eq!(b"1", key.value());
-            let value = values.next().unwrap();
+            let value = values.next().unwrap().unwrap();
             assert_eq!(i, value.value());
         }
     }
     assert!(iter.next().is_none());
 
     let mut total: u64 = 0;
-    for (_, values) in table.range(start..=end).unwrap() {
-        total += values.map(|x| x.value()).sum::<u64>();
+    for item in table.range(start..=end).unwrap() {
+        let (_, values) = item.unwrap();
+        total += values.map(|x| x.unwrap().value()).sum::<u64>();
     }
     assert_eq!(total, 45);
 }
@@ -150,7 +151,17 @@ fn range_lifetime() {
         let start = "hello".to_string();
         table.range::<&str>(start.as_str()..).unwrap()
     };
-    assert_eq!(iter.next().unwrap().1.next().unwrap().value(), "world");
+    assert_eq!(
+        iter.next()
+            .unwrap()
+            .unwrap()
+            .1
+            .next()
+            .unwrap()
+            .unwrap()
+            .value(),
+        "world"
+    );
     assert!(iter.next().is_none());
 }
 
@@ -198,8 +209,8 @@ fn delete() {
     {
         let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
         let mut iter = table.remove_all("hello").unwrap();
-        assert_eq!("world", iter.next().unwrap().value());
-        assert_eq!("world3", iter.next().unwrap().value());
+        assert_eq!("world", iter.next().unwrap().unwrap().value());
+        assert_eq!("world3", iter.next().unwrap().unwrap().value());
         assert!(iter.next().is_none());
     }
     write_txn.commit().unwrap();
@@ -298,10 +309,10 @@ fn iter() {
     let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
     let mut iter = table.iter().unwrap();
     for i in 0..10 {
-        let (k, mut values) = iter.next().unwrap();
+        let (k, mut values) = iter.next().unwrap().unwrap();
         assert_eq!(k.value(), i);
         for j in 0..10 {
-            assert_eq!(values.next().unwrap().value(), j);
+            assert_eq!(values.next().unwrap().unwrap().value(), j);
         }
     }
 }
