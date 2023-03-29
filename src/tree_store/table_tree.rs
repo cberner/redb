@@ -75,8 +75,7 @@ impl RedbKey for FreedTableKey {
 }
 
 // Format:
-// TODO: should change this to 2 bytes. We don't need 8 bytes worth
-// 8 bytes: length
+// 2 bytes: length
 // length * size_of(PageNumber): array of page numbers
 #[derive(Debug)]
 pub(crate) struct FreedPageList<'a> {
@@ -85,17 +84,15 @@ pub(crate) struct FreedPageList<'a> {
 
 impl<'a> FreedPageList<'a> {
     pub(crate) fn required_bytes(len: usize) -> usize {
-        8 + PageNumber::serialized_size() * len
+        2 + PageNumber::serialized_size() * len
     }
 
     pub(crate) fn len(&self) -> usize {
-        u64::from_le_bytes(self.data[..8].try_into().unwrap())
-            .try_into()
-            .unwrap()
+        u16::from_le_bytes(self.data[..size_of::<u16>()].try_into().unwrap()).into()
     }
 
     pub(crate) fn get(&self, index: usize) -> PageNumber {
-        let start = 8 + PageNumber::serialized_size() * index;
+        let start = size_of::<u16>() + PageNumber::serialized_size() * index;
         PageNumber::from_le_bytes(
             self.data[start..(start + PageNumber::serialized_size())]
                 .try_into()
@@ -112,15 +109,16 @@ pub(crate) struct FreedPageListMut {
 
 impl FreedPageListMut {
     pub(crate) fn push_back(&mut self, value: PageNumber) {
-        let len = FreedPageList { data: &self.data }.len();
-        self.data[..8].copy_from_slice(&(len as u64 + 1).to_le_bytes());
-        let start = 8 + PageNumber::serialized_size() * len;
+        let len = u16::from_le_bytes(self.data[..size_of::<u16>()].try_into().unwrap());
+        self.data[..size_of::<u16>()].copy_from_slice(&(len + 1).to_le_bytes());
+        let len: usize = len.into();
+        let start = size_of::<u16>() + PageNumber::serialized_size() * len;
         self.data[start..(start + PageNumber::serialized_size())]
             .copy_from_slice(&value.to_le_bytes());
     }
 
     pub(crate) fn clear(&mut self) {
-        self.data[..8].fill(0);
+        self.data[..size_of::<u16>()].fill(0);
     }
 }
 
