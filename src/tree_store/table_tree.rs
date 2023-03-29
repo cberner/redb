@@ -2,10 +2,11 @@ use crate::tree_store::btree::btree_stats;
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
-use crate::types::{RedbKey, RedbValue, TypeName};
+use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace, TypeName};
 use crate::{DatabaseStats, Error, Result};
 use std::cmp::max;
 use std::collections::HashMap;
+use std::mem;
 use std::mem::size_of;
 use std::ops::RangeFull;
 use std::sync::{Arc, Mutex};
@@ -70,6 +71,102 @@ impl RedbKey for FreedTableKey {
             std::cmp::Ordering::Equal => value1.pagination_id.cmp(&value2.pagination_id),
             std::cmp::Ordering::Less => std::cmp::Ordering::Less,
         }
+    }
+}
+
+// Format:
+// TODO: should change this to 2 bytes. We don't need 8 bytes worth
+// 8 bytes: length
+// length * size_of(PageNumber): array of page numbers
+#[derive(Debug)]
+pub(crate) struct FreedPageList<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> FreedPageList<'a> {
+    pub(crate) fn required_bytes(len: usize) -> usize {
+        8 + PageNumber::serialized_size() * len
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        u64::from_le_bytes(self.data[..8].try_into().unwrap())
+            .try_into()
+            .unwrap()
+    }
+
+    pub(crate) fn get(&self, index: usize) -> PageNumber {
+        let start = 8 + PageNumber::serialized_size() * index;
+        PageNumber::from_le_bytes(
+            self.data[start..(start + PageNumber::serialized_size())]
+                .try_into()
+                .unwrap(),
+        )
+    }
+}
+
+#[derive(Debug)]
+#[repr(transparent)]
+pub(crate) struct FreedPageListMut {
+    data: [u8],
+}
+
+impl FreedPageListMut {
+    pub(crate) fn push_back(&mut self, value: PageNumber) {
+        let len = FreedPageList { data: &self.data }.len();
+        self.data[..8].copy_from_slice(&(len as u64 + 1).to_le_bytes());
+        let start = 8 + PageNumber::serialized_size() * len;
+        self.data[start..(start + PageNumber::serialized_size())]
+            .copy_from_slice(&value.to_le_bytes());
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.data[..8].fill(0);
+    }
+}
+
+impl RedbValue for FreedPageList<'_> {
+    type SelfType<'a> = FreedPageList<'a>
+        where
+            Self: 'a;
+    type AsBytes<'a> = &'a [u8]
+        where
+            Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        FreedPageList { data }
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'b [u8]
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        value.data
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("redb::FreedPageList")
+    }
+}
+
+impl RedbValueMutInPlace for FreedPageList<'_> {
+    type BaseRefType = FreedPageListMut;
+
+    fn initialize(data: &mut [u8]) {
+        assert!(data.len() >= 8);
+        // Set the length to zero
+        data[..8].fill(0);
+    }
+
+    fn from_bytes_mut(data: &mut [u8]) -> &mut Self::BaseRefType {
+        unsafe { mem::transmute(data) }
     }
 }
 

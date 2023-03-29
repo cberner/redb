@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
-    Btree, BtreeMut, FreedTableKey, InternalTableDefinition, PageHint, PageNumber, TableTree,
-    TableType, TransactionalMemory,
+    Btree, BtreeMut, FreedPageList, FreedTableKey, InternalTableDefinition, PageHint, PageNumber,
+    TableTree, TableType, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{
@@ -13,7 +13,6 @@ use crate::{
 use log::{info, warn};
 use std::cmp::min;
 use std::collections::HashMap;
-use std::mem::size_of;
 use std::ops::RangeFull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -100,10 +99,9 @@ pub struct WriteTransaction<'db> {
     mem: &'db TransactionalMemory,
     transaction_id: TransactionId,
     table_tree: RwLock<TableTree<'db>>,
-    // TODO: change the value type to Vec<PageNumber>
     // The table of freed pages by transaction. FreedTableKey -> binary.
     // The binary blob is a length-prefixed array of PageNumber
-    freed_tree: Mutex<BtreeMut<'db, FreedTableKey, &'static [u8]>>,
+    freed_tree: Mutex<BtreeMut<'db, FreedTableKey, FreedPageList<'static>>>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     open_tables: Mutex<HashMap<String, &'static panic::Location<'static>>>,
     completed: bool,
@@ -519,13 +517,8 @@ impl<'db> WriteTransaction<'db> {
         for entry in freed_tree.range(..lookup_key)? {
             to_remove.push(entry.key());
             let value = entry.value();
-            let length: usize = u64::from_le_bytes(value[..size_of::<u64>()].try_into().unwrap())
-                .try_into()
-                .unwrap();
-            // 1..=length because the array is length prefixed
-            for i in 1..=length {
-                let page = PageNumber::from_le_bytes(value[i * 8..(i + 1) * 8].try_into().unwrap());
-                self.mem.free(page);
+            for i in 0..value.len() {
+                self.mem.free(value.get(i));
             }
         }
 
@@ -544,7 +537,7 @@ impl<'db> WriteTransaction<'db> {
         let mut freed_tree = self.freed_tree.lock().unwrap();
         while !self.freed_pages.lock().unwrap().is_empty() {
             let chunk_size = 100;
-            let buffer_size = size_of::<u64>() + 8 * chunk_size;
+            let buffer_size = FreedPageList::required_bytes(chunk_size);
             let key = FreedTableKey {
                 transaction_id: self.transaction_id.0,
                 pagination_id: pagination_counter,
@@ -553,11 +546,9 @@ impl<'db> WriteTransaction<'db> {
 
             let mut freed_pages = self.freed_pages.lock().unwrap();
             let len = freed_pages.len();
-            access_guard.as_mut()[..8]
-                .copy_from_slice(&min(len as u64, chunk_size as u64).to_le_bytes());
-            for (i, page) in freed_pages.drain(len - min(len, chunk_size)..).enumerate() {
-                access_guard.as_mut()[(i + 1) * 8..(i + 2) * 8]
-                    .copy_from_slice(&page.to_le_bytes());
+            access_guard.as_mut().clear();
+            for page in freed_pages.drain(len - min(len, chunk_size)..) {
+                access_guard.as_mut().push_back(page);
             }
             drop(access_guard);
 
