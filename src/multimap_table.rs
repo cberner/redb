@@ -313,16 +313,20 @@ impl<'a, V: RedbKey + 'static> MultimapValue<'a, V> {
 }
 
 impl<'a, V: RedbKey + 'static> Iterator for MultimapValue<'a, V> {
-    // TODO: this probably needs to return a Result
-    type Item = AccessGuard<'a, V>;
+    type Item = Result<AccessGuard<'a, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         // TODO: optimize out this copy
         let bytes = match self.inner.as_mut().unwrap() {
-            ValueIterState::Subtree(ref mut iter) => iter.next().map(|e| e.key_data())?,
+            ValueIterState::Subtree(ref mut iter) => match iter.next()? {
+                Ok(e) => e.key_data(),
+                Err(err) => {
+                    return Some(Err(err));
+                }
+            },
             ValueIterState::InlineLeaf(ref mut iter) => iter.next_key()?.to_vec(),
         };
-        Some(AccessGuard::with_owned_value(bytes))
+        Some(Ok(AccessGuard::with_owned_value(bytes)))
     }
 }
 
@@ -330,10 +334,15 @@ impl<'a, V: RedbKey + 'static> DoubleEndedIterator for MultimapValue<'a, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         // TODO: optimize out this copy
         let bytes = match self.inner.as_mut().unwrap() {
-            ValueIterState::Subtree(ref mut iter) => iter.next_back().map(|e| e.key_data())?,
+            ValueIterState::Subtree(ref mut iter) => match iter.next_back()? {
+                Ok(e) => e.key_data(),
+                Err(err) => {
+                    return Some(Err(err));
+                }
+            },
             ValueIterState::InlineLeaf(ref mut iter) => iter.next_key_back()?.to_vec(),
         };
-        Some(AccessGuard::with_owned_value(bytes))
+        Some(Ok(AccessGuard::with_owned_value(bytes)))
     }
 }
 
@@ -374,18 +383,18 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapRange<'a, K, V> {
 }
 
 impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> Iterator for MultimapRange<'a, K, V> {
-    // TODO: this probably needs to return a Result
-    type Item = (AccessGuard<'a, K>, MultimapValue<'a, V>);
+    type Item = Result<(AccessGuard<'a, K>, MultimapValue<'a, V>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let entry = self.inner.next()?;
-        let key = AccessGuard::with_owned_value(entry.key_data());
-        let (page, _, value_range) = entry.into_raw();
-        let collection = AccessGuard::with_page(page, value_range);
-        // TODO: propagate error
-        let iter = DynamicCollection::iter(collection, self.mem).unwrap();
-
-        Some((key, iter))
+        match self.inner.next()? {
+            Ok(entry) => {
+                let key = AccessGuard::with_owned_value(entry.key_data());
+                let (page, _, value_range) = entry.into_raw();
+                let collection = AccessGuard::with_page(page, value_range);
+                Some(DynamicCollection::iter(collection, self.mem).map(|iter| (key, iter)))
+            }
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
@@ -393,14 +402,15 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> DoubleEndedIterator
     for MultimapRange<'a, K, V>
 {
     fn next_back(&mut self) -> Option<Self::Item> {
-        let entry = self.inner.next_back()?;
-        let key = AccessGuard::with_owned_value(entry.key_data());
-        let (page, _, value_range) = entry.into_raw();
-        let collection = AccessGuard::with_page(page, value_range);
-        // TODO: propagate error
-        let iter = DynamicCollection::iter(collection, self.mem).unwrap();
-
-        Some((key, iter))
+        match self.inner.next_back()? {
+            Ok(entry) => {
+                let key = AccessGuard::with_owned_value(entry.key_data());
+                let (page, _, value_range) = entry.into_raw();
+                let collection = AccessGuard::with_page(page, value_range);
+                Some(DynamicCollection::iter(collection, self.mem).map(|iter| (key, iter)))
+            }
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
@@ -779,8 +789,10 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTabl
     /// Returns the number of key-value pairs in the table
     fn len(&self) -> Result<usize> {
         let mut count = 0;
-        for (_, mut values) in self.iter()? {
-            while values.next().is_some() {
+        for item in self.iter()? {
+            let (_, values) = item?;
+            for v in values {
+                v?;
                 count += 1;
             }
         }
@@ -879,8 +891,10 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, 
 
     fn len(&self) -> Result<usize> {
         let mut count = 0;
-        for (_, mut values) in self.iter()? {
-            while values.next().is_some() {
+        for item in self.iter()? {
+            let (_, values) = item?;
+            for v in values {
+                v?;
                 count += 1;
             }
         }

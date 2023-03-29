@@ -237,7 +237,7 @@ impl<'db> WriteTransaction<'db> {
             .range::<RangeFull, FreedTableKey>(..)?
             .next()
         {
-            entry.key().transaction_id
+            entry?.key().transaction_id
         } else {
             self.transaction_id.0
         };
@@ -253,7 +253,7 @@ impl<'db> WriteTransaction<'db> {
         };
         let mut to_remove = vec![];
         for entry in freed_tree.range(..lookup_key)? {
-            to_remove.push(entry.key());
+            to_remove.push(entry?.key());
         }
         for key in to_remove {
             freed_tree.remove(&key)?;
@@ -515,6 +515,7 @@ impl<'db> WriteTransaction<'db> {
         let mut to_remove = vec![];
         let mut freed_tree = self.freed_tree.lock().unwrap();
         for entry in freed_tree.range(..lookup_key)? {
+            let entry = entry?;
             to_remove.push(entry.key());
             let value = entry.value();
             for i in 0..value.len() {

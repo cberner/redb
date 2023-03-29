@@ -460,8 +460,8 @@ fn regression7() {
         t.remove(&145227).unwrap();
 
         let mut iter = t.range(138763..(138763 + 232359)).unwrap().rev();
-        assert_eq!(iter.next().unwrap().0.value(), 153701);
-        assert_eq!(iter.next().unwrap().0.value(), 146255);
+        assert_eq!(iter.next().unwrap().unwrap().0.value(), 153701);
+        assert_eq!(iter.next().unwrap().unwrap().0.value(), 146255);
         assert!(iter.next().is_none());
     }
     tx.commit().unwrap();
@@ -509,8 +509,8 @@ fn regression8() {
     {
         let t = tx.open_table(table_def).unwrap();
         let mut iter = t.range(118749..142650).unwrap();
-        assert_eq!(iter.next().unwrap().0.value(), 118749);
-        assert_eq!(iter.next().unwrap().0.value(), 130571);
+        assert_eq!(iter.next().unwrap().unwrap().0.value(), 118749);
+        assert_eq!(iter.next().unwrap().unwrap().0.value(), 130571);
         assert!(iter.next().is_none());
     }
     tx.commit().unwrap();
@@ -670,14 +670,14 @@ fn regression14() {
 
         let mut iter = t.range(514043..(514043 + 514043)).unwrap().rev();
         {
-            let (key, mut value_iter) = iter.next().unwrap();
+            let (key, mut value_iter) = iter.next().unwrap().unwrap();
             assert_eq!(key.value(), 776971);
-            assert_eq!(value_iter.next().unwrap().value(), &[0; 2230]);
+            assert_eq!(value_iter.next().unwrap().unwrap().value(), &[0; 2230]);
         }
         {
-            let (key, mut value_iter) = iter.next().unwrap();
+            let (key, mut value_iter) = iter.next().unwrap().unwrap();
             assert_eq!(key.value(), 539749);
-            assert_eq!(value_iter.next().unwrap().value(), &[0; 1424]);
+            assert_eq!(value_iter.next().unwrap().unwrap().value(), &[0; 1424]);
         }
     }
     tx.abort().unwrap();
@@ -929,7 +929,7 @@ fn range_query() {
     let table = read_txn.open_table(U64_TABLE).unwrap();
     let mut iter = table.range(3..7).unwrap();
     for i in 3..7u64 {
-        let (key, value) = iter.next().unwrap();
+        let (key, value) = iter.next().unwrap().unwrap();
         assert_eq!(i, key.value());
         assert_eq!(i, value.value());
     }
@@ -937,13 +937,17 @@ fn range_query() {
 
     let mut iter = table.range(3..=7).unwrap();
     for i in 3..=7u64 {
-        let (key, value) = iter.next().unwrap();
+        let (key, value) = iter.next().unwrap().unwrap();
         assert_eq!(i, key.value());
         assert_eq!(i, value.value());
     }
     assert!(iter.next().is_none());
 
-    let total: u64 = table.range(1..=3).unwrap().map(|(_, v)| v.value()).sum();
+    let total: u64 = table
+        .range(1..=3)
+        .unwrap()
+        .map(|item| item.unwrap().1.value())
+        .sum();
     assert_eq!(total, 6);
 }
 
@@ -964,7 +968,7 @@ fn range_query_reversed() {
     let table = read_txn.open_table(U64_TABLE).unwrap();
     let mut iter = table.range(3..7).unwrap().rev();
     for i in (3..7u64).rev() {
-        let (key, value) = iter.next().unwrap();
+        let (key, value) = iter.next().unwrap().unwrap();
         assert_eq!(i, key.value());
         assert_eq!(i, value.value());
     }
@@ -972,17 +976,17 @@ fn range_query_reversed() {
 
     // Test reversing multiple times
     let mut iter = table.range(3..7).unwrap();
-    let (key, _) = iter.next().unwrap();
+    let (key, _) = iter.next().unwrap().unwrap();
     assert_eq!(3, key.value());
 
     let mut iter = iter.rev();
-    let (key, _) = iter.next().unwrap();
+    let (key, _) = iter.next().unwrap().unwrap();
     assert_eq!(6, key.value());
-    let (key, _) = iter.next().unwrap();
+    let (key, _) = iter.next().unwrap().unwrap();
     assert_eq!(5, key.value());
 
     let mut iter = iter.rev();
-    let (key, _) = iter.next().unwrap();
+    let (key, _) = iter.next().unwrap().unwrap();
     assert_eq!(4, key.value());
 
     assert!(iter.next().is_none());

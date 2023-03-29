@@ -39,10 +39,12 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     /// Removes and returns the first key-value pair in the table
     pub fn pop_first(&mut self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
         // TODO: optimize this
-        let first = self.iter()?.next();
-        if let Some((ref key, _)) = first {
-            let owned_key = K::as_bytes(key.value().borrow()).as_ref().to_vec();
-            drop(first);
+        let first = self
+            .iter()?
+            .next()
+            .map(|x| x.map(|(key, _)| K::as_bytes(key.value().borrow()).as_ref().to_vec()));
+        if let Some(owned_key) = first {
+            let owned_key = owned_key?;
             let key = K::from_bytes(&owned_key);
             let value = self.remove(&key)?.unwrap();
             drop(key);
@@ -55,10 +57,13 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     /// Removes and returns the last key-value pair in the table
     pub fn pop_last(&mut self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
         // TODO: optimize this
-        let first = self.iter()?.rev().next();
-        if let Some((ref key, _)) = first {
-            let owned_key = K::as_bytes(key.value().borrow()).as_ref().to_vec();
-            drop(first);
+        let last = self
+            .iter()?
+            .rev()
+            .next()
+            .map(|x| x.map(|(key, _)| K::as_bytes(key.value().borrow()).as_ref().to_vec()));
+        if let Some(owned_key) = last {
+            let owned_key = owned_key?;
             let key = K::from_bytes(&owned_key);
             let value = self.remove(&key)?.unwrap();
             drop(key);
@@ -207,7 +212,7 @@ pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static> {
     /// let read_txn = db.begin_read()?;
     /// let table = read_txn.open_table(TABLE)?;
     /// let mut iter = table.range("a".."c")?;
-    /// let (key, value) = iter.next().unwrap();
+    /// let (key, value) = iter.next().unwrap()?;
     /// assert_eq!("a", key.value());
     /// assert_eq!(0, value.value());
     /// # Ok(())
@@ -285,25 +290,28 @@ impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Drain<'a, K, V> {
 }
 
 impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Iterator for Drain<'a, K, V> {
-    // TODO: probably needs to be a Result
-    type Item = (AccessGuard<'a, K>, AccessGuard<'a, V>);
+    type Item = Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next()?;
-        let (page, key_range, value_range) = entry.into_raw();
-        let key = AccessGuard::with_page(page.clone(), key_range);
-        let value = AccessGuard::with_page(page, value_range);
-        Some((key, value))
+        Some(entry.map(|entry| {
+            let (page, key_range, value_range) = entry.into_raw();
+            let key = AccessGuard::with_page(page.clone(), key_range);
+            let value = AccessGuard::with_page(page, value_range);
+            (key, value)
+        }))
     }
 }
 
 impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> DoubleEndedIterator for Drain<'a, K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;
-        let (page, key_range, value_range) = entry.into_raw();
-        let key = AccessGuard::with_page(page.clone(), key_range);
-        let value = AccessGuard::with_page(page, value_range);
-        Some((key, value))
+        Some(entry.map(|entry| {
+            let (page, key_range, value_range) = entry.into_raw();
+            let key = AccessGuard::with_page(page.clone(), key_range);
+            let value = AccessGuard::with_page(page, value_range);
+            (key, value)
+        }))
     }
 }
 
@@ -335,15 +343,16 @@ impl<
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > Iterator for DrainFilter<'a, K, V, F>
 {
-    // TODO: probably needs to be a Result
-    type Item = (AccessGuard<'a, K>, AccessGuard<'a, V>);
+    type Item = Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next()?;
-        let (page, key_range, value_range) = entry.into_raw();
-        let key = AccessGuard::with_page(page.clone(), key_range);
-        let value = AccessGuard::with_page(page, value_range);
-        Some((key, value))
+        Some(entry.map(|entry| {
+            let (page, key_range, value_range) = entry.into_raw();
+            let key = AccessGuard::with_page(page.clone(), key_range);
+            let value = AccessGuard::with_page(page, value_range);
+            (key, value)
+        }))
     }
 }
 
@@ -356,10 +365,12 @@ impl<
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;
-        let (page, key_range, value_range) = entry.into_raw();
-        let key = AccessGuard::with_page(page.clone(), key_range);
-        let value = AccessGuard::with_page(page, value_range);
-        Some((key, value))
+        Some(entry.map(|entry| {
+            let (page, key_range, value_range) = entry.into_raw();
+            let key = AccessGuard::with_page(page.clone(), key_range);
+            let value = AccessGuard::with_page(page, value_range);
+            (key, value)
+        }))
     }
 }
 
@@ -374,30 +385,29 @@ impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Range<'a, K, V> {
 }
 
 impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Iterator for Range<'a, K, V> {
-    // TODO: this probably needs to return a Result
-    type Item = (AccessGuard<'a, K>, AccessGuard<'a, V>);
+    type Item = Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(entry) = self.inner.next() {
-            let (page, key_range, value_range) = entry.into_raw();
-            let key = AccessGuard::with_page(page.clone(), key_range);
-            let value = AccessGuard::with_page(page, value_range);
-            Some((key, value))
-        } else {
-            None
-        }
+        self.inner.next().map(|x| {
+            x.map(|entry| {
+                let (page, key_range, value_range) = entry.into_raw();
+                let key = AccessGuard::with_page(page.clone(), key_range);
+                let value = AccessGuard::with_page(page, value_range);
+                (key, value)
+            })
+        })
     }
 }
 
 impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> DoubleEndedIterator for Range<'a, K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        if let Some(entry) = self.inner.next_back() {
-            let (page, key_range, value_range) = entry.into_raw();
-            let key = AccessGuard::with_page(page.clone(), key_range);
-            let value = AccessGuard::with_page(page, value_range);
-            Some((key, value))
-        } else {
-            None
-        }
+        self.inner.next_back().map(|x| {
+            x.map(|entry| {
+                let (page, key_range, value_range) = entry.into_raw();
+                let key = AccessGuard::with_page(page.clone(), key_range);
+                let value = AccessGuard::with_page(page, value_range);
+                (key, value)
+            })
+        })
     }
 }

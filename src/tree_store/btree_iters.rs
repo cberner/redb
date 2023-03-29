@@ -271,7 +271,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeDrain<'a, K, V> {
 }
 
 impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Iterator for BtreeDrain<'a, K, V> {
-    type Item = EntryGuard<'a, K, V>;
+    type Item = Result<EntryGuard<'a, K, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next()
@@ -345,11 +345,11 @@ impl<
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > Iterator for BtreeDrainFilter<'a, K, V, F>
 {
-    type Item = EntryGuard<'a, K, V>;
+    type Item = Result<EntryGuard<'a, K, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut item = self.inner.next();
-        while let Some(ref entry) = item {
+        while let Some(Ok(ref entry)) = item {
             if (self.predicate)(entry.key(), entry.value()) {
                 break;
             }
@@ -368,7 +368,7 @@ impl<
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         let mut item = self.inner.next_back();
-        while let Some(ref entry) = item {
+        while let Some(Ok(ref entry)) = item {
             if (self.predicate)(entry.key(), entry.value()) {
                 break;
             }
@@ -487,7 +487,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeRangeIter<'a, K, V> {
 }
 
 impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Iterator for BtreeRangeIter<'a, K, V> {
-    type Item = EntryGuard<'a, K, V>;
+    type Item = Result<EntryGuard<'a, K, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let (
@@ -513,8 +513,14 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Iterator for BtreeRangeIter<'a, K, 
 
         loop {
             if !self.include_left {
-                // TODO: propagate this error
-                self.left = self.left.take()?.next(false, self.manager).unwrap();
+                match self.left.take()?.next(false, self.manager) {
+                    Ok(left) => {
+                        self.left = left;
+                    }
+                    Err(err) => {
+                        return Some(Err(err));
+                    }
+                }
             }
             // Return None if the next state is None
             self.left.as_ref()?;
@@ -542,7 +548,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Iterator for BtreeRangeIter<'a, K, 
 
             self.include_left = false;
             if self.left.as_ref().unwrap().get_entry::<K, V>().is_some() {
-                return self.left.as_ref().map(|s| s.get_entry().unwrap());
+                return self.left.as_ref().map(|s| s.get_entry().unwrap()).map(Ok);
             }
         }
     }
@@ -573,8 +579,14 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> DoubleEndedIterator for BtreeRangeI
 
         loop {
             if !self.include_right {
-                // TODO: propagate this error
-                self.right = self.right.take()?.next(true, self.manager).unwrap();
+                match self.right.take()?.next(true, self.manager) {
+                    Ok(right) => {
+                        self.right = right;
+                    }
+                    Err(err) => {
+                        return Some(Err(err));
+                    }
+                }
             }
             // Return None if the next state is None
             self.right.as_ref()?;
@@ -602,7 +614,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> DoubleEndedIterator for BtreeRangeI
 
             self.include_right = false;
             if self.right.as_ref().unwrap().get_entry::<K, V>().is_some() {
-                return self.right.as_ref().map(|s| s.get_entry().unwrap());
+                return self.right.as_ref().map(|s| s.get_entry().unwrap()).map(Ok);
             }
         }
     }
