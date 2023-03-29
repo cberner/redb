@@ -593,7 +593,7 @@ impl<'db> WriteTransaction<'db> {
         {
             eprintln!("Master tree:");
             let master_tree: Btree<&str, InternalTableDefinition> =
-                Btree::new(Some(page), PageHint::None, self.mem);
+                Btree::new(Some(page), PageHint::None, self.mem)?;
             master_tree.print_debug(true)?;
         }
 
@@ -643,11 +643,7 @@ impl<'db> ReadTransaction<'db> {
             .get_table::<K, V>(definition.name(), TableType::Normal)?
             .ok_or_else(|| Error::TableDoesNotExist(definition.name().to_string()))?;
 
-        Ok(ReadOnlyTable::new(
-            header.get_root(),
-            PageHint::Clean,
-            self.db.get_memory(),
-        ))
+        ReadOnlyTable::new(header.get_root(), PageHint::Clean, self.db.get_memory())
     }
 
     /// Open the given table
@@ -660,11 +656,7 @@ impl<'db> ReadTransaction<'db> {
             .get_table::<K, V>(definition.name(), TableType::Multimap)?
             .ok_or_else(|| Error::TableDoesNotExist(definition.name().to_string()))?;
 
-        Ok(ReadOnlyMultimapTable::new(
-            header.get_root(),
-            PageHint::Clean,
-            self.db.get_memory(),
-        ))
+        ReadOnlyMultimapTable::new(header.get_root(), PageHint::Clean, self.db.get_memory())
     }
 
     /// List all the tables

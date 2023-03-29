@@ -240,10 +240,10 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadOnlyTable<'txn, K, 
         root_page: Option<(PageNumber, Checksum)>,
         hint: PageHint,
         mem: &'txn TransactionalMemory,
-    ) -> ReadOnlyTable<'txn, K, V> {
-        ReadOnlyTable {
-            tree: Btree::new(root_page, hint, mem),
-        }
+    ) -> Result<ReadOnlyTable<'txn, K, V>> {
+        Ok(ReadOnlyTable {
+            tree: Btree::new(root_page, hint, mem)?,
+        })
     }
 }
 

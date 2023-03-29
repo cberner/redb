@@ -106,7 +106,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
 
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
-        self.read_tree().print_debug(include_values)
+        self.read_tree()?.print_debug(include_values)
     }
 
     pub(crate) fn stats(&self) -> Result<BtreeStats> {
@@ -118,12 +118,12 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         )
     }
 
-    fn read_tree(&self) -> Btree<'a, K, V> {
+    fn read_tree(&self) -> Result<Btree<'a, K, V>> {
         Btree::new(self.get_root(), PageHint::None, self.mem)
     }
 
     pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'_, V>>> {
-        self.read_tree().get(key)
+        self.read_tree()?.get(key)
     }
 
     pub(crate) fn range<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
@@ -133,7 +133,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
     where
         'a: 'a0,
     {
-        self.read_tree().range(range)
+        self.read_tree()?.range(range)
     }
 
     pub(crate) fn drain<
@@ -208,7 +208,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
     }
 
     pub(crate) fn len(&self) -> Result<usize> {
-        self.read_tree().len()
+        self.read_tree()?.len()
     }
 }
 
@@ -327,19 +327,20 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
         root: Option<(PageNumber, Checksum)>,
         hint: PageHint,
         mem: &'a TransactionalMemory,
-    ) -> Self {
-        let cached_root = root.map(|(root, _)| {
-            // TODO: propagate error
-            mem.get_page_extended(root, hint).unwrap()
-        });
-        Self {
+    ) -> Result<Self> {
+        let cached_root = if let Some((r, _)) = root {
+            Some(mem.get_page_extended(r, hint)?)
+        } else {
+            None
+        };
+        Ok(Self {
             mem,
             cached_root,
             root,
             hint,
             _key_type: Default::default(),
             _value_type: Default::default(),
-        }
+        })
     }
 
     pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
