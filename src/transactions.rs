@@ -111,7 +111,10 @@ pub struct WriteTransaction<'db> {
 }
 
 impl<'db> WriteTransaction<'db> {
-    pub(crate) fn new(db: &'db Database) -> Result<Self> {
+    pub(crate) fn new(
+        db: &'db Database,
+        transaction_tracker: Arc<Mutex<TransactionTracker>>,
+    ) -> Result<Self> {
         let mut live_write_transaction = db.live_write_transaction.lock().unwrap();
         assert!(live_write_transaction.is_none());
         let transaction_id = db.increment_transaction_id();
@@ -124,7 +127,7 @@ impl<'db> WriteTransaction<'db> {
         let freed_pages = Arc::new(Mutex::new(vec![]));
         Ok(Self {
             db,
-            transaction_tracker: db.transaction_tracker(),
+            transaction_tracker,
             mem: db.get_memory(),
             transaction_id,
             table_tree: RwLock::new(TableTree::new(
@@ -165,7 +168,8 @@ impl<'db> WriteTransaction<'db> {
         let root = self.mem.get_data_root();
         let freed_root = self.mem.get_freed_root();
         let savepoint = Savepoint::new(
-            self.db,
+            self.db.get_memory(),
+            self.transaction_tracker.clone(),
             id,
             transaction_id,
             root,
@@ -182,7 +186,7 @@ impl<'db> WriteTransaction<'db> {
     pub fn restore_savepoint(&mut self, savepoint: &Savepoint) -> Result {
         // Ensure that user does not try to restore a Savepoint that is from a different Database
         assert_eq!(
-            self.db.transaction_tracker().as_ref() as *const _,
+            self.transaction_tracker.as_ref() as *const _,
             savepoint.db_address()
         );
 
@@ -619,17 +623,23 @@ impl<'a> Drop for WriteTransaction<'a> {
 ///
 /// Read-only transactions may exist concurrently with writes
 pub struct ReadTransaction<'a> {
-    db: &'a Database,
+    transaction_tracker: Arc<Mutex<TransactionTracker>>,
+    mem: &'a TransactionalMemory,
     tree: TableTree<'a>,
     transaction_id: TransactionId,
 }
 
 impl<'db> ReadTransaction<'db> {
-    pub(crate) fn new(db: &'db Database, transaction_id: TransactionId) -> Self {
-        let root_page = db.get_memory().get_data_root();
+    pub(crate) fn new(
+        mem: &'db TransactionalMemory,
+        transaction_tracker: Arc<Mutex<TransactionTracker>>,
+        transaction_id: TransactionId,
+    ) -> Self {
+        let root_page = mem.get_data_root();
         Self {
-            db,
-            tree: TableTree::new(root_page, db.get_memory(), Default::default()),
+            transaction_tracker,
+            mem,
+            tree: TableTree::new(root_page, mem, Default::default()),
             transaction_id,
         }
     }
@@ -644,7 +654,7 @@ impl<'db> ReadTransaction<'db> {
             .get_table::<K, V>(definition.name(), TableType::Normal)?
             .ok_or_else(|| Error::TableDoesNotExist(definition.name().to_string()))?;
 
-        ReadOnlyTable::new(header.get_root(), PageHint::Clean, self.db.get_memory())
+        ReadOnlyTable::new(header.get_root(), PageHint::Clean, self.mem)
     }
 
     /// Open the given table
@@ -657,7 +667,7 @@ impl<'db> ReadTransaction<'db> {
             .get_table::<K, V>(definition.name(), TableType::Multimap)?
             .ok_or_else(|| Error::TableDoesNotExist(definition.name().to_string()))?;
 
-        ReadOnlyMultimapTable::new(header.get_root(), PageHint::Clean, self.db.get_memory())
+        ReadOnlyMultimapTable::new(header.get_root(), PageHint::Clean, self.mem)
     }
 
     /// List all the tables
@@ -677,8 +687,7 @@ impl<'db> ReadTransaction<'db> {
 
 impl<'a> Drop for ReadTransaction<'a> {
     fn drop(&mut self) {
-        self.db
-            .transaction_tracker()
+        self.transaction_tracker
             .lock()
             .unwrap()
             .deallocate_read_transaction(self.transaction_id);

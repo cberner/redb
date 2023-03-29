@@ -1,7 +1,6 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::page_store::ChecksumType;
-use crate::tree_store::{Checksum, PageNumber};
-use crate::Database;
+use crate::tree_store::{Checksum, PageNumber, TransactionalMemory};
 use std::sync::{Arc, Mutex};
 
 pub struct Savepoint {
@@ -19,7 +18,8 @@ pub struct Savepoint {
 
 impl Savepoint {
     pub(crate) fn new(
-        db: &Database,
+        mem: &TransactionalMemory,
+        transaction_tracker: Arc<Mutex<TransactionTracker>>,
         id: SavepointId,
         transaction_id: TransactionId,
         root: Option<(PageNumber, Checksum)>,
@@ -29,12 +29,12 @@ impl Savepoint {
         Self {
             id,
             transaction_id,
-            version: db.get_memory().get_version(),
-            checksum_type: db.get_memory().checksum_type(),
+            version: mem.get_version(),
+            checksum_type: mem.checksum_type(),
             root,
             freed_root,
             regional_allocators,
-            transaction_tracker: db.transaction_tracker(),
+            transaction_tracker,
         }
     }
 
