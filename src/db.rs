@@ -398,11 +398,6 @@ impl Database {
         })
     }
 
-    // TODO: we could probably remove this method and pass this clone into the Transaction objects
-    pub(crate) fn transaction_tracker(&self) -> Arc<Mutex<TransactionTracker>> {
-        self.transaction_tracker.clone()
-    }
-
     fn allocate_read_transaction(&self) -> Result<TransactionId> {
         let mut guard = self.transaction_tracker.lock().unwrap();
         let id = self.mem.get_last_committed_transaction_id()?;
@@ -462,7 +457,7 @@ impl Database {
     /// write may be in progress at a time. If a write is in progress, this function will block
     /// until it completes.
     pub fn begin_write(&self) -> Result<WriteTransaction> {
-        WriteTransaction::new(self)
+        WriteTransaction::new(self, self.transaction_tracker.clone())
     }
 
     /// Begins a read transaction
@@ -476,7 +471,11 @@ impl Database {
         let id = self.allocate_read_transaction()?;
         #[cfg(feature = "logging")]
         info!("Beginning read transaction id={:?}", id);
-        Ok(ReadTransaction::new(self, id))
+        Ok(ReadTransaction::new(
+            self.get_memory(),
+            self.transaction_tracker.clone(),
+            id,
+        ))
     }
 }
 
