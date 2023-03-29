@@ -361,13 +361,13 @@ impl Database {
                             &mem,
                         )?;
                         for table_page in table_pages_iter {
-                            let page = mem.get_page(table_page)?;
+                            let page = mem.get_page(table_page?)?;
                             let mut subtree_roots = parse_subtree_roots(
                                 &page,
                                 definition.get_fixed_key_size(),
                                 definition.get_fixed_value_size(),
                             );
-                            mem.mark_pages_allocated(subtree_roots.drain(..))?;
+                            mem.mark_pages_allocated(subtree_roots.drain(..).map(Ok))?;
                         }
                     }
                 }

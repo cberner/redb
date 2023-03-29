@@ -546,7 +546,7 @@ impl<'txn> TableTree<'txn> {
                 )?;
                 let mut freed_pages = self.freed_pages.lock().unwrap();
                 for page_number in iter {
-                    freed_pages.push(page_number);
+                    freed_pages.push(page_number?);
                 }
             }
 

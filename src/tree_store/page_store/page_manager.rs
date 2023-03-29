@@ -672,11 +672,12 @@ impl TransactionalMemory {
 
     pub(crate) fn mark_pages_allocated(
         &self,
-        allocated_pages: impl Iterator<Item = PageNumber>,
+        allocated_pages: impl Iterator<Item = Result<PageNumber>>,
     ) -> Result<()> {
         let mut state = self.state.lock().unwrap();
 
         for page_number in allocated_pages {
+            let page_number = page_number?;
             let region_index = page_number.region;
             let mut region = state.get_region_mut(region_index);
             region.allocator_mut().record_alloc(

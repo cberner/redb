@@ -221,7 +221,7 @@ impl<'a> AllPageNumbersBtreeIter<'a> {
 }
 
 impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
-    type Item = PageNumber;
+    type Item = Result<PageNumber>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -232,10 +232,16 @@ impl<'a> Iterator for AllPageNumbersBtreeIter<'a> {
                 Leaf { entry, .. } => entry == 0,
                 Internal { child, .. } => child == 0,
             };
-            // TODO: propagate this error
-            self.next = state.next(false, self.manager).unwrap();
+            match state.next(false, self.manager) {
+                Ok(next) => {
+                    self.next = next;
+                }
+                Err(err) => {
+                    return Some(Err(err));
+                }
+            }
             if once {
-                return Some(value);
+                return Some(Ok(value));
             }
         }
     }

@@ -724,7 +724,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                     self.mem,
                 )?;
                 for page in all_pages {
-                    pages.push(page);
+                    pages.push(page?);
                 }
             }
             DynamicCollection::iter_free_on_drop(
