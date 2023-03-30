@@ -1,5 +1,4 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
-use crate::tree_store::page_store::ChecksumType;
 use crate::tree_store::{Checksum, PageNumber, TransactionalMemory};
 use std::sync::{Arc, Mutex};
 
@@ -9,7 +8,6 @@ pub struct Savepoint {
     // are not freed
     transaction_id: TransactionId,
     version: u8,
-    checksum_type: ChecksumType,
     root: Option<(PageNumber, Checksum)>,
     freed_root: Option<(PageNumber, Checksum)>,
     regional_allocators: Vec<Vec<u8>>,
@@ -30,7 +28,6 @@ impl Savepoint {
             id,
             transaction_id,
             version: mem.get_version(),
-            checksum_type: mem.checksum_type(),
             root,
             freed_root,
             regional_allocators,
@@ -40,10 +37,6 @@ impl Savepoint {
 
     pub(crate) fn get_version(&self) -> u8 {
         self.version
-    }
-
-    pub(crate) fn get_checksum_type(&self) -> ChecksumType {
-        self.checksum_type
     }
 
     pub(crate) fn get_id(&self) -> SavepointId {

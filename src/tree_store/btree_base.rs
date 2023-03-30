@@ -1,5 +1,5 @@
-use crate::tree_store::page_store::{ChecksumType, Page, PageImpl, PageMut, TransactionalMemory};
-use crate::tree_store::{page_store, PageNumber};
+use crate::tree_store::page_store::{xxh3_checksum, Page, PageImpl, PageMut, TransactionalMemory};
+use crate::tree_store::PageNumber;
 use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
 use crate::Result;
 use std::cmp::Ordering;
@@ -18,31 +18,20 @@ pub(super) fn leaf_checksum<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
-    checksum: ChecksumType,
 ) -> Checksum {
     let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
     // TODO: during verification, the page could be corrupted, so this needs to be safe on
     // arbitrary data
     let end = accessor.value_end(accessor.num_pairs() - 1).unwrap();
-    match checksum {
-        ChecksumType::Unused => 0,
-        ChecksumType::XXH3_128 => page_store::hash128_with_seed(&page.memory()[..end], 0),
-    }
+    xxh3_checksum(&page.memory()[..end])
 }
 
-pub(super) fn branch_checksum<T: Page>(
-    page: &T,
-    fixed_key_size: Option<usize>,
-    checksum: ChecksumType,
-) -> Checksum {
+pub(super) fn branch_checksum<T: Page>(page: &T, fixed_key_size: Option<usize>) -> Checksum {
     let accessor = BranchAccessor::new(page, fixed_key_size);
     // TODO: during verification, the page could be corrupted, so this needs to be safe on
     // arbitrary data
     let end = accessor.key_end(accessor.num_keys() - 1);
-    match checksum {
-        ChecksumType::Unused => 0,
-        ChecksumType::XXH3_128 => page_store::hash128_with_seed(&page.memory()[..end], 0),
-    }
+    xxh3_checksum(&page.memory()[..end])
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -273,17 +262,9 @@ impl<'a, K: RedbKey, V: RedbValue> AccessGuardMut<'a, K, V> {
     }
 
     fn checksum_helper<T: Page>(&self, page: &T) -> Checksum {
-        if self.mem.checksum_type() == ChecksumType::Unused {
-            return 0;
-        }
         match page.memory()[0] {
-            LEAF => leaf_checksum(
-                page,
-                K::fixed_width(),
-                V::fixed_width(),
-                self.mem.checksum_type(),
-            ),
-            BRANCH => branch_checksum(page, K::fixed_width(), self.mem.checksum_type()),
+            LEAF => leaf_checksum(page, K::fixed_width(), V::fixed_width()),
+            BRANCH => branch_checksum(page, K::fixed_width()),
             _ => unreachable!(),
         }
     }

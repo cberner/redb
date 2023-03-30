@@ -37,7 +37,7 @@ database file.
 | padding                                                                                        |
 | padding                                                                                        |
 ----------------------------------------- Commit slot 0 ------------------------------------------
-| version   | root nn   | f-root nn | chksum typ| padding                                        |
+| version   | root nn   | f-root nn | padding                                                    |
 | root page number                                                                               |
 | root checksum                                                                                  |
 | root checksum (cont.)                                                                          |
@@ -101,8 +101,7 @@ inspired by the PNG magic number.
 * 1 byte: file format version number
 * 1 byte: boolean indicating that root page is non-null
 * 1 byte: boolean indicating that freed table root page is non-null
-* 1 byte: checksum type
-* 4 bytes: padding to 64-bit aligned
+* 5 bytes: padding to 64-bit aligned
 * 8 bytes: root page
 * 16 bytes: root checksum
 * 8 bytes: freed table root page
@@ -117,13 +116,9 @@ inspired by the PNG magic number.
 `version` the file format version of the database. This is stored in the transaction data, so that it can be atomically
 changed during an upgrade.
 
-`checksum type` is an enum indicating whether checksums are used. It is `1` if checksums are disabled, and `2` if
-128bit XXH3 checksums are used. When checksums are enabled the 1-phase commit strategy is used.
-
 `root page` is the page number of the root of the table tree.
 
 `root checksum` stores the XXH3_128bit checksum of the root page, which in turn stores the checksum of its child pages.
-When 2-phase commit is used this field is zero, because checksums are disabled.
 
 `freed table root page` is the page of the root of the pending free table.
 
@@ -294,6 +289,9 @@ Allocated pages may be of two types: b-tree branch pages, or b-tree leaf pages. 
 
 # Commit strategies
 
+All data is checksumed when written, using a non-cryptographic Merkle tree with XXH3_128. This
+allows a partially committed transaction to be detected and rolled back, after a crash.
+
 All redb transactions are atomic, and use one of the following commit strategies.
 
 ## Non-durable commits
@@ -306,15 +304,9 @@ In the event of a crash, the database will simply rollback to the primary page a
 rebuilt via the normal repair process.
 Note that freeing pages during a non-durable commit is not permitted, because it could be rolled back at anytime.
 
-## 2-phase durable commits (2PC)
-A 2-phase commit strategy is used when the database is configured for maximum write throughput (of bytes per transaction).
-First, data is written to a new copy of the btree, second an `fsync` is performed,
-finally the byte controlling which copy of the btree is the primary is flipped and a second `fsync` is performed.
-
 ## 1-phase + checksum durable commits (1PC+C)
-A reduced latency commit strategy is used by default, in which all branch pages in the btree contain checksums of their children,
-these checksums form a non-cryptographic Merkle tree allowing corruption of a btree to be detected. A commit is then
-performed with a single `fsync`. First, all data and checksums are written, along with a monotonically incrementing transaction
+A reduced latency commit strategy is used by default. A commit is performed with a single `fsync`.
+First, all data and checksums are written, along with a monotonically incrementing transaction
 id, then the primary is flipped and `fsync` called. If a crash occurs, we must verify that the primary has a larger
 transaction id and that all of its checksums are valid. If this check fails, then the database will replace the partially
 updated primary with the secondary.
@@ -328,6 +320,12 @@ occur during the fsync:
    2. If it is updated, then we must verify that the transaction was completely written, or roll it back:
       1. If none of the transaction data was written, we will detect that the transaction id is older, and roll it back
       2. If some, but not all was written, then the checksum verification will fail, and it will be rolled back.
+
+## 2-phase durable commits (2PC)
+A 2-phase commit strategy can also be used which mitigates a theoretical attack when handling malicious data
+and when the attacker has high degree of control over the redb process (see below).
+First, data is written to a new copy of the btree, second an `fsync` is performed,
+finally the byte controlling which copy of the btree is the primary is flipped and a second `fsync` is performed.
 
 ### Security of 1PC+C
 Given that the 1PC+C commit strategy relies on a non-cyptographic checksum (XXH3) there is, at least in theory, a way to attack it.

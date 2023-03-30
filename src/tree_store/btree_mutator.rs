@@ -5,7 +5,7 @@ use crate::tree_store::btree_base::{
 use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,
 };
-use crate::tree_store::page_store::{ChecksumType, Page, PageImpl};
+use crate::tree_store::page_store::{Page, PageImpl};
 use crate::tree_store::{AccessGuardMut, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
 use crate::{AccessGuard, Result};
@@ -588,17 +588,9 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
     }
 
     fn checksum_helper<T: Page>(&self, page: &T) -> Checksum {
-        if self.mem.checksum_type() == ChecksumType::Unused {
-            return 0;
-        }
         match page.memory()[0] {
-            LEAF => leaf_checksum(
-                page,
-                K::fixed_width(),
-                V::fixed_width(),
-                self.mem.checksum_type(),
-            ),
-            BRANCH => branch_checksum(page, K::fixed_width(), self.mem.checksum_type()),
+            LEAF => leaf_checksum(page, K::fixed_width(), V::fixed_width()),
+            BRANCH => branch_checksum(page, K::fixed_width()),
             _ => unreachable!(),
         }
     }

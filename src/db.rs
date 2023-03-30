@@ -301,7 +301,6 @@ impl Database {
         initial_size: Option<u64>,
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
-        write_strategy: Option<WriteStrategy>,
     ) -> Result<Self> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -314,13 +313,12 @@ impl Database {
             initial_size,
             read_cache_size_bytes,
             write_cache_size_bytes,
-            write_strategy,
         )?;
         if mem.needs_repair()? {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
 
-            if mem.needs_checksum_verification()? && !Self::verify_primary_checksums(&mem)? {
+            if !Self::verify_primary_checksums(&mem)? {
                 mem.repair_primary_corrupted();
                 assert!(Self::verify_primary_checksums(&mem)?);
             }
@@ -383,7 +381,7 @@ impl Database {
                 None,
                 transaction_id,
                 false,
-                None,
+                true,
             )?;
         }
 
@@ -424,33 +422,6 @@ impl Database {
         Builder::new()
     }
 
-    /// Changes the write strategy of the database for future [`WriteTransaction`]s.
-    ///
-    /// Calling this method will invalidate all existing [`crate::Savepoint`]s.
-    ///
-    /// Note: Changing to the [`WriteStrategy::Checksum`] strategy can take a long time, as checksums
-    /// will need to be calculated for every entry in the database
-    pub fn set_write_strategy(&self, strategy: WriteStrategy) -> Result {
-        let mut tracker = self.transaction_tracker.lock().unwrap();
-        tracker.invalidate_all_savepoints();
-
-        let guard = self.live_write_transaction.lock().unwrap();
-        assert!(guard.is_none());
-        // TODO: implement switching to checksum strategy
-        assert!(matches!(strategy, WriteStrategy::TwoPhase));
-
-        let id = self.increment_transaction_id();
-        let root_page = self.mem.get_data_root();
-        let freed_root = self.mem.get_freed_root();
-        self.mem
-            .commit(root_page, freed_root, id, false, Some(strategy.into()))?;
-        drop(guard);
-
-        drop(tracker);
-
-        Ok(())
-    }
-
     /// Begins a write transaction
     ///
     /// Returns a [`WriteTransaction`] which may be used to read/write to the database. Only a single
@@ -479,59 +450,6 @@ impl Database {
     }
 }
 
-/// redb can be configured to use one of two write-and-commit strategies.
-///
-/// Both strategies have security tradeoffs in situations where an attacker has a high degree of
-/// control over the database workload. For example being able to control the exact order of reads
-/// and writes, or being able to crash the database process at will.
-#[derive(Copy, Clone)]
-pub enum WriteStrategy {
-    /// Optimize for minimum write transaction latency by calculating and storing recursive checksums
-    /// of database contents, with a single-phase [`WriteTransaction::commit`] that makes a single
-    /// call to `fsync`.
-    ///
-    /// Data is written with checksums, with the following commit algorithm:
-    ///
-    /// 1. Update the inactive commit slot with the new database state
-    /// 2. Flip the god byte primary bit to activate the newly updated commit slot
-    /// 3. Call `fsync` to ensure all writes have been persisted to disk
-    ///
-    /// When opening the database after a crash, the most recent of the two commit slots with a
-    /// valid checksum is used.
-    ///
-    /// This write strategy requires calculating checksums as data is written, which decreases write
-    /// throughput, but only requires one call to `fsync`, which decreases commit latency.
-    ///
-    /// Security considerations: The checksum used is xxhash, a fast, non-cryptographic hash
-    /// function with close to perfect collision resistance when used with non-malicious input. An
-    /// attacker with an extremely high degree of control over the database's workload, including
-    /// the ability to cause the database process to crash, can cause invalid data to be written
-    /// with a valid checksum, leaving the database in an invalid, attacker-controlled state.
-    Checksum,
-    /// Optimize for maximum write transaction throughput by omitting checksums, with a two-phase
-    /// [`WriteTransaction::commit`] that makes two calls to `fsync`.
-    ///
-    /// Data is written without checksums, with the following commit algorithm:
-    ///
-    /// 1. Update the inactive commit slot with the new database state
-    /// 2. Call `fsync` to ensure the database slate and commit slot update have been persisted
-    /// 3. Flip the god byte primary bit to activate the newly updated commit slot
-    /// 4. Call `fsync` to ensure the write to the god byte has been persisted
-    ///
-    /// When opening the database after a crash, the god byte primary bit will always point to the
-    /// most recent valid commit.
-    ///
-    /// This write strategy avoids calculating checksums, which increases write throughput, but
-    /// requires two calls to fsync, which increases commit latency.
-    ///
-    /// Security considerations: Many hard disk drives and SSDs do not actually guarantee that data
-    /// has been persisted to disk after calling `fsync`. An attacker with a high degree of control
-    /// over the database's workload, including the ability to cause the database process to crash,
-    /// can cause the database to crash with the god byte primary bit pointing to an invalid commit
-    /// slot, leaving the database in an invalid, potentially attacker-controlled state.
-    TwoPhase,
-}
-
 /// Configuration builder of a redb [Database].
 pub struct Builder {
     page_size: usize,
@@ -539,7 +457,6 @@ pub struct Builder {
     initial_size: Option<u64>,
     read_cache_size_bytes: usize,
     write_cache_size_bytes: usize,
-    write_strategy: Option<WriteStrategy>,
 }
 
 impl Builder {
@@ -549,7 +466,6 @@ impl Builder {
     ///
     /// - `read_cache_size_bytes`: 1GiB
     /// - `write_cache_size_bytes`: 100MiB
-    /// - `write_strategy`: [WriteStrategy::Checksum]
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -563,7 +479,6 @@ impl Builder {
             read_cache_size_bytes: 1024 * 1024 * 1024,
             // TODO: Default should probably take into account the total system memory
             write_cache_size_bytes: 100 * 1024 * 1024,
-            write_strategy: None,
         }
     }
 
@@ -578,14 +493,6 @@ impl Builder {
     pub fn set_page_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
         self.page_size = std::cmp::max(size, 512);
-        self
-    }
-
-    /// Set the write strategy of the database.
-    ///
-    /// See [WriteStrategy] for details.
-    pub fn set_write_strategy(&mut self, write_strategy: WriteStrategy) -> &mut Self {
-        self.write_strategy = Some(write_strategy);
         self
     }
 
@@ -635,7 +542,6 @@ impl Builder {
             self.initial_size,
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
-            self.write_strategy,
         )
     }
 
@@ -652,7 +558,6 @@ impl Builder {
                 self.initial_size,
                 self.read_cache_size_bytes,
                 self.write_cache_size_bytes,
-                None,
             )
         } else {
             Err(Error::Io(io::Error::from(ErrorKind::InvalidData)))
@@ -671,7 +576,7 @@ impl std::fmt::Debug for Database {
 mod test {
     use tempfile::NamedTempFile;
 
-    use crate::{Database, Durability, ReadableTable, TableDefinition, WriteStrategy};
+    use crate::{Database, Durability, ReadableTable, TableDefinition};
 
     #[test]
     fn small_pages() {
@@ -695,14 +600,14 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
         let db = Database::builder()
-            .set_write_strategy(WriteStrategy::TwoPhase)
             .set_page_size(512)
             .create(tmpfile.path())
             .unwrap();
 
         let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
-        let tx = db.begin_write().unwrap();
+        let mut tx = db.begin_write().unwrap();
+        tx.set_durability(Durability::Paranoid);
         let savepoint0 = tx.savepoint().unwrap();
         {
             tx.open_table(table_def).unwrap();
@@ -710,6 +615,7 @@ mod test {
         tx.commit().unwrap();
 
         let mut tx = db.begin_write().unwrap();
+        tx.set_durability(Durability::Paranoid);
         let savepoint1 = tx.savepoint().unwrap();
         tx.restore_savepoint(&savepoint0).unwrap();
         tx.set_durability(Durability::None);
@@ -721,6 +627,7 @@ mod test {
         tx.commit().unwrap();
 
         let mut tx = db.begin_write().unwrap();
+        tx.set_durability(Durability::Paranoid);
         tx.restore_savepoint(&savepoint0).unwrap();
         {
             tx.open_table(table_def).unwrap();
@@ -728,6 +635,7 @@ mod test {
         tx.commit().unwrap();
 
         let mut tx = db.begin_write().unwrap();
+        tx.set_durability(Durability::Paranoid);
         let savepoint2 = tx.savepoint().unwrap();
         drop(savepoint0);
         tx.restore_savepoint(&savepoint2).unwrap();
@@ -740,6 +648,7 @@ mod test {
         tx.commit().unwrap();
 
         let mut tx = db.begin_write().unwrap();
+        tx.set_durability(Durability::Paranoid);
         let savepoint3 = tx.savepoint().unwrap();
         drop(savepoint1);
         tx.restore_savepoint(&savepoint3).unwrap();
@@ -749,6 +658,7 @@ mod test {
         tx.commit().unwrap();
 
         let mut tx = db.begin_write().unwrap();
+        tx.set_durability(Durability::Paranoid);
         let savepoint4 = tx.savepoint().unwrap();
         drop(savepoint2);
         tx.restore_savepoint(&savepoint3).unwrap();
@@ -760,6 +670,7 @@ mod test {
         tx.abort().unwrap();
 
         let mut tx = db.begin_write().unwrap();
+        tx.set_durability(Durability::Paranoid);
         let savepoint5 = tx.savepoint().unwrap();
         drop(savepoint3);
         assert!(tx.restore_savepoint(&savepoint4).is_err());
@@ -769,6 +680,7 @@ mod test {
         tx.commit().unwrap();
 
         let mut tx = db.begin_write().unwrap();
+        tx.set_durability(Durability::Paranoid);
         tx.restore_savepoint(&savepoint5).unwrap();
         tx.set_durability(Durability::None);
         {
@@ -782,7 +694,6 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
         let db = Database::builder()
-            .set_write_strategy(WriteStrategy::Checksum)
             .set_page_size(1024)
             .create(tmpfile.path())
             .unwrap();
@@ -816,7 +727,6 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
         let db = Database::builder()
-            .set_write_strategy(WriteStrategy::Checksum)
             .set_read_cache_size(1024 * 1024)
             .set_write_cache_size(0)
             .set_page_size(1024)

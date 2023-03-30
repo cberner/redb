@@ -87,7 +87,45 @@ pub enum Durability {
     Eventual,
     /// Commits with this durability level are guaranteed to be persistent as soon as
     /// [WriteTransaction::commit] returns.
+    ///
+    /// Data is written with checksums, with the following commit algorithm:
+    ///
+    /// 1. Update the inactive commit slot with the new database state
+    /// 2. Flip the god byte primary bit to activate the newly updated commit slot
+    /// 3. Call `fsync` to ensure all writes have been persisted to disk
+    ///
+    /// When opening the database after a crash, the most recent of the two commit slots with a
+    /// valid checksum is used.
+    ///
+    /// Security considerations: The checksum used is xxhash, a fast, non-cryptographic hash
+    /// function with close to perfect collision resistance when used with non-malicious input. An
+    /// attacker with an extremely high degree of control over the database's workload, including
+    /// the ability to cause the database process to crash, can cause invalid data to be written
+    /// with a valid checksum, leaving the database in an invalid, attacker-controlled state.
     Immediate,
+    /// Commits with this durability level have the same gaurantees as [Durability::Immediate]
+    ///
+    /// Additionally, aata is written with the following 2-phase commit algorithm:
+    ///
+    /// 1. Update the inactive commit slot with the new database state
+    /// 2. Call `fsync` to ensure the database slate and commit slot update have been persisted
+    /// 3. Flip the god byte primary bit to activate the newly updated commit slot
+    /// 4. Call `fsync` to ensure the write to the god byte has been persisted
+    ///
+    /// This mitigates a theoretical attack where an attacker who
+    /// 1. can control the order in which pages are flushed to disk
+    /// 2. can introduce crashes during fsync(),
+    /// 3. has knowledge of the database file contents, and
+    /// 4. can include arbitrary data in a write transaction
+    /// could cause a transaction to partially commit (some but not all of the data is written).
+    /// This is described in the design doc in futher detail.
+    ///
+    /// Security considerations: Many hard disk drives and SSDs do not actually guarantee that data
+    /// has been persisted to disk after calling `fsync`. Even with this commit level, an attacker
+    /// with a high degree of control over the database's workload, including the ability to cause
+    /// the database process to crash, can cause the database to crash with the god byte primary bit
+    /// pointing to an invalid commit slot, leaving the database in an invalid, potentially attacker-controlled state.
+    Paranoid,
 }
 
 /// A read/write transaction
@@ -207,10 +245,6 @@ impl<'db> WriteTransaction<'db> {
         // Restoring a savepoint that reverted a file format or checksum type change could corrupt
         // the database
         assert_eq!(self.db.get_memory().get_version(), savepoint.get_version());
-        assert_eq!(
-            self.db.get_memory().checksum_type(),
-            savepoint.get_checksum_type()
-        );
         self.dirty.store(true, Ordering::Release);
 
         let allocated_since_savepoint = self
@@ -431,8 +465,9 @@ impl<'db> WriteTransaction<'db> {
         );
         match self.durability {
             Durability::None => self.non_durable_commit()?,
-            Durability::Eventual => self.durable_commit(true)?,
-            Durability::Immediate => self.durable_commit(false)?,
+            Durability::Eventual => self.durable_commit(true, false)?,
+            Durability::Immediate => self.durable_commit(false, false)?,
+            Durability::Paranoid => self.durable_commit(false, true)?,
         }
 
         self.completed = true;
@@ -463,7 +498,7 @@ impl<'db> WriteTransaction<'db> {
         Ok(())
     }
 
-    pub(crate) fn durable_commit(&mut self, eventual: bool) -> Result {
+    pub(crate) fn durable_commit(&mut self, eventual: bool, two_phase: bool) -> Result {
         let oldest_live_read = self
             .transaction_tracker
             .lock()
@@ -483,7 +518,7 @@ impl<'db> WriteTransaction<'db> {
         let freed_root = self.freed_tree.lock().unwrap().get_root();
 
         self.mem
-            .commit(root, freed_root, self.transaction_id, eventual, None)?;
+            .commit(root, freed_root, self.transaction_id, eventual, two_phase)?;
         Ok(())
     }
 

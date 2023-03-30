@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use redb::{AccessGuard, Database, Durability, Error, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, TableDefinition, WriteStrategy};
+use redb::{AccessGuard, Database, Durability, Error, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, TableDefinition};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -279,13 +279,7 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
 
 fuzz_target!(|config: FuzzConfig| {
     let redb_file: NamedTempFile = NamedTempFile::new().unwrap();
-    let write_strategy = if config.use_checksums {
-        WriteStrategy::Checksum
-    } else {
-        WriteStrategy::TwoPhase
-    };
     let db = Database::builder()
-            .set_write_strategy(write_strategy)
             .set_page_size(config.page_size.value)
             .set_read_cache_size(config.read_cache_size.value)
             .set_write_cache_size(config.write_cache_size.value)

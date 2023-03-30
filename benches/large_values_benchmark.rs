@@ -5,7 +5,6 @@ mod common;
 use common::*;
 
 use rand::Rng;
-use redb::WriteStrategy;
 use std::time::{Duration, Instant};
 
 const ELEMENTS: usize = 1_000_000;
@@ -70,20 +69,7 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
 fn main() {
     let redb_latency_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        let db = redb::Database::builder()
-            .set_write_strategy(WriteStrategy::Checksum)
-            .create(tmpfile.path())
-            .unwrap();
-        let table = RedbBenchDatabase::new(&db);
-        benchmark(table)
-    };
-
-    let redb_throughput_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        let db = redb::Database::builder()
-            .set_write_strategy(WriteStrategy::TwoPhase)
-            .create(tmpfile.path())
-            .unwrap();
+        let db = redb::Database::builder().create(tmpfile.path()).unwrap();
         let table = RedbBenchDatabase::new(&db);
         benchmark(table)
     };
@@ -118,7 +104,6 @@ fn main() {
 
     for results in [
         redb_latency_results,
-        redb_throughput_results,
         lmdb_results,
         rocksdb_results,
         sled_results,
@@ -130,7 +115,7 @@ fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_width(100);
-    table.set_header(["", "redb (1PC+C)", "redb (2PC)", "lmdb", "rocksdb", "sled"]);
+    table.set_header(["", "redb", "lmdb", "rocksdb", "sled"]);
     for row in rows {
         table.add_row(row);
     }
