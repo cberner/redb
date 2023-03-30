@@ -7,7 +7,6 @@ use tempfile::{NamedTempFile, TempDir};
 mod common;
 use common::*;
 
-use redb::WriteStrategy;
 use std::time::{Duration, Instant};
 
 const ITERATIONS: usize = 2;
@@ -281,19 +280,6 @@ fn main() {
     let redb_latency_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
         let db = redb::Database::builder()
-            .set_write_strategy(WriteStrategy::Checksum)
-            .set_read_cache_size(4 * 1024 * 1024 * 1024)
-            .set_write_cache_size(4 * 1024 * 1024 * 1024)
-            .create(tmpfile.path())
-            .unwrap();
-        let table = RedbBenchDatabase::new(&db);
-        benchmark(table)
-    };
-
-    let redb_throughput_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
-        let db = redb::Database::builder()
-            .set_write_strategy(WriteStrategy::TwoPhase)
             .set_read_cache_size(4 * 1024 * 1024 * 1024)
             .set_write_cache_size(4 * 1024 * 1024 * 1024)
             .create(tmpfile.path())
@@ -342,7 +328,6 @@ fn main() {
 
     for results in [
         redb_latency_results,
-        redb_throughput_results,
         lmdb_results,
         rocksdb_results,
         sled_results,
@@ -355,15 +340,7 @@ fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_width(100);
-    table.set_header([
-        "",
-        "redb (1PC+C)",
-        "redb (2PC)",
-        "lmdb",
-        "rocksdb",
-        "sled",
-        "sanakirja",
-    ]);
+    table.set_header(["", "redb", "lmdb", "rocksdb", "sled", "sanakirja"]);
     for row in rows {
         table.add_row(row);
     }

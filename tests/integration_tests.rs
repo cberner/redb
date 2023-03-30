@@ -7,7 +7,6 @@ use rand::Rng;
 use redb::ReadableMultimapTable;
 use redb::{
     Builder, Database, Durability, Error, MultimapTableDefinition, ReadableTable, TableDefinition,
-    WriteStrategy,
 };
 
 const ELEMENTS: usize = 100;
@@ -687,10 +686,7 @@ fn regression14() {
 fn regression17() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db = Database::builder()
-        .set_write_strategy(WriteStrategy::Checksum)
-        .create(tmpfile.path())
-        .unwrap();
+    let db = Database::builder().create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
@@ -711,10 +707,7 @@ fn regression17() {
 fn regression18() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db = Database::builder()
-        .set_write_strategy(WriteStrategy::Checksum)
-        .create(tmpfile.path())
-        .unwrap();
+    let db = Database::builder().create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
@@ -780,10 +773,7 @@ fn regression18() {
 fn regression19() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
-    let db = Database::builder()
-        .set_write_strategy(WriteStrategy::Checksum)
-        .create(tmpfile.path())
-        .unwrap();
+    let db = Database::builder().create(tmpfile.path()).unwrap();
 
     let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
@@ -818,53 +808,6 @@ fn regression19() {
 
     let tx = db.begin_write().unwrap();
     tx.open_table(table_def).unwrap();
-}
-
-#[test]
-fn change_invalidate_savepoint() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-
-    let db = Database::builder()
-        .set_write_strategy(WriteStrategy::Checksum)
-        .create(tmpfile.path())
-        .unwrap();
-    let tx = db.begin_write().unwrap();
-    let savepoint = tx.savepoint().unwrap();
-    tx.abort().unwrap();
-    db.set_write_strategy(WriteStrategy::TwoPhase).unwrap();
-
-    let mut tx = db.begin_write().unwrap();
-    assert!(matches!(
-        tx.restore_savepoint(&savepoint),
-        Err(Error::InvalidSavepoint)
-    ));
-}
-
-#[test]
-fn create_open_mismatch() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-
-    let db = Database::builder()
-        .set_write_strategy(WriteStrategy::TwoPhase)
-        .create(tmpfile.path())
-        .unwrap();
-    drop(db);
-
-    Database::create(tmpfile.path()).unwrap();
-
-    Database::builder().create(tmpfile.path()).unwrap();
-}
-
-#[test]
-fn twophase_open() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-
-    let db = Database::builder()
-        .set_write_strategy(WriteStrategy::TwoPhase)
-        .create(tmpfile.path())
-        .unwrap();
-    drop(db);
-    Database::open(tmpfile.path()).unwrap();
 }
 
 #[test]

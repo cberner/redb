@@ -129,7 +129,6 @@ pub(crate) struct FuzzTransaction {
 
 #[derive(Arbitrary, Debug, Clone)]
 pub(crate) struct FuzzConfig {
-    pub use_checksums: bool,
     pub multimap_table: bool,
     pub read_cache_size: BoundedUSize<MAX_CACHE_SIZE>,
     pub write_cache_size: BoundedUSize<MAX_CACHE_SIZE>,

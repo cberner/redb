@@ -67,10 +67,6 @@ impl TransactionTracker {
         self.valid_savepoints.contains(&id)
     }
 
-    pub(crate) fn invalidate_all_savepoints(&mut self) {
-        self.valid_savepoints.clear();
-    }
-
     pub(crate) fn invalidate_savepoints_after(&mut self, id: SavepointId) {
         self.valid_savepoints.retain(|x| *x <= id);
     }

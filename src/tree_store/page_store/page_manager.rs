@@ -1,4 +1,3 @@
-use crate::db::WriteStrategy;
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::page_store::base::PageHint;
@@ -35,7 +34,7 @@ const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
 const NUM_REGIONS: u32 = 1000;
 
 // TODO: set to 1, when version 1.0 is released
-pub(crate) const FILE_FORMAT_VERSION: u8 = 110;
+pub(crate) const FILE_FORMAT_VERSION: u8 = 111;
 
 fn ceil_log2(x: usize) -> usize {
     if x.is_power_of_two() {
@@ -45,48 +44,8 @@ fn ceil_log2(x: usize) -> usize {
     }
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
-pub(crate) enum ChecksumType {
-    Unused, // No checksum is calculated. Stores arbitrary data
-    XXH3_128,
-}
-
-impl ChecksumType {
-    pub(crate) fn checksum(&self, data: &[u8]) -> Checksum {
-        match self {
-            ChecksumType::Unused => 0,
-            ChecksumType::XXH3_128 => hash128_with_seed(data, 0),
-        }
-    }
-}
-
-impl From<WriteStrategy> for ChecksumType {
-    fn from(strategy: WriteStrategy) -> Self {
-        match strategy {
-            WriteStrategy::Checksum => ChecksumType::XXH3_128,
-            WriteStrategy::TwoPhase => ChecksumType::Unused,
-        }
-    }
-}
-
-impl From<u8> for ChecksumType {
-    fn from(x: u8) -> Self {
-        match x {
-            1 => ChecksumType::Unused,
-            2 => ChecksumType::XXH3_128,
-            _ => unimplemented!(),
-        }
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<u8> for ChecksumType {
-    fn into(self) -> u8 {
-        match self {
-            ChecksumType::Unused => 1,
-            ChecksumType::XXH3_128 => 2,
-        }
-    }
+pub(crate) fn xxh3_checksum(data: &[u8]) -> Checksum {
+    hash128_with_seed(data, 0)
 }
 
 // Tracks the page orders that MAY BE free in each region. This data structure is optimistic, so
@@ -447,7 +406,6 @@ impl TransactionalMemory {
         initial_size: Option<u64>,
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
-        write_strategy: Option<WriteStrategy>,
     ) -> Result<Self> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
@@ -515,12 +473,7 @@ impl TransactionalMemory {
                 )
             };
 
-            let checksum_type = match write_strategy.unwrap_or(WriteStrategy::Checksum) {
-                WriteStrategy::Checksum => ChecksumType::XXH3_128,
-                WriteStrategy::TwoPhase => ChecksumType::Unused,
-            };
-            let mut header =
-                DatabaseHeader::new(layout, checksum_type, TransactionId(0), tracker_page);
+            let mut header = DatabaseHeader::new(layout, TransactionId(0), tracker_page);
 
             header.recovery_required = false;
             storage
@@ -540,11 +493,6 @@ impl TransactionalMemory {
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
         let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes);
-
-        if let Some(requested_strategy) = write_strategy {
-            let checksum_type: ChecksumType = requested_strategy.into();
-            assert_eq!(checksum_type, header.primary_slot().checksum_type);
-        }
 
         assert_eq!(header.page_size() as usize, page_size);
         let version = header.primary_slot().version;
@@ -628,19 +576,6 @@ impl TransactionalMemory {
 
     pub(crate) fn needs_repair(&self) -> Result<bool> {
         Ok(self.state.lock().unwrap().header.recovery_required)
-    }
-
-    pub(crate) fn needs_checksum_verification(&self) -> Result<bool> {
-        Ok(self.checksum_type() == ChecksumType::XXH3_128)
-    }
-
-    pub(crate) fn checksum_type(&self) -> ChecksumType {
-        self.state
-            .lock()
-            .unwrap()
-            .header
-            .primary_slot()
-            .checksum_type
     }
 
     pub(crate) fn repair_primary_corrupted(&self) {
@@ -754,15 +689,13 @@ impl TransactionalMemory {
     }
 
     // Commit all outstanding changes and make them visible as the primary
-    //
-    // If new_checksum_type is provided, caller must ensure that all pages conform to the new checksum
     pub(crate) fn commit(
         &self,
         data_root: Option<(PageNumber, Checksum)>,
         freed_root: Option<(PageNumber, Checksum)>,
         transaction_id: TransactionId,
         eventual: bool,
-        new_checksum_type: Option<ChecksumType>,
+        two_phase: bool,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
@@ -772,15 +705,12 @@ impl TransactionalMemory {
         assert!(!self.needs_recovery);
 
         let mut state = self.state.lock().unwrap();
-        let original_checksum_type = state.header.primary_slot().checksum_type;
-        let checksum_type = new_checksum_type.unwrap_or(original_checksum_type);
         let mut layout = self.layout.lock().unwrap();
 
         // Trim surplus file space, before finalizing the commit
         let shrunk = self.try_shrink(&mut state, &mut layout)?;
 
         let mut secondary = state.header.secondary_slot_mut();
-        secondary.checksum_type = checksum_type;
         secondary.transaction_id = transaction_id;
         secondary.root = data_root;
         secondary.freed_root = freed_root;
@@ -789,7 +719,7 @@ impl TransactionalMemory {
         self.write_header(&state.header, false)?;
 
         // Use 2-phase commit, if checksums are disabled
-        if matches!(checksum_type, ChecksumType::Unused) {
+        if two_phase {
             if eventual {
                 self.storage.eventual_flush()?;
             } else {
@@ -833,10 +763,8 @@ impl TransactionalMemory {
         assert!(!self.needs_recovery);
 
         let mut state = self.state.lock().unwrap();
-        let checksum_type = state.header.primary_slot().checksum_type;
         let layout = self.layout.lock().unwrap();
         let mut secondary = state.header.secondary_slot_mut();
-        secondary.checksum_type = checksum_type;
         secondary.transaction_id = transaction_id;
         secondary.root = data_root;
         secondary.freed_root = freed_root;
@@ -1325,7 +1253,7 @@ impl Drop for TransactionalMemory {
                 let root = self.get_data_root();
                 let freed_root = self.get_freed_root();
                 if self
-                    .commit(root, freed_root, non_durable_transaction_id, false, None)
+                    .commit(root, freed_root, non_durable_transaction_id, false, true)
                     .is_err()
                 {
                     eprintln!(

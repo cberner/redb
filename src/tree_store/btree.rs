@@ -284,17 +284,10 @@ impl<'a> RawBtree<'a> {
         Ok(match node_mem[0] {
             LEAF => {
                 expected_checksum
-                    == leaf_checksum(
-                        &page,
-                        self.fixed_key_size,
-                        self.fixed_value_size,
-                        self.mem.checksum_type(),
-                    )
+                    == leaf_checksum(&page, self.fixed_key_size, self.fixed_value_size)
             }
             BRANCH => {
-                if expected_checksum
-                    != branch_checksum(&page, self.fixed_key_size, self.mem.checksum_type())
-                {
+                if expected_checksum != branch_checksum(&page, self.fixed_key_size) {
                     return Ok(false);
                 }
                 let accessor = BranchAccessor::new(&page, self.fixed_key_size);

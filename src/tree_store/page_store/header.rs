@@ -1,7 +1,6 @@
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
-use crate::tree_store::page_store::page_manager::FILE_FORMAT_VERSION;
-use crate::tree_store::page_store::ChecksumType;
+use crate::tree_store::page_store::page_manager::{xxh3_checksum, FILE_FORMAT_VERSION};
 use crate::tree_store::{Checksum, PageNumber};
 use std::mem::size_of;
 
@@ -23,8 +22,7 @@ use std::mem::size_of;
 // 1 byte: version
 // 1 byte: != 0 if root page is non-null
 // 1 byte: != 0 if freed table root page is non-null
-// 1 byte: checksum type
-// 4 bytes: padding
+// 5 bytes: padding
 // 8 bytes: root page
 // 16 bytes: root checksum
 // 8 bytes: freed table root page
@@ -57,9 +55,8 @@ const RECOVERY_REQUIRED: u8 = 2;
 const VERSION_OFFSET: usize = 0;
 const ROOT_NON_NULL_OFFSET: usize = size_of::<u8>();
 const FREED_ROOT_NON_NULL_OFFSET: usize = ROOT_NON_NULL_OFFSET + size_of::<u8>();
-const CHECKSUM_TYPE_OFFSET: usize = FREED_ROOT_NON_NULL_OFFSET + size_of::<u8>();
-const PADDING: usize = 4;
-const ROOT_PAGE_OFFSET: usize = CHECKSUM_TYPE_OFFSET + size_of::<u8>() + PADDING;
+const PADDING: usize = 5;
+const ROOT_PAGE_OFFSET: usize = FREED_ROOT_NON_NULL_OFFSET + size_of::<u8>() + PADDING;
 const ROOT_CHECKSUM_OFFSET: usize = ROOT_PAGE_OFFSET + size_of::<u64>();
 const FREED_ROOT_OFFSET: usize = ROOT_CHECKSUM_OFFSET + size_of::<u128>();
 const FREED_ROOT_CHECKSUM_OFFSET: usize = FREED_ROOT_OFFSET + size_of::<u64>();
@@ -101,7 +98,6 @@ pub(super) struct DatabaseHeader {
 impl DatabaseHeader {
     pub(super) fn new(
         layout: DatabaseLayout,
-        checksum_type: ChecksumType,
         transaction_id: TransactionId,
         region_tracker: PageNumber,
     ) -> Self {
@@ -110,7 +106,7 @@ impl DatabaseHeader {
             assert!(TRANSACTION_LAST_FIELD <= TRANSACTION_SIZE);
         }
 
-        let slot = TransactionHeader::new(checksum_type, transaction_id, region_tracker, layout);
+        let slot = TransactionHeader::new(transaction_id, region_tracker, layout);
         Self {
             primary_slot: 0,
             recovery_required: true,
@@ -220,7 +216,6 @@ impl DatabaseHeader {
 #[derive(Clone)]
 pub(super) struct TransactionHeader {
     pub(super) version: u8,
-    pub(super) checksum_type: ChecksumType,
     pub(super) root: Option<(PageNumber, Checksum)>,
     pub(super) freed_root: Option<(PageNumber, Checksum)>,
     pub(super) transaction_id: TransactionId,
@@ -230,14 +225,12 @@ pub(super) struct TransactionHeader {
 
 impl TransactionHeader {
     fn new(
-        checksum_type: ChecksumType,
         transaction_id: TransactionId,
         region_tracker: PageNumber,
         layout: DatabaseLayout,
     ) -> Self {
         Self {
             version: FILE_FORMAT_VERSION,
-            checksum_type,
             root: None,
             freed_root: None,
             transaction_id,
@@ -249,13 +242,12 @@ impl TransactionHeader {
     // Returned bool indicates whether the checksum was corrupted
     pub(super) fn from_bytes(data: &[u8], full_region_layout: RegionLayout) -> (Self, bool) {
         let version = data[VERSION_OFFSET];
-        let checksum_type = ChecksumType::from(data[CHECKSUM_TYPE_OFFSET]);
         let checksum = Checksum::from_le_bytes(
             data[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
                 .try_into()
                 .unwrap(),
         );
-        let corrupted = checksum != checksum_type.checksum(&data[..SLOT_CHECKSUM_OFFSET]);
+        let corrupted = checksum != xxh3_checksum(&data[..SLOT_CHECKSUM_OFFSET]);
 
         let root = if data[ROOT_NON_NULL_OFFSET] != 0 {
             let page = PageNumber::from_le_bytes(
@@ -310,7 +302,6 @@ impl TransactionHeader {
 
         let result = Self {
             version,
-            checksum_type,
             root,
             freed_root,
             transaction_id,
@@ -324,7 +315,6 @@ impl TransactionHeader {
     pub(super) fn to_bytes(&self) -> [u8; TRANSACTION_SIZE] {
         let mut result = [0; TRANSACTION_SIZE];
         result[VERSION_OFFSET] = self.version;
-        result[CHECKSUM_TYPE_OFFSET] = self.checksum_type.into();
         if let Some((page, checksum)) = self.root {
             result[ROOT_NON_NULL_OFFSET] = 1;
             result[ROOT_PAGE_OFFSET..(ROOT_PAGE_OFFSET + PageNumber::serialized_size())]
@@ -352,7 +342,7 @@ impl TransactionHeader {
         result[REGION_TRACKER_PAGE_NUMBER_OFFSET
             ..(REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size())]
             .copy_from_slice(&self.region_tracker.to_le_bytes());
-        let checksum = self.checksum_type.checksum(&result[..SLOT_CHECKSUM_OFFSET]);
+        let checksum = xxh3_checksum(&result[..SLOT_CHECKSUM_OFFSET]);
         result[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
             .copy_from_slice(&checksum.to_le_bytes());
 
@@ -368,7 +358,7 @@ mod test {
         ROOT_CHECKSUM_OFFSET, TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET,
     };
     use crate::tree_store::page_store::TransactionalMemory;
-    use crate::{Database, ReadableTable, WriteStrategy};
+    use crate::{Database, ReadableTable};
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::mem::size_of;
@@ -377,72 +367,9 @@ mod test {
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
 
     #[test]
-    fn repair_allocator_no_checksums() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = Database::builder()
-            .set_write_strategy(WriteStrategy::TwoPhase)
-            .create(tmpfile.path())
-            .unwrap();
-        let write_txn = db.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            table.insert("hello", "world").unwrap();
-        }
-        write_txn.commit().unwrap();
-        let write_txn = db.begin_write().unwrap();
-        let allocated_pages = write_txn.stats().unwrap().allocated_pages();
-        write_txn.abort().unwrap();
-        drop(db);
-
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(tmpfile.path())
-            .unwrap();
-
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        let mut buffer = [0u8; 1];
-        file.read_exact(&mut buffer).unwrap();
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        buffer[0] |= RECOVERY_REQUIRED;
-        file.write_all(&buffer).unwrap();
-
-        assert!(TransactionalMemory::new(
-            file,
-            PAGE_SIZE,
-            None,
-            None,
-            0,
-            0,
-            Some(WriteStrategy::TwoPhase)
-        )
-        .unwrap()
-        .needs_repair()
-        .unwrap());
-
-        let db2 = Database::builder()
-            .set_write_strategy(WriteStrategy::TwoPhase)
-            .create(tmpfile.path())
-            .unwrap();
-        let write_txn = db2.begin_write().unwrap();
-        assert_eq!(
-            allocated_pages,
-            write_txn.stats().unwrap().allocated_pages()
-        );
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            table.insert("hello2", "world2").unwrap();
-        }
-        write_txn.commit().unwrap();
-    }
-
-    #[test]
     fn repair_allocator_checksums() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = Database::builder()
-            .set_write_strategy(WriteStrategy::Checksum)
-            .create(tmpfile.path())
-            .unwrap();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
@@ -487,18 +414,10 @@ mod test {
         .unwrap();
         file.write_all(&[0; size_of::<u128>()]).unwrap();
 
-        assert!(TransactionalMemory::new(
-            file,
-            PAGE_SIZE,
-            None,
-            None,
-            0,
-            0,
-            Some(WriteStrategy::Checksum)
-        )
-        .unwrap()
-        .needs_repair()
-        .unwrap());
+        assert!(TransactionalMemory::new(file, PAGE_SIZE, None, None, 0, 0,)
+            .unwrap()
+            .needs_repair()
+            .unwrap());
 
         let db2 = Database::create(tmpfile.path()).unwrap();
         let write_txn = db2.begin_write().unwrap();
@@ -511,73 +430,9 @@ mod test {
     }
 
     #[test]
-    fn change_write_strategy_to_2pc() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = Database::builder()
-            .set_write_strategy(WriteStrategy::Checksum)
-            .create(tmpfile.path())
-            .unwrap();
-        let write_txn = db.begin_write().unwrap();
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            table.insert("hello", "world").unwrap();
-        }
-        write_txn.commit().unwrap();
-        let write_txn = db.begin_write().unwrap();
-        let allocated_pages = write_txn.stats().unwrap().allocated_pages();
-        write_txn.abort().unwrap();
-        db.set_write_strategy(WriteStrategy::TwoPhase).unwrap();
-        drop(db);
-
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(tmpfile.path())
-            .unwrap();
-
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        let mut buffer = [0u8; 1];
-        file.read_exact(&mut buffer).unwrap();
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        buffer[0] |= RECOVERY_REQUIRED;
-        file.write_all(&buffer).unwrap();
-
-        assert!(TransactionalMemory::new(
-            file,
-            PAGE_SIZE,
-            None,
-            None,
-            0,
-            0,
-            Some(WriteStrategy::TwoPhase)
-        )
-        .unwrap()
-        .needs_repair()
-        .unwrap());
-
-        let db2 = Database::builder()
-            .set_write_strategy(WriteStrategy::TwoPhase)
-            .create(tmpfile.path())
-            .unwrap();
-        let write_txn = db2.begin_write().unwrap();
-        assert_eq!(
-            allocated_pages,
-            write_txn.stats().unwrap().allocated_pages()
-        );
-        {
-            let mut table = write_txn.open_table(X).unwrap();
-            table.insert("hello2", "world2").unwrap();
-        }
-        write_txn.commit().unwrap();
-    }
-
-    #[test]
     fn repair_insert_reserve_regression() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
-        let db = Database::builder()
-            .set_write_strategy(WriteStrategy::Checksum)
-            .create(tmpfile.path())
-            .unwrap();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
 
         let def: TableDefinition<&str, &[u8]> = TableDefinition::new("x");
 
@@ -612,18 +467,10 @@ mod test {
         buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
 
-        assert!(TransactionalMemory::new(
-            file,
-            PAGE_SIZE,
-            None,
-            None,
-            0,
-            0,
-            Some(WriteStrategy::Checksum),
-        )
-        .unwrap()
-        .needs_repair()
-        .unwrap());
+        assert!(TransactionalMemory::new(file, PAGE_SIZE, None, None, 0, 0,)
+            .unwrap()
+            .needs_repair()
+            .unwrap());
 
         Database::open(tmpfile.path()).unwrap();
     }

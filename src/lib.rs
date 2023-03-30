@@ -8,7 +8,7 @@
 
 pub use db::{
     Builder, Database, MultimapTableDefinition, MultimapTableHandle, TableDefinition, TableHandle,
-    UntypedMultimapTableHandle, UntypedTableHandle, WriteStrategy,
+    UntypedMultimapTableHandle, UntypedTableHandle,
 };
 pub use error::Error;
 pub use multimap_table::{
