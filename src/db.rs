@@ -298,7 +298,6 @@ impl Database {
         file: File,
         page_size: usize,
         region_size: Option<usize>,
-        initial_size: Option<u64>,
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
     ) -> Result<Self> {
@@ -310,7 +309,6 @@ impl Database {
             file,
             page_size,
             region_size,
-            initial_size,
             read_cache_size_bytes,
             write_cache_size_bytes,
         )?;
@@ -454,7 +452,6 @@ impl Database {
 pub struct Builder {
     page_size: usize,
     region_size: Option<usize>,
-    initial_size: Option<u64>,
     read_cache_size_bytes: usize,
     write_cache_size_bytes: usize,
 }
@@ -474,7 +471,6 @@ impl Builder {
             // It is part of the file format, so can be enabled in the future.
             page_size: PAGE_SIZE,
             region_size: None,
-            initial_size: None,
             // TODO: Default should probably take into account the total system memory
             read_cache_size_bytes: 1024 * 1024 * 1024,
             // TODO: Default should probably take into account the total system memory
@@ -515,15 +511,6 @@ impl Builder {
         self
     }
 
-    /// The initial amount of usable space in bytes for the database
-    ///
-    /// Databases grow dynamically, so it is generally unnecessary to set this. However, it can
-    /// be used to avoid runtime overhead caused by resizing the database.
-    pub fn set_initial_size(&mut self, size: u64) -> &mut Self {
-        self.initial_size = Some(size);
-        self
-    }
-
     /// Opens the specified file as a redb database.
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
@@ -539,7 +526,6 @@ impl Builder {
             file,
             self.page_size,
             self.region_size,
-            self.initial_size,
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
         )
@@ -555,7 +541,6 @@ impl Builder {
                 file,
                 self.page_size,
                 None,
-                self.initial_size,
                 self.read_cache_size_bytes,
                 self.write_cache_size_bytes,
             )

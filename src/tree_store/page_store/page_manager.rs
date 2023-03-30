@@ -403,7 +403,6 @@ impl TransactionalMemory {
         file: File,
         page_size: usize,
         requested_region_size: Option<usize>,
-        initial_size: Option<u64>,
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
     ) -> Result<Self> {
@@ -417,17 +416,15 @@ impl TransactionalMemory {
         // TODO: allocate more tracker space when it becomes exhausted, and remove this hard coded 1000 regions
         let region_tracker_required_bytes =
             RegionTracker::required_bytes(NUM_REGIONS, MAX_MAX_PAGE_ORDER + 1);
-        let starting_size = if let Some(size) = initial_size {
-            size
-        } else {
-            // Make sure that there is enough room to allocate the region tracker into a page
-            let size: u64 = max(MIN_DESIRED_USABLE_BYTES, page_size * MIN_USABLE_PAGES)
-                .try_into()
-                .unwrap();
-            let tracker_space =
-                (page_size * ((region_tracker_required_bytes + page_size - 1) / page_size)) as u64;
-            size + tracker_space
-        };
+
+        // Make sure that there is enough room to allocate the region tracker into a page
+        let size: u64 = max(MIN_DESIRED_USABLE_BYTES, page_size * MIN_USABLE_PAGES)
+            .try_into()
+            .unwrap();
+        let tracker_space =
+            (page_size * ((region_tracker_required_bytes + page_size - 1) / page_size)) as u64;
+        let starting_size = size + tracker_space;
+
         let layout = DatabaseLayout::calculate(
             starting_size,
             (region_size / u64::try_from(page_size).unwrap())
