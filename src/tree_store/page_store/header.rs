@@ -414,7 +414,7 @@ mod test {
         .unwrap();
         file.write_all(&[0; size_of::<u128>()]).unwrap();
 
-        assert!(TransactionalMemory::new(file, PAGE_SIZE, None, None, 0, 0,)
+        assert!(TransactionalMemory::new(file, PAGE_SIZE, None, 0, 0)
             .unwrap()
             .needs_repair()
             .unwrap());
@@ -467,7 +467,7 @@ mod test {
         buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
 
-        assert!(TransactionalMemory::new(file, PAGE_SIZE, None, None, 0, 0,)
+        assert!(TransactionalMemory::new(file, PAGE_SIZE, None, 0, 0)
             .unwrap()
             .needs_repair()
             .unwrap());
