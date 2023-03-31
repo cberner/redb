@@ -35,6 +35,10 @@ fn pop() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
+
+        assert!(table.pop_first().unwrap().is_none());
+        assert!(table.pop_last().unwrap().is_none());
+
         table.insert("a", "world").unwrap();
         table.insert("b", "world2").unwrap();
         table.insert("c", "world3").unwrap();
@@ -59,6 +63,8 @@ fn pop() {
             assert_eq!(key.value(), "b");
             assert_eq!(value.value(), "world2");
         }
+
+        assert!(table.pop_first().unwrap().is_none());
         assert!(table.pop_last().unwrap().is_none());
     }
     write_txn.commit().unwrap();
@@ -631,7 +637,9 @@ fn is_empty() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(table.is_empty().unwrap());
         table.insert("hello", "world").unwrap();
+        assert!(!table.is_empty().unwrap());
     }
     write_txn.commit().unwrap();
 
@@ -1292,6 +1300,52 @@ fn iter() {
     let mut iter = table.iter().unwrap();
     for i in 0..10 {
         let (k, v) = iter.next().unwrap().unwrap();
+        assert_eq!(i, k.value());
+        assert_eq!(i, v.value());
+    }
+}
+
+#[test]
+fn drain_next_back() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let mut table = write_txn.open_table(U64_TABLE).unwrap();
+    let mut iter = table.drain(0..10).unwrap();
+    for i in (0..10).rev() {
+        let (k, v) = iter.next_back().unwrap().unwrap();
+        assert_eq!(i, k.value());
+        assert_eq!(i, v.value());
+    }
+}
+
+#[test]
+fn drain_filter_all_elements_next_back() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let mut table = write_txn.open_table(U64_TABLE).unwrap();
+    let mut iter = table.drain_filter(0..10, |_, _| true).unwrap();
+    for i in (0..10).rev() {
+        let (k, v) = iter.next_back().unwrap().unwrap();
         assert_eq!(i, k.value());
         assert_eq!(i, v.value());
     }
