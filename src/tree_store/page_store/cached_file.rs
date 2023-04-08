@@ -289,6 +289,16 @@ impl PagedCachedFile {
         }
     }
 
+    pub(super) fn invalidate_cache_all(&self) {
+        for cache_slot in 0..self.read_cache.len() {
+            let mut lock = self.read_cache[cache_slot].write().unwrap();
+            while let Some((_, removed)) = lock.pop_first() {
+                self.read_cache_bytes
+                    .fetch_sub(removed.len(), Ordering::AcqRel);
+            }
+        }
+    }
+
     pub(super) fn write(&self, offset: u64, len: usize) -> Result<WritablePage> {
         self.check_fsync_failure()?;
         assert_eq!(0, offset % self.page_size);

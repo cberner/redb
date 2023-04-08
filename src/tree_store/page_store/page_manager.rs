@@ -10,6 +10,7 @@ use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMu
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
 use crate::tree_store::PageNumber;
 use crate::Error;
+use crate::Error::Corrupted;
 use crate::Result;
 use std::cmp;
 use std::cmp::max;
@@ -561,6 +562,53 @@ impl TransactionalMemory {
             region_size,
             region_header_with_padding_size: region_header_size,
         })
+    }
+
+    pub(crate) fn clear_cache_and_reload(&mut self) -> Result {
+        assert!(self.allocated_since_commit.lock().unwrap().is_empty());
+        assert!(self.log_since_commit.lock().unwrap().is_empty());
+
+        self.storage.flush()?;
+        self.storage.invalidate_cache_all();
+
+        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes);
+        // TODO: should probably consolidate this logic with Self::new()
+        if header.recovery_required {
+            if repair_info.primary_corrupted {
+                header.swap_primary_slot();
+            } else {
+                // If the secondary is a valid commit, verify that the primary is newer. This handles an edge case where:
+                // * the primary bit is flipped to the secondary
+                // * a crash occurs during fsync, such that no other data is written out to the secondary. meaning that it contains a valid, but out of date transaction
+                let secondary_newer =
+                    header.secondary_slot().transaction_id > header.primary_slot().transaction_id;
+                if secondary_newer && !repair_info.secondary_corrupted {
+                    header.swap_primary_slot();
+                }
+            }
+            if repair_info.invalid_magic_number {
+                return Err(Corrupted("Invalid magic number".to_string()));
+            }
+            self.storage
+                .write(0, DB_HEADER_SIZE)?
+                .mem_mut()
+                .copy_from_slice(&header.to_bytes(true, false));
+            self.storage.flush()?;
+        }
+
+        self.needs_recovery = header.recovery_required;
+        let state = InMemoryState::from_bytes(header.clone(), &self.storage)?;
+        *self.state.lock().unwrap() = state;
+        let layout = header.primary_slot().layout;
+        let tracker_page = header.primary_slot().region_tracker;
+
+        *self.layout.lock().unwrap() = InProgressLayout {
+            layout,
+            tracker_page,
+        };
+
+        Ok(())
     }
 
     pub(crate) fn begin_writable(&self) -> Result {
