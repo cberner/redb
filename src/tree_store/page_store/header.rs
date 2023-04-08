@@ -86,6 +86,7 @@ pub(super) struct HeaderRepairInfo {
     pub(super) secondary_corrupted: bool,
 }
 
+#[derive(Clone)]
 pub(super) struct DatabaseHeader {
     primary_slot: usize,
     pub(super) recovery_required: bool,
@@ -358,6 +359,8 @@ mod test {
         ROOT_CHECKSUM_OFFSET, TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET,
     };
     use crate::tree_store::page_store::TransactionalMemory;
+    #[cfg(not(target_os = "windows"))]
+    use crate::Error;
     use crate::{Database, ReadableTable};
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -419,7 +422,8 @@ mod test {
             .needs_repair()
             .unwrap());
 
-        let db2 = Database::create(tmpfile.path()).unwrap();
+        #[allow(unused_mut)]
+        let mut db2 = Database::create(tmpfile.path()).unwrap();
         let write_txn = db2.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
@@ -427,6 +431,54 @@ mod test {
             table.insert("hello2", "world2").unwrap();
         }
         write_txn.commit().unwrap();
+
+        // Locks are exclusive on Windows, so we can't concurrently overwrite the file
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(tmpfile.path())
+                .unwrap();
+            file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+            let mut buffer = [0u8; 1];
+            file.read_exact(&mut buffer).unwrap();
+
+            // Overwrite the primary checksum to simulate a failure during commit
+            let primary_slot_offset = if buffer[0] & PRIMARY_BIT == 0 {
+                TRANSACTION_0_OFFSET
+            } else {
+                TRANSACTION_1_OFFSET
+            };
+            file.seek(SeekFrom::Start(
+                (primary_slot_offset + ROOT_CHECKSUM_OFFSET) as u64,
+            ))
+            .unwrap();
+            file.write_all(&[0; size_of::<u128>()]).unwrap();
+
+            assert!(!db2.check_integrity().unwrap());
+
+            // Overwrite both checksums to simulate corruption
+            file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+            let mut buffer = [0u8; 1];
+            file.read_exact(&mut buffer).unwrap();
+
+            file.seek(SeekFrom::Start(
+                (TRANSACTION_0_OFFSET + ROOT_CHECKSUM_OFFSET) as u64,
+            ))
+            .unwrap();
+            file.write_all(&[0; size_of::<u128>()]).unwrap();
+            file.seek(SeekFrom::Start(
+                (TRANSACTION_1_OFFSET + ROOT_CHECKSUM_OFFSET) as u64,
+            ))
+            .unwrap();
+            file.write_all(&[0; size_of::<u128>()]).unwrap();
+
+            assert!(matches!(
+                db2.check_integrity().unwrap_err(),
+                Error::Corrupted(_)
+            ));
+        }
     }
 
     #[test]

@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::multimap_table::parse_subtree_roots;
+use crate::Error::Corrupted;
 #[cfg(feature = "logging")]
 use log::{info, warn};
 
@@ -293,6 +294,96 @@ impl Database {
         Ok(true)
     }
 
+    /// Check the integrity of the database file, and repair it if possible.
+    ///
+    /// Returns `Ok(true)` if the database passed integrity checks; `Ok(false)` if it failed but was repaired,
+    /// and `Err(Corrupted)` if the check failed and the file could not be repaired
+    pub fn check_integrity(&mut self) -> Result<bool> {
+        self.mem.clear_cache_and_reload()?;
+
+        if !self.mem.needs_repair()? && Self::verify_primary_checksums(&self.mem)? {
+            return Ok(true);
+        }
+
+        Self::do_repair(&mut self.mem)?;
+
+        Ok(false)
+    }
+
+    fn do_repair(mem: &mut TransactionalMemory) -> Result {
+        if !Self::verify_primary_checksums(mem)? {
+            mem.repair_primary_corrupted();
+            if !Self::verify_primary_checksums(mem)? {
+                return Err(Corrupted(
+                    "Failed to repair database. All roots are corrupted".to_string(),
+                ));
+            }
+        }
+
+        mem.begin_repair()?;
+
+        let (root, root_checksum) = mem
+            .get_data_root()
+            .expect("Tried to repair an empty database");
+
+        // Repair the allocator state
+        // All pages in the master table
+        let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, mem)?;
+        mem.mark_pages_allocated(master_pages_iter)?;
+
+        // Iterate over all other tables
+        let iter: BtreeRangeIter<&str, InternalTableDefinition> =
+            BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
+
+        // Chain all the other tables to the master table iter
+        for entry in iter {
+            let definition = entry?.value();
+            if let Some((table_root, _)) = definition.get_root() {
+                let table_pages_iter = AllPageNumbersBtreeIter::new(
+                    table_root,
+                    definition.get_fixed_key_size(),
+                    definition.get_fixed_value_size(),
+                    mem,
+                )?;
+                mem.mark_pages_allocated(table_pages_iter)?;
+
+                // Multimap tables may have additional subtrees in their values
+                if definition.get_type() == TableType::Multimap {
+                    let table_pages_iter = AllPageNumbersBtreeIter::new(
+                        table_root,
+                        definition.get_fixed_key_size(),
+                        definition.get_fixed_value_size(),
+                        mem,
+                    )?;
+                    for table_page in table_pages_iter {
+                        let page = mem.get_page(table_page?)?;
+                        let mut subtree_roots = parse_subtree_roots(
+                            &page,
+                            definition.get_fixed_key_size(),
+                            definition.get_fixed_value_size(),
+                        );
+                        mem.mark_pages_allocated(subtree_roots.drain(..).map(Ok))?;
+                    }
+                }
+            }
+        }
+
+        mem.end_repair()?;
+
+        // Clear the freed table. We just rebuilt the allocator state by walking all the
+        // reachable data pages, which implicitly frees the pages for the freed table
+        let transaction_id = mem.get_last_committed_transaction_id()?.next();
+        mem.commit(
+            Some((root, root_checksum)),
+            None,
+            transaction_id,
+            false,
+            true,
+        )?;
+
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         file: File,
@@ -315,72 +406,7 @@ impl Database {
         if mem.needs_repair()? {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
-
-            if !Self::verify_primary_checksums(&mem)? {
-                mem.repair_primary_corrupted();
-                assert!(Self::verify_primary_checksums(&mem)?);
-            }
-
-            mem.begin_repair()?;
-
-            let (root, root_checksum) = mem
-                .get_data_root()
-                .expect("Tried to repair an empty database");
-
-            // Repair the allocator state
-            // All pages in the master table
-            let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, &mem)?;
-            mem.mark_pages_allocated(master_pages_iter)?;
-
-            // Iterate over all other tables
-            let iter: BtreeRangeIter<&str, InternalTableDefinition> =
-                BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), &mem)?;
-
-            // Chain all the other tables to the master table iter
-            for entry in iter {
-                let definition = entry?.value();
-                if let Some((table_root, _)) = definition.get_root() {
-                    let table_pages_iter = AllPageNumbersBtreeIter::new(
-                        table_root,
-                        definition.get_fixed_key_size(),
-                        definition.get_fixed_value_size(),
-                        &mem,
-                    )?;
-                    mem.mark_pages_allocated(table_pages_iter)?;
-
-                    // Multimap tables may have additional subtrees in their values
-                    if definition.get_type() == TableType::Multimap {
-                        let table_pages_iter = AllPageNumbersBtreeIter::new(
-                            table_root,
-                            definition.get_fixed_key_size(),
-                            definition.get_fixed_value_size(),
-                            &mem,
-                        )?;
-                        for table_page in table_pages_iter {
-                            let page = mem.get_page(table_page?)?;
-                            let mut subtree_roots = parse_subtree_roots(
-                                &page,
-                                definition.get_fixed_key_size(),
-                                definition.get_fixed_value_size(),
-                            );
-                            mem.mark_pages_allocated(subtree_roots.drain(..).map(Ok))?;
-                        }
-                    }
-                }
-            }
-
-            mem.end_repair()?;
-
-            // Clear the freed table. We just rebuilt the allocator state by walking all the
-            // reachable data pages, which implicitly frees the pages for the freed table
-            let transaction_id = mem.get_last_committed_transaction_id()?.next();
-            mem.commit(
-                Some((root, root_checksum)),
-                None,
-                transaction_id,
-                false,
-                true,
-            )?;
+            Self::do_repair(&mut mem)?;
         }
 
         mem.begin_writable()?;
