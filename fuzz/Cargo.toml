@@ -17,6 +17,8 @@ rand_distr = "0.4.3"
 
 [dependencies.redb]
 path = ".."
+# Kinda unclear why this is required, but we get a linker error on MacOS otherwise
+features = ["python"]
 
 # Prevent this from interfering with workspaces
 [workspace]
