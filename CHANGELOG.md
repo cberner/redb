@@ -1,5 +1,16 @@
 # redb - Changelog
 
+## 0.15.0 - 2023-04-09
+* Add `Database::check_integrity()` to explicitly run repair process (it is still always run if needed on db open)
+* Change `list_tables()` to return a `TableHandle`
+* Change `delete_table()` to take a `TableHandle`
+* Make `insert_reserve()` API signature type safe
+* Change all iterators to return `Result` and propagate I/O errors
+* Replace `WriteStrategy` with `Durability::Paranoid`
+* Remove `Builder::set_initial_size()`
+* Enable db file shrinking on Windows
+* Performance optimizations
+
 ## 0.14.0 - 2023-03-26
 * Remove `Builder::create_mmapped()` and `Builder::open_mmapped()`. The mmap backend has been removed
   because it was infeasible to prove that it was sound. This makes the redb API entirely safe,
