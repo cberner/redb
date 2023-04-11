@@ -1,4 +1,6 @@
-use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
+use crate::tree_store::page_store::bitmap::{
+    BtreeBitmap, BtreeBitmapMut, U64GroupedBitmap, U64GroupedBitmapMut,
+};
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 use crate::tree_store::PageNumber;
 use std::cmp::min;
@@ -8,41 +10,74 @@ use std::mem::size_of;
 const MAX_ORDER_OFFSET: usize = 0;
 const PADDING: usize = 3;
 const NUM_PAGES_OFFSET: usize = MAX_ORDER_OFFSET + size_of::<u8>() + PADDING;
-const END_OFFSETS: usize = NUM_PAGES_OFFSET + size_of::<u32>();
+const FREE_END_OFFSETS: usize = NUM_PAGES_OFFSET + size_of::<u32>();
 
 fn calculate_usable_order(pages: u64) -> usize {
     let max_order = (64 - pages.leading_zeros() - 1) as usize;
     min(MAX_MAX_PAGE_ORDER, max_order)
 }
 
-fn get_order_start(data: &[u8], i: u32) -> usize {
+fn get_order_allocated_start(data: &[u8], i: u32) -> usize {
     if i == 0 {
-        get_data_start(data)
+        get_allocated_data_start(data)
     } else {
-        get_order_end(data, i - 1)
+        get_order_allocated_end(data, i - 1)
     }
 }
 
-fn get_order_end(data: &[u8], i: u32) -> usize {
-    let index = END_OFFSETS + (i as usize) * size_of::<u32>();
+fn get_order_allocated_end(data: &[u8], i: u32) -> usize {
+    let index =
+        FREE_END_OFFSETS + (get_max_order(data) as usize + 1 + (i as usize)) * size_of::<u32>();
     u32::from_le_bytes(data[index..(index + size_of::<u32>())].try_into().unwrap())
         .try_into()
         .unwrap()
 }
 
-fn get_data_start(data: &[u8]) -> usize {
-    END_OFFSETS + ((get_max_order(data) + 1) as usize) * size_of::<u32>()
+fn get_allocated_data_start(data: &[u8]) -> usize {
+    // Allocated structs starts after the freed index
+    get_order_free_end(data, get_max_order(data).into())
 }
 
-fn get_order_bytes(data: &[u8], order: u32) -> &[u8] {
-    let start = get_order_start(data, order);
-    let end = get_order_end(data, order);
+fn get_order_allocated_bytes(data: &[u8], order: u32) -> &[u8] {
+    let start = get_order_allocated_start(data, order);
+    let end = get_order_allocated_end(data, order);
     &data[start..end]
 }
 
-fn get_order_bytes_mut(data: &mut [u8], order: u32) -> &mut [u8] {
-    let start = get_order_start(data, order);
-    let end = get_order_end(data, order);
+fn get_order_allocated_bytes_mut(data: &mut [u8], order: u32) -> &mut [u8] {
+    let start = get_order_allocated_start(data, order);
+    let end = get_order_allocated_end(data, order);
+    &mut data[start..end]
+}
+
+fn get_order_free_start(data: &[u8], i: u32) -> usize {
+    if i == 0 {
+        get_free_data_start(data)
+    } else {
+        get_order_free_end(data, i - 1)
+    }
+}
+
+fn get_order_free_end(data: &[u8], i: u32) -> usize {
+    let index = FREE_END_OFFSETS + (i as usize) * size_of::<u32>();
+    u32::from_le_bytes(data[index..(index + size_of::<u32>())].try_into().unwrap())
+        .try_into()
+        .unwrap()
+}
+
+fn get_free_data_start(data: &[u8]) -> usize {
+    FREE_END_OFFSETS + 2 * ((get_max_order(data) + 1) as usize) * size_of::<u32>()
+}
+
+fn get_order_free_bytes(data: &[u8], order: u32) -> &[u8] {
+    let start = get_order_free_start(data, order);
+    let end = get_order_free_end(data, order);
+    &data[start..end]
+}
+
+fn get_order_free_bytes_mut(data: &mut [u8], order: u32) -> &mut [u8] {
+    let start = get_order_free_start(data, order);
+    let end = get_order_free_end(data, order);
     &mut data[start..end]
 }
 
@@ -74,7 +109,8 @@ fn buddy_page(page_number: u64) -> u64 {
 // max_order: u8
 // padding: 3 bytes
 // num_pages: u32
-// order_ends: array of u32, with ending offset for BtreeBitmap structure for the given order
+// free_ends: array of u32, with ending offset for BtreeBitmap structure for the given order
+// allocated_ends: array of u32, with ending offset for U64GroupedBitmap structure for the given order
 // ... BtreeBitmap structures
 pub(crate) struct BuddyAllocator<'a> {
     data: &'a [u8],
@@ -87,9 +123,10 @@ impl<'a> BuddyAllocator<'a> {
 
     #[inline]
     pub(crate) fn highest_free_order(&self) -> Option<usize> {
-        (0..=self.get_max_order())
-            .rev()
-            .find(|order| self.get_order((*order).try_into().unwrap()).has_unset())
+        (0..=self.get_max_order()).rev().find(|order| {
+            self.get_order_free((*order).try_into().unwrap())
+                .has_unset()
+        })
     }
 
     pub(crate) fn count_allocated_pages(&self) -> usize {
@@ -99,19 +136,19 @@ impl<'a> BuddyAllocator<'a> {
     pub(crate) fn count_free_pages(&self) -> usize {
         let mut pages = 0;
         for order in 0..=self.get_max_order() {
-            pages += self.get_order(order.try_into().unwrap()).count_unset()
+            pages += self.get_order_free(order.try_into().unwrap()).count_unset()
                 * 2usize.pow(order.try_into().unwrap());
         }
         pages
     }
 
     pub(crate) fn capacity(&self) -> usize {
-        self.get_order(0).len()
+        self.get_order_free(0).len()
     }
 
     fn find_free_order(&self, mut page: u64) -> Option<usize> {
         for order in 0..=self.get_max_order() {
-            if !self.get_order(order.try_into().unwrap()).get(page) {
+            if !self.get_order_free(order.try_into().unwrap()).get(page) {
                 return Some(order);
             }
             page = next_higher_order(page);
@@ -154,9 +191,9 @@ impl<'a> BuddyAllocator<'a> {
         get_num_pages(self.data) as usize
     }
 
-    fn get_order(&self, order: u32) -> BtreeBitmap {
+    fn get_order_free(&self, order: u32) -> BtreeBitmap {
         assert!(order <= self.get_max_order().try_into().unwrap());
-        BtreeBitmap::new(get_order_bytes(self.data, order))
+        BtreeBitmap::new(get_order_free_bytes(self.data, order))
     }
 }
 
@@ -176,8 +213,8 @@ impl<'a> BuddyAllocatorMut<'a> {
         data[NUM_PAGES_OFFSET..(NUM_PAGES_OFFSET + size_of::<u32>())]
             .copy_from_slice(&u32::try_from(num_pages).unwrap().to_le_bytes());
 
-        let mut metadata_offset = END_OFFSETS;
-        let mut data_offset = get_data_start(data);
+        let mut metadata_offset = FREE_END_OFFSETS;
+        let mut data_offset = get_free_data_start(data);
 
         let mut pages_for_order = max_page_capacity;
         for order in 0..=max_order {
@@ -186,7 +223,7 @@ impl<'a> BuddyAllocatorMut<'a> {
             data[metadata_offset..metadata_offset + size_of::<u32>()]
                 .copy_from_slice(&u32::try_from(data_offset).unwrap().to_le_bytes());
             BtreeBitmapMut::init_new(
-                get_order_bytes_mut(data, order.try_into().unwrap()),
+                get_order_free_bytes_mut(data, order.try_into().unwrap()),
                 pages_for_order,
             );
             pages_for_order = next_higher_order(pages_for_order.try_into().unwrap())
@@ -198,7 +235,7 @@ impl<'a> BuddyAllocatorMut<'a> {
         // Mark the available pages, starting with the highest order
         let mut accounted_pages = 0;
         for order in (0..=max_order).rev() {
-            let order_data = get_order_bytes_mut(data, order.try_into().unwrap());
+            let order_data = get_order_free_bytes_mut(data, order.try_into().unwrap());
             let mut allocator = BtreeBitmapMut::new(order_data);
             let order_size = 2usize.pow(order.try_into().unwrap());
             while accounted_pages + order_size <= num_pages {
@@ -208,6 +245,22 @@ impl<'a> BuddyAllocatorMut<'a> {
             }
         }
         assert_eq!(accounted_pages, num_pages);
+
+        // Initialize the allocated page index
+        assert_eq!(data_offset, get_allocated_data_start(data));
+        let mut pages_for_order = max_page_capacity;
+        for order in 0..=max_order {
+            let required = U64GroupedBitmapMut::required_bytes(pages_for_order);
+            data_offset += required;
+            data[metadata_offset..metadata_offset + size_of::<u32>()]
+                .copy_from_slice(&u32::try_from(data_offset).unwrap().to_le_bytes());
+            let order_bytes = get_order_allocated_bytes_mut(data, order.try_into().unwrap());
+            U64GroupedBitmapMut::init_empty(order_bytes);
+            pages_for_order = next_higher_order(pages_for_order.try_into().unwrap())
+                .try_into()
+                .unwrap();
+            metadata_offset += size_of::<u32>();
+        }
 
         Self { data }
     }
@@ -226,7 +279,7 @@ impl<'a> BuddyAllocatorMut<'a> {
                 if order >= self.get_max_order() || processed_pages + order_size > new_size {
                     break;
                 }
-                self.free(page as u64, order);
+                self.free_inner(page as u64, order);
                 processed_pages += order_size;
             }
             // Allocate the remaining space, at the highest order
@@ -234,7 +287,7 @@ impl<'a> BuddyAllocatorMut<'a> {
                 let order_size = 2usize.pow(order.try_into().unwrap());
                 while processed_pages + order_size <= new_size {
                     let page = processed_pages / order_size;
-                    self.free(page as u64, order);
+                    self.free_inner(page as u64, order);
                     processed_pages += order_size;
                 }
             }
@@ -280,7 +333,7 @@ impl<'a> BuddyAllocatorMut<'a> {
                 let mut found = false;
                 let mut page = processed as u64;
                 for order in 0..=self.get_max_order() {
-                    let order_data = get_order_bytes(self.data, order.try_into().unwrap());
+                    let order_data = get_order_free_bytes(self.data, order.try_into().unwrap());
                     let allocator = BtreeBitmap::new(order_data);
                     if !allocator.get(page) {
                         assert!(!found);
@@ -296,7 +349,7 @@ impl<'a> BuddyAllocatorMut<'a> {
                 let order_len: u64 = (self.len() / (2usize.pow(order.try_into().unwrap())))
                     .try_into()
                     .unwrap();
-                let order_bytes = get_order_bytes(self.data, order.try_into().unwrap());
+                let order_bytes = get_order_free_bytes(self.data, order.try_into().unwrap());
                 let allocator = BtreeBitmap::new(order_bytes);
                 for page in 0..order_len {
                     if !allocator.get(page) {
@@ -312,9 +365,12 @@ impl<'a> BuddyAllocatorMut<'a> {
     /// Returns the number of bytes required for the data argument of new()
     pub(crate) fn required_space(mut capacity: usize) -> usize {
         let max_order = calculate_usable_order(capacity as u64);
-        let mut required = END_OFFSETS + (max_order + 1) * size_of::<u32>();
+        let mut required = FREE_END_OFFSETS + 2 * (max_order + 1) * size_of::<u32>();
         for _ in 0..=max_order {
+            // Index of free pages
             required += BtreeBitmapMut::required_space(capacity);
+            // Index of allocated pages
+            required += U64GroupedBitmapMut::required_bytes(capacity);
             capacity = next_higher_order(capacity.try_into().unwrap())
                 .try_into()
                 .unwrap();
@@ -342,18 +398,31 @@ impl<'a> BuddyAllocatorMut<'a> {
 
     /// data must have been initialized by Self::init_new()
     pub(crate) fn alloc(&mut self, order: usize) -> Option<u64> {
+        let page = self.alloc_inner(order);
+        if let Some(page_number) = page {
+            // TODO: enable this assert
+            // debug_assert!(!self
+            //     .get_order_allocated(order.try_into().unwrap())
+            //     .get(page_number.try_into().unwrap()));
+            self.get_order_allocated_mut(order.try_into().unwrap())
+                .set(page_number.try_into().unwrap());
+        }
+        page
+    }
+
+    pub(crate) fn alloc_inner(&mut self, order: usize) -> Option<u64> {
         if order > self.get_max_order() {
             return None;
         }
-        let mut allocator = self.get_order_mut(order.try_into().unwrap());
+        let mut allocator = self.get_order_free_mut(order.try_into().unwrap());
         if let Some(x) = allocator.alloc() {
             Some(x)
         } else {
             // Try to allocate a higher order page and split it
             drop(allocator);
-            let upper_page = self.alloc(order + 1)?;
+            let upper_page = self.alloc_inner(order + 1)?;
             let (free1, free2) = (upper_page * 2, upper_page * 2 + 1);
-            let mut allocator = self.get_order_mut(order.try_into().unwrap());
+            let mut allocator = self.get_order_free_mut(order.try_into().unwrap());
             debug_assert!(allocator.get(free1));
             debug_assert!(allocator.get(free2));
             allocator.clear(free2);
@@ -365,13 +434,21 @@ impl<'a> BuddyAllocatorMut<'a> {
     /// data must have been initialized by Self::init_new(), and page_number must be free
     pub(crate) fn record_alloc(&mut self, page_number: u64, order: usize) {
         assert!(order <= self.get_max_order());
-        let mut allocator = self.get_order_mut(order.try_into().unwrap());
+        // Only record the allocation for the actual page
+        self.get_order_allocated_mut(order.try_into().unwrap())
+            .set(page_number.try_into().unwrap());
+        // Split parent pages as necessary, and update the free index
+        self.record_alloc_inner(page_number, order);
+    }
+
+    pub(crate) fn record_alloc_inner(&mut self, page_number: u64, order: usize) {
+        let mut allocator = self.get_order_free_mut(order.try_into().unwrap());
         if allocator.get(page_number) {
             // Need to split parent page
             let upper_page = next_higher_order(page_number);
             drop(allocator);
-            self.record_alloc(upper_page, order + 1);
-            let mut allocator = self.get_order_mut(order.try_into().unwrap());
+            self.record_alloc_inner(upper_page, order + 1);
+            let mut allocator = self.get_order_free_mut(order.try_into().unwrap());
 
             let (free1, free2) = (upper_page * 2, upper_page * 2 + 1);
             debug_assert!(free1 == page_number || free2 == page_number);
@@ -388,23 +465,36 @@ impl<'a> BuddyAllocatorMut<'a> {
     /// data must have been initialized by Self::init_new()
     pub(crate) fn free(&mut self, page_number: u64, order: usize) {
         debug_assert!(self
-            .get_order_mut(order.try_into().unwrap())
+            .get_order_free_mut(order.try_into().unwrap())
             .get(page_number));
+        // TODO: enable this assert
+        // debug_assert!(self
+        //     .get_order_allocated(order.try_into().unwrap())
+        //     .get(page_number.try_into().unwrap()));
 
+        // TODO: seems like page_number should be a u32. That would avoid this try_into()
+        self.get_order_allocated_mut(order.try_into().unwrap())
+            .clear(page_number.try_into().unwrap());
+
+        // Update the free index and merge free pages
+        self.free_inner(page_number, order);
+    }
+
+    pub(crate) fn free_inner(&mut self, page_number: u64, order: usize) {
         if order == self.get_max_order() {
-            let mut allocator = self.get_order_mut(order.try_into().unwrap());
+            let mut allocator = self.get_order_free_mut(order.try_into().unwrap());
             allocator.clear(page_number);
             return;
         }
 
-        let mut allocator = self.get_order_mut(order.try_into().unwrap());
+        let mut allocator = self.get_order_free_mut(order.try_into().unwrap());
         let buddy = buddy_page(page_number);
         if allocator.get(buddy) {
             allocator.clear(page_number);
         } else {
             // Merge into higher order page
             allocator.set(buddy);
-            self.free(next_higher_order(page_number), order + 1);
+            self.free_inner(next_higher_order(page_number), order + 1);
         }
     }
 
@@ -412,9 +502,19 @@ impl<'a> BuddyAllocatorMut<'a> {
         self.data[0] as usize
     }
 
-    fn get_order_mut(&mut self, order: u32) -> BtreeBitmapMut {
+    fn get_order_free_mut(&mut self, order: u32) -> BtreeBitmapMut {
         assert!(order <= self.get_max_order().try_into().unwrap());
-        BtreeBitmapMut::new(get_order_bytes_mut(self.data, order))
+        BtreeBitmapMut::new(get_order_free_bytes_mut(self.data, order))
+    }
+
+    fn get_order_allocated_mut(&mut self, order: u32) -> U64GroupedBitmapMut {
+        assert!(order <= self.get_max_order().try_into().unwrap());
+        U64GroupedBitmapMut::new(get_order_allocated_bytes_mut(self.data, order))
+    }
+
+    fn get_order_allocated(&self, order: u32) -> U64GroupedBitmap {
+        assert!(order <= self.get_max_order().try_into().unwrap());
+        U64GroupedBitmap::new(get_order_allocated_bytes(self.data, order))
     }
 }
 

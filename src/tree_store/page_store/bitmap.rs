@@ -277,12 +277,12 @@ impl<'a> BtreeBitmapMut<'a> {
 }
 
 // A bitmap which groups consecutive groups of 64bits together
-struct U64GroupedBitmap<'a> {
+pub(crate) struct U64GroupedBitmap<'a> {
     data: &'a [u8],
 }
 
 impl<'a> U64GroupedBitmap<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    pub fn new(data: &'a [u8]) -> Self {
         assert_eq!(data.len() % 8, 0);
         Self { data }
     }
@@ -316,7 +316,7 @@ impl<'a> U64GroupedBitmap<'a> {
         }
     }
 
-    fn get(&self, bit: usize) -> bool {
+    pub fn get(&self, bit: usize) -> bool {
         let (index, bit_index) = self.data_index_of(bit);
         let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
         group & U64GroupedBitmapMut::select_mask(bit_index) == 0
@@ -325,29 +325,31 @@ impl<'a> U64GroupedBitmap<'a> {
 
 // Note bits are set in the opposite of what may be intuitive: they are 0 when set and 1 when unset.
 // This is so that the data structure can be efficiently initialized to be all set.
-struct U64GroupedBitmapMut<'a> {
+pub(crate) struct U64GroupedBitmapMut<'a> {
     data: &'a mut [u8],
 }
 
 impl<'a> U64GroupedBitmapMut<'a> {
-    fn required_bytes(elements: usize) -> usize {
+    pub fn required_bytes(elements: usize) -> usize {
         let words = (elements + 63) / 64;
         words * size_of::<u64>()
     }
 
-    fn init_full(data: &mut [u8]) {
-        for value in data.iter_mut() {
-            *value = 0;
-        }
+    pub fn init_full(data: &mut [u8]) {
+        data.fill(0);
     }
 
-    fn new(data: &'a mut [u8]) -> Self {
+    pub fn init_empty(data: &mut [u8]) {
+        data.fill(0xFF);
+    }
+
+    pub fn new(data: &'a mut [u8]) -> Self {
         assert_eq!(data.len() % 8, 0);
         Self { data }
     }
 
     // Returns true iff the bit's group is all set
-    fn set(&mut self, bit: usize) -> bool {
+    pub fn set(&mut self, bit: usize) -> bool {
         let (index, bit_index) = self.data_index_of(bit);
         let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
         group &= !Self::select_mask(bit_index);
@@ -356,7 +358,7 @@ impl<'a> U64GroupedBitmapMut<'a> {
         group == 0
     }
 
-    fn clear(&mut self, bit: usize) {
+    pub fn clear(&mut self, bit: usize) {
         let (index, bit_index) = self.data_index_of(bit);
         let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
         group |= Self::select_mask(bit_index);
