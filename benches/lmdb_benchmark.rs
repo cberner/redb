@@ -280,8 +280,7 @@ fn main() {
     let redb_latency_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
         let db = redb::Database::builder()
-            .set_read_cache_size(4 * 1024 * 1024 * 1024)
-            .set_write_cache_size(4 * 1024 * 1024 * 1024)
+            .set_cache_size(4 * 1024 * 1024 * 1024)
             .create(tmpfile.path())
             .unwrap();
         let table = RedbBenchDatabase::new(&db);

@@ -281,8 +281,7 @@ fuzz_target!(|config: FuzzConfig| {
     let redb_file: NamedTempFile = NamedTempFile::new().unwrap();
     let db = Database::builder()
             .set_page_size(config.page_size.value)
-            .set_read_cache_size(config.read_cache_size.value)
-            .set_write_cache_size(config.write_cache_size.value)
+            .set_cache_size(config.cache_size.value)
             .create(redb_file.path());
 
     let db = Arc::new(db.unwrap());
