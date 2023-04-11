@@ -188,12 +188,16 @@ described in the [following section](#b-tree-pages)
 
 ### Regional allocator state
 The regional allocator is a buddy allocator and allocates pages within the region. Its buddy allocator implementation relies
-on the `BtreeBitmap` described above.
+on the `BtreeBitmap` described above and the `U64GroupedBitmap`. The btree map is used to track the
+pages which are free, and the grouped bitmap is used to track the order at which a even address
+range has been allocated
 * 1 byte: max order
 * 3 byte: padding to 32bits aligned
 * 4 bytes: number of pages
-* 4 byte (repeating): end offset of order allocator state
-* n bytes: allocator data
+* 4 byte (repeating): end offset of order allocator free state
+* 4 byte (repeating): end offset of order allocator allocated page state
+* n bytes: free index data
+* n bytes: allocated data
 
 ```
 <-------------------------------------------- 8 bytes ------------------------------------------->
