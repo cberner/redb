@@ -487,21 +487,23 @@ impl Builder {
     ///
     /// ## Defaults
     ///
-    /// - `read_cache_size_bytes`: 1GiB
-    /// - `write_cache_size_bytes`: 100MiB
+    /// - `cache_size_bytes`: 1GiB
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Self {
+        let mut result = Self {
             // Default to 4k pages. Benchmarking showed that this was a good default on all platforms,
             // including MacOS with 16k pages. Therefore, users are not allowed to configure it at the moment.
             // It is part of the file format, so can be enabled in the future.
             page_size: PAGE_SIZE,
             region_size: None,
             // TODO: Default should probably take into account the total system memory
-            read_cache_size_bytes: 1024 * 1024 * 1024,
+            read_cache_size_bytes: 0,
             // TODO: Default should probably take into account the total system memory
-            write_cache_size_bytes: 100 * 1024 * 1024,
-        }
+            write_cache_size_bytes: 0,
+        };
+
+        result.set_cache_size(1024 * 1024 * 1024);
+        result
     }
 
     /// Set the internal page size of the database
@@ -518,15 +520,11 @@ impl Builder {
         self
     }
 
-    /// Set the amount of memory (in bytes) used for caching data that has been read
-    pub fn set_read_cache_size(&mut self, bytes: usize) -> &mut Self {
-        self.read_cache_size_bytes = bytes;
-        self
-    }
-
-    /// Set the amount of memory (in bytes) used for caching data that has been written
-    pub fn set_write_cache_size(&mut self, bytes: usize) -> &mut Self {
-        self.write_cache_size_bytes = bytes;
+    /// Set the amount of memory (in bytes) used for caching data
+    pub fn set_cache_size(&mut self, bytes: usize) -> &mut Self {
+        // TODO: allow dynamic expansion of the read/write cache
+        self.read_cache_size_bytes = bytes * 9 / 10;
+        self.write_cache_size_bytes = bytes / 10;
         self
     }
 
@@ -738,8 +736,7 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
         let db = Database::builder()
-            .set_read_cache_size(1024 * 1024)
-            .set_write_cache_size(0)
+            .set_cache_size(1024 * 1024)
             .set_page_size(1024)
             .create(tmpfile.path())
             .unwrap();
