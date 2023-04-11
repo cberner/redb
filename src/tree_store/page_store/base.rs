@@ -63,6 +63,38 @@ impl PageNumber {
         }
     }
 
+    #[cfg(debug_assertions)]
+    pub(crate) fn to_order0(self) -> Vec<PageNumber> {
+        let mut pages = vec![self];
+        loop {
+            let mut progress = false;
+            let mut new_pages = vec![];
+            for page in pages {
+                if page.page_order == 0 {
+                    new_pages.push(page);
+                } else {
+                    progress = true;
+                    new_pages.push(PageNumber::new(
+                        page.region,
+                        page.page_index * 2,
+                        page.page_order - 1,
+                    ));
+                    new_pages.push(PageNumber::new(
+                        page.region,
+                        page.page_index * 2 + 1,
+                        page.page_order - 1,
+                    ));
+                }
+            }
+            pages = new_pages;
+            if !progress {
+                break;
+            }
+        }
+
+        pages
+    }
+
     pub(crate) fn address_range(
         &self,
         data_section_offset: u64,

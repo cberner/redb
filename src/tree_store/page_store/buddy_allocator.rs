@@ -171,13 +171,37 @@ impl<'a> BuddyAllocator<'a> {
         free_pages
     }
 
-    pub(crate) fn get_order0_allocated_pages(&self, region: u32) -> HashSet<PageNumber> {
+    pub(crate) fn get_allocated_pages(&self, region: u32) -> HashSet<PageNumber> {
         let mut result = HashSet::new();
 
-        for i in 0..u64::try_from(self.len()).unwrap() {
-            if self.find_free_order(i).is_none() {
-                result.insert(PageNumber::new(region, i.try_into().unwrap(), 0));
+        for order in 0..=self.get_max_order() {
+            let allocated = self.get_order_allocated(order.try_into().unwrap());
+            for i in 0..min(allocated.len(), self.len()) {
+                if allocated.get(i) {
+                    result.insert(PageNumber::new(
+                        region,
+                        i.try_into().unwrap(),
+                        order.try_into().unwrap(),
+                    ));
+                }
             }
+        }
+
+        #[cfg(debug_assertions)]
+        // Check the result against the free index to be sure it matches
+        {
+            let mut free_check = HashSet::new();
+            for i in 0..u64::try_from(self.len()).unwrap() {
+                if self.find_free_order(i).is_none() {
+                    free_check.insert(PageNumber::new(region, i.try_into().unwrap(), 0));
+                }
+            }
+
+            let mut check_result = HashSet::new();
+            for page in result.iter() {
+                check_result.extend(page.to_order0());
+            }
+            assert_eq!(free_check, check_result);
         }
 
         result
@@ -194,6 +218,11 @@ impl<'a> BuddyAllocator<'a> {
     fn get_order_free(&self, order: u32) -> BtreeBitmap {
         assert!(order <= self.get_max_order().try_into().unwrap());
         BtreeBitmap::new(get_order_free_bytes(self.data, order))
+    }
+
+    fn get_order_allocated(&self, order: u32) -> U64GroupedBitmap {
+        assert!(order <= self.get_max_order().try_into().unwrap());
+        U64GroupedBitmap::new(get_order_allocated_bytes(self.data, order))
     }
 }
 
@@ -304,7 +333,7 @@ impl<'a> BuddyAllocatorMut<'a> {
                 if order >= self.get_max_order() || processed_pages + order_size > self.len() {
                     break;
                 }
-                self.record_alloc(page as u64, order);
+                self.record_alloc_inner(page as u64, order);
                 processed_pages += order_size;
             }
             // Allocate the remaining space, at the highest order
@@ -312,7 +341,7 @@ impl<'a> BuddyAllocatorMut<'a> {
                 let order_size = 2usize.pow(order.try_into().unwrap());
                 while processed_pages + order_size <= self.len() {
                     let page = processed_pages / order_size;
-                    self.record_alloc(page as u64, order);
+                    self.record_alloc_inner(page as u64, order);
                     processed_pages += order_size;
                 }
             }
@@ -400,10 +429,9 @@ impl<'a> BuddyAllocatorMut<'a> {
     pub(crate) fn alloc(&mut self, order: usize) -> Option<u64> {
         let page = self.alloc_inner(order);
         if let Some(page_number) = page {
-            // TODO: enable this assert
-            // debug_assert!(!self
-            //     .get_order_allocated(order.try_into().unwrap())
-            //     .get(page_number.try_into().unwrap()));
+            debug_assert!(!self
+                .get_order_allocated(order.try_into().unwrap())
+                .get(page_number.try_into().unwrap()));
             self.get_order_allocated_mut(order.try_into().unwrap())
                 .set(page_number.try_into().unwrap());
         }
@@ -467,10 +495,9 @@ impl<'a> BuddyAllocatorMut<'a> {
         debug_assert!(self
             .get_order_free_mut(order.try_into().unwrap())
             .get(page_number));
-        // TODO: enable this assert
-        // debug_assert!(self
-        //     .get_order_allocated(order.try_into().unwrap())
-        //     .get(page_number.try_into().unwrap()));
+        debug_assert!(self
+            .get_order_allocated(order.try_into().unwrap())
+            .get(page_number.try_into().unwrap()));
 
         // TODO: seems like page_number should be a u32. That would avoid this try_into()
         self.get_order_allocated_mut(order.try_into().unwrap())

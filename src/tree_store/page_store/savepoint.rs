@@ -10,6 +10,7 @@ pub struct Savepoint {
     version: u8,
     root: Option<(PageNumber, Checksum)>,
     freed_root: Option<(PageNumber, Checksum)>,
+    // TODO: we don't need the full allocators. Just the index of allocated pages
     regional_allocators: Vec<Vec<u8>>,
     transaction_tracker: Arc<Mutex<TransactionTracker>>,
 }

@@ -276,14 +276,11 @@ impl PagedCachedFile {
     // Invalidate any caching of the given range. After this call overlapping reads of the range are allowed
     //
     // NOTE: Invalidating a cached region in subsections is permitted, as long as all subsections are invalidated
-    pub(super) fn invalidate_cache(&self, offset: u64, _len: usize) {
+    pub(super) fn invalidate_cache(&self, offset: u64, len: usize) {
         let cache_slot: usize = (offset % self.read_cache.len() as u64).try_into().unwrap();
         let mut lock = self.read_cache[cache_slot].write().unwrap();
         if let Some(removed) = lock.remove(&offset) {
-            // TODO: it would be nice to re-enable this assertion. However, when restoring a Savepoint
-            // the information about page order is lost ;( and those order-0 pages are then stored
-            // the freed tree
-            // assert_eq!(len, removed.len());
+            assert_eq!(len, removed.len());
             self.read_cache_bytes
                 .fetch_sub(removed.len(), Ordering::AcqRel);
         }
@@ -309,10 +306,7 @@ impl PagedCachedFile {
         let existing = {
             let mut lock = self.read_cache[cache_slot].write().unwrap();
             if let Some(removed) = lock.remove(&offset) {
-                // TODO: it would be nice to re-enable this assertion. However, when restoring a Savepoint
-                // the information about page order is lost ;( and those order-0 pages are then stored
-                // the freed tree
-                // assert_eq!(len, removed.len());
+                assert_eq!(len, removed.len());
                 self.read_cache_bytes
                     .fetch_sub(removed.len(), Ordering::AcqRel);
                 Some(Arc::try_unwrap(removed).unwrap())

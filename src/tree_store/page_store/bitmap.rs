@@ -295,7 +295,7 @@ impl<'a> U64GroupedBitmap<'a> {
         self.data.iter().map(|x| x.count_ones() as usize).sum()
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.data.len() * (u8::BITS as usize)
     }
 

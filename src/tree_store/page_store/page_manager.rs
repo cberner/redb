@@ -719,16 +719,14 @@ impl TransactionalMemory {
             let region = state.get_region(i);
             let current_state = region.allocator();
             if let Some(old_state) = region_states.get(i as usize) {
-                let old_allocated = BuddyAllocator::new(old_state).get_order0_allocated_pages(i);
-                let new_allocated = current_state.get_order0_allocated_pages(i);
+                let old_allocated = BuddyAllocator::new(old_state).get_allocated_pages(i);
+                let new_allocated = current_state.get_allocated_pages(i);
                 result.extend(new_allocated.difference(&old_allocated));
             } else {
                 // This region didn't exist, so everything is newly allocated
-                result.extend(current_state.get_order0_allocated_pages(i));
+                result.extend(current_state.get_allocated_pages(i));
             }
         }
-
-        // TODO: it would be more efficient if we merged all the adjacent order0 pages together
 
         result
     }
