@@ -1,4 +1,4 @@
-use crate::tree_store::btree::btree_stats;
+use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
@@ -593,6 +593,36 @@ impl<'txn> TableTree<'txn> {
         };
         self.tree.insert(&name, &table)?;
         Ok(table)
+    }
+
+    pub(crate) fn compact_tables(&mut self) -> Result<bool> {
+        let mut progress = false;
+        for entry in self.tree.range::<RangeFull, &str>(..)? {
+            let entry = entry?;
+            let mut definition = entry.value();
+            if let Some(updated_root) = self.pending_table_updates.get(entry.key()) {
+                definition.table_root = *updated_root;
+            }
+
+            let mut tree = UntypedBtreeMut::new(
+                definition.table_root,
+                self.mem,
+                self.freed_pages.clone(),
+                definition.fixed_key_size,
+                definition.fixed_value_size,
+            );
+            if tree.relocate()? {
+                progress = true;
+                self.pending_table_updates
+                    .insert(entry.key().to_string(), tree.get_root());
+            }
+        }
+
+        if self.tree.relocate()? {
+            progress = true;
+        }
+
+        Ok(progress)
     }
 
     pub fn stats(&self) -> Result<DatabaseStats> {

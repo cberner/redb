@@ -425,6 +425,57 @@ impl<'a> BuddyAllocatorMut<'a> {
         BuddyAllocator::new(self.data).highest_free_order()
     }
 
+    // Allocates a page of the given order at the lowest index possible. Will split a higher order page,
+    // to get one of lower index
+    pub(crate) fn alloc_lowest(&mut self, order: usize) -> Option<u64> {
+        let page = self.alloc_lowest_inner(order);
+        if let Some(page_number) = page {
+            debug_assert!(!self
+                .get_order_allocated(order.try_into().unwrap())
+                .get(page_number.try_into().unwrap()));
+            self.get_order_allocated_mut(order.try_into().unwrap())
+                .set(page_number.try_into().unwrap());
+        }
+        page
+    }
+
+    pub(crate) fn alloc_lowest_inner(&mut self, order: usize) -> Option<u64> {
+        // Lowest index at the requested order
+        let mut best_index_at_order = self.alloc_inner(order)?;
+        // Best (index, order) found
+        let mut best = (best_index_at_order, order);
+
+        // Find the lowest index at which we can fill this allocation, across all orders
+        let mut multiplier = 2;
+        for i in (order + 1)..=self.get_max_order() {
+            if let Some(index) = self.alloc_inner(i) {
+                let index_at_order = index * multiplier;
+                if index_at_order < best_index_at_order {
+                    self.free_inner(best.0, best.1);
+                    best_index_at_order = index_at_order;
+                    best = (index, i);
+                } else {
+                    self.free_inner(index, i);
+                }
+            }
+            multiplier *= 2;
+        }
+
+        // Split the page, until we get to the requested order
+        while best.1 > order {
+            let (best_index, best_order) = best;
+            let (free1, free2) = (best_index * 2, best_index * 2 + 1);
+            let mut allocator = self.get_order_free_mut((best_order - 1).try_into().unwrap());
+            debug_assert!(allocator.get(free1));
+            debug_assert!(allocator.get(free2));
+            allocator.clear(free2);
+            best = (free1, best_order - 1);
+        }
+        assert_eq!(best.0, best_index_at_order);
+
+        Some(best.0)
+    }
+
     /// data must have been initialized by Self::init_new()
     pub(crate) fn alloc(&mut self, order: usize) -> Option<u64> {
         let page = self.alloc_inner(order);
