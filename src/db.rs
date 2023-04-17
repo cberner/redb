@@ -4,7 +4,7 @@ use crate::tree_store::{
     TableType, TransactionalMemory, PAGE_SIZE,
 };
 use crate::types::{RedbKey, RedbValue};
-use crate::Error;
+use crate::{Durability, Error};
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
@@ -317,6 +317,48 @@ impl Database {
         Self::do_repair(&mut self.mem)?;
 
         Ok(false)
+    }
+
+    /// Compacts the database file
+    ///
+    /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
+    pub fn compact(&mut self) -> Result<bool> {
+        // Commit to free up any pending free pages
+        // Use 2-phase commit to avoid any possible security issues. Plus this compaction is going to be so slow that it doesn't matter
+        let mut txn = self.begin_write()?;
+        txn.set_durability(Durability::Paranoid);
+        txn.commit()?;
+        // There can't be any outstanding transactions because we have a `&mut self`, so all pending free pages
+        // should have been cleared out by the above commit()
+        assert!(self.mem.get_freed_root().is_none());
+
+        let mut compacted = false;
+        // Iteratively compact until no progress is made
+        loop {
+            let mut progress = false;
+
+            let mut txn = self.begin_write()?;
+            if txn.compact_pages()? {
+                progress = true;
+                txn.commit()?;
+            } else {
+                txn.abort()?;
+            }
+
+            // Double commit to free up the relocated pages for reuse
+            let mut txn = self.begin_write()?;
+            txn.set_durability(Durability::Paranoid);
+            txn.commit()?;
+            assert!(self.mem.get_freed_root().is_none());
+
+            if !progress {
+                break;
+            } else {
+                compacted = true;
+            }
+        }
+
+        Ok(compacted)
     }
 
     fn do_repair(mem: &mut TransactionalMemory) -> Result {

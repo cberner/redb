@@ -8,7 +8,7 @@ use crate::tree_store::page_store::header::{DatabaseHeader, DB_HEADER_SIZE, MAGI
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
-use crate::tree_store::PageNumber;
+use crate::tree_store::{Page, PageNumber};
 use crate::Error;
 use crate::Error::Corrupted;
 use crate::Result;
@@ -691,6 +691,28 @@ impl TransactionalMemory {
         result
     }
 
+    // Relocates the region tracker to a lower page, if possible
+    // Returns the old tracker page, if the tracker was relocated. The old page should be freed
+    // after the transaction commits
+    pub(crate) fn relocate_region_tracker(&self) -> Result<Option<PageNumber>> {
+        let layout = self.layout.lock().unwrap();
+        let region_tracker_size = layout.tracker_page.page_size_bytes(self.page_size);
+        let old_tracker_page = layout.tracker_page;
+        // allocate acquires this lock, so we need to drop it
+        drop(layout);
+        let new_page = self.allocate_lowest(region_tracker_size.try_into().unwrap())?;
+        if new_page.get_page_number().is_before(old_tracker_page) {
+            let mut layout = self.layout.lock().unwrap();
+            layout.tracker_page = new_page.get_page_number();
+            Ok(Some(old_tracker_page))
+        } else {
+            let new_page_number = new_page.get_page_number();
+            drop(new_page);
+            self.free(new_page_number);
+            Ok(None)
+        }
+    }
+
     pub(crate) fn get_raw_allocator_states(&self) -> Vec<Vec<u8>> {
         let state = self.state.lock().unwrap();
         let layout = self.layout.lock().unwrap();
@@ -1082,6 +1104,101 @@ impl TransactionalMemory {
     // Page has not been committed
     pub(crate) fn uncommitted(&self, page: PageNumber) -> bool {
         self.allocated_since_commit.lock().unwrap().contains(&page)
+    }
+
+    pub(crate) fn allocate_lowest(&self, allocation_size: usize) -> Result<PageMut> {
+        let required_pages = (allocation_size + self.get_page_size() - 1) / self.get_page_size();
+        let required_order = ceil_log2(required_pages);
+
+        let mut state = self.state.lock().unwrap();
+        let mut layout = self.layout.lock().unwrap();
+
+        let page_number =
+            if let Some(page_number) = self.allocate_lowest_helper(&mut state, required_order)? {
+                page_number
+            } else {
+                self.grow(&mut state, &mut layout, required_order)?;
+                self.allocate_lowest_helper(&mut state, required_order)?
+                    .unwrap()
+            };
+
+        self.allocated_since_commit
+            .lock()
+            .unwrap()
+            .insert(page_number);
+        self.log_since_commit
+            .lock()
+            .unwrap()
+            .push(AllocationOp::Allocate(page_number));
+        #[cfg(debug_assertions)]
+        {
+            assert!(
+                !self
+                    .read_page_ref_counts
+                    .lock()
+                    .unwrap()
+                    .contains_key(&page_number),
+                "Allocated a page that is still referenced! {page_number:?}"
+            );
+            assert!(self.open_dirty_pages.lock().unwrap().insert(page_number));
+        }
+
+        let address_range = page_number.address_range(
+            self.page_size as u64,
+            self.region_size,
+            self.region_header_with_padding_size,
+            self.page_size,
+        );
+        let len: usize = (address_range.end - address_range.start)
+            .try_into()
+            .unwrap();
+
+        #[allow(unused_mut)]
+        let mut mem = self.storage.write(address_range.start, len)?;
+        debug_assert!(mem.mem().len() >= allocation_size);
+
+        #[cfg(debug_assertions)]
+        {
+            // Poison the memory in debug mode to help detect uninitialized reads
+            mem.mem_mut().fill(0xFF);
+        }
+
+        Ok(PageMut {
+            mem,
+            page_number,
+            #[cfg(debug_assertions)]
+            open_pages: &self.open_dirty_pages,
+            #[cfg(not(debug_assertions))]
+            _debug_lifetime: Default::default(),
+        })
+    }
+
+    fn allocate_lowest_helper(
+        &self,
+        state: &mut InMemoryState,
+        required_order: usize,
+    ) -> Result<Option<PageNumber>> {
+        loop {
+            let candidate_region =
+                if let Some(candidate) = state.get_region_tracker_mut().find_free(required_order) {
+                    candidate.try_into().unwrap()
+                } else {
+                    return Ok(None);
+                };
+            let mut region = state.get_region_mut(candidate_region);
+            if let Some(page) = region.allocator_mut().alloc_lowest(required_order) {
+                return Ok(Some(PageNumber::new(
+                    candidate_region,
+                    page.try_into().unwrap(),
+                    required_order.try_into().unwrap(),
+                )));
+            } else {
+                // Mark the region, if it's full
+                state
+                    .get_region_tracker_mut()
+                    .mark_full(required_order, candidate_region as u64);
+            }
+        }
     }
 
     fn allocate_helper(

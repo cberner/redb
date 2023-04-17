@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
-    branch_checksum, leaf_checksum, BranchAccessor, Checksum, FreePolicy, LeafAccessor, BRANCH,
-    LEAF,
+    branch_checksum, leaf_checksum, BranchAccessor, BranchMutator, Checksum, FreePolicy,
+    LeafAccessor, BRANCH, LEAF,
 };
 use crate::tree_store::btree_iters::BtreeDrain;
 use crate::tree_store::btree_mutator::MutateHelper;
@@ -23,6 +23,86 @@ pub(crate) struct BtreeStats {
     pub(crate) stored_leaf_bytes: usize,
     pub(crate) metadata_bytes: usize,
     pub(crate) fragmented_bytes: usize,
+}
+
+pub(crate) struct UntypedBtreeMut<'a> {
+    mem: &'a TransactionalMemory,
+    root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
+    freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+    key_width: Option<usize>,
+    value_width: Option<usize>,
+}
+
+impl<'a> UntypedBtreeMut<'a> {
+    pub(crate) fn new(
+        root: Option<(PageNumber, Checksum)>,
+        mem: &'a TransactionalMemory,
+        freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+        key_width: Option<usize>,
+        value_width: Option<usize>,
+    ) -> Self {
+        Self {
+            mem,
+            root: Arc::new(Mutex::new(root)),
+            freed_pages,
+            key_width,
+            value_width,
+        }
+    }
+
+    pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
+        *(*self.root).lock().unwrap()
+    }
+
+    // Relocate the btree to lower pages
+    pub(crate) fn relocate(&mut self) -> Result<bool> {
+        if let Some(root) = self.get_root() {
+            if let Some(new_root) = self.relocate_helper(root.0)? {
+                *self.root.lock().unwrap() = Some(new_root);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    // Relocates the given page to a lower page if possible, and returns the new page number
+    fn relocate_helper(
+        &mut self,
+        page_number: PageNumber,
+    ) -> Result<Option<(PageNumber, Checksum)>> {
+        let old_page = self.mem.get_page(page_number)?;
+        let mut new_page = self.mem.allocate_lowest(old_page.memory().len())?;
+        let new_page_number = new_page.get_page_number();
+        if !new_page_number.is_before(page_number) {
+            drop(new_page);
+            self.mem.free(new_page_number);
+            return Ok(None);
+        }
+
+        new_page.memory_mut().copy_from_slice(old_page.memory());
+
+        let node_mem = old_page.memory();
+        let new_checksum = match node_mem[0] {
+            LEAF => leaf_checksum(&new_page, self.key_width, self.value_width),
+            BRANCH => {
+                let accessor = BranchAccessor::new(&old_page, self.key_width);
+                let mut mutator = BranchMutator::new(&mut new_page);
+                for i in 0..accessor.count_children() {
+                    let child = accessor.child_page(i).unwrap();
+                    if let Some((new_child, new_checksum)) = self.relocate_helper(child)? {
+                        mutator.write_child_page(i, new_child, new_checksum);
+                    }
+                }
+                branch_checksum(&new_page, self.key_width)
+            }
+            _ => unreachable!(),
+        };
+
+        let mut freed_pages = self.freed_pages.lock().unwrap();
+        FreePolicy::Uncommitted.conditional_free(page_number, &mut freed_pages, self.mem);
+
+        Ok(Some((new_page_number, new_checksum)))
+    }
 }
 
 pub(crate) struct BtreeMut<'a, K: RedbKey, V: RedbValue> {
@@ -50,6 +130,22 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
 
     pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
         *(*self.root).lock().unwrap()
+    }
+
+    pub(crate) fn relocate(&mut self) -> Result<bool> {
+        let mut tree = UntypedBtreeMut::new(
+            self.get_root(),
+            self.mem,
+            self.freed_pages.clone(),
+            K::fixed_width(),
+            V::fixed_width(),
+        );
+        if tree.relocate()? {
+            *self.root.lock().unwrap() = tree.get_root();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub(crate) fn insert(

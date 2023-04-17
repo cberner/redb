@@ -562,6 +562,25 @@ impl<'db> WriteTransaction<'db> {
         Ok(())
     }
 
+    // Relocate pages to lower number regions/pages
+    // Returns true if a page(s) was moved
+    pub(crate) fn compact_pages(&mut self) -> Result<bool> {
+        let mut progress = false;
+        // Relocate the region tracker page
+        if let Some(old_page) = self.mem.relocate_region_tracker()? {
+            self.post_commit_frees.lock().unwrap().push(old_page);
+            progress = true;
+        }
+
+        // Relocate the btree pages
+        let mut table_tree = self.table_tree.write().unwrap();
+        if table_tree.compact_tables()? {
+            progress = true;
+        }
+
+        Ok(progress)
+    }
+
     // NOTE: must be called before store_freed_pages() during commit, since this can create
     // more pages freed by the current transaction
     fn process_freed_pages(&mut self, oldest_live_read: TransactionId) -> Result {

@@ -1211,3 +1211,46 @@ fn savepoint() {
     txn.restore_savepoint(&savepoint).unwrap();
     txn.commit().unwrap();
 }
+
+#[test]
+fn compaction() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let definition: TableDefinition<u32, &[u8]> = TableDefinition::new("x");
+
+    let big_value = vec![0u8; 100 * 1024];
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        // Insert 10MiB of data
+        for i in 0..100 {
+            table.insert(&i, big_value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        // Delete 90% of it
+        for i in 0..90 {
+            table.remove(&i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+    // Second commit to trigger dynamic compaction
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    // The values are > 1 page, so shouldn't get relocated. Therefore there should be a bunch of fragmented space,
+    // since we left the last 100 values in the db.
+    drop(db);
+    let file_size = tmpfile.as_file().metadata().unwrap().len();
+    let mut db = Database::open(tmpfile.path()).unwrap();
+
+    assert!(db.compact().unwrap());
+    drop(db);
+    let file_size2 = tmpfile.as_file().metadata().unwrap().len();
+    assert!(file_size2 < file_size);
+}
