@@ -316,3 +316,33 @@ fn iter() {
         }
     }
 }
+
+#[test]
+fn multimap_signature_lifetimes() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let def: MultimapTableDefinition<&str, u64> = MultimapTableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(def).unwrap();
+        table.insert("bye", 0).unwrap();
+
+        let _ = {
+            let key = "hi".to_string();
+            table.get(key.as_str()).unwrap()
+        };
+
+        let _ = {
+            let key = "hi".to_string();
+            table.range(key.as_str()..).unwrap()
+        };
+
+        let _ = {
+            let key = "hi".to_string();
+            table.remove_all(key.as_str()).unwrap()
+        };
+    }
+    write_txn.commit().unwrap();
+}
