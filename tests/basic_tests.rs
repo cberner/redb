@@ -1350,3 +1350,45 @@ fn drain_filter_all_elements_next_back() {
         assert_eq!(i, v.value());
     }
 }
+
+#[test]
+fn signature_lifetimes() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+
+        let _ = {
+            let key = "hi".to_string();
+            let value = "1".to_string();
+            table.insert(key.as_str(), value.as_str()).unwrap()
+        };
+
+        let _ = {
+            let key = "hi".to_string();
+            table.get(key.as_str()).unwrap()
+        };
+
+        let _ = {
+            let key = "hi".to_string();
+            table.remove(key.as_str()).unwrap()
+        };
+
+        let _ = {
+            let key = "hi".to_string();
+            table.range(key.as_str()..).unwrap()
+        };
+
+        let _ = {
+            let key = "hi".to_string();
+            table.drain(key.as_str()..).unwrap()
+        };
+
+        let _ = {
+            let key = "hi".to_string();
+            table.drain_filter(key.as_str().., |_, _| true).unwrap()
+        };
+    }
+    write_txn.commit().unwrap();
+}
