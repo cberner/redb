@@ -759,7 +759,10 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTabl
     for MultimapTable<'db, 'txn, K, V>
 {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
-    fn get<'a>(&'a self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'a, V>> {
+    fn get<'a: 'b, 'b>(
+        &'a self,
+        key: impl Borrow<K::SelfType<'b>>,
+    ) -> Result<MultimapValue<'a, V>> {
         let iter = if let Some(collection) = self.tree.get(key.borrow())? {
             DynamicCollection::iter(collection, self.mem)?
         } else {
@@ -815,7 +818,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> Drop
 
 pub trait ReadableMultimapTable<K: RedbKey + 'static, V: RedbKey + 'static> {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
-    fn get<'a>(&'a self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'a, V>>
+    fn get<'a: 'b, 'b>(&'a self, key: impl Borrow<K::SelfType<'b>>) -> Result<MultimapValue<'a, V>>
     where
         K: 'a;
 
@@ -863,7 +866,10 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, 
     for ReadOnlyMultimapTable<'txn, K, V>
 {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
-    fn get<'a>(&'a self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'a, V>> {
+    fn get<'a: 'b, 'b>(
+        &'a self,
+        key: impl Borrow<K::SelfType<'b>>,
+    ) -> Result<MultimapValue<'a, V>> {
         let iter = if let Some(collection) = self.tree.get(key.borrow())? {
             DynamicCollection::iter(collection, self.mem)?
         } else {
