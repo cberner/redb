@@ -418,7 +418,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeRangeIter<'a, K, V> {
         manager: &'a TransactionalMemory,
     ) -> Result<Self>
     where
-        'a: 'a0,
+        K: 'a0,
     {
         if let Some(root) = table_root {
             let (include_left, left) = match query_range.start_bound() {

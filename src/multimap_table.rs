@@ -777,13 +777,10 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTabl
     }
 
     /// Returns a double-ended iterator over a range of elements in the table
-    fn range<'a: 'b, 'b, KR>(
-        &'a self,
-        range: impl RangeBounds<KR> + 'b,
-    ) -> Result<MultimapRange<'a, K, V>>
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<K, V>>
     where
         K: 'a,
-        KR: Borrow<K::SelfType<'b>> + 'b,
+        KR: Borrow<K::SelfType<'a>> + 'a,
     {
         let inner = self.tree.range(range)?;
         Ok(MultimapRange::new(inner, self.mem))
@@ -822,13 +819,10 @@ pub trait ReadableMultimapTable<K: RedbKey + 'static, V: RedbKey + 'static> {
     where
         K: 'a;
 
-    fn range<'a: 'b, 'b, KR>(
-        &'a self,
-        range: impl RangeBounds<KR> + 'b,
-    ) -> Result<MultimapRange<'a, K, V>>
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<K, V>>
     where
         K: 'a,
-        KR: Borrow<K::SelfType<'b>> + 'b;
+        KR: Borrow<K::SelfType<'a>> + 'a;
 
     fn len(&self) -> Result<usize>;
 
@@ -883,13 +877,10 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, 
         Ok(iter)
     }
 
-    fn range<'a: 'b, 'b, KR>(
-        &'a self,
-        range: impl RangeBounds<KR> + 'b,
-    ) -> Result<MultimapRange<'a, K, V>>
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<K, V>>
     where
         K: 'a,
-        KR: Borrow<K::SelfType<'b>> + 'b,
+        KR: Borrow<K::SelfType<'a>> + 'a,
     {
         let inner = self.tree.range(range)?;
         Ok(MultimapRange::new(inner, self.mem))
