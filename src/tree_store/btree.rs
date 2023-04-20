@@ -142,11 +142,11 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         // TODO: we shouldn't require Clone
         KR: Borrow<K::SelfType<'a0>> + Clone + 'a0,
     >(
-        &'a0 mut self,
+        &mut self,
         range: T,
     ) -> Result<BtreeDrain<'a, K, V>>
     where
-        'a: 'a0,
+        K: 'a0,
     {
         let iter = self.range(range.clone())?;
         let return_iter = self.range(range)?;
@@ -176,12 +176,12 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         KR: Borrow<K::SelfType<'a0>> + Clone + 'a0,
         F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     >(
-        &'a0 mut self,
+        &mut self,
         range: T,
         predicate: F,
     ) -> Result<BtreeDrainFilter<'a, K, V, F>>
     where
-        'a: 'a0,
+        K: 'a0,
     {
         let iter = self.range(range.clone())?;
         let return_iter = self.range(range)?;

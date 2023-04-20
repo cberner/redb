@@ -74,29 +74,26 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     }
 
     /// Removes the specified range and returns the removed entries in an iterator
-    pub fn drain<'a: 'b, 'b, KR>(
-        &'a mut self,
-        range: impl RangeBounds<KR> + Clone + 'b,
-    ) -> Result<Drain<'a, K, V>>
+    pub fn drain<'a, KR>(&mut self, range: impl RangeBounds<KR> + Clone + 'a) -> Result<Drain<K, V>>
     where
         K: 'a,
         // TODO: we should not require Clone here
-        KR: Borrow<K::SelfType<'b>> + Clone + 'b,
+        KR: Borrow<K::SelfType<'a>> + Clone + 'a,
     {
         self.tree.drain(range).map(Drain::new)
     }
 
     /// Applies `predicate` to all key-value pairs in the specified range. All entries for which
     /// `predicate` evaluates to `true` are removed and returned in an iterator
-    pub fn drain_filter<'a: 'b, 'b, KR, F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
-        &'a mut self,
-        range: impl RangeBounds<KR> + Clone + 'b,
+    pub fn drain_filter<'a, KR, F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+        &mut self,
+        range: impl RangeBounds<KR> + Clone + 'a,
         predicate: F,
-    ) -> Result<DrainFilter<'a, K, V, F>>
+    ) -> Result<DrainFilter<K, V, F>>
     where
         K: 'a,
         // TODO: we should not require Clone here
-        KR: Borrow<K::SelfType<'b>> + Clone + 'b,
+        KR: Borrow<K::SelfType<'a>> + Clone + 'a,
     {
         self.tree
             .drain_filter(range, predicate)
