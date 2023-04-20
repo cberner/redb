@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::multimap_table::parse_subtree_roots;
+use crate::sealed::Sealed;
 use crate::Error::Corrupted;
 #[cfg(feature = "logging")]
 use log::{info, warn};
@@ -38,7 +39,7 @@ impl AtomicTransactionId {
     }
 }
 
-pub trait TableHandle {
+pub trait TableHandle: Sealed {
     // Returns the name of the table
     fn name(&self) -> &str;
 }
@@ -60,7 +61,9 @@ impl TableHandle for UntypedTableHandle {
     }
 }
 
-pub trait MultimapTableHandle {
+impl Sealed for UntypedTableHandle {}
+
+pub trait MultimapTableHandle: Sealed {
     // Returns the name of the multimap table
     fn name(&self) -> &str;
 }
@@ -81,6 +84,8 @@ impl MultimapTableHandle for UntypedMultimapTableHandle {
         &self.name
     }
 }
+
+impl Sealed for UntypedMultimapTableHandle {}
 
 /// Defines the name and types of a table
 ///
@@ -115,6 +120,8 @@ impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> TableHandle for TableDefi
         self.name
     }
 }
+
+impl<K: RedbKey, V: RedbValue> Sealed for TableDefinition<'_, K, V> {}
 
 impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Clone for TableDefinition<'a, K, V> {
     fn clone(&self) -> Self {
@@ -168,6 +175,8 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableHandle
         self.name
     }
 }
+
+impl<K: RedbKey, V: RedbKey> Sealed for MultimapTableDefinition<'_, K, V> {}
 
 impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> Clone for MultimapTableDefinition<'a, K, V> {
     fn clone(&self) -> Self {

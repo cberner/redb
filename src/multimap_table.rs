@@ -1,4 +1,5 @@
 use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
+use crate::sealed::Sealed;
 use crate::tree_store::{
     AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, Page,
     PageHint, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
@@ -805,6 +806,8 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTabl
     }
 }
 
+impl<K: RedbKey, V: RedbKey> Sealed for MultimapTable<'_, '_, K, V> {}
+
 impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> Drop
     for MultimapTable<'db, 'txn, K, V>
 {
@@ -902,3 +905,5 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, 
         self.len().map(|x| x == 0)
     }
 }
+
+impl<K: RedbKey, V: RedbKey> Sealed for ReadOnlyMultimapTable<'_, K, V> {}

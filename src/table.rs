@@ -1,3 +1,4 @@
+use crate::sealed::Sealed;
 use crate::tree_store::{
     AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeMut, BtreeRangeIter, Checksum,
     PageHint, PageNumber, TransactionalMemory,
@@ -171,13 +172,15 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V
     }
 }
 
+impl<K: RedbKey, V: RedbValue> Sealed for Table<'_, '_, K, V> {}
+
 impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Drop for Table<'db, 'txn, K, V> {
     fn drop(&mut self) {
         self.transaction.close_table(&self.name, &mut self.tree);
     }
 }
 
-pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static> {
+pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static>: Sealed {
     /// Returns the value corresponding to the given key
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
     where
@@ -275,6 +278,8 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V>
         self.len().map(|x| x == 0)
     }
 }
+
+impl<K: RedbKey, V: RedbValue> Sealed for ReadOnlyTable<'_, K, V> {}
 
 pub struct Drain<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
     inner: BtreeDrain<'a, K, V>,
