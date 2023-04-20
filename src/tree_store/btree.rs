@@ -127,11 +127,11 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
     }
 
     pub(crate) fn range<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
-        &'a0 self,
+        &self,
         range: T,
     ) -> Result<BtreeRangeIter<'a, K, V>>
     where
-        'a: 'a0,
+        K: 'a0,
     {
         self.read_tree()?.range(range)
     }
@@ -374,7 +374,7 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
         range: T,
     ) -> Result<BtreeRangeIter<'a, K, V>>
     where
-        'a: 'a0,
+        K: 'a0,
     {
         BtreeRangeIter::new(range, self.root.map(|(p, _)| p), self.mem)
     }
