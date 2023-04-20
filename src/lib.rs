@@ -29,6 +29,7 @@ mod error;
 mod multimap_table;
 #[cfg(feature = "python")]
 mod python;
+mod sealed;
 mod table;
 mod transaction_tracker;
 mod transactions;
