@@ -51,6 +51,10 @@ impl TransactionTracker {
         }
     }
 
+    pub(crate) fn any_savepoint_exists(&self) -> bool {
+        !self.valid_savepoints.is_empty()
+    }
+
     pub(crate) fn allocate_savepoint(&mut self) -> SavepointId {
         let id = self.next_savepoint_id.next();
         self.next_savepoint_id = id;

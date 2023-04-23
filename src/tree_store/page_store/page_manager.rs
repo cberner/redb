@@ -1233,11 +1233,14 @@ impl TransactionalMemory {
             .push(AllocationOp::Allocate(page_number));
         #[cfg(debug_assertions)]
         {
-            assert!(!self
-                .read_page_ref_counts
-                .lock()
-                .unwrap()
-                .contains_key(&page_number));
+            assert!(
+                !self
+                    .read_page_ref_counts
+                    .lock()
+                    .unwrap()
+                    .contains_key(&page_number),
+                "Allocated a page that is still referenced! {page_number:?}"
+            );
             assert!(self.open_dirty_pages.lock().unwrap().insert(page_number));
         }
 

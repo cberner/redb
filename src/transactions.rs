@@ -141,6 +141,9 @@ pub struct WriteTransaction<'db> {
     // The binary blob is a length-prefixed array of PageNumber
     freed_tree: Mutex<BtreeMut<'db, FreedTableKey, FreedPageList<'static>>>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+    // Pages that were freed from the freed-tree. These can be freed immediately after commit(),
+    // since read transactions do not access the freed-tree
+    post_commit_frees: Arc<Mutex<Vec<PageNumber>>>,
     open_tables: Mutex<HashMap<String, &'static panic::Location<'static>>>,
     completed: bool,
     dirty: AtomicBool,
@@ -163,6 +166,7 @@ impl<'db> WriteTransaction<'db> {
         let root_page = db.get_memory().get_data_root();
         let freed_root = db.get_memory().get_freed_root();
         let freed_pages = Arc::new(Mutex::new(vec![]));
+        let post_commit_frees = Arc::new(Mutex::new(vec![]));
         Ok(Self {
             db,
             transaction_tracker,
@@ -176,9 +180,10 @@ impl<'db> WriteTransaction<'db> {
             freed_tree: Mutex::new(BtreeMut::new(
                 freed_root,
                 db.get_memory(),
-                freed_pages.clone(),
+                post_commit_frees.clone(),
             )),
             freed_pages,
+            post_commit_frees,
             open_tables: Mutex::new(Default::default()),
             completed: false,
             dirty: AtomicBool::new(false),
@@ -513,12 +518,28 @@ impl<'db> WriteTransaction<'db> {
             .flush_table_root_updates()?;
 
         self.process_freed_pages(oldest_live_read)?;
-        self.store_freed_pages()?;
+        // If a savepoint exists it might reference the freed-tree, since it holds a reference to the
+        // root of the freed-tree. Therefore, we must use the transactional free mechanism to free
+        // those pages. If there are no save points then these can be immediately freed, which is
+        // done at the end of this function.
+        let savepoint_exists = self
+            .transaction_tracker
+            .lock()
+            .unwrap()
+            .any_savepoint_exists();
+        self.store_freed_pages(savepoint_exists)?;
 
         let freed_root = self.freed_tree.lock().unwrap().get_root();
 
         self.mem
             .commit(root, freed_root, self.transaction_id, eventual, two_phase)?;
+
+        // Immediately free the pages that were freed from the freed-tree itself. These are only
+        // accessed by write transactions, so it's safe to free them as soon as the commit is done.
+        for page in self.post_commit_frees.lock().unwrap().drain(..) {
+            self.mem.free(page);
+        }
+
         Ok(())
     }
 
@@ -532,7 +553,7 @@ impl<'db> WriteTransaction<'db> {
 
         // Store all freed pages for a future commit(), since we can't free pages during a
         // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
-        self.store_freed_pages()?;
+        self.store_freed_pages(true)?;
 
         let freed_root = self.freed_tree.lock().unwrap().get_root();
 
@@ -570,7 +591,7 @@ impl<'db> WriteTransaction<'db> {
         Ok(())
     }
 
-    fn store_freed_pages(&mut self) -> Result {
+    fn store_freed_pages(&mut self, include_post_commit_free: bool) -> Result {
         assert_eq!(PageNumber::serialized_size(), 8); // We assume below that PageNumber is length 8
 
         let mut pagination_counter = 0u64;
@@ -593,6 +614,12 @@ impl<'db> WriteTransaction<'db> {
             drop(access_guard);
 
             pagination_counter += 1;
+
+            if include_post_commit_free {
+                // Move all the post-commit pages that came from the freed-tree. These need to be stored
+                // since we can't free pages until a durable commit
+                freed_pages.extend(self.post_commit_frees.lock().unwrap().drain(..));
+            }
         }
 
         Ok(())
