@@ -1,5 +1,11 @@
 # redb - Changelog
 
+## 0.16.0 - 2023-04-28
+* Combine `Builder::set_read_cache_size()` and `Builder::set_write_cache_size()` into a single,
+  `Builder::set_cache_size()` setting
+* Relax lifetime constraints on read methods on tables
+* Optimizations to `Savepoint`
+
 ## 0.15.0 - 2023-04-09
 * Add `Database::check_integrity()` to explicitly run repair process (it is still always run if needed on db open)
 * Change `list_tables()` to return a `TableHandle`
