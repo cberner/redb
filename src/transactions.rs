@@ -596,6 +596,14 @@ impl<'db> WriteTransaction<'db> {
 
         let mut pagination_counter = 0u64;
         let mut freed_tree = self.freed_tree.lock().unwrap();
+        if include_post_commit_free {
+            // Move all the post-commit pages that came from the freed-tree. These need to be stored
+            // since we can't free pages until a durable commit
+            self.freed_pages
+                .lock()
+                .unwrap()
+                .extend(self.post_commit_frees.lock().unwrap().drain(..));
+        }
         while !self.freed_pages.lock().unwrap().is_empty() {
             let chunk_size = 100;
             let buffer_size = FreedPageList::required_bytes(chunk_size);
