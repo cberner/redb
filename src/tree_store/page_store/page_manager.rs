@@ -1270,8 +1270,6 @@ impl TransactionalMemory {
         state.allocators.resize_to(new_layout);
         assert!(new_layout.len() <= layout.len());
 
-        // TODO: try to shrink the region tracker and relocate it to a lower region, if it's in the last one
-
         *in_progress_layout = InProgressLayout {
             layout: new_layout,
             tracker_page: *tracker_page,
