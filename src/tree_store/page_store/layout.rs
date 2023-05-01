@@ -30,10 +30,9 @@ impl RegionLayout {
     }
 
     fn header_pages(page_capacity: u32, page_size: u32) -> u32 {
-        let mut header_size: u32 =
-            BuddyAllocatorMut::required_space(page_capacity.try_into().unwrap())
-                .try_into()
-                .unwrap();
+        let mut header_size: u32 = BuddyAllocatorMut::required_space(page_capacity)
+            .try_into()
+            .unwrap();
 
         if header_size % page_size != 0 {
             header_size += page_size - header_size % page_size;

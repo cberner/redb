@@ -27,7 +27,7 @@ use std::sync::Mutex;
 // because the leaf node format uses 32bit offsets
 const MAX_USABLE_REGION_SPACE: u64 = 4 * 1024 * 1024 * 1024;
 // TODO: remove this constant?
-pub(crate) const MAX_MAX_PAGE_ORDER: usize = 20;
+pub(crate) const MAX_MAX_PAGE_ORDER: u8 = 20;
 pub(super) const MIN_USABLE_PAGES: usize = 10;
 const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
 
@@ -37,11 +37,11 @@ const NUM_REGIONS: u32 = 1000;
 // TODO: set to 1, when version 1.0 is released
 pub(crate) const FILE_FORMAT_VERSION: u8 = 112;
 
-fn ceil_log2(x: usize) -> usize {
+fn ceil_log2(x: usize) -> u8 {
     if x.is_power_of_two() {
-        x.trailing_zeros() as usize
+        x.trailing_zeros().try_into().unwrap()
     } else {
-        x.next_power_of_two().trailing_zeros() as usize
+        x.next_power_of_two().trailing_zeros().try_into().unwrap()
     }
 }
 
@@ -65,34 +65,35 @@ impl<'a> RegionTracker<'a> {
         Self { data }
     }
 
-    pub(crate) fn required_bytes(regions: u32, orders: usize) -> usize {
-        2 * size_of::<u32>() + orders * BtreeBitmapMut::required_space(regions.try_into().unwrap())
+    pub(crate) fn required_bytes(regions: u32, orders: u8) -> usize {
+        2 * size_of::<u32>() + (orders as usize) * BtreeBitmapMut::required_space(regions)
     }
 
-    pub(crate) fn init_new(regions: u32, orders: usize, data: &'a mut [u8]) -> Self {
+    pub(crate) fn init_new(regions: u32, orders: u8, data: &'a mut [u8]) -> Self {
         assert!(data.len() >= Self::required_bytes(regions, orders));
-        data[..4].copy_from_slice(&u32::try_from(orders).unwrap().to_le_bytes());
+        data[..4].copy_from_slice(&(orders as u32).to_le_bytes());
         data[4..8].copy_from_slice(
-            &u32::try_from(BtreeBitmapMut::required_space(regions.try_into().unwrap()))
+            &u32::try_from(BtreeBitmapMut::required_space(regions))
                 .unwrap()
                 .to_le_bytes(),
         );
 
         let mut result = Self { data };
         for i in 0..orders {
-            BtreeBitmapMut::init_new(result.get_order_mut(i), regions as usize);
+            BtreeBitmapMut::init_new(result.get_order_mut(i), regions);
         }
 
         result
     }
 
-    pub(crate) fn find_free(&self, order: usize) -> Option<u64> {
+    pub(crate) fn find_free(&self, order: u8) -> Option<u32> {
         let mem = self.get_order(order);
         let accessor = BtreeBitmap::new(mem);
         accessor.find_first_unset()
     }
 
-    pub(crate) fn mark_free(&mut self, order: usize, region: u64) {
+    pub(crate) fn mark_free(&mut self, order: u8, region: u32) {
+        let order: usize = order.into();
         assert!(order < self.suballocators());
         for i in 0..=order {
             let start = 8 + i * self.suballocator_len();
@@ -103,7 +104,8 @@ impl<'a> RegionTracker<'a> {
         }
     }
 
-    pub(crate) fn mark_full(&mut self, order: usize, region: u64) {
+    pub(crate) fn mark_full(&mut self, order: u8, region: u32) {
+        let order: usize = order.into();
         assert!(order < self.suballocators());
         for i in order..self.suballocators() {
             let start = 8 + i * self.suballocator_len();
@@ -122,14 +124,16 @@ impl<'a> RegionTracker<'a> {
         u32::from_le_bytes(self.data[..4].try_into().unwrap()) as usize
     }
 
-    fn get_order_mut(&mut self, order: usize) -> &mut [u8] {
+    fn get_order_mut(&mut self, order: u8) -> &mut [u8] {
+        let order: usize = order.into();
         assert!(order < self.suballocators());
         let start = 8 + order * self.suballocator_len();
         let end = start + self.suballocator_len();
         &mut self.data[start..end]
     }
 
-    fn get_order(&self, order: usize) -> &[u8] {
+    fn get_order(&self, order: u8) -> &[u8] {
+        let order: usize = order.into();
         assert!(order < self.suballocators());
         let start = 8 + order * self.suballocator_len();
         let end = start + self.suballocator_len();
@@ -188,7 +192,7 @@ impl Allocators {
                 layout.full_region_layout().num_pages(),
             );
             let max_order = region.allocator_mut().get_max_order();
-            region_tracker.mark_free(max_order, i as u64);
+            region_tracker.mark_free(max_order, i);
             region_headers.push(region_header_bytes);
         }
         drop(region_tracker);
@@ -302,7 +306,7 @@ impl Allocators {
         let mut region_tracker = RegionTracker::new(&mut self.region_tracker);
         if shrink {
             // Drop all regions that were removed
-            for i in (new_layout.num_regions() as u64)..(self.region_headers.len() as u64) {
+            for i in new_layout.num_regions()..(self.region_headers.len().try_into().unwrap()) {
                 region_tracker.mark_full(0, i);
             }
             self.region_headers
@@ -328,7 +332,7 @@ impl Allocators {
                         let mut allocator = region.allocator_mut();
                         allocator.resize(new_region.num_pages() as usize);
                         let highest_free = allocator.highest_free_order().unwrap();
-                        region_tracker.mark_free(highest_free, i as u64);
+                        region_tracker.mark_free(highest_free, i);
                     }
                 } else {
                     // brand new region
@@ -340,7 +344,7 @@ impl Allocators {
                         new_layout.full_region_layout().num_pages(),
                     );
                     let highest_free = region.allocator_mut().highest_free_order().unwrap();
-                    region_tracker.mark_free(highest_free, i as u64);
+                    region_tracker.mark_free(highest_free, i);
                     self.region_headers.push(new_region_bytes);
                 }
             }
@@ -464,11 +468,7 @@ impl TransactionalMemory {
                     (allocators.region_tracker.len() + page_size - 1) / page_size;
                 let required_order = ceil_log2(tracker_required_pages);
                 let page_number = region.allocator_mut().alloc(required_order).unwrap();
-                PageNumber::new(
-                    0,
-                    page_number.try_into().unwrap(),
-                    required_order.try_into().unwrap(),
-                )
+                PageNumber::new(0, page_number, required_order)
             };
 
             let mut header = DatabaseHeader::new(layout, TransactionId(0), tracker_page);
@@ -643,8 +643,8 @@ impl TransactionalMemory {
             .get_region_mut(region_tracker_page.region)
             .allocator_mut()
             .record_alloc(
-                region_tracker_page.page_index.into(),
-                region_tracker_page.page_order as usize,
+                region_tracker_page.page_index,
+                region_tracker_page.page_order,
             );
 
         Ok(())
@@ -660,10 +660,9 @@ impl TransactionalMemory {
             let page_number = page_number?;
             let region_index = page_number.region;
             let mut region = state.get_region_mut(region_index);
-            region.allocator_mut().record_alloc(
-                page_number.page_index as u64,
-                page_number.page_order as usize,
-            );
+            region
+                .allocator_mut()
+                .record_alloc(page_number.page_index, page_number.page_order);
         }
 
         Ok(())
@@ -869,12 +868,11 @@ impl TransactionalMemory {
                     let region_index = page_number.region;
                     state
                         .get_region_tracker_mut()
-                        .mark_free(page_number.page_order as usize, region_index as u64);
+                        .mark_free(page_number.page_order, region_index);
                     let mut region = state.get_region_mut(region_index);
-                    region.allocator_mut().free(
-                        page_number.page_index as u64,
-                        page_number.page_order as usize,
-                    );
+                    region
+                        .allocator_mut()
+                        .free(page_number.page_index, page_number.page_order);
 
                     let address = page_number.address_range(
                         self.page_size as u64,
@@ -889,10 +887,9 @@ impl TransactionalMemory {
                 AllocationOp::Free(page_number) | AllocationOp::FreeUncommitted(page_number) => {
                     let region_index = page_number.region;
                     let mut region = state.get_region_mut(region_index);
-                    region.allocator_mut().record_alloc(
-                        page_number.page_index as u64,
-                        page_number.page_order as usize,
-                    );
+                    region
+                        .allocator_mut()
+                        .record_alloc(page_number.page_index, page_number.page_order);
                 }
             }
         }
@@ -1041,11 +1038,11 @@ impl TransactionalMemory {
         let mut region = state.get_region_mut(region_index);
         region
             .allocator_mut()
-            .free(page.page_index as u64, page.page_order as usize);
+            .free(page.page_index, page.page_order);
         // Ensure that the region is marked as having free space
         state
             .get_region_tracker_mut()
-            .mark_free(page.page_order as usize, region_index as u64);
+            .mark_free(page.page_order, region_index);
         self.log_since_commit
             .lock()
             .unwrap()
@@ -1072,11 +1069,11 @@ impl TransactionalMemory {
             let mut region = state.get_region_mut(page.region);
             region
                 .allocator_mut()
-                .free(page.page_index as u64, page.page_order as usize);
+                .free(page.page_index, page.page_order);
             // Ensure that the region is marked as having free space
             state
                 .get_region_tracker_mut()
-                .mark_free(page.page_order as usize, page.region as u64);
+                .mark_free(page.page_order, page.region);
 
             self.log_since_commit
                 .lock()
@@ -1176,12 +1173,12 @@ impl TransactionalMemory {
     fn allocate_lowest_helper(
         &self,
         state: &mut InMemoryState,
-        required_order: usize,
+        required_order: u8,
     ) -> Result<Option<PageNumber>> {
         loop {
             let candidate_region =
                 if let Some(candidate) = state.get_region_tracker_mut().find_free(required_order) {
-                    candidate.try_into().unwrap()
+                    candidate
                 } else {
                     return Ok(None);
                 };
@@ -1189,14 +1186,14 @@ impl TransactionalMemory {
             if let Some(page) = region.allocator_mut().alloc_lowest(required_order) {
                 return Ok(Some(PageNumber::new(
                     candidate_region,
-                    page.try_into().unwrap(),
-                    required_order.try_into().unwrap(),
+                    page,
+                    required_order,
                 )));
             } else {
                 // Mark the region, if it's full
                 state
                     .get_region_tracker_mut()
-                    .mark_full(required_order, candidate_region as u64);
+                    .mark_full(required_order, candidate_region);
             }
         }
     }
@@ -1204,12 +1201,12 @@ impl TransactionalMemory {
     fn allocate_helper(
         &self,
         state: &mut InMemoryState,
-        required_order: usize,
+        required_order: u8,
     ) -> Result<Option<PageNumber>> {
         loop {
             let candidate_region =
                 if let Some(candidate) = state.get_region_tracker_mut().find_free(required_order) {
-                    candidate.try_into().unwrap()
+                    candidate
                 } else {
                     return Ok(None);
                 };
@@ -1217,14 +1214,14 @@ impl TransactionalMemory {
             if let Some(page) = region.allocator_mut().alloc(required_order) {
                 return Ok(Some(PageNumber::new(
                     candidate_region,
-                    page.try_into().unwrap(),
-                    required_order.try_into().unwrap(),
+                    page,
+                    required_order,
                 )));
             } else {
                 // Mark the region, if it's full
                 state
                     .get_region_tracker_mut()
-                    .mark_full(required_order, candidate_region as u64);
+                    .mark_full(required_order, candidate_region);
             }
         }
     }
@@ -1282,7 +1279,7 @@ impl TransactionalMemory {
         &self,
         state: &mut InMemoryState,
         layout: &mut InProgressLayout,
-        required_order_allocation: usize,
+        required_order_allocation: u8,
     ) -> Result<()> {
         let layout = &mut layout.layout;
 

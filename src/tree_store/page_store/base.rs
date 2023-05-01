@@ -35,7 +35,7 @@ impl PageNumber {
     pub(crate) fn new(region: u32, page_index: u32, page_order: u8) -> Self {
         debug_assert!(region <= 0x000F_FFFF);
         debug_assert!(page_index <= 0x000F_FFFF);
-        debug_assert!(page_order <= MAX_MAX_PAGE_ORDER.try_into().unwrap());
+        debug_assert!(page_order <= MAX_MAX_PAGE_ORDER);
         Self {
             region,
             page_index,

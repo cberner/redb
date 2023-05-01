@@ -21,13 +21,13 @@ impl<'a> RegionHeaderMutator<'a> {
 
     pub(crate) fn initialize(&mut self, num_pages: u32, max_page_capacity: u32) {
         self.mem[0] = REGION_FORMAT_VERSION;
-        let allocator_len = BuddyAllocatorMut::required_space(max_page_capacity as usize);
+        let allocator_len = BuddyAllocatorMut::required_space(max_page_capacity);
         self.mem[ALLOCATOR_LENGTH_OFFSET..(ALLOCATOR_LENGTH_OFFSET + size_of::<u32>())]
             .copy_from_slice(&u32::try_from(allocator_len).unwrap().to_le_bytes());
         BuddyAllocatorMut::init_new(
             &mut self.mem[ALLOCATOR_OFFSET..(ALLOCATOR_OFFSET + allocator_len)],
-            num_pages as usize,
-            max_page_capacity as usize,
+            num_pages,
+            max_page_capacity,
         );
     }
 

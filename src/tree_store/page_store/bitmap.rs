@@ -61,9 +61,8 @@ impl<'a> BtreeBitmap<'a> {
         self.get_level(self.get_height() - 1).any_unset()
     }
 
-    pub(crate) fn get(&self, i: u64) -> bool {
-        self.get_level(self.get_height() - 1)
-            .get(i.try_into().unwrap())
+    pub(crate) fn get(&self, i: u32) -> bool {
+        self.get_level(self.get_height() - 1).get(i)
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -71,7 +70,7 @@ impl<'a> BtreeBitmap<'a> {
     }
 
     /// data must have been initialized by Self::init_new(). Returns the first free id, after (inclusive) of start
-    pub(crate) fn find_first_unset(&self) -> Option<u64> {
+    pub(crate) fn find_first_unset(&self) -> Option<u32> {
         if let Some(mut entry) = self.get_level(0).first_unset(0, 64) {
             let mut height = 0;
 
@@ -84,7 +83,7 @@ impl<'a> BtreeBitmap<'a> {
                     .unwrap();
             }
 
-            Some(entry as u64)
+            Some(entry)
         } else {
             None
         }
@@ -113,7 +112,7 @@ impl<'a> BtreeBitmapMut<'a> {
     }
 
     // Initializes a new allocator, with no ids free
-    pub(crate) fn init_new(data: &'a mut [u8], elements: usize) -> Self {
+    pub(crate) fn init_new(data: &'a mut [u8], elements: u32) -> Self {
         assert!(data.len() >= Self::required_space(elements));
         let height = Self::required_tree_height(elements);
         data[HEIGHT_OFFSET..(HEIGHT_OFFSET + size_of::<u32>())]
@@ -138,7 +137,7 @@ impl<'a> BtreeBitmapMut<'a> {
 
         // Leaf level
         if Self::required_tree_height(elements) > 1 {
-            let len = (elements + 63) / 64 * size_of::<u64>();
+            let len = (elements as usize + 63) / 64 * size_of::<u64>();
             tree_level_offsets.push(offset + len);
             offset += len;
         }
@@ -159,35 +158,32 @@ impl<'a> BtreeBitmapMut<'a> {
         Self::new(data)
     }
 
-    pub(crate) fn find_first_unset(&self) -> Option<u64> {
+    pub(crate) fn find_first_unset(&self) -> Option<u32> {
         BtreeBitmap::new(self.data).find_first_unset()
     }
 
-    pub(crate) fn get(&self, i: u64) -> bool {
+    pub(crate) fn get(&self, i: u32) -> bool {
         BtreeBitmap::new(self.data).get(i)
     }
 
     // Returns the first unset id, and sets it
-    pub(crate) fn alloc(&mut self) -> Option<u64> {
+    pub(crate) fn alloc(&mut self) -> Option<u32> {
         let entry = self.find_first_unset()?;
         self.set(entry);
         Some(entry)
     }
 
-    pub(crate) fn set(&mut self, i: u64) {
-        let full = self
-            .get_level_mut(self.get_height() - 1)
-            .set(i.try_into().unwrap());
-        self.update_to_root(i.try_into().unwrap(), full);
+    pub(crate) fn set(&mut self, i: u32) {
+        let full = self.get_level_mut(self.get_height() - 1).set(i);
+        self.update_to_root(i, full);
     }
 
-    pub(crate) fn clear(&mut self, i: u64) {
-        self.get_level_mut(self.get_height() - 1)
-            .clear(i.try_into().unwrap());
-        self.update_to_root(i.try_into().unwrap(), false);
+    pub(crate) fn clear(&mut self, i: u32) {
+        self.get_level_mut(self.get_height() - 1).clear(i);
+        self.update_to_root(i, false);
     }
 
-    pub(crate) fn required_space(capacity: usize) -> usize {
+    pub(crate) fn required_space(capacity: u32) -> usize {
         let tree_space = if Self::required_tree_height(capacity) == 1 {
             assert!(capacity <= 64);
             // Space for root
@@ -209,11 +205,11 @@ impl<'a> BtreeBitmapMut<'a> {
         Self::tree_data_start(capacity) + tree_space
     }
 
-    fn tree_data_start(capacity: usize) -> usize {
+    fn tree_data_start(capacity: u32) -> usize {
         END_OFFSETS + (Self::required_tree_height(capacity) - 1) * size_of::<u32>()
     }
 
-    fn required_interior_bytes_per_subtree(capacity: usize) -> usize {
+    fn required_interior_bytes_per_subtree(capacity: u32) -> usize {
         let subtree_height = Self::required_tree_height(capacity) - 1;
         (1..subtree_height)
             .map(|i| 64usize.pow(i.try_into().unwrap()))
@@ -221,14 +217,14 @@ impl<'a> BtreeBitmapMut<'a> {
             / 8
     }
 
-    fn required_subtrees(capacity: usize) -> usize {
+    fn required_subtrees(capacity: u32) -> usize {
         let height = Self::required_tree_height(capacity);
         let values_per_subtree = 64usize.pow((height - 1).try_into().unwrap());
 
-        (capacity + values_per_subtree - 1) / values_per_subtree
+        (capacity as usize + values_per_subtree - 1) / values_per_subtree
     }
 
-    fn required_tree_height(capacity: usize) -> usize {
+    fn required_tree_height(capacity: u32) -> usize {
         let mut height = 1;
         let mut storable = 64;
         while capacity > storable {
@@ -252,7 +248,7 @@ impl<'a> BtreeBitmapMut<'a> {
 
     // Recursively update to the root, starting at the given entry in the given height
     // full parameter must be set if all bits in the entry's group of u64 are full
-    fn update_to_root(&mut self, i: usize, mut full: bool) {
+    fn update_to_root(&mut self, i: u32, mut full: bool) {
         if self.get_height() == 1 {
             return;
         }
@@ -287,8 +283,11 @@ impl<'a> U64GroupedBitmap<'a> {
         Self { data }
     }
 
-    fn data_index_of(&self, bit: usize) -> (usize, usize) {
-        ((bit / 64) * size_of::<u64>(), (bit % 64))
+    fn data_index_of(&self, bit: u32) -> (usize, usize) {
+        (
+            ((bit as usize) / 64) * size_of::<u64>(),
+            ((bit as usize) % 64),
+        )
     }
 
     fn count_unset(&self) -> usize {
@@ -303,7 +302,7 @@ impl<'a> U64GroupedBitmap<'a> {
         self.data.iter().any(|x| x.count_ones() > 0)
     }
 
-    fn first_unset(&self, start_bit: usize, end_bit: usize) -> Option<usize> {
+    fn first_unset(&self, start_bit: u32, end_bit: u32) -> Option<u32> {
         assert_eq!(end_bit, (start_bit - start_bit % 64) + 64);
 
         let (index, bit) = self.data_index_of(start_bit);
@@ -312,11 +311,11 @@ impl<'a> U64GroupedBitmap<'a> {
         let group = group & mask;
         match group.trailing_zeros() {
             64 => None,
-            x => Some(start_bit + x as usize - bit),
+            x => Some(start_bit + x - u32::try_from(bit).unwrap()),
         }
     }
 
-    pub fn get(&self, bit: usize) -> bool {
+    pub fn get(&self, bit: u32) -> bool {
         let (index, bit_index) = self.data_index_of(bit);
         let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
         group & U64GroupedBitmapMut::select_mask(bit_index) == 0
@@ -330,9 +329,9 @@ pub(crate) struct U64GroupedBitmapMut<'a> {
 }
 
 impl<'a> U64GroupedBitmapMut<'a> {
-    pub fn required_bytes(elements: usize) -> usize {
+    pub fn required_bytes(elements: u32) -> usize {
         let words = (elements + 63) / 64;
-        words * size_of::<u64>()
+        (words as usize) * size_of::<u64>()
     }
 
     pub fn init_full(data: &mut [u8]) {
@@ -349,8 +348,8 @@ impl<'a> U64GroupedBitmapMut<'a> {
     }
 
     // Returns true iff the bit's group is all set
-    pub fn set(&mut self, bit: usize) -> bool {
-        let (index, bit_index) = self.data_index_of(bit);
+    pub fn set(&mut self, bit: u32) -> bool {
+        let (index, bit_index) = self.data_index_of(bit as usize);
         let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
         group &= !Self::select_mask(bit_index);
         self.data[index..(index + 8)].copy_from_slice(&group.to_le_bytes());
@@ -358,8 +357,8 @@ impl<'a> U64GroupedBitmapMut<'a> {
         group == 0
     }
 
-    pub fn clear(&mut self, bit: usize) {
-        let (index, bit_index) = self.data_index_of(bit);
+    pub fn clear(&mut self, bit: u32) {
+        let (index, bit_index) = self.data_index_of(bit as usize);
         let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
         group |= Self::select_mask(bit_index);
         self.data[index..(index + 8)].copy_from_slice(&group.to_le_bytes());
@@ -389,10 +388,10 @@ mod test {
         let mut data = vec![0; BtreeBitmapMut::required_space(num_pages)];
         let mut allocator = BtreeBitmapMut::init_new(&mut data, num_pages);
         for i in 0..num_pages {
-            allocator.clear(i as u64);
+            allocator.clear(i);
         }
         for i in 0..num_pages {
-            assert_eq!(i as u64, allocator.alloc().unwrap());
+            assert_eq!(i, allocator.alloc().unwrap());
         }
         assert!(allocator.alloc().is_none());
     }
@@ -425,10 +424,10 @@ mod test {
         let mut data = vec![0; BtreeBitmapMut::required_space(num_pages)];
         let mut allocator = BtreeBitmapMut::init_new(&mut data, num_pages);
         for i in 0..num_pages {
-            allocator.clear(i as u64);
+            allocator.clear(i);
         }
         for i in 0..num_pages {
-            assert_eq!(i as u64, allocator.alloc().unwrap());
+            assert_eq!(i, allocator.alloc().unwrap());
         }
         allocator.clear(5);
         allocator.clear(15);
@@ -443,7 +442,7 @@ mod test {
         let mut data = vec![0; BtreeBitmapMut::required_space(num_pages)];
         let mut allocator = BtreeBitmapMut::init_new(&mut data, num_pages);
         for i in 0..num_pages {
-            allocator.clear(i as u64);
+            allocator.clear(i);
         }
         // Allocate everything
         while allocator.alloc().is_some() {}
@@ -482,7 +481,7 @@ mod test {
         let mut data = vec![0; BtreeBitmapMut::required_space(num_pages)];
         let mut allocator = BtreeBitmapMut::init_new(&mut data, num_pages);
         for i in 0..num_pages {
-            allocator.clear(i as u64);
+            allocator.clear(i);
         }
         let mut allocated = HashSet::new();
 
@@ -491,7 +490,7 @@ mod test {
                 if let Some(page) = allocator.alloc() {
                     allocated.insert(page);
                 } else {
-                    assert_eq!(allocated.len(), num_pages);
+                    assert_eq!(allocated.len(), num_pages as usize);
                 }
             } else if let Some(to_free) = allocated.iter().choose(&mut rng).cloned() {
                 allocator.clear(to_free);
@@ -499,13 +498,13 @@ mod test {
             }
         }
 
-        for _ in allocated.len()..num_pages {
+        for _ in allocated.len()..(num_pages as usize) {
             allocator.alloc().unwrap();
         }
         assert!(allocator.alloc().is_none());
 
         for i in 0..num_pages {
-            allocator.clear(i as u64);
+            allocator.clear(i);
         }
 
         for _ in 0..num_pages {
