@@ -26,7 +26,7 @@ enum DeletionResult {
     DeletedBranch(PageNumber, Checksum),
 }
 
-struct InsertionResult<'a, K: RedbKey, V: RedbValue> {
+struct InsertionResult<'a, V: RedbValue> {
     // the new root page
     new_root: PageNumber,
     // checksum of the root page
@@ -34,7 +34,7 @@ struct InsertionResult<'a, K: RedbKey, V: RedbValue> {
     // Following sibling, if the root had to be split
     additional_sibling: Option<(Vec<u8>, PageNumber, Checksum)>,
     // The inserted value for .insert_reserve() to use
-    inserted_value: AccessGuardMut<'a, K, V>,
+    inserted_value: AccessGuardMut<'a, V>,
     // The previous value, if any
     old_value: Option<AccessGuard<'a, V>>,
 }
@@ -110,7 +110,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
         &mut self,
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
-    ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMut<'a, K, V>)> {
+    ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMut<'a, V>)> {
         let (new_root, old_value, guard) = if let Some((p, checksum)) = *self.root {
             let result = self.insert_helper(
                 self.mem.get_page(p)?,
@@ -143,7 +143,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
             let offset = accessor.offset_of_first_value();
             let page_num = page.get_page_number();
             let checksum = self.checksum_helper(&page);
-            let guard = AccessGuardMut::new(key_bytes, page, offset, value_bytes.len(), self.mem);
+            let guard = AccessGuardMut::new::<K>(page, offset, value_bytes.len(), self.mem);
 
             ((page_num, checksum), None, guard)
         };
@@ -157,7 +157,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
         page_checksum: Checksum,
         key: &[u8],
         value: &[u8],
-    ) -> Result<InsertionResult<'a, K, V>> {
+    ) -> Result<InsertionResult<'a, V>> {
         let node_mem = page.memory();
         Ok(match node_mem[0] {
             LEAF => {
@@ -178,7 +178,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                         LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
                     let offset = new_page_accessor.offset_of_first_value();
                     drop(new_page_accessor);
-                    let guard = AccessGuardMut::new(key, new_page, offset, value.len(), self.mem);
+                    let guard = AccessGuardMut::new::<K>(new_page, offset, value.len(), self.mem);
                     return if position == 0 {
                         Ok(InsertionResult {
                             new_root: new_page_number,
@@ -236,7 +236,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                     let offset = new_page_accessor.offset_of_value(position).unwrap();
                     drop(new_page_accessor);
                     let new_checksum = self.checksum_helper(&page_mut);
-                    let guard = AccessGuardMut::new(key, page_mut, offset, value.len(), self.mem);
+                    let guard = AccessGuardMut::new::<K>(page_mut, offset, value.len(), self.mem);
                     return Ok(InsertionResult {
                         new_root: page_number,
                         root_checksum: new_checksum,
@@ -293,7 +293,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                     let accessor =
                         LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
                     let offset = accessor.offset_of_value(position).unwrap();
-                    let guard = AccessGuardMut::new(key, new_page, offset, value.len(), self.mem);
+                    let guard = AccessGuardMut::new::<K>(new_page, offset, value.len(), self.mem);
 
                     InsertionResult {
                         new_root: new_page_number,
@@ -340,7 +340,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                             V::fixed_width(),
                         );
                         let offset = accessor.offset_of_value(position).unwrap();
-                        AccessGuardMut::new(key, new_page1, offset, value.len(), self.mem)
+                        AccessGuardMut::new::<K>(new_page1, offset, value.len(), self.mem)
                     } else {
                         let accessor = LeafAccessor::new(
                             new_page2.memory(),
@@ -348,7 +348,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                             V::fixed_width(),
                         );
                         let offset = accessor.offset_of_value(position - division).unwrap();
-                        AccessGuardMut::new(key, new_page2, offset, value.len(), self.mem)
+                        AccessGuardMut::new::<K>(new_page2, offset, value.len(), self.mem)
                     };
 
                     InsertionResult {

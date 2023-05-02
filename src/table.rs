@@ -137,7 +137,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValueMutInPlace + 'static> Table<'d
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
         value_length: usize,
-    ) -> Result<AccessGuardMut<K, V>>
+    ) -> Result<AccessGuardMut<V>>
     where
         K: 'a,
     {

@@ -201,22 +201,20 @@ impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
     }
 }
 
-pub struct AccessGuardMut<'a, K: RedbKey, V: RedbValue> {
+pub struct AccessGuardMut<'a, V: RedbValue> {
     root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
-    key: Vec<u8>,
     mem: &'a TransactionalMemory,
     page: PageMut<'a>,
     offset: usize,
     len: usize,
-    // TODO: kind of a hack that we have to have the key type to find the leaf page again. We
-    // could instead save the path from the root to the leaf during .insert_reserve()
-    _key_type: PhantomData<K>,
+    // child indices starting at root and going to the leaf which holds this value
+    tree_path: Vec<usize>,
+    key_width: Option<usize>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey, V: RedbValue> AccessGuardMut<'a, K, V> {
-    pub(crate) fn new(
-        key: &[u8],
+impl<'a, V: RedbValue> AccessGuardMut<'a, V> {
+    pub(crate) fn new<K: RedbKey>(
         page: PageMut<'a>,
         offset: usize,
         len: usize,
@@ -224,36 +222,82 @@ impl<'a, K: RedbKey, V: RedbValue> AccessGuardMut<'a, K, V> {
     ) -> Self {
         AccessGuardMut {
             root: Arc::new(Mutex::new(None)),
-            key: key.to_vec(),
             mem,
             page,
             offset,
             len,
-            _key_type: Default::default(),
+            tree_path: vec![],
+            key_width: K::fixed_width(),
             _value_type: Default::default(),
         }
     }
 
-    pub(crate) fn set_root_for_drop(&mut self, root: Arc<Mutex<Option<(PageNumber, Checksum)>>>) {
+    fn make_tree_path<K: RedbKey>(
+        key: &[u8],
+        page_number: PageNumber,
+        leaf_page_number: PageNumber,
+        path: &mut Vec<usize>,
+        mem: &TransactionalMemory,
+    ) -> Result {
+        // Don't try to read the leaf page, because we already have a PageMut for it, and so can't open it again
+        if page_number == leaf_page_number {
+            return Ok(());
+        }
+        let page = mem.get_page(page_number)?;
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => unreachable!(),
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let (child_index, child_page) = accessor.child_for_key::<K>(key);
+                path.push(child_index);
+                Self::make_tree_path::<K>(key, child_page, leaf_page_number, path, mem)?;
+                Ok(())
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn set_root_for_drop<K: RedbKey>(
+        &mut self,
+        root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
+        key: &[u8],
+    ) -> Result {
         self.root = root;
+        let mut path = vec![];
+        Self::make_tree_path::<K>(
+            key,
+            self.root.lock().unwrap().unwrap().0,
+            self.page.get_page_number(),
+            &mut path,
+            self.mem,
+        )?;
+        self.tree_path = path;
+        Ok(())
     }
 
     // Repairs the checksums after the user has filled the mutable buffer. This is necessary
     // because the checksums will have been calculated with the values during .insert_reserve(),
     // but the user is given a mutable reference and will have modified the value, which invalidates
     // the checksum.
-    fn finalize_checksum(&mut self, page_number: PageNumber) -> Result<Checksum> {
+    fn finalize_checksum(
+        &mut self,
+        page_number: PageNumber,
+        tree_height: usize,
+    ) -> Result<Checksum> {
         if page_number == self.page.get_page_number() {
             assert_eq!(LEAF, self.page.memory()[0]);
+            assert_eq!(tree_height, self.tree_path.len());
             Ok(self.checksum_helper(&self.page))
         } else {
             assert!(self.mem.uncommitted(page_number));
             // This is a dirty page so it can't be read cached
             let mut page = self.mem.get_page_mut(page_number)?;
             assert_eq!(BRANCH, page.memory()[0]);
-            let accessor = BranchAccessor::new(&page, K::fixed_width());
-            let (child_index, child_page) = accessor.child_for_key::<K>(&self.key);
-            let child_checksum = self.finalize_checksum(child_page)?;
+            let accessor = BranchAccessor::new(&page, self.key_width);
+            let child_index = self.tree_path[tree_height];
+            let child_page = accessor.child_page(child_index).unwrap();
+            let child_checksum = self.finalize_checksum(child_page, tree_height + 1)?;
             drop(accessor);
             let mut mutator = BranchMutator::new(&mut page);
             mutator.write_child_page(child_index, child_page, child_checksum);
@@ -263,27 +307,27 @@ impl<'a, K: RedbKey, V: RedbValue> AccessGuardMut<'a, K, V> {
 
     fn checksum_helper<T: Page>(&self, page: &T) -> Checksum {
         match page.memory()[0] {
-            LEAF => leaf_checksum(page, K::fixed_width(), V::fixed_width()),
-            BRANCH => branch_checksum(page, K::fixed_width()),
+            LEAF => leaf_checksum(page, self.key_width, V::fixed_width()),
+            BRANCH => branch_checksum(page, self.key_width),
             _ => unreachable!(),
         }
     }
 }
 
-impl<'a, K: RedbKey, V: RedbValueMutInPlace> AsMut<V::BaseRefType> for AccessGuardMut<'a, K, V> {
+impl<'a, V: RedbValueMutInPlace> AsMut<V::BaseRefType> for AccessGuardMut<'a, V> {
     fn as_mut(&mut self) -> &mut V::BaseRefType {
         V::from_bytes_mut(&mut self.page.memory_mut()[self.offset..(self.offset + self.len)])
     }
 }
 
-impl<'a, K: RedbKey, V: RedbValue> Drop for AccessGuardMut<'a, K, V> {
+impl<'a, V: RedbValue> Drop for AccessGuardMut<'a, V> {
     fn drop(&mut self) {
         // Was dropped before being returned to the user, so no clean up needed
         if self.root.lock().unwrap().is_none() {
             return;
         }
         let new_checksum = self
-            .finalize_checksum((self.root.clone()).lock().unwrap().unwrap().0)
+            .finalize_checksum((self.root.clone()).lock().unwrap().unwrap().0, 0)
             .unwrap();
         let mut borrow = self.root.lock().unwrap();
         let (_, root_checksum_ref) = borrow.as_mut().unwrap();
