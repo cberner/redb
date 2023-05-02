@@ -28,8 +28,8 @@ use std::sync::Mutex;
 const MAX_USABLE_REGION_SPACE: u64 = 4 * 1024 * 1024 * 1024;
 // TODO: remove this constant?
 pub(crate) const MAX_MAX_PAGE_ORDER: u8 = 20;
-pub(super) const MIN_USABLE_PAGES: usize = 10;
-const MIN_DESIRED_USABLE_BYTES: usize = 1024 * 1024;
+pub(super) const MIN_USABLE_PAGES: u32 = 10;
+const MIN_DESIRED_USABLE_BYTES: u64 = 1024 * 1024;
 
 // TODO: allocate more tracker space when it becomes exhausted, and remove this hard coded 1000 regions
 const NUM_REGIONS: u32 = 1000;
@@ -291,7 +291,7 @@ impl Allocators {
                 let last_region = new_layout
                     .trailing_region_layout()
                     .unwrap_or_else(|| new_layout.full_region_layout());
-                match (last_region.num_pages() as usize).cmp(&allocator.len()) {
+                match last_region.num_pages().cmp(&allocator.len()) {
                     cmp::Ordering::Less => true,
                     cmp::Ordering::Equal => {
                         // No-op
@@ -318,8 +318,8 @@ impl Allocators {
                 .unwrap_or_else(|| new_layout.full_region_layout());
             let mut region = RegionHeaderMutator::new(self.region_headers.last_mut().unwrap());
             let mut allocator = region.allocator_mut();
-            if allocator.len() > last_region.num_pages() as usize {
-                allocator.resize(last_region.num_pages() as usize);
+            if allocator.len() > last_region.num_pages() {
+                allocator.resize(last_region.num_pages());
             }
         } else {
             let old_num_regions = self.region_headers.len();
@@ -327,10 +327,10 @@ impl Allocators {
                 let new_region = new_layout.region_layout(i);
                 if (i as usize) < old_num_regions {
                     let mut region = RegionHeaderMutator::new(&mut self.region_headers[i as usize]);
-                    assert!(new_region.num_pages() as usize >= region.allocator_mut().len());
-                    if new_region.num_pages() as usize != region.allocator_mut().len() {
+                    assert!(new_region.num_pages() >= region.allocator_mut().len());
+                    if new_region.num_pages() != region.allocator_mut().len() {
                         let mut allocator = region.allocator_mut();
-                        allocator.resize(new_region.num_pages() as usize);
+                        allocator.resize(new_region.num_pages());
                         let highest_free = allocator.highest_free_order().unwrap();
                         region_tracker.mark_free(highest_free, i);
                     }
@@ -423,9 +423,10 @@ impl TransactionalMemory {
             RegionTracker::required_bytes(NUM_REGIONS, MAX_MAX_PAGE_ORDER + 1);
 
         // Make sure that there is enough room to allocate the region tracker into a page
-        let size: u64 = max(MIN_DESIRED_USABLE_BYTES, page_size * MIN_USABLE_PAGES)
-            .try_into()
-            .unwrap();
+        let size: u64 = max(
+            MIN_DESIRED_USABLE_BYTES,
+            page_size as u64 * MIN_USABLE_PAGES as u64,
+        );
         let tracker_space =
             (page_size * ((region_tracker_required_bytes + page_size - 1) / page_size)) as u64;
         let starting_size = size + tracker_space;
@@ -903,9 +904,7 @@ impl TransactionalMemory {
             let last_region_index = restore.num_regions() - 1;
             let last_region = restore.region_layout(last_region_index);
             let mut region = state.get_region_mut(last_region_index);
-            region
-                .allocator_mut()
-                .resize(last_region.num_pages() as usize);
+            region.allocator_mut().resize(last_region.num_pages());
 
             *layout = InProgressLayout {
                 layout: restore,
@@ -1386,13 +1385,13 @@ impl TransactionalMemory {
         })
     }
 
-    pub(crate) fn count_allocated_pages(&self) -> Result<usize> {
+    pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
         let state = self.state.lock().unwrap();
         let layout = self.layout.lock().unwrap();
-        let mut count = 0;
+        let mut count = 0u64;
         for i in 0..layout.layout.num_regions() {
             let region = state.get_region(i);
-            count += region.allocator().count_allocated_pages();
+            count += region.allocator().count_allocated_pages() as u64;
         }
 
         Ok(count)

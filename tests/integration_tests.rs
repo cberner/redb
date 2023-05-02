@@ -1096,7 +1096,7 @@ fn wrong_types() {
 #[test]
 fn tree_balance() {
     const EXPECTED_ORDER: usize = 9;
-    fn expected_height(mut elements: usize) -> usize {
+    fn expected_height(mut elements: usize) -> u32 {
         // Root may have only 2 entries
         let mut height = 1;
         elements /= 2;
@@ -1107,7 +1107,7 @@ fn tree_balance() {
         // Each internal node half-full, plus 1 to round up
         height += (elements as f32).log((EXPECTED_ORDER / 2) as f32) as usize + 1;
 
-        height
+        height.try_into().unwrap()
     }
 
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
