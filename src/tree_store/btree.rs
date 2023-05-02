@@ -312,11 +312,12 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
 impl<'a, K: RedbKey + 'a, V: RedbValueMutInPlace + 'a> BtreeMut<'a, K, V> {
     /// Reserve space to insert a key-value pair
     /// The returned reference will have length equal to value_length
+    // Return type has the same lifetime as &self, because the tree must not be modified until the mutable guard is dropped
     pub(crate) fn insert_reserve(
         &mut self,
         key: &K::SelfType<'_>,
         value_length: usize,
-    ) -> Result<AccessGuardMut<'a, K, V>> {
+    ) -> Result<AccessGuardMut<V>> {
         #[cfg(feature = "logging")]
         trace!(
             "Btree(root={:?}): Inserting {:?} with {} reserved bytes for the value",
@@ -335,7 +336,8 @@ impl<'a, K: RedbKey + 'a, V: RedbValueMutInPlace + 'a> BtreeMut<'a, K, V> {
             freed_pages.as_mut(),
         );
         let (_, mut guard) = operation.insert(key, &V::from_bytes(&value))?;
-        guard.set_root_for_drop(self.root.clone());
+        drop(root);
+        guard.set_root_for_drop::<K>(self.root.clone(), K::as_bytes(key).as_ref())?;
         Ok(guard)
     }
 }
