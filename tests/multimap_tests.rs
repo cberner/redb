@@ -271,7 +271,7 @@ fn efficient_storage() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_multimap_table(table_def).unwrap();
-    assert_eq!(table.len().unwrap(), entries as usize);
+    assert_eq!(table.len().unwrap(), entries as u64);
 }
 
 #[test]

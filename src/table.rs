@@ -163,7 +163,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V
         self.tree.range(range).map(Range::new)
     }
 
-    fn len(&self) -> Result<usize> {
+    fn len(&self) -> Result<u64> {
         self.tree.len()
     }
 
@@ -224,7 +224,7 @@ pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static>: Sealed {
         KR: Borrow<K::SelfType<'a>> + 'a;
 
     /// Returns the number of entries in the table
-    fn len(&self) -> Result<usize>;
+    fn len(&self) -> Result<u64>;
 
     /// Returns `true` if the table is empty
     fn is_empty(&self) -> Result<bool>;
@@ -270,7 +270,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V>
         self.tree.range(range).map(Range::new)
     }
 
-    fn len(&self) -> Result<usize> {
+    fn len(&self) -> Result<u64> {
         self.tree.len()
     }
 

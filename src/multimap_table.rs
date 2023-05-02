@@ -788,7 +788,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTabl
     }
 
     /// Returns the number of key-value pairs in the table
-    fn len(&self) -> Result<usize> {
+    fn len(&self) -> Result<u64> {
         let mut count = 0;
         for item in self.iter()? {
             let (_, values) = item?;
@@ -827,7 +827,7 @@ pub trait ReadableMultimapTable<K: RedbKey + 'static, V: RedbKey + 'static>: Sea
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a;
 
-    fn len(&self) -> Result<usize>;
+    fn len(&self) -> Result<u64>;
 
     fn is_empty(&self) -> Result<bool>;
 
@@ -889,7 +889,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, 
         Ok(MultimapRange::new(inner, self.mem))
     }
 
-    fn len(&self) -> Result<usize> {
+    fn len(&self) -> Result<u64> {
         let mut count = 0;
         for item in self.iter()? {
             let (_, values) = item?;
