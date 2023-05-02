@@ -98,7 +98,7 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
                         }
                     }
                     FuzzOperation::Len {} => {
-                        assert_eq!(local_reference.len(), table.len().unwrap());
+                        assert_eq!(local_reference.len() as u64, table.len().unwrap());
                     }
                     FuzzOperation::Range {
                         start_key,
@@ -235,7 +235,7 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
                         for v in local_reference.values() {
                             reference_len += v.len();
                         }
-                        assert_eq!(reference_len, table.len().unwrap());
+                        assert_eq!(reference_len as u64, table.len().unwrap());
                     }
                     FuzzOperation::Range {
                         start_key,

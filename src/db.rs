@@ -435,11 +435,10 @@ impl Database {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn new(
         file: File,
         page_size: usize,
-        region_size: Option<usize>,
+        region_size: Option<u64>,
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
     ) -> Result<Self> {
@@ -528,7 +527,7 @@ impl Database {
 /// Configuration builder of a redb [Database].
 pub struct Builder {
     page_size: usize,
-    region_size: Option<usize>,
+    region_size: Option<u64>,
     read_cache_size_bytes: usize,
     write_cache_size_bytes: usize,
 }
@@ -580,7 +579,7 @@ impl Builder {
     }
 
     #[cfg(test)]
-    fn set_region_size(&mut self, size: usize) -> &mut Self {
+    fn set_region_size(&mut self, size: u64) -> &mut Self {
         assert!(size.is_power_of_two());
         self.region_size = Some(size);
         self

@@ -7,7 +7,7 @@ use rand::{Rng, SeedableRng};
 use redb::{Database, ReadableTable, TableDefinition};
 use std::time::Instant;
 
-const ELEMENTS: usize = 1_000_000;
+const ELEMENTS: u64 = 1_000_000;
 const RNG_SEED: u64 = 3;
 
 const TABLE1: TableDefinition<u128, u128> = TableDefinition::new("x");

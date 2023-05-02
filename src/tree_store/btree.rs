@@ -304,7 +304,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         Ok(result)
     }
 
-    pub(crate) fn len(&self) -> Result<usize> {
+    pub(crate) fn len(&self) -> Result<u64> {
         self.read_tree()?.len()
     }
 }
@@ -477,7 +477,7 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
         BtreeRangeIter::new(range, self.root.map(|(p, _)| p), self.mem)
     }
 
-    pub(crate) fn len(&self) -> Result<usize> {
+    pub(crate) fn len(&self) -> Result<u64> {
         let iter: BtreeRangeIter<K, V> = BtreeRangeIter::new::<RangeFull, K::SelfType<'_>>(
             ..,
             self.root.map(|(p, _)| p),

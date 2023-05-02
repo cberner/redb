@@ -407,15 +407,13 @@ impl TransactionalMemory {
     pub(crate) fn new(
         file: File,
         page_size: usize,
-        requested_region_size: Option<usize>,
+        requested_region_size: Option<u64>,
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
     ) -> Result<Self> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
-        let region_size = requested_region_size
-            .map(|x| x as u64)
-            .unwrap_or(MAX_USABLE_REGION_SPACE);
+        let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
         assert!(region_size.is_power_of_two());
 
         // TODO: allocate more tracker space when it becomes exhausted, and remove this hard coded 1000 regions
