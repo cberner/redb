@@ -816,7 +816,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> Drop
     }
 }
 
-pub trait ReadableMultimapTable<K: RedbKey + 'static, V: RedbKey + 'static> {
+pub trait ReadableMultimapTable<K: RedbKey + 'static, V: RedbKey + 'static>: Sealed {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<V>>
     where
