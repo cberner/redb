@@ -21,50 +21,50 @@ use std::{panic, thread};
 /// Informational storage stats about the database
 #[derive(Debug)]
 pub struct DatabaseStats {
-    pub(crate) tree_height: usize,
-    pub(crate) allocated_pages: usize,
-    pub(crate) leaf_pages: usize,
-    pub(crate) branch_pages: usize,
-    pub(crate) stored_leaf_bytes: usize,
-    pub(crate) metadata_bytes: usize,
-    pub(crate) fragmented_bytes: usize,
+    pub(crate) tree_height: u32,
+    pub(crate) allocated_pages: u64,
+    pub(crate) leaf_pages: u64,
+    pub(crate) branch_pages: u64,
+    pub(crate) stored_leaf_bytes: u64,
+    pub(crate) metadata_bytes: u64,
+    pub(crate) fragmented_bytes: u64,
     pub(crate) page_size: usize,
 }
 
 impl DatabaseStats {
     /// Maximum traversal distance to reach the deepest (key, value) pair, across all tables
-    pub fn tree_height(&self) -> usize {
+    pub fn tree_height(&self) -> u32 {
         self.tree_height
     }
 
     /// Number of pages allocated
-    pub fn allocated_pages(&self) -> usize {
+    pub fn allocated_pages(&self) -> u64 {
         self.allocated_pages
     }
 
     /// Number of leaf pages that store user data
-    pub fn leaf_pages(&self) -> usize {
+    pub fn leaf_pages(&self) -> u64 {
         self.leaf_pages
     }
 
     /// Number of branch pages in btrees that store user data
-    pub fn branch_pages(&self) -> usize {
+    pub fn branch_pages(&self) -> u64 {
         self.branch_pages
     }
 
     /// Number of bytes consumed by keys and values that have been inserted.
     /// Does not include indexing overhead
-    pub fn stored_bytes(&self) -> usize {
+    pub fn stored_bytes(&self) -> u64 {
         self.stored_leaf_bytes
     }
 
     /// Number of bytes consumed by keys in internal branch pages, plus other metadata
-    pub fn metadata_bytes(&self) -> usize {
+    pub fn metadata_bytes(&self) -> u64 {
         self.metadata_bytes
     }
 
     /// Number of bytes consumed by fragmentation, both in data pages and internal metadata tables
-    pub fn fragmented_bytes(&self) -> usize {
+    pub fn fragmented_bytes(&self) -> u64 {
         self.fragmented_bytes
     }
 

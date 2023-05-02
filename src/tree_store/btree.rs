@@ -17,12 +17,12 @@ use std::ops::{RangeBounds, RangeFull};
 use std::sync::{Arc, Mutex};
 
 pub(crate) struct BtreeStats {
-    pub(crate) tree_height: usize,
-    pub(crate) leaf_pages: usize,
-    pub(crate) branch_pages: usize,
-    pub(crate) stored_leaf_bytes: usize,
-    pub(crate) metadata_bytes: usize,
-    pub(crate) fragmented_bytes: usize,
+    pub(crate) tree_height: u32,
+    pub(crate) leaf_pages: u64,
+    pub(crate) branch_pages: u64,
+    pub(crate) stored_leaf_bytes: u64,
+    pub(crate) metadata_bytes: u64,
+    pub(crate) fragmented_bytes: u64,
 }
 
 pub(crate) struct UntypedBtreeMut<'a> {
@@ -561,13 +561,13 @@ fn stats_helper(
             let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
             let leaf_bytes = accessor.length_of_pairs(0, accessor.num_pairs());
             let overhead_bytes = accessor.total_length() - leaf_bytes;
-            let fragmented_bytes = page.memory().len() - accessor.total_length();
+            let fragmented_bytes = (page.memory().len() - accessor.total_length()) as u64;
             Ok(BtreeStats {
                 tree_height: 1,
                 leaf_pages: 1,
                 branch_pages: 0,
-                stored_leaf_bytes: leaf_bytes,
-                metadata_bytes: overhead_bytes,
+                stored_leaf_bytes: leaf_bytes.try_into().unwrap(),
+                metadata_bytes: overhead_bytes.try_into().unwrap(),
                 fragmented_bytes,
             })
         }
@@ -577,8 +577,8 @@ fn stats_helper(
             let mut leaf_pages = 0;
             let mut branch_pages = 1;
             let mut stored_leaf_bytes = 0;
-            let mut metadata_bytes = accessor.total_length();
-            let mut fragmented_bytes = page.memory().len() - accessor.total_length();
+            let mut metadata_bytes = accessor.total_length() as u64;
+            let mut fragmented_bytes = (page.memory().len() - accessor.total_length()) as u64;
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
                     let stats = stats_helper(child, mem, fixed_key_size, fixed_value_size)?;

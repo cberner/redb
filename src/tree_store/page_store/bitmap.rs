@@ -53,7 +53,7 @@ impl<'a> BtreeBitmap<'a> {
         Self { data }
     }
 
-    pub(crate) fn count_unset(&self) -> usize {
+    pub(crate) fn count_unset(&self) -> u32 {
         self.get_level(self.get_height() - 1).count_unset()
     }
 
@@ -65,7 +65,7 @@ impl<'a> BtreeBitmap<'a> {
         self.get_level(self.get_height() - 1).get(i)
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> u32 {
         self.get_level(self.get_height() - 1).len()
     }
 
@@ -290,12 +290,13 @@ impl<'a> U64GroupedBitmap<'a> {
         )
     }
 
-    fn count_unset(&self) -> usize {
-        self.data.iter().map(|x| x.count_ones() as usize).sum()
+    fn count_unset(&self) -> u32 {
+        self.data.iter().map(|x| x.count_ones()).sum()
     }
 
-    pub fn len(&self) -> usize {
-        self.data.len() * (u8::BITS as usize)
+    pub fn len(&self) -> u32 {
+        let len: u32 = self.data.len().try_into().unwrap();
+        len * u8::BITS
     }
 
     fn any_unset(&self) -> bool {
