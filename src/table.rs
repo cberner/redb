@@ -136,7 +136,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValueMutInPlace + 'static> Table<'d
     pub fn insert_reserve<'a>(
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
-        value_length: usize,
+        value_length: u32,
     ) -> Result<AccessGuardMut<V>>
     where
         K: 'a,
