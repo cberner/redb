@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use redb::{AccessGuard, Database, Durability, Error, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, TableDefinition};
+use redb::{AccessGuard, Database, Durability, Error, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, Table, TableDefinition};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -13,6 +13,79 @@ use common::*;
 const TABLE_DEF: TableDefinition<u64, &[u8]> = TableDefinition::new("fuzz_table");
 const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, &[u8]> =
     MultimapTableDefinition::new("fuzz_multimap_table");
+
+fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, table: &mut Table<u64, &[u8]>) -> Result<(), redb::Error> {
+    match op {
+        FuzzOperation::Get { key } => {
+            let key = key.value;
+            match reference.get(&key) {
+                Some(reference_len) => {
+                    let value = table.get(&key).unwrap().unwrap();
+                    assert_eq!(value.value().len(), *reference_len);
+                }
+                None => {
+                    assert!(table.get(&key).unwrap().is_none());
+                }
+            }
+        }
+        FuzzOperation::Insert { key, value_size } => {
+            let key = key.value;
+            let value_size = value_size.value as usize;
+            let value = vec![0xFF; value_size];
+            table.insert(&key, value.as_slice())?;
+            reference.insert(key, value_size);
+        }
+        FuzzOperation::InsertReserve { key, value_size } => {
+            let key = key.value;
+            let value_size = value_size.value;
+            let mut value = table.insert_reserve(&key, value_size as u32)?;
+            value.as_mut().fill(0xFF);
+            reference.insert(key, value_size);
+        }
+        FuzzOperation::Remove { key } | FuzzOperation::RemoveOne { key, .. } => {
+            let key = key.value;
+            match reference.remove(&key) {
+                Some(reference_len) => {
+                    let value = table.remove(&key)?;
+                    assert_eq!(value.unwrap().value().len(), reference_len);
+                }
+                None => {
+                    assert!(table.remove(&key).unwrap().is_none());
+                }
+            }
+        }
+        FuzzOperation::Len {} => {
+            assert_eq!(reference.len() as u64, table.len().unwrap());
+        }
+        FuzzOperation::Range {
+            start_key,
+            len,
+            reversed,
+        } => {
+            let start = start_key.value;
+            let end = start + len.value;
+            let mut reference_iter: Box<dyn Iterator<Item = (&u64, &usize)>> =
+                if *reversed {
+                    Box::new(reference.range(start..end).rev())
+                } else {
+                    Box::new(reference.range(start..end))
+                };
+            let mut iter: Box<dyn Iterator<Item = (AccessGuard<u64>, AccessGuard<&[u8]>)>> = if *reversed {
+                Box::new(table.range(start..end).unwrap().map(|x| x.unwrap()).rev())
+            } else {
+                Box::new(table.range(start..end).unwrap().map(|x| x.unwrap()))
+            };
+            while let Some((ref_key, ref_value_len)) = reference_iter.next() {
+                let (key, value) = iter.next().unwrap();
+                assert_eq!(*ref_key, key.value());
+                assert_eq!(*ref_value_len, value.value().len());
+            }
+            assert!(iter.next().is_none());
+        }
+    }
+
+    Ok(())
+}
 
 fn exec_table(db: Arc<Database>, transactions: &[FuzzTransaction], reference: Arc<Mutex<BTreeMap<u64, usize>>>, barrier: Arc<CustomBarrier>) {
     exec_table_inner(db, &transactions, reference, barrier.clone()).unwrap();
@@ -58,74 +131,7 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
         {
             let mut table = txn.open_table(TABLE_DEF)?;
             for op in transaction.ops.iter() {
-                match op {
-                    FuzzOperation::Get { key } => {
-                        let key = key.value;
-                        match local_reference.get(&key) {
-                            Some(reference_len) => {
-                                let value = table.get(&key).unwrap().unwrap();
-                                assert_eq!(value.value().len(), *reference_len);
-                            }
-                            None => {
-                                assert!(table.get(&key).unwrap().is_none());
-                            }
-                        }
-                    }
-                    FuzzOperation::Insert { key, value_size } => {
-                        let key = key.value;
-                        let value_size = value_size.value as usize;
-                        let value = vec![0xFF; value_size];
-                        table.insert(&key, value.as_slice())?;
-                        local_reference.insert(key, value_size);
-                    }
-                    FuzzOperation::InsertReserve { key, value_size } => {
-                        let key = key.value;
-                        let value_size = value_size.value;
-                        let mut value = table.insert_reserve(&key, value_size as u32)?;
-                        value.as_mut().fill(0xFF);
-                        local_reference.insert(key, value_size);
-                    }
-                    FuzzOperation::Remove { key } | FuzzOperation::RemoveOne { key, .. } => {
-                        let key = key.value;
-                        match local_reference.remove(&key) {
-                            Some(reference_len) => {
-                                let value = table.remove(&key)?;
-                                assert_eq!(value.unwrap().value().len(), reference_len);
-                            }
-                            None => {
-                                assert!(table.remove(&key).unwrap().is_none());
-                            }
-                        }
-                    }
-                    FuzzOperation::Len {} => {
-                        assert_eq!(local_reference.len() as u64, table.len().unwrap());
-                    }
-                    FuzzOperation::Range {
-                        start_key,
-                        len,
-                        reversed,
-                    } => {
-                        let start = start_key.value;
-                        let end = start + len.value;
-                        let mut reference_iter: Box<dyn Iterator<Item = (&u64, &usize)>> =
-                            if *reversed {
-                                Box::new(local_reference.range(start..end).rev())
-                            } else {
-                                Box::new(local_reference.range(start..end))
-                            };
-                        let mut iter: Box<dyn Iterator<Item = (AccessGuard<u64>, AccessGuard<&[u8]>)>> = if *reversed {
-                            Box::new(table.range(start..end).unwrap().map(|x| x.unwrap()).rev())
-                        } else {
-                            Box::new(table.range(start..end).unwrap().map(|x| x.unwrap()))
-                        };
-                        while let Some((ref_key, ref_value_len)) = reference_iter.next() {
-                            let (key, value) = iter.next().unwrap();
-                            assert_eq!(*ref_key, key.value());
-                            assert_eq!(*ref_value_len, value.value().len());
-                        }
-                        assert!(iter.next().is_none());
-                    }
-                }
+                handle_table_op(op, &mut local_reference, &mut table)?;
             }
         }
         if transaction.commit {
