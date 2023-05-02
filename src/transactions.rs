@@ -630,7 +630,8 @@ impl<'db> WriteTransaction<'db> {
                 transaction_id: self.transaction_id.0,
                 pagination_id: pagination_counter,
             };
-            let mut access_guard = freed_tree.insert_reserve(&key, buffer_size)?;
+            let mut access_guard =
+                freed_tree.insert_reserve(&key, buffer_size.try_into().unwrap())?;
 
             let mut freed_pages = self.freed_pages.lock().unwrap();
             let len = freed_pages.len();

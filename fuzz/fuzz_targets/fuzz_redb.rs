@@ -80,8 +80,8 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
                     }
                     FuzzOperation::InsertReserve { key, value_size } => {
                         let key = key.value;
-                        let value_size = value_size.value as usize;
-                        let mut value = table.insert_reserve(&key, value_size)?;
+                        let value_size = value_size.value;
+                        let mut value = table.insert_reserve(&key, value_size as u32)?;
                         value.as_mut().fill(0xFF);
                         local_reference.insert(key, value_size);
                     }

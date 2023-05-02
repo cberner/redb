@@ -316,7 +316,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValueMutInPlace + 'a> BtreeMut<'a, K, V> {
     pub(crate) fn insert_reserve(
         &mut self,
         key: &K::SelfType<'_>,
-        value_length: usize,
+        value_length: u32,
     ) -> Result<AccessGuardMut<V>> {
         #[cfg(feature = "logging")]
         trace!(
@@ -327,7 +327,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValueMutInPlace + 'a> BtreeMut<'a, K, V> {
         );
         let mut root = self.root.lock().unwrap();
         let mut freed_pages = self.freed_pages.lock().unwrap();
-        let mut value = vec![0u8; value_length];
+        let mut value = vec![0u8; value_length as usize];
         V::initialize(&mut value);
         let mut operation = MutateHelper::<K, V>::new(
             &mut root,
