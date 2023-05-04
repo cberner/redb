@@ -979,7 +979,7 @@ impl TransactionalMemory {
                 .lock()
                 .unwrap()
                 .contains_key(&page_number));
-            assert!(self.open_dirty_pages.lock().unwrap().insert(page_number));
+            assert!(!self.open_dirty_pages.lock().unwrap().contains(&page_number));
         }
 
         let address_range = page_number.address_range(
@@ -992,6 +992,11 @@ impl TransactionalMemory {
             .try_into()
             .unwrap();
         let mem = self.storage.write(address_range.start, len)?;
+
+        #[cfg(debug_assertions)]
+        {
+            assert!(self.open_dirty_pages.lock().unwrap().insert(page_number));
+        }
 
         Ok(PageMut {
             mem,
@@ -1127,14 +1132,6 @@ impl TransactionalMemory {
                     .unwrap()
             };
 
-        self.allocated_since_commit
-            .lock()
-            .unwrap()
-            .insert(page_number);
-        self.log_since_commit
-            .lock()
-            .unwrap()
-            .push(AllocationOp::Allocate(page_number));
         #[cfg(debug_assertions)]
         {
             assert!(
@@ -1145,8 +1142,17 @@ impl TransactionalMemory {
                     .contains_key(&page_number),
                 "Allocated a page that is still referenced! {page_number:?}"
             );
-            assert!(self.open_dirty_pages.lock().unwrap().insert(page_number));
+            assert!(!self.open_dirty_pages.lock().unwrap().contains(&page_number));
         }
+
+        self.allocated_since_commit
+            .lock()
+            .unwrap()
+            .insert(page_number);
+        self.log_since_commit
+            .lock()
+            .unwrap()
+            .push(AllocationOp::Allocate(page_number));
 
         let address_range = page_number.address_range(
             self.page_size as u64,
@@ -1164,6 +1170,8 @@ impl TransactionalMemory {
 
         #[cfg(debug_assertions)]
         {
+            assert!(self.open_dirty_pages.lock().unwrap().insert(page_number));
+
             // Poison the memory in debug mode to help detect uninitialized reads
             mem.mem_mut().fill(0xFF);
         }
@@ -1343,14 +1351,6 @@ impl TransactionalMemory {
                 self.allocate_helper(&mut state, required_order)?.unwrap()
             };
 
-        self.allocated_since_commit
-            .lock()
-            .unwrap()
-            .insert(page_number);
-        self.log_since_commit
-            .lock()
-            .unwrap()
-            .push(AllocationOp::Allocate(page_number));
         #[cfg(debug_assertions)]
         {
             assert!(
@@ -1361,8 +1361,17 @@ impl TransactionalMemory {
                     .contains_key(&page_number),
                 "Allocated a page that is still referenced! {page_number:?}"
             );
-            assert!(self.open_dirty_pages.lock().unwrap().insert(page_number));
+            assert!(!self.open_dirty_pages.lock().unwrap().contains(&page_number));
         }
+
+        self.allocated_since_commit
+            .lock()
+            .unwrap()
+            .insert(page_number);
+        self.log_since_commit
+            .lock()
+            .unwrap()
+            .push(AllocationOp::Allocate(page_number));
 
         let address_range = page_number.address_range(
             self.page_size as u64,
@@ -1380,6 +1389,8 @@ impl TransactionalMemory {
 
         #[cfg(debug_assertions)]
         {
+            assert!(self.open_dirty_pages.lock().unwrap().insert(page_number));
+
             // Poison the memory in debug mode to help detect uninitialized reads
             mem.mem_mut().fill(0xFF);
         }
