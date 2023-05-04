@@ -563,6 +563,11 @@ impl TransactionalMemory {
         })
     }
 
+    #[cfg(any(fuzzing, test))]
+    pub(crate) fn set_crash_countdown(&self, value: u64) {
+        self.storage.set_crash_countdown(value);
+    }
+
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result {
         assert!(self.allocated_since_commit.lock().unwrap().is_empty());
         assert!(self.log_since_commit.lock().unwrap().is_empty());
