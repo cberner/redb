@@ -482,6 +482,33 @@ mod test {
     }
 
     #[test]
+    fn repair_empty() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
+        drop(db);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        let mut buffer = [0u8; 1];
+        file.read_exact(&mut buffer).unwrap();
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        buffer[0] |= RECOVERY_REQUIRED;
+        file.write_all(&buffer).unwrap();
+
+        assert!(TransactionalMemory::new(file, PAGE_SIZE, None, 0, 0)
+            .unwrap()
+            .needs_repair()
+            .unwrap());
+
+        Database::open(tmpfile.path()).unwrap();
+    }
+
+    #[test]
     fn repair_insert_reserve_regression() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let db = Database::builder().create(tmpfile.path()).unwrap();

@@ -120,6 +120,10 @@ impl PagedCachedFile {
         self.crash_countdown.store(value, Ordering::Release);
     }
 
+    pub(crate) fn file_len(&self) -> Result<u64> {
+        Ok(self.file.file().metadata()?.len())
+    }
+
     const fn lock_stripes() -> usize {
         131
     }

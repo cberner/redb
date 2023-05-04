@@ -1017,6 +1017,10 @@ impl TransactionalMemory {
         }
     }
 
+    pub(crate) fn raw_file_len(&self) -> Result<u64> {
+        self.storage.file_len()
+    }
+
     pub(crate) fn get_data_root(&self) -> Option<(PageNumber, Checksum)> {
         let state = self.state.lock().unwrap();
         if self.read_from_secondary.load(Ordering::Acquire) {

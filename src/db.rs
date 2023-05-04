@@ -259,18 +259,38 @@ impl Database {
     }
 
     fn verify_primary_checksums(mem: &TransactionalMemory) -> Result<bool> {
-        let (root, root_checksum) = mem
-            .get_data_root()
-            .expect("Tried to repair an empty database");
-        if !RawBtree::new(
-            Some((root, root_checksum)),
-            <&str>::fixed_width(),
-            InternalTableDefinition::fixed_width(),
-            mem,
-        )
-        .verify_checksum()?
-        {
-            return Ok(false);
+        if let Some((root, root_checksum)) = mem.get_data_root() {
+            if !RawBtree::new(
+                Some((root, root_checksum)),
+                <&str>::fixed_width(),
+                InternalTableDefinition::fixed_width(),
+                mem,
+            )
+            .verify_checksum()?
+            {
+                return Ok(false);
+            }
+
+            // Iterate over all other tables
+            let iter: BtreeRangeIter<&str, InternalTableDefinition> =
+                BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
+            for entry in iter {
+                let definition = entry?.value();
+                if let Some((table_root, table_checksum)) = definition.get_root() {
+                    if !RawBtree::new(
+                        Some((table_root, table_checksum)),
+                        definition.get_fixed_key_size(),
+                        definition.get_fixed_value_size(),
+                        mem,
+                    )
+                    .verify_checksum()?
+                    {
+                        return Ok(false);
+                    }
+                }
+            }
+        } else {
+            assert!(mem.raw_file_len()? < 10 * 1024 * 1024, "Database detected as empty, but file is > 10MiB. Aborting repair to avoid potential data loss.");
         }
 
         if let Some((freed_root, freed_checksum)) = mem.get_freed_root() {
@@ -283,25 +303,6 @@ impl Database {
             .verify_checksum()?
             {
                 return Ok(false);
-            }
-        }
-
-        // Iterate over all other tables
-        let iter: BtreeRangeIter<&str, InternalTableDefinition> =
-            BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
-        for entry in iter {
-            let definition = entry?.value();
-            if let Some((table_root, table_checksum)) = definition.get_root() {
-                if !RawBtree::new(
-                    Some((table_root, table_checksum)),
-                    definition.get_fixed_key_size(),
-                    definition.get_fixed_value_size(),
-                    mem,
-                )
-                .verify_checksum()?
-                {
-                    return Ok(false);
-                }
             }
         }
 
@@ -378,47 +379,46 @@ impl Database {
 
         mem.begin_repair()?;
 
-        let (root, root_checksum) = mem
-            .get_data_root()
-            .expect("Tried to repair an empty database");
+        let data_root = mem.get_data_root();
+        if let Some((root, _)) = data_root {
+            // Repair the allocator state
+            // All pages in the master table
+            let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, mem)?;
+            mem.mark_pages_allocated(master_pages_iter)?;
 
-        // Repair the allocator state
-        // All pages in the master table
-        let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, mem)?;
-        mem.mark_pages_allocated(master_pages_iter)?;
+            // Iterate over all other tables
+            let iter: BtreeRangeIter<&str, InternalTableDefinition> =
+                BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
 
-        // Iterate over all other tables
-        let iter: BtreeRangeIter<&str, InternalTableDefinition> =
-            BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
-
-        // Chain all the other tables to the master table iter
-        for entry in iter {
-            let definition = entry?.value();
-            if let Some((table_root, _)) = definition.get_root() {
-                let table_pages_iter = AllPageNumbersBtreeIter::new(
-                    table_root,
-                    definition.get_fixed_key_size(),
-                    definition.get_fixed_value_size(),
-                    mem,
-                )?;
-                mem.mark_pages_allocated(table_pages_iter)?;
-
-                // Multimap tables may have additional subtrees in their values
-                if definition.get_type() == TableType::Multimap {
+            // Chain all the other tables to the master table iter
+            for entry in iter {
+                let definition = entry?.value();
+                if let Some((table_root, _)) = definition.get_root() {
                     let table_pages_iter = AllPageNumbersBtreeIter::new(
                         table_root,
                         definition.get_fixed_key_size(),
                         definition.get_fixed_value_size(),
                         mem,
                     )?;
-                    for table_page in table_pages_iter {
-                        let page = mem.get_page(table_page?)?;
-                        let mut subtree_roots = parse_subtree_roots(
-                            &page,
+                    mem.mark_pages_allocated(table_pages_iter)?;
+
+                    // Multimap tables may have additional subtrees in their values
+                    if definition.get_type() == TableType::Multimap {
+                        let table_pages_iter = AllPageNumbersBtreeIter::new(
+                            table_root,
                             definition.get_fixed_key_size(),
                             definition.get_fixed_value_size(),
-                        );
-                        mem.mark_pages_allocated(subtree_roots.drain(..).map(Ok))?;
+                            mem,
+                        )?;
+                        for table_page in table_pages_iter {
+                            let page = mem.get_page(table_page?)?;
+                            let mut subtree_roots = parse_subtree_roots(
+                                &page,
+                                definition.get_fixed_key_size(),
+                                definition.get_fixed_value_size(),
+                            );
+                            mem.mark_pages_allocated(subtree_roots.drain(..).map(Ok))?;
+                        }
                     }
                 }
             }
@@ -429,13 +429,7 @@ impl Database {
         // Clear the freed table. We just rebuilt the allocator state by walking all the
         // reachable data pages, which implicitly frees the pages for the freed table
         let transaction_id = mem.get_last_committed_transaction_id()?.next();
-        mem.commit(
-            Some((root, root_checksum)),
-            None,
-            transaction_id,
-            false,
-            true,
-        )?;
+        mem.commit(data_root, None, transaction_id, false, true)?;
 
         Ok(())
     }
