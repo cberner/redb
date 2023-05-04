@@ -824,6 +824,152 @@ mod test {
     }
 
     #[test]
+    fn crash_regression1() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+        let db = Database::builder()
+            .set_cache_size(1024 * 1024)
+            .set_page_size(1024)
+            .create(tmpfile.path())
+            .unwrap();
+        db.set_crash_countdown(0);
+
+        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+        let tx = db.begin_write().unwrap();
+        {
+            assert!(matches!(
+                tx.open_table(table_def),
+                Err(Error::SimulatedIOFailure)
+            ));
+        }
+        tx.abort().unwrap();
+    }
+
+    #[test]
+    fn crash_regression2() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+        let db = Database::builder()
+            .set_cache_size(65284)
+            .set_page_size(512)
+            .create(tmpfile.path())
+            .unwrap();
+        db.set_crash_countdown(37);
+
+        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("fuzz_table");
+
+        let mut tx = db.begin_write().unwrap();
+        let savepoint = tx.savepoint().unwrap();
+        tx.restore_savepoint(&savepoint).unwrap();
+        {
+            tx.open_table(table_def).unwrap();
+        }
+        tx.commit().unwrap();
+
+        let mut tx = db.begin_write().unwrap();
+        tx.set_durability(Durability::None);
+        let savepoint2 = tx.savepoint().unwrap();
+        tx.restore_savepoint(&savepoint).unwrap();
+        {
+            let mut table = tx.open_table(table_def).unwrap();
+            table
+                .insert_reserve(238208, 1250)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table.insert(671397, [0xFFu8; 52].as_slice()).unwrap();
+            table
+                .insert_reserve(160132, 988)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table
+                .insert_reserve(579303, 1096)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table
+                .insert_reserve(286181, 1809)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table
+                .insert_reserve(31645, 2136)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table
+                .insert_reserve(723991, 2414)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table.insert(802889, [0xFFu8; 185].as_slice()).unwrap();
+            table
+                .insert_reserve(65408, 924)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table
+                .insert_reserve(723991, 2414)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table
+                .insert_reserve(878783, 2235)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table.get(35723).unwrap();
+            table.get(712797).unwrap();
+            table
+                .insert_reserve(118749, 1302)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table
+                .insert_reserve(123869, 3111)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table
+                .insert_reserve(723991, 2414)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table
+                .insert_reserve(784138, 460)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table
+                .insert_reserve(119517, 869)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            table
+                .insert_reserve(182743, 2414)
+                .unwrap()
+                .as_mut()
+                .fill(0xFF);
+            assert!(matches!(
+                table.insert_reserve(723991, 896),
+                Err(Error::SimulatedIOFailure)
+            ));
+        }
+        drop(tx);
+        drop(db);
+        Database::builder()
+            .set_cache_size(65284)
+            .set_page_size(512)
+            .create(tmpfile.path())
+            .unwrap();
+
+        drop(savepoint);
+        drop(savepoint2);
+    }
+
+    #[test]
     fn dynamic_shrink() {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
         let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
