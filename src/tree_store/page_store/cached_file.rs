@@ -9,7 +9,7 @@ use std::ops::{DerefMut, Index, IndexMut};
 #[cfg(any(target_os = "linux", all(unix, not(fuzzing))))]
 use std::os::unix::io::AsRawFd;
 use std::slice::SliceIndex;
-#[cfg(feature = "cache_metrics")]
+#[cfg(any(fuzzing, test, feature = "cache_metrics"))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -71,6 +71,8 @@ pub(super) struct PagedCachedFile {
     read_cache: Vec<RwLock<BTreeMap<u64, Arc<Vec<u8>>>>>,
     // TODO: maybe move this cache to WriteTransaction?
     write_buffer: Mutex<BTreeMap<u64, Arc<Vec<u8>>>>,
+    #[cfg(any(fuzzing, test))]
+    crash_countdown: AtomicU64,
 }
 
 impl PagedCachedFile {
@@ -108,7 +110,14 @@ impl PagedCachedFile {
             fsync_failed: Default::default(),
             read_cache,
             write_buffer: Mutex::new(BTreeMap::new()),
+            #[cfg(any(fuzzing, test))]
+            crash_countdown: AtomicU64::new(u64::MAX),
         })
+    }
+
+    #[cfg(any(fuzzing, test))]
+    pub(crate) fn set_crash_countdown(&self, value: u64) {
+        self.crash_countdown.store(value, Ordering::Release);
     }
 
     const fn lock_stripes() -> usize {
@@ -213,6 +222,12 @@ impl PagedCachedFile {
 
     // Read directly from the file, ignoring any cached data
     pub(super) fn read_direct(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
+        #[cfg(any(fuzzing, test))]
+        {
+            if self.crash_countdown.load(Ordering::Acquire) == 0 {
+                return Err(Error::SimulatedIOFailure);
+            }
+        }
         self.check_fsync_failure()?;
         self.file.read(offset, len)
     }
@@ -326,6 +341,13 @@ impl PagedCachedFile {
                         self.write_buffer_bytes
                             .fetch_sub(buffer.len(), Ordering::Release);
                         removed_bytes += buffer.len();
+                        #[cfg(any(fuzzing, test))]
+                        {
+                            if self.crash_countdown.load(Ordering::Acquire) == 0 {
+                                return Err(Error::SimulatedIOFailure);
+                            }
+                            self.crash_countdown.fetch_sub(1, Ordering::AcqRel);
+                        }
                         self.file.write(offset, &buffer)?;
                     } else {
                         break;

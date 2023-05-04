@@ -6,6 +6,9 @@ use std::{io, panic};
 /// Possibles errors in `redb` crate
 #[derive(Debug)]
 pub enum Error {
+    /// For use by fuzzer only
+    #[cfg(any(fuzzing, test))]
+    SimulatedIOFailure,
     /// The Database is already open. Cannot acquire lock.
     DatabaseAlreadyOpen,
     /// This savepoint is invalid because an older savepoint was restored after it was created
@@ -40,6 +43,10 @@ impl From<io::Error> for Error {
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(any(fuzzing, test))]
+            Error::SimulatedIOFailure => {
+                write!(f, "Fuzzer: Simulated I/O error")
+            }
             Error::Corrupted(msg) => {
                 write!(f, "DB corrupted: {msg}")
             }

@@ -253,6 +253,11 @@ impl Database {
         &self.mem
     }
 
+    #[cfg(any(fuzzing, test))]
+    pub fn set_crash_countdown(&self, value: u64) {
+        self.mem.set_crash_countdown(value);
+    }
+
     fn verify_primary_checksums(mem: &TransactionalMemory) -> Result<bool> {
         let (root, root_checksum) = mem
             .get_data_root()
@@ -635,7 +640,7 @@ impl std::fmt::Debug for Database {
 mod test {
     use tempfile::NamedTempFile;
 
-    use crate::{Database, Durability, ReadableTable, TableDefinition};
+    use crate::{Database, Durability, Error, ReadableTable, TableDefinition};
 
     #[test]
     fn small_pages() {

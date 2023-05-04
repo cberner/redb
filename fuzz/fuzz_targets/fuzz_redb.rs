@@ -1,8 +1,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use redb::{AccessGuard, Database, Durability, Error, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, Table, TableDefinition};
+use redb::{AccessGuard, Database, Durability, Error, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, Savepoint, Table, TableDefinition};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tempfile::NamedTempFile;
@@ -20,11 +21,11 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
             let key = key.value;
             match reference.get(&key) {
                 Some(reference_len) => {
-                    let value = table.get(&key).unwrap().unwrap();
+                    let value = table.get(&key)?.unwrap();
                     assert_eq!(value.value().len(), *reference_len);
                 }
                 None => {
-                    assert!(table.get(&key).unwrap().is_none());
+                    assert!(table.get(&key)?.is_none());
                 }
             }
         }
@@ -50,12 +51,12 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
                     assert_eq!(value.unwrap().value().len(), reference_len);
                 }
                 None => {
-                    assert!(table.remove(&key).unwrap().is_none());
+                    assert!(table.remove(&key)?.is_none());
                 }
             }
         }
         FuzzOperation::Len {} => {
-            assert_eq!(reference.len() as u64, table.len().unwrap());
+            assert_eq!(reference.len() as u64, table.len()?);
         }
         FuzzOperation::Range {
             start_key,
@@ -70,18 +71,110 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
                 } else {
                     Box::new(reference.range(start..end))
                 };
-            let mut iter: Box<dyn Iterator<Item = (AccessGuard<u64>, AccessGuard<&[u8]>)>> = if *reversed {
-                Box::new(table.range(start..end).unwrap().map(|x| x.unwrap()).rev())
+            let mut iter: Box<dyn Iterator<Item = Result<(AccessGuard<u64>, AccessGuard<&[u8]>), redb::Error>>> = if *reversed {
+                Box::new(table.range(start..end)?.rev())
             } else {
-                Box::new(table.range(start..end).unwrap().map(|x| x.unwrap()))
+                Box::new(table.range(start..end)?)
             };
             while let Some((ref_key, ref_value_len)) = reference_iter.next() {
-                let (key, value) = iter.next().unwrap();
+                let (key, value) = iter.next().unwrap()?;
                 assert_eq!(*ref_key, key.value());
                 assert_eq!(*ref_value_len, value.value().len());
             }
             assert!(iter.next().is_none());
         }
+    }
+
+    Ok(())
+}
+
+fn exec_table_crash_support(config: &FuzzConfig) -> Result<(), redb::Error> {
+    let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let mut db = Database::builder()
+        .set_page_size(config.page_size.value)
+        .set_cache_size(config.cache_size.value)
+        .create(redb_file.path())
+        .unwrap();
+    db.set_crash_countdown(config.crash_after_ops.value);
+
+    let mut savepoints = vec![];
+    let mut reference_savepoints = vec![];
+    let mut reference = BTreeMap::new();
+    let mut non_durable_reference = reference.clone();
+
+    for transaction in config.thread0_transactions.iter() {
+        let result = apply_crashable_transaction(&db, &mut non_durable_reference, transaction, &mut savepoints, &mut reference_savepoints);
+        if result.is_err() {
+            if matches!(result, Err(Error::SimulatedIOFailure)) {
+                drop(db);
+                savepoints.clear();
+                reference_savepoints.clear();
+                non_durable_reference = reference.clone();
+
+                // Check that recovery flag is set
+                redb_file.seek(SeekFrom::Start(9)).unwrap();
+                let mut god_byte = vec![0u8];
+                assert_eq!(redb_file.read(&mut god_byte).unwrap(), 1);
+                assert_ne!(god_byte[0] & 2, 0);
+
+                // Repair the database
+                db = Database::builder()
+                    .set_page_size(config.page_size.value)
+                    .set_cache_size(config.cache_size.value)
+                    .create(redb_file.path())
+                    .unwrap();
+            } else {
+                return result;
+            }
+        } else if transaction.durable && transaction.commit {
+            reference = non_durable_reference.clone();
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_crashable_transaction(db: &Database, reference: &mut BTreeMap<u64, usize>, transaction: &FuzzTransaction, savepoints: &mut Vec<Savepoint>, reference_savepoints: &mut Vec<BTreeMap<u64, usize>>) -> Result<(), redb::Error> {
+    let mut txn = db.begin_write().unwrap();
+    let mut local_reference = reference.clone();
+
+    if transaction.create_savepoint {
+        savepoints.push(txn.savepoint()?);
+        reference_savepoints.push(local_reference.clone());
+        if savepoints.len() > MAX_SAVEPOINTS {
+            savepoints.remove(0);
+            reference_savepoints.remove(0);
+        }
+    }
+    let restore_to = transaction.restore_savepoint.value;
+    if restore_to > 0 && restore_to <= savepoints.len() {
+        let index = savepoints.len() - restore_to;
+        let result = txn.restore_savepoint(&savepoints[index]);
+        if result.is_ok() {
+            local_reference = reference_savepoints[index].clone();
+        }
+        if result.is_err() && !matches!(result, Err(Error::InvalidSavepoint)) {
+            return result;
+        }
+    }
+
+    // We're not trying to test crash safety, so don't bother with durability
+    if !transaction.durable {
+        txn.set_durability(Durability::None);
+    }
+    {
+        let mut table = txn.open_table(TABLE_DEF)?;
+        for op in transaction.ops.iter() {
+            handle_table_op(op, &mut local_reference, &mut table)?;
+        }
+    }
+
+    if transaction.commit {
+        txn.commit()?;
+        *reference = local_reference;
+    } else {
+        txn.abort()?;
     }
 
     Ok(())
@@ -284,6 +377,8 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
 }
 
 fuzz_target!(|config: FuzzConfig| {
+    exec_table_crash_support(&config).unwrap();
+
     let redb_file: NamedTempFile = NamedTempFile::new().unwrap();
     let db = Database::builder()
             .set_page_size(config.page_size.value)
