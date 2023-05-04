@@ -12,6 +12,8 @@ use crate::tree_store::{Page, PageNumber};
 use crate::Error;
 use crate::Error::Corrupted;
 use crate::Result;
+#[cfg(feature = "logging")]
+use log::warn;
 use std::cmp;
 use std::cmp::max;
 #[cfg(debug_assertions)]
@@ -1437,14 +1439,14 @@ impl Drop for TransactionalMemory {
                     .commit(root, freed_root, non_durable_transaction_id, false, true)
                     .is_err()
                 {
-                    eprintln!(
+                    #[cfg(feature = "logging")]
+                    warn!(
                         "Failure while finalizing non-durable commit. Database may have rolled back"
                     );
                 }
             } else {
-                eprintln!(
-                    "Failure while finalizing non-durable commit. Database may have rolled back"
-                );
+                #[cfg(feature = "logging")]
+                warn!("Failure while finalizing non-durable commit. Database may have rolled back");
             }
         }
         let mut state = self.state.lock().unwrap();
@@ -1457,7 +1459,8 @@ impl Drop for TransactionalMemory {
             )
             .is_err()
         {
-            eprintln!("Failure while flushing allocator state. Repair required at restart.");
+            #[cfg(feature = "logging")]
+            warn!("Failure while flushing allocator state. Repair required at restart.");
         }
 
         if self.storage.flush().is_ok() && !self.needs_recovery {
