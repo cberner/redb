@@ -845,7 +845,13 @@ impl TransactionalMemory {
 
     pub(crate) fn rollback_uncommitted_writes(&self) -> Result {
         #[cfg(debug_assertions)]
-        debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
+        {
+            let dirty_pages = self.open_dirty_pages.lock().unwrap();
+            debug_assert!(
+                dirty_pages.is_empty(),
+                "Dirty pages outstanding: {dirty_pages:?}"
+            );
+        }
         let mut state = self.state.lock().unwrap();
         // The layout to restore
         let (restore, restore_tracker_page) = if self.read_from_secondary.load(Ordering::Acquire) {
