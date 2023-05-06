@@ -570,6 +570,10 @@ impl TransactionalMemory {
         self.storage.set_crash_countdown(value);
     }
 
+    pub(crate) fn clear_read_cache(&mut self) {
+        self.storage.invalidate_cache_all()
+    }
+
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result {
         assert!(self.allocated_since_commit.lock().unwrap().is_empty());
         assert!(self.log_since_commit.lock().unwrap().is_empty());

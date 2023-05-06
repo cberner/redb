@@ -371,6 +371,10 @@ impl Database {
     fn do_repair(mem: &mut TransactionalMemory) -> Result {
         if !Self::verify_primary_checksums(mem)? {
             mem.repair_primary_corrupted();
+            // We need to invalidate the userspace cache, because walking the tree in verify_primary_checksums() may
+            // have poisoned it with pages that just got rolled back by repair_primary_corrupted(), since
+            // that rolls back a partially committed transaction.
+            mem.clear_read_cache();
             if !Self::verify_primary_checksums(mem)? {
                 return Err(Corrupted(
                     "Failed to repair database. All roots are corrupted".to_string(),
@@ -426,6 +430,10 @@ impl Database {
         }
 
         mem.end_repair()?;
+
+        // We need to invalidate the userspace cache, because we're about to implicitly free the freed table
+        // by storing an empty root during the below commit()
+        mem.clear_read_cache();
 
         // Clear the freed table. We just rebuilt the allocator state by walking all the
         // reachable data pages, which implicitly frees the pages for the freed table
