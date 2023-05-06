@@ -325,7 +325,12 @@ impl PagedCachedFile {
         let existing = {
             let mut lock = self.read_cache[cache_slot].write().unwrap();
             if let Some(removed) = lock.remove(&offset) {
-                assert_eq!(len, removed.len());
+                assert_eq!(
+                    len,
+                    removed.len(),
+                    "cache inconsistency {len} != {} for offset {offset}",
+                    removed.len()
+                );
                 self.read_cache_bytes
                     .fetch_sub(removed.len(), Ordering::AcqRel);
                 Some(Arc::try_unwrap(removed).unwrap())
