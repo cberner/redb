@@ -321,6 +321,7 @@ impl Database {
         }
 
         Self::do_repair(&mut self.mem)?;
+        self.mem.begin_writable()?;
 
         Ok(false)
     }
