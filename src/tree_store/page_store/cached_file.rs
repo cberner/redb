@@ -344,20 +344,24 @@ impl PagedCachedFile {
         } else {
             let previous = self.write_buffer_bytes.fetch_add(len, Ordering::AcqRel);
             if previous + len > self.max_write_buffer_bytes {
+                #[cfg(any(fuzzing, test))]
+                {
+                    if self.crash_countdown.load(Ordering::Acquire) == 0 {
+                        return Err(Error::SimulatedIOFailure);
+                    }
+                    self.crash_countdown.fetch_sub(1, Ordering::AcqRel);
+                }
                 let mut removed_bytes = 0;
                 while removed_bytes < len {
                     if let Some((offset, buffer)) = lock.pop_first() {
                         self.write_buffer_bytes
                             .fetch_sub(buffer.len(), Ordering::Release);
                         removed_bytes += buffer.len();
-                        #[cfg(any(fuzzing, test))]
-                        {
-                            if self.crash_countdown.load(Ordering::Acquire) == 0 {
-                                return Err(Error::SimulatedIOFailure);
-                            }
-                            self.crash_countdown.fetch_sub(1, Ordering::AcqRel);
+                        let result = self.file.write(offset, &buffer);
+                        if result.is_err() {
+                            lock.insert(offset, buffer);
                         }
-                        self.file.write(offset, &buffer)?;
+                        result?;
                     } else {
                         break;
                     }
