@@ -9,6 +9,14 @@ impl TransactionId {
     pub(crate) fn next(&self) -> TransactionId {
         TransactionId(self.0 + 1)
     }
+
+    pub(crate) fn parent(&self) -> Option<TransactionId> {
+        if self.0 == 0 {
+            None
+        } else {
+            Some(TransactionId(self.0 - 1))
+        }
+    }
 }
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
@@ -25,6 +33,10 @@ pub(crate) struct TransactionTracker {
     // reference count of read transactions per transaction id
     live_read_transactions: BTreeMap<TransactionId, u64>,
     valid_savepoints: BTreeSet<SavepointId>,
+    // Non-durable commits that are still in-memory, and waiting for a durable commit to get flushed
+    // We need to make sure that the freed-table does not get processed for these, since they are not durable yet
+    // Therefore, we hold a read transaction on their parent
+    pending_non_durable_commits: Vec<TransactionId>,
 }
 
 impl TransactionTracker {
@@ -33,7 +45,30 @@ impl TransactionTracker {
             next_savepoint_id: SavepointId(0),
             live_read_transactions: Default::default(),
             valid_savepoints: Default::default(),
+            pending_non_durable_commits: Default::default(),
         }
+    }
+
+    pub(crate) fn clear_pending_non_durable_commits(&mut self) {
+        for id in self.pending_non_durable_commits.drain(..) {
+            if let Some(parent) = id.parent() {
+                let ref_count = self.live_read_transactions.get_mut(&parent).unwrap();
+                *ref_count -= 1;
+                if *ref_count == 0 {
+                    self.live_read_transactions.remove(&parent);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn register_non_durable_commit(&mut self, id: TransactionId) {
+        if let Some(parent) = id.parent() {
+            self.live_read_transactions
+                .entry(parent)
+                .and_modify(|x| *x += 1)
+                .or_insert(1);
+        }
+        self.pending_non_durable_commits.push(id);
     }
 
     pub(crate) fn register_read_transaction(&mut self, id: TransactionId) {
