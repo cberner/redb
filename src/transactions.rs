@@ -75,6 +75,7 @@ impl DatabaseStats {
 }
 
 #[derive(Copy, Clone, Debug)]
+#[non_exhaustive]
 pub enum Durability {
     /// Commits with this durability level will not be persisted to disk unless followed by a
     /// commit with a higher durability level.
