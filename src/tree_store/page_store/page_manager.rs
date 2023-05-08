@@ -383,7 +383,7 @@ pub(crate) struct TransactionalMemory {
     allocated_since_commit: Mutex<HashSet<PageNumber>>,
     log_since_commit: Mutex<Vec<AllocationOp>>,
     // True if the allocator state was corrupted when the file was opened
-    needs_recovery: bool,
+    needs_recovery: AtomicBool,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
     // The current layout for the active transaction.
@@ -547,7 +547,7 @@ impl TransactionalMemory {
         Ok(Self {
             allocated_since_commit: Mutex::new(HashSet::new()),
             log_since_commit: Mutex::new(vec![]),
-            needs_recovery,
+            needs_recovery: AtomicBool::new(needs_recovery),
             storage,
             layout: Mutex::new(InProgressLayout {
                 layout,
@@ -607,7 +607,8 @@ impl TransactionalMemory {
             self.storage.flush()?;
         }
 
-        self.needs_recovery = header.recovery_required;
+        self.needs_recovery
+            .store(header.recovery_required, Ordering::Release);
         let state = InMemoryState::from_bytes(header.clone(), &self.storage)?;
         *self.state.lock().unwrap() = state;
         let layout = header.primary_slot().layout;
@@ -695,7 +696,7 @@ impl TransactionalMemory {
         state.header.recovery_required = false;
         self.write_header(&state.header, false)?;
         let result = self.storage.flush();
-        self.needs_recovery = false;
+        self.needs_recovery.store(false, Ordering::Release);
 
         result
     }
@@ -771,12 +772,27 @@ impl TransactionalMemory {
         eventual: bool,
         two_phase: bool,
     ) -> Result {
+        let result = self.commit_inner(data_root, freed_root, transaction_id, eventual, two_phase);
+        if result.is_err() {
+            self.needs_recovery.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    fn commit_inner(
+        &self,
+        data_root: Option<(PageNumber, Checksum)>,
+        freed_root: Option<(PageNumber, Checksum)>,
+        transaction_id: TransactionId,
+        eventual: bool,
+        two_phase: bool,
+    ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
-        assert!(!self.needs_recovery);
+        assert!(!self.needs_recovery.load(Ordering::Acquire));
 
         let mut state = self.state.lock().unwrap();
         let mut layout = self.layout.lock().unwrap();
@@ -834,7 +850,7 @@ impl TransactionalMemory {
         // to future read transactions
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
-        assert!(!self.needs_recovery);
+        assert!(!self.needs_recovery.load(Ordering::Acquire));
 
         let mut state = self.state.lock().unwrap();
         let layout = self.layout.lock().unwrap();
@@ -855,6 +871,14 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn rollback_uncommitted_writes(&self) -> Result {
+        let result = self.rollback_uncommitted_writes_inner();
+        if result.is_err() {
+            self.needs_recovery.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    fn rollback_uncommitted_writes_inner(&self) -> Result {
         #[cfg(debug_assertions)]
         {
             let dirty_pages = self.open_dirty_pages.lock().unwrap();
@@ -1435,7 +1459,9 @@ impl TransactionalMemory {
 impl Drop for TransactionalMemory {
     fn drop(&mut self) {
         // Commit any non-durable transactions that are outstanding
-        if self.read_from_secondary.load(Ordering::Acquire) {
+        if self.read_from_secondary.load(Ordering::Acquire)
+            && !self.needs_recovery.load(Ordering::Acquire)
+        {
             if let Ok(non_durable_transaction_id) = self.get_last_committed_transaction_id() {
                 let root = self.get_data_root();
                 let freed_root = self.get_freed_root();
@@ -1467,7 +1493,7 @@ impl Drop for TransactionalMemory {
             warn!("Failure while flushing allocator state. Repair required at restart.");
         }
 
-        if self.storage.flush().is_ok() && !self.needs_recovery {
+        if self.storage.flush().is_ok() && !self.needs_recovery.load(Ordering::Acquire) {
             state.header.recovery_required = false;
             let _ = self.write_header(&state.header, false);
             let _ = self.storage.flush();
