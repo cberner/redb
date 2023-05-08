@@ -263,15 +263,15 @@ impl<'a, V: RedbValue> AccessGuardMut<'a, V> {
         root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
         key: &[u8],
     ) -> Result {
-        self.root = root;
         let mut path = vec![];
         Self::make_tree_path::<K>(
             key,
-            self.root.lock().unwrap().unwrap().0,
+            root.lock().unwrap().unwrap().0,
             self.page.get_page_number(),
             &mut path,
             self.mem,
         )?;
+        self.root = root;
         self.tree_path = path;
         Ok(())
     }
