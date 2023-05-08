@@ -12,6 +12,8 @@ use std::sync::Arc;
 #[cfg(debug_assertions)]
 use std::sync::Mutex;
 
+pub(crate) const MAX_VALUE_LENGTH: usize = 3 * 1024 * 1024 * 1024;
+
 // On-disk format is:
 // lowest 20bits: page index within the region
 // second 20bits: region number

@@ -2,10 +2,10 @@ use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::sealed::Sealed;
 use crate::tree_store::{
     AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, Page,
-    PageHint, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF,
+    PageHint, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF, MAX_VALUE_LENGTH,
 };
 use crate::types::{RedbKey, RedbValue, TypeName};
-use crate::{AccessGuard, Result, WriteTransaction};
+use crate::{AccessGuard, Error, Result, WriteTransaction};
 use std::borrow::Borrow;
 use std::convert::TryInto;
 use std::marker::PhantomData;
@@ -464,6 +464,13 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
     {
         let value_bytes = V::as_bytes(value.borrow());
         let value_bytes_ref = value_bytes.as_ref();
+        if value_bytes_ref.len() > MAX_VALUE_LENGTH {
+            return Err(Error::ValueTooLarge(value_bytes_ref.len()));
+        }
+        let key_bytes = K::as_bytes(key.borrow());
+        if key_bytes.as_ref().len() > MAX_VALUE_LENGTH {
+            return Err(Error::ValueTooLarge(key_bytes.as_ref().len()));
+        }
         let get_result = self.tree.get(key.borrow())?;
         let existed = if get_result.is_some() {
             #[allow(clippy::unnecessary_unwrap)]
