@@ -288,7 +288,7 @@ impl<'db> WriteTransaction<'db> {
         let mut freed_tree = BtreeMut::new(
             savepoint.get_freed_root(),
             self.mem,
-            self.freed_pages.clone(),
+            self.post_commit_frees.clone(),
         );
         let lookup_key = FreedTableKey {
             transaction_id: oldest_unprocessed_transaction,
