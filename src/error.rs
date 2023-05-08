@@ -1,4 +1,4 @@
-use crate::tree_store::FILE_FORMAT_VERSION;
+use crate::tree_store::{FILE_FORMAT_VERSION, MAX_VALUE_LENGTH};
 use std::fmt::{Display, Formatter};
 use std::sync::PoisonError;
 use std::{io, panic};
@@ -18,6 +18,8 @@ pub enum Error {
     Corrupted(String),
     /// The database file is in an old file format and must be manually upgraded
     UpgradeRequired(u8),
+    /// The value being inserted exceeds the maximum of 3GiB
+    ValueTooLarge(usize),
     /// Table types didn't match.
     TableTypeMismatch(String),
     /// Table name does not match any table in database
@@ -53,6 +55,13 @@ impl Display for Error {
             }
             Error::UpgradeRequired(actual) => {
                 write!(f, "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION}, but file is version {actual}")
+            }
+            Error::ValueTooLarge(len) => {
+                write!(
+                    f,
+                    "The value (length={len}) being inserted exceeds the maximum of {}GiB",
+                    MAX_VALUE_LENGTH / 1024 / 1024 / 1024
+                )
             }
             Error::TableTypeMismatch(msg) => {
                 write!(f, "{msg}")
