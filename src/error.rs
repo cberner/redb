@@ -5,6 +5,7 @@ use std::{io, panic};
 
 /// Possibles errors in `redb` crate
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// For use by fuzzer only
     #[cfg(any(fuzzing, test))]
