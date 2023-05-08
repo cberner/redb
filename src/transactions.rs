@@ -534,6 +534,12 @@ impl<'db> WriteTransaction<'db> {
         self.mem
             .commit(root, freed_root, self.transaction_id, eventual, two_phase)?;
 
+        // Mark any pending non-durable commits as fully committed.
+        self.transaction_tracker
+            .lock()
+            .unwrap()
+            .clear_pending_non_durable_commits();
+
         // Immediately free the pages that were freed from the freed-tree itself. These are only
         // accessed by write transactions, so it's safe to free them as soon as the commit is done.
         for page in self.post_commit_frees.lock().unwrap().drain(..) {
@@ -559,6 +565,12 @@ impl<'db> WriteTransaction<'db> {
 
         self.mem
             .non_durable_commit(root, freed_root, self.transaction_id)?;
+        // Register this as a non-durable transaction to ensure that the freed pages we just pushed
+        // are only processed after this has been persisted
+        self.transaction_tracker
+            .lock()
+            .unwrap()
+            .register_non_durable_commit(self.transaction_id);
         Ok(())
     }
 
