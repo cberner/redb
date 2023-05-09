@@ -1,5 +1,18 @@
 # redb - Changelog
 
+## 0.17.0 - 2023-05-09
+* Enforce a limit of 3GiB on keys & values
+* Fix database corruption bug that could occur if a `Durability::None` commit was made,
+  followed by a durable commit and the durable commit crashed or encountered an I/O error during `commit()`
+* Fix panic when re-openning a database file, when the process that last had it open had crashed
+* Fix several bugs where an I/O error during `commit()` could cause a panic instead of returning an `Err`
+* Change `length` argument to `insert_reserve()` to `u32`
+* Change `Table::len()` to return `u64`
+* Change width of most fields in `DatabaseStats` to `u64`
+* Remove `K` type parameter from `AccessGuardMut`
+* Add `Database::compact()` which compacts the database file
+* Performance optimizations
+
 ## 0.16.0 - 2023-04-28
 * Combine `Builder::set_read_cache_size()` and `Builder::set_write_cache_size()` into a single,
   `Builder::set_cache_size()` setting
