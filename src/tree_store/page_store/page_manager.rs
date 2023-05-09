@@ -887,6 +887,7 @@ impl TransactionalMemory {
                 "Dirty pages outstanding: {dirty_pages:?}"
             );
         }
+        assert!(!self.needs_recovery.load(Ordering::Acquire));
         let mut state = self.state.lock().unwrap();
         // The layout to restore
         let (restore, restore_tracker_page) = if self.read_from_secondary.load(Ordering::Acquire) {

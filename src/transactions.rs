@@ -456,6 +456,8 @@ impl<'db> WriteTransaction<'db> {
     /// All writes performed in this transaction will be visible to future transactions, and are
     /// durable as consistent with the [`Durability`] level set by [`Self::set_durability`]
     pub fn commit(mut self) -> Result {
+        // Set completed flag first, so that we don't go through the abort() path on drop, if this fails
+        self.completed = true;
         self.table_tree
             .write()
             .unwrap()
@@ -476,7 +478,6 @@ impl<'db> WriteTransaction<'db> {
             Durability::Paranoid => self.durable_commit(false, true)?,
         }
 
-        self.completed = true;
         #[cfg(feature = "logging")]
         info!(
             "Finished commit of transaction id={:?}",
@@ -490,6 +491,8 @@ impl<'db> WriteTransaction<'db> {
     ///
     /// All writes performed in this transaction will be rolled back
     pub fn abort(mut self) -> Result {
+        // Set completed flag first, so that we don't go through the abort() path on drop, if this fails
+        self.completed = true;
         self.abort_inner()
     }
 
@@ -498,7 +501,6 @@ impl<'db> WriteTransaction<'db> {
         info!("Aborting transaction id={:?}", self.transaction_id);
         self.table_tree.write().unwrap().clear_table_root_updates();
         self.mem.rollback_uncommitted_writes()?;
-        self.completed = true;
         #[cfg(feature = "logging")]
         info!("Finished abort of transaction id={:?}", self.transaction_id);
         Ok(())
