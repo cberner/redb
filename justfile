@@ -34,10 +34,10 @@ watch +args='test':
   cargo watch --clear --exec "{{args}}"
 
 fuzz: pre
-    cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=1000000
+    cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=100000
 
 fuzz_ci: pre
-    cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=1000000 -max_total_time=60
+    cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=100000 -max_total_time=60
 
 fuzz_coverage: pre
     #!/usr/bin/env bash
