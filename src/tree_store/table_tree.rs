@@ -481,16 +481,18 @@ impl<'txn> TableTree<'txn> {
                 };
             }
             if definition.get_key_alignment() != ALIGNMENT {
-                return Err(Error::Corrupted(format!(
-                    "{:?} key alignment {} does not match {}",
-                    name, ALIGNMENT, definition.key_alignment
-                )));
+                return Err(Error::TypeDefinitionChanged {
+                    name: definition.key_type.clone(),
+                    alignment: definition.get_key_alignment(),
+                    width: definition.get_fixed_key_size(),
+                });
             }
             if definition.get_value_alignment() != ALIGNMENT {
-                return Err(Error::Corrupted(format!(
-                    "{:?} value alignment {} does not match {}",
-                    name, ALIGNMENT, definition.value_alignment
-                )));
+                return Err(Error::TypeDefinitionChanged {
+                    name: definition.value_type.clone(),
+                    alignment: definition.get_value_alignment(),
+                    width: definition.get_fixed_value_size(),
+                });
             }
 
             if let Some(updated_root) = self.pending_table_updates.get(name) {
@@ -521,20 +523,18 @@ impl<'txn> TableTree<'txn> {
                     });
                 }
                 if definition.get_fixed_key_size() != K::fixed_width() {
-                    return Err(Error::Corrupted(format!(
-                        "{:?} key width {:?} does not match {:?}",
-                        name,
-                        K::fixed_width(),
-                        definition.get_fixed_key_size()
-                    )));
+                    return Err(Error::TypeDefinitionChanged {
+                        name: K::type_name(),
+                        alignment: definition.get_key_alignment(),
+                        width: definition.get_fixed_key_size(),
+                    });
                 }
                 if definition.get_fixed_value_size() != V::fixed_width() {
-                    return Err(Error::Corrupted(format!(
-                        "{:?} value width {:?} does not match {:?}",
-                        name,
-                        V::fixed_width(),
-                        definition.get_fixed_value_size()
-                    )));
+                    return Err(Error::TypeDefinitionChanged {
+                        name: V::type_name(),
+                        alignment: definition.get_value_alignment(),
+                        width: definition.get_fixed_value_size(),
+                    });
                 }
                 Some(definition)
             } else {

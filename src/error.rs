@@ -31,6 +31,11 @@ pub enum Error {
     TableIsMultimap(String),
     /// The table is not a multimap table
     TableIsNotMultimap(String),
+    TypeDefinitionChanged {
+        name: TypeName,
+        alignment: usize,
+        width: Option<usize>,
+    },
     /// Table name does not match any table in database
     TableDoesNotExist(String),
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
@@ -70,6 +75,19 @@ impl Display for Error {
                     f,
                     "The value (length={len}) being inserted exceeds the maximum of {}GiB",
                     MAX_VALUE_LENGTH / 1024 / 1024 / 1024
+                )
+            }
+            Error::TypeDefinitionChanged {
+                name,
+                alignment,
+                width,
+            } => {
+                write!(
+                    f,
+                    "Current definition of {} does not match stored definition (width={:?}, alignment={})",
+                    name.name(),
+                    width,
+                    alignment,
                 )
             }
             Error::TableTypeMismatch { table, key, value } => {
