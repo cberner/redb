@@ -237,7 +237,7 @@ fn wrong_types() {
     let txn = db.begin_write().unwrap();
     assert!(matches!(
         txn.open_multimap_table(wrong_definition),
-        Err(Error::TableTypeMismatch(_))
+        Err(Error::TableTypeMismatch { .. })
     ));
     txn.abort().unwrap();
 
@@ -245,7 +245,7 @@ fn wrong_types() {
     txn.open_multimap_table(definition).unwrap();
     assert!(matches!(
         txn.open_multimap_table(wrong_definition),
-        Err(Error::TableTypeMismatch(_))
+        Err(Error::TableTypeMismatch { .. })
     ));
 }
 
