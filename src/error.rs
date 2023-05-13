@@ -1,4 +1,5 @@
 use crate::tree_store::{FILE_FORMAT_VERSION, MAX_VALUE_LENGTH};
+use crate::TypeName;
 use std::fmt::{Display, Formatter};
 use std::sync::PoisonError;
 use std::{io, panic};
@@ -21,7 +22,15 @@ pub enum Error {
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
     /// Table types didn't match.
-    TableTypeMismatch(String),
+    TableTypeMismatch {
+        table: String,
+        key: TypeName,
+        value: TypeName,
+    },
+    /// The table is a multimap table
+    TableIsMultimap(String),
+    /// The table is not a multimap table
+    TableIsNotMultimap(String),
     /// Table name does not match any table in database
     TableDoesNotExist(String),
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
@@ -63,8 +72,19 @@ impl Display for Error {
                     MAX_VALUE_LENGTH / 1024 / 1024 / 1024
                 )
             }
-            Error::TableTypeMismatch(msg) => {
-                write!(f, "{msg}")
+            Error::TableTypeMismatch { table, key, value } => {
+                write!(
+                    f,
+                    "{table} is of type Table<{}, {}>",
+                    key.name(),
+                    value.name(),
+                )
+            }
+            Error::TableIsMultimap(table) => {
+                write!(f, "{table} is a multimap table")
+            }
+            Error::TableIsNotMultimap(table) => {
+                write!(f, "{table} is not a multimap table")
             }
             Error::TableDoesNotExist(table) => {
                 write!(f, "Table '{table}' does not exist")

@@ -474,9 +474,11 @@ impl<'txn> TableTree<'txn> {
         if let Some(guard) = self.tree.get(&name)? {
             let mut definition = guard.value();
             if definition.get_type() != table_type {
-                return Err(Error::TableTypeMismatch(format!(
-                    "{name:?} is not of type {table_type:?}",
-                )));
+                return if definition.get_type() == TableType::Multimap {
+                    Err(Error::TableIsMultimap(name.to_string()))
+                } else {
+                    Err(Error::TableIsNotMultimap(name.to_string()))
+                };
             }
             if definition.get_key_alignment() != ALIGNMENT {
                 return Err(Error::Corrupted(format!(
@@ -512,14 +514,11 @@ impl<'txn> TableTree<'txn> {
                 // Do additional checks on the types to be sure they match
                 if definition.key_type != K::type_name() || definition.value_type != V::type_name()
                 {
-                    return Err(Error::TableTypeMismatch(format!(
-                        "{} is of type Table<{}, {}> not Table<{}, {}>",
-                        name,
-                        definition.key_type.name(),
-                        definition.value_type.name(),
-                        K::type_name().name(),
-                        V::type_name().name()
-                    )));
+                    return Err(Error::TableTypeMismatch {
+                        table: name.to_string(),
+                        key: definition.key_type,
+                        value: definition.value_type,
+                    });
                 }
                 if definition.get_fixed_key_size() != K::fixed_width() {
                     return Err(Error::Corrupted(format!(
