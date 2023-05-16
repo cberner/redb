@@ -195,8 +195,10 @@ impl<'db> WriteTransaction<'db> {
 
     /// Creates a snapshot of the current database state, which can be used to rollback the database
     ///
+    /// This savepoint will be freed as soon as the returned `[Savepoint]` is dropped.
+    ///
     /// Returns `[Error::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened)
-    pub fn savepoint(&self) -> Result<Savepoint> {
+    pub fn ephemeral_savepoint(&self) -> Result<Savepoint> {
         if self.dirty.load(Ordering::Acquire) {
             return Err(Error::InvalidSavepoint);
         }

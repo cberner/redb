@@ -140,7 +140,7 @@ fn apply_crashable_transaction(db: &Database, reference: &mut BTreeMap<u64, usiz
     let mut local_reference = reference.clone();
 
     if transaction.create_savepoint {
-        savepoints.push(txn.savepoint()?);
+        savepoints.push(txn.ephemeral_savepoint()?);
         reference_savepoints.push(local_reference.clone());
         if savepoints.len() > MAX_SAVEPOINTS {
             savepoints.remove(0);
@@ -196,7 +196,7 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], referen
         let mut local_reference = reference.lock().unwrap().clone();
 
         if transaction.create_savepoint {
-            savepoints.push(txn.savepoint()?);
+            savepoints.push(txn.ephemeral_savepoint()?);
             let guard = reference.lock().unwrap();
             reference_savepoints.push(guard.clone());
             drop(guard);
@@ -267,7 +267,7 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
         let mut local_reference = reference.lock().unwrap().clone();
 
         if transaction.create_savepoint {
-            savepoints.push(txn.savepoint()?);
+            savepoints.push(txn.ephemeral_savepoint()?);
             let guard = reference.lock().unwrap();
             reference_savepoints.push(guard.clone());
             drop(guard);

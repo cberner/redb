@@ -675,7 +675,7 @@ mod test {
 
         let mut tx = db.begin_write().unwrap();
         tx.set_durability(Durability::Paranoid);
-        let savepoint0 = tx.savepoint().unwrap();
+        let savepoint0 = tx.ephemeral_savepoint().unwrap();
         {
             tx.open_table(table_def).unwrap();
         }
@@ -683,7 +683,7 @@ mod test {
 
         let mut tx = db.begin_write().unwrap();
         tx.set_durability(Durability::Paranoid);
-        let savepoint1 = tx.savepoint().unwrap();
+        let savepoint1 = tx.ephemeral_savepoint().unwrap();
         tx.restore_savepoint(&savepoint0).unwrap();
         tx.set_durability(Durability::None);
         {
@@ -703,7 +703,7 @@ mod test {
 
         let mut tx = db.begin_write().unwrap();
         tx.set_durability(Durability::Paranoid);
-        let savepoint2 = tx.savepoint().unwrap();
+        let savepoint2 = tx.ephemeral_savepoint().unwrap();
         drop(savepoint0);
         tx.restore_savepoint(&savepoint2).unwrap();
         {
@@ -716,7 +716,7 @@ mod test {
 
         let mut tx = db.begin_write().unwrap();
         tx.set_durability(Durability::Paranoid);
-        let savepoint3 = tx.savepoint().unwrap();
+        let savepoint3 = tx.ephemeral_savepoint().unwrap();
         drop(savepoint1);
         tx.restore_savepoint(&savepoint3).unwrap();
         {
@@ -726,7 +726,7 @@ mod test {
 
         let mut tx = db.begin_write().unwrap();
         tx.set_durability(Durability::Paranoid);
-        let savepoint4 = tx.savepoint().unwrap();
+        let savepoint4 = tx.ephemeral_savepoint().unwrap();
         drop(savepoint2);
         tx.restore_savepoint(&savepoint3).unwrap();
         tx.set_durability(Durability::None);
@@ -738,7 +738,7 @@ mod test {
 
         let mut tx = db.begin_write().unwrap();
         tx.set_durability(Durability::Paranoid);
-        let savepoint5 = tx.savepoint().unwrap();
+        let savepoint5 = tx.ephemeral_savepoint().unwrap();
         drop(savepoint3);
         assert!(tx.restore_savepoint(&savepoint4).is_err());
         {
@@ -768,7 +768,7 @@ mod test {
         let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
         let mut tx = db.begin_write().unwrap();
-        let _savepoint0 = tx.savepoint().unwrap();
+        let _savepoint0 = tx.ephemeral_savepoint().unwrap();
         tx.set_durability(Durability::None);
         {
             let mut t = tx.open_table(table_def).unwrap();
@@ -778,7 +778,7 @@ mod test {
         tx.abort().unwrap();
 
         let mut tx = db.begin_write().unwrap();
-        let savepoint1 = tx.savepoint().unwrap();
+        let savepoint1 = tx.ephemeral_savepoint().unwrap();
         tx.restore_savepoint(&savepoint1).unwrap();
         tx.set_durability(Durability::None);
         {
