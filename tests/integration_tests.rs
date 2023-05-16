@@ -712,7 +712,7 @@ fn regression18() {
     let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
     let tx = db.begin_write().unwrap();
-    let savepoint0 = tx.savepoint().unwrap();
+    let savepoint0 = tx.ephemeral_savepoint().unwrap();
     {
         let mut t = tx.open_table(table_def).unwrap();
         let mut value = t.insert_reserve(&118749, 817).unwrap();
@@ -721,7 +721,7 @@ fn regression18() {
     tx.commit().unwrap();
 
     let tx = db.begin_write().unwrap();
-    let savepoint1 = tx.savepoint().unwrap();
+    let savepoint1 = tx.ephemeral_savepoint().unwrap();
     {
         let mut t = tx.open_table(table_def).unwrap();
         let mut value = t.insert_reserve(&65373, 1807).unwrap();
@@ -730,7 +730,7 @@ fn regression18() {
     tx.commit().unwrap();
 
     let mut tx = db.begin_write().unwrap();
-    let savepoint2 = tx.savepoint().unwrap();
+    let savepoint2 = tx.ephemeral_savepoint().unwrap();
 
     tx.restore_savepoint(&savepoint2).unwrap();
     tx.commit().unwrap();
@@ -746,7 +746,7 @@ fn regression18() {
     tx.commit().unwrap();
 
     let tx = db.begin_write().unwrap();
-    let savepoint4 = tx.savepoint().unwrap();
+    let savepoint4 = tx.ephemeral_savepoint().unwrap();
     tx.abort().unwrap();
     drop(savepoint1);
 
@@ -786,7 +786,7 @@ fn regression19() {
     tx.commit().unwrap();
 
     let tx = db.begin_write().unwrap();
-    let savepoint0 = tx.savepoint().unwrap();
+    let savepoint0 = tx.ephemeral_savepoint().unwrap();
     {
         let mut t = tx.open_table(table_def).unwrap();
         let value = vec![0xFF; 101];
@@ -1184,7 +1184,7 @@ fn savepoint() {
     txn.commit().unwrap();
 
     let txn = db.begin_write().unwrap();
-    let savepoint = txn.savepoint().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
     {
         let mut table = txn.open_table(definition).unwrap();
         table.remove(&0).unwrap();
@@ -1192,7 +1192,7 @@ fn savepoint() {
     txn.commit().unwrap();
 
     let mut txn = db.begin_write().unwrap();
-    let savepoint2 = txn.savepoint().unwrap();
+    let savepoint2 = txn.ephemeral_savepoint().unwrap();
 
     txn.restore_savepoint(&savepoint).unwrap();
 
