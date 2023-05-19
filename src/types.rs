@@ -162,6 +162,12 @@ impl RedbValue for () {
     }
 }
 
+impl RedbKey for () {
+    fn compare(_data1: &[u8], _data2: &[u8]) -> Ordering {
+        Ordering::Equal
+    }
+}
+
 impl<T: RedbValue> RedbValue for Option<T> {
     type SelfType<'a> = Option<T::SelfType<'a>>
     where
