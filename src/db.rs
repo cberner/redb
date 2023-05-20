@@ -333,6 +333,13 @@ impl Database {
         // Commit to free up any pending free pages
         // Use 2-phase commit to avoid any possible security issues. Plus this compaction is going to be so slow that it doesn't matter
         let mut txn = self.begin_write()?;
+        if txn.list_persistent_savepoints()?.next().is_some() {
+            return Err(Error::PersistentSavepointExists);
+        }
+        txn.set_durability(Durability::Paranoid);
+        txn.commit()?;
+        // Repeat, just in case executing list_persistent_savepoints() created a new table
+        let mut txn = self.begin_write()?;
         txn.set_durability(Durability::Paranoid);
         txn.commit()?;
         // There can't be any outstanding transactions because we have a `&mut self`, so all pending free pages
@@ -470,12 +477,31 @@ impl Database {
         mem.begin_writable()?;
         let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
 
-        Ok(Database {
+        let db = Database {
             mem,
             next_transaction_id: AtomicTransactionId::new(next_transaction_id),
             transaction_tracker: Arc::new(Mutex::new(TransactionTracker::new())),
             live_write_transaction: Mutex::new(None),
-        })
+        };
+
+        // Restore the tracker state for any persistent savepoints
+        let txn = db.begin_write()?;
+        if let Some(next_id) = txn.next_persistent_savepoint_id()? {
+            db.transaction_tracker
+                .lock()
+                .unwrap()
+                .restore_savepoint_counter_state(next_id);
+        }
+        for id in txn.list_persistent_savepoints()? {
+            let savepoint = txn.get_persistent_savepoint(id)?;
+            db.transaction_tracker
+                .lock()
+                .unwrap()
+                .register_persistent_savepoint(&savepoint);
+        }
+        txn.abort()?;
+
+        Ok(db)
     }
 
     fn allocate_read_transaction(&self) -> Result<TransactionId> {

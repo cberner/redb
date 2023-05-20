@@ -71,6 +71,16 @@ impl TransactionTracker {
         self.pending_non_durable_commits.push(id);
     }
 
+    pub(crate) fn restore_savepoint_counter_state(&mut self, next_savepoint: SavepointId) {
+        assert!(self.valid_savepoints.is_empty());
+        self.next_savepoint_id = next_savepoint;
+    }
+
+    pub(crate) fn register_persistent_savepoint(&mut self, savepoint: &Savepoint) {
+        self.register_read_transaction(savepoint.get_transaction_id());
+        self.valid_savepoints.insert(savepoint.get_id());
+    }
+
     pub(crate) fn register_read_transaction(&mut self, id: TransactionId) {
         self.live_read_transactions
             .entry(id)
