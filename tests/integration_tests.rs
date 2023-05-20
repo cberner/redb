@@ -1171,6 +1171,46 @@ fn database_lock() {
 }
 
 #[test]
+fn persistent_savepoint() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let definition: TableDefinition<u32, &str> = TableDefinition::new("x");
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        table.insert(&0, "hello").unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let savepoint_id = txn.persistent_savepoint().unwrap();
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        table.remove(&0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    drop(db);
+    let db = Database::create(tmpfile.path()).unwrap();
+    // Make sure running the GC doesn't invalidate the savepoint
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    let savepoint = txn.get_persistent_savepoint(savepoint_id).unwrap();
+
+    txn.restore_savepoint(&savepoint).unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(definition).unwrap();
+    assert_eq!(table.get(&0).unwrap().unwrap().value(), "hello");
+}
+
+#[test]
 fn savepoint() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = Database::create(tmpfile.path()).unwrap();

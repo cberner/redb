@@ -15,6 +15,8 @@ pub enum Error {
     DatabaseAlreadyOpen,
     /// This savepoint is invalid because an older savepoint was restored after it was created
     InvalidSavepoint,
+    /// A persistent savepoint exists
+    PersistentSavepointExists,
     /// The Database is corrupted
     Corrupted(String),
     /// The database file is in an old file format and must be manually upgraded
@@ -118,6 +120,12 @@ impl Display for Error {
             }
             Error::DatabaseAlreadyOpen => {
                 write!(f, "Database already open. Cannot acquire lock.")
+            }
+            Error::PersistentSavepointExists => {
+                write!(
+                    f,
+                    "Persistent savepoint exists. Operation cannot be performed."
+                )
             }
             Error::InvalidSavepoint => {
                 write!(

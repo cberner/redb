@@ -27,7 +27,7 @@ database file.
 ```
 <-------------------------------------------- 8 bytes ------------------------------------------->
 ========================================== Super header ==========================================
--------------------------------------------- Header ----------------------------------------------
+---------------------------------------- Header (64 bytes) ---------------------------------------
 | magic number                                                                                   |
 | magic con.| god byte  | padding               | page size                                      |
 | region header pages                           | region max data pages                          |
@@ -36,11 +36,14 @@ database file.
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
------------------------------------------ Commit slot 0 ------------------------------------------
-| version   | root nn   | f-root nn | padding                                                    |
-| root page number                                                                               |
-| root checksum                                                                                  |
-| root checksum (cont.)                                                                          |
+------------------------------------ Commit slot 0 (192 bytes) -----------------------------------
+| version   | user nn   | sys nn    | f-root nn | padding                                        |
+| user root page number                                                                          |
+| user root checksum                                                                             |
+| user root checksum (cont.)                                                                     |
+| system root page number                                                                        |
+| system root checksum                                                                           |
+| system root checksum (cont.)                                                                   |
 | freed root page number                                                                         |
 | freed checksum                                                                                 |
 | freed checksum (cont.)                                                                         |
@@ -53,8 +56,14 @@ database file.
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
 ----------------------------------------- Commit slot 1 ------------------------------------------
 |                                 Same layout as commit slot 0                                   |
+----------------------------------- footer padding (64+ bytes) ------------------------------------
 ==================================================================================================
 | Region header                                                                                  |
 --------------------------------------------------------------------------------------------------
@@ -97,13 +106,16 @@ inspired by the PNG magic number.
 
 `region max data pages` is the maximum number of data pages in each region
 
-### Transaction slot 0 (128 bytes):
+### Transaction slot 0 (192 bytes):
 * 1 byte: file format version number
-* 1 byte: boolean indicating that root page is non-null
+* 1 byte: boolean indicating that user root page is non-null
+* 1 byte: boolean indicating that system root page is non-null
 * 1 byte: boolean indicating that freed table root page is non-null
-* 5 bytes: padding to 64-bit aligned
-* 8 bytes: root page
-* 16 bytes: root checksum
+* 4 bytes: padding to 64-bit aligned
+* 8 bytes: user root page
+* 16 bytes: user root checksum
+* 8 bytes: system root page
+* 16 bytes: system root checksum
 * 8 bytes: freed table root page
 * 16 bytes: freed table root checksum
 * 8 bytes: last committed transaction id
@@ -111,18 +123,22 @@ inspired by the PNG magic number.
 * 4 bytes: data pages in partial trailing region
 * 8 bytes: region tracker page number
 * 16 bytes: slot checksum
-* 32 bytes: padding to 128 bytes
+* 70 bytes: padding to 192 bytes
 
 `version` the file format version of the database. This is stored in the transaction data, so that it can be atomically
 changed during an upgrade.
 
-`root page` is the page number of the root of the table tree.
+`user root page` is the page number of the root of the user table tree.
 
-`root checksum` stores the XXH3_128bit checksum of the root page, which in turn stores the checksum of its child pages.
+`user root checksum` stores the XXH3_128bit checksum of the user root page, which in turn stores the checksum of its child pages.
+
+`system root page` is the page number of the root of the system table tree.
+
+`system root checksum` stores the XXH3_128bit checksum of the system root page, which in turn stores the checksum of its child pages.
 
 `freed table root page` is the page of the root of the pending free table.
 
-`freed table root checksum` is the same as `root checksum` but for the pending free table.
+`freed table root checksum` stores the XXH3_128bit checksum of the freed table root page, which in turn stores the checksum of its child pages.
 
 `number of full regions` stores the number of full regions in the database. This can change during a transaction if the database
 grows of shrinks.
@@ -133,7 +149,7 @@ grows of shrinks.
 
 `slot checksum` is the XXH3_128bit checksum of all the preceding fields in the transaction slot.
 
-### Transaction slot 1 (128 bytes):
+### Transaction slot 1 (192 bytes):
 * Same layout as slot 0
 
 ### Region tracker
@@ -372,6 +388,11 @@ of the page allocator state -- this is about 64kB per 1GB of values (assuming 4k
 the database to a savepoint the root of the b-tree is restored, and the snapshot of the page allocator
 is diff'ed against the currently allocated pages to determine which have been allocated since the savepoint
 was created. These pages are then queued to be freed, completing the rollback.
+
+Savepoints come in two varieties:
+1. Ephemeral. These savepoints are immediately deallocated when they are dropped
+2. Persistent. These savepoints are persisted in the database file and therefore across restarts.
+   They are stored in a table inside the system table tree. They must be explicitly deallocated.
 
 # Assumptions about underlying media
 redb is designed to be safe even in the event of power failure or on poorly behaved media.

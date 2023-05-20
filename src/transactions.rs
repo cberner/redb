@@ -1,4 +1,4 @@
-use crate::transaction_tracker::{TransactionId, TransactionTracker};
+use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeMut, FreedPageList, FreedTableKey, InternalTableDefinition, PageHint, PageNumber,
     TableTree, TableType, TransactionalMemory,
@@ -6,17 +6,22 @@ use crate::tree_store::{
 use crate::types::{RedbKey, RedbValue};
 use crate::{
     Database, Error, MultimapTable, MultimapTableDefinition, MultimapTableHandle,
-    ReadOnlyMultimapTable, ReadOnlyTable, Result, Savepoint, Table, TableDefinition, TableHandle,
-    UntypedMultimapTableHandle, UntypedTableHandle,
+    ReadOnlyMultimapTable, ReadOnlyTable, ReadableTable, Result, Savepoint, Table, TableDefinition,
+    TableHandle, UntypedMultimapTableHandle, UntypedTableHandle,
 };
 #[cfg(feature = "logging")]
 use log::{info, warn};
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::RangeFull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{panic, thread};
+
+// TODO: remove this magic name. Instead there should be a separate root for "system" tables
+const NEXT_SAVEPOINT_TABLE: TableDefinition<(), u64> =
+    TableDefinition::new("$$$_NEXT_SAVEPOINT_ID_$$$");
+const SAVEPOINT_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("$$$_SAVEPOINTS_$$$");
 
 /// Informational storage stats about the database
 #[derive(Debug)]
@@ -149,6 +154,8 @@ pub struct WriteTransaction<'db> {
     completed: bool,
     dirty: AtomicBool,
     durability: Durability,
+    // Persistent savepoints created during this transaction
+    created_persistent_savepoints: Mutex<HashSet<u64>>,
     live_write_transaction: MutexGuard<'db, Option<TransactionId>>,
 }
 
@@ -189,8 +196,84 @@ impl<'db> WriteTransaction<'db> {
             completed: false,
             dirty: AtomicBool::new(false),
             durability: Durability::Immediate,
+            created_persistent_savepoints: Mutex::new(Default::default()),
             live_write_transaction,
         })
+    }
+
+    /// Creates a snapshot of the current database state, which can be used to rollback the database.
+    /// This savepoint will exist until it is deleted with `[delete_savepoint()]`.
+    ///
+    /// Note that while a savepoint exists, pages that become unused after it was created are not freed.
+    /// Therefore, the lifetime of a savepoint should be minimized.
+    ///
+    /// Returns `[Error::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened)
+    pub fn persistent_savepoint(&self) -> Result<u64> {
+        let mut savepoint = self.ephemeral_savepoint()?;
+
+        let mut next_table = self.open_table(NEXT_SAVEPOINT_TABLE)?;
+        let mut savepoint_table = self.open_table(SAVEPOINT_TABLE)?;
+        next_table.insert((), savepoint.get_id().0 + 1)?;
+
+        savepoint_table.insert(savepoint.get_id().0, savepoint.to_bytes().as_slice())?;
+
+        savepoint.set_persistent();
+
+        self.created_persistent_savepoints
+            .lock()
+            .unwrap()
+            .insert(savepoint.get_id().0);
+
+        Ok(savepoint.get_id().0)
+    }
+
+    pub(crate) fn next_persistent_savepoint_id(&self) -> Result<Option<SavepointId>> {
+        let next_table = self.open_table(NEXT_SAVEPOINT_TABLE)?;
+        let value = next_table.get(())?;
+        if let Some(next_id) = value {
+            Ok(Some(SavepointId(next_id.value())))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get a persistent savepoint given its id
+    pub fn get_persistent_savepoint(&self, id: u64) -> Result<Savepoint> {
+        let table = self.open_table(SAVEPOINT_TABLE)?;
+        let value = table.get(id)?;
+
+        value
+            .map(|x| Savepoint::from_bytes(x.value(), self.transaction_tracker.clone(), false))
+            .ok_or(Error::InvalidSavepoint)
+    }
+
+    /// Delete the given persistent savepoint.
+    ///
+    /// Returns `true` if the savepoint existed
+    pub fn delete_persistent_savepoint(&self, id: u64) -> Result<bool> {
+        let mut table = self.open_table(SAVEPOINT_TABLE)?;
+        let savepoint = table.remove(id)?;
+        if let Some(bytes) = savepoint {
+            let savepoint =
+                Savepoint::from_bytes(bytes.value(), self.transaction_tracker.clone(), false);
+            self.transaction_tracker
+                .lock()
+                .unwrap()
+                .deallocate_savepoint(&savepoint);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// List all persistent savepoints
+    pub fn list_persistent_savepoints(&self) -> Result<impl Iterator<Item = u64>> {
+        let table = self.open_table(SAVEPOINT_TABLE)?;
+        let mut savepoints = vec![];
+        for savepoint in table.range::<u64>(..)? {
+            savepoints.push(savepoint?.0.value());
+        }
+        Ok(savepoints.into_iter())
     }
 
     /// Creates a snapshot of the current database state, which can be used to rollback the database
@@ -213,7 +296,7 @@ impl<'db> WriteTransaction<'db> {
         let regional_allocators = self.mem.get_raw_allocator_states();
         let root = self.mem.get_data_root();
         let freed_root = self.mem.get_freed_root();
-        let savepoint = Savepoint::new(
+        let savepoint = Savepoint::new_ephemeral(
             self.db.get_memory(),
             self.transaction_tracker.clone(),
             id,
@@ -501,6 +584,9 @@ impl<'db> WriteTransaction<'db> {
     fn abort_inner(&mut self) -> Result {
         #[cfg(feature = "logging")]
         info!("Aborting transaction id={:?}", self.transaction_id);
+        for savepoint in self.created_persistent_savepoints.lock().unwrap().iter() {
+            self.delete_persistent_savepoint(*savepoint)?;
+        }
         self.table_tree.write().unwrap().clear_table_root_updates();
         self.mem.rollback_uncommitted_writes()?;
         #[cfg(feature = "logging")]
