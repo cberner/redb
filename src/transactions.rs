@@ -1,3 +1,4 @@
+use crate::sealed::Sealed;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeMut, FreedPageList, FreedTableKey, InternalTableDefinition, PageHint, PageNumber,
@@ -13,15 +14,64 @@ use crate::{
 use log::{info, warn};
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
+use std::fmt::{Display, Formatter};
+use std::marker::PhantomData;
 use std::ops::RangeFull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{panic, thread};
 
-// TODO: remove this magic name. Instead there should be a separate root for "system" tables
-const NEXT_SAVEPOINT_TABLE: TableDefinition<(), u64> =
-    TableDefinition::new("$$$_NEXT_SAVEPOINT_ID_$$$");
-const SAVEPOINT_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("$$$_SAVEPOINTS_$$$");
+const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), u64> =
+    SystemTableDefinition::new("next_savepoint_id");
+const SAVEPOINT_TABLE: SystemTableDefinition<u64, &[u8]> =
+    SystemTableDefinition::new("persistent_savepoints");
+
+pub struct SystemTableDefinition<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
+    name: &'a str,
+    _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
+}
+
+impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> SystemTableDefinition<'a, K, V> {
+    pub const fn new(name: &'a str) -> Self {
+        assert!(!name.is_empty());
+        Self {
+            name,
+            _key_type: PhantomData,
+            _value_type: PhantomData,
+        }
+    }
+}
+
+impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> TableHandle
+    for SystemTableDefinition<'a, K, V>
+{
+    fn name(&self) -> &str {
+        self.name
+    }
+}
+
+impl<K: RedbKey, V: RedbValue> Sealed for SystemTableDefinition<'_, K, V> {}
+
+impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Clone for SystemTableDefinition<'a, K, V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Copy for SystemTableDefinition<'a, K, V> {}
+
+impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Display for SystemTableDefinition<'a, K, V> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}<{}, {}>",
+            self.name,
+            K::type_name().name(),
+            V::type_name().name()
+        )
+    }
+}
 
 /// Informational storage stats about the database
 #[derive(Debug)]
@@ -143,6 +193,7 @@ pub struct WriteTransaction<'db> {
     mem: &'db TransactionalMemory,
     transaction_id: TransactionId,
     table_tree: RwLock<TableTree<'db>>,
+    system_table_tree: RwLock<TableTree<'db>>,
     // The table of freed pages by transaction. FreedTableKey -> binary.
     // The binary blob is a length-prefixed array of PageNumber
     freed_tree: Mutex<BtreeMut<'db, FreedTableKey, FreedPageList<'static>>>,
@@ -151,6 +202,7 @@ pub struct WriteTransaction<'db> {
     // since read transactions do not access the freed-tree
     post_commit_frees: Arc<Mutex<Vec<PageNumber>>>,
     open_tables: Mutex<HashMap<String, &'static panic::Location<'static>>>,
+    open_system_tables: Mutex<HashMap<String, &'static panic::Location<'static>>>,
     completed: bool,
     dirty: AtomicBool,
     durability: Durability,
@@ -172,6 +224,7 @@ impl<'db> WriteTransaction<'db> {
         *live_write_transaction = Some(transaction_id);
 
         let root_page = db.get_memory().get_data_root();
+        let system_page = db.get_memory().get_system_root();
         let freed_root = db.get_memory().get_freed_root();
         let freed_pages = Arc::new(Mutex::new(vec![]));
         let post_commit_frees = Arc::new(Mutex::new(vec![]));
@@ -185,6 +238,11 @@ impl<'db> WriteTransaction<'db> {
                 db.get_memory(),
                 freed_pages.clone(),
             )),
+            system_table_tree: RwLock::new(TableTree::new(
+                system_page,
+                db.get_memory(),
+                freed_pages.clone(),
+            )),
             freed_tree: Mutex::new(BtreeMut::new(
                 freed_root,
                 db.get_memory(),
@@ -193,12 +251,52 @@ impl<'db> WriteTransaction<'db> {
             freed_pages,
             post_commit_frees,
             open_tables: Mutex::new(Default::default()),
+            open_system_tables: Mutex::new(Default::default()),
             completed: false,
             dirty: AtomicBool::new(false),
             durability: Durability::Immediate,
             created_persistent_savepoints: Mutex::new(Default::default()),
             live_write_transaction,
         })
+    }
+
+    fn open_system_table<'txn, K: RedbKey + 'static, V: RedbValue + 'static>(
+        &'txn self,
+        definition: SystemTableDefinition<K, V>,
+    ) -> Result<Table<'db, 'txn, K, V>> {
+        #[cfg(feature = "logging")]
+        info!("Opening system table: {}", definition);
+        if let Some(location) = self
+            .open_system_tables
+            .lock()
+            .unwrap()
+            .get(definition.name())
+        {
+            return Err(Error::TableAlreadyOpen(
+                definition.name().to_string(),
+                location,
+            ));
+        }
+        self.dirty.store(true, Ordering::Release);
+        self.open_system_tables
+            .lock()
+            .unwrap()
+            .insert(definition.name().to_string(), panic::Location::caller());
+
+        let internal_table = self
+            .system_table_tree
+            .write()
+            .unwrap()
+            .get_or_create_table::<K, V>(definition.name(), TableType::Normal)?;
+
+        Ok(Table::new(
+            definition.name(),
+            true,
+            internal_table.get_root(),
+            self.freed_pages.clone(),
+            self.mem,
+            self,
+        ))
     }
 
     /// Creates a snapshot of the current database state, which can be used to rollback the database.
@@ -211,8 +309,8 @@ impl<'db> WriteTransaction<'db> {
     pub fn persistent_savepoint(&self) -> Result<u64> {
         let mut savepoint = self.ephemeral_savepoint()?;
 
-        let mut next_table = self.open_table(NEXT_SAVEPOINT_TABLE)?;
-        let mut savepoint_table = self.open_table(SAVEPOINT_TABLE)?;
+        let mut next_table = self.open_system_table(NEXT_SAVEPOINT_TABLE)?;
+        let mut savepoint_table = self.open_system_table(SAVEPOINT_TABLE)?;
         next_table.insert((), savepoint.get_id().0 + 1)?;
 
         savepoint_table.insert(savepoint.get_id().0, savepoint.to_bytes().as_slice())?;
@@ -228,7 +326,7 @@ impl<'db> WriteTransaction<'db> {
     }
 
     pub(crate) fn next_persistent_savepoint_id(&self) -> Result<Option<SavepointId>> {
-        let next_table = self.open_table(NEXT_SAVEPOINT_TABLE)?;
+        let next_table = self.open_system_table(NEXT_SAVEPOINT_TABLE)?;
         let value = next_table.get(())?;
         if let Some(next_id) = value {
             Ok(Some(SavepointId(next_id.value())))
@@ -239,7 +337,7 @@ impl<'db> WriteTransaction<'db> {
 
     /// Get a persistent savepoint given its id
     pub fn get_persistent_savepoint(&self, id: u64) -> Result<Savepoint> {
-        let table = self.open_table(SAVEPOINT_TABLE)?;
+        let table = self.open_system_table(SAVEPOINT_TABLE)?;
         let value = table.get(id)?;
 
         value
@@ -251,7 +349,7 @@ impl<'db> WriteTransaction<'db> {
     ///
     /// Returns `true` if the savepoint existed
     pub fn delete_persistent_savepoint(&self, id: u64) -> Result<bool> {
-        let mut table = self.open_table(SAVEPOINT_TABLE)?;
+        let mut table = self.open_system_table(SAVEPOINT_TABLE)?;
         let savepoint = table.remove(id)?;
         if let Some(bytes) = savepoint {
             let savepoint =
@@ -268,7 +366,7 @@ impl<'db> WriteTransaction<'db> {
 
     /// List all persistent savepoints
     pub fn list_persistent_savepoints(&self) -> Result<impl Iterator<Item = u64>> {
-        let table = self.open_table(SAVEPOINT_TABLE)?;
+        let table = self.open_system_table(SAVEPOINT_TABLE)?;
         let mut savepoints = vec![];
         for savepoint in table.range::<u64>(..)? {
             savepoints.push(savepoint?.0.value());
@@ -295,6 +393,7 @@ impl<'db> WriteTransaction<'db> {
 
         let regional_allocators = self.mem.get_raw_allocator_states();
         let root = self.mem.get_data_root();
+        let system_root = self.mem.get_system_root();
         let freed_root = self.mem.get_freed_root();
         let savepoint = Savepoint::new_ephemeral(
             self.db.get_memory(),
@@ -302,6 +401,7 @@ impl<'db> WriteTransaction<'db> {
             id,
             transaction_id,
             root,
+            system_root,
             freed_root,
             regional_allocators,
         );
@@ -352,7 +452,12 @@ impl<'db> WriteTransaction<'db> {
         }
         *self.freed_pages.lock().unwrap() = freed_pages;
         self.table_tree = RwLock::new(TableTree::new(
-            savepoint.get_root(),
+            savepoint.get_user_root(),
+            self.mem,
+            self.freed_pages.clone(),
+        ));
+        self.system_table_tree = RwLock::new(TableTree::new(
+            savepoint.get_system_root(),
             self.mem,
             self.freed_pages.clone(),
         ));
@@ -397,6 +502,8 @@ impl<'db> WriteTransaction<'db> {
             .unwrap()
             .invalidate_savepoints_after(savepoint.get_id());
 
+        // TODO: I think we also need to release the read transaction on persistent savepoints, since they aren't cleaned up on drop?
+
         Ok(())
     }
 
@@ -435,6 +542,7 @@ impl<'db> WriteTransaction<'db> {
 
         Ok(Table::new(
             definition.name(),
+            false,
             internal_table.get_root(),
             self.freed_pages.clone(),
             self.mem,
@@ -471,6 +579,7 @@ impl<'db> WriteTransaction<'db> {
 
         Ok(MultimapTable::new(
             definition.name(),
+            false,
             internal_table.get_root(),
             self.freed_pages.clone(),
             self.mem,
@@ -481,13 +590,26 @@ impl<'db> WriteTransaction<'db> {
     pub(crate) fn close_table<K: RedbKey + 'static, V: RedbValue + 'static>(
         &self,
         name: &str,
+        system: bool,
         table: &mut BtreeMut<K, V>,
     ) {
-        self.open_tables.lock().unwrap().remove(name).unwrap();
-        self.table_tree
-            .write()
-            .unwrap()
-            .stage_update_table_root(name, table.get_root());
+        if system {
+            self.open_system_tables
+                .lock()
+                .unwrap()
+                .remove(name)
+                .unwrap();
+            self.system_table_tree
+                .write()
+                .unwrap()
+                .stage_update_table_root(name, table.get_root());
+        } else {
+            self.open_tables.lock().unwrap().remove(name).unwrap();
+            self.table_tree
+                .write()
+                .unwrap()
+                .stage_update_table_root(name, table.get_root());
+        }
     }
 
     /// Delete the given table
@@ -602,8 +724,14 @@ impl<'db> WriteTransaction<'db> {
             .oldest_live_read_transaction()
             .unwrap_or(self.transaction_id);
 
-        let root = self
+        let user_root = self
             .table_tree
+            .write()
+            .unwrap()
+            .flush_table_root_updates()?;
+
+        let system_root = self
+            .system_table_tree
             .write()
             .unwrap()
             .flush_table_root_updates()?;
@@ -622,8 +750,14 @@ impl<'db> WriteTransaction<'db> {
 
         let freed_root = self.freed_tree.lock().unwrap().get_root();
 
-        self.mem
-            .commit(root, freed_root, self.transaction_id, eventual, two_phase)?;
+        self.mem.commit(
+            user_root,
+            system_root,
+            freed_root,
+            self.transaction_id,
+            eventual,
+            two_phase,
+        )?;
 
         // Mark any pending non-durable commits as fully committed.
         self.transaction_tracker
@@ -642,8 +776,14 @@ impl<'db> WriteTransaction<'db> {
 
     // Commit without a durability guarantee
     pub(crate) fn non_durable_commit(&mut self) -> Result {
-        let root = self
+        let user_root = self
             .table_tree
+            .write()
+            .unwrap()
+            .flush_table_root_updates()?;
+
+        let system_root = self
+            .system_table_tree
             .write()
             .unwrap()
             .flush_table_root_updates()?;
@@ -655,7 +795,7 @@ impl<'db> WriteTransaction<'db> {
         let freed_root = self.freed_tree.lock().unwrap().get_root();
 
         self.mem
-            .non_durable_commit(root, freed_root, self.transaction_id)?;
+            .non_durable_commit(user_root, system_root, freed_root, self.transaction_id)?;
         // Register this as a non-durable transaction to ensure that the freed pages we just pushed
         // are only processed after this has been persisted
         self.transaction_tracker

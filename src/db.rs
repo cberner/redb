@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition, RawBtree,
-    TableType, TransactionalMemory, PAGE_SIZE,
+    AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition, PageNumber,
+    RawBtree, TableType, TransactionalMemory, PAGE_SIZE,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{Durability, Error};
@@ -293,6 +293,38 @@ impl Database {
             assert!(mem.raw_file_len()? < 10 * 1024 * 1024, "Database detected as empty, but file is > 10MiB. Aborting repair to avoid potential data loss.");
         }
 
+        if let Some((root, root_checksum)) = mem.get_system_root() {
+            if !RawBtree::new(
+                Some((root, root_checksum)),
+                <&str>::fixed_width(),
+                InternalTableDefinition::fixed_width(),
+                mem,
+            )
+            .verify_checksum()?
+            {
+                return Ok(false);
+            }
+
+            // Iterate over all other tables
+            let iter: BtreeRangeIter<&str, InternalTableDefinition> =
+                BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
+            for entry in iter {
+                let definition = entry?.value();
+                if let Some((table_root, table_checksum)) = definition.get_root() {
+                    if !RawBtree::new(
+                        Some((table_root, table_checksum)),
+                        definition.get_fixed_key_size(),
+                        definition.get_fixed_value_size(),
+                        mem,
+                    )
+                    .verify_checksum()?
+                    {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+
         if let Some((freed_root, freed_checksum)) = mem.get_freed_root() {
             if !RawBtree::new(
                 Some((freed_root, freed_checksum)),
@@ -375,6 +407,52 @@ impl Database {
         Ok(compacted)
     }
 
+    fn mark_tables_recursive(root: PageNumber, mem: &mut TransactionalMemory) -> Result {
+        // Repair the allocator state
+        // All pages in the master table
+        let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, mem)?;
+        mem.mark_pages_allocated(master_pages_iter)?;
+
+        // Iterate over all other tables
+        let iter: BtreeRangeIter<&str, InternalTableDefinition> =
+            BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
+
+        // Chain all the other tables to the master table iter
+        for entry in iter {
+            let definition = entry?.value();
+            if let Some((table_root, _)) = definition.get_root() {
+                let table_pages_iter = AllPageNumbersBtreeIter::new(
+                    table_root,
+                    definition.get_fixed_key_size(),
+                    definition.get_fixed_value_size(),
+                    mem,
+                )?;
+                mem.mark_pages_allocated(table_pages_iter)?;
+
+                // Multimap tables may have additional subtrees in their values
+                if definition.get_type() == TableType::Multimap {
+                    let table_pages_iter = AllPageNumbersBtreeIter::new(
+                        table_root,
+                        definition.get_fixed_key_size(),
+                        definition.get_fixed_value_size(),
+                        mem,
+                    )?;
+                    for table_page in table_pages_iter {
+                        let page = mem.get_page(table_page?)?;
+                        let mut subtree_roots = parse_subtree_roots(
+                            &page,
+                            definition.get_fixed_key_size(),
+                            definition.get_fixed_value_size(),
+                        );
+                        mem.mark_pages_allocated(subtree_roots.drain(..).map(Ok))?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn do_repair(mem: &mut TransactionalMemory) -> Result {
         if !Self::verify_primary_checksums(mem)? {
             mem.repair_primary_corrupted();
@@ -393,47 +471,12 @@ impl Database {
 
         let data_root = mem.get_data_root();
         if let Some((root, _)) = data_root {
-            // Repair the allocator state
-            // All pages in the master table
-            let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, mem)?;
-            mem.mark_pages_allocated(master_pages_iter)?;
+            Self::mark_tables_recursive(root, mem)?;
+        }
 
-            // Iterate over all other tables
-            let iter: BtreeRangeIter<&str, InternalTableDefinition> =
-                BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
-
-            // Chain all the other tables to the master table iter
-            for entry in iter {
-                let definition = entry?.value();
-                if let Some((table_root, _)) = definition.get_root() {
-                    let table_pages_iter = AllPageNumbersBtreeIter::new(
-                        table_root,
-                        definition.get_fixed_key_size(),
-                        definition.get_fixed_value_size(),
-                        mem,
-                    )?;
-                    mem.mark_pages_allocated(table_pages_iter)?;
-
-                    // Multimap tables may have additional subtrees in their values
-                    if definition.get_type() == TableType::Multimap {
-                        let table_pages_iter = AllPageNumbersBtreeIter::new(
-                            table_root,
-                            definition.get_fixed_key_size(),
-                            definition.get_fixed_value_size(),
-                            mem,
-                        )?;
-                        for table_page in table_pages_iter {
-                            let page = mem.get_page(table_page?)?;
-                            let mut subtree_roots = parse_subtree_roots(
-                                &page,
-                                definition.get_fixed_key_size(),
-                                definition.get_fixed_value_size(),
-                            );
-                            mem.mark_pages_allocated(subtree_roots.drain(..).map(Ok))?;
-                        }
-                    }
-                }
-            }
+        let system_root = mem.get_system_root();
+        if let Some((root, _)) = system_root {
+            Self::mark_tables_recursive(root, mem)?;
         }
 
         mem.end_repair()?;
@@ -445,7 +488,7 @@ impl Database {
         // Clear the freed table. We just rebuilt the allocator state by walking all the
         // reachable data pages, which implicitly frees the pages for the freed table
         let transaction_id = mem.get_last_committed_transaction_id()?.next();
-        mem.commit(data_root, None, transaction_id, false, true)?;
+        mem.commit(data_root, system_root, None, transaction_id, false, true)?;
 
         Ok(())
     }
