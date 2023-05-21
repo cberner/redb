@@ -448,7 +448,7 @@ impl TransactionalMemory {
         }
 
         let mut storage = PagedCachedFile::new(
-            file.try_clone().unwrap(),
+            file,
             page_size as u64,
             read_cache_size_bytes,
             write_cache_size_bytes,
