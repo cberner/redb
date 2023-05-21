@@ -169,6 +169,60 @@ impl<'a> BuddyAllocator<'a> {
         free_pages
     }
 
+    // Reduced state for savepoint, which includes only the list of allocated pages
+    // Format:
+    // 1 byte: max order
+    // 4 bytes: num pages
+    // 4 * (max order + 1) bytes: end offsets
+    pub(crate) fn make_state_for_savepoint(&self) -> Vec<u8> {
+        let mut result = vec![self.get_max_order()];
+        result.extend(self.len().to_le_bytes());
+
+        let mut data_offset = result.len() + size_of::<u32>() * (self.get_max_order() as usize + 1);
+        for order in 0..=self.get_max_order() {
+            let bytes = get_order_allocated_bytes(self.data, order);
+            data_offset += bytes.len();
+            result.extend(u32::try_from(data_offset).unwrap().to_le_bytes());
+        }
+
+        for order in 0..=self.get_max_order() {
+            result.extend(get_order_allocated_bytes(self.data, order));
+        }
+
+        result
+    }
+
+    pub(crate) fn allocated_pages_from_savepoint_state(
+        state: &[u8],
+        region: u32,
+    ) -> HashSet<PageNumber> {
+        let mut result = HashSet::new();
+
+        let max_order = state[0];
+        let num_pages = u32::from_le_bytes(state[1..5].try_into().unwrap());
+
+        let mut data_start = 5 + size_of::<u32>() * (max_order as usize + 1);
+
+        for order in 0..=max_order {
+            let offset_index = 5 + size_of::<u32>() * (order as usize);
+            let data_end = u32::from_le_bytes(
+                state[offset_index..(offset_index + size_of::<u32>())]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let bytes = &state[data_start..data_end];
+            let allocated = U64GroupedBitmap::new(bytes);
+            for i in 0..min(allocated.len(), num_pages) {
+                if allocated.get(i) {
+                    result.insert(PageNumber::new(region, i, order));
+                }
+            }
+            data_start = data_end;
+        }
+
+        result
+    }
+
     pub(crate) fn get_allocated_pages(&self, region: u32) -> HashSet<PageNumber> {
         let mut result = HashSet::new();
 

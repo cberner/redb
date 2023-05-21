@@ -63,10 +63,6 @@ impl<'a> RegionHeaderAccessor<'a> {
         ) as usize
     }
 
-    pub(crate) fn allocator_raw(&self) -> Vec<u8> {
-        self.mem[ALLOCATOR_OFFSET..(ALLOCATOR_OFFSET + self.get_allocator_len())].to_vec()
-    }
-
     pub(crate) fn allocator(&self) -> BuddyAllocator {
         BuddyAllocator::new(
             &self.mem[ALLOCATOR_OFFSET..(ALLOCATOR_OFFSET + self.get_allocator_len())],

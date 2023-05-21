@@ -37,7 +37,7 @@ const MIN_DESIRED_USABLE_BYTES: u64 = 1024 * 1024;
 const NUM_REGIONS: u32 = 1000;
 
 // TODO: set to 1, when version 1.0 is released
-pub(crate) const FILE_FORMAT_VERSION: u8 = 112;
+pub(crate) const FILE_FORMAT_VERSION: u8 = 113;
 
 fn ceil_log2(x: usize) -> u8 {
     if x.is_power_of_two() {
@@ -729,7 +729,7 @@ impl TransactionalMemory {
 
         let mut regional_allocators = vec![];
         for i in 0..layout.layout.num_regions() {
-            regional_allocators.push(state.get_region(i).allocator_raw());
+            regional_allocators.push(state.get_region(i).allocator().make_state_for_savepoint());
         }
 
         regional_allocators
@@ -751,7 +751,8 @@ impl TransactionalMemory {
             let region = state.get_region(i);
             let current_state = region.allocator();
             if let Some(old_state) = region_states.get(i as usize) {
-                let old_allocated = BuddyAllocator::new(old_state).get_allocated_pages(i);
+                let old_allocated =
+                    BuddyAllocator::allocated_pages_from_savepoint_state(old_state, i);
                 let new_allocated = current_state.get_allocated_pages(i);
                 result.extend(new_allocated.difference(&old_allocated));
             } else {
