@@ -37,7 +37,7 @@ const MIN_DESIRED_USABLE_BYTES: u64 = 1024 * 1024;
 const NUM_REGIONS: u32 = 1000;
 
 // TODO: set to 1, when version 1.0 is released
-pub(crate) const FILE_FORMAT_VERSION: u8 = 113;
+pub(crate) const FILE_FORMAT_VERSION: u8 = 114;
 
 fn ceil_log2(x: usize) -> u8 {
     if x.is_power_of_two() {
@@ -768,12 +768,20 @@ impl TransactionalMemory {
     pub(crate) fn commit(
         &self,
         data_root: Option<(PageNumber, Checksum)>,
+        system_root: Option<(PageNumber, Checksum)>,
         freed_root: Option<(PageNumber, Checksum)>,
         transaction_id: TransactionId,
         eventual: bool,
         two_phase: bool,
     ) -> Result {
-        let result = self.commit_inner(data_root, freed_root, transaction_id, eventual, two_phase);
+        let result = self.commit_inner(
+            data_root,
+            system_root,
+            freed_root,
+            transaction_id,
+            eventual,
+            two_phase,
+        );
         if result.is_err() {
             self.needs_recovery.store(true, Ordering::Release);
         }
@@ -783,6 +791,7 @@ impl TransactionalMemory {
     fn commit_inner(
         &self,
         data_root: Option<(PageNumber, Checksum)>,
+        system_root: Option<(PageNumber, Checksum)>,
         freed_root: Option<(PageNumber, Checksum)>,
         transaction_id: TransactionId,
         eventual: bool,
@@ -803,7 +812,8 @@ impl TransactionalMemory {
 
         let mut secondary = state.header.secondary_slot_mut();
         secondary.transaction_id = transaction_id;
-        secondary.root = data_root;
+        secondary.user_root = data_root;
+        secondary.system_root = system_root;
         secondary.freed_root = freed_root;
         secondary.layout = layout.layout;
         secondary.region_tracker = layout.tracker_page;
@@ -843,6 +853,7 @@ impl TransactionalMemory {
     pub(crate) fn non_durable_commit(
         &self,
         data_root: Option<(PageNumber, Checksum)>,
+        system_root: Option<(PageNumber, Checksum)>,
         freed_root: Option<(PageNumber, Checksum)>,
         transaction_id: TransactionId,
     ) -> Result {
@@ -857,7 +868,8 @@ impl TransactionalMemory {
         let layout = self.layout.lock().unwrap();
         let mut secondary = state.header.secondary_slot_mut();
         secondary.transaction_id = transaction_id;
-        secondary.root = data_root;
+        secondary.user_root = data_root;
+        secondary.system_root = system_root;
         secondary.freed_root = freed_root;
         secondary.layout = layout.layout;
         secondary.region_tracker = layout.tracker_page;
@@ -1056,9 +1068,18 @@ impl TransactionalMemory {
     pub(crate) fn get_data_root(&self) -> Option<(PageNumber, Checksum)> {
         let state = self.state.lock().unwrap();
         if self.read_from_secondary.load(Ordering::Acquire) {
-            state.header.secondary_slot().root
+            state.header.secondary_slot().user_root
         } else {
-            state.header.primary_slot().root
+            state.header.primary_slot().user_root
+        }
+    }
+
+    pub(crate) fn get_system_root(&self) -> Option<(PageNumber, Checksum)> {
+        let state = self.state.lock().unwrap();
+        if self.read_from_secondary.load(Ordering::Acquire) {
+            state.header.secondary_slot().system_root
+        } else {
+            state.header.primary_slot().system_root
         }
     }
 
@@ -1466,9 +1487,17 @@ impl Drop for TransactionalMemory {
         {
             if let Ok(non_durable_transaction_id) = self.get_last_committed_transaction_id() {
                 let root = self.get_data_root();
+                let system_root = self.get_system_root();
                 let freed_root = self.get_freed_root();
                 if self
-                    .commit(root, freed_root, non_durable_transaction_id, false, true)
+                    .commit(
+                        root,
+                        system_root,
+                        freed_root,
+                        non_durable_transaction_id,
+                        false,
+                        true,
+                    )
                     .is_err()
                 {
                     #[cfg(feature = "logging")]

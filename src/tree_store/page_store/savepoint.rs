@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex};
 // * 1 byte: user root not-null
 // * 8 bytes: user root page
 // * 8 bytes: user root checksum
+// * 1 byte: system root not-null
+// * 8 bytes: system root page
+// * 8 bytes: system root checksum
 // * 1 byte: freed root not-null
 // * 8 bytes: freed root page
 // * 8 bytes: freed root checksum
@@ -22,7 +25,8 @@ pub struct Savepoint {
     // Each savepoint has an associated read transaction id to ensure that any pages it references
     // are not freed
     transaction_id: TransactionId,
-    root: Option<(PageNumber, Checksum)>,
+    user_root: Option<(PageNumber, Checksum)>,
+    system_root: Option<(PageNumber, Checksum)>,
     freed_root: Option<(PageNumber, Checksum)>,
     regional_allocators: Vec<Vec<u8>>,
     transaction_tracker: Arc<Mutex<TransactionTracker>>,
@@ -30,12 +34,14 @@ pub struct Savepoint {
 }
 
 impl Savepoint {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_ephemeral(
         mem: &TransactionalMemory,
         transaction_tracker: Arc<Mutex<TransactionTracker>>,
         id: SavepointId,
         transaction_id: TransactionId,
-        root: Option<(PageNumber, Checksum)>,
+        user_root: Option<(PageNumber, Checksum)>,
+        system_root: Option<(PageNumber, Checksum)>,
         freed_root: Option<(PageNumber, Checksum)>,
         regional_allocators: Vec<Vec<u8>>,
     ) -> Self {
@@ -43,7 +49,8 @@ impl Savepoint {
             id,
             transaction_id,
             version: mem.get_version(),
-            root,
+            user_root,
+            system_root,
             freed_root,
             regional_allocators,
             transaction_tracker,
@@ -63,8 +70,12 @@ impl Savepoint {
         self.transaction_id
     }
 
-    pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
-        self.root
+    pub(crate) fn get_user_root(&self) -> Option<(PageNumber, Checksum)> {
+        self.user_root
+    }
+
+    pub(crate) fn get_system_root(&self) -> Option<(PageNumber, Checksum)> {
+        self.system_root
     }
 
     pub(crate) fn get_freed_root(&self) -> Option<(PageNumber, Checksum)> {
@@ -109,7 +120,30 @@ impl Savepoint {
         let not_null = data[offset];
         assert!(not_null == 0 || not_null == 1);
         offset += 1;
-        let root = if not_null == 1 {
+        let user_root = if not_null == 1 {
+            let page_number = PageNumber::from_le_bytes(
+                data[offset..(offset + PageNumber::serialized_size())]
+                    .try_into()
+                    .unwrap(),
+            );
+            offset += PageNumber::serialized_size();
+            let checksum = Checksum::from_le_bytes(
+                data[offset..(offset + size_of::<Checksum>())]
+                    .try_into()
+                    .unwrap(),
+            );
+            offset += size_of::<Checksum>();
+            Some((page_number, checksum))
+        } else {
+            offset += PageNumber::serialized_size();
+            offset += size_of::<Checksum>();
+            None
+        };
+
+        let not_null = data[offset];
+        assert!(not_null == 0 || not_null == 1);
+        offset += 1;
+        let system_root = if not_null == 1 {
             let page_number = PageNumber::from_le_bytes(
                 data[offset..(offset + PageNumber::serialized_size())]
                     .try_into()
@@ -178,7 +212,8 @@ impl Savepoint {
             version,
             id: SavepointId(id),
             transaction_id: TransactionId(transaction_id),
-            root,
+            user_root,
+            system_root,
             freed_root,
             regional_allocators,
             transaction_tracker,
@@ -191,7 +226,17 @@ impl Savepoint {
         result.extend(self.id.0.to_le_bytes());
         result.extend(self.transaction_id.0.to_le_bytes());
 
-        if let Some((root, checksum)) = self.root {
+        if let Some((root, checksum)) = self.user_root {
+            result.push(1);
+            result.extend(root.to_le_bytes());
+            result.extend(checksum.to_le_bytes());
+        } else {
+            result.push(0);
+            result.extend([0; PageNumber::serialized_size()]);
+            result.extend((0 as Checksum).to_le_bytes());
+        }
+
+        if let Some((root, checksum)) = self.system_root {
             result.push(1);
             result.extend(root.to_le_bytes());
             result.extend(checksum.to_le_bytes());
