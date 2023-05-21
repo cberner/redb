@@ -650,7 +650,7 @@ impl Builder {
     /// Set the amount of memory (in bytes) used for caching data
     pub fn set_cache_size(&mut self, bytes: usize) -> &mut Self {
         // TODO: allow dynamic expansion of the read/write cache
-        self.read_cache_size_bytes = bytes * 9 / 10;
+        self.read_cache_size_bytes = bytes / 10 * 9;
         self.write_cache_size_bytes = bytes / 10;
         self
     }

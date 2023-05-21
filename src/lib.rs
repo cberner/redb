@@ -5,6 +5,8 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
+// TODO remove this once wasi no longer requires nightly
+#![cfg_attr(feature = "wasi", feature(wasi_ext))]
 
 pub use db::{
     Builder, Database, MultimapTableDefinition, MultimapTableHandle, TableDefinition, TableHandle,
