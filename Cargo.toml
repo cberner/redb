@@ -43,7 +43,7 @@ python = ["pyo3"]
 logging = ["log"]
 # Enable cache hit metrics
 cache_metrics = []
-# Whether to enable experimental wasi support (requires nightly and has no file locking!)
+# Enable experimental wasi support (requires nightly and has no file locking!)
 wasi = []
 
 [profile.bench]
