@@ -441,7 +441,7 @@ impl<'txn> TableTree<'txn> {
     pub(crate) fn flush_table_root_updates(&mut self) -> Result<Option<(PageNumber, Checksum)>> {
         for (name, table_root) in self.pending_table_updates.drain() {
             // Bypass .get_table() since the table types are dynamic
-            let mut definition = self.tree.get(&name.as_str()).unwrap().unwrap().value();
+            let mut definition = self.tree.get(&name.as_str())?.unwrap().value();
             // No-op if the root has not changed
             if definition.table_root == table_root {
                 continue;
