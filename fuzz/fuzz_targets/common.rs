@@ -6,12 +6,12 @@ use rand_distr::{Binomial, Distribution};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
-const MAX_CRASH_OPS: u64 = 50;
+const MAX_CRASH_OPS: u64 = 20;
 const MAX_CACHE_SIZE: usize = 100_000_000;
 // Limit values to 10MiB
 const MAX_VALUE_SIZE: usize = 10_000_000;
 const KEY_SPACE: u64 = 1_000_000;
-pub const MAX_SAVEPOINTS: usize = 3;
+pub const MAX_SAVEPOINTS: usize = 6;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundedU64<const N: u64> {
@@ -125,7 +125,8 @@ pub(crate) struct FuzzTransaction {
     pub durable: bool,
     pub commit: bool,
     pub create_ephemeral_savepoint: bool,
-    pub restore_savepoint: BoundedUSize<MAX_SAVEPOINTS>,
+    pub create_persistent_savepoint: bool,
+    pub restore_savepoint: Option<BoundedUSize<MAX_SAVEPOINTS>>,
 }
 
 #[derive(Arbitrary, Debug, Clone)]

@@ -2,7 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use redb::{AccessGuard, Database, Durability, Error, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, Savepoint, Table, TableDefinition, WriteTransaction};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -10,7 +10,7 @@ use tempfile::NamedTempFile;
 
 mod common;
 use common::*;
-use crate::FuzzerSavepoint::{Ephemeral, Persistent};
+use crate::FuzzerSavepoint::{Ephemeral, NotYetDurablePersistent, Persistent};
 
 const TABLE_DEF: TableDefinition<u64, &[u8]> = TableDefinition::new("fuzz_table");
 const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, &[u8]> =
@@ -18,23 +18,92 @@ const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, &[u8]> =
 
 enum FuzzerSavepoint<T: Clone> {
     Ephemeral(Savepoint, BTreeMap<u64, T>),
-    Persistent(u64, BTreeMap<u64, T>)
+    Persistent(u64, BTreeMap<u64, T>),
+    NotYetDurablePersistent(u64, BTreeMap<u64, T>)
 }
 
 struct SavepointManager<T: Clone> {
-    savepoints: Vec<FuzzerSavepoint<T>>
+    savepoints: Vec<FuzzerSavepoint<T>>,
+    uncommitted_persistent: HashSet<u64>,
 }
 
 impl<T: Clone> SavepointManager<T> {
     fn new() -> Self {
         Self {
             savepoints: vec![],
+            uncommitted_persistent: Default::default(),
         }
     }
 
     fn crash(&mut self) {
         let persistent: Vec<FuzzerSavepoint<T>> = self.savepoints.drain(..).filter(|x| matches!(x, FuzzerSavepoint::Persistent(_, _))).collect();
         self.savepoints = persistent;
+        self.uncommitted_persistent.clear();
+    }
+
+    fn abort(&mut self) {
+        let mut savepoints = vec![];
+        for savepoint in self.savepoints.drain(..) {
+            match savepoint {
+                Ephemeral(x, y) => {
+                    savepoints.push(Ephemeral(x, y));
+                }
+                Persistent(x, y) => {
+                    savepoints.push(Persistent(x, y));
+                }
+                NotYetDurablePersistent(id, y) => {
+                    if !self.uncommitted_persistent.contains(&id) {
+                        savepoints.push(NotYetDurablePersistent(id, y));
+                    }
+                }
+            }
+        }
+        self.savepoints = savepoints;
+        self.uncommitted_persistent.clear();
+    }
+
+    fn gc_persistent_savepoints(&mut self, txn: &WriteTransaction) -> Result<(), Error> {
+        let mut savepoints = HashSet::new();
+        for savepoint in self.savepoints.iter() {
+            match savepoint {
+                Ephemeral(_, _) => {}
+                Persistent(id, _) |
+                NotYetDurablePersistent(id, _) => {
+                    savepoints.insert(*id);
+                }
+            }
+        }
+
+        for id in txn.list_persistent_savepoints()? {
+            if !savepoints.contains(&id) {
+                txn.delete_persistent_savepoint(id)?;
+            }
+        }
+
+        assert!(txn.list_persistent_savepoints()?.count() <= MAX_SAVEPOINTS);
+
+        Ok(())
+    }
+
+    fn commit(&mut self, durable: bool) {
+        if durable {
+            let mut savepoints = vec![];
+            for savepoint in self.savepoints.drain(..) {
+                match savepoint {
+                    Ephemeral(x, y) => {
+                        savepoints.push(Ephemeral(x, y));
+                    }
+                    Persistent(x, y) => {
+                        savepoints.push(Persistent(x, y));
+                    }
+                    NotYetDurablePersistent(x, y) => {
+                        savepoints.push(Persistent(x, y));
+                    }
+                }
+            }
+            self.savepoints = savepoints;
+        }
+        self.uncommitted_persistent.clear();
     }
 
     fn restore_savepoint(&mut self, i: usize, txn: &mut WriteTransaction, reference: &mut BTreeMap<u64, T>) -> Result<(), Error> {
@@ -44,6 +113,11 @@ impl<T: Clone> SavepointManager<T> {
         match &self.savepoints[i] {
             FuzzerSavepoint::Ephemeral(savepoint, reference_savepoint) => {
                 txn.restore_savepoint(savepoint)?;
+                *reference = reference_savepoint.clone();
+            }
+            FuzzerSavepoint::NotYetDurablePersistent(savepoint_id, reference_savepoint) => {
+                let savepoint = txn.get_persistent_savepoint(*savepoint_id)?;
+                txn.restore_savepoint(&savepoint)?;
                 *reference = reference_savepoint.clone();
             }
             FuzzerSavepoint::Persistent(savepoint_id, reference_savepoint) => {
@@ -66,7 +140,9 @@ impl<T: Clone> SavepointManager<T> {
     }
 
     fn persistent_savepoint(&mut self, txn: &WriteTransaction, reference: &BTreeMap<u64, T>) -> Result<(), Error> {
-        self.savepoints.push(Persistent(txn.persistent_savepoint()?, reference.clone()));
+        let id = txn.persistent_savepoint()?;
+        self.savepoints.push(NotYetDurablePersistent(id, reference.clone()));
+        self.uncommitted_persistent.insert(id);
         if self.savepoints.len() > MAX_SAVEPOINTS {
             self.savepoints.remove(0);
         }
@@ -162,6 +238,37 @@ fn exec_table_crash_support(config: &FuzzConfig) -> Result<(), redb::Error> {
     let mut non_durable_reference = reference.clone();
 
     for transaction in config.thread0_transactions.iter() {
+        let result = handle_savepoints(db.begin_write().unwrap(), &mut non_durable_reference, transaction, &mut savepoint_manager);
+        match result {
+            Ok(durable) => {
+                if durable {
+                    reference = non_durable_reference.clone();
+                }
+            }
+            Err(err) => {
+                if matches!(err, Error::SimulatedIOFailure) {
+                    drop(db);
+                    savepoint_manager.crash();
+                    non_durable_reference = reference.clone();
+
+                    // Check that recovery flag is set
+                    redb_file.seek(SeekFrom::Start(9)).unwrap();
+                    let mut god_byte = vec![0u8];
+                    assert_eq!(redb_file.read(&mut god_byte).unwrap(), 1);
+                    assert_ne!(god_byte[0] & 2, 0);
+
+                    // Repair the database
+                    db = Database::builder()
+                        .set_page_size(config.page_size.value)
+                        .set_cache_size(config.cache_size.value)
+                        .create(redb_file.path())
+                        .unwrap();
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+
         let result = apply_crashable_transaction(&db, &mut non_durable_reference, transaction, &mut savepoint_manager);
         if result.is_err() {
             if matches!(result, Err(Error::SimulatedIOFailure)) {
@@ -192,17 +299,32 @@ fn exec_table_crash_support(config: &FuzzConfig) -> Result<(), redb::Error> {
     Ok(())
 }
 
+// Returns true if a durable commit was made
+fn handle_savepoints<T: Clone>(mut txn: WriteTransaction, reference: &mut BTreeMap<u64, T>, transaction: &FuzzTransaction, savepoints: &mut SavepointManager<T>) -> Result<bool, redb::Error> {
+    if transaction.create_ephemeral_savepoint {
+        savepoints.ephemeral_savepoint(&txn, &reference)?;
+    }
+
+    if transaction.create_persistent_savepoint || transaction.restore_savepoint.is_some() {
+        if transaction.create_persistent_savepoint {
+            savepoints.persistent_savepoint(&mut txn, reference)?;
+        }
+        if let Some(ref restore_to) = transaction.restore_savepoint {
+            savepoints.restore_savepoint(restore_to.value, &mut txn, reference)?;
+        }
+        txn.commit()?;
+        Ok(true)
+    } else {
+        txn.abort()?;
+        Ok(false)
+    }
+
+}
+
 fn apply_crashable_transaction(db: &Database, reference: &mut BTreeMap<u64, usize>, transaction: &FuzzTransaction, savepoints: &mut SavepointManager<usize>) -> Result<(), redb::Error> {
     let mut txn = db.begin_write().unwrap();
     let mut local_reference = reference.clone();
 
-    if transaction.create_ephemeral_savepoint {
-        savepoints.ephemeral_savepoint(&mut txn, &local_reference)?;
-    }
-    let restore_to = transaction.restore_savepoint.value;
-    savepoints.restore_savepoint(restore_to, &mut txn, &mut local_reference)?;
-
-    // We're not trying to test crash safety, so don't bother with durability
     if !transaction.durable {
         txn.set_durability(Durability::None);
     }
@@ -214,9 +336,14 @@ fn apply_crashable_transaction(db: &Database, reference: &mut BTreeMap<u64, usiz
     }
 
     if transaction.commit {
+        if transaction.durable {
+            savepoints.gc_persistent_savepoints(&txn)?;
+        }
         txn.commit()?;
+        savepoints.commit(transaction.durable);
         *reference = local_reference;
     } else {
+        savepoints.abort();
         txn.abort()?;
     }
 
@@ -232,16 +359,15 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], savepoi
     for transaction in transactions.iter() {
         barrier.wait();
 
+        let txn = db.begin_write().unwrap();
+        let mut guard = reference.lock().unwrap();
+        let mut savepoints_guard = savepoints.lock().unwrap();
+        handle_savepoints(txn, &mut guard, transaction, &mut savepoints_guard)?;
+        drop(guard);
+        drop(savepoints_guard);
         let mut txn = db.begin_write().unwrap();
         let mut local_reference = reference.lock().unwrap().clone();
 
-        if transaction.create_ephemeral_savepoint {
-            savepoints.lock().unwrap().ephemeral_savepoint(&mut txn, &local_reference)?;
-        }
-        let restore_to = transaction.restore_savepoint.value;
-        savepoints.lock().unwrap().restore_savepoint(restore_to, &mut txn, &mut local_reference)?;
-
-        // We're not trying to test crash safety, so don't bother with durability
         if !transaction.durable {
             txn.set_durability(Durability::None);
         }
@@ -253,9 +379,15 @@ fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], savepoi
         }
         if transaction.commit {
             let mut guard = reference.lock().unwrap();
+            let mut savepoints_guard = savepoints.lock().unwrap();
+            if transaction.durable {
+                savepoints_guard.gc_persistent_savepoints(&txn)?;
+            }
             txn.commit()?;
+            savepoints_guard.commit(transaction.durable);
             *guard = local_reference;
         } else {
+            savepoints.lock().unwrap().abort();
             txn.abort().unwrap();
         }
     }
@@ -284,16 +416,15 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
     for transaction in transactions.iter() {
         barrier.wait();
 
+        let txn = db.begin_write().unwrap();
+        let mut guard = reference.lock().unwrap();
+        let mut savepoints_guard = savepoints.lock().unwrap();
+        handle_savepoints(txn, &mut guard, transaction, &mut savepoints_guard)?;
+        drop(guard);
+        drop(savepoints_guard);
         let mut txn = db.begin_write().unwrap();
         let mut local_reference = reference.lock().unwrap().clone();
 
-        if transaction.create_ephemeral_savepoint {
-            savepoints.lock().unwrap().ephemeral_savepoint(&mut txn, &local_reference)?;
-        }
-        let restore_to = transaction.restore_savepoint.value;
-        savepoints.lock().unwrap().restore_savepoint(restore_to, &mut txn, &mut local_reference)?;
-
-        // We're not trying to test crash safety, so don't bother with durability
         if !transaction.durable {
             txn.set_durability(Durability::None);
         }
@@ -371,9 +502,15 @@ fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction]
         }
         if transaction.commit {
             let mut guard = reference.lock().unwrap();
+            let mut savepoints_guard = savepoints.lock().unwrap();
+            if transaction.durable {
+                savepoints_guard.gc_persistent_savepoints(&txn)?;
+            }
             txn.commit()?;
+            savepoints_guard.commit(transaction.durable);
             *guard = local_reference;
         } else {
+            savepoints.lock().unwrap().abort();
             txn.abort().unwrap();
         }
     }
