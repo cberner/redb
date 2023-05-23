@@ -326,12 +326,18 @@ impl<'a, V: RedbValue> Drop for AccessGuardMut<'a, V> {
         if self.root.lock().unwrap().is_none() {
             return;
         }
-        let new_checksum = self
-            .finalize_checksum((self.root.clone()).lock().unwrap().unwrap().0, 0)
-            .unwrap();
-        let mut borrow = self.root.lock().unwrap();
-        let (_, root_checksum_ref) = borrow.as_mut().unwrap();
-        *root_checksum_ref = new_checksum;
+        let result = self.finalize_checksum((self.root.clone()).lock().unwrap().unwrap().0, 0);
+        match result {
+            Ok(new_checksum) => {
+                let mut borrow = self.root.lock().unwrap();
+                let (_, root_checksum_ref) = borrow.as_mut().unwrap();
+                *root_checksum_ref = new_checksum;
+            }
+            Err(err) => {
+                // TODO: this should probably be stored in the table or transaction, and not the mem
+                self.mem.set_deferred_error(err);
+            }
+        }
     }
 }
 
