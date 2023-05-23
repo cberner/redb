@@ -124,7 +124,7 @@ pub(crate) struct FuzzTransaction {
     pub ops: Vec<FuzzOperation>,
     pub durable: bool,
     pub commit: bool,
-    pub create_savepoint: bool,
+    pub create_ephemeral_savepoint: bool,
     pub restore_savepoint: BoundedUSize<MAX_SAVEPOINTS>,
 }
 
