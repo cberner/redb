@@ -289,8 +289,6 @@ impl Database {
                     }
                 }
             }
-        } else {
-            assert!(mem.raw_file_len()? < 10 * 1024 * 1024, "Database detected as empty, but file is > 10MiB. Aborting repair to avoid potential data loss.");
         }
 
         if let Some((root, root_checksum)) = mem.get_system_root() {
