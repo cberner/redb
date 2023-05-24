@@ -23,7 +23,7 @@ use std::{panic, thread};
 
 const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), u64> =
     SystemTableDefinition::new("next_savepoint_id");
-const SAVEPOINT_TABLE: SystemTableDefinition<u64, &[u8]> =
+pub(crate) const SAVEPOINT_TABLE: SystemTableDefinition<u64, &[u8]> =
     SystemTableDefinition::new("persistent_savepoints");
 
 pub struct SystemTableDefinition<'a, K: RedbKey + 'static, V: RedbValue + 'static> {

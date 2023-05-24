@@ -599,6 +599,10 @@ impl<'a> BuddyAllocatorMut<'a> {
         }
     }
 
+    pub(crate) fn is_allocated(&self, page_number: u32, order: u8) -> bool {
+        self.get_order_allocated(order).get(page_number)
+    }
+
     pub(super) fn get_max_order(&self) -> u8 {
         self.data[0]
     }
