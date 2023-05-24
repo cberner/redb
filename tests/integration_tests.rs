@@ -811,6 +811,32 @@ fn regression19() {
 }
 
 #[test]
+fn no_savepoint_resurrection() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db = Database::builder()
+        .set_cache_size(41178283)
+        .create(tmpfile.path())
+        .unwrap();
+
+    let tx = db.begin_write().unwrap();
+    let persistent_savepoint = tx.persistent_savepoint().unwrap();
+    tx.commit().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    let savepoint2 = tx.ephemeral_savepoint().unwrap();
+    tx.delete_persistent_savepoint(persistent_savepoint)
+        .unwrap();
+    tx.commit().unwrap();
+
+    let mut tx = db.begin_write().unwrap();
+    tx.restore_savepoint(&savepoint2).unwrap();
+    tx.delete_persistent_savepoint(persistent_savepoint)
+        .unwrap();
+    tx.commit().unwrap();
+}
+
+#[test]
 fn non_durable_read_isolation() {
     let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
