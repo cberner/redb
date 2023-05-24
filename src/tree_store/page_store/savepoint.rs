@@ -283,7 +283,7 @@ impl Drop for Savepoint {
             self.transaction_tracker
                 .lock()
                 .unwrap()
-                .deallocate_savepoint(self);
+                .deallocate_savepoint(self.get_id(), self.get_transaction_id());
         }
     }
 }
