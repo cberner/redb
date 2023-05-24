@@ -208,6 +208,7 @@ pub struct WriteTransaction<'db> {
     durability: Durability,
     // Persistent savepoints created during this transaction
     created_persistent_savepoints: Mutex<HashSet<u64>>,
+    deleted_persistent_savepoints: Mutex<Vec<(SavepointId, TransactionId)>>,
     live_write_transaction: MutexGuard<'db, Option<TransactionId>>,
 }
 
@@ -256,6 +257,7 @@ impl<'db> WriteTransaction<'db> {
             dirty: AtomicBool::new(false),
             durability: Durability::Immediate,
             created_persistent_savepoints: Mutex::new(Default::default()),
+            deleted_persistent_savepoints: Mutex::new(vec![]),
             live_write_transaction,
         })
     }
@@ -306,7 +308,15 @@ impl<'db> WriteTransaction<'db> {
     /// Therefore, the lifetime of a savepoint should be minimized.
     ///
     /// Returns `[Error::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened)
+    /// or if the transaction's durability is less than `[Durability::Immediate]`
     pub fn persistent_savepoint(&self) -> Result<u64> {
+        if !matches!(
+            self.durability,
+            Durability::Immediate | Durability::Paranoid
+        ) {
+            return Err(Error::InvalidSavepoint);
+        }
+
         let mut savepoint = self.ephemeral_savepoint()?;
 
         let mut next_table = self.open_system_table(NEXT_SAVEPOINT_TABLE)?;
@@ -347,17 +357,26 @@ impl<'db> WriteTransaction<'db> {
 
     /// Delete the given persistent savepoint.
     ///
+    /// Note that if the transaction is abort()'ed this deletion will be rolled back.
+    ///
     /// Returns `true` if the savepoint existed
+    /// Returns `[Error::InvalidSavepoint`] if the transaction's durability is less than `[Durability::Immediate]`
     pub fn delete_persistent_savepoint(&self, id: u64) -> Result<bool> {
+        if !matches!(
+            self.durability,
+            Durability::Immediate | Durability::Paranoid
+        ) {
+            return Err(Error::InvalidSavepoint);
+        }
         let mut table = self.open_system_table(SAVEPOINT_TABLE)?;
         let savepoint = table.remove(id)?;
         if let Some(bytes) = savepoint {
             let savepoint =
                 Savepoint::from_bytes(bytes.value(), self.transaction_tracker.clone(), false);
-            self.transaction_tracker
+            self.deleted_persistent_savepoints
                 .lock()
                 .unwrap()
-                .deallocate_savepoint(&savepoint);
+                .push((savepoint.get_id(), savepoint.get_transaction_id()));
             Ok(true)
         } else {
             Ok(false)
@@ -509,7 +528,20 @@ impl<'db> WriteTransaction<'db> {
 
     /// Set the desired durability level for writes made in this transaction
     /// Defaults to [`Durability::Immediate`]
+    ///
+    /// Will panic if the durability is reduced below `[Durability::Immediate]` after a persistent savepoint has been created or deleted.
     pub fn set_durability(&mut self, durability: Durability) {
+        let no_created = self
+            .created_persistent_savepoints
+            .lock()
+            .unwrap()
+            .is_empty();
+        let no_deleted = self
+            .deleted_persistent_savepoints
+            .lock()
+            .unwrap()
+            .is_empty();
+        assert!(no_created && no_deleted);
         self.durability = durability;
     }
 
@@ -683,6 +715,13 @@ impl<'db> WriteTransaction<'db> {
             Durability::Eventual => self.durable_commit(true, false)?,
             Durability::Immediate => self.durable_commit(false, false)?,
             Durability::Paranoid => self.durable_commit(false, true)?,
+        }
+
+        for (savepoint, transaction) in self.deleted_persistent_savepoints.lock().unwrap().iter() {
+            self.transaction_tracker
+                .lock()
+                .unwrap()
+                .deallocate_savepoint(*savepoint, *transaction);
         }
 
         #[cfg(feature = "logging")]
