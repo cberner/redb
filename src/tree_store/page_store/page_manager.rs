@@ -670,6 +670,7 @@ impl TransactionalMemory {
     pub(crate) fn mark_pages_allocated(
         &self,
         allocated_pages: impl Iterator<Item = Result<PageNumber>>,
+        allow_duplicates: bool,
     ) -> Result<()> {
         let mut state = self.state.lock().unwrap();
 
@@ -677,9 +678,13 @@ impl TransactionalMemory {
             let page_number = page_number?;
             let region_index = page_number.region;
             let mut region = state.get_region_mut(region_index);
-            region
-                .allocator_mut()
-                .record_alloc(page_number.page_index, page_number.page_order);
+            let mut allocator = region.allocator_mut();
+            if allow_duplicates
+                && allocator.is_allocated(page_number.page_index, page_number.page_order)
+            {
+                continue;
+            }
+            allocator.record_alloc(page_number.page_index, page_number.page_order);
         }
 
         Ok(())
