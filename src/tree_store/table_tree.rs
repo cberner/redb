@@ -5,7 +5,7 @@ use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemor
 use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace, TypeName};
 use crate::{DatabaseStats, Error, Result};
 use std::cmp::max;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::mem::size_of;
 use std::ops::RangeFull;
@@ -422,6 +422,39 @@ impl<'txn> TableTree<'txn> {
             pending_table_updates: Default::default(),
             freed_pages,
         }
+    }
+
+    pub(crate) fn all_referenced_pages(&self) -> Result<HashSet<PageNumber>> {
+        // All the pages in the table tree itself
+        let mut result = HashSet::new();
+        if let Some(iter) = self.tree.all_pages_iter()? {
+            for page in iter {
+                result.insert(page?);
+            }
+        }
+
+        // All the normal tables
+        for entry in self.list_tables(TableType::Normal)? {
+            let definition = self.get_table_untyped(&entry, TableType::Normal)?.unwrap();
+            if let Some((table_root, _)) = definition.get_root() {
+                let table_pages_iter = AllPageNumbersBtreeIter::new(
+                    table_root,
+                    definition.get_fixed_key_size(),
+                    definition.get_fixed_value_size(),
+                    self.mem,
+                )?;
+
+                for page in table_pages_iter {
+                    result.insert(page?);
+                }
+            }
+        }
+
+        if !self.list_tables(TableType::Multimap)?.is_empty() {
+            unimplemented!("Walking all multimap references is not currently supported");
+        }
+
+        Ok(result)
     }
 
     // Queues an update to the table root

@@ -461,8 +461,18 @@ impl<'db> WriteTransaction<'db> {
             .mem
             .pages_allocated_since_raw_state(savepoint.get_regional_allocator_states());
 
+        // We don't want to rollback the system tree, so keep any pages it references
+        let referenced_by_system_tree = self
+            .system_table_tree
+            .read()
+            .unwrap()
+            .all_referenced_pages()?;
+
         let mut freed_pages = vec![];
         for page in allocated_since_savepoint {
+            if referenced_by_system_tree.contains(&page) {
+                continue;
+            }
             if self.mem.uncommitted(page) {
                 self.mem.free(page);
             } else {
@@ -472,11 +482,6 @@ impl<'db> WriteTransaction<'db> {
         *self.freed_pages.lock().unwrap() = freed_pages;
         self.table_tree = RwLock::new(TableTree::new(
             savepoint.get_user_root(),
-            self.mem,
-            self.freed_pages.clone(),
-        ));
-        self.system_table_tree = RwLock::new(TableTree::new(
-            savepoint.get_system_root(),
             self.mem,
             self.freed_pages.clone(),
         ));

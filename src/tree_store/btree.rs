@@ -5,7 +5,9 @@ use crate::tree_store::btree_base::{
 use crate::tree_store::btree_iters::BtreeDrain;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
-use crate::tree_store::{AccessGuardMut, BtreeDrainFilter, BtreeRangeIter, PageHint, PageNumber};
+use crate::tree_store::{
+    AccessGuardMut, AllPageNumbersBtreeIter, BtreeDrainFilter, BtreeRangeIter, PageHint, PageNumber,
+};
 use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
 use crate::{AccessGuard, Result};
 #[cfg(feature = "logging")]
@@ -125,6 +127,19 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
             freed_pages,
             _key_type: Default::default(),
             _value_type: Default::default(),
+        }
+    }
+
+    pub(crate) fn all_pages_iter(&self) -> Result<Option<AllPageNumbersBtreeIter>> {
+        if let Some((root, _)) = *self.root.lock().unwrap() {
+            Ok(Some(AllPageNumbersBtreeIter::new(
+                root,
+                K::fixed_width(),
+                V::fixed_width(),
+                self.mem,
+            )?))
+        } else {
+            Ok(None)
         }
     }
 
