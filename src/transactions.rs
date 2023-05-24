@@ -526,7 +526,11 @@ impl<'db> WriteTransaction<'db> {
             .unwrap()
             .invalidate_savepoints_after(savepoint.get_id());
 
-        // TODO: I think we also need to release the read transaction on persistent savepoints, since they aren't cleaned up on drop?
+        for persistent_savepoint in self.list_persistent_savepoints()? {
+            if persistent_savepoint > savepoint.get_id().0 {
+                self.delete_persistent_savepoint(persistent_savepoint)?;
+            }
+        }
 
         Ok(())
     }
