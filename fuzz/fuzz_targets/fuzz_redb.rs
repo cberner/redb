@@ -127,7 +127,7 @@ impl<T: Clone> SavepointManager<T> {
             }
         }
         // Invalidate all future savepoints
-        self.savepoints.drain(i..);
+        self.savepoints.drain((i + 1)..);
         Ok(())
     }
 
