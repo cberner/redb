@@ -212,6 +212,7 @@ impl<'a> BuddyAllocator<'a> {
             ) as usize;
             let bytes = &state[data_start..data_end];
             let allocated = U64GroupedBitmap::new(bytes);
+            // TODO: optimize this. We should be able to get an iterator from the GroupedBitMap
             for i in 0..min(allocated.len(), num_pages) {
                 if allocated.get(i) {
                     result.insert(PageNumber::new(region, i, order));
@@ -228,6 +229,8 @@ impl<'a> BuddyAllocator<'a> {
 
         for order in 0..=self.get_max_order() {
             let allocated = self.get_order_allocated(order);
+            // TODO: optimize this. We should be able to get an iterator from the GroupedBitMap
+            // instead of querying every bit individually
             for i in 0..min(allocated.len(), self.len()) {
                 if allocated.get(i) {
                     result.insert(PageNumber::new(region, i, order));
@@ -235,7 +238,7 @@ impl<'a> BuddyAllocator<'a> {
             }
         }
 
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         // Check the result against the free index to be sure it matches
         {
             let mut free_check = HashSet::new();
