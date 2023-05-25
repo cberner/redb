@@ -76,7 +76,7 @@ impl PageNumber {
         self_order0 < other_order0
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     pub(crate) fn to_order0(self) -> Vec<PageNumber> {
         let mut pages = vec![self];
         loop {
