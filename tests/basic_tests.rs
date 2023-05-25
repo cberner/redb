@@ -3,6 +3,7 @@ use redb::{
     RedbValue, TableDefinition, TableHandle, TypeName,
 };
 use std::cmp::Ordering;
+#[cfg(not(target_os = "wasi"))]
 use std::sync;
 use tempfile::NamedTempFile;
 
@@ -1263,6 +1264,7 @@ fn ref_get_signatures() {
     assert!(iter.next().is_none());
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[test]
 fn concurrent_write_transactions_block() {
     let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();

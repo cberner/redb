@@ -5,6 +5,7 @@ use tempfile::NamedTempFile;
 
 const TABLE: TableDefinition<&str, &str> = TableDefinition::new("x");
 
+#[cfg(not(target_os = "wasi"))]
 #[test]
 fn len() {
     let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
@@ -32,6 +33,7 @@ fn len() {
     assert_eq!(table.len().unwrap(), 3);
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[test]
 fn multithreaded_insert() {
     let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
