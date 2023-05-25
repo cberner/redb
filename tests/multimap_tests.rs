@@ -24,7 +24,7 @@ fn get_vec(
 
 #[test]
 fn len() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -42,7 +42,7 @@ fn len() {
 
 #[test]
 fn is_empty() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let write_txn = db.begin_write().unwrap();
@@ -59,7 +59,7 @@ fn is_empty() {
 
 #[test]
 fn insert() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -81,7 +81,7 @@ fn insert() {
 
 #[test]
 fn range_query() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -132,7 +132,7 @@ fn range_query() {
 
 #[test]
 fn range_lifetime() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let definition: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("x");
@@ -167,7 +167,7 @@ fn range_lifetime() {
 
 #[test]
 fn delete() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -224,7 +224,7 @@ fn delete() {
 
 #[test]
 fn wrong_types() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let definition: MultimapTableDefinition<u32, u32> = MultimapTableDefinition::new("x");
@@ -251,7 +251,7 @@ fn wrong_types() {
 
 #[test]
 fn efficient_storage() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
     let expected_max_size = 1024 * 1024;
     // Write enough values that big_key.len() * entries > db_size to check that duplicate key data is not stored
     // and entries * sizeof(u32) > page_size to validate that large numbers of values can be stored per key
@@ -276,7 +276,7 @@ fn efficient_storage() {
 
 #[test]
 fn reopen_table() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -292,7 +292,7 @@ fn reopen_table() {
 
 #[test]
 fn iter() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -319,7 +319,7 @@ fn iter() {
 
 #[test]
 fn multimap_signature_lifetimes() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let def: MultimapTableDefinition<&str, u64> = MultimapTableDefinition::new("x");

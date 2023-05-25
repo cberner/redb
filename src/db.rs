@@ -716,7 +716,7 @@ mod test {
 
     #[test]
     fn small_pages() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
 
         let db = Database::builder()
             .set_page_size(512)
@@ -733,7 +733,7 @@ mod test {
 
     #[test]
     fn small_pages2() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
 
         let db = Database::builder()
             .set_page_size(512)
@@ -827,7 +827,7 @@ mod test {
 
     #[test]
     fn small_pages3() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
 
         let db = Database::builder()
             .set_page_size(1024)
@@ -860,7 +860,7 @@ mod test {
 
     #[test]
     fn small_pages4() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
 
         let db = Database::builder()
             .set_cache_size(1024 * 1024)
@@ -897,7 +897,7 @@ mod test {
 
     #[test]
     fn crash_regression1() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
 
         let db = Database::builder()
             .set_cache_size(1024 * 1024)
@@ -920,7 +920,7 @@ mod test {
 
     #[test]
     fn dynamic_shrink() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
         let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
         let big_value = vec![0u8; 1024];
 

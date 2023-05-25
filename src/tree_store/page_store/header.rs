@@ -405,7 +405,7 @@ mod test {
 
     #[test]
     fn repair_allocator_checksums() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
         let db = Database::builder().create(tmpfile.path()).unwrap();
         let write_txn = db.begin_write().unwrap();
         {
@@ -517,7 +517,7 @@ mod test {
 
     #[test]
     fn repair_empty() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
         let db = Database::builder().create(tmpfile.path()).unwrap();
         drop(db);
 
@@ -544,7 +544,7 @@ mod test {
 
     #[test]
     fn repair_insert_reserve_regression() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
         let db = Database::builder().create(tmpfile.path()).unwrap();
 
         let def: TableDefinition<&str, &[u8]> = TableDefinition::new("x");

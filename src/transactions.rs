@@ -1036,7 +1036,7 @@ mod test {
 
     #[test]
     fn transaction_id_persistence() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
         let db = Database::create(tmpfile.path()).unwrap();
         let write_txn = db.begin_write().unwrap();
         {
