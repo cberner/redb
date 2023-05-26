@@ -272,6 +272,49 @@ impl<'a> BtreeBitmapMut<'a> {
     }
 }
 
+pub(crate) struct U64GroupedBitmapIter<'a> {
+    data: &'a [u8],
+    data_index: usize,
+    current: u64,
+}
+
+impl<'a> U64GroupedBitmapIter<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            data_index: 0,
+            current: u64::from_le_bytes(data[..8].try_into().unwrap()),
+        }
+    }
+}
+
+impl<'a> Iterator for U64GroupedBitmapIter<'a> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current != 0 {
+            let mut result: u32 = self.data_index.try_into().unwrap();
+            result *= u8::BITS;
+            let bit = self.current.trailing_zeros();
+            result += bit;
+            self.current &= !U64GroupedBitmapMut::select_mask(bit as usize);
+            return Some(result);
+        }
+        self.data_index += size_of::<u64>();
+        while self.data_index + size_of::<u64>() <= self.data.len() {
+            let start = self.data_index;
+            let end = start + size_of::<u64>();
+            let next = u64::from_le_bytes(self.data[start..end].try_into().unwrap());
+            if next != 0 {
+                self.current = next;
+                return self.next();
+            }
+            self.data_index += size_of::<u64>();
+        }
+        None
+    }
+}
+
 // A bitmap which groups consecutive groups of 64bits together
 pub(crate) struct U64GroupedBitmap<'a> {
     data: &'a [u8],
@@ -292,6 +335,10 @@ impl<'a> U64GroupedBitmap<'a> {
 
     fn count_unset(&self) -> u32 {
         self.data.iter().map(|x| x.count_zeros()).sum()
+    }
+
+    pub fn iter(&self) -> U64GroupedBitmapIter {
+        U64GroupedBitmapIter::new(self.data)
     }
 
     pub fn len(&self) -> u32 {
@@ -374,7 +421,9 @@ impl<'a> U64GroupedBitmapMut<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::tree_store::page_store::bitmap::BtreeBitmapMut;
+    use crate::tree_store::page_store::bitmap::{
+        BtreeBitmapMut, U64GroupedBitmap, U64GroupedBitmapMut,
+    };
     use rand::prelude::IteratorRandom;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -467,6 +516,24 @@ mod test {
         assert_eq!(allocator.find_first_unset().unwrap(), 8);
         allocator.clear(0);
         assert_eq!(allocator.find_first_unset().unwrap(), 0);
+    }
+
+    #[test]
+    fn iter() {
+        let num_pages = 129;
+        let mut data = vec![0; U64GroupedBitmapMut::required_bytes(num_pages)];
+        U64GroupedBitmapMut::init_empty(&mut data);
+        let mut bitmap = U64GroupedBitmapMut::new(&mut data);
+        let values = [0, 1, 33, 63, 64, 65, 90, 126, 127, 128];
+        for x in values {
+            bitmap.set(x);
+        }
+        drop(bitmap);
+        let bitmap = U64GroupedBitmap::new(&data);
+        for (i, x) in bitmap.iter().enumerate() {
+            assert_eq!(values[i], x);
+        }
+        assert_eq!(bitmap.iter().count(), values.len());
     }
 
     #[test]
