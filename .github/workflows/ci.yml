@@ -72,7 +72,8 @@ jobs:
         run: cargo install --force --version 1.8.0 just --locked
 
       - name: Compile
-        run: cargo build --all-targets --all-features
+        # TODO replace --features=... with --all-features once the "wasi" feature is removed
+        run: cargo build --all-targets --features=python,logging,cache_metrics
 
       - name: Fuzzer
         run: just fuzz_ci
@@ -104,3 +105,11 @@ jobs:
           pip3 install --upgrade pip
           pip3 install maturin
           just test_py
+
+      - name: Run WASI tests
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          rustup target add wasm32-wasi
+          brew install wasmtime
+          cargo install cargo-wasi
+          just test_wasi

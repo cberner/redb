@@ -27,11 +27,14 @@ install_py: pre
 test: pre
     RUST_BACKTRACE=1 cargo test
 
+test_wasi: pre
+    CARGO_TARGET_WASM32_WASI_RUNNER="wasmtime --dir=." cargo +nightly wasi test --features=wasi -- --nocapture
+
 bench bench='lmdb_benchmark': pre
     cargo bench --bench {{bench}}
 
 watch +args='test':
-  cargo watch --clear --exec "{{args}}"
+    cargo watch --clear --exec "{{args}}"
 
 fuzz: pre
     cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=100000
