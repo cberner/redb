@@ -1,6 +1,6 @@
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::Checksum;
-use crate::tree_store::page_store::base::PageHint;
+use crate::tree_store::page_store::base::{PageHint, MAX_PAGE_INDEX};
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
@@ -15,7 +15,7 @@ use crate::Result;
 #[cfg(feature = "logging")]
 use log::warn;
 use std::cmp;
-use std::cmp::max;
+use std::cmp::{max, min};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -417,6 +417,7 @@ impl TransactionalMemory {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
         let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
+        let region_size = min(region_size, (MAX_PAGE_INDEX as u64 + 1) * page_size as u64);
         assert!(region_size.is_power_of_two());
 
         // TODO: allocate more tracker space when it becomes exhausted, and remove this hard coded 1000 regions

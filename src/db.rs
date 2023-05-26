@@ -1018,11 +1018,11 @@ mod test {
         let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
 
         let db = Database::builder()
-            .set_cache_size(48101213)
+            .set_cache_size(48101213 / 5)
             .set_page_size(512)
             .create(tmpfile.path())
             .unwrap();
-        db.set_crash_countdown(13);
+        db.set_crash_countdown(8);
 
         let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
