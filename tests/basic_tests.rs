@@ -3,7 +3,6 @@ use redb::{
     RedbValue, TableDefinition, TableHandle, TypeName,
 };
 use std::cmp::Ordering;
-#[cfg(not(target_os = "wasi"))]
 use std::sync;
 use tempfile::NamedTempFile;
 
