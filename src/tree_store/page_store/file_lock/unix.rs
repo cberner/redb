@@ -3,7 +3,7 @@
 // See also: https://github.com/WebAssembly/wasi-filesystem/issues/2
 
 // Remove this line once wasi-libc has flock
-#![cfg_attr(feature = "wasi", allow(unused_imports))]
+#![cfg_attr(target_os = "wasi", allow(unused_imports))]
 
 use crate::{Error, Result};
 use std::fs::File;
