@@ -122,7 +122,7 @@ fn immediate_persistence() {
     test_persistence(Durability::Immediate);
 }
 
-#[cfg(not(feature = "wasi"))] // TODO figure out why this fails on WASI
+#[cfg(not(target_os = "wasi"))] // TODO figure out why this fails on WASI
 #[test]
 fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
@@ -1156,7 +1156,7 @@ fn tree_balance() {
     assert!(height <= expected, "height={height} expected={expected}",);
 }
 
-#[cfg(not(feature = "wasi"))] // TODO remove this line once WASI gets flock
+#[cfg(not(target_os = "wasi"))] // TODO remove this line once WASI gets flock
 #[test]
 fn database_lock() {
     let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();

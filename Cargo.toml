@@ -22,12 +22,12 @@ libc = "0.2.104"
 log = {version = "0.4.17", optional = true }
 pyo3 = {version = "0.18.0", features=["extension-module", "abi3-py37"], optional = true }
 
-# These are actually test dependencies
+# Common test/bench dependencies
 [dev-dependencies]
 rand = "0.8"
 tempfile = "3.5.0"
 
-# These are actually benchmarking dependencies
+# Just benchmarking dependencies
 [target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
 ctrlc = "3.2.3"
 fastrand = "1.9.0"
@@ -47,8 +47,6 @@ python = ["pyo3"]
 logging = ["log"]
 # Enable cache hit metrics
 cache_metrics = []
-# Enable experimental wasi support (requires nightly and has no file locking!)
-wasi = []
 
 [profile.bench]
 debug = true

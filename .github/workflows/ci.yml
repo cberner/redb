@@ -72,8 +72,7 @@ jobs:
         run: cargo install --force --version 1.8.0 just --locked
 
       - name: Compile
-        # TODO replace --features=... with --all-features once the "wasi" feature is removed
-        run: cargo build --all-targets --features=python,logging,cache_metrics
+        run: cargo build --all-targets --all-features
 
       - name: Fuzzer
         run: just fuzz_ci

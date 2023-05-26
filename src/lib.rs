@@ -5,13 +5,8 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
-// TODO remove these (and the "wasi" Cargo feature) once wasi no longer requires nightly
-#![cfg_attr(feature = "wasi", feature(wasi_ext))]
-#[cfg(all(target_os = "wasi", not(feature = "wasi")))]
-compile_error!(
-    r"To compile to WASI, you must enable the 'wasi' feature for now!
-See redb's Cargo.toml for why; this restriction will be lifted in the future."
-);
+// TODO remove this once wasi no longer requires nightly
+#![cfg_attr(target_os = "wasi", feature(wasi_ext))]
 
 pub use db::{
     Builder, Database, MultimapTableDefinition, MultimapTableHandle, TableDefinition, TableHandle,
