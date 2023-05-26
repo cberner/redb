@@ -291,7 +291,7 @@ impl<'a> U64GroupedBitmap<'a> {
     }
 
     fn count_unset(&self) -> u32 {
-        self.data.iter().map(|x| x.count_ones()).sum()
+        self.data.iter().map(|x| x.count_zeros()).sum()
     }
 
     pub fn len(&self) -> u32 {
@@ -300,17 +300,17 @@ impl<'a> U64GroupedBitmap<'a> {
     }
 
     fn any_unset(&self) -> bool {
-        self.data.iter().any(|x| x.count_ones() > 0)
+        self.data.iter().any(|x| x.count_zeros() > 0)
     }
 
     fn first_unset(&self, start_bit: u32, end_bit: u32) -> Option<u32> {
         assert_eq!(end_bit, (start_bit - start_bit % 64) + 64);
 
         let (index, bit) = self.data_index_of(start_bit);
-        let mask = !((1 << bit) - 1);
+        let mask = (1 << bit) - 1;
         let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        let group = group & mask;
-        match group.trailing_zeros() {
+        let group = group | mask;
+        match group.trailing_ones() {
             64 => None,
             x => Some(start_bit + x - u32::try_from(bit).unwrap()),
         }
@@ -319,12 +319,10 @@ impl<'a> U64GroupedBitmap<'a> {
     pub fn get(&self, bit: u32) -> bool {
         let (index, bit_index) = self.data_index_of(bit);
         let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        group & U64GroupedBitmapMut::select_mask(bit_index) == 0
+        group & U64GroupedBitmapMut::select_mask(bit_index) != 0
     }
 }
 
-// Note bits are set in the opposite of what may be intuitive: they are 0 when set and 1 when unset.
-// This is so that the data structure can be efficiently initialized to be all set.
 pub(crate) struct U64GroupedBitmapMut<'a> {
     data: &'a mut [u8],
 }
@@ -336,11 +334,11 @@ impl<'a> U64GroupedBitmapMut<'a> {
     }
 
     pub fn init_full(data: &mut [u8]) {
-        data.fill(0);
+        data.fill(0xFF);
     }
 
     pub fn init_empty(data: &mut [u8]) {
-        data.fill(0xFF);
+        data.fill(0);
     }
 
     pub fn new(data: &'a mut [u8]) -> Self {
@@ -352,16 +350,16 @@ impl<'a> U64GroupedBitmapMut<'a> {
     pub fn set(&mut self, bit: u32) -> bool {
         let (index, bit_index) = self.data_index_of(bit as usize);
         let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        group &= !Self::select_mask(bit_index);
+        group |= Self::select_mask(bit_index);
         self.data[index..(index + 8)].copy_from_slice(&group.to_le_bytes());
 
-        group == 0
+        group == u64::MAX
     }
 
     pub fn clear(&mut self, bit: u32) {
         let (index, bit_index) = self.data_index_of(bit as usize);
         let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        group |= Self::select_mask(bit_index);
+        group &= !Self::select_mask(bit_index);
         self.data[index..(index + 8)].copy_from_slice(&group.to_le_bytes());
     }
 
@@ -449,7 +447,7 @@ mod test {
         while allocator.alloc().is_some() {}
         // The last u64 must be used, since the leaf layer is compact
         let l = data.len();
-        assert_ne!(
+        assert_eq!(
             u64::MAX,
             u64::from_le_bytes(data[(l - 8)..].try_into().unwrap())
         );
