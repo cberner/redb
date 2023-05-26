@@ -510,15 +510,20 @@ impl Database {
                     )?;
                     for table_page in table_pages_iter {
                         let page = mem.get_page(table_page?)?;
-                        let mut subtree_roots = parse_subtree_roots(
+                        let subtree_roots = parse_subtree_roots(
                             &page,
                             definition.get_fixed_key_size(),
                             definition.get_fixed_value_size(),
                         );
-                        mem.mark_pages_allocated(
-                            subtree_roots.drain(..).map(Ok),
-                            allow_duplicates,
-                        )?;
+                        for sub_root in subtree_roots {
+                            let sub_root_iter = AllPageNumbersBtreeIter::new(
+                                sub_root,
+                                definition.get_fixed_value_size(),
+                                <()>::fixed_width(),
+                                mem,
+                            )?;
+                            mem.mark_pages_allocated(sub_root_iter, allow_duplicates)?;
+                        }
                     }
                 }
             }
