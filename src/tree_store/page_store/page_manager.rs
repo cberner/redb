@@ -2,7 +2,6 @@ use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::page_store::base::{PageHint, MAX_PAGE_INDEX};
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
-use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::header::{DatabaseHeader, DB_HEADER_SIZE, MAGICNUMBER};
 use crate::tree_store::page_store::layout::DatabaseLayout;
@@ -763,11 +762,7 @@ impl TransactionalMemory {
             let region = state.get_region(i);
             let current_state = region.allocator();
             if let Some(old_state) = region_states.get(i as usize) {
-                let old_allocated =
-                    BuddyAllocator::allocated_pages_from_savepoint_state(old_state, i);
-                let new_allocated = current_state.get_allocated_pages(i);
-                // TODO: this could be faster if BuddyAllocator implemented a difference() method natively
-                result.extend(new_allocated.difference(&old_allocated));
+                current_state.get_allocated_pages_since_savepoint(i, old_state, &mut result);
             } else {
                 // This region didn't exist, so everything is newly allocated
                 result.extend(current_state.get_allocated_pages(i));
