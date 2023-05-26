@@ -4,8 +4,6 @@ use libfuzzer_sys::fuzz_target;
 use redb::{AccessGuard, Database, Durability, Error, MultimapTable, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, Savepoint, Table, TableDefinition, WriteTransaction};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::{Arc, Mutex};
-use std::thread;
 use tempfile::NamedTempFile;
 
 mod common;
@@ -295,7 +293,7 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
     Ok(())
 }
 
-fn exec_multimap_table_crash_support(config: &FuzzConfig) -> Result<(), redb::Error> {
+fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, &mut BTreeMap<u64, T>, &FuzzTransaction, &mut SavepointManager<T>) -> Result<(), redb::Error>) -> Result<(), redb::Error> {
     let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
 
     let mut db = Database::builder()
@@ -309,7 +307,7 @@ fn exec_multimap_table_crash_support(config: &FuzzConfig) -> Result<(), redb::Er
     let mut reference = BTreeMap::new();
     let mut non_durable_reference = reference.clone();
 
-    for transaction in config.thread0_transactions.iter() {
+    for transaction in config.transactions.iter() {
         let result = handle_savepoints(db.begin_write().unwrap(), &mut non_durable_reference, transaction, &mut savepoint_manager);
         match result {
             Ok(durable) => {
@@ -341,83 +339,7 @@ fn exec_multimap_table_crash_support(config: &FuzzConfig) -> Result<(), redb::Er
             }
         }
 
-        let result = apply_crashable_transaction_multimap(&db, &mut non_durable_reference, transaction, &mut savepoint_manager);
-        if result.is_err() {
-            if matches!(result, Err(Error::SimulatedIOFailure)) {
-                drop(db);
-                savepoint_manager.crash();
-                non_durable_reference = reference.clone();
-
-                // Check that recovery flag is set
-                redb_file.seek(SeekFrom::Start(9)).unwrap();
-                let mut god_byte = vec![0u8];
-                assert_eq!(redb_file.read(&mut god_byte).unwrap(), 1);
-                assert_ne!(god_byte[0] & 2, 0);
-
-                // Repair the database
-                db = Database::builder()
-                    .set_page_size(config.page_size.value)
-                    .set_cache_size(config.cache_size.value)
-                    .create(redb_file.path())
-                    .unwrap();
-            } else {
-                return result;
-            }
-        } else if transaction.durable && transaction.commit {
-            reference = non_durable_reference.clone();
-        }
-    }
-
-    Ok(())
-}
-
-fn exec_table_crash_support(config: &FuzzConfig) -> Result<(), redb::Error> {
-    let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
-
-    let mut db = Database::builder()
-        .set_page_size(config.page_size.value)
-        .set_cache_size(config.cache_size.value)
-        .create(redb_file.path())
-        .unwrap();
-    db.set_crash_countdown(config.crash_after_ops.value);
-
-    let mut savepoint_manager = SavepointManager::new();
-    let mut reference = BTreeMap::new();
-    let mut non_durable_reference = reference.clone();
-
-    for transaction in config.thread0_transactions.iter() {
-        let result = handle_savepoints(db.begin_write().unwrap(), &mut non_durable_reference, transaction, &mut savepoint_manager);
-        match result {
-            Ok(durable) => {
-                if durable {
-                    reference = non_durable_reference.clone();
-                }
-            }
-            Err(err) => {
-                if matches!(err, Error::SimulatedIOFailure) {
-                    drop(db);
-                    savepoint_manager.crash();
-                    non_durable_reference = reference.clone();
-
-                    // Check that recovery flag is set
-                    redb_file.seek(SeekFrom::Start(9)).unwrap();
-                    let mut god_byte = vec![0u8];
-                    assert_eq!(redb_file.read(&mut god_byte).unwrap(), 1);
-                    assert_ne!(god_byte[0] & 2, 0);
-
-                    // Repair the database
-                    db = Database::builder()
-                        .set_page_size(config.page_size.value)
-                        .set_cache_size(config.cache_size.value)
-                        .create(redb_file.path())
-                        .unwrap();
-                } else {
-                    return Err(err);
-                }
-            }
-        }
-
-        let result = apply_crashable_transaction(&db, &mut non_durable_reference, transaction, &mut savepoint_manager);
+        let result = apply(&db, &mut non_durable_reference, transaction, &mut savepoint_manager);
         if result.is_err() {
             if matches!(result, Err(Error::SimulatedIOFailure)) {
                 drop(db);
@@ -527,51 +449,6 @@ fn apply_crashable_transaction(db: &Database, reference: &mut BTreeMap<u64, usiz
     Ok(())
 }
 
-fn exec_table(db: Arc<Database>, transactions: &[FuzzTransaction], savepoints: Arc<Mutex<SavepointManager<usize>>>, reference: Arc<Mutex<BTreeMap<u64, usize>>>, barrier: Arc<CustomBarrier>) {
-    exec_table_inner(db, &transactions, savepoints, reference, barrier.clone()).unwrap();
-    barrier.decrement_waiters();
-}
-
-fn exec_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], savepoints: Arc<Mutex<SavepointManager<usize>>>, reference: Arc<Mutex<BTreeMap<u64, usize>>>, barrier: Arc<CustomBarrier>) -> Result<(), redb::Error> {
-    for transaction in transactions.iter() {
-        barrier.wait();
-
-        let txn = db.begin_write().unwrap();
-        let mut guard = reference.lock().unwrap();
-        let mut savepoints_guard = savepoints.lock().unwrap();
-        handle_savepoints(txn, &mut guard, transaction, &mut savepoints_guard)?;
-        drop(guard);
-        drop(savepoints_guard);
-        let mut txn = db.begin_write().unwrap();
-        let mut local_reference = reference.lock().unwrap().clone();
-
-        if !transaction.durable {
-            txn.set_durability(Durability::None);
-        }
-        {
-            let mut table = txn.open_table(TABLE_DEF)?;
-            for op in transaction.ops.iter() {
-                handle_table_op(op, &mut local_reference, &mut table)?;
-            }
-        }
-        if transaction.commit {
-            let mut guard = reference.lock().unwrap();
-            let mut savepoints_guard = savepoints.lock().unwrap();
-            if transaction.durable {
-                savepoints_guard.gc_persistent_savepoints(&txn)?;
-            }
-            txn.commit()?;
-            savepoints_guard.commit(transaction.durable);
-            *guard = local_reference;
-        } else {
-            savepoints.lock().unwrap().abort();
-            txn.abort().unwrap();
-        }
-    }
-
-    Ok(())
-}
-
 fn assert_multimap_value_eq(
     mut iter: MultimapValue<&[u8]>,
     reference: Option<&BTreeSet<usize>>,
@@ -584,167 +461,10 @@ fn assert_multimap_value_eq(
     assert!(iter.next().is_none());
 }
 
-fn exec_multimap_table(db: Arc<Database>, transactions: &[FuzzTransaction], savepoints: Arc<Mutex<SavepointManager<BTreeSet<usize>>>>, reference: Arc<Mutex<BTreeMap<u64, BTreeSet<usize>>>>, barrier: Arc<CustomBarrier>) {
-    exec_multimap_table_inner(db, &transactions, savepoints, reference, barrier.clone()).unwrap();
-    barrier.decrement_waiters();
-}
-
-fn exec_multimap_table_inner(db: Arc<Database>, transactions: &[FuzzTransaction], savepoints: Arc<Mutex<SavepointManager<BTreeSet<usize>>>>, reference: Arc<Mutex<BTreeMap<u64, BTreeSet<usize>>>>, barrier: Arc<CustomBarrier>) -> Result<(), redb::Error> {
-    for transaction in transactions.iter() {
-        barrier.wait();
-
-        let txn = db.begin_write().unwrap();
-        let mut guard = reference.lock().unwrap();
-        let mut savepoints_guard = savepoints.lock().unwrap();
-        handle_savepoints(txn, &mut guard, transaction, &mut savepoints_guard)?;
-        drop(guard);
-        drop(savepoints_guard);
-        let mut txn = db.begin_write().unwrap();
-        let mut local_reference = reference.lock().unwrap().clone();
-
-        if !transaction.durable {
-            txn.set_durability(Durability::None);
-        }
-        {
-            let mut table = txn.open_multimap_table(MULTIMAP_TABLE_DEF)?;
-            for op in transaction.ops.iter() {
-                match op {
-                    FuzzOperation::Get { key } => {
-                        let key = key.value;
-                        let iter = table.get(&key).unwrap();
-                        let entry = local_reference.get(&key);
-                        assert_multimap_value_eq(iter, entry);
-                    }
-                    FuzzOperation::Insert { key, value_size } => {
-                        let key = key.value;
-                        let value_size = value_size.value as usize;
-                        table.insert(&key, vec![0xFFu8; value_size].as_slice())?;
-                        local_reference.entry(key).or_default().insert(value_size);
-                    }
-                    FuzzOperation::InsertReserve { .. } => {
-                        // no-op. Multimap tables don't support insert_reserve
-                    }
-                    FuzzOperation::Remove { key } => {
-                        let key = key.value;
-                        let entry = local_reference.remove(&key);
-                        let iter = table.remove_all(&key)?;
-                        assert_multimap_value_eq(iter, entry.as_ref());
-                    }
-                    FuzzOperation::RemoveOne { key, value_size } => {
-                        let key = key.value;
-                        let value_size = value_size.value as usize;
-                        let value = vec![0xFFu8; value_size];
-                        let reference_existed =
-                            local_reference.entry(key).or_default().remove(&value_size);
-                        if local_reference.entry(key).or_default().is_empty() {
-                            local_reference.remove(&key);
-                        }
-                        let existed = table.remove(&key, value.as_slice())?;
-                        assert_eq!(reference_existed, existed);
-                    }
-                    FuzzOperation::Len {} => {
-                        let mut reference_len = 0;
-                        for v in local_reference.values() {
-                            reference_len += v.len();
-                        }
-                        assert_eq!(reference_len as u64, table.len().unwrap());
-                    }
-                    FuzzOperation::Range {
-                        start_key,
-                        len,
-                        reversed,
-                    } => {
-                        let start = start_key.value;
-                        let end = start + len.value;
-                        let mut reference_iter: Box<dyn Iterator<Item = (&u64, &BTreeSet<usize>)>> =
-                            if *reversed {
-                                Box::new(local_reference.range(start..end).rev())
-                            } else {
-                                Box::new(local_reference.range(start..end))
-                            };
-                        let mut iter: Box<dyn Iterator<Item = (AccessGuard<u64>, MultimapValue<&[u8]>)>> = if *reversed {
-                            Box::new(table.range(start..end).unwrap().map(|x| x.unwrap()).rev())
-                        } else {
-                            Box::new(table.range(start..end).unwrap().map(|x| x.unwrap()))
-                        };
-                        while let Some((ref_key, ref_values)) = reference_iter.next() {
-                            let (key, value_iter) = iter.next().unwrap();
-                            assert_eq!(*ref_key, key.value());
-                            assert_multimap_value_eq(value_iter, Some(ref_values));
-                        }
-                        assert!(iter.next().is_none());
-                    }
-                }
-            }
-        }
-        if transaction.commit {
-            let mut guard = reference.lock().unwrap();
-            let mut savepoints_guard = savepoints.lock().unwrap();
-            if transaction.durable {
-                savepoints_guard.gc_persistent_savepoints(&txn)?;
-            }
-            txn.commit()?;
-            savepoints_guard.commit(transaction.durable);
-            *guard = local_reference;
-        } else {
-            savepoints.lock().unwrap().abort();
-            txn.abort().unwrap();
-        }
-    }
-
-    Ok(())
-}
-
 fuzz_target!(|config: FuzzConfig| {
     if config.multimap_table {
-        exec_multimap_table_crash_support(&config).unwrap();
+        exec_table_crash_support(&config, apply_crashable_transaction_multimap).unwrap();
     } else {
-        exec_table_crash_support(&config).unwrap();
+        exec_table_crash_support(&config, apply_crashable_transaction).unwrap();
     }
-
-    let redb_file: NamedTempFile = NamedTempFile::new().unwrap();
-    let db = Database::builder()
-            .set_page_size(config.page_size.value)
-            .set_cache_size(config.cache_size.value)
-            .create(redb_file.path());
-
-    let db = Arc::new(db.unwrap());
-
-    let barrier = Arc::new(CustomBarrier::new(2));
-    if config.multimap_table {
-        let savepoints = Arc::new(Mutex::new(SavepointManager::new()));
-        let savepoints2 = savepoints.clone();
-        let reference = Arc::new(Mutex::new(Default::default()));
-        let reference2 = reference.clone();
-        let barrier2 = barrier.clone();
-        let db2 = db.clone();
-        let transactions = config.thread0_transactions.clone();
-        let t0 = thread::spawn(move || {
-            exec_multimap_table(db, &transactions, savepoints, reference, barrier);
-        });
-        let transactions = config.thread1_transactions.clone();
-        let t1 = thread::spawn(move || {
-            exec_multimap_table(db2, &transactions, savepoints2, reference2, barrier2);
-        });
-        assert!(t0.join().is_ok());
-        assert!(t1.join().is_ok());
-    } else {
-        let savepoints = Arc::new(Mutex::new(SavepointManager::new()));
-        let savepoints2 = savepoints.clone();
-        let reference = Arc::new(Mutex::new(Default::default()));
-        let reference2 = reference.clone();
-        let barrier2 = barrier.clone();
-        let db2 = db.clone();
-        let transactions = config.thread0_transactions.clone();
-        let t0 = thread::spawn(move || {
-            exec_table(db, &transactions, savepoints, reference, barrier);
-        });
-        let transactions = config.thread1_transactions.clone();
-        let t1 = thread::spawn(move || {
-            exec_table(db2, &transactions, savepoints2, reference2, barrier2);
-        });
-        assert!(t0.join().is_ok());
-        assert!(t1.join().is_ok());
-    };
-
 });
