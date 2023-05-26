@@ -765,6 +765,7 @@ impl TransactionalMemory {
                 let old_allocated =
                     BuddyAllocator::allocated_pages_from_savepoint_state(old_state, i);
                 let new_allocated = current_state.get_allocated_pages(i);
+                // TODO: this could be faster if BuddyAllocator implemented a difference() method natively
                 result.extend(new_allocated.difference(&old_allocated));
             } else {
                 // This region didn't exist, so everything is newly allocated
