@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 pub(crate) const MAX_VALUE_LENGTH: usize = 3 * 1024 * 1024 * 1024;
+pub(crate) const MAX_PAGE_INDEX: u32 = 0x000F_FFFF;
 
 // On-disk format is:
 // lowest 20bits: page index within the region
@@ -36,7 +37,7 @@ impl PageNumber {
 
     pub(crate) fn new(region: u32, page_index: u32, page_order: u8) -> Self {
         debug_assert!(region <= 0x000F_FFFF);
-        debug_assert!(page_index <= 0x000F_FFFF);
+        debug_assert!(page_index <= MAX_PAGE_INDEX);
         debug_assert!(page_order <= MAX_MAX_PAGE_ORDER);
         Self {
             region,
@@ -76,7 +77,7 @@ impl PageNumber {
         self_order0 < other_order0
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     pub(crate) fn to_order0(self) -> Vec<PageNumber> {
         let mut pages = vec![self];
         loop {

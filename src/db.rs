@@ -1,10 +1,11 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, BtreeRangeIter, FreedTableKey, InternalTableDefinition, PageNumber,
-    RawBtree, TableType, TransactionalMemory, PAGE_SIZE,
+    AllPageNumbersBtreeIter, BtreeRangeIter, Checksum, FreedPageList, FreedTableKey,
+    InternalTableDefinition, PageHint, PageNumber, RawBtree, TableTree, TableType,
+    TransactionalMemory, PAGE_SIZE,
 };
 use crate::types::{RedbKey, RedbValue};
-use crate::{Durability, Error};
+use crate::{Durability, Error, ReadOnlyTable, ReadableTable, Savepoint};
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
@@ -18,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::multimap_table::parse_subtree_roots;
 use crate::sealed::Sealed;
+use crate::transactions::SAVEPOINT_TABLE;
 use crate::Error::Corrupted;
 #[cfg(feature = "logging")]
 use log::{info, warn};
@@ -289,8 +291,6 @@ impl Database {
                     }
                 }
             }
-        } else {
-            assert!(mem.raw_file_len()? < 10 * 1024 * 1024, "Database detected as empty, but file is > 10MiB. Aborting repair to avoid potential data loss.");
         }
 
         if let Some((root, root_checksum)) = mem.get_system_root() {
@@ -407,11 +407,82 @@ impl Database {
         Ok(compacted)
     }
 
-    fn mark_tables_recursive(root: PageNumber, mem: &mut TransactionalMemory) -> Result {
+    fn mark_persistent_savepoints(
+        system_root: Option<(PageNumber, Checksum)>,
+        mem: &mut TransactionalMemory,
+        oldest_unprocessed_free_transaction: TransactionId,
+    ) -> Result {
+        let freed_list = Arc::new(Mutex::new(vec![]));
+        let table_tree = TableTree::new(system_root, mem, freed_list);
+        let fake_transaction_tracker = Arc::new(Mutex::new(TransactionTracker::new()));
+        if let Some(savepoint_table_def) =
+            table_tree.get_table::<u64, &[u8]>(SAVEPOINT_TABLE.name(), TableType::Normal)?
+        {
+            let savepoint_table: ReadOnlyTable<u64, &[u8]> =
+                ReadOnlyTable::new(savepoint_table_def.get_root(), PageHint::None, mem)?;
+            for result in savepoint_table.range::<u64>(..)? {
+                let (_, savepoint_data) = result?;
+                let savepoint = Savepoint::from_bytes(
+                    savepoint_data.value(),
+                    fake_transaction_tracker.clone(),
+                    false,
+                );
+                if let Some((root, _)) = savepoint.get_user_root() {
+                    Self::mark_tables_recursive(root, mem, true)?;
+                }
+                Self::mark_freed_tree(
+                    savepoint.get_freed_root(),
+                    mem,
+                    oldest_unprocessed_free_transaction,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn mark_freed_tree(
+        freed_root: Option<(PageNumber, Checksum)>,
+        mem: &TransactionalMemory,
+        oldest_unprocessed_free_transaction: TransactionId,
+    ) -> Result {
+        if let Some((root, _)) = freed_root {
+            let freed_pages_iter = AllPageNumbersBtreeIter::new(
+                root,
+                FreedTableKey::fixed_width(),
+                FreedPageList::fixed_width(),
+                mem,
+            )?;
+            mem.mark_pages_allocated(freed_pages_iter, true)?;
+        }
+
+        let freed_table: ReadOnlyTable<FreedTableKey, FreedPageList<'static>> =
+            ReadOnlyTable::new(freed_root, PageHint::None, mem)?;
+        let lookup_key = FreedTableKey {
+            transaction_id: oldest_unprocessed_free_transaction.0,
+            pagination_id: 0,
+        };
+        for result in freed_table.range::<FreedTableKey>(lookup_key..)? {
+            let (_, freed_page_list) = result?;
+            let mut freed_page_list_as_vec = vec![];
+            for i in 0..freed_page_list.value().len() {
+                freed_page_list_as_vec.push(Ok(freed_page_list.value().get(i)));
+            }
+            mem.mark_pages_allocated(freed_page_list_as_vec.into_iter(), true)?;
+        }
+
+        Ok(())
+    }
+
+    fn mark_tables_recursive(
+        root: PageNumber,
+        mem: &TransactionalMemory,
+        allow_duplicates: bool,
+    ) -> Result {
         // Repair the allocator state
         // All pages in the master table
         let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, mem)?;
-        mem.mark_pages_allocated(master_pages_iter)?;
+        mem.mark_pages_allocated(master_pages_iter, allow_duplicates)?;
 
         // Iterate over all other tables
         let iter: BtreeRangeIter<&str, InternalTableDefinition> =
@@ -427,7 +498,7 @@ impl Database {
                     definition.get_fixed_value_size(),
                     mem,
                 )?;
-                mem.mark_pages_allocated(table_pages_iter)?;
+                mem.mark_pages_allocated(table_pages_iter, allow_duplicates)?;
 
                 // Multimap tables may have additional subtrees in their values
                 if definition.get_type() == TableType::Multimap {
@@ -439,12 +510,20 @@ impl Database {
                     )?;
                     for table_page in table_pages_iter {
                         let page = mem.get_page(table_page?)?;
-                        let mut subtree_roots = parse_subtree_roots(
+                        let subtree_roots = parse_subtree_roots(
                             &page,
                             definition.get_fixed_key_size(),
                             definition.get_fixed_value_size(),
                         );
-                        mem.mark_pages_allocated(subtree_roots.drain(..).map(Ok))?;
+                        for sub_root in subtree_roots {
+                            let sub_root_iter = AllPageNumbersBtreeIter::new(
+                                sub_root,
+                                definition.get_fixed_value_size(),
+                                <()>::fixed_width(),
+                                mem,
+                            )?;
+                            mem.mark_pages_allocated(sub_root_iter, allow_duplicates)?;
+                        }
                     }
                 }
             }
@@ -471,13 +550,29 @@ impl Database {
 
         let data_root = mem.get_data_root();
         if let Some((root, _)) = data_root {
-            Self::mark_tables_recursive(root, mem)?;
+            Self::mark_tables_recursive(root, mem, false)?;
         }
+
+        let freed_root = mem.get_freed_root();
+        // Allow processing of all transactions, since this is the main freed tree
+        Self::mark_freed_tree(freed_root, mem, TransactionId(0))?;
+        let freed_table: ReadOnlyTable<FreedTableKey, FreedPageList<'static>> =
+            ReadOnlyTable::new(freed_root, PageHint::None, mem)?;
+        // The persistent savepoints might hold references to older freed trees that are partially processed.
+        // Make sure we don't reprocess those frees, as that would result in a double-free
+        let oldest_unprocessed_transaction =
+            if let Some(entry) = freed_table.range::<FreedTableKey>(..)?.next() {
+                TransactionId(entry?.0.value().transaction_id)
+            } else {
+                mem.get_last_committed_transaction_id()?
+            };
+        drop(freed_table);
 
         let system_root = mem.get_system_root();
         if let Some((root, _)) = system_root {
-            Self::mark_tables_recursive(root, mem)?;
+            Self::mark_tables_recursive(root, mem, false)?;
         }
+        Self::mark_persistent_savepoints(system_root, mem, oldest_unprocessed_transaction)?;
 
         mem.end_repair()?;
 
@@ -485,10 +580,15 @@ impl Database {
         // by storing an empty root during the below commit()
         mem.clear_read_cache();
 
-        // Clear the freed table. We just rebuilt the allocator state by walking all the
-        // reachable data pages, which implicitly frees the pages for the freed table
         let transaction_id = mem.get_last_committed_transaction_id()?.next();
-        mem.commit(data_root, system_root, None, transaction_id, false, true)?;
+        mem.commit(
+            data_root,
+            system_root,
+            freed_root,
+            transaction_id,
+            false,
+            true,
+        )?;
 
         Ok(())
     }
@@ -916,6 +1016,87 @@ mod test {
             ));
         }
         tx.abort().unwrap();
+    }
+
+    #[test]
+    fn crash_regression2() {
+        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+        let db = Database::builder()
+            .set_cache_size(48101213 / 5)
+            .set_page_size(512)
+            .create(tmpfile.path())
+            .unwrap();
+        db.set_crash_countdown(8);
+
+        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+        // TX1
+        println!("\nTX1");
+        let tx = db.begin_write().unwrap();
+        let savepoint0 = tx.persistent_savepoint().unwrap();
+        tx.commit().unwrap();
+        let mut tx = db.begin_write().unwrap();
+        tx.set_durability(Durability::None);
+        {
+            tx.open_table(table_def).unwrap();
+        }
+        tx.commit().unwrap();
+
+        // TX2
+        println!("\nTX2");
+        let mut tx = db.begin_write().unwrap();
+        let savepoint1 = tx.ephemeral_savepoint().unwrap();
+        let _savepoint2 = tx.persistent_savepoint().unwrap();
+        let temp = tx.get_persistent_savepoint(savepoint0).unwrap();
+        tx.restore_savepoint(&temp).unwrap();
+        drop(temp);
+        drop(savepoint1);
+        tx.commit().unwrap();
+        let mut tx = db.begin_write().unwrap();
+        tx.set_durability(Durability::None);
+        {
+            tx.open_table(table_def).unwrap();
+        }
+        tx.commit().unwrap();
+
+        // TX3
+        println!("\nTX3");
+        let mut tx = db.begin_write().unwrap();
+        let _savepoint3 = tx.ephemeral_savepoint().unwrap();
+        let savepoint4 = tx.persistent_savepoint().unwrap();
+        let temp = tx.get_persistent_savepoint(savepoint4).unwrap();
+        tx.restore_savepoint(&temp).unwrap();
+        drop(temp);
+        tx.commit().unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            tx.open_table(table_def).unwrap();
+        }
+        tx.delete_persistent_savepoint(savepoint0).unwrap();
+        tx.delete_persistent_savepoint(savepoint4).unwrap();
+        tx.commit().unwrap();
+
+        // TX4
+        println!("\nTX4");
+        let tx = db.begin_write().unwrap();
+        let _savepoint5 = tx.persistent_savepoint().unwrap();
+        tx.commit().unwrap();
+
+        // TX5
+        println!("\nTX5");
+        let mut tx = db.begin_write().unwrap();
+        let savepoint6 = tx.ephemeral_savepoint().unwrap();
+        let _savepoint7 = tx.persistent_savepoint().unwrap();
+        tx.restore_savepoint(&savepoint6).unwrap();
+        assert!(matches!(tx.commit(), Err(Error::SimulatedIOFailure)));
+
+        drop(db);
+        Database::builder()
+            .set_cache_size(48101213)
+            .set_page_size(512)
+            .create(tmpfile.path())
+            .unwrap();
     }
 
     #[test]

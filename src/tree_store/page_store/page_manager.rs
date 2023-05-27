@@ -1,8 +1,7 @@
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::Checksum;
-use crate::tree_store::page_store::base::PageHint;
+use crate::tree_store::page_store::base::{PageHint, MAX_PAGE_INDEX};
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
-use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::header::{DatabaseHeader, DB_HEADER_SIZE, MAGICNUMBER};
 use crate::tree_store::page_store::layout::DatabaseLayout;
@@ -15,7 +14,7 @@ use crate::Result;
 #[cfg(feature = "logging")]
 use log::warn;
 use std::cmp;
-use std::cmp::max;
+use std::cmp::{max, min};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -37,7 +36,7 @@ const MIN_DESIRED_USABLE_BYTES: u64 = 1024 * 1024;
 const NUM_REGIONS: u32 = 1000;
 
 // TODO: set to 1, when version 1.0 is released
-pub(crate) const FILE_FORMAT_VERSION: u8 = 114;
+pub(crate) const FILE_FORMAT_VERSION: u8 = 115;
 
 fn ceil_log2(x: usize) -> u8 {
     if x.is_power_of_two() {
@@ -417,6 +416,7 @@ impl TransactionalMemory {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
         let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
+        let region_size = min(region_size, (MAX_PAGE_INDEX as u64 + 1) * page_size as u64);
         assert!(region_size.is_power_of_two());
 
         // TODO: allocate more tracker space when it becomes exhausted, and remove this hard coded 1000 regions
@@ -670,6 +670,7 @@ impl TransactionalMemory {
     pub(crate) fn mark_pages_allocated(
         &self,
         allocated_pages: impl Iterator<Item = Result<PageNumber>>,
+        allow_duplicates: bool,
     ) -> Result<()> {
         let mut state = self.state.lock().unwrap();
 
@@ -677,9 +678,13 @@ impl TransactionalMemory {
             let page_number = page_number?;
             let region_index = page_number.region;
             let mut region = state.get_region_mut(region_index);
-            region
-                .allocator_mut()
-                .record_alloc(page_number.page_index, page_number.page_order);
+            let mut allocator = region.allocator_mut();
+            if allow_duplicates
+                && allocator.is_allocated(page_number.page_index, page_number.page_order)
+            {
+                continue;
+            }
+            allocator.record_alloc(page_number.page_index, page_number.page_order);
         }
 
         Ok(())
@@ -757,10 +762,7 @@ impl TransactionalMemory {
             let region = state.get_region(i);
             let current_state = region.allocator();
             if let Some(old_state) = region_states.get(i as usize) {
-                let old_allocated =
-                    BuddyAllocator::allocated_pages_from_savepoint_state(old_state, i);
-                let new_allocated = current_state.get_allocated_pages(i);
-                result.extend(new_allocated.difference(&old_allocated));
+                current_state.get_allocated_pages_since_savepoint(i, old_state, &mut result);
             } else {
                 // This region didn't exist, so everything is newly allocated
                 result.extend(current_state.get_allocated_pages(i));
@@ -1068,10 +1070,6 @@ impl TransactionalMemory {
         } else {
             state.header.primary_slot().version
         }
-    }
-
-    pub(crate) fn raw_file_len(&self) -> Result<u64> {
-        self.storage.file_len()
     }
 
     pub(crate) fn get_data_root(&self) -> Option<(PageNumber, Checksum)> {

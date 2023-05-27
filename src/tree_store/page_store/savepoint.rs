@@ -26,6 +26,7 @@ pub struct Savepoint {
     // are not freed
     transaction_id: TransactionId,
     user_root: Option<(PageNumber, Checksum)>,
+    // For future use. This is not used in the restoration protocol.
     system_root: Option<(PageNumber, Checksum)>,
     freed_root: Option<(PageNumber, Checksum)>,
     regional_allocators: Vec<Vec<u8>>,
@@ -72,10 +73,6 @@ impl Savepoint {
 
     pub(crate) fn get_user_root(&self) -> Option<(PageNumber, Checksum)> {
         self.user_root
-    }
-
-    pub(crate) fn get_system_root(&self) -> Option<(PageNumber, Checksum)> {
-        self.system_root
     }
 
     pub(crate) fn get_freed_root(&self) -> Option<(PageNumber, Checksum)> {
@@ -283,7 +280,7 @@ impl Drop for Savepoint {
             self.transaction_tracker
                 .lock()
                 .unwrap()
-                .deallocate_savepoint(self);
+                .deallocate_savepoint(self.get_id(), self.get_transaction_id());
         }
     }
 }

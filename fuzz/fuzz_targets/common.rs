@@ -1,17 +1,16 @@
 use std::mem::size_of;
-use std::sync::{Condvar, Mutex};
 use arbitrary::Unstructured;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use rand_distr::{Binomial, Distribution};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
-const MAX_CRASH_OPS: u64 = 50;
+const MAX_CRASH_OPS: u64 = 20;
 const MAX_CACHE_SIZE: usize = 100_000_000;
 // Limit values to 10MiB
 const MAX_VALUE_SIZE: usize = 10_000_000;
 const KEY_SPACE: u64 = 1_000_000;
-pub const MAX_SAVEPOINTS: usize = 3;
+pub const MAX_SAVEPOINTS: usize = 6;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundedU64<const N: u64> {
@@ -124,8 +123,9 @@ pub(crate) struct FuzzTransaction {
     pub ops: Vec<FuzzOperation>,
     pub durable: bool,
     pub commit: bool,
-    pub create_savepoint: bool,
-    pub restore_savepoint: BoundedUSize<MAX_SAVEPOINTS>,
+    pub create_ephemeral_savepoint: bool,
+    pub create_persistent_savepoint: bool,
+    pub restore_savepoint: Option<BoundedUSize<MAX_SAVEPOINTS>>,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -133,41 +133,6 @@ pub(crate) struct FuzzConfig {
     pub multimap_table: bool,
     pub cache_size: BoundedUSize<MAX_CACHE_SIZE>,
     pub crash_after_ops: BoundedU64<MAX_CRASH_OPS>,
-    pub thread0_transactions: Vec<FuzzTransaction>,
-    pub thread1_transactions: Vec<FuzzTransaction>,
+    pub transactions: Vec<FuzzTransaction>,
     pub page_size: PowerOfTwoBetween<9, 14>,
-}
-
-pub(crate) struct CustomBarrier {
-    mutex: Mutex<(u64, u64)>,
-    condition: Condvar
-}
-
-impl CustomBarrier {
-    pub(crate) fn new(waiters: u64) -> Self {
-        Self {
-            mutex: Mutex::new((0, waiters)),
-            condition: Default::default()
-        }
-    }
-
-    pub(crate) fn decrement_waiters(&self) {
-        let mut guard = self.mutex.lock().unwrap();
-        guard.1 -= 1;
-        if guard.0 == guard.1 {
-            guard.0 = 0;
-            self.condition.notify_all()
-        }
-    }
-
-    pub(crate) fn wait(&self) {
-        let mut guard = self.mutex.lock().unwrap();
-        guard.0 += 1;
-        if guard.0 == guard.1 {
-            guard.0 = 0;
-            self.condition.notify_all();
-        } else {
-            drop(self.condition.wait(guard).unwrap());
-        }
-    }
 }

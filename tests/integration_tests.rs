@@ -159,7 +159,7 @@ fn free() {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..num_writes {
             let mut mut_key = key.clone();
-            mut_key.extend_from_slice(&i.to_le_bytes());
+            mut_key.extend_from_slice(&(i as u64).to_le_bytes());
             table.insert(mut_key.as_slice(), value.as_slice()).unwrap();
         }
     }
@@ -809,6 +809,32 @@ fn regression19() {
 
     let tx = db.begin_write().unwrap();
     tx.open_table(table_def).unwrap();
+}
+
+#[test]
+fn no_savepoint_resurrection() {
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+
+    let db = Database::builder()
+        .set_cache_size(41178283)
+        .create(tmpfile.path())
+        .unwrap();
+
+    let tx = db.begin_write().unwrap();
+    let persistent_savepoint = tx.persistent_savepoint().unwrap();
+    tx.commit().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    let savepoint2 = tx.ephemeral_savepoint().unwrap();
+    tx.delete_persistent_savepoint(persistent_savepoint)
+        .unwrap();
+    tx.commit().unwrap();
+
+    let mut tx = db.begin_write().unwrap();
+    tx.restore_savepoint(&savepoint2).unwrap();
+    tx.delete_persistent_savepoint(persistent_savepoint)
+        .unwrap();
+    tx.commit().unwrap();
 }
 
 #[test]

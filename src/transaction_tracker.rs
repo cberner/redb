@@ -107,9 +107,14 @@ impl TransactionTracker {
         id
     }
 
-    pub(crate) fn deallocate_savepoint(&mut self, savepoint: &Savepoint) {
-        self.valid_savepoints.remove(&savepoint.get_id());
-        self.deallocate_read_transaction(savepoint.get_transaction_id());
+    // Deallocates the given savepoint and its matching reference count on the transcation
+    pub(crate) fn deallocate_savepoint(
+        &mut self,
+        savepoint: SavepointId,
+        transaction: TransactionId,
+    ) {
+        self.valid_savepoints.remove(&savepoint);
+        self.deallocate_read_transaction(transaction);
     }
 
     pub(crate) fn is_valid_savepoint(&self, id: SavepointId) -> bool {

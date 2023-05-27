@@ -272,6 +272,100 @@ impl<'a> BtreeBitmapMut<'a> {
     }
 }
 
+pub(crate) struct U64GroupedBitmapIter<'a> {
+    data: &'a [u8],
+    data_index: usize,
+    current: u64,
+}
+
+impl<'a> U64GroupedBitmapIter<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        let base = u64::from_le_bytes(data[..8].try_into().unwrap());
+        Self {
+            data,
+            data_index: 0,
+            current: base,
+        }
+    }
+}
+
+impl<'a> Iterator for U64GroupedBitmapIter<'a> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current != 0 {
+            let mut result: u32 = self.data_index.try_into().unwrap();
+            result *= u8::BITS;
+            let bit = self.current.trailing_zeros();
+            result += bit;
+            self.current &= !U64GroupedBitmapMut::select_mask(bit as usize);
+            return Some(result);
+        }
+        self.data_index += size_of::<u64>();
+        while self.data_index + size_of::<u64>() <= self.data.len() {
+            let start = self.data_index;
+            let end = start + size_of::<u64>();
+            let next = u64::from_le_bytes(self.data[start..end].try_into().unwrap());
+            if next != 0 {
+                self.current = next;
+                return self.next();
+            }
+            self.data_index += size_of::<u64>();
+        }
+        None
+    }
+}
+
+pub(crate) struct U64GroupedBitmapDifference<'a, 'b> {
+    data: &'a [u8],
+    exclusion_data: &'b [u8],
+    data_index: usize,
+    current: u64,
+}
+
+impl<'a, 'b> U64GroupedBitmapDifference<'a, 'b> {
+    fn new(data: &'a [u8], exclusion_data: &'b [u8]) -> Self {
+        assert_eq!(data.len(), exclusion_data.len());
+        let base = u64::from_le_bytes(data[..8].try_into().unwrap());
+        let exclusion = u64::from_le_bytes(exclusion_data[..8].try_into().unwrap());
+        Self {
+            data,
+            exclusion_data,
+            data_index: 0,
+            current: base & (!exclusion),
+        }
+    }
+}
+
+impl<'a, 'b> Iterator for U64GroupedBitmapDifference<'a, 'b> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current != 0 {
+            let mut result: u32 = self.data_index.try_into().unwrap();
+            result *= u8::BITS;
+            let bit = self.current.trailing_zeros();
+            result += bit;
+            self.current &= !U64GroupedBitmapMut::select_mask(bit as usize);
+            return Some(result);
+        }
+        self.data_index += size_of::<u64>();
+        while self.data_index + size_of::<u64>() <= self.data.len() {
+            let start = self.data_index;
+            let end = start + size_of::<u64>();
+            let next = u64::from_le_bytes(self.data[start..end].try_into().unwrap());
+            let exclusion = u64::from_le_bytes(self.exclusion_data[start..end].try_into().unwrap());
+            let next = next & (!exclusion);
+            if next != 0 {
+                self.current = next;
+                return self.next();
+            }
+            self.data_index += size_of::<u64>();
+        }
+        None
+    }
+}
+
 // A bitmap which groups consecutive groups of 64bits together
 pub(crate) struct U64GroupedBitmap<'a> {
     data: &'a [u8],
@@ -291,7 +385,18 @@ impl<'a> U64GroupedBitmap<'a> {
     }
 
     fn count_unset(&self) -> u32 {
-        self.data.iter().map(|x| x.count_ones()).sum()
+        self.data.iter().map(|x| x.count_zeros()).sum()
+    }
+
+    pub fn difference<'a0, 'b0>(
+        &'a0 self,
+        exclusion: U64GroupedBitmap<'b0>,
+    ) -> U64GroupedBitmapDifference<'a0, 'b0> {
+        U64GroupedBitmapDifference::new(self.data, exclusion.data)
+    }
+
+    pub fn iter(&self) -> U64GroupedBitmapIter {
+        U64GroupedBitmapIter::new(self.data)
     }
 
     pub fn len(&self) -> u32 {
@@ -300,17 +405,17 @@ impl<'a> U64GroupedBitmap<'a> {
     }
 
     fn any_unset(&self) -> bool {
-        self.data.iter().any(|x| x.count_ones() > 0)
+        self.data.iter().any(|x| x.count_zeros() > 0)
     }
 
     fn first_unset(&self, start_bit: u32, end_bit: u32) -> Option<u32> {
         assert_eq!(end_bit, (start_bit - start_bit % 64) + 64);
 
         let (index, bit) = self.data_index_of(start_bit);
-        let mask = !((1 << bit) - 1);
+        let mask = (1 << bit) - 1;
         let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        let group = group & mask;
-        match group.trailing_zeros() {
+        let group = group | mask;
+        match group.trailing_ones() {
             64 => None,
             x => Some(start_bit + x - u32::try_from(bit).unwrap()),
         }
@@ -319,12 +424,10 @@ impl<'a> U64GroupedBitmap<'a> {
     pub fn get(&self, bit: u32) -> bool {
         let (index, bit_index) = self.data_index_of(bit);
         let group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        group & U64GroupedBitmapMut::select_mask(bit_index) == 0
+        group & U64GroupedBitmapMut::select_mask(bit_index) != 0
     }
 }
 
-// Note bits are set in the opposite of what may be intuitive: they are 0 when set and 1 when unset.
-// This is so that the data structure can be efficiently initialized to be all set.
 pub(crate) struct U64GroupedBitmapMut<'a> {
     data: &'a mut [u8],
 }
@@ -336,11 +439,11 @@ impl<'a> U64GroupedBitmapMut<'a> {
     }
 
     pub fn init_full(data: &mut [u8]) {
-        data.fill(0);
+        data.fill(0xFF);
     }
 
     pub fn init_empty(data: &mut [u8]) {
-        data.fill(0xFF);
+        data.fill(0);
     }
 
     pub fn new(data: &'a mut [u8]) -> Self {
@@ -352,16 +455,16 @@ impl<'a> U64GroupedBitmapMut<'a> {
     pub fn set(&mut self, bit: u32) -> bool {
         let (index, bit_index) = self.data_index_of(bit as usize);
         let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        group &= !Self::select_mask(bit_index);
+        group |= Self::select_mask(bit_index);
         self.data[index..(index + 8)].copy_from_slice(&group.to_le_bytes());
 
-        group == 0
+        group == u64::MAX
     }
 
     pub fn clear(&mut self, bit: u32) {
         let (index, bit_index) = self.data_index_of(bit as usize);
         let mut group = u64::from_le_bytes(self.data[index..(index + 8)].try_into().unwrap());
-        group |= Self::select_mask(bit_index);
+        group &= !Self::select_mask(bit_index);
         self.data[index..(index + 8)].copy_from_slice(&group.to_le_bytes());
     }
 
@@ -376,7 +479,9 @@ impl<'a> U64GroupedBitmapMut<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::tree_store::page_store::bitmap::BtreeBitmapMut;
+    use crate::tree_store::page_store::bitmap::{
+        BtreeBitmapMut, U64GroupedBitmap, U64GroupedBitmapMut,
+    };
     use rand::prelude::IteratorRandom;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -449,7 +554,7 @@ mod test {
         while allocator.alloc().is_some() {}
         // The last u64 must be used, since the leaf layer is compact
         let l = data.len();
-        assert_ne!(
+        assert_eq!(
             u64::MAX,
             u64::from_le_bytes(data[(l - 8)..].try_into().unwrap())
         );
@@ -469,6 +574,24 @@ mod test {
         assert_eq!(allocator.find_first_unset().unwrap(), 8);
         allocator.clear(0);
         assert_eq!(allocator.find_first_unset().unwrap(), 0);
+    }
+
+    #[test]
+    fn iter() {
+        let num_pages = 129;
+        let mut data = vec![0; U64GroupedBitmapMut::required_bytes(num_pages)];
+        U64GroupedBitmapMut::init_empty(&mut data);
+        let mut bitmap = U64GroupedBitmapMut::new(&mut data);
+        let values = [0, 1, 33, 63, 64, 65, 90, 126, 127, 128];
+        for x in values {
+            bitmap.set(x);
+        }
+        drop(bitmap);
+        let bitmap = U64GroupedBitmap::new(&data);
+        for (i, x) in bitmap.iter().enumerate() {
+            assert_eq!(values[i], x);
+        }
+        assert_eq!(bitmap.iter().count(), values.len());
     }
 
     #[test]

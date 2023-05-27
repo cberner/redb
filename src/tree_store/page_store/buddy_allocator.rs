@@ -192,12 +192,12 @@ impl<'a> BuddyAllocator<'a> {
         result
     }
 
-    pub(crate) fn allocated_pages_from_savepoint_state(
-        state: &[u8],
+    pub(crate) fn get_allocated_pages_since_savepoint(
+        &self,
         region: u32,
-    ) -> HashSet<PageNumber> {
-        let mut result = HashSet::new();
-
+        state: &[u8],
+        output: &mut Vec<PageNumber>,
+    ) {
         let max_order = state[0];
         let num_pages = u32::from_le_bytes(state[1..5].try_into().unwrap());
 
@@ -211,16 +211,16 @@ impl<'a> BuddyAllocator<'a> {
                     .unwrap(),
             ) as usize;
             let bytes = &state[data_start..data_end];
-            let allocated = U64GroupedBitmap::new(bytes);
-            for i in 0..min(allocated.len(), num_pages) {
-                if allocated.get(i) {
-                    result.insert(PageNumber::new(region, i, order));
+            let savepoint_allocated = U64GroupedBitmap::new(bytes);
+            let self_allocated = self.get_order_allocated(order);
+            for i in self_allocated.difference(savepoint_allocated) {
+                if i >= num_pages {
+                    break;
                 }
+                output.push(PageNumber::new(region, i, order));
             }
             data_start = data_end;
         }
-
-        result
     }
 
     pub(crate) fn get_allocated_pages(&self, region: u32) -> HashSet<PageNumber> {
@@ -228,14 +228,15 @@ impl<'a> BuddyAllocator<'a> {
 
         for order in 0..=self.get_max_order() {
             let allocated = self.get_order_allocated(order);
-            for i in 0..min(allocated.len(), self.len()) {
-                if allocated.get(i) {
-                    result.insert(PageNumber::new(region, i, order));
+            for i in allocated.iter() {
+                if i >= self.len() {
+                    break;
                 }
+                result.insert(PageNumber::new(region, i, order));
             }
         }
 
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         // Check the result against the free index to be sure it matches
         {
             let mut free_check = HashSet::new();
@@ -597,6 +598,10 @@ impl<'a> BuddyAllocatorMut<'a> {
             allocator.set(buddy);
             self.free_inner(next_higher_order(page_number), order + 1);
         }
+    }
+
+    pub(crate) fn is_allocated(&self, page_number: u32, order: u8) -> bool {
+        self.get_order_allocated(order).get(page_number)
     }
 
     pub(super) fn get_max_order(&self) -> u8 {
