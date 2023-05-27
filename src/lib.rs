@@ -39,3 +39,12 @@ mod transactions;
 mod tree_store;
 mod tuple_types;
 mod types;
+
+#[cfg(test)]
+fn create_tempfile() -> tempfile::NamedTempFile {
+    if cfg!(target_os = "wasi") {
+        tempfile::NamedTempFile::new_in("/").unwrap()
+    } else {
+        tempfile::NamedTempFile::new().unwrap()
+    }
+}

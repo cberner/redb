@@ -1,10 +1,17 @@
 use redb::{Database, Error, MultimapTableDefinition, ReadableMultimapTable};
-use tempfile::NamedTempFile;
 
 const STR_TABLE: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("str_to_str");
 const SLICE_U64_TABLE: MultimapTableDefinition<&[u8], u64> =
     MultimapTableDefinition::new("slice_to_u64");
 const U64_TABLE: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("u64");
+
+fn create_tempfile() -> tempfile::NamedTempFile {
+    if cfg!(target_os = "wasi") {
+        tempfile::NamedTempFile::new_in("/").unwrap()
+    } else {
+        tempfile::NamedTempFile::new().unwrap()
+    }
+}
 
 fn get_vec(
     table: &impl ReadableMultimapTable<&'static str, &'static str>,
@@ -24,7 +31,7 @@ fn get_vec(
 
 #[test]
 fn len() {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -42,7 +49,7 @@ fn len() {
 
 #[test]
 fn is_empty() {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let write_txn = db.begin_write().unwrap();
@@ -59,7 +66,7 @@ fn is_empty() {
 
 #[test]
 fn insert() {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -81,7 +88,7 @@ fn insert() {
 
 #[test]
 fn range_query() {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -132,7 +139,7 @@ fn range_query() {
 
 #[test]
 fn range_lifetime() {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let definition: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("x");
@@ -167,7 +174,7 @@ fn range_lifetime() {
 
 #[test]
 fn delete() {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -224,7 +231,7 @@ fn delete() {
 
 #[test]
 fn wrong_types() {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let definition: MultimapTableDefinition<u32, u32> = MultimapTableDefinition::new("x");
@@ -251,7 +258,7 @@ fn wrong_types() {
 
 #[test]
 fn efficient_storage() {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
+    let tmpfile = create_tempfile();
     let expected_max_size = 1024 * 1024;
     // Write enough values that big_key.len() * entries > db_size to check that duplicate key data is not stored
     // and entries * sizeof(u32) > page_size to validate that large numbers of values can be stored per key
@@ -276,7 +283,7 @@ fn efficient_storage() {
 
 #[test]
 fn reopen_table() {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -292,7 +299,7 @@ fn reopen_table() {
 
 #[test]
 fn iter() {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -319,7 +326,7 @@ fn iter() {
 
 #[test]
 fn multimap_signature_lifetimes() {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let def: MultimapTableDefinition<&str, u64> = MultimapTableDefinition::new("x");

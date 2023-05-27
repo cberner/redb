@@ -1078,13 +1078,12 @@ impl<'a> Drop for ReadTransaction<'a> {
 #[cfg(test)]
 mod test {
     use crate::{Database, TableDefinition};
-    use tempfile::NamedTempFile;
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
 
     #[test]
     fn transaction_id_persistence() {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
+        let tmpfile = crate::create_tempfile();
         let db = Database::create(tmpfile.path()).unwrap();
         let write_txn = db.begin_write().unwrap();
         {
