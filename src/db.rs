@@ -1020,7 +1020,7 @@ mod test {
 
     #[test]
     fn crash_regression2() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
 
         let db = Database::builder()
             .set_cache_size(48101213 / 5)

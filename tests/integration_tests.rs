@@ -122,7 +122,6 @@ fn immediate_persistence() {
     test_persistence(Durability::Immediate);
 }
 
-#[cfg(not(target_os = "wasi"))] // TODO figure out why this fails on WASI
 #[test]
 fn free() {
     let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
@@ -813,7 +812,7 @@ fn regression19() {
 
 #[test]
 fn no_savepoint_resurrection() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in("").unwrap();
 
     let db = Database::builder()
         .set_cache_size(41178283)
