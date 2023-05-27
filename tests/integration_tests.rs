@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::ErrorKind;
-use tempfile::NamedTempFile;
 
 use rand::prelude::SliceRandom;
 use rand::Rng;
@@ -15,6 +14,14 @@ const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice")
 const SLICE_TABLE2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice2");
 const STR_TABLE: TableDefinition<&str, &str> = TableDefinition::new("x");
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
+
+fn create_tempfile() -> tempfile::NamedTempFile {
+    if cfg!(target_os = "wasi") {
+        tempfile::NamedTempFile::new_in("/").unwrap()
+    } else {
+        tempfile::NamedTempFile::new().unwrap()
+    }
+}
 
 /// Returns pairs of key, value
 fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -31,7 +38,7 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
 
 #[test]
 fn mixed_durable_commit() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
     let mut txn = db.begin_write().unwrap();
@@ -48,7 +55,7 @@ fn mixed_durable_commit() {
 
 #[test]
 fn non_durable_commit_persistence() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
     let mut txn = db.begin_write().unwrap();
@@ -81,7 +88,7 @@ fn non_durable_commit_persistence() {
 }
 
 fn test_persistence(durability: Durability) {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
     let mut txn = db.begin_write().unwrap();
@@ -124,7 +131,7 @@ fn immediate_persistence() {
 
 #[test]
 fn free() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
@@ -191,7 +198,7 @@ fn free() {
 
 #[test]
 fn large_values() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
@@ -220,7 +227,7 @@ fn large_values() {
 
 #[test]
 fn large_keys() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
@@ -249,7 +256,7 @@ fn large_keys() {
 
 #[test]
 fn dynamic_growth() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
     let big_value = vec![0u8; 1024];
 
@@ -281,7 +288,7 @@ fn dynamic_growth() {
 
 #[test]
 fn multi_page_kv() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let elements = 4;
     let page_size = 4096;
 
@@ -322,7 +329,7 @@ fn multi_page_kv() {
 #[test]
 // Test for a bug in the deletion code, where deleting a key accidentally deleted other keys
 fn regression() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
@@ -383,7 +390,7 @@ fn regression() {
 #[test]
 // Test for a bug in table creation code, where multiple tables could end up with the same id
 fn regression2() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
     let tx = db.begin_write().unwrap();
@@ -403,7 +410,7 @@ fn regression2() {
 // Test for a bug in deletion code, where deletions could delete neighboring keys in a leaf,
 // due to the partial leaf entries being dropped
 fn regression3() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
     let tx = db.begin_write().unwrap();
@@ -425,7 +432,7 @@ fn regression3() {
 
 #[test]
 fn regression7() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
 
@@ -468,7 +475,7 @@ fn regression7() {
 
 #[test]
 fn regression8() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
 
@@ -517,7 +524,7 @@ fn regression8() {
 
 #[test]
 fn regression9() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
 
@@ -535,7 +542,7 @@ fn regression9() {
 
 #[test]
 fn regression10() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
 
@@ -567,7 +574,7 @@ fn regression10() {
 
 #[test]
 fn regression11() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
 
@@ -604,7 +611,7 @@ fn regression11() {
 #[test]
 // Test that for stale read bug when re-opening a table during a write
 fn regression12() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
 
@@ -625,7 +632,7 @@ fn regression12() {
 
 #[test]
 fn regression13() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
 
@@ -645,7 +652,7 @@ fn regression13() {
 
 #[test]
 fn regression14() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
 
@@ -684,7 +691,7 @@ fn regression14() {
 
 #[test]
 fn regression17() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::builder().create(tmpfile.path()).unwrap();
 
@@ -705,7 +712,7 @@ fn regression17() {
 
 #[test]
 fn regression18() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::builder().create(tmpfile.path()).unwrap();
 
@@ -771,7 +778,7 @@ fn regression18() {
 
 #[test]
 fn regression19() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::builder().create(tmpfile.path()).unwrap();
 
@@ -812,7 +819,7 @@ fn regression19() {
 
 #[test]
 fn no_savepoint_resurrection() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::builder()
         .set_cache_size(41178283)
@@ -838,7 +845,7 @@ fn no_savepoint_resurrection() {
 
 #[test]
 fn non_durable_read_isolation() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let mut write_txn = db.begin_write().unwrap();
     write_txn.set_durability(Durability::None);
@@ -883,7 +890,7 @@ fn non_durable_read_isolation() {
 
 #[test]
 fn range_query() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -922,7 +929,7 @@ fn range_query() {
 
 #[test]
 fn range_query_reversed() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
@@ -963,7 +970,7 @@ fn range_query_reversed() {
 
 #[test]
 fn alias_table() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let write_txn = db.begin_write().unwrap();
@@ -978,7 +985,7 @@ fn alias_table() {
 
 #[test]
 fn delete_table() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let y_def: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("y");
@@ -1008,7 +1015,7 @@ fn delete_table() {
 
 #[test]
 fn delete_all_tables() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let x_def: TableDefinition<&str, &str> = TableDefinition::new("x");
@@ -1038,7 +1045,7 @@ fn delete_all_tables() {
 
 #[test]
 fn dropped_write() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let write_txn = db.begin_write().unwrap();
@@ -1054,7 +1061,7 @@ fn dropped_write() {
 
 #[test]
 fn non_page_size_multiple() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
@@ -1073,7 +1080,7 @@ fn non_page_size_multiple() {
 
 #[test]
 fn does_not_exist() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     fs::remove_file(tmpfile.path()).unwrap();
     let result = Database::open(tmpfile.path());
     if let Err(Error::Io(e)) = result {
@@ -1082,7 +1089,7 @@ fn does_not_exist() {
         panic!();
     }
 
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     let result = Database::open(tmpfile.path());
     if let Err(Error::Io(e)) = result {
@@ -1094,7 +1101,7 @@ fn does_not_exist() {
 
 #[test]
 fn wrong_types() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
     let definition: TableDefinition<u32, u32> = TableDefinition::new("x");
@@ -1136,7 +1143,7 @@ fn tree_balance() {
         height.try_into().unwrap()
     }
 
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
 
     // One for the last table id counter, and one for the "x" -> TableDefinition entry
     let num_internal_entries = 2;
@@ -1181,9 +1188,10 @@ fn tree_balance() {
     assert!(height <= expected, "height={height} expected={expected}",);
 }
 
+#[cfg(not(target_os = "wasi"))] // TODO remove this line once WASI gets flock
 #[test]
 fn database_lock() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let result = Database::create(tmpfile.path());
     assert!(result.is_ok());
     let result2 = Database::open(tmpfile.path());
@@ -1198,7 +1206,7 @@ fn database_lock() {
 
 #[test]
 fn persistent_savepoint() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let definition: TableDefinition<u32, &str> = TableDefinition::new("x");
 
@@ -1238,7 +1246,7 @@ fn persistent_savepoint() {
 
 #[test]
 fn savepoint() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let definition: TableDefinition<u32, &str> = TableDefinition::new("x");
 
@@ -1280,7 +1288,7 @@ fn savepoint() {
 
 #[test]
 fn compaction() {
-    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let definition: TableDefinition<u32, &[u8]> = TableDefinition::new("x");
 

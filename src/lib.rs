@@ -6,6 +6,8 @@
     clippy::cast_sign_loss,
     clippy::disallowed_methods
 )]
+// TODO remove this once wasi no longer requires nightly
+#![cfg_attr(target_os = "wasi", feature(wasi_ext))]
 
 pub use db::{
     Builder, Database, MultimapTableDefinition, MultimapTableHandle, TableDefinition, TableHandle,
@@ -37,3 +39,12 @@ mod transactions;
 mod tree_store;
 mod tuple_types;
 mod types;
+
+#[cfg(test)]
+fn create_tempfile() -> tempfile::NamedTempFile {
+    if cfg!(target_os = "wasi") {
+        tempfile::NamedTempFile::new_in("/").unwrap()
+    } else {
+        tempfile::NamedTempFile::new().unwrap()
+    }
+}

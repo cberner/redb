@@ -399,13 +399,12 @@ mod test {
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::mem::size_of;
-    use tempfile::NamedTempFile;
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
 
     #[test]
     fn repair_allocator_checksums() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile = crate::create_tempfile();
         let db = Database::builder().create(tmpfile.path()).unwrap();
         let write_txn = db.begin_write().unwrap();
         {
@@ -517,7 +516,7 @@ mod test {
 
     #[test]
     fn repair_empty() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile = crate::create_tempfile();
         let db = Database::builder().create(tmpfile.path()).unwrap();
         drop(db);
 
@@ -544,7 +543,7 @@ mod test {
 
     #[test]
     fn repair_insert_reserve_regression() {
-        let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+        let tmpfile = crate::create_tempfile();
         let db = Database::builder().create(tmpfile.path()).unwrap();
 
         let def: TableDefinition<&str, &[u8]> = TableDefinition::new("x");
