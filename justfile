@@ -28,7 +28,7 @@ test: pre
     RUST_BACKTRACE=1 cargo test
 
 test_wasi: pre
-    CARGO_TARGET_WASM32_WASI_RUNNER="wasmtime --dir=." cargo +nightly wasi test -- --nocapture
+    CARGO_TARGET_WASM32_WASI_RUNNER="wasmtime --dir=." cargo +nightly wasi test --target=wasm32-wasi -- --nocapture
 
 bench bench='lmdb_benchmark': pre
     cargo bench --bench {{bench}}
