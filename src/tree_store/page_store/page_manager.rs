@@ -821,7 +821,7 @@ impl TransactionalMemory {
         // Trim surplus file space, before finalizing the commit
         let shrunk = self.try_shrink(&mut state, &mut layout)?;
 
-        let mut secondary = state.header.secondary_slot_mut();
+        let secondary = state.header.secondary_slot_mut();
         secondary.transaction_id = transaction_id;
         secondary.user_root = data_root;
         secondary.system_root = system_root;
@@ -877,7 +877,7 @@ impl TransactionalMemory {
 
         let mut state = self.state.lock().unwrap();
         let layout = self.layout.lock().unwrap();
-        let mut secondary = state.header.secondary_slot_mut();
+        let secondary = state.header.secondary_slot_mut();
         secondary.transaction_id = transaction_id;
         secondary.user_root = data_root;
         secondary.system_root = system_root;

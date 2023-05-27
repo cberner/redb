@@ -46,7 +46,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
         let first = self
             .iter()?
             .next()
-            .map(|x| x.map(|(key, _)| K::as_bytes(key.value().borrow()).as_ref().to_vec()));
+            .map(|x| x.map(|(key, _)| K::as_bytes(&key.value()).as_ref().to_vec()));
         if let Some(owned_key) = first {
             let owned_key = owned_key?;
             let key = K::from_bytes(&owned_key);
@@ -65,7 +65,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
             .iter()?
             .rev()
             .next()
-            .map(|x| x.map(|(key, _)| K::as_bytes(key.value().borrow()).as_ref().to_vec()));
+            .map(|x| x.map(|(key, _)| K::as_bytes(&key.value()).as_ref().to_vec()));
         if let Some(owned_key) = last {
             let owned_key = owned_key?;
             let key = K::from_bytes(&owned_key);
