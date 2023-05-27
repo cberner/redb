@@ -5,7 +5,7 @@
 // Remove this line once wasi-libc has flock
 #![cfg_attr(target_os = "wasi", allow(unused_imports))]
 
-use crate::{Error, Result};
+use crate::{DatabaseError, Result};
 use std::fs::File;
 use std::io;
 
@@ -28,15 +28,15 @@ impl LockedFile {
     }
 
     #[cfg(unix)] // remove this line when wasi-libc gets flock
-    pub(crate) fn new(file: File) -> Result<Self> {
+    pub(crate) fn new(file: File) -> Result<Self, DatabaseError> {
         let fd = file.as_raw_fd();
         let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
         if result != 0 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::WouldBlock {
-                Err(Error::DatabaseAlreadyOpen)
+                Err(DatabaseError::DatabaseAlreadyOpen)
             } else {
-                Err(Error::Io(err))
+                Err(err.into())
             }
         } else {
             Ok(Self { file })
@@ -47,16 +47,14 @@ impl LockedFile {
         &self.file
     }
 
-    pub(crate) fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
+    pub(crate) fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
         let mut buffer = vec![0; len];
-        self.file
-            .read_exact_at(&mut buffer, offset)
-            .map_err(Error::from)?;
+        self.file.read_exact_at(&mut buffer, offset)?;
         Ok(buffer)
     }
 
-    pub(crate) fn write(&self, offset: u64, data: &[u8]) -> Result {
-        self.file.write_all_at(data, offset).map_err(Error::from)
+    pub(crate) fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
+        self.file.write_all_at(data, offset)
     }
 }
 

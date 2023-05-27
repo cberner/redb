@@ -1,3 +1,4 @@
+use crate::error::CommitError;
 use crate::sealed::Sealed;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
@@ -6,9 +7,9 @@ use crate::tree_store::{
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{
-    Database, Error, MultimapTable, MultimapTableDefinition, MultimapTableHandle,
-    ReadOnlyMultimapTable, ReadOnlyTable, ReadableTable, Result, Savepoint, Table, TableDefinition,
-    TableHandle, UntypedMultimapTableHandle, UntypedTableHandle,
+    Database, MultimapTable, MultimapTableDefinition, MultimapTableHandle, ReadOnlyMultimapTable,
+    ReadOnlyTable, ReadableTable, Result, Savepoint, SavepointError, Table, TableDefinition,
+    TableError, TableHandle, UntypedMultimapTableHandle, UntypedTableHandle,
 };
 #[cfg(feature = "logging")]
 use log::{info, warn};
@@ -274,10 +275,11 @@ impl<'db> WriteTransaction<'db> {
             .unwrap()
             .get(definition.name())
         {
-            return Err(Error::TableAlreadyOpen(
-                definition.name().to_string(),
-                location,
-            ));
+            panic!(
+                "System table {} is already open at {}",
+                definition.name(),
+                location
+            );
         }
         self.dirty.store(true, Ordering::Release);
         self.open_system_tables
@@ -289,7 +291,10 @@ impl<'db> WriteTransaction<'db> {
             .system_table_tree
             .write()
             .unwrap()
-            .get_or_create_table::<K, V>(definition.name(), TableType::Normal)?;
+            .get_or_create_table::<K, V>(definition.name(), TableType::Normal)
+            .map_err(|e| {
+                e.into_storage_error_or_corrupted("Internal error. System table is corrupted")
+            })?;
 
         Ok(Table::new(
             definition.name(),
@@ -307,14 +312,14 @@ impl<'db> WriteTransaction<'db> {
     /// Note that while a savepoint exists, pages that become unused after it was created are not freed.
     /// Therefore, the lifetime of a savepoint should be minimized.
     ///
-    /// Returns `[Error::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened)
+    /// Returns `[SavepointError::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened)
     /// or if the transaction's durability is less than `[Durability::Immediate]`
-    pub fn persistent_savepoint(&self) -> Result<u64> {
+    pub fn persistent_savepoint(&self) -> Result<u64, SavepointError> {
         if !matches!(
             self.durability,
             Durability::Immediate | Durability::Paranoid
         ) {
-            return Err(Error::InvalidSavepoint);
+            return Err(SavepointError::InvalidSavepoint);
         }
 
         let mut savepoint = self.ephemeral_savepoint()?;
@@ -346,13 +351,13 @@ impl<'db> WriteTransaction<'db> {
     }
 
     /// Get a persistent savepoint given its id
-    pub fn get_persistent_savepoint(&self, id: u64) -> Result<Savepoint> {
+    pub fn get_persistent_savepoint(&self, id: u64) -> Result<Savepoint, SavepointError> {
         let table = self.open_system_table(SAVEPOINT_TABLE)?;
         let value = table.get(id)?;
 
         value
             .map(|x| Savepoint::from_bytes(x.value(), self.transaction_tracker.clone(), false))
-            .ok_or(Error::InvalidSavepoint)
+            .ok_or(SavepointError::InvalidSavepoint)
     }
 
     /// Delete the given persistent savepoint.
@@ -360,13 +365,13 @@ impl<'db> WriteTransaction<'db> {
     /// Note that if the transaction is abort()'ed this deletion will be rolled back.
     ///
     /// Returns `true` if the savepoint existed
-    /// Returns `[Error::InvalidSavepoint`] if the transaction's durability is less than `[Durability::Immediate]`
-    pub fn delete_persistent_savepoint(&self, id: u64) -> Result<bool> {
+    /// Returns `[SavepointError::InvalidSavepoint`] if the transaction's durability is less than `[Durability::Immediate]`
+    pub fn delete_persistent_savepoint(&self, id: u64) -> Result<bool, SavepointError> {
         if !matches!(
             self.durability,
             Durability::Immediate | Durability::Paranoid
         ) {
-            return Err(Error::InvalidSavepoint);
+            return Err(SavepointError::InvalidSavepoint);
         }
         let mut table = self.open_system_table(SAVEPOINT_TABLE)?;
         let savepoint = table.remove(id)?;
@@ -397,10 +402,10 @@ impl<'db> WriteTransaction<'db> {
     ///
     /// This savepoint will be freed as soon as the returned `[Savepoint]` is dropped.
     ///
-    /// Returns `[Error::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened)
-    pub fn ephemeral_savepoint(&self) -> Result<Savepoint> {
+    /// Returns `[SavepointError::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened)
+    pub fn ephemeral_savepoint(&self) -> Result<Savepoint, SavepointError> {
         if self.dirty.load(Ordering::Acquire) {
-            return Err(Error::InvalidSavepoint);
+            return Err(SavepointError::InvalidSavepoint);
         }
 
         let (id, transaction_id) = self.db.allocate_savepoint()?;
@@ -431,7 +436,7 @@ impl<'db> WriteTransaction<'db> {
     /// Restore the state of the database to the given [`Savepoint`]
     ///
     /// Calling this method invalidates all [`Savepoint`]s created after savepoint
-    pub fn restore_savepoint(&mut self, savepoint: &Savepoint) -> Result {
+    pub fn restore_savepoint(&mut self, savepoint: &Savepoint) -> Result<(), SavepointError> {
         // Ensure that user does not try to restore a Savepoint that is from a different Database
         assert_eq!(
             self.transaction_tracker.as_ref() as *const _,
@@ -444,7 +449,7 @@ impl<'db> WriteTransaction<'db> {
             .unwrap()
             .is_valid_savepoint(savepoint.get_id())
         {
-            return Err(Error::InvalidSavepoint);
+            return Err(SavepointError::InvalidSavepoint);
         }
         #[cfg(feature = "logging")]
         info!(
@@ -560,11 +565,11 @@ impl<'db> WriteTransaction<'db> {
     pub fn open_table<'txn, K: RedbKey + 'static, V: RedbValue + 'static>(
         &'txn self,
         definition: TableDefinition<K, V>,
-    ) -> Result<Table<'db, 'txn, K, V>> {
+    ) -> Result<Table<'db, 'txn, K, V>, TableError> {
         #[cfg(feature = "logging")]
         info!("Opening table: {}", definition);
         if let Some(location) = self.open_tables.lock().unwrap().get(definition.name()) {
-            return Err(Error::TableAlreadyOpen(
+            return Err(TableError::TableAlreadyOpen(
                 definition.name().to_string(),
                 location,
             ));
@@ -597,11 +602,11 @@ impl<'db> WriteTransaction<'db> {
     pub fn open_multimap_table<'txn, K: RedbKey + 'static, V: RedbKey + 'static>(
         &'txn self,
         definition: MultimapTableDefinition<K, V>,
-    ) -> Result<MultimapTable<'db, 'txn, K, V>> {
+    ) -> Result<MultimapTable<'db, 'txn, K, V>, TableError> {
         #[cfg(feature = "logging")]
         info!("Opening multimap table: {}", definition);
         if let Some(location) = self.open_tables.lock().unwrap().get(definition.name()) {
-            return Err(Error::TableAlreadyOpen(
+            return Err(TableError::TableAlreadyOpen(
                 definition.name().to_string(),
                 location,
             ));
@@ -656,7 +661,7 @@ impl<'db> WriteTransaction<'db> {
     /// Delete the given table
     ///
     /// Returns a bool indicating whether the table existed
-    pub fn delete_table(&self, definition: impl TableHandle) -> Result<bool> {
+    pub fn delete_table(&self, definition: impl TableHandle) -> Result<bool, TableError> {
         #[cfg(feature = "logging")]
         info!("Deleting table: {}", definition.name());
         self.dirty.store(true, Ordering::Release);
@@ -669,7 +674,10 @@ impl<'db> WriteTransaction<'db> {
     /// Delete the given table
     ///
     /// Returns a bool indicating whether the table existed
-    pub fn delete_multimap_table(&self, definition: impl MultimapTableHandle) -> Result<bool> {
+    pub fn delete_multimap_table(
+        &self,
+        definition: impl MultimapTableHandle,
+    ) -> Result<bool, TableError> {
         #[cfg(feature = "logging")]
         info!("Deleting multimap table: {}", definition.name());
         self.dirty.store(true, Ordering::Release);
@@ -703,7 +711,7 @@ impl<'db> WriteTransaction<'db> {
     ///
     /// All writes performed in this transaction will be visible to future transactions, and are
     /// durable as consistent with the [`Durability`] level set by [`Self::set_durability`]
-    pub fn commit(mut self) -> Result {
+    pub fn commit(mut self) -> Result<(), CommitError> {
         // Set completed flag first, so that we don't go through the abort() path on drop, if this fails
         self.completed = true;
         self.table_tree
@@ -713,7 +721,7 @@ impl<'db> WriteTransaction<'db> {
         self.commit_inner()
     }
 
-    fn commit_inner(&mut self) -> Result {
+    fn commit_inner(&mut self) -> Result<(), CommitError> {
         #[cfg(feature = "logging")]
         info!(
             "Committing transaction id={:?} with durability={:?}",
@@ -755,7 +763,17 @@ impl<'db> WriteTransaction<'db> {
         #[cfg(feature = "logging")]
         info!("Aborting transaction id={:?}", self.transaction_id);
         for savepoint in self.created_persistent_savepoints.lock().unwrap().iter() {
-            self.delete_persistent_savepoint(*savepoint)?;
+            match self.delete_persistent_savepoint(*savepoint) {
+                Ok(_) => {}
+                Err(err) => match err {
+                    SavepointError::InvalidSavepoint => {
+                        unreachable!();
+                    }
+                    SavepointError::Storage(storage_err) => {
+                        return Err(storage_err);
+                    }
+                },
+            }
         }
         self.table_tree.write().unwrap().clear_table_root_updates();
         self.mem.rollback_uncommitted_writes()?;
@@ -1029,26 +1047,34 @@ impl<'db> ReadTransaction<'db> {
     pub fn open_table<K: RedbKey + 'static, V: RedbValue + 'static>(
         &self,
         definition: TableDefinition<K, V>,
-    ) -> Result<ReadOnlyTable<K, V>> {
+    ) -> Result<ReadOnlyTable<K, V>, TableError> {
         let header = self
             .tree
             .get_table::<K, V>(definition.name(), TableType::Normal)?
-            .ok_or_else(|| Error::TableDoesNotExist(definition.name().to_string()))?;
+            .ok_or_else(|| TableError::TableDoesNotExist(definition.name().to_string()))?;
 
-        ReadOnlyTable::new(header.get_root(), PageHint::Clean, self.mem)
+        Ok(ReadOnlyTable::new(
+            header.get_root(),
+            PageHint::Clean,
+            self.mem,
+        )?)
     }
 
     /// Open the given table
     pub fn open_multimap_table<K: RedbKey + 'static, V: RedbKey + 'static>(
         &self,
         definition: MultimapTableDefinition<K, V>,
-    ) -> Result<ReadOnlyMultimapTable<K, V>> {
+    ) -> Result<ReadOnlyMultimapTable<K, V>, TableError> {
         let header = self
             .tree
             .get_table::<K, V>(definition.name(), TableType::Multimap)?
-            .ok_or_else(|| Error::TableDoesNotExist(definition.name().to_string()))?;
+            .ok_or_else(|| TableError::TableDoesNotExist(definition.name().to_string()))?;
 
-        ReadOnlyMultimapTable::new(header.get_root(), PageHint::Clean, self.mem)
+        Ok(ReadOnlyMultimapTable::new(
+            header.get_root(),
+            PageHint::Clean,
+            self.mem,
+        )?)
     }
 
     /// List all the tables

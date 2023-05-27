@@ -1,4 +1,4 @@
-use redb::{Database, Error, MultimapTableDefinition, ReadableMultimapTable};
+use redb::{Database, MultimapTableDefinition, ReadableMultimapTable, TableError};
 
 const STR_TABLE: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("str_to_str");
 const SLICE_U64_TABLE: MultimapTableDefinition<&[u8], u64> =
@@ -244,7 +244,7 @@ fn wrong_types() {
     let txn = db.begin_write().unwrap();
     assert!(matches!(
         txn.open_multimap_table(wrong_definition),
-        Err(Error::TableTypeMismatch { .. })
+        Err(TableError::TableTypeMismatch { .. })
     ));
     txn.abort().unwrap();
 
@@ -252,7 +252,7 @@ fn wrong_types() {
     txn.open_multimap_table(definition).unwrap();
     assert!(matches!(
         txn.open_multimap_table(wrong_definition),
-        Err(Error::TableTypeMismatch { .. })
+        Err(TableError::TableTypeMismatch { .. })
     ));
 }
 

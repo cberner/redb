@@ -13,7 +13,7 @@ pub use db::{
     Builder, Database, MultimapTableDefinition, MultimapTableHandle, TableDefinition, TableHandle,
     UntypedMultimapTableHandle, UntypedTableHandle,
 };
-pub use error::Error;
+pub use error::{CompactionError, DatabaseError, Error, SavepointError, StorageError, TableError};
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, ReadOnlyMultimapTable, ReadableMultimapTable,
 };
@@ -22,7 +22,7 @@ pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransact
 pub use tree_store::{AccessGuard, AccessGuardMut, Savepoint};
 pub use types::{RedbKey, RedbValue, TypeName};
 
-type Result<T = (), E = Error> = std::result::Result<T, E>;
+type Result<T = (), E = StorageError> = std::result::Result<T, E>;
 
 #[cfg(feature = "python")]
 pub use crate::python::redb;
