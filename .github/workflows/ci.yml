@@ -106,7 +106,7 @@ jobs:
           just test_py
 
       - name: Run WASI tests
-        if: startsWith(matrix.os, 'ubuntu')
+        if: startsWith(matrix.os, 'macos')
         run: |
           rustup target add wasm32-wasi
           brew install wasmtime
