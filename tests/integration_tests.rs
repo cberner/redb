@@ -3,10 +3,10 @@ use std::io::ErrorKind;
 
 use rand::prelude::SliceRandom;
 use rand::Rng;
-use redb::ReadableMultimapTable;
 use redb::{
-    Builder, Database, Durability, Error, MultimapTableDefinition, ReadableTable, TableDefinition,
+    Builder, Database, Durability, MultimapTableDefinition, ReadableTable, TableDefinition,
 };
+use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 
 const ELEMENTS: usize = 100;
 
@@ -978,7 +978,7 @@ fn alias_table() {
     let result = write_txn.open_table(STR_TABLE);
     assert!(matches!(
         result.err().unwrap(),
-        Error::TableAlreadyOpen(_, _)
+        TableError::TableAlreadyOpen(_, _)
     ));
     drop(table);
 }
@@ -1056,7 +1056,7 @@ fn dropped_write() {
     drop(write_txn);
     let read_txn = db.begin_read().unwrap();
     let result = read_txn.open_table(STR_TABLE);
-    assert!(matches!(result, Err(Error::TableDoesNotExist(_))));
+    assert!(matches!(result, Err(TableError::TableDoesNotExist(_))));
 }
 
 #[test]
@@ -1083,7 +1083,7 @@ fn does_not_exist() {
     let tmpfile = create_tempfile();
     fs::remove_file(tmpfile.path()).unwrap();
     let result = Database::open(tmpfile.path());
-    if let Err(Error::Io(e)) = result {
+    if let Err(DatabaseError::Storage(StorageError::Io(e))) = result {
         assert!(matches!(e.kind(), ErrorKind::NotFound));
     } else {
         panic!();
@@ -1092,7 +1092,7 @@ fn does_not_exist() {
     let tmpfile = create_tempfile();
 
     let result = Database::open(tmpfile.path());
-    if let Err(Error::Io(e)) = result {
+    if let Err(DatabaseError::Storage(StorageError::Io(e))) = result {
         assert!(matches!(e.kind(), ErrorKind::InvalidData));
     } else {
         panic!();
@@ -1114,7 +1114,7 @@ fn wrong_types() {
     let txn = db.begin_write().unwrap();
     assert!(matches!(
         txn.open_table(wrong_definition),
-        Err(Error::TableTypeMismatch { .. })
+        Err(TableError::TableTypeMismatch { .. })
     ));
     txn.abort().unwrap();
 
@@ -1122,7 +1122,7 @@ fn wrong_types() {
     txn.open_table(definition).unwrap();
     assert!(matches!(
         txn.open_table(wrong_definition),
-        Err(Error::TableTypeMismatch { .. })
+        Err(TableError::TableTypeMismatch { .. })
     ));
 }
 
@@ -1196,7 +1196,7 @@ fn database_lock() {
     assert!(result.is_ok());
     let result2 = Database::open(tmpfile.path());
     assert!(
-        matches!(result2, Err(Error::DatabaseAlreadyOpen)),
+        matches!(result2, Err(DatabaseError::DatabaseAlreadyOpen)),
         "{result2:?}",
     );
     drop(result);
@@ -1272,7 +1272,7 @@ fn savepoint() {
 
     assert!(matches!(
         txn.restore_savepoint(&savepoint2).err().unwrap(),
-        Error::InvalidSavepoint
+        SavepointError::InvalidSavepoint
     ));
     txn.commit().unwrap();
 

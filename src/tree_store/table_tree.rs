@@ -1,9 +1,10 @@
+use crate::error::TableError;
 use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace, TypeName};
-use crate::{DatabaseStats, Error, Result};
+use crate::{DatabaseStats, Result};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::mem;
@@ -435,7 +436,10 @@ impl<'txn> TableTree<'txn> {
 
         // All the normal tables
         for entry in self.list_tables(TableType::Normal)? {
-            let definition = self.get_table_untyped(&entry, TableType::Normal)?.unwrap();
+            let definition = self
+                .get_table_untyped(&entry, TableType::Normal)
+                .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
+                .unwrap();
             if let Some((table_root, _)) = definition.get_root() {
                 let table_pages_iter = AllPageNumbersBtreeIter::new(
                     table_root,
@@ -503,25 +507,25 @@ impl<'txn> TableTree<'txn> {
         &self,
         name: &str,
         table_type: TableType,
-    ) -> Result<Option<InternalTableDefinition>> {
+    ) -> Result<Option<InternalTableDefinition>, TableError> {
         if let Some(guard) = self.tree.get(&name)? {
             let mut definition = guard.value();
             if definition.get_type() != table_type {
                 return if definition.get_type() == TableType::Multimap {
-                    Err(Error::TableIsMultimap(name.to_string()))
+                    Err(TableError::TableIsMultimap(name.to_string()))
                 } else {
-                    Err(Error::TableIsNotMultimap(name.to_string()))
+                    Err(TableError::TableIsNotMultimap(name.to_string()))
                 };
             }
             if definition.get_key_alignment() != ALIGNMENT {
-                return Err(Error::TypeDefinitionChanged {
+                return Err(TableError::TypeDefinitionChanged {
                     name: definition.key_type.clone(),
                     alignment: definition.get_key_alignment(),
                     width: definition.get_fixed_key_size(),
                 });
             }
             if definition.get_value_alignment() != ALIGNMENT {
-                return Err(Error::TypeDefinitionChanged {
+                return Err(TableError::TypeDefinitionChanged {
                     name: definition.value_type.clone(),
                     alignment: definition.get_value_alignment(),
                     width: definition.get_fixed_value_size(),
@@ -543,27 +547,27 @@ impl<'txn> TableTree<'txn> {
         &self,
         name: &str,
         table_type: TableType,
-    ) -> Result<Option<InternalTableDefinition>> {
+    ) -> Result<Option<InternalTableDefinition>, TableError> {
         Ok(
             if let Some(definition) = self.get_table_untyped(name, table_type)? {
                 // Do additional checks on the types to be sure they match
                 if definition.key_type != K::type_name() || definition.value_type != V::type_name()
                 {
-                    return Err(Error::TableTypeMismatch {
+                    return Err(TableError::TableTypeMismatch {
                         table: name.to_string(),
                         key: definition.key_type,
                         value: definition.value_type,
                     });
                 }
                 if definition.get_fixed_key_size() != K::fixed_width() {
-                    return Err(Error::TypeDefinitionChanged {
+                    return Err(TableError::TypeDefinitionChanged {
                         name: K::type_name(),
                         alignment: definition.get_key_alignment(),
                         width: definition.get_fixed_key_size(),
                     });
                 }
                 if definition.get_fixed_value_size() != V::fixed_width() {
-                    return Err(Error::TypeDefinitionChanged {
+                    return Err(TableError::TypeDefinitionChanged {
                         name: V::type_name(),
                         alignment: definition.get_value_alignment(),
                         width: definition.get_fixed_value_size(),
@@ -577,7 +581,11 @@ impl<'txn> TableTree<'txn> {
     }
 
     // root_page: the root of the master table
-    pub(crate) fn delete_table(&mut self, name: &str, table_type: TableType) -> Result<bool> {
+    pub(crate) fn delete_table(
+        &mut self,
+        name: &str,
+        table_type: TableType,
+    ) -> Result<bool, TableError> {
         if let Some(definition) = self.get_table_untyped(name, table_type)? {
             if let Some((table_root, _)) = definition.get_root() {
                 let iter = AllPageNumbersBtreeIter::new(
@@ -607,7 +615,7 @@ impl<'txn> TableTree<'txn> {
         &mut self,
         name: &str,
         table_type: TableType,
-    ) -> Result<InternalTableDefinition> {
+    ) -> Result<InternalTableDefinition, TableError> {
         if let Some(found) = self.get_table::<K, V>(name, table_type)? {
             return Ok(found);
         }

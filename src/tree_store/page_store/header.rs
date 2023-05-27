@@ -394,7 +394,7 @@ mod test {
     };
     use crate::tree_store::page_store::TransactionalMemory;
     #[cfg(not(target_os = "windows"))]
-    use crate::Error;
+    use crate::StorageError;
     use crate::{Database, ReadableTable};
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -509,7 +509,7 @@ mod test {
 
             assert!(matches!(
                 db2.check_integrity().unwrap_err(),
-                Error::Corrupted(_)
+                StorageError::Corrupted(_)
             ));
         }
     }

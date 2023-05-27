@@ -1,5 +1,4 @@
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocatorMut;
-use crate::Result;
 use std::ops::Range;
 
 fn round_up_to_multiple_of(value: u64, multiple: u64) -> u64 {
@@ -114,13 +113,9 @@ impl DatabaseLayout {
         }
     }
 
-    pub(super) fn calculate(
-        desired_usable_bytes: u64,
-        page_capacity: u32,
-        page_size: u32,
-    ) -> Result<Self> {
+    pub(super) fn calculate(desired_usable_bytes: u64, page_capacity: u32, page_size: u32) -> Self {
         let full_region_layout = RegionLayout::full_region_layout(page_capacity, page_size);
-        let result = if desired_usable_bytes <= full_region_layout.usable_bytes() {
+        if desired_usable_bytes <= full_region_layout.usable_bytes() {
             // Single region layout
             let region_layout =
                 RegionLayout::calculate(desired_usable_bytes, page_capacity, page_size);
@@ -153,9 +148,7 @@ impl DatabaseLayout {
                 num_full_regions: full_regions.try_into().unwrap(),
                 trailing_partial_region: trailing_region,
             }
-        };
-
-        Ok(result)
+        }
     }
 
     pub(super) fn full_region_layout(&self) -> &RegionLayout {

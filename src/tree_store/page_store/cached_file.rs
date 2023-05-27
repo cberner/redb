@@ -1,6 +1,6 @@
 use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::file_lock::LockedFile;
-use crate::{Error, Result};
+use crate::{DatabaseError, Result, StorageError};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
@@ -81,7 +81,7 @@ impl PagedCachedFile {
         page_size: u64,
         max_read_cache_bytes: usize,
         max_write_buffer_bytes: usize,
-    ) -> Result<Self> {
+    ) -> Result<Self, DatabaseError> {
         let mut read_cache = Vec::with_capacity(Self::lock_stripes());
         for _ in 0..Self::lock_stripes() {
             read_cache.push(RwLock::new(BTreeMap::new()));
@@ -127,7 +127,7 @@ impl PagedCachedFile {
     #[inline]
     fn check_fsync_failure(&self) -> Result<()> {
         if self.fsync_failed.load(Ordering::Acquire) {
-            Err(Error::Io(io::Error::from(io::ErrorKind::Other)))
+            Err(StorageError::Io(io::Error::from(io::ErrorKind::Other)))
         } else {
             Ok(())
         }
@@ -165,7 +165,7 @@ impl PagedCachedFile {
             }
         }
 
-        self.file.file().set_len(len).map_err(Error::from)
+        self.file.file().set_len(len).map_err(StorageError::from)
     }
 
     pub(super) fn flush(&self) -> Result {
@@ -174,7 +174,7 @@ impl PagedCachedFile {
         // Disable fsync when fuzzing, since it doesn't test crash consistency
         #[cfg(not(fuzzing))]
         {
-            let res = self.file.file().sync_data().map_err(Error::from);
+            let res = self.file.file().sync_data().map_err(StorageError::from);
             if res.is_err() {
                 self.set_fsync_failed(true);
                 // Try to flush any pages in the page cache that are out of sync with disk.
@@ -225,11 +225,11 @@ impl PagedCachedFile {
         #[cfg(any(fuzzing, test))]
         {
             if self.crash_countdown.load(Ordering::Acquire) == 0 {
-                return Err(Error::SimulatedIOFailure);
+                return Err(StorageError::SimulatedIOFailure);
             }
         }
         self.check_fsync_failure()?;
-        self.file.read(offset, len)
+        Ok(self.file.read(offset, len)?)
     }
 
     // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
@@ -343,7 +343,7 @@ impl PagedCachedFile {
                 #[cfg(any(fuzzing, test))]
                 {
                     if self.crash_countdown.load(Ordering::Acquire) == 0 {
-                        return Err(Error::SimulatedIOFailure);
+                        return Err(StorageError::SimulatedIOFailure);
                     }
                     self.crash_countdown.fetch_sub(1, Ordering::AcqRel);
                 }

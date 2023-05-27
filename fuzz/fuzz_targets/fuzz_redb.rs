@@ -203,7 +203,7 @@ fn handle_multimap_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, BT
                 } else {
                     Box::new(reference.range(start..end))
                 };
-            let mut iter: Box<dyn Iterator<Item = Result<(AccessGuard<u64>, MultimapValue<&[u8]>), redb::Error>>> = if *reversed {
+            let mut iter: Box<dyn Iterator<Item = Result<(AccessGuard<u64>, MultimapValue<&[u8]>), redb::StorageError>>> = if *reversed {
                 Box::new(table.range(start..end)?.rev())
             } else {
                 Box::new(table.range(start..end)?)
@@ -276,7 +276,7 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
                 } else {
                     Box::new(reference.range(start..end))
                 };
-            let mut iter: Box<dyn Iterator<Item = Result<(AccessGuard<u64>, AccessGuard<&[u8]>), redb::Error>>> = if *reversed {
+            let mut iter: Box<dyn Iterator<Item = Result<(AccessGuard<u64>, AccessGuard<&[u8]>), redb::StorageError>>> = if *reversed {
                 Box::new(table.range(start..end)?.rev())
             } else {
                 Box::new(table.range(start..end)?)

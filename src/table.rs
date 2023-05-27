@@ -4,8 +4,8 @@ use crate::tree_store::{
     PageHint, PageNumber, TransactionalMemory, MAX_VALUE_LENGTH,
 };
 use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
-use crate::{AccessGuard, WriteTransaction};
-use crate::{Error, Result};
+use crate::Result;
+use crate::{AccessGuard, StorageError, WriteTransaction};
 use std::borrow::Borrow;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
@@ -118,11 +118,11 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     {
         let value_len = V::as_bytes(value.borrow()).as_ref().len();
         if value_len > MAX_VALUE_LENGTH {
-            return Err(Error::ValueTooLarge(value_len));
+            return Err(StorageError::ValueTooLarge(value_len));
         }
         let key_len = K::as_bytes(key.borrow()).as_ref().len();
         if key_len > MAX_VALUE_LENGTH {
-            return Err(Error::ValueTooLarge(key_len));
+            return Err(StorageError::ValueTooLarge(key_len));
         }
         self.tree.insert(key.borrow(), value.borrow())
     }
@@ -153,11 +153,11 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValueMutInPlace + 'static> Table<'d
         K: 'a,
     {
         if value_length as usize > MAX_VALUE_LENGTH {
-            return Err(Error::ValueTooLarge(value_length as usize));
+            return Err(StorageError::ValueTooLarge(value_length as usize));
         }
         let key_len = K::as_bytes(key.borrow()).as_ref().len();
         if key_len > MAX_VALUE_LENGTH {
-            return Err(Error::ValueTooLarge(key_len));
+            return Err(StorageError::ValueTooLarge(key_len));
         }
         self.tree.insert_reserve(key.borrow(), value_length)
     }

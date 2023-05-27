@@ -8,9 +8,7 @@ use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{RegionHeaderAccessor, RegionHeaderMutator};
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
 use crate::tree_store::{Page, PageNumber};
-use crate::Error;
-use crate::Error::Corrupted;
-use crate::Result;
+use crate::{DatabaseError, Result, StorageError};
 #[cfg(feature = "logging")]
 use log::warn;
 use std::cmp;
@@ -401,7 +399,7 @@ pub(crate) struct TransactionalMemory {
     // code path where there is no locking
     region_size: u64,
     region_header_with_padding_size: u64,
-    deferred_error: Mutex<Option<Error>>,
+    deferred_error: Mutex<Option<StorageError>>,
 }
 
 impl TransactionalMemory {
@@ -412,7 +410,7 @@ impl TransactionalMemory {
         requested_region_size: Option<u64>,
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
-    ) -> Result<Self> {
+    ) -> Result<Self, DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
         let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
@@ -438,7 +436,7 @@ impl TransactionalMemory {
                 .try_into()
                 .unwrap(),
             page_size.try_into().unwrap(),
-        )?;
+        );
 
         {
             let file_len = file.metadata()?.len();
@@ -497,21 +495,23 @@ impl TransactionalMemory {
         assert_eq!(header.page_size() as usize, page_size);
         let version = header.primary_slot().version;
         if version > FILE_FORMAT_VERSION {
-            return Err(Error::Corrupted(format!(
+            return Err(StorageError::Corrupted(format!(
                 "Expected file format version {FILE_FORMAT_VERSION}, found {version}",
-            )));
+            ))
+            .into());
         }
         if version < FILE_FORMAT_VERSION {
-            return Err(Error::UpgradeRequired(version));
+            return Err(DatabaseError::UpgradeRequired(version));
         }
         let version = header.secondary_slot().version;
         if version > FILE_FORMAT_VERSION {
-            return Err(Error::Corrupted(format!(
+            return Err(StorageError::Corrupted(format!(
                 "Expected file format version {FILE_FORMAT_VERSION}, found {version}",
-            )));
+            ))
+            .into());
         }
         if version < FILE_FORMAT_VERSION {
-            return Err(Error::UpgradeRequired(version));
+            return Err(DatabaseError::UpgradeRequired(version));
         }
 
         let needs_recovery = header.recovery_required;
@@ -567,7 +567,7 @@ impl TransactionalMemory {
         })
     }
 
-    pub(crate) fn set_deferred_error(&self, err: Error) {
+    pub(crate) fn set_deferred_error(&self, err: StorageError) {
         *self.deferred_error.lock().unwrap() = Some(err);
     }
 
@@ -604,7 +604,7 @@ impl TransactionalMemory {
                 }
             }
             if repair_info.invalid_magic_number {
-                return Err(Corrupted("Invalid magic number".to_string()));
+                return Err(StorageError::Corrupted("Invalid magic number".to_string()));
             }
             self.storage
                 .write(0, DB_HEADER_SIZE)?
@@ -1343,7 +1343,7 @@ impl TransactionalMemory {
             new_usable_bytes,
             state.header.region_max_data_pages(),
             self.page_size,
-        )?;
+        );
         state.allocators.resize_to(new_layout);
         assert!(new_layout.len() <= layout.len());
 
@@ -1390,7 +1390,7 @@ impl TransactionalMemory {
             next_desired_size,
             state.header.region_max_data_pages(),
             self.page_size,
-        )?;
+        );
         assert!(new_layout.len() >= layout.len());
 
         self.storage.resize(new_layout.len())?;

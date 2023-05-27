@@ -1,6 +1,6 @@
 #![allow(clippy::upper_case_acronyms)]
 
-use crate::{Error, Result};
+use crate::{DatabaseError, Result};
 use std::fs::File;
 use std::io;
 use std::os::windows::fs::FileExt;
@@ -35,7 +35,7 @@ pub(crate) struct LockedFile {
 }
 
 impl LockedFile {
-    pub(crate) fn new(file: File) -> Result<Self> {
+    pub(crate) fn new(file: File) -> Result<Self, DatabaseError> {
         let handle = file.as_raw_handle();
         unsafe {
             let result = LockFile(handle, 0, 0, u32::MAX, u32::MAX);
@@ -45,9 +45,9 @@ impl LockedFile {
                 return if err.raw_os_error() == Some(ERROR_IO_PENDING)
                     || err.raw_os_error() == Some(ERROR_LOCK_VIOLATION)
                 {
-                    Err(Error::DatabaseAlreadyOpen)
+                    Err(DatabaseError::DatabaseAlreadyOpen)
                 } else {
-                    Err(Error::Io(err))
+                    Err(err.into())
                 };
             }
         };
@@ -55,27 +55,21 @@ impl LockedFile {
         Ok(Self { file })
     }
 
-    pub(crate) fn read(&self, mut offset: u64, len: usize) -> Result<Vec<u8>> {
+    pub(crate) fn read(&self, mut offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
         let mut buffer = vec![0; len];
         let mut data_offset = 0;
         while data_offset < buffer.len() {
-            let read = self
-                .file
-                .seek_read(&mut buffer[data_offset..], offset)
-                .map_err(Error::from)?;
+            let read = self.file.seek_read(&mut buffer[data_offset..], offset)?;
             offset += read as u64;
             data_offset += read;
         }
         Ok(buffer)
     }
 
-    pub(crate) fn write(&self, mut offset: u64, data: &[u8]) -> Result {
+    pub(crate) fn write(&self, mut offset: u64, data: &[u8]) -> Result<(), io::Error> {
         let mut data_offset = 0;
         while data_offset < data.len() {
-            let written = self
-                .file
-                .seek_write(&data[data_offset..], offset)
-                .map_err(Error::from)?;
+            let written = self.file.seek_write(&data[data_offset..], offset)?;
             offset += written as u64;
             data_offset += written;
         }
