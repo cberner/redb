@@ -158,7 +158,7 @@ fn free() {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..num_writes {
             let mut mut_key = key.clone();
-            mut_key.extend_from_slice(&i.to_le_bytes());
+            mut_key.extend_from_slice(&(i as u64).to_le_bytes());
             table.insert(mut_key.as_slice(), value.as_slice()).unwrap();
         }
     }
