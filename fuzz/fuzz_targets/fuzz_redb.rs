@@ -154,7 +154,7 @@ fn handle_multimap_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, BT
             let key = key.value;
             let iter = table.get(&key)?;
             let entry = reference.get(&key);
-            assert_multimap_value_eq(iter, entry);
+            assert_multimap_value_eq(iter, entry)?;
         }
         FuzzOperation::Insert { key, value_size } => {
             let key = key.value;
@@ -169,7 +169,7 @@ fn handle_multimap_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, BT
             let key = key.value;
             let entry = reference.remove(&key);
             let iter = table.remove_all(&key)?;
-            assert_multimap_value_eq(iter, entry.as_ref());
+            assert_multimap_value_eq(iter, entry.as_ref())?;
         }
         FuzzOperation::RemoveOne { key, value_size } => {
             let key = key.value;
@@ -211,7 +211,7 @@ fn handle_multimap_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, BT
             while let Some((ref_key, ref_values)) = reference_iter.next() {
                 let (key, value_iter) = iter.next().unwrap()?;
                 assert_eq!(*ref_key, key.value());
-                assert_multimap_value_eq(value_iter, Some(ref_values));
+                assert_multimap_value_eq(value_iter, Some(ref_values))?;
             }
             assert!(iter.next().is_none());
         }
@@ -452,13 +452,15 @@ fn apply_crashable_transaction(db: &Database, reference: &mut BTreeMap<u64, usiz
 fn assert_multimap_value_eq(
     mut iter: MultimapValue<&[u8]>,
     reference: Option<&BTreeSet<usize>>,
-) {
+) -> Result<(), redb::Error> {
     if let Some(values) = reference {
         for value in values.iter() {
-            assert_eq!(iter.next().unwrap().unwrap().value().len(), *value);
+            assert_eq!(iter.next().unwrap()?.value().len(), *value);
         }
     }
     assert!(iter.next().is_none());
+
+    Ok(())
 }
 
 fuzz_target!(|config: FuzzConfig| {
