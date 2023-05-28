@@ -1,5 +1,16 @@
 # redb - Changelog
 
+## 0.18.0 - 2023-05-28
+* Improve errors to be more granular. `Error` has been split into multiple different `enum`s, which
+  can all be implicitly converted back to `Error` for convenience
+* Rename `savepoint()` to `ephemeral_savepoint()`
+* Add support for persistent savepoints. These persist across database restarts and must be explicitly
+  released
+* Optimize `restore_savepoint()` to be ~30x faster
+* Add experimental support for WASI. This requires nightly
+* Implement `RedbKey` for `()`
+* Fix some rare crash and data corruption bugs
+
 ## 0.17.0 - 2023-05-09
 * Enforce a limit of 3GiB on keys & values
 * Fix database corruption bug that could occur if a `Durability::None` commit was made,
