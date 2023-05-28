@@ -413,7 +413,7 @@ pub(crate) struct BtreeRangeIter<'a, K: RedbKey + 'a, V: RedbValue + 'a> {
 
 impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeRangeIter<'a, K, V> {
     pub(crate) fn new<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
-        query_range: T,
+        query_range: &'_ T,
         table_root: Option<PageNumber>,
         manager: &'a TransactionalMemory,
     ) -> Result<Self>

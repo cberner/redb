@@ -491,7 +491,7 @@ impl<'txn> TableTree<'txn> {
 
     // root_page: the root of the master table
     pub(crate) fn list_tables(&self, table_type: TableType) -> Result<Vec<String>> {
-        let iter = self.tree.range::<RangeFull, &str>(..)?;
+        let iter = self.tree.range::<RangeFull, &str>(&(..))?;
         let iter = TableNameIter {
             inner: iter,
             table_type,
@@ -636,7 +636,7 @@ impl<'txn> TableTree<'txn> {
 
     pub(crate) fn compact_tables(&mut self) -> Result<bool> {
         let mut progress = false;
-        for entry in self.tree.range::<RangeFull, &str>(..)? {
+        for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let mut definition = entry.value();
             if let Some(updated_root) = self.pending_table_updates.get(entry.key()) {
@@ -676,7 +676,7 @@ impl<'txn> TableTree<'txn> {
             master_tree_stats.metadata_bytes + master_tree_stats.stored_leaf_bytes;
         let mut total_fragmented = master_tree_stats.fragmented_bytes;
 
-        for entry in self.tree.range::<RangeFull, &str>(..)? {
+        for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let mut definition = entry.value();
             if let Some(updated_root) = self.pending_table_updates.get(entry.key()) {

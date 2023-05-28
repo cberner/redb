@@ -78,29 +78,27 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     }
 
     /// Removes the specified range and returns the removed entries in an iterator
-    pub fn drain<'a, KR>(&mut self, range: impl RangeBounds<KR> + Clone + 'a) -> Result<Drain<K, V>>
+    pub fn drain<'a, KR>(&mut self, range: impl RangeBounds<KR> + 'a) -> Result<Drain<K, V>>
     where
         K: 'a,
-        // TODO: we should not require Clone here
-        KR: Borrow<K::SelfType<'a>> + Clone + 'a,
+        KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree.drain(range).map(Drain::new)
+        self.tree.drain(&range).map(Drain::new)
     }
 
     /// Applies `predicate` to all key-value pairs in the specified range. All entries for which
     /// `predicate` evaluates to `true` are removed and returned in an iterator
     pub fn drain_filter<'a, KR, F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
-        range: impl RangeBounds<KR> + Clone + 'a,
+        range: impl RangeBounds<KR> + 'a,
         predicate: F,
     ) -> Result<DrainFilter<K, V, F>>
     where
         K: 'a,
-        // TODO: we should not require Clone here
-        KR: Borrow<K::SelfType<'a>> + Clone + 'a,
+        KR: Borrow<K::SelfType<'a>> + 'a,
     {
         self.tree
-            .drain_filter(range, predicate)
+            .drain_filter(&range, predicate)
             .map(DrainFilter::new)
     }
 
@@ -178,7 +176,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree.range(range).map(Range::new)
+        self.tree.range(&range).map(Range::new)
     }
 
     fn len(&self) -> Result<u64> {
@@ -286,7 +284,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V>
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree.range(range).map(Range::new)
+        self.tree.range(&range).map(Range::new)
     }
 
     fn len(&self) -> Result<u64> {
