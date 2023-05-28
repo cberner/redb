@@ -278,7 +278,7 @@ impl Database {
 
             // Iterate over all other tables
             let iter: BtreeRangeIter<&str, InternalTableDefinition> =
-                BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
+                BtreeRangeIter::new::<RangeFull, &str>(&(..), Some(root), mem)?;
             for entry in iter {
                 let definition = entry?.value();
                 if let Some((table_root, table_checksum)) = definition.get_root() {
@@ -310,7 +310,7 @@ impl Database {
 
             // Iterate over all other tables
             let iter: BtreeRangeIter<&str, InternalTableDefinition> =
-                BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
+                BtreeRangeIter::new::<RangeFull, &str>(&(..), Some(root), mem)?;
             for entry in iter {
                 let definition = entry?.value();
                 if let Some((table_root, table_checksum)) = definition.get_root() {
@@ -492,7 +492,7 @@ impl Database {
 
         // Iterate over all other tables
         let iter: BtreeRangeIter<&str, InternalTableDefinition> =
-            BtreeRangeIter::new::<RangeFull, &str>(.., Some(root), mem)?;
+            BtreeRangeIter::new::<RangeFull, &str>(&(..), Some(root), mem)?;
 
         // Chain all the other tables to the master table iter
         for entry in iter {

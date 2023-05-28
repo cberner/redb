@@ -239,7 +239,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
 
     pub(crate) fn range<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
         &self,
-        range: T,
+        range: &'_ T,
     ) -> Result<BtreeRangeIter<'a, K, V>>
     where
         K: 'a0,
@@ -247,19 +247,14 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         self.read_tree()?.range(range)
     }
 
-    pub(crate) fn drain<
-        'a0,
-        T: RangeBounds<KR> + Clone + 'a0,
-        // TODO: we shouldn't require Clone
-        KR: Borrow<K::SelfType<'a0>> + Clone + 'a0,
-    >(
+    pub(crate) fn drain<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
         &mut self,
-        range: T,
+        range: &'_ T,
     ) -> Result<BtreeDrain<'a, K, V>>
     where
         K: 'a0,
     {
-        let iter = self.range(range.clone())?;
+        let iter = self.range(range)?;
         let return_iter = self.range(range)?;
         let mut free_on_drop = vec![];
         let mut root = self.root.lock().unwrap();
@@ -282,19 +277,18 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
 
     pub(crate) fn drain_filter<
         'a0,
-        T: RangeBounds<KR> + Clone + 'a0,
-        // TODO: we shouldn't require Clone
-        KR: Borrow<K::SelfType<'a0>> + Clone + 'a0,
+        T: RangeBounds<KR> + 'a0,
+        KR: Borrow<K::SelfType<'a0>> + 'a0,
         F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     >(
         &mut self,
-        range: T,
+        range: &'_ T,
         predicate: F,
     ) -> Result<BtreeDrainFilter<'a, K, V, F>>
     where
         K: 'a0,
     {
-        let iter = self.range(range.clone())?;
+        let iter = self.range(range)?;
         let return_iter = self.range(range)?;
         let mut free_on_drop = vec![];
         let mut root = self.root.lock().unwrap();
@@ -484,7 +478,7 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
 
     pub(crate) fn range<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
         &self,
-        range: T,
+        range: &'_ T,
     ) -> Result<BtreeRangeIter<'a, K, V>>
     where
         K: 'a0,
@@ -494,7 +488,7 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
 
     pub(crate) fn len(&self) -> Result<u64> {
         let iter: BtreeRangeIter<K, V> = BtreeRangeIter::new::<RangeFull, K::SelfType<'_>>(
-            ..,
+            &(..),
             self.root.map(|(p, _)| p),
             self.mem,
         )?;

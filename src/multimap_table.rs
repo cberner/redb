@@ -215,7 +215,7 @@ impl DynamicCollection {
             Subtree => {
                 let root = collection.value().as_subtree().0;
                 MultimapValue::new_subtree(BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
-                    ..,
+                    &(..),
                     Some(root),
                     mem,
                 )?)
@@ -241,7 +241,7 @@ impl DynamicCollection {
             Subtree => {
                 let root = collection.value().as_subtree().0;
                 let inner =
-                    BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(.., Some(root), mem)?;
+                    BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), Some(root), mem)?;
                 MultimapValue::new_subtree_free_on_drop(inner, freed_pages, pages, mem)
             }
         })
@@ -756,7 +756,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
             )?
         } else {
             MultimapValue::new_subtree(BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
-                ..,
+                &(..),
                 None,
                 self.mem,
             )?)
@@ -778,7 +778,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTabl
             DynamicCollection::iter(collection, self.mem)?
         } else {
             MultimapValue::new_subtree(BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
-                ..,
+                &(..),
                 None,
                 self.mem,
             )?)
@@ -793,7 +793,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTabl
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        let inner = self.tree.range(range)?;
+        let inner = self.tree.range(&range)?;
         Ok(MultimapRange::new(inner, self.mem))
     }
 
@@ -882,7 +882,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, 
             DynamicCollection::iter(collection, self.mem)?
         } else {
             MultimapValue::new_subtree(BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
-                ..,
+                &(..),
                 None,
                 self.mem,
             )?)
@@ -896,7 +896,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, 
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        let inner = self.tree.range(range)?;
+        let inner = self.tree.range(&range)?;
         Ok(MultimapRange::new(inner, self.mem))
     }
 
