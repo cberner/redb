@@ -111,5 +111,5 @@ jobs:
           rustup toolchain install nightly
           rustup target add wasm32-wasi
           brew install wasmtime
-          cargo install cargo-wasi
+          cargo install --force --version 0.1.27 cargo-wasi --locked
           just test_wasi
