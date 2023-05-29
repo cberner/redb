@@ -1,13 +1,13 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeRangeIter, Checksum, FreedPageList, FreedTableKey,
-    InternalTableDefinition, PageHint, PageNumber, RawBtree, TableTree, TableType,
-    TransactionalMemory, PAGE_SIZE,
+    InternalTableDefinition, PageHint, PageNumber, RawBtree, SerializedSavepoint, TableTree,
+    TableType, TransactionalMemory, PAGE_SIZE,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{
-    CompactionError, DatabaseError, Durability, ReadOnlyTable, ReadableTable, Savepoint,
-    SavepointError, StorageError,
+    CompactionError, DatabaseError, Durability, ReadOnlyTable, ReadableTable, SavepointError,
+    StorageError,
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Display, Formatter};
@@ -419,20 +419,21 @@ impl Database {
         let table_tree = TableTree::new(system_root, mem, freed_list);
         let fake_transaction_tracker = Arc::new(Mutex::new(TransactionTracker::new()));
         if let Some(savepoint_table_def) = table_tree
-            .get_table::<u64, &[u8]>(SAVEPOINT_TABLE.name(), TableType::Normal)
+            .get_table::<SavepointId, SerializedSavepoint>(
+                SAVEPOINT_TABLE.name(),
+                TableType::Normal,
+            )
             .map_err(|e| {
                 e.into_storage_error_or_corrupted("Persistent savepoint table corrupted")
             })?
         {
-            let savepoint_table: ReadOnlyTable<u64, &[u8]> =
+            let savepoint_table: ReadOnlyTable<SavepointId, SerializedSavepoint> =
                 ReadOnlyTable::new(savepoint_table_def.get_root(), PageHint::None, mem)?;
-            for result in savepoint_table.range::<u64>(..)? {
+            for result in savepoint_table.range::<SavepointId>(..)? {
                 let (_, savepoint_data) = result?;
-                let savepoint = Savepoint::from_bytes(
-                    savepoint_data.value(),
-                    fake_transaction_tracker.clone(),
-                    false,
-                );
+                let savepoint = savepoint_data
+                    .value()
+                    .to_savepoint(fake_transaction_tracker.clone());
                 if let Some((root, _)) = savepoint.get_user_root() {
                     Self::mark_tables_recursive(root, mem, true)?;
                 }

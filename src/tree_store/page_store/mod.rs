@@ -15,6 +15,7 @@ pub(crate) use base::{Page, PageHint, PageNumber, MAX_VALUE_LENGTH};
 pub(crate) use header::PAGE_SIZE;
 pub(crate) use page_manager::{xxh3_checksum, TransactionalMemory, FILE_FORMAT_VERSION};
 pub use savepoint::Savepoint;
+pub(crate) use savepoint::SerializedSavepoint;
 
 pub(super) use base::{PageImpl, PageMut};
 pub(super) use xxh3::hash128_with_seed;

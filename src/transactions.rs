@@ -3,7 +3,7 @@ use crate::sealed::Sealed;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeMut, FreedPageList, FreedTableKey, InternalTableDefinition, PageHint, PageNumber,
-    TableTree, TableType, TransactionalMemory,
+    SerializedSavepoint, TableTree, TableType, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{
@@ -22,9 +22,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{panic, thread};
 
-const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), u64> =
+const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), SavepointId> =
     SystemTableDefinition::new("next_savepoint_id");
-pub(crate) const SAVEPOINT_TABLE: SystemTableDefinition<u64, &[u8]> =
+pub(crate) const SAVEPOINT_TABLE: SystemTableDefinition<SavepointId, SerializedSavepoint> =
     SystemTableDefinition::new("persistent_savepoints");
 
 pub struct SystemTableDefinition<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
@@ -208,7 +208,7 @@ pub struct WriteTransaction<'db> {
     dirty: AtomicBool,
     durability: Durability,
     // Persistent savepoints created during this transaction
-    created_persistent_savepoints: Mutex<HashSet<u64>>,
+    created_persistent_savepoints: Mutex<HashSet<SavepointId>>,
     deleted_persistent_savepoints: Mutex<Vec<(SavepointId, TransactionId)>>,
     live_write_transaction: MutexGuard<'db, Option<TransactionId>>,
 }
@@ -326,16 +326,19 @@ impl<'db> WriteTransaction<'db> {
 
         let mut next_table = self.open_system_table(NEXT_SAVEPOINT_TABLE)?;
         let mut savepoint_table = self.open_system_table(SAVEPOINT_TABLE)?;
-        next_table.insert((), savepoint.get_id().0 + 1)?;
+        next_table.insert((), savepoint.get_id().next())?;
 
-        savepoint_table.insert(savepoint.get_id().0, savepoint.to_bytes().as_slice())?;
+        savepoint_table.insert(
+            savepoint.get_id(),
+            SerializedSavepoint::from_savepoint(&savepoint),
+        )?;
 
         savepoint.set_persistent();
 
         self.created_persistent_savepoints
             .lock()
             .unwrap()
-            .insert(savepoint.get_id().0);
+            .insert(savepoint.get_id());
 
         Ok(savepoint.get_id().0)
     }
@@ -344,7 +347,7 @@ impl<'db> WriteTransaction<'db> {
         let next_table = self.open_system_table(NEXT_SAVEPOINT_TABLE)?;
         let value = next_table.get(())?;
         if let Some(next_id) = value {
-            Ok(Some(SavepointId(next_id.value())))
+            Ok(Some(next_id.value()))
         } else {
             Ok(None)
         }
@@ -353,10 +356,10 @@ impl<'db> WriteTransaction<'db> {
     /// Get a persistent savepoint given its id
     pub fn get_persistent_savepoint(&self, id: u64) -> Result<Savepoint, SavepointError> {
         let table = self.open_system_table(SAVEPOINT_TABLE)?;
-        let value = table.get(id)?;
+        let value = table.get(SavepointId(id))?;
 
         value
-            .map(|x| Savepoint::from_bytes(x.value(), self.transaction_tracker.clone(), false))
+            .map(|x| x.value().to_savepoint(self.transaction_tracker.clone()))
             .ok_or(SavepointError::InvalidSavepoint)
     }
 
@@ -374,10 +377,11 @@ impl<'db> WriteTransaction<'db> {
             return Err(SavepointError::InvalidSavepoint);
         }
         let mut table = self.open_system_table(SAVEPOINT_TABLE)?;
-        let savepoint = table.remove(id)?;
-        if let Some(bytes) = savepoint {
-            let savepoint =
-                Savepoint::from_bytes(bytes.value(), self.transaction_tracker.clone(), false);
+        let savepoint = table.remove(SavepointId(id))?;
+        if let Some(serialized) = savepoint {
+            let savepoint = serialized
+                .value()
+                .to_savepoint(self.transaction_tracker.clone());
             self.deleted_persistent_savepoints
                 .lock()
                 .unwrap()
@@ -392,8 +396,8 @@ impl<'db> WriteTransaction<'db> {
     pub fn list_persistent_savepoints(&self) -> Result<impl Iterator<Item = u64>> {
         let table = self.open_system_table(SAVEPOINT_TABLE)?;
         let mut savepoints = vec![];
-        for savepoint in table.range::<u64>(..)? {
-            savepoints.push(savepoint?.0.value());
+        for savepoint in table.range::<SavepointId>(..)? {
+            savepoints.push(savepoint?.0.value().0);
         }
         Ok(savepoints.into_iter())
     }
@@ -763,7 +767,7 @@ impl<'db> WriteTransaction<'db> {
         #[cfg(feature = "logging")]
         info!("Aborting transaction id={:?}", self.transaction_id);
         for savepoint in self.created_persistent_savepoints.lock().unwrap().iter() {
-            match self.delete_persistent_savepoint(*savepoint) {
+            match self.delete_persistent_savepoint(savepoint.0) {
                 Ok(_) => {}
                 Err(err) => match err {
                     SavepointError::InvalidSavepoint => {
