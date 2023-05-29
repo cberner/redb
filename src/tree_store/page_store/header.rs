@@ -68,9 +68,9 @@ const NUM_FULL_REGIONS_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
 const TRAILING_REGION_DATA_PAGES_OFFSET: usize = NUM_FULL_REGIONS_OFFSET + size_of::<u32>();
 const REGION_TRACKER_PAGE_NUMBER_OFFSET: usize =
     TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>();
-const SLOT_CHECKSUM_OFFSET: usize =
+const TRANSACTION_LAST_FIELD: usize =
     REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size();
-const TRANSACTION_LAST_FIELD: usize = SLOT_CHECKSUM_OFFSET + size_of::<u128>();
+const SLOT_CHECKSUM_OFFSET: usize = TRANSACTION_SIZE - size_of::<Checksum>();
 
 pub(crate) const PAGE_SIZE: usize = 4096;
 
@@ -107,7 +107,7 @@ impl DatabaseHeader {
     ) -> Self {
         #[allow(clippy::assertions_on_constants)]
         {
-            assert!(TRANSACTION_LAST_FIELD <= TRANSACTION_SIZE);
+            assert!(TRANSACTION_LAST_FIELD <= SLOT_CHECKSUM_OFFSET);
         }
 
         let slot = TransactionHeader::new(transaction_id, region_tracker, layout);

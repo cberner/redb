@@ -50,17 +50,17 @@ database file.
 | transaction id                                                                                 |
 | number of full regions                        | data pages in trailing region                  |
 | region tracker page number                                                                     |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
 | slot checksum                                                                                  |
 | slot checksum (cont.)                                                                          |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
 ----------------------------------------- Commit slot 1 ------------------------------------------
 |                                 Same layout as commit slot 0                                   |
 ----------------------------------- footer padding (64+ bytes) ------------------------------------
