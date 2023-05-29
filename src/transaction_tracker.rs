@@ -1,6 +1,8 @@
-use crate::Savepoint;
+use crate::{RedbKey, RedbValue, Savepoint, TypeName};
+use std::cmp::Ordering;
 use std::collections::btree_map::BTreeMap;
 use std::collections::btree_set::BTreeSet;
+use std::mem::size_of;
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub(crate) struct TransactionId(pub u64);
@@ -19,12 +21,46 @@ impl TransactionId {
     }
 }
 
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Debug)]
 pub(crate) struct SavepointId(pub u64);
 
 impl SavepointId {
-    fn next(&self) -> SavepointId {
+    pub(crate) fn next(&self) -> SavepointId {
         SavepointId(self.0 + 1)
+    }
+}
+
+impl RedbValue for SavepointId {
+    type SelfType<'a> = SavepointId;
+    type AsBytes<'a> = [u8; size_of::<u64>()];
+
+    fn fixed_width() -> Option<usize> {
+        Some(size_of::<u64>())
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        SavepointId(u64::from_le_bytes(data.try_into().unwrap()))
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        value.0.to_le_bytes()
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("redb::SavepointId")
+    }
+}
+
+impl RedbKey for SavepointId {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        Self::from_bytes(data1).0.cmp(&Self::from_bytes(data2).0)
     }
 }
 
