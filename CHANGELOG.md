@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 0.19.0 - 2023-05-29
+* Remove `Clone` bound from range argument type on `drain()` and `drain_filter()`
+* File format changes to improve future extensibility
+
 ## 0.18.0 - 2023-05-28
 * Improve errors to be more granular. `Error` has been split into multiple different `enum`s, which
   can all be implicitly converted back to `Error` for convenience
