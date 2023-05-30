@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 0.20.0 - 2023-05-30
+* Export `TransactionError` and `CommitError`. These were unintentionally private
+* Implement `std::error::Error` for all error enums
+
 ## 0.19.0 - 2023-05-29
 * Remove `Clone` bound from range argument type on `drain()` and `drain_filter()`
 * File format changes to improve future extensibility
