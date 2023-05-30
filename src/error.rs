@@ -71,6 +71,8 @@ impl Display for StorageError {
     }
 }
 
+impl std::error::Error for StorageError {}
+
 /// Errors related to opening tables
 #[derive(Debug)]
 #[non_exhaustive]
@@ -186,6 +188,8 @@ impl Display for TableError {
     }
 }
 
+impl std::error::Error for TableError {}
+
 /// Errors related to opening a database
 #[derive(Debug)]
 #[non_exhaustive]
@@ -234,6 +238,8 @@ impl Display for DatabaseError {
     }
 }
 
+impl std::error::Error for DatabaseError {}
+
 /// Errors related to savepoints
 #[derive(Debug)]
 #[non_exhaustive]
@@ -272,6 +278,8 @@ impl Display for SavepointError {
         }
     }
 }
+
+impl std::error::Error for SavepointError {}
 
 /// Errors related to compaction
 #[derive(Debug)]
@@ -312,6 +320,8 @@ impl Display for CompactionError {
     }
 }
 
+impl std::error::Error for CompactionError {}
+
 /// Errors related to transactions
 #[derive(Debug)]
 #[non_exhaustive]
@@ -350,6 +360,8 @@ impl Display for TransactionError {
     }
 }
 
+impl std::error::Error for TransactionError {}
+
 /// Errors related to committing transactions
 #[derive(Debug)]
 #[non_exhaustive]
@@ -387,6 +399,8 @@ impl Display for CommitError {
         }
     }
 }
+
+impl std::error::Error for CommitError {}
 
 /// Superset of all other errors that can occur. Convenience enum so that users can convert all errors into a single type
 #[derive(Debug)]
