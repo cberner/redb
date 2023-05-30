@@ -13,7 +13,10 @@ pub use db::{
     Builder, Database, MultimapTableDefinition, MultimapTableHandle, TableDefinition, TableHandle,
     UntypedMultimapTableHandle, UntypedTableHandle,
 };
-pub use error::{CompactionError, DatabaseError, Error, SavepointError, StorageError, TableError};
+pub use error::{
+    CommitError, CompactionError, DatabaseError, Error, SavepointError, StorageError, TableError,
+    TransactionError,
+};
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, ReadOnlyMultimapTable, ReadableMultimapTable,
 };
