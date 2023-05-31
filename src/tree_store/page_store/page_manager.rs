@@ -140,12 +140,6 @@ impl<'a> RegionTracker<'a> {
     }
 }
 
-enum AllocationOp {
-    Allocate(PageNumber),
-    Free(PageNumber),
-    FreeUncommitted(PageNumber),
-}
-
 // The current layout for the active transaction.
 // May include uncommitted changes to the database layout, if it grew or shrank
 // TODO: this should probably be merged into InMemoryState
@@ -378,7 +372,6 @@ impl InMemoryState {
 pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
     allocated_since_commit: Mutex<HashSet<PageNumber>>,
-    log_since_commit: Mutex<Vec<AllocationOp>>,
     // True if the allocator state was corrupted when the file was opened
     needs_recovery: AtomicBool,
     storage: PagedCachedFile,
@@ -547,7 +540,6 @@ impl TransactionalMemory {
 
         Ok(Self {
             allocated_since_commit: Mutex::new(HashSet::new()),
-            log_since_commit: Mutex::new(vec![]),
             needs_recovery: AtomicBool::new(needs_recovery),
             storage,
             layout: Mutex::new(InProgressLayout {
@@ -582,7 +574,6 @@ impl TransactionalMemory {
 
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result {
         assert!(self.allocated_since_commit.lock().unwrap().is_empty());
-        assert!(self.log_since_commit.lock().unwrap().is_empty());
 
         self.storage.flush()?;
         self.storage.invalidate_cache_all();
@@ -853,7 +844,6 @@ impl TransactionalMemory {
             self.storage.resize(layout.layout.len())?;
         }
 
-        self.log_since_commit.lock().unwrap().clear();
         self.allocated_since_commit.lock().unwrap().clear();
         self.read_from_secondary.store(false, Ordering::Release);
 
@@ -885,7 +875,6 @@ impl TransactionalMemory {
         secondary.layout = layout.layout;
         secondary.region_tracker = layout.tracker_page;
 
-        self.log_since_commit.lock().unwrap().clear();
         self.allocated_since_commit.lock().unwrap().clear();
         self.storage.write_barrier()?;
         // TODO: maybe we can remove this flag and just update the in-memory DatabaseHeader state?
@@ -927,38 +916,28 @@ impl TransactionalMemory {
         };
 
         let mut layout = self.layout.lock().unwrap();
-        for op in self.log_since_commit.lock().unwrap().drain(..).rev() {
-            match op {
-                AllocationOp::Allocate(page_number) => {
-                    let region_index = page_number.region;
-                    state
-                        .get_region_tracker_mut()
-                        .mark_free(page_number.page_order, region_index);
-                    let mut region = state.get_region_mut(region_index);
-                    region
-                        .allocator_mut()
-                        .free(page_number.page_index, page_number.page_order);
+        let mut guard = self.allocated_since_commit.lock().unwrap();
+        for page_number in guard.iter() {
+            let region_index = page_number.region;
+            state
+                .get_region_tracker_mut()
+                .mark_free(page_number.page_order, region_index);
+            let mut region = state.get_region_mut(region_index);
+            region
+                .allocator_mut()
+                .free(page_number.page_index, page_number.page_order);
 
-                    let address = page_number.address_range(
-                        self.page_size as u64,
-                        self.region_size,
-                        self.region_header_with_padding_size,
-                        self.page_size,
-                    );
-                    let len: usize = (address.end - address.start).try_into().unwrap();
-                    self.storage.invalidate_cache(address.start, len);
-                    self.storage.cancel_pending_write(address.start, len);
-                }
-                AllocationOp::Free(page_number) | AllocationOp::FreeUncommitted(page_number) => {
-                    let region_index = page_number.region;
-                    let mut region = state.get_region_mut(region_index);
-                    region
-                        .allocator_mut()
-                        .record_alloc(page_number.page_index, page_number.page_order);
-                }
-            }
+            let address = page_number.address_range(
+                self.page_size as u64,
+                self.region_size,
+                self.region_header_with_padding_size,
+                self.page_size,
+            );
+            let len: usize = (address.end - address.start).try_into().unwrap();
+            self.storage.invalidate_cache(address.start, len);
+            self.storage.cancel_pending_write(address.start, len);
         }
-        self.allocated_since_commit.lock().unwrap().clear();
+        guard.clear();
 
         // Shrinking only happens during commit
         assert!(restore.len() <= layout.layout.len());
@@ -1120,10 +1099,7 @@ impl TransactionalMemory {
         state
             .get_region_tracker_mut()
             .mark_free(page.page_order, region_index);
-        self.log_since_commit
-            .lock()
-            .unwrap()
-            .push(AllocationOp::Free(page));
+        self.allocated_since_commit.lock().unwrap().remove(&page);
 
         let address_range = page.address_range(
             self.page_size as u64,
@@ -1151,11 +1127,6 @@ impl TransactionalMemory {
             state
                 .get_region_tracker_mut()
                 .mark_free(page.page_order, page.region);
-
-            self.log_since_commit
-                .lock()
-                .unwrap()
-                .push(AllocationOp::FreeUncommitted(page));
 
             let address_range = page.address_range(
                 self.page_size as u64,
@@ -1213,10 +1184,6 @@ impl TransactionalMemory {
             .lock()
             .unwrap()
             .insert(page_number);
-        self.log_since_commit
-            .lock()
-            .unwrap()
-            .push(AllocationOp::Allocate(page_number));
 
         let address_range = page_number.address_range(
             self.page_size as u64,
@@ -1432,10 +1399,6 @@ impl TransactionalMemory {
             .lock()
             .unwrap()
             .insert(page_number);
-        self.log_since_commit
-            .lock()
-            .unwrap()
-            .push(AllocationOp::Allocate(page_number));
 
         let address_range = page_number.address_range(
             self.page_size as u64,
