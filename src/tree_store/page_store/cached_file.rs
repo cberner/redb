@@ -115,6 +115,10 @@ impl PagedCachedFile {
         })
     }
 
+    pub(crate) fn raw_file_len(&self) -> Result<u64> {
+        Ok(self.file.file().metadata()?.len())
+    }
+
     #[cfg(any(fuzzing, test))]
     pub(crate) fn set_crash_countdown(&self, value: u64) {
         self.crash_countdown.store(value, Ordering::Release);
