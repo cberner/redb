@@ -902,20 +902,6 @@ impl TransactionalMemory {
         }
         assert!(!self.needs_recovery.load(Ordering::Acquire));
         let mut state = self.state.lock().unwrap();
-        // The layout to restore
-        let (restore, restore_tracker_page) = if self.read_from_secondary.load(Ordering::Acquire) {
-            (
-                state.header.secondary_slot().layout,
-                state.header.secondary_slot().region_tracker,
-            )
-        } else {
-            (
-                state.header.primary_slot().layout,
-                state.header.primary_slot().region_tracker,
-            )
-        };
-
-        let mut layout = self.layout.lock().unwrap();
         let mut guard = self.allocated_since_commit.lock().unwrap();
         for page_number in guard.iter() {
             let region_index = page_number.region;
@@ -938,24 +924,6 @@ impl TransactionalMemory {
             self.storage.cancel_pending_write(address.start, len);
         }
         guard.clear();
-
-        // Shrinking only happens during commit
-        assert!(restore.len() <= layout.layout.len());
-        // Reset the layout, in case it changed during the writes
-        if restore.len() < layout.layout.len() {
-            // Restore the size of the last region's allocator
-            let last_region_index = restore.num_regions() - 1;
-            let last_region = restore.region_layout(last_region_index);
-            let mut region = state.get_region_mut(last_region_index);
-            region.allocator_mut().resize(last_region.num_pages());
-
-            *layout = InProgressLayout {
-                layout: restore,
-                tracker_page: restore_tracker_page,
-            };
-
-            self.storage.resize(layout.layout.len())?;
-        }
 
         Ok(())
     }
