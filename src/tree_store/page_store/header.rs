@@ -42,6 +42,7 @@ const GOD_BYTE_OFFSET: usize = MAGICNUMBER.len();
 const PAGE_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + 2; // +2 for padding
 const REGION_HEADER_PAGES_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u32>();
 const REGION_MAX_DATA_PAGES_OFFSET: usize = REGION_HEADER_PAGES_OFFSET + size_of::<u32>();
+const REGION_TRACKER_PAGE_NUMBER_OFFSET: usize = REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>();
 const TRANSACTION_SIZE: usize = 192;
 const TRANSACTION_0_OFFSET: usize = 64;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
@@ -66,10 +67,7 @@ const FREED_ROOT_CHECKSUM_OFFSET: usize = FREED_ROOT_OFFSET + size_of::<u64>();
 const TRANSACTION_ID_OFFSET: usize = FREED_ROOT_CHECKSUM_OFFSET + size_of::<u128>();
 const NUM_FULL_REGIONS_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
 const TRAILING_REGION_DATA_PAGES_OFFSET: usize = NUM_FULL_REGIONS_OFFSET + size_of::<u32>();
-const REGION_TRACKER_PAGE_NUMBER_OFFSET: usize =
-    TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>();
-const TRANSACTION_LAST_FIELD: usize =
-    REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size();
+const TRANSACTION_LAST_FIELD: usize = TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>();
 const SLOT_CHECKSUM_OFFSET: usize = TRANSACTION_SIZE - size_of::<Checksum>();
 
 pub(crate) const PAGE_SIZE: usize = 4096;
@@ -96,6 +94,7 @@ pub(super) struct DatabaseHeader {
     page_size: u32,
     region_header_pages: u32,
     region_max_data_pages: u32,
+    region_tracker: PageNumber,
     transaction_slots: [TransactionHeader; 2],
 }
 
@@ -110,13 +109,14 @@ impl DatabaseHeader {
             assert!(TRANSACTION_LAST_FIELD <= SLOT_CHECKSUM_OFFSET);
         }
 
-        let slot = TransactionHeader::new(transaction_id, region_tracker, layout);
+        let slot = TransactionHeader::new(transaction_id, layout);
         Self {
             primary_slot: 0,
             recovery_required: true,
             page_size: layout.full_region_layout().page_size(),
             region_header_pages: layout.full_region_layout().get_header_pages(),
             region_max_data_pages: layout.full_region_layout().num_pages(),
+            region_tracker,
             transaction_slots: [slot.clone(), slot],
         }
     }
@@ -131,6 +131,14 @@ impl DatabaseHeader {
 
     pub(super) fn region_max_data_pages(&self) -> u32 {
         self.region_max_data_pages
+    }
+
+    pub(super) fn region_tracker(&self) -> PageNumber {
+        self.region_tracker
+    }
+
+    pub(super) fn set_region_tracker(&mut self, page: PageNumber) {
+        self.region_tracker = page;
     }
 
     pub(super) fn primary_slot(&self) -> &TransactionHeader {
@@ -158,6 +166,12 @@ impl DatabaseHeader {
         let page_size = get_u32(&data[PAGE_SIZE_OFFSET..]);
         let region_header_pages = get_u32(&data[REGION_HEADER_PAGES_OFFSET..]);
         let region_max_data_pages = get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..]);
+        let region_tracker = PageNumber::from_le_bytes(
+            data[REGION_TRACKER_PAGE_NUMBER_OFFSET
+                ..(REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size())]
+                .try_into()
+                .unwrap(),
+        );
         let full_region_layout =
             RegionLayout::new(region_max_data_pages, region_header_pages, page_size);
         let (slot0, slot0_corrupted) =
@@ -176,6 +190,7 @@ impl DatabaseHeader {
             page_size,
             region_header_pages,
             region_max_data_pages,
+            region_tracker,
             transaction_slots: [slot0, slot1],
         };
         let repair = HeaderRepairInfo {
@@ -208,6 +223,9 @@ impl DatabaseHeader {
             .copy_from_slice(&self.region_header_pages.to_le_bytes());
         result[REGION_MAX_DATA_PAGES_OFFSET..(REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>())]
             .copy_from_slice(&self.region_max_data_pages.to_le_bytes());
+        result[REGION_TRACKER_PAGE_NUMBER_OFFSET
+            ..(REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size())]
+            .copy_from_slice(&self.region_tracker.to_le_bytes());
         let slot0 = self.transaction_slots[0].to_bytes();
         result[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + slot0.len())].copy_from_slice(&slot0);
         let slot1 = self.transaction_slots[1].to_bytes();
@@ -224,23 +242,17 @@ pub(super) struct TransactionHeader {
     pub(super) system_root: Option<(PageNumber, Checksum)>,
     pub(super) freed_root: Option<(PageNumber, Checksum)>,
     pub(super) transaction_id: TransactionId,
-    pub(super) region_tracker: PageNumber,
     pub(super) layout: DatabaseLayout,
 }
 
 impl TransactionHeader {
-    fn new(
-        transaction_id: TransactionId,
-        region_tracker: PageNumber,
-        layout: DatabaseLayout,
-    ) -> Self {
+    fn new(transaction_id: TransactionId, layout: DatabaseLayout) -> Self {
         Self {
             version: FILE_FORMAT_VERSION,
             user_root: None,
             system_root: None,
             freed_root: None,
             transaction_id,
-            region_tracker,
             layout,
         }
     }
@@ -306,12 +318,6 @@ impl TransactionHeader {
             None
         };
         let transaction_id = TransactionId(get_u64(&data[TRANSACTION_ID_OFFSET..]));
-        let region_tracker = PageNumber::from_le_bytes(
-            data[REGION_TRACKER_PAGE_NUMBER_OFFSET
-                ..(REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size())]
-                .try_into()
-                .unwrap(),
-        );
         let full_regions = get_u32(&data[NUM_FULL_REGIONS_OFFSET..]);
         let trailing_data_pages = get_u32(&data[TRAILING_REGION_DATA_PAGES_OFFSET..]);
         let trailing_region = if trailing_data_pages > 0 {
@@ -331,7 +337,6 @@ impl TransactionHeader {
             system_root,
             freed_root,
             transaction_id,
-            region_tracker,
             layout,
         };
 
@@ -374,9 +379,6 @@ impl TransactionHeader {
                 ..(TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>())]
                 .copy_from_slice(&trailing.num_pages().to_le_bytes());
         }
-        result[REGION_TRACKER_PAGE_NUMBER_OFFSET
-            ..(REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size())]
-            .copy_from_slice(&self.region_tracker.to_le_bytes());
         let checksum = xxh3_checksum(&result[..SLOT_CHECKSUM_OFFSET]);
         result[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
             .copy_from_slice(&checksum.to_le_bytes());

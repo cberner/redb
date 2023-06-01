@@ -31,7 +31,7 @@ database file.
 | magic number                                                                                   |
 | magic con.| god byte  | padding               | page size                                      |
 | region header pages                           | region max data pages                          |
-| padding                                                                                        |
+| region tracker page number                                                                     |
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
@@ -49,7 +49,7 @@ database file.
 | freed checksum (cont.)                                                                         |
 | transaction id                                                                                 |
 | number of full regions                        | data pages in trailing region                  |
-| region tracker page number                                                                     |
+| padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
@@ -88,7 +88,8 @@ controls which transaction pointer is the primary.
 * 4 bytes: page size
 * 4 bytes: region header pages
 * 4 bytes: region max data pages
-* 40 bytes: padding to 64 bytes
+* 8 bytes: region tracker page number
+* 32 bytes: padding to 64 bytes
 
 `magic number` must be set to the ASCII letters 'redb' followed by 0x1A, 0x0A, 0xA9, 0x0D, 0x0A. This sequence is
 inspired by the PNG magic number.
@@ -106,6 +107,8 @@ inspired by the PNG magic number.
 
 `region max data pages` is the maximum number of data pages in each region
 
+`region tracker page number` the page storing the region tracker data structure. Only valid when the database does not need recovery
+
 ### Transaction slot 0 (192 bytes):
 * 1 byte: file format version number
 * 1 byte: boolean indicating that user root page is non-null
@@ -121,9 +124,8 @@ inspired by the PNG magic number.
 * 8 bytes: last committed transaction id
 * 4 bytes: number of full regions
 * 4 bytes: data pages in partial trailing region
-* 8 bytes: region tracker page number
 * 16 bytes: slot checksum
-* 70 bytes: padding to 192 bytes
+* 78 bytes: padding to 192 bytes
 
 `version` the file format version of the database. This is stored in the transaction data, so that it can be atomically
 changed during an upgrade.
@@ -144,8 +146,6 @@ changed during an upgrade.
 grows of shrinks.
 
 `pages in partial trailing region` all pages except the last must be full. This stores the number of pages in the last region.
-
-`region tracker page number` the page storing the region tracker data structure
 
 `slot checksum` is the XXH3_128bit checksum of all the preceding fields in the transaction slot.
 

@@ -880,8 +880,7 @@ impl<'db> WriteTransaction<'db> {
     pub(crate) fn compact_pages(&mut self) -> Result<bool> {
         let mut progress = false;
         // Relocate the region tracker page
-        if let Some(old_page) = self.mem.relocate_region_tracker()? {
-            self.post_commit_frees.lock().unwrap().push(old_page);
+        if self.mem.relocate_region_tracker()? {
             progress = true;
         }
 
