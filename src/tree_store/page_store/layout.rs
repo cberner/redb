@@ -11,7 +11,7 @@ fn round_up_to_multiple_of(value: u64, multiple: u64) -> u64 {
 
 // Regions are laid out starting with the allocator state header, followed by the pages aligned
 // to the next page
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RegionLayout {
     num_pages: u32,
     // Offset where data pages start
@@ -110,6 +110,46 @@ impl DatabaseLayout {
             full_region_layout: full_region,
             num_full_regions: full_regions,
             trailing_partial_region: trailing_region,
+        }
+    }
+
+    pub(super) fn recalculate(
+        file_len: u64,
+        region_header_pages_u32: u32,
+        region_max_data_pages_u32: u32,
+        page_size_u32: u32,
+    ) -> Self {
+        let page_size = page_size_u32 as u64;
+        let region_header_pages = region_header_pages_u32 as u64;
+        let region_max_data_pages = region_max_data_pages_u32 as u64;
+        // Super-header
+        let mut remaining = file_len - page_size;
+        let full_region_size = (region_header_pages + region_max_data_pages) * page_size;
+        let full_regions = remaining / full_region_size;
+        remaining -= full_regions * full_region_size;
+        let trailing = if remaining > (region_header_pages + 1) * page_size {
+            remaining -= region_header_pages * page_size;
+            let remaining: u32 = remaining.try_into().unwrap();
+            let data_pages = remaining / page_size_u32;
+            assert!(data_pages < region_max_data_pages_u32);
+            Some(RegionLayout::new(
+                data_pages,
+                region_header_pages_u32,
+                page_size_u32,
+            ))
+        } else {
+            None
+        };
+        let full_layout = RegionLayout::new(
+            region_max_data_pages_u32,
+            region_header_pages_u32,
+            page_size_u32,
+        );
+
+        Self {
+            full_region_layout: full_layout,
+            num_full_regions: full_regions.try_into().unwrap(),
+            trailing_partial_region: trailing,
         }
     }
 

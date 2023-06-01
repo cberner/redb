@@ -32,7 +32,7 @@ database file.
 | magic con.| god byte  | padding               | page size                                      |
 | region header pages                           | region max data pages                          |
 | region tracker page number                                                                     |
-| padding                                                                                        |
+| number of full regions                        | data pages in trailing region                  |
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
@@ -48,7 +48,7 @@ database file.
 | freed checksum                                                                                 |
 | freed checksum (cont.)                                                                         |
 | transaction id                                                                                 |
-| number of full regions                        | data pages in trailing region                  |
+| padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
@@ -88,8 +88,10 @@ controls which transaction pointer is the primary.
 * 4 bytes: page size
 * 4 bytes: region header pages
 * 4 bytes: region max data pages
+* 4 bytes: number of full regions
+* 4 bytes: data pages in partial trailing region
 * 8 bytes: region tracker page number
-* 32 bytes: padding to 64 bytes
+* 24 bytes: padding to 64 bytes
 
 `magic number` must be set to the ASCII letters 'redb' followed by 0x1A, 0x0A, 0xA9, 0x0D, 0x0A. This sequence is
 inspired by the PNG magic number.
@@ -107,6 +109,12 @@ inspired by the PNG magic number.
 
 `region max data pages` is the maximum number of data pages in each region
 
+`number of full regions` stores the number of full regions in the database. This can change during a transaction if the database
+grows or shrinks. This field is only valid when the database does not need recovery. Otherwise it must be recalculated from the file length and verified
+
+`pages in partial trailing region` all regions except the last must be full. This stores the number of pages in the last region.
+This field is only valid when the database does not need recovery. Otherwise it must be recalculated from the file length and verified
+
 `region tracker page number` the page storing the region tracker data structure. Only valid when the database does not need recovery
 
 ### Transaction slot 0 (192 bytes):
@@ -122,10 +130,8 @@ inspired by the PNG magic number.
 * 8 bytes: freed table root page
 * 16 bytes: freed table root checksum
 * 8 bytes: last committed transaction id
-* 4 bytes: number of full regions
-* 4 bytes: data pages in partial trailing region
 * 16 bytes: slot checksum
-* 78 bytes: padding to 192 bytes
+* 86 bytes: padding to 192 bytes
 
 `version` the file format version of the database. This is stored in the transaction data, so that it can be atomically
 changed during an upgrade.
@@ -141,11 +147,6 @@ changed during an upgrade.
 `freed table root page` is the page of the root of the pending free table.
 
 `freed table root checksum` stores the XXH3_128bit checksum of the freed table root page, which in turn stores the checksum of its child pages.
-
-`number of full regions` stores the number of full regions in the database. This can change during a transaction if the database
-grows of shrinks.
-
-`pages in partial trailing region` all pages except the last must be full. This stores the number of pages in the last region.
 
 `slot checksum` is the XXH3_128bit checksum of all the preceding fields in the transaction slot.
 

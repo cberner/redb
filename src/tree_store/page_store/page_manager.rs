@@ -34,7 +34,7 @@ const MIN_DESIRED_USABLE_BYTES: u64 = 1024 * 1024;
 const NUM_REGIONS: u32 = 1000;
 
 // TODO: set to 1, when version 1.0 is released
-pub(crate) const FILE_FORMAT_VERSION: u8 = 118;
+pub(crate) const FILE_FORMAT_VERSION: u8 = 119;
 
 fn ceil_log2(x: usize) -> u8 {
     if x.is_power_of_two() {
@@ -191,9 +191,11 @@ impl Allocators {
 
     fn from_bytes(header: &DatabaseHeader, storage: &PagedCachedFile) -> Result<Self> {
         let page_size = header.page_size();
-        let region_header_size = header.region_header_pages() * page_size;
-        let region_size =
-            header.region_max_data_pages() as u64 * page_size as u64 + region_header_size as u64;
+        let region_header_size =
+            header.layout().full_region_layout().get_header_pages() * page_size;
+        let region_size = header.layout().full_region_layout().num_pages() as u64
+            * page_size as u64
+            + region_header_size as u64;
         let range = header.region_tracker().address_range(
             page_size as u64,
             region_size,
@@ -203,7 +205,7 @@ impl Allocators {
         let len: usize = (range.end - range.start).try_into().unwrap();
         let region_tracker = storage.read_direct(range.start, len)?;
         let mut region_headers = vec![];
-        let layout = header.primary_slot().layout;
+        let layout = header.layout();
         for i in 0..layout.num_regions() {
             let base = layout.region_base_address(i);
             let len: usize = layout
@@ -501,6 +503,15 @@ impl TransactionalMemory {
 
         let needs_recovery = header.recovery_required;
         if needs_recovery {
+            let layout = header.layout();
+            let region_max_pages = layout.full_region_layout().num_pages();
+            let region_header_pages = layout.full_region_layout().get_header_pages();
+            header.set_layout(DatabaseLayout::recalculate(
+                storage.raw_file_len()?,
+                region_header_pages,
+                region_max_pages,
+                page_size.try_into().unwrap(),
+            ));
             if repair_info.primary_corrupted {
                 header.swap_primary_slot();
             } else {
@@ -521,7 +532,8 @@ impl TransactionalMemory {
             storage.flush()?;
         }
 
-        let layout = header.primary_slot().layout;
+        let layout = header.layout();
+        assert_eq!(layout.len(), storage.raw_file_len()?);
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
 
@@ -596,9 +608,8 @@ impl TransactionalMemory {
             .store(header.recovery_required, Ordering::Release);
         let state = InMemoryState::from_bytes(header.clone(), &self.storage)?;
         *self.state.lock().unwrap() = state;
-        let layout = header.primary_slot().layout;
 
-        *self.layout.lock().unwrap() = layout;
+        *self.layout.lock().unwrap() = header.layout();
 
         Ok(())
     }
@@ -619,7 +630,7 @@ impl TransactionalMemory {
         let mut state = self.state.lock().unwrap();
         state.header.swap_primary_slot();
         let mut layout = self.layout.lock().unwrap();
-        *layout = state.header.primary_slot().layout;
+        *layout = state.header.layout();
     }
 
     pub(crate) fn begin_repair(&self) -> Result<()> {
@@ -808,7 +819,6 @@ impl TransactionalMemory {
         secondary.user_root = data_root;
         secondary.system_root = system_root;
         secondary.freed_root = freed_root;
-        secondary.layout = *layout;
         self.write_header(&state.header, false)?;
 
         // Use 2-phase commit, if checksums are disabled
@@ -856,13 +866,11 @@ impl TransactionalMemory {
         assert!(!self.needs_recovery.load(Ordering::Acquire));
 
         let mut state = self.state.lock().unwrap();
-        let layout = self.layout.lock().unwrap();
         let secondary = state.header.secondary_slot_mut();
         secondary.transaction_id = transaction_id;
         secondary.user_root = data_root;
         secondary.system_root = system_root;
         secondary.freed_root = freed_root;
-        secondary.layout = *layout;
 
         self.allocated_since_commit.lock().unwrap().clear();
         self.storage.write_barrier()?;
@@ -1257,7 +1265,7 @@ impl TransactionalMemory {
 
         let new_layout = DatabaseLayout::calculate(
             new_usable_bytes,
-            state.header.region_max_data_pages(),
+            state.header.layout().full_region_layout().num_pages(),
             self.page_size,
         );
         state.allocators.resize_to(new_layout);
@@ -1276,8 +1284,8 @@ impl TransactionalMemory {
     ) -> Result<()> {
         let required_growth = 2u64.pow(required_order_allocation.try_into().unwrap())
             * state.header.page_size() as u64;
-        let max_region_size =
-            (state.header.region_max_data_pages() as u64) * (state.header.page_size() as u64);
+        let max_region_size = (state.header.layout().full_region_layout().num_pages() as u64)
+            * (state.header.page_size() as u64);
         let next_desired_size = if layout.num_full_regions() > 0 {
             if let Some(trailing) = layout.trailing_region_layout() {
                 if 2 * required_growth < max_region_size - trailing.usable_bytes() {
@@ -1299,7 +1307,7 @@ impl TransactionalMemory {
         };
         let new_layout = DatabaseLayout::calculate(
             next_desired_size,
-            state.header.region_max_data_pages(),
+            state.header.layout().full_region_layout().num_pages(),
             self.page_size,
         );
         assert!(new_layout.len() >= layout.len());
@@ -1425,11 +1433,13 @@ impl Drop for TransactionalMemory {
             }
         }
         let mut state = self.state.lock().unwrap();
+        let layout = self.layout.lock().unwrap();
+        state.header.set_layout(*layout);
         if state
             .allocators
             .flush_to(
                 state.header.region_tracker(),
-                state.header.primary_slot().layout,
+                state.header.layout(),
                 &mut self.storage,
             )
             .is_err()

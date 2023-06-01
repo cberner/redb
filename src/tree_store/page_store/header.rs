@@ -42,7 +42,10 @@ const GOD_BYTE_OFFSET: usize = MAGICNUMBER.len();
 const PAGE_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + 2; // +2 for padding
 const REGION_HEADER_PAGES_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u32>();
 const REGION_MAX_DATA_PAGES_OFFSET: usize = REGION_HEADER_PAGES_OFFSET + size_of::<u32>();
-const REGION_TRACKER_PAGE_NUMBER_OFFSET: usize = REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>();
+const NUM_FULL_REGIONS_OFFSET: usize = REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>();
+const TRAILING_REGION_DATA_PAGES_OFFSET: usize = NUM_FULL_REGIONS_OFFSET + size_of::<u32>();
+const REGION_TRACKER_PAGE_NUMBER_OFFSET: usize =
+    TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>();
 const TRANSACTION_SIZE: usize = 192;
 const TRANSACTION_0_OFFSET: usize = 64;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
@@ -65,9 +68,7 @@ const SYSTEM_ROOT_CHECKSUM_OFFSET: usize = SYSTEM_ROOT_PAGE_OFFSET + size_of::<u
 const FREED_ROOT_OFFSET: usize = SYSTEM_ROOT_CHECKSUM_OFFSET + size_of::<u128>();
 const FREED_ROOT_CHECKSUM_OFFSET: usize = FREED_ROOT_OFFSET + size_of::<u64>();
 const TRANSACTION_ID_OFFSET: usize = FREED_ROOT_CHECKSUM_OFFSET + size_of::<u128>();
-const NUM_FULL_REGIONS_OFFSET: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
-const TRAILING_REGION_DATA_PAGES_OFFSET: usize = NUM_FULL_REGIONS_OFFSET + size_of::<u32>();
-const TRANSACTION_LAST_FIELD: usize = TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>();
+const TRANSACTION_LAST_FIELD: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
 const SLOT_CHECKSUM_OFFSET: usize = TRANSACTION_SIZE - size_of::<Checksum>();
 
 pub(crate) const PAGE_SIZE: usize = 4096;
@@ -94,6 +95,8 @@ pub(super) struct DatabaseHeader {
     page_size: u32,
     region_header_pages: u32,
     region_max_data_pages: u32,
+    full_regions: u32,
+    trailing_partial_region_pages: u32,
     region_tracker: PageNumber,
     transaction_slots: [TransactionHeader; 2],
 }
@@ -109,13 +112,18 @@ impl DatabaseHeader {
             assert!(TRANSACTION_LAST_FIELD <= SLOT_CHECKSUM_OFFSET);
         }
 
-        let slot = TransactionHeader::new(transaction_id, layout);
+        let slot = TransactionHeader::new(transaction_id);
         Self {
             primary_slot: 0,
             recovery_required: true,
             page_size: layout.full_region_layout().page_size(),
             region_header_pages: layout.full_region_layout().get_header_pages(),
             region_max_data_pages: layout.full_region_layout().num_pages(),
+            full_regions: layout.num_full_regions(),
+            trailing_partial_region_pages: layout
+                .trailing_region_layout()
+                .map(|x| x.num_pages())
+                .unwrap_or_default(),
             region_tracker,
             transaction_slots: [slot.clone(), slot],
         }
@@ -125,12 +133,37 @@ impl DatabaseHeader {
         self.page_size
     }
 
-    pub(super) fn region_header_pages(&self) -> u32 {
-        self.region_header_pages
+    pub(super) fn layout(&self) -> DatabaseLayout {
+        let full_layout = RegionLayout::new(
+            self.region_max_data_pages,
+            self.region_header_pages,
+            self.page_size,
+        );
+        let trailing = if self.trailing_partial_region_pages > 0 {
+            Some(RegionLayout::new(
+                self.trailing_partial_region_pages,
+                self.region_header_pages,
+                self.page_size,
+            ))
+        } else {
+            None
+        };
+        DatabaseLayout::new(self.full_regions, full_layout, trailing)
     }
 
-    pub(super) fn region_max_data_pages(&self) -> u32 {
-        self.region_max_data_pages
+    pub(super) fn set_layout(&mut self, layout: DatabaseLayout) {
+        assert_eq!(
+            self.layout().full_region_layout(),
+            layout.full_region_layout()
+        );
+        if let Some(trailing) = layout.trailing_region_layout() {
+            assert_eq!(trailing.get_header_pages(), self.region_header_pages);
+            assert_eq!(trailing.page_size(), self.page_size);
+            self.trailing_partial_region_pages = trailing.num_pages();
+        } else {
+            self.trailing_partial_region_pages = 0;
+        }
+        self.full_regions = layout.num_full_regions();
     }
 
     pub(super) fn region_tracker(&self) -> PageNumber {
@@ -166,18 +199,16 @@ impl DatabaseHeader {
         let page_size = get_u32(&data[PAGE_SIZE_OFFSET..]);
         let region_header_pages = get_u32(&data[REGION_HEADER_PAGES_OFFSET..]);
         let region_max_data_pages = get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..]);
+        let full_regions = get_u32(&data[NUM_FULL_REGIONS_OFFSET..]);
+        let trailing_data_pages = get_u32(&data[TRAILING_REGION_DATA_PAGES_OFFSET..]);
         let region_tracker = PageNumber::from_le_bytes(
             data[REGION_TRACKER_PAGE_NUMBER_OFFSET
                 ..(REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size())]
                 .try_into()
                 .unwrap(),
         );
-        let full_region_layout =
-            RegionLayout::new(region_max_data_pages, region_header_pages, page_size);
-        let (slot0, slot0_corrupted) =
-            TransactionHeader::from_bytes(&data[TRANSACTION_0_OFFSET..], full_region_layout);
-        let (slot1, slot1_corrupted) =
-            TransactionHeader::from_bytes(&data[TRANSACTION_1_OFFSET..], full_region_layout);
+        let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(&data[TRANSACTION_0_OFFSET..]);
+        let (slot1, slot1_corrupted) = TransactionHeader::from_bytes(&data[TRANSACTION_1_OFFSET..]);
         let (primary_corrupted, secondary_corrupted) = if primary_slot == 0 {
             (slot0_corrupted, slot1_corrupted)
         } else {
@@ -190,6 +221,8 @@ impl DatabaseHeader {
             page_size,
             region_header_pages,
             region_max_data_pages,
+            full_regions,
+            trailing_partial_region_pages: trailing_data_pages,
             region_tracker,
             transaction_slots: [slot0, slot1],
         };
@@ -223,6 +256,11 @@ impl DatabaseHeader {
             .copy_from_slice(&self.region_header_pages.to_le_bytes());
         result[REGION_MAX_DATA_PAGES_OFFSET..(REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>())]
             .copy_from_slice(&self.region_max_data_pages.to_le_bytes());
+        result[NUM_FULL_REGIONS_OFFSET..(NUM_FULL_REGIONS_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&self.full_regions.to_le_bytes());
+        result[TRAILING_REGION_DATA_PAGES_OFFSET
+            ..(TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&self.trailing_partial_region_pages.to_le_bytes());
         result[REGION_TRACKER_PAGE_NUMBER_OFFSET
             ..(REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size())]
             .copy_from_slice(&self.region_tracker.to_le_bytes());
@@ -242,23 +280,21 @@ pub(super) struct TransactionHeader {
     pub(super) system_root: Option<(PageNumber, Checksum)>,
     pub(super) freed_root: Option<(PageNumber, Checksum)>,
     pub(super) transaction_id: TransactionId,
-    pub(super) layout: DatabaseLayout,
 }
 
 impl TransactionHeader {
-    fn new(transaction_id: TransactionId, layout: DatabaseLayout) -> Self {
+    fn new(transaction_id: TransactionId) -> Self {
         Self {
             version: FILE_FORMAT_VERSION,
             user_root: None,
             system_root: None,
             freed_root: None,
             transaction_id,
-            layout,
         }
     }
 
     // Returned bool indicates whether the checksum was corrupted
-    pub(super) fn from_bytes(data: &[u8], full_region_layout: RegionLayout) -> (Self, bool) {
+    pub(super) fn from_bytes(data: &[u8]) -> (Self, bool) {
         let version = data[VERSION_OFFSET];
         let checksum = Checksum::from_le_bytes(
             data[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
@@ -318,18 +354,6 @@ impl TransactionHeader {
             None
         };
         let transaction_id = TransactionId(get_u64(&data[TRANSACTION_ID_OFFSET..]));
-        let full_regions = get_u32(&data[NUM_FULL_REGIONS_OFFSET..]);
-        let trailing_data_pages = get_u32(&data[TRAILING_REGION_DATA_PAGES_OFFSET..]);
-        let trailing_region = if trailing_data_pages > 0 {
-            Some(RegionLayout::new(
-                trailing_data_pages,
-                full_region_layout.get_header_pages(),
-                full_region_layout.page_size(),
-            ))
-        } else {
-            None
-        };
-        let layout = DatabaseLayout::new(full_regions, full_region_layout, trailing_region);
 
         let result = Self {
             version,
@@ -337,7 +361,6 @@ impl TransactionHeader {
             system_root,
             freed_root,
             transaction_id,
-            layout,
         };
 
         (result, corrupted)
@@ -372,13 +395,6 @@ impl TransactionHeader {
         }
         result[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
             .copy_from_slice(&self.transaction_id.0.to_le_bytes());
-        result[NUM_FULL_REGIONS_OFFSET..(NUM_FULL_REGIONS_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&self.layout.num_full_regions().to_le_bytes());
-        if let Some(trailing) = self.layout.trailing_region_layout() {
-            result[TRAILING_REGION_DATA_PAGES_OFFSET
-                ..(TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>())]
-                .copy_from_slice(&trailing.num_pages().to_le_bytes());
-        }
         let checksum = xxh3_checksum(&result[..SLOT_CHECKSUM_OFFSET]);
         result[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
             .copy_from_slice(&checksum.to_le_bytes());
