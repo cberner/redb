@@ -365,6 +365,7 @@ impl InMemoryState {
 
 pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
+    // TODO: maybe this should be moved to WriteTransaction?
     allocated_since_commit: Mutex<HashSet<PageNumber>>,
     // True if the allocator state was corrupted when the file was opened
     needs_recovery: AtomicBool,
@@ -1053,6 +1054,11 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn free(&self, page: PageNumber) {
+        self.allocated_since_commit.lock().unwrap().remove(&page);
+        self.free_helper(page);
+    }
+
+    fn free_helper(&self, page: PageNumber) {
         let mut state = self.state.lock().unwrap();
         let region_index = page.region;
         // Free in the regional allocator
@@ -1064,7 +1070,6 @@ impl TransactionalMemory {
         state
             .get_region_tracker_mut()
             .mark_free(page.page_order, region_index);
-        self.allocated_since_commit.lock().unwrap().remove(&page);
 
         let address_range = page.address_range(
             self.page_size as u64,
@@ -1082,29 +1087,7 @@ impl TransactionalMemory {
     // Frees the page if it was allocated since the last commit. Returns true, if the page was freed
     pub(crate) fn free_if_uncommitted(&self, page: PageNumber) -> bool {
         if self.allocated_since_commit.lock().unwrap().remove(&page) {
-            let mut state = self.state.lock().unwrap();
-            // Free in the regional allocator
-            let mut region = state.get_region_mut(page.region);
-            region
-                .allocator_mut()
-                .free(page.page_index, page.page_order);
-            // Ensure that the region is marked as having free space
-            state
-                .get_region_tracker_mut()
-                .mark_free(page.page_order, page.region);
-
-            let address_range = page.address_range(
-                self.page_size as u64,
-                self.region_size,
-                self.region_header_with_padding_size,
-                self.page_size,
-            );
-            let len: usize = (address_range.end - address_range.start)
-                .try_into()
-                .unwrap();
-            self.storage.invalidate_cache(address_range.start, len);
-            self.storage.cancel_pending_write(address_range.start, len);
-
+            self.free_helper(page);
             true
         } else {
             false
@@ -1116,21 +1099,22 @@ impl TransactionalMemory {
         self.allocated_since_commit.lock().unwrap().contains(&page)
     }
 
-    pub(crate) fn allocate_lowest(&self, allocation_size: usize) -> Result<PageMut> {
+    pub(crate) fn allocate_helper(&self, allocation_size: usize, lowest: bool) -> Result<PageMut> {
         let required_pages = (allocation_size + self.get_page_size() - 1) / self.get_page_size();
         let required_order = ceil_log2(required_pages);
 
         let mut state = self.state.lock().unwrap();
         let mut layout = self.layout.lock().unwrap();
 
-        let page_number =
-            if let Some(page_number) = self.allocate_lowest_helper(&mut state, required_order)? {
-                page_number
-            } else {
-                self.grow(&mut state, &mut layout, required_order)?;
-                self.allocate_lowest_helper(&mut state, required_order)?
-                    .unwrap()
-            };
+        let page_number = if let Some(page_number) =
+            self.allocate_helper_retry(&mut state, required_order, lowest)?
+        {
+            page_number
+        } else {
+            self.grow(&mut state, &mut layout, required_order)?;
+            self.allocate_helper_retry(&mut state, required_order, lowest)?
+                .unwrap()
+        };
 
         #[cfg(debug_assertions)]
         {
@@ -1182,10 +1166,11 @@ impl TransactionalMemory {
         })
     }
 
-    fn allocate_lowest_helper(
+    fn allocate_helper_retry(
         &self,
         state: &mut InMemoryState,
         required_order: u8,
+        lowest: bool,
     ) -> Result<Option<PageNumber>> {
         loop {
             let candidate_region =
@@ -1195,35 +1180,12 @@ impl TransactionalMemory {
                     return Ok(None);
                 };
             let mut region = state.get_region_mut(candidate_region);
-            if let Some(page) = region.allocator_mut().alloc_lowest(required_order) {
-                return Ok(Some(PageNumber::new(
-                    candidate_region,
-                    page,
-                    required_order,
-                )));
+            let r = if lowest {
+                region.allocator_mut().alloc_lowest(required_order)
             } else {
-                // Mark the region, if it's full
-                state
-                    .get_region_tracker_mut()
-                    .mark_full(required_order, candidate_region);
-            }
-        }
-    }
-
-    fn allocate_helper(
-        &self,
-        state: &mut InMemoryState,
-        required_order: u8,
-    ) -> Result<Option<PageNumber>> {
-        loop {
-            let candidate_region =
-                if let Some(candidate) = state.get_region_tracker_mut().find_free(required_order) {
-                    candidate
-                } else {
-                    return Ok(None);
-                };
-            let mut region = state.get_region_mut(candidate_region);
-            if let Some(page) = region.allocator_mut().alloc(required_order) {
+                region.allocator_mut().alloc(required_order)
+            };
+            if let Some(page) = r {
                 return Ok(Some(PageNumber::new(
                     candidate_region,
                     page,
@@ -1320,68 +1282,11 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn allocate(&self, allocation_size: usize) -> Result<PageMut> {
-        let required_pages = (allocation_size + self.get_page_size() - 1) / self.get_page_size();
-        let required_order = ceil_log2(required_pages);
+        self.allocate_helper(allocation_size, false)
+    }
 
-        let mut state = self.state.lock().unwrap();
-        let mut layout = self.layout.lock().unwrap();
-
-        let page_number =
-            if let Some(page_number) = self.allocate_helper(&mut state, required_order)? {
-                page_number
-            } else {
-                self.grow(&mut state, &mut layout, required_order)?;
-                self.allocate_helper(&mut state, required_order)?.unwrap()
-            };
-
-        #[cfg(debug_assertions)]
-        {
-            assert!(
-                !self
-                    .read_page_ref_counts
-                    .lock()
-                    .unwrap()
-                    .contains_key(&page_number),
-                "Allocated a page that is still referenced! {page_number:?}"
-            );
-            assert!(!self.open_dirty_pages.lock().unwrap().contains(&page_number));
-        }
-
-        self.allocated_since_commit
-            .lock()
-            .unwrap()
-            .insert(page_number);
-
-        let address_range = page_number.address_range(
-            self.page_size as u64,
-            self.region_size,
-            self.region_header_with_padding_size,
-            self.page_size,
-        );
-        let len: usize = (address_range.end - address_range.start)
-            .try_into()
-            .unwrap();
-
-        #[allow(unused_mut)]
-        let mut mem = self.storage.write(address_range.start, len)?;
-        debug_assert!(mem.mem().len() >= allocation_size);
-
-        #[cfg(debug_assertions)]
-        {
-            assert!(self.open_dirty_pages.lock().unwrap().insert(page_number));
-
-            // Poison the memory in debug mode to help detect uninitialized reads
-            mem.mem_mut().fill(0xFF);
-        }
-
-        Ok(PageMut {
-            mem,
-            page_number,
-            #[cfg(debug_assertions)]
-            open_pages: &self.open_dirty_pages,
-            #[cfg(not(debug_assertions))]
-            _debug_lifetime: Default::default(),
-        })
+    pub(crate) fn allocate_lowest(&self, allocation_size: usize) -> Result<PageMut> {
+        self.allocate_helper(allocation_size, true)
     }
 
     pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
