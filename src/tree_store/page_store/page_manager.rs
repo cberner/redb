@@ -371,9 +371,6 @@ pub(crate) struct TransactionalMemory {
     needs_recovery: AtomicBool,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
-    // The current layout for the active transaction.
-    // May include uncommitted changes to the database layout, if it grew or shrank
-    layout: Mutex<DatabaseLayout>,
     // The number of PageMut which are outstanding
     #[cfg(debug_assertions)]
     open_dirty_pages: Mutex<HashSet<PageNumber>>,
@@ -546,7 +543,6 @@ impl TransactionalMemory {
             allocated_since_commit: Mutex::new(HashSet::new()),
             needs_recovery: AtomicBool::new(needs_recovery),
             storage,
-            layout: Mutex::new(layout),
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
             open_dirty_pages: Mutex::new(HashSet::new()),
@@ -610,8 +606,6 @@ impl TransactionalMemory {
         let state = InMemoryState::from_bytes(header.clone(), &self.storage)?;
         *self.state.lock().unwrap() = state;
 
-        *self.layout.lock().unwrap() = header.layout();
-
         Ok(())
     }
 
@@ -630,15 +624,11 @@ impl TransactionalMemory {
     pub(crate) fn repair_primary_corrupted(&self) {
         let mut state = self.state.lock().unwrap();
         state.header.swap_primary_slot();
-        let mut layout = self.layout.lock().unwrap();
-        *layout = state.header.layout();
     }
 
     pub(crate) fn begin_repair(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
-
-        let layout = self.layout.lock().unwrap();
-        state.allocators = Allocators::new(*layout);
+        state.allocators = Allocators::new(state.header.layout());
 
         Ok(())
     }
@@ -726,10 +716,9 @@ impl TransactionalMemory {
 
     pub(crate) fn get_raw_allocator_states(&self) -> Vec<Vec<u8>> {
         let state = self.state.lock().unwrap();
-        let layout = self.layout.lock().unwrap();
 
         let mut regional_allocators = vec![];
-        for i in 0..layout.num_regions() {
+        for i in 0..state.header.layout().num_regions() {
             regional_allocators.push(state.get_region(i).allocator().make_state_for_savepoint());
         }
 
@@ -744,11 +733,10 @@ impl TransactionalMemory {
     ) -> Vec<PageNumber> {
         let mut result = vec![];
         let state = self.state.lock().unwrap();
-        let layout = self.layout.lock().unwrap();
 
-        assert!(region_states.len() <= layout.num_regions() as usize);
+        assert!(region_states.len() <= state.header.layout().num_regions() as usize);
 
-        for i in 0..layout.num_regions() {
+        for i in 0..state.header.layout().num_regions() {
             let region = state.get_region(i);
             let current_state = region.allocator();
             if let Some(old_state) = region_states.get(i as usize) {
@@ -810,10 +798,9 @@ impl TransactionalMemory {
         assert!(!self.needs_recovery.load(Ordering::Acquire));
 
         let mut state = self.state.lock().unwrap();
-        let mut layout = self.layout.lock().unwrap();
 
         // Trim surplus file space, before finalizing the commit
-        let shrunk = self.try_shrink(&mut state, &mut layout)?;
+        let shrunk = self.try_shrink(&mut state)?;
 
         let secondary = state.header.secondary_slot_mut();
         secondary.transaction_id = transaction_id;
@@ -842,7 +829,7 @@ impl TransactionalMemory {
         state.header.swap_primary_slot();
 
         if shrunk {
-            self.storage.resize(layout.len())?;
+            self.storage.resize(state.header.layout().len())?;
         }
 
         self.allocated_since_commit.lock().unwrap().clear();
@@ -1104,14 +1091,13 @@ impl TransactionalMemory {
         let required_order = ceil_log2(required_pages);
 
         let mut state = self.state.lock().unwrap();
-        let mut layout = self.layout.lock().unwrap();
 
         let page_number = if let Some(page_number) =
             self.allocate_helper_retry(&mut state, required_order, lowest)?
         {
             page_number
         } else {
-            self.grow(&mut state, &mut layout, required_order)?;
+            self.grow(&mut state, required_order)?;
             self.allocate_helper_retry(&mut state, required_order, lowest)?
                 .unwrap()
         };
@@ -1200,7 +1186,8 @@ impl TransactionalMemory {
         }
     }
 
-    fn try_shrink(&self, state: &mut InMemoryState, layout: &mut DatabaseLayout) -> Result<bool> {
+    fn try_shrink(&self, state: &mut InMemoryState) -> Result<bool> {
+        let layout = state.header.layout();
         let last_region_index = layout.num_regions() - 1;
         let last_region = layout.region_layout(last_region_index);
         let region = state.get_region(last_region_index);
@@ -1233,17 +1220,13 @@ impl TransactionalMemory {
         state.allocators.resize_to(new_layout);
         assert!(new_layout.len() <= layout.len());
 
-        *layout = new_layout;
+        state.header.set_layout(new_layout);
 
         Ok(true)
     }
 
-    fn grow(
-        &self,
-        state: &mut InMemoryState,
-        layout: &mut DatabaseLayout,
-        required_order_allocation: u8,
-    ) -> Result<()> {
+    fn grow(&self, state: &mut InMemoryState, required_order_allocation: u8) -> Result<()> {
+        let layout = state.header.layout();
         let required_growth = 2u64.pow(required_order_allocation.try_into().unwrap())
             * state.header.page_size() as u64;
         let max_region_size = (state.header.layout().full_region_layout().num_pages() as u64)
@@ -1277,7 +1260,7 @@ impl TransactionalMemory {
         self.storage.resize(new_layout.len())?;
 
         state.allocators.resize_to(new_layout);
-        *layout = new_layout;
+        state.header.set_layout(new_layout);
         Ok(())
     }
 
@@ -1291,9 +1274,8 @@ impl TransactionalMemory {
 
     pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
         let state = self.state.lock().unwrap();
-        let layout = self.layout.lock().unwrap();
         let mut count = 0u64;
-        for i in 0..layout.num_regions() {
+        for i in 0..state.header.layout().num_regions() {
             let region = state.get_region(i);
             count += region.allocator().count_allocated_pages() as u64;
         }
@@ -1338,8 +1320,6 @@ impl Drop for TransactionalMemory {
             }
         }
         let mut state = self.state.lock().unwrap();
-        let layout = self.layout.lock().unwrap();
-        state.header.set_layout(*layout);
         if state
             .allocators
             .flush_to(
