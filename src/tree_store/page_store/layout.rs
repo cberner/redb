@@ -1,4 +1,4 @@
-use crate::tree_store::page_store::buddy_allocator::BuddyAllocatorMut;
+use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use std::ops::Range;
 
 fn round_up_to_multiple_of(value: u64, multiple: u64) -> u64 {
@@ -29,7 +29,7 @@ impl RegionLayout {
     }
 
     fn header_pages(page_capacity: u32, page_size: u32) -> u32 {
-        let mut header_size: u32 = BuddyAllocatorMut::required_space(page_capacity)
+        let mut header_size: u32 = BuddyAllocator::required_space(page_capacity)
             .try_into()
             .unwrap();
 
