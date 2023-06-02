@@ -36,7 +36,7 @@ database file.
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
------------------------------------- Commit slot 0 (192 bytes) -----------------------------------
+------------------------------------ Commit slot 0 (128 bytes) -----------------------------------
 | version   | user nn   | sys nn    | f-root nn | padding                                        |
 | user root page number                                                                          |
 | user root checksum                                                                             |
@@ -51,19 +51,11 @@ database file.
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
 | slot checksum                                                                                  |
 | slot checksum (cont.)                                                                          |
 ----------------------------------------- Commit slot 1 ------------------------------------------
 |                                 Same layout as commit slot 0                                   |
------------------------------------ footer padding (64+ bytes) ------------------------------------
+----------------------------------- footer padding (192+ bytes) ------------------------------------
 ==================================================================================================
 | Region header                                                                                  |
 --------------------------------------------------------------------------------------------------
@@ -117,7 +109,7 @@ This field is only valid when the database does not need recovery. Otherwise it 
 
 `region tracker page number` the page storing the region tracker data structure. Only valid when the database does not need recovery
 
-### Transaction slot 0 (192 bytes):
+### Transaction slot 0 (128 bytes):
 * 1 byte: file format version number
 * 1 byte: boolean indicating that user root page is non-null
 * 1 byte: boolean indicating that system root page is non-null
@@ -130,8 +122,8 @@ This field is only valid when the database does not need recovery. Otherwise it 
 * 8 bytes: freed table root page
 * 16 bytes: freed table root checksum
 * 8 bytes: last committed transaction id
+* 24 bytes: padding
 * 16 bytes: slot checksum
-* 86 bytes: padding to 192 bytes
 
 `version` the file format version of the database. This is stored in the transaction data, so that it can be atomically
 changed during an upgrade.
@@ -150,7 +142,7 @@ changed during an upgrade.
 
 `slot checksum` is the XXH3_128bit checksum of all the preceding fields in the transaction slot.
 
-### Transaction slot 1 (192 bytes):
+### Transaction slot 1 (128 bytes):
 * Same layout as slot 0
 
 ### Region tracker
