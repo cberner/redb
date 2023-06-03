@@ -34,21 +34,6 @@ pub(crate) struct BuddyAllocator {
 }
 
 impl BuddyAllocator {
-    /// Returns the number of bytes required for the data argument of new()
-    pub(crate) fn required_space(mut capacity: u32) -> usize {
-        let max_order = calculate_usable_order(capacity) as usize;
-        let mut required = FREE_END_OFFSETS + 2 * (max_order + 1) * size_of::<u32>();
-        for _ in 0..=max_order {
-            // Index of free pages
-            required += BtreeBitmap::required_space(capacity);
-            // Index of allocated pages
-            required += U64GroupedBitmap::required_bytes(capacity);
-            capacity = next_higher_order(capacity);
-        }
-
-        required
-    }
-
     pub(crate) fn new(num_pages: u32, max_page_capacity: u32) -> Self {
         let max_order = calculate_usable_order(max_page_capacity);
 

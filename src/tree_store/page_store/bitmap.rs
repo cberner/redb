@@ -142,59 +142,6 @@ impl BtreeBitmap {
         self.update_to_root(i, false);
     }
 
-    // TODO: All this space calculation stuff is pretty errorprone. It should probably be removed and the actual size cached instead
-    pub(crate) fn required_space(capacity: u32) -> usize {
-        let tree_space = if Self::required_tree_height(capacity) == 1 {
-            assert!(capacity <= 64);
-            // Space for root
-            size_of::<u64>()
-        } else if Self::required_tree_height(capacity) == 2 {
-            // Space for root
-            size_of::<u64>() +
-                // Space for the leaves
-                U64GroupedBitmap::required_bytes(capacity)
-        } else {
-            // Space for root
-            size_of::<u64>() +
-                // Space for the subtrees
-                Self::required_subtrees(capacity) * Self::required_interior_bytes_per_subtree(capacity) +
-                // Space for the leaves
-                U64GroupedBitmap::required_bytes(capacity)
-        };
-
-        Self::tree_data_start(capacity) + tree_space
-    }
-
-    fn tree_data_start(capacity: u32) -> usize {
-        END_OFFSETS + (Self::required_tree_height(capacity) - 1) * size_of::<u32>()
-    }
-
-    fn required_interior_bytes_per_subtree(capacity: u32) -> usize {
-        let subtree_height = Self::required_tree_height(capacity) - 1;
-        (1..subtree_height)
-            .map(|i| 64usize.pow(i.try_into().unwrap()))
-            .sum::<usize>()
-            / 8
-    }
-
-    fn required_subtrees(capacity: u32) -> usize {
-        let height = Self::required_tree_height(capacity);
-        let values_per_subtree = 64usize.pow((height - 1).try_into().unwrap());
-
-        (capacity as usize + values_per_subtree - 1) / values_per_subtree
-    }
-
-    fn required_tree_height(capacity: u32) -> usize {
-        let mut height = 1;
-        let mut storable = 64;
-        while capacity > storable {
-            storable *= 64;
-            height += 1;
-        }
-
-        height
-    }
-
     fn get_level_mut(&mut self, i: u32) -> &mut U64GroupedBitmap {
         assert!(i < self.get_height());
         &mut self.heights[i as usize]
@@ -331,11 +278,7 @@ pub(crate) struct U64GroupedBitmap {
 }
 
 impl U64GroupedBitmap {
-    pub fn required_bytes(elements: u32) -> usize {
-        size_of::<u32>() + Self::required_words(elements) * size_of::<u64>()
-    }
-
-    pub fn required_words(elements: u32) -> usize {
+    fn required_words(elements: u32) -> usize {
         let words = (elements + 63) / 64;
         words as usize
     }

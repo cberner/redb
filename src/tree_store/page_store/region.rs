@@ -30,10 +30,6 @@ impl RegionTracker {
         }
     }
 
-    pub(crate) fn required_bytes(regions: u32, orders: u8) -> usize {
-        2 * size_of::<u32>() + (orders as usize) * BtreeBitmap::required_space(regions)
-    }
-
     // Format:
     // num_orders: u32 number of order allocators
     // allocator_len: u32 length of each allocator
@@ -264,9 +260,17 @@ impl Allocators {
 // 3 bytes: padding
 // 4 bytes: length of the allocator state in bytes
 // n bytes: the allocator state
-struct RegionHeader {}
+pub(crate) struct RegionHeader {}
 
 impl RegionHeader {
+    pub(crate) fn header_pages_expensive(page_size: u32, pages_per_region: u32) -> u32 {
+        let page_size = page_size as u64;
+        // TODO: this is kind of expensive. Maybe it should be cached
+        let allocator = BuddyAllocator::new(pages_per_region, pages_per_region);
+        let result = 8u64 + allocator.to_vec().len() as u64;
+        ((result + page_size - 1) / page_size).try_into().unwrap()
+    }
+
     fn serialize(allocator: &BuddyAllocator, output: &mut [u8]) {
         let serialized = allocator.to_vec();
         let len: u32 = serialized.len().try_into().unwrap();

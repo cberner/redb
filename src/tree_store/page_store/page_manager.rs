@@ -110,8 +110,9 @@ impl TransactionalMemory {
         assert!(region_size.is_power_of_two());
 
         // TODO: allocate more tracker space when it becomes exhausted, and remove this hard coded 1000 regions
-        let region_tracker_required_bytes =
-            RegionTracker::required_bytes(NUM_REGIONS, MAX_MAX_PAGE_ORDER + 1);
+        let region_tracker_required_bytes = RegionTracker::new(NUM_REGIONS, MAX_MAX_PAGE_ORDER + 1)
+            .to_vec()
+            .len();
 
         // Make sure that there is enough room to allocate the region tracker into a page
         let size: u64 = max(
