@@ -628,4 +628,23 @@ mod test {
         }
         assert_eq!(allocator.count_allocated_pages(), 0);
     }
+
+    #[test]
+    fn serialized_size() {
+        // Check that serialized size is as expected for a full region
+        let max_region_pages = 1024 * 1024;
+        let allocator = BuddyAllocator::new(max_region_pages, max_region_pages);
+        let max_region_pages = max_region_pages as u64;
+        // 2x because that's the integral of 1/2^x to account for all the 21 orders
+        let allocated_state_bits = 2 * max_region_pages;
+        // + u32 * 21 because of the length field
+        let allocated_state_bytes = allocated_state_bits / 8 + 4 * 21;
+
+        // Add 2/64 to account for the intermediate index of the bitmap tree
+        let free_state_bits = allocated_state_bits + allocated_state_bits * 2 / 64;
+        // Add u32s to account for the stored offsets. Might be a bit of an over estimate
+        let free_state_bytes = free_state_bits / 8 + 4 * 21 * 3;
+
+        assert!((allocator.to_vec().len() as u64) < allocated_state_bytes + free_state_bytes);
+    }
 }
