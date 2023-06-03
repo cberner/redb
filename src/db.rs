@@ -1041,7 +1041,7 @@ mod test {
             .set_page_size(512)
             .create(tmpfile.path())
             .unwrap();
-        db.set_crash_countdown(8);
+        db.set_crash_countdown(9);
 
         let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
