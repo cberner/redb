@@ -1,4 +1,4 @@
-use crate::tree_store::page_store::bitmap::{BtreeBitmap, BtreeBitmapMut};
+use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::header::DatabaseHeader;
@@ -16,22 +16,22 @@ const ALLOCATOR_OFFSET: usize = ALLOCATOR_LENGTH_OFFSET + size_of::<u32>();
 // Tracks the page orders that MAY BE free in each region. This data structure is optimistic, so
 // a region may not actually have a page free for a given order
 pub(crate) struct RegionTracker {
-    data: Vec<Vec<u8>>,
+    order_trackers: Vec<BtreeBitmap>,
 }
 
 impl RegionTracker {
     pub(crate) fn new(regions: u32, orders: u8) -> Self {
         let mut data = vec![];
         for _ in 0..orders {
-            let mut order = vec![0; BtreeBitmapMut::required_space(regions)];
-            BtreeBitmapMut::init_new(&mut order, regions);
-            data.push(order);
+            data.push(BtreeBitmap::new(regions));
         }
-        Self { data }
+        Self {
+            order_trackers: data,
+        }
     }
 
     pub(crate) fn required_bytes(regions: u32, orders: u8) -> usize {
-        2 * size_of::<u32>() + (orders as usize) * BtreeBitmapMut::required_space(regions)
+        2 * size_of::<u32>() + (orders as usize) * BtreeBitmap::required_space(regions)
     }
 
     // Format:
@@ -40,12 +40,12 @@ impl RegionTracker {
     // data: BtreeBitmap data for each order
     pub(super) fn to_vec(&self) -> Vec<u8> {
         let mut result = vec![];
-        let orders: u32 = self.data.len().try_into().unwrap();
-        let allocator_len: u32 = self.data[0].len().try_into().unwrap();
+        let orders: u32 = self.order_trackers.len().try_into().unwrap();
+        let allocator_len: u32 = self.order_trackers[0].to_vec().len().try_into().unwrap();
         result.extend(orders.to_le_bytes());
         result.extend(allocator_len.to_le_bytes());
-        for order in self.data.iter() {
-            result.extend(order);
+        for order in self.order_trackers.iter() {
+            result.extend(&order.to_vec());
         }
         result
     }
@@ -61,32 +61,33 @@ impl RegionTracker {
         let mut data = vec![];
         let mut start = 2 * size_of::<u32>();
         for _ in 0..orders {
-            data.push(page[start..(start + allocator_len)].to_vec());
+            data.push(BtreeBitmap::from_bytes(
+                &page[start..(start + allocator_len)],
+            ));
             start += allocator_len;
         }
 
-        Self { data }
+        Self {
+            order_trackers: data,
+        }
     }
 
     pub(crate) fn find_free(&self, order: u8) -> Option<u32> {
-        let accessor = BtreeBitmap::new(&self.data[order as usize]);
-        accessor.find_first_unset()
+        self.order_trackers[order as usize].find_first_unset()
     }
 
     pub(crate) fn mark_free(&mut self, order: u8, region: u32) {
         let order: usize = order.into();
         for i in 0..=order {
-            let mut accessor = BtreeBitmapMut::new(&mut self.data[i]);
-            accessor.clear(region);
+            self.order_trackers[i].clear(region);
         }
     }
 
     pub(crate) fn mark_full(&mut self, order: u8, region: u32) {
         let order: usize = order.into();
-        assert!(order < self.data.len());
-        for i in order..self.data.len() {
-            let mut accessor = BtreeBitmapMut::new(&mut self.data[i]);
-            accessor.set(region);
+        assert!(order < self.order_trackers.len());
+        for i in order..self.order_trackers.len() {
+            self.order_trackers[i].set(region);
         }
     }
 }
