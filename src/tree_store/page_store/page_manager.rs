@@ -28,8 +28,7 @@ pub(crate) const MAX_MAX_PAGE_ORDER: u8 = 20;
 pub(super) const MIN_USABLE_PAGES: u32 = 10;
 const MIN_DESIRED_USABLE_BYTES: u64 = 1024 * 1024;
 
-// TODO: allocate more tracker space when it becomes exhausted, and remove this hard coded 1000 regions
-pub(super) const NUM_REGIONS: u32 = 1000;
+pub(super) const INITIAL_REGIONS: u32 = 1000; // Enough for a 4TiB database
 
 // TODO: set to 1, when version 1.0 is released
 pub(crate) const FILE_FORMAT_VERSION: u8 = 121;
@@ -109,10 +108,10 @@ impl TransactionalMemory {
         let region_size = min(region_size, (MAX_PAGE_INDEX as u64 + 1) * page_size as u64);
         assert!(region_size.is_power_of_two());
 
-        // TODO: allocate more tracker space when it becomes exhausted, and remove this hard coded 1000 regions
-        let region_tracker_required_bytes = RegionTracker::new(NUM_REGIONS, MAX_MAX_PAGE_ORDER + 1)
-            .to_vec()
-            .len();
+        let region_tracker_required_bytes =
+            RegionTracker::new(INITIAL_REGIONS, MAX_MAX_PAGE_ORDER + 1)
+                .to_vec()
+                .len();
 
         // Make sure that there is enough room to allocate the region tracker into a page
         let size: u64 = max(
@@ -1032,6 +1031,25 @@ impl Drop for TransactionalMemory {
             }
         }
         let mut state = self.state.lock().unwrap();
+        let tracker_len = state.allocators.region_tracker.to_vec().len();
+        let tracker_page_size = state
+            .header
+            .region_tracker()
+            .page_size_bytes(self.page_size);
+        if tracker_page_size < (tracker_len as u64) {
+            drop(state);
+            // Allocate a larger tracker page
+            if let Ok(tracker_page) = self.allocate(tracker_len) {
+                state = self.state.lock().unwrap();
+                state
+                    .header
+                    .set_region_tracker(tracker_page.get_page_number());
+            } else {
+                #[cfg(feature = "logging")]
+                warn!("Failure while flushing allocator state. Repair required at restart.");
+                return;
+            }
+        }
         if state
             .allocators
             .flush_to(
@@ -1043,6 +1061,7 @@ impl Drop for TransactionalMemory {
         {
             #[cfg(feature = "logging")]
             warn!("Failure while flushing allocator state. Repair required at restart.");
+            return;
         }
 
         if self.storage.flush().is_ok() && !self.needs_recovery.load(Ordering::Acquire) {
@@ -1055,7 +1074,7 @@ impl Drop for TransactionalMemory {
 
 #[cfg(test)]
 mod test {
-    use crate::tree_store::page_store::page_manager::NUM_REGIONS;
+    use crate::tree_store::page_store::page_manager::INITIAL_REGIONS;
     use crate::{Database, TableDefinition};
 
     // Test that the region tracker expansion code works, by adding more data than fits into the initial max regions
@@ -1063,18 +1082,19 @@ mod test {
     fn out_of_regions() {
         let tmpfile = crate::create_tempfile();
         let table_definition: TableDefinition<u32, &[u8]> = TableDefinition::new("x");
-        let big_value = vec![0u8; 5 * 512];
+        let page_size = 1024;
+        let big_value = vec![0u8; 5 * page_size];
 
         let db = Database::builder()
-            .set_region_size(8 * 512)
-            .set_page_size(512)
+            .set_region_size((8 * page_size).try_into().unwrap())
+            .set_page_size(page_size)
             .create(tmpfile.path())
             .unwrap();
 
         let txn = db.begin_write().unwrap();
         {
             let mut table = txn.open_table(table_definition).unwrap();
-            for i in 0..(NUM_REGIONS - 500) {
+            for i in 0..=INITIAL_REGIONS {
                 table.insert(&i, big_value.as_slice()).unwrap();
             }
         }

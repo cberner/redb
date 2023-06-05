@@ -27,8 +27,12 @@ impl BtreeBitmap {
         self.get_level(self.get_height() - 1).get(i)
     }
 
-    pub(crate) fn len(&self) -> u32 {
+    pub(crate) fn capacity(&self) -> u32 {
         self.get_level(self.get_height() - 1).capacity()
+    }
+
+    pub(crate) fn len(&self) -> u32 {
+        self.get_level(self.get_height() - 1).len()
     }
 
     pub(crate) fn find_first_unset(&self) -> Option<u32> {
@@ -366,6 +370,10 @@ impl U64GroupedBitmap {
             64 => None,
             x => Some(start_bit + x - u32::try_from(bit).unwrap()),
         }
+    }
+
+    pub fn len(&self) -> u32 {
+        self.len
     }
 
     // TODO: thread this through up to BuddyAllocator
