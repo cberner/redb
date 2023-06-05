@@ -950,8 +950,8 @@ impl TransactionalMemory {
                     // Fill out the trailing region
                     layout.usable_bytes() + (max_region_size - trailing.usable_bytes())
                 } else {
-                    // Grow by 1 region
-                    layout.usable_bytes() + max_region_size
+                    // Fill out trailing & Grow by 1 region
+                    layout.usable_bytes() + 2 * max_region_size - trailing.usable_bytes()
                 }
             } else {
                 // Grow by 1 region
@@ -1050,5 +1050,34 @@ impl Drop for TransactionalMemory {
             let _ = self.write_header(&state.header, false);
             let _ = self.storage.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::tree_store::page_store::page_manager::NUM_REGIONS;
+    use crate::{Database, TableDefinition};
+
+    // Test that the region tracker expansion code works, by adding more data than fits into the initial max regions
+    #[test]
+    fn out_of_regions() {
+        let tmpfile = crate::create_tempfile();
+        let table_definition: TableDefinition<u32, &[u8]> = TableDefinition::new("x");
+        let big_value = vec![0u8; 5 * 512];
+
+        let db = Database::builder()
+            .set_region_size(8 * 512)
+            .set_page_size(512)
+            .create(tmpfile.path())
+            .unwrap();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_definition).unwrap();
+            for i in 0..(NUM_REGIONS - 500) {
+                table.insert(&i, big_value.as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
     }
 }
