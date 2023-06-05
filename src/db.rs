@@ -771,7 +771,7 @@ impl Builder {
     }
 
     #[cfg(test)]
-    fn set_region_size(&mut self, size: u64) -> &mut Self {
+    pub(crate) fn set_region_size(&mut self, size: u64) -> &mut Self {
         assert!(size.is_power_of_two());
         self.region_size = Some(size);
         self
