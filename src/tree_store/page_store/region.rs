@@ -3,7 +3,7 @@ use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::header::DatabaseHeader;
 use crate::tree_store::page_store::layout::DatabaseLayout;
-use crate::tree_store::page_store::page_manager::{MAX_MAX_PAGE_ORDER, NUM_REGIONS};
+use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, MAX_MAX_PAGE_ORDER};
 use crate::tree_store::PageNumber;
 use crate::Result;
 use std::cmp;
@@ -86,6 +86,29 @@ impl RegionTracker {
             self.order_trackers[i].set(region);
         }
     }
+
+    fn expand(&mut self, new_capacity: u32) {
+        let mut new_trackers = vec![];
+        for order in 0..self.order_trackers.len() {
+            let mut new_bitmap = BtreeBitmap::new(new_capacity);
+            for region in 0..self.order_trackers[order].len() {
+                if !self.order_trackers[order].get(region) {
+                    new_bitmap.clear(region);
+                }
+            }
+            new_trackers.push(new_bitmap);
+        }
+
+        self.order_trackers = new_trackers;
+    }
+
+    fn capacity(&self) -> u32 {
+        self.order_trackers[0].capacity()
+    }
+
+    fn len(&self) -> u32 {
+        self.order_trackers[0].len()
+    }
 }
 
 pub(super) struct Allocators {
@@ -96,7 +119,7 @@ pub(super) struct Allocators {
 impl Allocators {
     pub(super) fn new(layout: DatabaseLayout) -> Self {
         let mut region_allocators = vec![];
-        let mut region_tracker = RegionTracker::new(NUM_REGIONS, MAX_MAX_PAGE_ORDER + 1);
+        let mut region_tracker = RegionTracker::new(INITIAL_REGIONS, MAX_MAX_PAGE_ORDER + 1);
         for i in 0..layout.num_regions() {
             let region_layout = layout.region_layout(i);
             let allocator = BuddyAllocator::new(
@@ -241,12 +264,16 @@ impl Allocators {
                     }
                 } else {
                     // brand new region
-                    // TODO: check that region_tracker has enough space and grow it if needed
                     let allocator = BuddyAllocator::new(
                         new_region.num_pages(),
                         new_layout.full_region_layout().num_pages(),
                     );
                     let highest_free = allocator.highest_free_order().unwrap();
+                    // TODO: we should be calling .capacity(), and resizing if possible
+                    if i >= self.region_tracker.len() {
+                        self.region_tracker
+                            .expand(self.region_tracker.capacity() * 2);
+                    }
                     self.region_tracker.mark_free(highest_free, i);
                     self.region_allocators.push(allocator);
                 }

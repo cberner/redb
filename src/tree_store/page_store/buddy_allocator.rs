@@ -169,7 +169,7 @@ impl BuddyAllocator {
     }
 
     pub(crate) fn capacity(&self) -> u32 {
-        self.get_order_free(0).len()
+        self.get_order_free(0).capacity()
     }
 
     pub(crate) fn get_max_order(&self) -> u8 {
