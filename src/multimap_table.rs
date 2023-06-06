@@ -1,8 +1,9 @@
 use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::sealed::Sealed;
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, Page,
-    PageHint, PageNumber, RawLeafBuilder, TransactionalMemory, BRANCH, LEAF, MAX_VALUE_LENGTH,
+    AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, LeafMutator,
+    Page, PageHint, PageNumber, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF,
+    MAX_VALUE_LENGTH,
 };
 use crate::types::{RedbKey, RedbValue, TypeName};
 use crate::{AccessGuard, Result, StorageError, WriteTransaction};
@@ -13,6 +14,68 @@ use std::mem;
 use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull};
 use std::sync::{Arc, Mutex};
+
+// Finalize all the checksums in the tree, including any Dynamic collection subtrees
+// Returns the root checksum
+pub(crate) fn finalize_tree_and_subtree_checksums(
+    root: Option<(PageNumber, Checksum)>,
+    key_size: Option<usize>,
+    value_size: Option<usize>,
+    mem: &TransactionalMemory,
+) -> Result<Option<(PageNumber, Checksum)>> {
+    let freed_pages = Arc::new(Mutex::new(vec![]));
+    let mut tree = UntypedBtreeMut::new(
+        root,
+        mem,
+        freed_pages.clone(),
+        key_size,
+        <&DynamicCollection>::fixed_width(),
+    );
+    tree.dirty_leaf_visitor(|mut leaf_page| {
+        let mut sub_root_updates = vec![];
+        let accessor = LeafAccessor::new(
+            leaf_page.memory(),
+            key_size,
+            <&DynamicCollection>::fixed_width(),
+        );
+        for i in 0..accessor.num_pairs() {
+            let entry = accessor.entry(i).unwrap();
+            let collection = <&DynamicCollection>::from_bytes(entry.value());
+            if matches!(collection.collection_type(), DynamicCollectionType::Subtree) {
+                let sub_root = collection.as_subtree();
+                if mem.uncommitted(sub_root.0) {
+                    let mut subtree = UntypedBtreeMut::new(
+                        Some(sub_root),
+                        mem,
+                        freed_pages.clone(),
+                        value_size,
+                        <()>::fixed_width(),
+                    );
+                    subtree.finalize_dirty_checksums()?;
+                    sub_root_updates.push((i, entry.key().to_vec(), subtree.get_root().unwrap()));
+                }
+            }
+        }
+        drop(accessor);
+        // TODO: maybe there's a better abstraction, so that we don't need to call into this low-level method?
+        let mut mutator = LeafMutator::new(
+            &mut leaf_page,
+            key_size,
+            <&DynamicCollection>::fixed_width(),
+        );
+        for (i, key, (sub_root, checksum)) in sub_root_updates {
+            let collection = DynamicCollection::make_subtree_data(sub_root, checksum);
+            mutator.insert(i, true, &key, &collection);
+        }
+
+        Ok(())
+    })?;
+
+    tree.finalize_dirty_checksums()?;
+    // No pages should have been freed by this operation
+    assert!(freed_pages.lock().unwrap().is_empty());
+    Ok(tree.get_root())
+}
 
 pub(crate) fn parse_subtree_roots<T: Page>(
     page: &T,

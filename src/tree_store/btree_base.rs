@@ -6,13 +6,14 @@ use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
 use std::{mem, thread};
 
 pub(crate) const LEAF: u8 = 1;
 pub(crate) const BRANCH: u8 = 2;
 
 pub(crate) type Checksum = u128;
+// Dummy value. Final value will be computed during commit
+pub(crate) const DEFERRED: Checksum = 999;
 
 pub(super) fn leaf_checksum<T: Page>(
     page: &T,
@@ -202,114 +203,19 @@ impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
 }
 
 pub struct AccessGuardMut<'a, V: RedbValue> {
-    root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
-    mem: &'a TransactionalMemory,
     page: PageMut<'a>,
     offset: usize,
     len: usize,
-    // child indices starting at root and going to the leaf which holds this value
-    tree_path: Vec<usize>,
-    key_width: Option<usize>,
     _value_type: PhantomData<V>,
 }
 
 impl<'a, V: RedbValue> AccessGuardMut<'a, V> {
-    pub(crate) fn new<K: RedbKey>(
-        page: PageMut<'a>,
-        offset: usize,
-        len: usize,
-        mem: &'a TransactionalMemory,
-    ) -> Self {
+    pub(crate) fn new(page: PageMut<'a>, offset: usize, len: usize) -> Self {
         AccessGuardMut {
-            root: Arc::new(Mutex::new(None)),
-            mem,
             page,
             offset,
             len,
-            tree_path: vec![],
-            key_width: K::fixed_width(),
             _value_type: Default::default(),
-        }
-    }
-
-    fn make_tree_path<K: RedbKey>(
-        key: &[u8],
-        page_number: PageNumber,
-        leaf_page_number: PageNumber,
-        path: &mut Vec<usize>,
-        mem: &TransactionalMemory,
-    ) -> Result {
-        // Don't try to read the leaf page, because we already have a PageMut for it, and so can't open it again
-        if page_number == leaf_page_number {
-            return Ok(());
-        }
-        let page = mem.get_page(page_number)?;
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => unreachable!(),
-            BRANCH => {
-                let accessor = BranchAccessor::new(&page, K::fixed_width());
-                let (child_index, child_page) = accessor.child_for_key::<K>(key);
-                path.push(child_index);
-                Self::make_tree_path::<K>(key, child_page, leaf_page_number, path, mem)?;
-                Ok(())
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub(crate) fn set_root_for_drop<K: RedbKey>(
-        &mut self,
-        root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
-        key: &[u8],
-    ) -> Result {
-        let mut path = vec![];
-        Self::make_tree_path::<K>(
-            key,
-            root.lock().unwrap().unwrap().0,
-            self.page.get_page_number(),
-            &mut path,
-            self.mem,
-        )?;
-        self.root = root;
-        self.tree_path = path;
-        Ok(())
-    }
-
-    // Repairs the checksums after the user has filled the mutable buffer. This is necessary
-    // because the checksums will have been calculated with the values during .insert_reserve(),
-    // but the user is given a mutable reference and will have modified the value, which invalidates
-    // the checksum.
-    fn finalize_checksum(
-        &mut self,
-        page_number: PageNumber,
-        tree_height: usize,
-    ) -> Result<Checksum> {
-        if page_number == self.page.get_page_number() {
-            assert_eq!(LEAF, self.page.memory()[0]);
-            assert_eq!(tree_height, self.tree_path.len());
-            Ok(self.checksum_helper(&self.page))
-        } else {
-            assert!(self.mem.uncommitted(page_number));
-            // This is a dirty page so it can't be read cached
-            let mut page = self.mem.get_page_mut(page_number)?;
-            assert_eq!(BRANCH, page.memory()[0]);
-            let accessor = BranchAccessor::new(&page, self.key_width);
-            let child_index = self.tree_path[tree_height];
-            let child_page = accessor.child_page(child_index).unwrap();
-            let child_checksum = self.finalize_checksum(child_page, tree_height + 1)?;
-            drop(accessor);
-            let mut mutator = BranchMutator::new(&mut page);
-            mutator.write_child_page(child_index, child_page, child_checksum);
-            Ok(self.checksum_helper(&page))
-        }
-    }
-
-    fn checksum_helper<T: Page>(&self, page: &T) -> Checksum {
-        match page.memory()[0] {
-            LEAF => leaf_checksum(page, self.key_width, V::fixed_width()),
-            BRANCH => branch_checksum(page, self.key_width),
-            _ => unreachable!(),
         }
     }
 }
@@ -317,27 +223,6 @@ impl<'a, V: RedbValue> AccessGuardMut<'a, V> {
 impl<'a, V: RedbValueMutInPlace> AsMut<V::BaseRefType> for AccessGuardMut<'a, V> {
     fn as_mut(&mut self) -> &mut V::BaseRefType {
         V::from_bytes_mut(&mut self.page.memory_mut()[self.offset..(self.offset + self.len)])
-    }
-}
-
-impl<'a, V: RedbValue> Drop for AccessGuardMut<'a, V> {
-    fn drop(&mut self) {
-        // Was dropped before being returned to the user, so no clean up needed
-        if self.root.lock().unwrap().is_none() {
-            return;
-        }
-        let result = self.finalize_checksum((self.root.clone()).lock().unwrap().unwrap().0, 0);
-        match result {
-            Ok(new_checksum) => {
-                let mut borrow = self.root.lock().unwrap();
-                let (_, root_checksum_ref) = borrow.as_mut().unwrap();
-                *root_checksum_ref = new_checksum;
-            }
-            Err(err) => {
-                // TODO: this should probably be stored in the table or transaction, and not the mem
-                self.mem.set_deferred_error(err);
-            }
-        }
     }
 }
 
@@ -844,14 +729,14 @@ impl<'a> Drop for RawLeafBuilder<'a> {
     }
 }
 
-pub(super) struct LeafMutator<'a: 'b, 'b> {
+pub(crate) struct LeafMutator<'a: 'b, 'b> {
     page: &'b mut PageMut<'a>,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
 }
 
 impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
-    pub(super) fn new(
+    pub(crate) fn new(
         page: &'b mut PageMut<'a>,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
@@ -900,7 +785,7 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
     }
 
     // Insert the given key, value pair at index i and shift all following pairs to the right
-    pub(super) fn insert(&mut self, i: usize, overwrite: bool, key: &[u8], value: &[u8]) {
+    pub(crate) fn insert(&mut self, i: usize, overwrite: bool, key: &[u8], value: &[u8]) {
         let accessor = LeafAccessor::new(
             self.page.memory(),
             self.fixed_key_size,

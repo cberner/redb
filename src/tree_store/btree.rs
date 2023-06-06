@@ -1,10 +1,10 @@
 use crate::tree_store::btree_base::{
     branch_checksum, leaf_checksum, BranchAccessor, BranchMutator, Checksum, FreePolicy,
-    LeafAccessor, BRANCH, LEAF,
+    LeafAccessor, BRANCH, DEFERRED, LEAF,
 };
 use crate::tree_store::btree_iters::BtreeDrain;
 use crate::tree_store::btree_mutator::MutateHelper;
-use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
+use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::{
     AccessGuardMut, AllPageNumbersBtreeIter, BtreeDrainFilter, BtreeRangeIter, PageHint, PageNumber,
 };
@@ -29,6 +29,7 @@ pub(crate) struct BtreeStats {
 
 pub(crate) struct UntypedBtreeMut<'a> {
     mem: &'a TransactionalMemory,
+    // TODO: Why is this an Arc<Mutex>???
     root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     key_width: Option<usize>,
@@ -54,6 +55,110 @@ impl<'a> UntypedBtreeMut<'a> {
 
     pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
         *(*self.root).lock().unwrap()
+    }
+
+    // Recomputes the checksum for all pages that are uncommitted
+    pub(crate) fn finalize_dirty_checksums(&mut self) -> Result {
+        let mut root = *self.root.lock().unwrap();
+        if let Some((ref page_number, ref mut checksum)) = root {
+            if !self.mem.uncommitted(*page_number) {
+                // root page is clean
+                return Ok(());
+            }
+
+            *checksum = self.finalize_dirty_checksums_helper(*page_number)?;
+            *self.root.lock().unwrap() = root;
+        }
+
+        Ok(())
+    }
+
+    fn finalize_dirty_checksums_helper(&mut self, page_number: PageNumber) -> Result<Checksum> {
+        assert!(self.mem.uncommitted(page_number));
+        let mut page = self.mem.get_page_mut(page_number)?;
+
+        match page.memory()[0] {
+            LEAF => Ok(leaf_checksum(&page, self.key_width, self.value_width)),
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, self.key_width);
+                let mut new_children = vec![];
+                for i in 0..accessor.count_children() {
+                    let child_page = accessor.child_page(i).unwrap();
+                    if self.mem.uncommitted(child_page) {
+                        let new_checksum = self.finalize_dirty_checksums_helper(child_page)?;
+                        new_children.push(Some((i, child_page, new_checksum)));
+                    } else {
+                        // Child is clean, skip it
+                        new_children.push(None);
+                    }
+                }
+
+                drop(accessor);
+                let mut mutator = BranchMutator::new(&mut page);
+                for (child_index, child_page, child_checksum) in new_children.into_iter().flatten()
+                {
+                    mutator.write_child_page(child_index, child_page, child_checksum);
+                }
+                drop(mutator);
+
+                Ok(branch_checksum(&page, self.key_width))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // Applies visitor to all dirty leaf pages in the tree
+    pub(crate) fn dirty_leaf_visitor<F>(&mut self, visitor: F) -> Result
+    where
+        F: Fn(PageMut) -> Result,
+    {
+        let root = *self.root.lock().unwrap();
+        if let Some((ref page_number, _)) = root {
+            if !self.mem.uncommitted(*page_number) {
+                // root page is clean
+                return Ok(());
+            }
+
+            let page = self.mem.get_page_mut(*page_number)?;
+            match page.memory()[0] {
+                LEAF => {
+                    visitor(page)?;
+                }
+                BRANCH => {
+                    drop(page);
+                    self.dirty_leaf_visitor_helper(*page_number, &visitor)?;
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        Ok(())
+    }
+
+    fn dirty_leaf_visitor_helper<F>(&mut self, page_number: PageNumber, visitor: &F) -> Result
+    where
+        F: Fn(PageMut) -> Result,
+    {
+        assert!(self.mem.uncommitted(page_number));
+        let page = self.mem.get_page_mut(page_number)?;
+
+        match page.memory()[0] {
+            LEAF => {
+                visitor(page)?;
+            }
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, self.key_width);
+                for i in 0..accessor.count_children() {
+                    let child_page = accessor.child_page(i).unwrap();
+                    if self.mem.uncommitted(child_page) {
+                        self.dirty_leaf_visitor_helper(child_page, visitor)?;
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
     }
 
     // Relocate the btree to lower pages
@@ -84,8 +189,10 @@ impl<'a> UntypedBtreeMut<'a> {
         new_page.memory_mut().copy_from_slice(old_page.memory());
 
         let node_mem = old_page.memory();
-        let new_checksum = match node_mem[0] {
-            LEAF => leaf_checksum(&new_page, self.key_width, self.value_width),
+        match node_mem[0] {
+            LEAF => {
+                // No-op
+            }
             BRANCH => {
                 let accessor = BranchAccessor::new(&old_page, self.key_width);
                 let mut mutator = BranchMutator::new(&mut new_page);
@@ -95,15 +202,14 @@ impl<'a> UntypedBtreeMut<'a> {
                         mutator.write_child_page(i, new_child, new_checksum);
                     }
                 }
-                branch_checksum(&new_page, self.key_width)
             }
             _ => unreachable!(),
-        };
+        }
 
         let mut freed_pages = self.freed_pages.lock().unwrap();
         FreePolicy::Uncommitted.conditional_free(page_number, &mut freed_pages, self.mem);
 
-        Ok(Some((new_page_number, new_checksum)))
+        Ok(Some((new_page_number, DEFERRED)))
     }
 }
 
@@ -128,6 +234,19 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
+    }
+
+    pub(crate) fn finalize_dirty_checksums(&mut self) -> Result {
+        let mut tree = UntypedBtreeMut::new(
+            self.get_root(),
+            self.mem,
+            self.freed_pages.clone(),
+            K::fixed_width(),
+            V::fixed_width(),
+        );
+        tree.finalize_dirty_checksums()?;
+        *self.root.lock().unwrap() = tree.get_root();
+        Ok(())
     }
 
     pub(crate) fn all_pages_iter(&self) -> Result<Option<AllPageNumbersBtreeIter>> {
@@ -344,9 +463,8 @@ impl<'a, K: RedbKey + 'a, V: RedbValueMutInPlace + 'a> BtreeMut<'a, K, V> {
             self.mem,
             freed_pages.as_mut(),
         );
-        let (_, mut guard) = operation.insert(key, &V::from_bytes(&value))?;
+        let (_, guard) = operation.insert(key, &V::from_bytes(&value))?;
         drop(root);
-        guard.set_root_for_drop::<K>(self.root.clone(), K::as_bytes(key).as_ref())?;
         Ok(guard)
     }
 }
