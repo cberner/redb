@@ -718,10 +718,6 @@ impl<'db> WriteTransaction<'db> {
     pub fn commit(mut self) -> Result<(), CommitError> {
         // Set completed flag first, so that we don't go through the abort() path on drop, if this fails
         self.completed = true;
-        self.table_tree
-            .write()
-            .unwrap()
-            .flush_table_root_updates()?;
         self.commit_inner()
     }
 
