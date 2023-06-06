@@ -1,4 +1,5 @@
 use crate::error::TableError;
+use crate::multimap_table::finalize_tree_and_subtree_checksums;
 use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
@@ -483,9 +484,28 @@ impl<'txn> TableTree<'txn> {
             if definition.table_root == table_root {
                 continue;
             }
-            definition.table_root = table_root;
+            // Finalize any dirty checksums
+            if definition.table_type == TableType::Normal {
+                let mut tree = UntypedBtreeMut::new(
+                    table_root,
+                    self.mem,
+                    self.freed_pages.clone(),
+                    definition.fixed_key_size,
+                    definition.fixed_value_size,
+                );
+                tree.finalize_dirty_checksums()?;
+                definition.table_root = tree.get_root();
+            } else {
+                definition.table_root = finalize_tree_and_subtree_checksums(
+                    table_root,
+                    definition.fixed_key_size,
+                    definition.fixed_value_size,
+                    self.mem,
+                )?;
+            }
             self.tree.insert(&name.as_str(), &definition)?;
         }
+        self.tree.finalize_dirty_checksums()?;
         Ok(self.tree.get_root())
     }
 

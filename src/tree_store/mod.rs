@@ -5,10 +5,10 @@ mod btree_mutator;
 mod page_store;
 mod table_tree;
 
-pub(crate) use btree::{Btree, BtreeMut, RawBtree};
+pub(crate) use btree::{Btree, BtreeMut, RawBtree, UntypedBtreeMut};
 pub(crate) use btree_base::Checksum;
 pub use btree_base::{AccessGuard, AccessGuardMut};
-pub(crate) use btree_base::{LeafAccessor, RawLeafBuilder, BRANCH, LEAF};
+pub(crate) use btree_base::{LeafAccessor, LeafMutator, RawLeafBuilder, BRANCH, LEAF};
 pub(crate) use btree_iters::{
     AllPageNumbersBtreeIter, BtreeDrain, BtreeDrainFilter, BtreeRangeIter,
 };

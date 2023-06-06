@@ -90,7 +90,6 @@ pub(crate) struct TransactionalMemory {
     // code path where there is no locking
     region_size: u64,
     region_header_with_padding_size: u64,
-    deferred_error: Mutex<Option<StorageError>>,
 }
 
 impl TransactionalMemory {
@@ -260,12 +259,7 @@ impl TransactionalMemory {
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,
-            deferred_error: Mutex::new(None),
         })
-    }
-
-    pub(crate) fn set_deferred_error(&self, err: StorageError) {
-        *self.deferred_error.lock().unwrap() = Some(err);
     }
 
     #[cfg(any(fuzzing, test))]
@@ -480,9 +474,6 @@ impl TransactionalMemory {
         eventual: bool,
         two_phase: bool,
     ) -> Result {
-        if let Some(err) = self.deferred_error.lock().unwrap().take() {
-            return Err(err);
-        }
         let result = self.commit_inner(
             data_root,
             system_root,

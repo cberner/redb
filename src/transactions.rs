@@ -814,6 +814,10 @@ impl<'db> WriteTransaction<'db> {
             .any_savepoint_exists();
         self.store_freed_pages(savepoint_exists)?;
 
+        // Finalize freed table checksums, before doing the final commit
+        // user & system table trees were already finalized when we flushed the pending roots above
+        self.freed_tree.lock().unwrap().finalize_dirty_checksums()?;
+
         let freed_root = self.freed_tree.lock().unwrap().get_root();
 
         self.mem.commit(
@@ -857,6 +861,9 @@ impl<'db> WriteTransaction<'db> {
         // Store all freed pages for a future commit(), since we can't free pages during a
         // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
         self.store_freed_pages(true)?;
+
+        // Finalize all checksums, before doing the final commit
+        self.freed_tree.lock().unwrap().finalize_dirty_checksums()?;
 
         let freed_root = self.freed_tree.lock().unwrap().get_root();
 
