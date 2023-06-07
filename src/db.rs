@@ -517,11 +517,8 @@ impl Database {
                     )?;
                     for table_page in table_pages_iter {
                         let page = mem.get_page(table_page?)?;
-                        let subtree_roots = parse_subtree_roots(
-                            &page,
-                            definition.get_fixed_key_size(),
-                            definition.get_fixed_value_size(),
-                        );
+                        let subtree_roots =
+                            parse_subtree_roots(&page, definition.get_fixed_key_size());
                         for sub_root in subtree_roots {
                             let sub_root_iter = AllPageNumbersBtreeIter::new(
                                 sub_root,
