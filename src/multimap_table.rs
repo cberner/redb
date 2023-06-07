@@ -17,7 +17,6 @@ use std::sync::{Arc, Mutex};
 pub(crate) fn parse_subtree_roots<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
-    fixed_value_size: Option<usize>,
 ) -> Vec<PageNumber> {
     match page.memory()[0] {
         BRANCH => {
@@ -25,7 +24,11 @@ pub(crate) fn parse_subtree_roots<T: Page>(
         }
         LEAF => {
             let mut result = vec![];
-            let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+            let accessor = LeafAccessor::new(
+                page.memory(),
+                fixed_key_size,
+                <&DynamicCollection>::fixed_width(),
+            );
             for i in 0..accessor.num_pairs() {
                 let entry = accessor.entry(i).unwrap();
                 let collection = <&DynamicCollection>::from_bytes(entry.value());
