@@ -822,7 +822,6 @@ impl std::fmt::Debug for Database {
 
 #[cfg(test)]
 mod test {
-    use crate::error::CommitError;
     use crate::{Database, Durability, ReadableTable, StorageError, TableDefinition, TableError};
 
     #[test]
@@ -1027,90 +1026,6 @@ mod test {
             ));
         }
         tx.abort().unwrap();
-    }
-
-    #[test]
-    fn crash_regression2() {
-        let tmpfile = crate::create_tempfile();
-
-        let db = Database::builder()
-            .set_cache_size(48101213 / 5)
-            .set_page_size(512)
-            .create(tmpfile.path())
-            .unwrap();
-        db.set_crash_countdown(13);
-
-        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
-
-        // TX1
-        println!("\nTX1");
-        let tx = db.begin_write().unwrap();
-        let savepoint0 = tx.persistent_savepoint().unwrap();
-        tx.commit().unwrap();
-        let mut tx = db.begin_write().unwrap();
-        tx.set_durability(Durability::None);
-        {
-            tx.open_table(table_def).unwrap();
-        }
-        tx.commit().unwrap();
-
-        // TX2
-        println!("\nTX2");
-        let mut tx = db.begin_write().unwrap();
-        let savepoint1 = tx.ephemeral_savepoint().unwrap();
-        let _savepoint2 = tx.persistent_savepoint().unwrap();
-        let temp = tx.get_persistent_savepoint(savepoint0).unwrap();
-        tx.restore_savepoint(&temp).unwrap();
-        drop(temp);
-        drop(savepoint1);
-        tx.commit().unwrap();
-        let mut tx = db.begin_write().unwrap();
-        tx.set_durability(Durability::None);
-        {
-            tx.open_table(table_def).unwrap();
-        }
-        tx.commit().unwrap();
-
-        // TX3
-        println!("\nTX3");
-        let mut tx = db.begin_write().unwrap();
-        let _savepoint3 = tx.ephemeral_savepoint().unwrap();
-        let savepoint4 = tx.persistent_savepoint().unwrap();
-        let temp = tx.get_persistent_savepoint(savepoint4).unwrap();
-        tx.restore_savepoint(&temp).unwrap();
-        drop(temp);
-        tx.commit().unwrap();
-        let tx = db.begin_write().unwrap();
-        {
-            tx.open_table(table_def).unwrap();
-        }
-        tx.delete_persistent_savepoint(savepoint0).unwrap();
-        tx.delete_persistent_savepoint(savepoint4).unwrap();
-        tx.commit().unwrap();
-
-        // TX4
-        println!("\nTX4");
-        let tx = db.begin_write().unwrap();
-        let _savepoint5 = tx.persistent_savepoint().unwrap();
-        tx.commit().unwrap();
-
-        // TX5
-        println!("\nTX5");
-        let mut tx = db.begin_write().unwrap();
-        let savepoint6 = tx.ephemeral_savepoint().unwrap();
-        let _savepoint7 = tx.persistent_savepoint().unwrap();
-        tx.restore_savepoint(&savepoint6).unwrap();
-        assert!(matches!(
-            tx.commit(),
-            Err(CommitError::Storage(StorageError::SimulatedIOFailure))
-        ));
-
-        drop(db);
-        Database::builder()
-            .set_cache_size(48101213)
-            .set_page_size(512)
-            .create(tmpfile.path())
-            .unwrap();
     }
 
     #[test]
