@@ -1,5 +1,13 @@
 # redb - Changelog
 
+## 0.21.0 - 2023-06-09
+* Improve cache heuristic. This asymptotically improves performance on large databases. Benchmarks show 30% to 5x+
+* Fix rare crash that could occur under certain conditions when inserting values > 2GiB
+* Fix crash when growing database beyond 4TiB
+* Fix panic when repairing a database containing a multimap table with fixed width values
+* Performance optimizations
+* File format simplifications
+
 ## 0.20.0 - 2023-05-30
 * Export `TransactionError` and `CommitError`. These were unintentionally private
 * Implement `std::error::Error` for all error enums
