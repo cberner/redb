@@ -52,7 +52,11 @@ struct InMemoryState {
 
 impl InMemoryState {
     fn from_bytes(header: DatabaseHeader, file: &PagedCachedFile) -> Result<Self> {
-        let allocators = Allocators::from_bytes(&header, file)?;
+        let allocators = if header.recovery_required {
+            Allocators::new(header.layout())
+        } else {
+            Allocators::from_bytes(&header, file)?
+        };
         Ok(Self { header, allocators })
     }
 
