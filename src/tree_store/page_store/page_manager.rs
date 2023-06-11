@@ -445,8 +445,6 @@ impl TransactionalMemory {
         let mut result = vec![];
         let state = self.state.lock().unwrap();
 
-        assert!(region_states.len() <= state.header.layout().num_regions() as usize);
-
         for i in 0..state.header.layout().num_regions() {
             let current_state = state.get_region(i);
             if let Some(old_state) = region_states.get(i as usize) {
