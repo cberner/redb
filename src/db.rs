@@ -1081,6 +1081,40 @@ mod test {
     }
 
     #[test]
+    fn crash_regression4() {
+        let tmpfile = crate::create_tempfile();
+
+        let db = Database::builder()
+            .set_cache_size(12686)
+            .set_page_size(8 * 1024)
+            .set_region_size(32 * 4096)
+            .create(tmpfile.path())
+            .unwrap();
+        db.set_crash_countdown(10);
+
+        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+        let tx = db.begin_write().unwrap();
+        let _savepoint = tx.ephemeral_savepoint().unwrap();
+        let _persistent_savepoint = tx.persistent_savepoint().unwrap();
+        tx.commit().unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(table_def).unwrap();
+            let _ = table.insert_reserve(118821, 360);
+        }
+
+        drop(tx);
+        drop(db);
+        Database::builder()
+            .set_cache_size(1024 * 1024)
+            .set_page_size(8 * 1024)
+            .set_region_size(32 * 4096)
+            .create(tmpfile.path())
+            .unwrap();
+    }
+
+    #[test]
     fn dynamic_shrink() {
         let tmpfile = crate::create_tempfile();
         let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
