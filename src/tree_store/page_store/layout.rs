@@ -115,7 +115,7 @@ impl DatabaseLayout {
         let full_region_size = (region_header_pages + region_max_data_pages) * page_size;
         let full_regions = remaining / full_region_size;
         remaining -= full_regions * full_region_size;
-        let trailing = if remaining > (region_header_pages + 1) * page_size {
+        let trailing = if remaining >= (region_header_pages + 1) * page_size {
             remaining -= region_header_pages * page_size;
             let remaining: u32 = remaining.try_into().unwrap();
             let data_pages = remaining / page_size_u32;
