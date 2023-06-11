@@ -767,8 +767,8 @@ impl Builder {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_region_size(&mut self, size: u64) -> &mut Self {
+    #[cfg(any(test, fuzzing))]
+    pub fn set_region_size(&mut self, size: u64) -> &mut Self {
         assert!(size.is_power_of_two());
         self.region_size = Some(size);
         self
@@ -1026,6 +1026,38 @@ mod test {
             ));
         }
         tx.abort().unwrap();
+    }
+
+    #[test]
+    fn crash_regression2() {
+        let tmpfile = crate::create_tempfile();
+
+        let db = Database::builder()
+            .set_cache_size(1024 * 1024)
+            .set_page_size(8 * 1024)
+            .set_region_size(32 * 4096)
+            .create(tmpfile.path())
+            .unwrap();
+        db.set_crash_countdown(0);
+
+        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+        let tx = db.begin_write().unwrap();
+        {
+            assert!(matches!(
+                tx.open_table(table_def),
+                Err(TableError::Storage(StorageError::SimulatedIOFailure))
+            ));
+        }
+        tx.abort().unwrap();
+
+        drop(db);
+        Database::builder()
+            .set_cache_size(1024 * 1024)
+            .set_page_size(8 * 1024)
+            .set_region_size(32 * 4096)
+            .create(tmpfile.path())
+            .unwrap();
     }
 
     #[test]
