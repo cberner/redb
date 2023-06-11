@@ -896,35 +896,22 @@ impl TransactionalMemory {
     fn try_shrink(&self, state: &mut InMemoryState) -> Result<bool> {
         let layout = state.header.layout();
         let last_region_index = layout.num_regions() - 1;
-        let last_region = layout.region_layout(last_region_index);
         let last_allocator = state.get_region(last_region_index);
         let trailing_free = last_allocator.trailing_free_pages();
         let last_allocator_len = last_allocator.len();
         if trailing_free < last_allocator_len / 2 {
             return Ok(false);
         }
-        let reduce_to_pages = if layout.num_regions() > 1 && trailing_free == last_allocator_len {
-            0
+        let reduce_by = if layout.num_regions() > 1 && trailing_free == last_allocator_len {
+            trailing_free
         } else {
-            max(MIN_USABLE_PAGES, last_allocator_len - trailing_free / 2)
+            trailing_free / 2
         };
 
-        let new_usable_bytes = if reduce_to_pages == 0 {
-            layout.usable_bytes() - last_region.usable_bytes()
-        } else {
-            layout.usable_bytes()
-                - ((last_allocator_len - reduce_to_pages) as u64)
-                    * (state.header.page_size() as u64)
-        };
-
-        let new_layout = DatabaseLayout::calculate(
-            new_usable_bytes,
-            state.header.layout().full_region_layout().num_pages(),
-            self.page_size,
-        );
+        let mut new_layout = layout;
+        new_layout.reduce_last_region(reduce_by);
         state.allocators.resize_to(new_layout);
         assert!(new_layout.len() <= layout.len());
-
         state.header.set_layout(new_layout);
 
         Ok(true)
