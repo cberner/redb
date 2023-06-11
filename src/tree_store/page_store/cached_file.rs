@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
 use std::mem;
-use std::ops::{DerefMut, Index, IndexMut};
+use std::ops::{Index, IndexMut};
 #[cfg(any(target_os = "linux", all(unix, not(fuzzing))))]
 use std::os::unix::io::AsRawFd;
 use std::slice::SliceIndex;
@@ -200,7 +200,7 @@ impl PagedCachedFile {
 
     fn flush_write_buffer(&self) -> Result {
         self.check_fsync_failure()?;
-        let mut write_buffer = std::mem::take(self.write_buffer.lock().unwrap().deref_mut());
+        let mut write_buffer = self.write_buffer.lock().unwrap();
 
         for (offset, buffer) in write_buffer.cache.iter() {
             self.file.write(*offset, buffer)?;
@@ -340,7 +340,10 @@ impl PagedCachedFile {
     // Discard pending writes to the given range
     pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
         assert_eq!(0, offset % self.page_size);
-        self.write_buffer.lock().unwrap().remove(&offset);
+        if let Some(removed) = self.write_buffer.lock().unwrap().remove(&offset) {
+            self.write_buffer_bytes
+                .fetch_sub(removed.len(), Ordering::Release);
+        }
     }
 
     // Invalidate any caching of the given range. After this call overlapping reads of the range are allowed
@@ -405,9 +408,7 @@ impl PagedCachedFile {
                 let mut removed_bytes = 0;
                 while removed_bytes < len {
                     if let Some((offset, buffer)) = lock.pop_lowest_priority() {
-                        self.write_buffer_bytes
-                            .fetch_sub(buffer.len(), Ordering::Release);
-                        removed_bytes += buffer.len();
+                        let removed_len = buffer.len();
                         let result = self.file.write(offset, &buffer);
                         if result.is_err() {
                             let low_pri = buffer[0] == LEAF;
@@ -415,6 +416,9 @@ impl PagedCachedFile {
                             lock.insert(offset, buffer, low_pri);
                         }
                         result?;
+                        self.write_buffer_bytes
+                            .fetch_sub(removed_len, Ordering::Release);
+                        removed_bytes += removed_len;
                     } else {
                         break;
                     }
