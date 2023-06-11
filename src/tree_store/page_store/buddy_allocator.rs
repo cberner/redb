@@ -325,10 +325,13 @@ impl BuddyAllocator {
             // Align to the highest order possible
             while processed_pages < self.len() {
                 let order: u8 = processed_pages.trailing_zeros().try_into().unwrap();
+                if order >= self.max_order {
+                    break;
+                }
                 let order_size = 2u32.pow(order.into());
                 let page = processed_pages / order_size;
                 debug_assert_eq!(processed_pages % order_size, 0);
-                if order >= self.max_order || processed_pages + order_size > self.len() {
+                if processed_pages + order_size > self.len() {
                     break;
                 }
                 self.record_alloc_inner(page, order);

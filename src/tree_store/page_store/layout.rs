@@ -21,6 +21,7 @@ pub(super) struct RegionLayout {
 
 impl RegionLayout {
     pub(super) fn new(num_pages: u32, header_pages: u32, page_size: u32) -> Self {
+        assert!(num_pages > 0);
         Self {
             num_pages,
             header_pages,
@@ -98,6 +99,26 @@ impl DatabaseLayout {
             full_region_layout: full_region,
             num_full_regions: full_regions,
             trailing_partial_region: trailing_region,
+        }
+    }
+
+    pub(super) fn reduce_last_region(&mut self, pages: u32) {
+        if let Some(ref mut trailing) = self.trailing_partial_region {
+            assert!(pages <= trailing.num_pages);
+            trailing.num_pages -= pages;
+            if trailing.num_pages == 0 {
+                self.trailing_partial_region = None;
+            }
+        } else {
+            self.num_full_regions -= 1;
+            let full_layout = self.full_region_layout;
+            if full_layout.num_pages > pages {
+                self.trailing_partial_region = Some(RegionLayout::new(
+                    full_layout.num_pages - pages,
+                    full_layout.header_pages,
+                    full_layout.page_size,
+                ));
+            }
         }
     }
 
