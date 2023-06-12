@@ -299,6 +299,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
     let mut db = Database::builder()
         .set_page_size(config.page_size.value)
         .set_cache_size(config.cache_size.value)
+        .set_region_size(config.region_size.value as u64)
         .create(redb_file.path())
         .unwrap();
     db.set_crash_countdown(config.crash_after_ops.value);
@@ -331,6 +332,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
                     db = Database::builder()
                         .set_page_size(config.page_size.value)
                         .set_cache_size(config.cache_size.value)
+                        .set_region_size(config.region_size.value as u64)
                         .create(redb_file.path())
                         .unwrap();
                 } else {
@@ -356,6 +358,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
                 db = Database::builder()
                     .set_page_size(config.page_size.value)
                     .set_cache_size(config.cache_size.value)
+                    .set_region_size(config.region_size.value as u64)
                     .create(redb_file.path())
                     .unwrap();
             } else {
