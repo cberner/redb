@@ -7,8 +7,8 @@ use rand::SeedableRng;
 
 const MAX_CRASH_OPS: u64 = 20;
 const MAX_CACHE_SIZE: usize = 100_000_000;
-// Limit values to 10MiB
-const MAX_VALUE_SIZE: usize = 10_000_000;
+// Limit values to 100KiB
+const MAX_VALUE_SIZE: usize = 100_000;
 const KEY_SPACE: u64 = 1_000_000;
 pub const MAX_SAVEPOINTS: usize = 6;
 
@@ -135,4 +135,6 @@ pub(crate) struct FuzzConfig {
     pub crash_after_ops: BoundedU64<MAX_CRASH_OPS>,
     pub transactions: Vec<FuzzTransaction>,
     pub page_size: PowerOfTwoBetween<9, 14>,
+    // Must not be too small, otherwise persistent savepoints won't fit into a region
+    pub region_size: PowerOfTwoBetween<20, 30>,
 }
