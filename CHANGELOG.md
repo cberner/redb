@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 0.22.0 - 2023-06-12
+* Fix panic while repairing a database file after crash
+* Fix rare panic in `restore_savepoint()`
+
 ## 0.21.0 - 2023-06-09
 * Improve cache heuristic. This asymptotically improves performance on large databases. Benchmarks show 30% to 5x+
 * Fix rare crash that could occur under certain conditions when inserting values > 2GiB
