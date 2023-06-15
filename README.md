@@ -34,8 +34,8 @@ fn main() -> Result<(), Error> {
 ```
 
 ## Status
-redb is undergoing active development, and should be considered beta quality. It may eat your data, and does not
-have any guarantees of file format stability :)
+redb is undergoing active development, and should be considered beta quality. The file format is stable,
+but redb has not been widely deployed in production systems (to my knowledge, atleast).
 
 ## Features
 * Zero-copy, thread-safe, `BTreeMap` based API
@@ -43,10 +43,6 @@ have any guarantees of file format stability :)
 * MVCC support for concurrent readers & writer, without blocking
 * Crash-safe by default
 * Savepoints and rollbacks
-
-## Roadmap
-The following features are planned before the 1.0 release
-* Stable file format
 
 ## Benchmarks
 redb is nearly as fast as lmdb, and faster than sled, on many benchmarks
