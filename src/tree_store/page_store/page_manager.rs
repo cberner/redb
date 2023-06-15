@@ -454,7 +454,7 @@ impl TransactionalMemory {
                 current_state.get_allocated_pages_since_savepoint(i, old_state, &mut result);
             } else {
                 // This region didn't exist, so everything is newly allocated
-                result.extend(current_state.get_allocated_pages(i));
+                current_state.get_allocated_pages(i, &mut result);
             }
         }
 
