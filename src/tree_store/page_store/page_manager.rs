@@ -30,8 +30,7 @@ const MIN_DESIRED_USABLE_BYTES: u64 = 1024 * 1024;
 
 pub(super) const INITIAL_REGIONS: u32 = 1000; // Enough for a 4TiB database
 
-// TODO: set to 1, when version 1.0 is released
-pub(crate) const FILE_FORMAT_VERSION: u8 = 121;
+pub(crate) const FILE_FORMAT_VERSION: u8 = 1;
 
 fn ceil_log2(x: usize) -> u8 {
     if x.is_power_of_two() {
