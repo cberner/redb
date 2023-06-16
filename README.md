@@ -45,20 +45,22 @@ but redb has not been widely deployed in production systems (to my knowledge, at
 * Savepoints and rollbacks
 
 ## Benchmarks
-redb is nearly as fast as lmdb, and faster than sled, on many benchmarks
+redb has similar performance to other top embedded key-value stores such as lmdb and rocksdb
 
 |                           | redb   | lmdb   | rocksdb | sled   | sanakirja |
 |---------------------------|--------|--------|---------|--------|-----------|
-| bulk load                 | 4285ms | 1031ms | 5387ms  | 5030ms | 1000ms    |
-| individual writes         | 229ms  | 430ms  | 678ms   | 650ms  | 411ms     |
-| batch writes              | 1948ms | 1684ms | 1027ms  | 1508ms | 2071ms    |
-| random reads              | 948ms  | 538ms  | 3112ms  | 1325ms | 622ms     |
-| random range reads        | 2496ms | 960ms  | 5726ms  | 4493ms | 1030ms    |
-| random reads (4 threads)  | 350ms  | 142ms  | 1216ms  | 410ms  | 277ms     |
-| random reads (8 threads)  | 193ms  | 77ms   | 660ms   | 218ms  | 844ms     |
-| random reads (16 threads) | 136ms  | 45ms   | 468ms   | 138ms  | 4596ms    |
-| random reads (32 threads) | 118ms  | 38ms   | 409ms   | 119ms  | 4457ms    |
-| removals                  | 4371ms | 697ms  | 2533ms  | 1943ms | 1065ms    |
+| bulk load                 | 2792ms | 1115ms | 5610ms  | 5005ms | 1161ms    |
+| individual writes         | 462ms  | 1119ms | 1097ms  | 957ms  | 662ms     |
+| batch writes              | 2568ms | 2247ms | 1344ms  | 1622ms | 2713ms    |
+| random reads              | 988ms  | 558ms  | 3469ms  | 1509ms | 678ms     |
+| random reads              | 962ms  | 556ms  | 3377ms  | 1425ms | 671ms     |
+| random range reads        | 2534ms | 985ms  | 6058ms  | 4670ms | 1089ms    |
+| random range reads        | 2493ms | 998ms  | 5801ms  | 4665ms | 1119ms    |
+| random reads (4 threads)  | 344ms  | 141ms  | 1247ms  | 424ms  | 266ms     |
+| random reads (8 threads)  | 192ms  | 72ms   | 673ms   | 230ms  | 620ms     |
+| random reads (16 threads) | 131ms  | 47ms   | 476ms   | 148ms  | 3500ms    |
+| random reads (32 threads) | 118ms  | 44ms   | 412ms   | 129ms  | 4313ms    |
+| removals                  | 2184ms | 784ms  | 2451ms  | 2047ms | 1344ms    |
 
 ## License
 
