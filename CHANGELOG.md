@@ -1,5 +1,20 @@
 # redb - Changelog
 
+## 1.0.0 - 2023-06-16
+### Announcement
+redb has reached its first stable release! The file format is now gauranteed to be backward compatible,
+and the API is stable. I've run pretty extensive fuzz testing, but please report any bugs you encounter.
+
+The following features are complete:
+* MVCC with a single `WriteTransaction` and multiple `ReadTransaction`s
+* Zero-copy reads
+* ACID semantics, including non-durable transactions which only sacrifice Durability
+* Savepoints which allow the state of the database to be captured and restored later
+
+#### Changes from 0.22.0:
+* Stabilize file format
+* Improve performance of `restore_savepoint()`
+
 ## 0.22.0 - 2023-06-12
 * Fix panic while repairing a database file after crash
 * Fix rare panic in `restore_savepoint()`
