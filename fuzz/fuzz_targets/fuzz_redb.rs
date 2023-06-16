@@ -10,6 +10,8 @@ mod common;
 use common::*;
 use crate::FuzzerSavepoint::{Ephemeral, NotYetDurablePersistent, Persistent};
 
+// These slow down the fuzzer, so don't create too many
+const MAX_PERSISTENT_SAVEPOINTS: usize = 20;
 const TABLE_DEF: TableDefinition<u64, &[u8]> = TableDefinition::new("fuzz_table");
 const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, &[u8]> =
     MultimapTableDefinition::new("fuzz_multimap_table");
@@ -23,6 +25,7 @@ enum FuzzerSavepoint<T: Clone> {
 struct SavepointManager<T: Clone> {
     savepoints: Vec<FuzzerSavepoint<T>>,
     uncommitted_persistent: HashSet<u64>,
+    persistent_countdown: usize,
 }
 
 impl<T: Clone> SavepointManager<T> {
@@ -30,6 +33,7 @@ impl<T: Clone> SavepointManager<T> {
         Self {
             savepoints: vec![],
             uncommitted_persistent: Default::default(),
+            persistent_countdown: MAX_PERSISTENT_SAVEPOINTS,
         }
     }
 
@@ -37,6 +41,7 @@ impl<T: Clone> SavepointManager<T> {
         let persistent: Vec<FuzzerSavepoint<T>> = self.savepoints.drain(..).filter(|x| matches!(x, FuzzerSavepoint::Persistent(_, _))).collect();
         self.savepoints = persistent;
         self.uncommitted_persistent.clear();
+        self.persistent_countdown = MAX_PERSISTENT_SAVEPOINTS;
     }
 
     fn abort(&mut self) {
@@ -138,6 +143,11 @@ impl<T: Clone> SavepointManager<T> {
     }
 
     fn persistent_savepoint(&mut self, txn: &WriteTransaction, reference: &BTreeMap<u64, T>) -> Result<(), Error> {
+        if self.persistent_countdown == 0 {
+            return self.ephemeral_savepoint(txn, reference);
+        } else {
+            self.persistent_countdown -= 1;
+        }
         let id = txn.persistent_savepoint()?;
         self.savepoints.push(NotYetDurablePersistent(id, reference.clone()));
         self.uncommitted_persistent.insert(id);
