@@ -35,7 +35,7 @@ fn main() -> Result<(), Error> {
 
 ## Status
 redb is undergoing active development, and should be considered beta quality. The file format is stable,
-but redb has not been widely deployed in production systems (to my knowledge, atleast).
+but redb has not been widely deployed in production systems (at least to my knowledge).
 
 ## Features
 * Zero-copy, thread-safe, `BTreeMap` based API
