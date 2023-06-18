@@ -192,7 +192,7 @@ impl Allocators {
                 page_size,
             );
             let len: usize = (range.end - range.start).try_into().unwrap();
-            storage.write(range.start, len)?
+            storage.write(range.start, len, false)?
         };
         let tracker_bytes = self.region_tracker.to_vec();
         region_tracker_mem.mem_mut()[..tracker_bytes.len()].copy_from_slice(&tracker_bytes);
@@ -207,7 +207,7 @@ impl Allocators {
                 .try_into()
                 .unwrap();
 
-            let mut mem = storage.write(base, len)?;
+            let mut mem = storage.write(base, len, false)?;
             RegionHeader::serialize(&self.region_allocators[i as usize], mem.mem_mut());
         }
 

@@ -170,7 +170,7 @@ impl TransactionalMemory {
 
             header.recovery_required = false;
             storage
-                .write(0, DB_HEADER_SIZE)?
+                .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(false, false));
             allocators.flush_to(tracker_page, layout, &mut storage)?;
@@ -179,7 +179,7 @@ impl TransactionalMemory {
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
             storage
-                .write(0, DB_HEADER_SIZE)?
+                .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true, false));
             storage.flush()?;
@@ -234,7 +234,7 @@ impl TransactionalMemory {
             }
             assert!(!repair_info.invalid_magic_number);
             storage
-                .write(0, DB_HEADER_SIZE)?
+                .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true, false));
             storage.flush()?;
@@ -309,7 +309,7 @@ impl TransactionalMemory {
                 return Err(StorageError::Corrupted("Invalid magic number".to_string()));
             }
             self.storage
-                .write(0, DB_HEADER_SIZE)?
+                .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true, false));
             self.storage.flush()?;
@@ -371,7 +371,7 @@ impl TransactionalMemory {
 
     fn write_header(&self, header: &DatabaseHeader, swap_primary: bool) -> Result {
         self.storage
-            .write(0, DB_HEADER_SIZE)?
+            .write(0, DB_HEADER_SIZE, true)?
             .mem_mut()
             .copy_from_slice(&header.to_bytes(true, swap_primary));
 
@@ -685,7 +685,7 @@ impl TransactionalMemory {
         let len: usize = (address_range.end - address_range.start)
             .try_into()
             .unwrap();
-        let mem = self.storage.write(address_range.start, len)?;
+        let mem = self.storage.write(address_range.start, len, false)?;
 
         #[cfg(debug_assertions)]
         {
@@ -837,7 +837,7 @@ impl TransactionalMemory {
             .unwrap();
 
         #[allow(unused_mut)]
-        let mut mem = self.storage.write(address_range.start, len)?;
+        let mut mem = self.storage.write(address_range.start, len, true)?;
         debug_assert!(mem.mem().len() >= allocation_size);
 
         #[cfg(debug_assertions)]
