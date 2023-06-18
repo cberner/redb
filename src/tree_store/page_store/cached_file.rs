@@ -199,6 +199,12 @@ impl PagedCachedFile {
     }
 
     fn flush_write_buffer(&self) -> Result {
+        #[cfg(any(fuzzing, test))]
+        {
+            if self.crash_countdown.load(Ordering::Acquire) == 0 {
+                return Err(StorageError::SimulatedIOFailure);
+            }
+        }
         self.check_fsync_failure()?;
         let mut write_buffer = self.write_buffer.lock().unwrap();
 
@@ -369,7 +375,8 @@ impl PagedCachedFile {
         }
     }
 
-    pub(super) fn write(&self, offset: u64, len: usize) -> Result<WritablePage> {
+    // If overwrite is true, the page is initialized to zero
+    pub(super) fn write(&self, offset: u64, len: usize, overwrite: bool) -> Result<WritablePage> {
         self.check_fsync_failure()?;
         assert_eq!(0, offset % self.page_size);
         let mut lock = self.write_buffer.lock().unwrap();
@@ -426,6 +433,8 @@ impl PagedCachedFile {
             }
             if let Some(data) = existing {
                 data
+            } else if overwrite {
+                vec![0; len]
             } else {
                 self.read_direct(offset, len)?
             }
