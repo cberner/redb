@@ -263,6 +263,7 @@ impl<'db> WriteTransaction<'db> {
         })
     }
 
+    #[track_caller]
     fn open_system_table<'txn, K: RedbKey + 'static, V: RedbValue + 'static>(
         &'txn self,
         definition: SystemTableDefinition<K, V>,
@@ -566,6 +567,7 @@ impl<'db> WriteTransaction<'db> {
     /// Open the given table
     ///
     /// The table will be created if it does not exist
+    #[track_caller]
     pub fn open_table<'txn, K: RedbKey + 'static, V: RedbValue + 'static>(
         &'txn self,
         definition: TableDefinition<K, V>,
@@ -603,6 +605,7 @@ impl<'db> WriteTransaction<'db> {
     /// Open the given table
     ///
     /// The table will be created if it does not exist
+    #[track_caller]
     pub fn open_multimap_table<'txn, K: RedbKey + 'static, V: RedbKey + 'static>(
         &'txn self,
         definition: MultimapTableDefinition<K, V>,
