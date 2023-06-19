@@ -283,10 +283,6 @@ impl<'db> WriteTransaction<'db> {
             );
         }
         self.dirty.store(true, Ordering::Release);
-        self.open_system_tables
-            .lock()
-            .unwrap()
-            .insert(definition.name().to_string(), panic::Location::caller());
 
         let internal_table = self
             .system_table_tree
@@ -296,6 +292,10 @@ impl<'db> WriteTransaction<'db> {
             .map_err(|e| {
                 e.into_storage_error_or_corrupted("Internal error. System table is corrupted")
             })?;
+        self.open_system_tables
+            .lock()
+            .unwrap()
+            .insert(definition.name().to_string(), panic::Location::caller());
 
         Ok(Table::new(
             definition.name(),
@@ -581,16 +581,16 @@ impl<'db> WriteTransaction<'db> {
             ));
         }
         self.dirty.store(true, Ordering::Release);
-        self.open_tables
-            .lock()
-            .unwrap()
-            .insert(definition.name().to_string(), panic::Location::caller());
 
         let internal_table = self
             .table_tree
             .write()
             .unwrap()
             .get_or_create_table::<K, V>(definition.name(), TableType::Normal)?;
+        self.open_tables
+            .lock()
+            .unwrap()
+            .insert(definition.name().to_string(), panic::Location::caller());
 
         Ok(Table::new(
             definition.name(),
@@ -619,16 +619,16 @@ impl<'db> WriteTransaction<'db> {
             ));
         }
         self.dirty.store(true, Ordering::Release);
-        self.open_tables
-            .lock()
-            .unwrap()
-            .insert(definition.name().to_string(), panic::Location::caller());
 
         let internal_table = self
             .table_tree
             .write()
             .unwrap()
             .get_or_create_table::<K, V>(definition.name(), TableType::Multimap)?;
+        self.open_tables
+            .lock()
+            .unwrap()
+            .insert(definition.name().to_string(), panic::Location::caller());
 
         Ok(MultimapTable::new(
             definition.name(),
