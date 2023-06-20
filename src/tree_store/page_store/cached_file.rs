@@ -15,10 +15,28 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+// Leaf pages are cached with low priority. Everything is cached with high priority
+#[derive(Clone, Copy)]
+pub(crate) enum CachePriority {
+    High,
+    Low,
+}
+
+impl CachePriority {
+    pub(crate) fn default_btree(data: &[u8]) -> CachePriority {
+        if data[0] == LEAF {
+            CachePriority::Low
+        } else {
+            CachePriority::High
+        }
+    }
+}
+
 pub(super) struct WritablePage<'a> {
-    buffer: &'a Mutex<PrioritizedCache>,
+    buffer: &'a Mutex<PrioritizedWriteCache>,
     offset: u64,
     data: Vec<u8>,
+    priority: CachePriority,
 }
 
 impl<'a> WritablePage<'a> {
@@ -34,14 +52,10 @@ impl<'a> WritablePage<'a> {
 impl<'a> Drop for WritablePage<'a> {
     fn drop(&mut self) {
         let data = mem::take(&mut self.data);
-        // TODO: it's quite a hack to check the leaf/branch byte here
-        let low_pri = data[0] == LEAF;
-        assert!(self
-            .buffer
+        self.buffer
             .lock()
             .unwrap()
-            .insert(self.offset, Arc::new(data), low_pri)
-            .is_none());
+            .return_value(&self.offset, Arc::new(data), self.priority);
     }
 }
 
@@ -73,18 +87,17 @@ impl PrioritizedCache {
         }
     }
 
-    fn insert(&mut self, key: u64, value: Arc<Vec<u8>>, low_pri: bool) -> Option<Arc<Vec<u8>>> {
-        #[cfg(debug_assertions)]
-        {
-            if low_pri {
-                assert!(!self.cache.contains_key(&key))
-            } else {
-                assert!(!self.low_pri_cache.contains_key(&key))
-            }
-        }
-        if low_pri {
+    fn insert(
+        &mut self,
+        key: u64,
+        value: Arc<Vec<u8>>,
+        priority: CachePriority,
+    ) -> Option<Arc<Vec<u8>>> {
+        if matches!(priority, CachePriority::Low) {
+            debug_assert!(self.cache.get(&key).is_none());
             self.low_pri_cache.insert(key, value)
         } else {
+            debug_assert!(self.low_pri_cache.get(&key).is_none());
             self.cache.insert(key, value)
         }
     }
@@ -112,6 +125,98 @@ impl PrioritizedCache {
         }
         self.cache.pop_first()
     }
+}
+
+#[derive(Default)]
+struct PrioritizedWriteCache {
+    cache: BTreeMap<u64, Option<Arc<Vec<u8>>>>,
+    low_pri_cache: BTreeMap<u64, Option<Arc<Vec<u8>>>>,
+}
+
+impl PrioritizedWriteCache {
+    fn new() -> Self {
+        Self {
+            cache: Default::default(),
+            low_pri_cache: Default::default(),
+        }
+    }
+
+    fn insert(&mut self, key: u64, value: Arc<Vec<u8>>, priority: CachePriority) {
+        if matches!(priority, CachePriority::Low) {
+            assert!(self.low_pri_cache.insert(key, Some(value)).is_none());
+            debug_assert!(self.cache.get(&key).is_none());
+        } else {
+            assert!(self.cache.insert(key, Some(value)).is_none());
+            debug_assert!(self.low_pri_cache.get(&key).is_none());
+        }
+    }
+
+    fn get(&self, key: &u64) -> Option<&Arc<Vec<u8>>> {
+        let result = self.cache.get(key);
+        if result.is_some() {
+            return result.map(|x| x.as_ref().unwrap());
+        }
+        self.low_pri_cache.get(key).map(|x| x.as_ref().unwrap())
+    }
+
+    fn remove(&mut self, key: &u64) -> Option<Arc<Vec<u8>>> {
+        if let Some(value) = self.cache.remove(key) {
+            assert!(value.is_some());
+            return value;
+        }
+        if let Some(value) = self.low_pri_cache.remove(key) {
+            assert!(value.is_some());
+            return value;
+        }
+        None
+    }
+
+    fn return_value(&mut self, key: &u64, value: Arc<Vec<u8>>, priority: CachePriority) {
+        if matches!(priority, CachePriority::Low) {
+            assert!(self
+                .low_pri_cache
+                .get_mut(key)
+                .unwrap()
+                .replace(value)
+                .is_none());
+        } else {
+            assert!(self.cache.get_mut(key).unwrap().replace(value).is_none());
+        }
+    }
+
+    fn take_value(&mut self, key: &u64) -> Option<Arc<Vec<u8>>> {
+        if let Some(value) = self.cache.get_mut(key) {
+            let result = value.take().unwrap();
+            return Some(result);
+        }
+        if let Some(value) = self.low_pri_cache.get_mut(key) {
+            let result = value.take().unwrap();
+            return Some(result);
+        }
+        None
+    }
+
+    fn pop_lowest_priority(&mut self) -> Option<(u64, Arc<Vec<u8>>, CachePriority)> {
+        for (k, v) in self.low_pri_cache.range(..) {
+            if v.is_some() {
+                let key = *k;
+                return self
+                    .low_pri_cache
+                    .remove(&key)
+                    .map(|x| (key, x.unwrap(), CachePriority::Low));
+            }
+        }
+        for (k, v) in self.cache.range(..) {
+            if v.is_some() {
+                let key = *k;
+                return self
+                    .cache
+                    .remove(&key)
+                    .map(|x| (key, x.unwrap(), CachePriority::High));
+            }
+        }
+        None
+    }
 
     fn clear(&mut self) {
         self.cache.clear();
@@ -133,7 +238,7 @@ pub(super) struct PagedCachedFile {
     fsync_failed: AtomicBool,
     read_cache: Vec<RwLock<PrioritizedCache>>,
     // TODO: maybe move this cache to WriteTransaction?
-    write_buffer: Mutex<PrioritizedCache>,
+    write_buffer: Mutex<PrioritizedWriteCache>,
     #[cfg(any(fuzzing, test))]
     crash_countdown: AtomicU64,
 }
@@ -172,7 +277,7 @@ impl PagedCachedFile {
             reads_hits: Default::default(),
             fsync_failed: Default::default(),
             read_cache,
-            write_buffer: Mutex::new(PrioritizedCache::new()),
+            write_buffer: Mutex::new(PrioritizedWriteCache::new()),
             #[cfg(any(fuzzing, test))]
             crash_countdown: AtomicU64::new(u64::MAX),
         })
@@ -217,10 +322,10 @@ impl PagedCachedFile {
         let mut write_buffer = self.write_buffer.lock().unwrap();
 
         for (offset, buffer) in write_buffer.cache.iter() {
-            self.file.write(*offset, buffer)?;
+            self.file.write(*offset, buffer.as_ref().unwrap())?;
         }
         for (offset, buffer) in write_buffer.low_pri_cache.iter() {
-            self.file.write(*offset, buffer)?;
+            self.file.write(*offset, buffer.as_ref().unwrap())?;
         }
         self.write_buffer_bytes.store(0, Ordering::Release);
         write_buffer.clear();
@@ -302,7 +407,13 @@ impl PagedCachedFile {
 
     // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
     // Doing so will not cause UB, but is a logic error.
-    pub(super) fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<Arc<Vec<u8>>> {
+    pub(super) fn read(
+        &self,
+        offset: u64,
+        len: usize,
+        hint: PageHint,
+        cache_policy: impl Fn(&[u8]) -> CachePriority,
+    ) -> Result<Arc<Vec<u8>>> {
         self.check_fsync_failure()?;
         debug_assert_eq!(0, offset % self.page_size);
         #[cfg(feature = "cache_metrics")]
@@ -332,8 +443,7 @@ impl PagedCachedFile {
         let buffer = Arc::new(self.read_direct(offset, len)?);
         let cache_size = self.read_cache_bytes.fetch_add(len, Ordering::AcqRel);
         let mut write_lock = self.read_cache[cache_slot].write().unwrap();
-        // TODO: this is quite a hack to check the leaf/branch byte here
-        write_lock.insert(offset, buffer.clone(), buffer[0] == LEAF);
+        write_lock.insert(offset, buffer.clone(), cache_policy(&buffer));
         let mut removed = 0;
         if cache_size + len > self.max_read_cache_bytes {
             while removed < len {
@@ -384,7 +494,14 @@ impl PagedCachedFile {
     }
 
     // If overwrite is true, the page is initialized to zero
-    pub(super) fn write(&self, offset: u64, len: usize, overwrite: bool) -> Result<WritablePage> {
+    // cache_policy takes the existing data as an argument and returns the priority. The priority should be stable and not change after WritablePage is dropped
+    pub(super) fn write(
+        &self,
+        offset: u64,
+        len: usize,
+        overwrite: bool,
+        cache_policy: impl Fn(&[u8]) -> CachePriority,
+    ) -> Result<WritablePage> {
         self.check_fsync_failure()?;
         assert_eq!(0, offset % self.page_size);
         let mut lock = self.write_buffer.lock().unwrap();
@@ -408,7 +525,7 @@ impl PagedCachedFile {
             }
         };
 
-        let data = if let Some(removed) = lock.remove(&offset) {
+        let data = if let Some(removed) = lock.take_value(&offset) {
             Arc::try_unwrap(removed).unwrap()
         } else {
             let previous = self.write_buffer_bytes.fetch_add(len, Ordering::AcqRel);
@@ -422,13 +539,11 @@ impl PagedCachedFile {
                 }
                 let mut removed_bytes = 0;
                 while removed_bytes < len {
-                    if let Some((offset, buffer)) = lock.pop_lowest_priority() {
+                    if let Some((offset, buffer, removed_priority)) = lock.pop_lowest_priority() {
                         let removed_len = buffer.len();
                         let result = self.file.write(offset, &buffer);
                         if result.is_err() {
-                            let low_pri = buffer[0] == LEAF;
-                            // TODO: it's quite a hack to check the leaf/branch byte here
-                            lock.insert(offset, buffer, low_pri);
+                            lock.insert(offset, buffer, removed_priority);
                         }
                         result?;
                         self.write_buffer_bytes
@@ -439,18 +554,23 @@ impl PagedCachedFile {
                     }
                 }
             }
-            if let Some(data) = existing {
+            let result = if let Some(data) = existing {
                 data
             } else if overwrite {
                 vec![0; len]
             } else {
                 self.read_direct(offset, len)?
-            }
+            };
+            let priority = cache_policy(&result);
+            lock.insert(offset, Arc::new(result), priority);
+            Arc::try_unwrap(lock.take_value(&offset).unwrap()).unwrap()
         };
+        let priority = cache_policy(&data);
         Ok(WritablePage {
             buffer: &self.write_buffer,
             offset,
             data,
+            priority,
         })
     }
 }
