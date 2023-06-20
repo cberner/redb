@@ -4,7 +4,7 @@ use crate::tree_store::btree_base::{
 };
 use crate::tree_store::btree_iters::BtreeDrain;
 use crate::tree_store::btree_mutator::MutateHelper;
-use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory};
+use crate::tree_store::page_store::{CachePriority, Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::{
     AccessGuardMut, AllPageNumbersBtreeIter, BtreeDrainFilter, BtreeRangeIter, PageHint, PageNumber,
 };
@@ -176,7 +176,10 @@ impl<'a> UntypedBtreeMut<'a> {
         page_number: PageNumber,
     ) -> Result<Option<(PageNumber, Checksum)>> {
         let old_page = self.mem.get_page(page_number)?;
-        let mut new_page = self.mem.allocate_lowest(old_page.memory().len())?;
+        let mut new_page = self.mem.allocate_lowest(
+            old_page.memory().len(),
+            CachePriority::default_btree(old_page.memory()),
+        )?;
         let new_page_number = new_page.get_page_number();
         if !new_page_number.is_before(page_number) {
             drop(new_page);

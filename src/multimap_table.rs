@@ -1,9 +1,9 @@
 use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::sealed::Sealed;
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, LeafMutator,
-    Page, PageHint, PageNumber, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut,
-    BRANCH, LEAF, MAX_VALUE_LENGTH,
+    AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, CachePriority, Checksum,
+    LeafAccessor, LeafMutator, Page, PageHint, PageNumber, RawBtree, RawLeafBuilder,
+    TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF, MAX_VALUE_LENGTH,
 };
 use crate::types::{RedbKey, RedbValue, TypeName};
 use crate::{AccessGuard, Result, StorageError, WriteTransaction};
@@ -659,7 +659,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                             .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                     } else {
                         // convert into a subtree
-                        let mut page = self.mem.allocate(leaf_data.len())?;
+                        let mut page = self.mem.allocate(leaf_data.len(), CachePriority::Low)?;
                         page.memory_mut()[..leaf_data.len()].copy_from_slice(leaf_data);
                         let page_number = page.get_page_number();
                         drop(page);

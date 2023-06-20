@@ -1,6 +1,6 @@
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
-use crate::tree_store::page_store::cached_file::PagedCachedFile;
+use crate::tree_store::page_store::cached_file::{CachePriority, PagedCachedFile};
 use crate::tree_store::page_store::header::DatabaseHeader;
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, MAX_MAX_PAGE_ORDER};
@@ -192,7 +192,7 @@ impl Allocators {
                 page_size,
             );
             let len: usize = (range.end - range.start).try_into().unwrap();
-            storage.write(range.start, len, false)?
+            storage.write(range.start, len, false, |_| CachePriority::High)?
         };
         let tracker_bytes = self.region_tracker.to_vec();
         region_tracker_mem.mem_mut()[..tracker_bytes.len()].copy_from_slice(&tracker_bytes);
@@ -207,7 +207,7 @@ impl Allocators {
                 .try_into()
                 .unwrap();
 
-            let mut mem = storage.write(base, len, false)?;
+            let mut mem = storage.write(base, len, false, |_| CachePriority::High)?;
             RegionHeader::serialize(&self.region_allocators[i as usize], mem.mem_mut());
         }
 
