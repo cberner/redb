@@ -74,6 +74,14 @@ impl PrioritizedCache {
     }
 
     fn insert(&mut self, key: u64, value: Arc<Vec<u8>>, low_pri: bool) -> Option<Arc<Vec<u8>>> {
+        #[cfg(debug_assertions)]
+        {
+            if low_pri {
+                assert!(!self.cache.contains_key(&key))
+            } else {
+                assert!(!self.low_pri_cache.contains_key(&key))
+            }
+        }
         if low_pri {
             self.low_pri_cache.insert(key, value)
         } else {
