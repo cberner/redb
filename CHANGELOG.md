@@ -1,5 +1,11 @@
 # redb - Changelog
 
+## 1.0.1 - 2023-06-26
+* Fix panic that could occur after an IO error when reopening a database
+* Fix panic that could occur after an IO error when opening a table
+* Improve error message when opening a table twice to include a more meaningful line number
+* Performance improvements
+
 ## 1.0.0 - 2023-06-16
 ### Announcement
 redb has reached its first stable release! The file format is now gauranteed to be backward compatible,
