@@ -335,6 +335,11 @@ impl TransactionalMemory {
         Ok(self.state.lock().unwrap().header.recovery_required)
     }
 
+    // TODO: need a clearer distinction between this and needs_repair()
+    pub(crate) fn storage_failure(&self) -> bool {
+        self.needs_recovery.load(Ordering::Acquire)
+    }
+
     pub(crate) fn repair_primary_corrupted(&self) {
         let mut state = self.state.lock().unwrap();
         state.header.swap_primary_slot();
@@ -537,7 +542,13 @@ impl TransactionalMemory {
         state.header.swap_primary_slot();
 
         if shrunk {
-            self.storage.resize(state.header.layout().len())?;
+            let result = self.storage.resize(state.header.layout().len());
+            if result.is_err() {
+                // TODO: it would be nice to have a more cohesive approach to setting this.
+                // we do it in commit() & rollback() on failure, but there are probably other places that need it
+                self.needs_recovery.store(true, Ordering::Release);
+                return result;
+            }
         }
 
         self.allocated_since_commit.lock().unwrap().clear();
@@ -948,7 +959,13 @@ impl TransactionalMemory {
         );
         assert!(new_layout.len() >= layout.len());
 
-        self.storage.resize(new_layout.len())?;
+        let result = self.storage.resize(new_layout.len());
+        if result.is_err() {
+            // TODO: it would be nice to have a more cohesive approach to setting this.
+            // we do it in commit() & rollback() on failure, but there are probably other places that need it
+            self.needs_recovery.store(true, Ordering::Release);
+            return result;
+        }
 
         state.allocators.resize_to(new_layout);
         state.header.set_layout(new_layout);

@@ -1017,7 +1017,7 @@ impl<'db> WriteTransaction<'db> {
 impl<'a> Drop for WriteTransaction<'a> {
     fn drop(&mut self) {
         *self.live_write_transaction = None;
-        if !self.completed && !thread::panicking() {
+        if !self.completed && !thread::panicking() && !self.mem.storage_failure() {
             #[allow(unused_variables)]
             if let Err(error) = self.abort_inner() {
                 #[cfg(feature = "logging")]
