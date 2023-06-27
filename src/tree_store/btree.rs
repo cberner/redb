@@ -29,8 +29,7 @@ pub(crate) struct BtreeStats {
 
 pub(crate) struct UntypedBtreeMut<'a> {
     mem: &'a TransactionalMemory,
-    // TODO: Why is this an Arc<Mutex>???
-    root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
+    root: Option<(PageNumber, Checksum)>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     key_width: Option<usize>,
     value_width: Option<usize>,
@@ -46,7 +45,7 @@ impl<'a> UntypedBtreeMut<'a> {
     ) -> Self {
         Self {
             mem,
-            root: Arc::new(Mutex::new(root)),
+            root,
             freed_pages,
             key_width,
             value_width,
@@ -54,12 +53,12 @@ impl<'a> UntypedBtreeMut<'a> {
     }
 
     pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
-        *(*self.root).lock().unwrap()
+        self.root
     }
 
     // Recomputes the checksum for all pages that are uncommitted
     pub(crate) fn finalize_dirty_checksums(&mut self) -> Result {
-        let mut root = *self.root.lock().unwrap();
+        let mut root = self.root;
         if let Some((ref page_number, ref mut checksum)) = root {
             if !self.mem.uncommitted(*page_number) {
                 // root page is clean
@@ -67,7 +66,7 @@ impl<'a> UntypedBtreeMut<'a> {
             }
 
             *checksum = self.finalize_dirty_checksums_helper(*page_number)?;
-            *self.root.lock().unwrap() = root;
+            self.root = root;
         }
 
         Ok(())
@@ -112,8 +111,7 @@ impl<'a> UntypedBtreeMut<'a> {
     where
         F: Fn(PageMut) -> Result,
     {
-        let root = *self.root.lock().unwrap();
-        if let Some((ref page_number, _)) = root {
+        if let Some((ref page_number, _)) = self.root {
             if !self.mem.uncommitted(*page_number) {
                 // root page is clean
                 return Ok(());
@@ -165,7 +163,7 @@ impl<'a> UntypedBtreeMut<'a> {
     pub(crate) fn relocate(&mut self) -> Result<bool> {
         if let Some(root) = self.get_root() {
             if let Some(new_root) = self.relocate_helper(root.0)? {
-                *self.root.lock().unwrap() = Some(new_root);
+                self.root = Some(new_root);
                 return Ok(true);
             }
         }
