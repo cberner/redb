@@ -77,7 +77,7 @@ impl<'a> UntypedBtreeMut<'a> {
         let mut page = self.mem.get_page_mut(page_number)?;
 
         match page.memory()[0] {
-            LEAF => Ok(leaf_checksum(&page, self.key_width, self.value_width)),
+            LEAF => leaf_checksum(&page, self.key_width, self.value_width),
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, self.key_width);
                 let mut new_children = vec![];
@@ -100,7 +100,7 @@ impl<'a> UntypedBtreeMut<'a> {
                 }
                 drop(mutator);
 
-                Ok(branch_checksum(&page, self.key_width))
+                branch_checksum(&page, self.key_width)
             }
             _ => unreachable!(),
         }
@@ -506,11 +506,20 @@ impl<'a> RawBtree<'a> {
         let node_mem = page.memory();
         Ok(match node_mem[0] {
             LEAF => {
-                expected_checksum
-                    == leaf_checksum(&page, self.fixed_key_size, self.fixed_value_size)
+                if let Ok(computed) =
+                    leaf_checksum(&page, self.fixed_key_size, self.fixed_value_size)
+                {
+                    expected_checksum == computed
+                } else {
+                    false
+                }
             }
             BRANCH => {
-                if expected_checksum != branch_checksum(&page, self.fixed_key_size) {
+                if let Ok(computed) = branch_checksum(&page, self.fixed_key_size) {
+                    if expected_checksum != computed {
+                        return Ok(false);
+                    }
+                } else {
                     return Ok(false);
                 }
                 let accessor = BranchAccessor::new(&page, self.fixed_key_size);
