@@ -1,7 +1,7 @@
 use crate::tree_store::page_store::{xxh3_checksum, Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::PageNumber;
 use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
-use crate::Result;
+use crate::{Result, StorageError};
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
@@ -19,20 +19,37 @@ pub(super) fn leaf_checksum<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
-) -> Checksum {
+) -> Result<Checksum, StorageError> {
     let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
-    // TODO: during verification, the page could be corrupted, so this needs to be safe on
-    // arbitrary data
     let end = accessor.value_end(accessor.num_pairs() - 1).unwrap();
-    xxh3_checksum(&page.memory()[..end])
+    if end > page.memory().len() {
+        Err(StorageError::Corrupted(format!(
+            "Leaf page {:?} corrupted. Last offset {} beyond end of data {}",
+            page.get_page_number(),
+            end,
+            page.memory().len()
+        )))
+    } else {
+        Ok(xxh3_checksum(&page.memory()[..end]))
+    }
 }
 
-pub(super) fn branch_checksum<T: Page>(page: &T, fixed_key_size: Option<usize>) -> Checksum {
+pub(super) fn branch_checksum<T: Page>(
+    page: &T,
+    fixed_key_size: Option<usize>,
+) -> Result<Checksum, StorageError> {
     let accessor = BranchAccessor::new(page, fixed_key_size);
-    // TODO: during verification, the page could be corrupted, so this needs to be safe on
-    // arbitrary data
     let end = accessor.key_end(accessor.num_keys() - 1);
-    xxh3_checksum(&page.memory()[..end])
+    if end > page.memory().len() {
+        Err(StorageError::Corrupted(format!(
+            "Branch page {:?} corrupted. Last offset {} beyond end of data {}",
+            page.get_page_number(),
+            end,
+            page.memory().len()
+        )))
+    } else {
+        Ok(xxh3_checksum(&page.memory()[..end]))
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
