@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::TransactionError;
-use crate::multimap_table::parse_subtree_roots;
+use crate::multimap_table::{parse_subtree_roots, DynamicCollection};
 use crate::sealed::Sealed;
 use crate::transactions::SAVEPOINT_TABLE;
 #[cfg(feature = "logging")]
@@ -263,76 +263,24 @@ impl Database {
         self.mem.set_crash_countdown(value);
     }
 
-    fn verify_primary_checksums(mem: &TransactionalMemory) -> Result<bool> {
-        if let Some((root, root_checksum)) = mem.get_data_root() {
-            if !RawBtree::new(
-                Some((root, root_checksum)),
-                <&str>::fixed_width(),
-                InternalTableDefinition::fixed_width(),
-                mem,
-            )
-            .verify_checksum()?
-            {
-                return Ok(false);
-            }
-
-            // Iterate over all other tables
-            let iter: BtreeRangeIter<&str, InternalTableDefinition> =
-                BtreeRangeIter::new::<RangeFull, &str>(&(..), Some(root), mem)?;
-            for entry in iter {
-                let definition = entry?.value();
-                if let Some((table_root, table_checksum)) = definition.get_root() {
-                    if !RawBtree::new(
-                        Some((table_root, table_checksum)),
-                        definition.get_fixed_key_size(),
-                        definition.get_fixed_value_size(),
-                        mem,
-                    )
-                    .verify_checksum()?
-                    {
-                        return Ok(false);
-                    }
-                }
-            }
+    pub(crate) fn verify_primary_checksums(mem: &TransactionalMemory) -> Result<bool> {
+        let fake_freed_pages = Arc::new(Mutex::new(vec![]));
+        let table_tree = TableTree::new(mem.get_data_root(), mem, fake_freed_pages.clone());
+        if !table_tree.verify_checksums()? {
+            return Ok(false);
         }
-
-        if let Some((root, root_checksum)) = mem.get_system_root() {
-            if !RawBtree::new(
-                Some((root, root_checksum)),
-                <&str>::fixed_width(),
-                InternalTableDefinition::fixed_width(),
-                mem,
-            )
-            .verify_checksum()?
-            {
-                return Ok(false);
-            }
-
-            // Iterate over all other tables
-            let iter: BtreeRangeIter<&str, InternalTableDefinition> =
-                BtreeRangeIter::new::<RangeFull, &str>(&(..), Some(root), mem)?;
-            for entry in iter {
-                let definition = entry?.value();
-                if let Some((table_root, table_checksum)) = definition.get_root() {
-                    if !RawBtree::new(
-                        Some((table_root, table_checksum)),
-                        definition.get_fixed_key_size(),
-                        definition.get_fixed_value_size(),
-                        mem,
-                    )
-                    .verify_checksum()?
-                    {
-                        return Ok(false);
-                    }
-                }
-            }
+        let system_table_tree =
+            TableTree::new(mem.get_system_root(), mem, fake_freed_pages.clone());
+        if !system_table_tree.verify_checksums()? {
+            return Ok(false);
         }
+        assert!(fake_freed_pages.lock().unwrap().is_empty());
 
         if let Some((freed_root, freed_checksum)) = mem.get_freed_root() {
             if !RawBtree::new(
                 Some((freed_root, freed_checksum)),
                 FreedTableKey::fixed_width(),
-                None,
+                FreedPageList::fixed_width(),
                 mem,
             )
             .verify_checksum()?
@@ -499,34 +447,44 @@ impl Database {
         for entry in iter {
             let definition = entry?.value();
             if let Some((table_root, _)) = definition.get_root() {
-                let table_pages_iter = AllPageNumbersBtreeIter::new(
-                    table_root,
-                    definition.get_fixed_key_size(),
-                    definition.get_fixed_value_size(),
-                    mem,
-                )?;
-                mem.mark_pages_allocated(table_pages_iter, allow_duplicates)?;
+                match definition.get_type() {
+                    TableType::Normal => {
+                        let table_pages_iter = AllPageNumbersBtreeIter::new(
+                            table_root,
+                            definition.get_fixed_key_size(),
+                            definition.get_fixed_value_size(),
+                            mem,
+                        )?;
+                        mem.mark_pages_allocated(table_pages_iter, allow_duplicates)?;
+                    }
+                    TableType::Multimap => {
+                        let table_pages_iter = AllPageNumbersBtreeIter::new(
+                            table_root,
+                            definition.get_fixed_key_size(),
+                            <&DynamicCollection>::fixed_width(),
+                            mem,
+                        )?;
+                        mem.mark_pages_allocated(table_pages_iter, allow_duplicates)?;
 
-                // Multimap tables may have additional subtrees in their values
-                if definition.get_type() == TableType::Multimap {
-                    let table_pages_iter = AllPageNumbersBtreeIter::new(
-                        table_root,
-                        definition.get_fixed_key_size(),
-                        definition.get_fixed_value_size(),
-                        mem,
-                    )?;
-                    for table_page in table_pages_iter {
-                        let page = mem.get_page(table_page?)?;
-                        let subtree_roots =
-                            parse_subtree_roots(&page, definition.get_fixed_key_size());
-                        for sub_root in subtree_roots {
-                            let sub_root_iter = AllPageNumbersBtreeIter::new(
-                                sub_root,
-                                definition.get_fixed_value_size(),
-                                <()>::fixed_width(),
-                                mem,
-                            )?;
-                            mem.mark_pages_allocated(sub_root_iter, allow_duplicates)?;
+                        let table_pages_iter = AllPageNumbersBtreeIter::new(
+                            table_root,
+                            definition.get_fixed_key_size(),
+                            <&DynamicCollection>::fixed_width(),
+                            mem,
+                        )?;
+                        for table_page in table_pages_iter {
+                            let page = mem.get_page(table_page?)?;
+                            let subtree_roots =
+                                parse_subtree_roots(&page, definition.get_fixed_key_size());
+                            for (sub_root, _) in subtree_roots {
+                                let sub_root_iter = AllPageNumbersBtreeIter::new(
+                                    sub_root,
+                                    definition.get_fixed_value_size(),
+                                    <()>::fixed_width(),
+                                    mem,
+                                )?;
+                                mem.mark_pages_allocated(sub_root_iter, allow_duplicates)?;
+                            }
                         }
                     }
                 }

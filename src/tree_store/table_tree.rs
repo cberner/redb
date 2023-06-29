@@ -1,9 +1,11 @@
 use crate::error::TableError;
-use crate::multimap_table::finalize_tree_and_subtree_checksums;
+use crate::multimap_table::{
+    finalize_tree_and_subtree_checksums, verify_tree_and_subtree_checksums,
+};
 use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
-use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
+use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, RawBtree, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace, TypeName};
 use crate::{DatabaseStats, Result};
 use std::cmp::max;
@@ -474,6 +476,48 @@ impl<'txn> TableTree<'txn> {
 
     pub(crate) fn clear_table_root_updates(&mut self) {
         self.pending_table_updates.clear();
+    }
+
+    pub(crate) fn verify_checksums(&self) -> Result<bool> {
+        assert!(self.pending_table_updates.is_empty());
+        if !self.tree.verify_checksum()? {
+            return Ok(false);
+        }
+
+        for entry in self.tree.range::<RangeFull, &str>(&(..))? {
+            let entry = entry?;
+            let definition = entry.value();
+            // TODO: all these matches on table_type() are pretty errorprone, because you can call .get_fixed_value_size() on either.
+            // Maybe InternalTableDefinition should be an enum for normal and multimap, instead
+            match definition.get_type() {
+                TableType::Normal => {
+                    if let Some((table_root, table_checksum)) = definition.get_root() {
+                        if !RawBtree::new(
+                            Some((table_root, table_checksum)),
+                            definition.get_fixed_key_size(),
+                            definition.get_fixed_value_size(),
+                            self.mem,
+                        )
+                        .verify_checksum()?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                }
+                TableType::Multimap => {
+                    if !verify_tree_and_subtree_checksums(
+                        definition.get_root(),
+                        definition.get_fixed_key_size(),
+                        definition.get_fixed_value_size(),
+                        self.mem,
+                    )? {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+
+        Ok(true)
     }
 
     pub(crate) fn flush_table_root_updates(&mut self) -> Result<Option<(PageNumber, Checksum)>> {

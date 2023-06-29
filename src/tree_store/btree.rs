@@ -234,6 +234,16 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         }
     }
 
+    pub(crate) fn verify_checksum(&self) -> Result<bool> {
+        RawBtree::new(
+            self.get_root(),
+            K::fixed_width(),
+            V::fixed_width(),
+            self.mem,
+        )
+        .verify_checksum()
+    }
+
     pub(crate) fn finalize_dirty_checksums(&mut self) -> Result {
         let mut tree = UntypedBtreeMut::new(
             self.get_root(),

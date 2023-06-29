@@ -2,8 +2,8 @@ use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::sealed::Sealed;
 use crate::tree_store::{
     AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, Checksum, LeafAccessor, LeafMutator,
-    Page, PageHint, PageNumber, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF,
-    MAX_VALUE_LENGTH,
+    Page, PageHint, PageNumber, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut,
+    BRANCH, LEAF, MAX_VALUE_LENGTH,
 };
 use crate::types::{RedbKey, RedbValue, TypeName};
 use crate::{AccessGuard, Result, StorageError, WriteTransaction};
@@ -14,6 +14,48 @@ use std::mem;
 use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull};
 use std::sync::{Arc, Mutex};
+
+// Verify all the checksums in the tree, including any Dynamic collection subtrees
+pub(crate) fn verify_tree_and_subtree_checksums(
+    root: Option<(PageNumber, Checksum)>,
+    key_size: Option<usize>,
+    value_size: Option<usize>,
+    mem: &TransactionalMemory,
+) -> Result<bool> {
+    if let Some((root, root_checksum)) = root {
+        if !RawBtree::new(
+            Some((root, root_checksum)),
+            key_size,
+            <&DynamicCollection>::fixed_width(),
+            mem,
+        )
+        .verify_checksum()?
+        {
+            return Ok(false);
+        }
+
+        let table_pages_iter =
+            AllPageNumbersBtreeIter::new(root, key_size, <&DynamicCollection>::fixed_width(), mem)?;
+        for table_page in table_pages_iter {
+            let page = mem.get_page(table_page?)?;
+            let subtree_roots = parse_subtree_roots(&page, key_size);
+            for (sub_root, sub_root_checksum) in subtree_roots {
+                if !RawBtree::new(
+                    Some((sub_root, sub_root_checksum)),
+                    value_size,
+                    <()>::fixed_width(),
+                    mem,
+                )
+                .verify_checksum()?
+                {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+
+    Ok(true)
+}
 
 // Finalize all the checksums in the tree, including any Dynamic collection subtrees
 // Returns the root checksum
@@ -80,7 +122,7 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
 pub(crate) fn parse_subtree_roots<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
-) -> Vec<PageNumber> {
+) -> Vec<(PageNumber, Checksum)> {
     match page.memory()[0] {
         BRANCH => {
             vec![]
@@ -96,7 +138,7 @@ pub(crate) fn parse_subtree_roots<T: Page>(
                 let entry = accessor.entry(i).unwrap();
                 let collection = <&DynamicCollection>::from_bytes(entry.value());
                 if matches!(collection.collection_type(), DynamicCollectionType::Subtree) {
-                    result.push(collection.as_subtree().0);
+                    result.push(collection.as_subtree());
                 }
             }
 
@@ -201,7 +243,7 @@ impl Into<u8> for DynamicCollectionType {
 /// (when type = 2) checksum (16 bytes): sub tree checksum
 #[derive(Debug)]
 #[repr(transparent)]
-struct DynamicCollection {
+pub(crate) struct DynamicCollection {
     data: [u8],
     // TODO: include V type when GATs are stable
     // _value_type: PhantomData<V>,
