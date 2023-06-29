@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 1.0.2 - 2023-06-2
+* Fix panic when recovering some databases after a forceful shutdown
+* Fix panic when recovering databases with multimaps that have fixed width values after a forceful shutdown
+
 ## 1.0.1 - 2023-06-26
 * Fix panic that could occur after an IO error when reopening a database
 * Fix panic that could occur after an IO error when opening a table
