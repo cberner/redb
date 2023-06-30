@@ -818,6 +818,29 @@ fn regression19() {
 }
 
 #[test]
+fn regression20() {
+    let tmpfile = create_tempfile();
+
+    let table_def: MultimapTableDefinition<'static, u128, u128> =
+        MultimapTableDefinition::new("some-table");
+
+    for _ in 0..3 {
+        let mut db = Database::builder().create(tmpfile.path()).unwrap();
+        db.check_integrity().unwrap();
+
+        let txn = db.begin_write().unwrap();
+        let mut table = txn.open_multimap_table(table_def).unwrap();
+
+        for i in 0..1024 {
+            table.insert(0, i).unwrap();
+        }
+        drop(table);
+
+        txn.commit().unwrap();
+    }
+}
+
+#[test]
 fn no_savepoint_resurrection() {
     let tmpfile = create_tempfile();
 

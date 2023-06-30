@@ -110,36 +110,6 @@ impl TransactionalMemory {
         let region_size = min(region_size, (MAX_PAGE_INDEX as u64 + 1) * page_size as u64);
         assert!(region_size.is_power_of_two());
 
-        let region_tracker_required_bytes =
-            RegionTracker::new(INITIAL_REGIONS, MAX_MAX_PAGE_ORDER + 1)
-                .to_vec()
-                .len();
-
-        // Make sure that there is enough room to allocate the region tracker into a page
-        let size: u64 = max(
-            MIN_DESIRED_USABLE_BYTES,
-            page_size as u64 * MIN_USABLE_PAGES as u64,
-        );
-        let tracker_space =
-            (page_size * ((region_tracker_required_bytes + page_size - 1) / page_size)) as u64;
-        let starting_size = size + tracker_space;
-
-        let layout = DatabaseLayout::calculate(
-            starting_size,
-            (region_size / u64::try_from(page_size).unwrap())
-                .try_into()
-                .unwrap(),
-            page_size.try_into().unwrap(),
-        );
-
-        {
-            let file_len = file.metadata()?.len();
-
-            if file_len < layout.len() {
-                file.set_len(layout.len())?;
-            }
-        }
-
         let mut storage = PagedCachedFile::new(
             file,
             page_size as u64,
@@ -147,12 +117,47 @@ impl TransactionalMemory {
             write_cache_size_bytes,
         )?;
 
-        let magic_number: [u8; MAGICNUMBER.len()] = storage
-            .read_direct(0, MAGICNUMBER.len())?
-            .try_into()
-            .unwrap();
+        let magic_number: [u8; MAGICNUMBER.len()] =
+            if storage.raw_file_len()? >= MAGICNUMBER.len() as u64 {
+                storage
+                    .read_direct(0, MAGICNUMBER.len())?
+                    .try_into()
+                    .unwrap()
+            } else {
+                [0; MAGICNUMBER.len()]
+            };
 
         if magic_number != MAGICNUMBER {
+            let region_tracker_required_bytes =
+                RegionTracker::new(INITIAL_REGIONS, MAX_MAX_PAGE_ORDER + 1)
+                    .to_vec()
+                    .len();
+
+            // Make sure that there is enough room to allocate the region tracker into a page
+            let size: u64 = max(
+                MIN_DESIRED_USABLE_BYTES,
+                page_size as u64 * MIN_USABLE_PAGES as u64,
+            );
+            let tracker_space =
+                (page_size * ((region_tracker_required_bytes + page_size - 1) / page_size)) as u64;
+            let starting_size = size + tracker_space;
+
+            let layout = DatabaseLayout::calculate(
+                starting_size,
+                (region_size / u64::try_from(page_size).unwrap())
+                    .try_into()
+                    .unwrap(),
+                page_size.try_into().unwrap(),
+            );
+
+            {
+                let file_len = storage.raw_file_len()?;
+
+                if file_len < layout.len() {
+                    storage.resize(layout.len())?;
+                }
+            }
+
             let mut allocators = Allocators::new(layout);
 
             // Allocate the region tracker in the zeroth region
@@ -209,7 +214,9 @@ impl TransactionalMemory {
             return Err(DatabaseError::UpgradeRequired(version));
         }
 
-        let needs_recovery = header.recovery_required;
+        assert!(storage.raw_file_len()? >= header.layout().len());
+        let needs_recovery =
+            header.recovery_required || header.layout().len() != storage.raw_file_len()?;
         if needs_recovery {
             let layout = header.layout();
             let region_max_pages = layout.full_region_layout().num_pages();
