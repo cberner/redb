@@ -1,6 +1,6 @@
 # redb - Changelog
 
-## 1.0.2 - 2023-06-2
+## 1.0.2 - 2023-06-29
 * Fix panic when recovering some databases after a forceful shutdown
 * Fix panic when recovering databases with multimaps that have fixed width values after a forceful shutdown
 
