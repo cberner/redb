@@ -329,19 +329,6 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         Ok(result)
     }
 
-    // Like remove(), but does not free uncommitted data
-    pub(crate) fn remove_retain_uncommitted(
-        &mut self,
-        key: &K::SelfType<'_>,
-    ) -> Result<Option<(AccessGuard<V>, Vec<PageNumber>)>> {
-        let mut freed_pages = vec![];
-        let mut root = self.root.lock().unwrap();
-        let mut operation: MutateHelper<'_, '_, K, V> =
-            MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut freed_pages);
-        let result = operation.safe_delete(key)?;
-        Ok(result.map(|x| (x, freed_pages)))
-    }
-
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.read_tree()?.print_debug(include_values)
