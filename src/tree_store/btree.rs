@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
-    branch_checksum, leaf_checksum, BranchAccessor, BranchMutator, Checksum, FreePolicy,
-    LeafAccessor, BRANCH, DEFERRED, LEAF,
+    branch_checksum, leaf_checksum, BranchAccessor, BranchMutator, Checksum, LeafAccessor, BRANCH,
+    DEFERRED, LEAF,
 };
 use crate::tree_store::btree_iters::BtreeDrain;
 use crate::tree_store::btree_mutator::MutateHelper;
@@ -205,7 +205,9 @@ impl<'a> UntypedBtreeMut<'a> {
         }
 
         let mut freed_pages = self.freed_pages.lock().unwrap();
-        FreePolicy::Uncommitted.conditional_free(page_number, &mut freed_pages, self.mem);
+        if !self.mem.free_if_uncommitted(page_number) {
+            freed_pages.push(page_number);
+        }
 
         Ok(Some((new_page_number, DEFERRED)))
     }
@@ -304,12 +306,8 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         );
         let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut root = self.root.lock().unwrap();
-        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
-            &mut root,
-            FreePolicy::Uncommitted,
-            self.mem,
-            freed_pages.as_mut(),
-        );
+        let mut operation: MutateHelper<'_, '_, K, V> =
+            MutateHelper::new(&mut root, self.mem, freed_pages.as_mut());
         let (old_value, _) = operation.insert(key, value)?;
         Ok(old_value)
     }
@@ -319,12 +317,8 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
         let mut root = self.root.lock().unwrap();
         let mut freed_pages = self.freed_pages.lock().unwrap();
-        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
-            &mut root,
-            FreePolicy::Uncommitted,
-            self.mem,
-            freed_pages.as_mut(),
-        );
+        let mut operation: MutateHelper<'_, '_, K, V> =
+            MutateHelper::new(&mut root, self.mem, freed_pages.as_mut());
         let result = operation.delete(key)?;
         Ok(result)
     }
@@ -373,10 +367,10 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         let mut free_on_drop = vec![];
         let mut root = self.root.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> =
-            MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut free_on_drop);
+            MutateHelper::new_do_not_modify(&mut root, self.mem, &mut free_on_drop);
         for entry in iter {
-            // TODO: optimize so that we don't have to call safe_delete in a loop
-            assert!(operation.safe_delete(&entry?.key())?.is_some());
+            // TODO: optimize so that we don't have to call delete in a loop
+            assert!(operation.delete(&entry?.key())?.is_some());
         }
 
         let result = BtreeDrain::new(
@@ -407,12 +401,12 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         let mut free_on_drop = vec![];
         let mut root = self.root.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> =
-            MutateHelper::new(&mut root, FreePolicy::Never, self.mem, &mut free_on_drop);
+            MutateHelper::new_do_not_modify(&mut root, self.mem, &mut free_on_drop);
         for entry in iter {
-            // TODO: optimize so that we don't have to call safe_delete in a loop
+            // TODO: optimize so that we don't have to call delete in a loop
             let entry = entry?;
             if predicate(entry.key(), entry.value()) {
-                assert!(operation.safe_delete(&entry.key())?.is_some());
+                assert!(operation.delete(&entry.key())?.is_some());
             }
         }
 
@@ -452,12 +446,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValueMutInPlace + 'a> BtreeMut<'a, K, V> {
         let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut value = vec![0u8; value_length as usize];
         V::initialize(&mut value);
-        let mut operation = MutateHelper::<K, V>::new(
-            &mut root,
-            FreePolicy::Uncommitted,
-            self.mem,
-            freed_pages.as_mut(),
-        );
+        let mut operation = MutateHelper::<K, V>::new(&mut root, self.mem, freed_pages.as_mut());
         let (_, guard) = operation.insert(key, &V::from_bytes(&value))?;
         drop(root);
         Ok(guard)
