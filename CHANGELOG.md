@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 1.0.4 - 2023-07-01
+* Fix serious data corruption issue when calling `drain()` or `drain_filter()` on a `Table` that had
+  uncommitted data
+
 ## 1.0.3 - 2023-06-30
 * Fix panic when re-opening databases of certain, small, sizes
 
