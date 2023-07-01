@@ -835,12 +835,8 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
     where
         K: 'a,
     {
-        // Safety: No other references to this table can exist.
-        // Tables can only be opened mutably in one location (see Error::TableAlreadyOpen),
-        // and we borrow &mut self.
-        let iter = if let Some((collection, mut pages)) =
-            self.tree.remove_retain_uncommitted(key.borrow())?
-        {
+        let iter = if let Some(collection) = self.tree.remove(key.borrow())? {
+            let mut pages = vec![];
             if matches!(
                 collection.value().collection_type(),
                 DynamicCollectionType::Subtree
