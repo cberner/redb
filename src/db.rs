@@ -461,7 +461,7 @@ impl Database {
                         let table_pages_iter = AllPageNumbersBtreeIter::new(
                             table_root,
                             definition.get_fixed_key_size(),
-                            <&DynamicCollection>::fixed_width(),
+                            <&DynamicCollection<()>>::fixed_width(),
                             mem,
                         )?;
                         mem.mark_pages_allocated(table_pages_iter, allow_duplicates)?;
@@ -469,7 +469,7 @@ impl Database {
                         let table_pages_iter = AllPageNumbersBtreeIter::new(
                             table_root,
                             definition.get_fixed_key_size(),
-                            <&DynamicCollection>::fixed_width(),
+                            <&DynamicCollection<()>>::fixed_width(),
                             mem,
                         )?;
                         for table_page in table_pages_iter {
