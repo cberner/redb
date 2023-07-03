@@ -841,6 +841,24 @@ fn regression20() {
 }
 
 #[test]
+fn regression21() {
+    let tmpfile = create_tempfile();
+    let db = Database::builder().create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let mut table = txn.open_table(U64_TABLE).unwrap();
+
+    for i in 0..100 {
+        table.insert(i, i).unwrap();
+    }
+
+    table.drain(..1).unwrap();
+
+    drop(table);
+    txn.commit().unwrap();
+}
+
+#[test]
 fn no_savepoint_resurrection() {
     let tmpfile = create_tempfile();
 

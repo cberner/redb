@@ -52,41 +52,6 @@ pub(super) fn branch_checksum<T: Page>(
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub(crate) enum FreePolicy {
-    // Never free pages during the operation. Defer until commit
-    Never,
-    // Free uncommitted pages immediately
-    Uncommitted,
-}
-
-impl FreePolicy {
-    pub(crate) fn conditional_free(
-        &self,
-        page: PageNumber,
-        freed: &mut Vec<PageNumber>,
-        mem: &TransactionalMemory,
-    ) {
-        match self {
-            FreePolicy::Never => {
-                freed.push(page);
-            }
-            FreePolicy::Uncommitted => {
-                if !mem.free_if_uncommitted(page) {
-                    freed.push(page);
-                }
-            }
-        }
-    }
-
-    pub(crate) fn free_on_drop(&self, page: PageNumber, mem: &TransactionalMemory) -> bool {
-        match self {
-            FreePolicy::Never => false,
-            FreePolicy::Uncommitted => mem.uncommitted(page),
-        }
-    }
-}
-
 enum OnDrop {
     None,
     Free(PageNumber),
