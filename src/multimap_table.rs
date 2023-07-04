@@ -26,7 +26,7 @@ pub(crate) fn verify_tree_and_subtree_checksums(
         if !RawBtree::new(
             Some((root, root_checksum)),
             key_size,
-            <&DynamicCollection<()>>::fixed_width(),
+            DynamicCollection::<()>::fixed_width_with(value_size),
             mem,
         )
         .verify_checksum()?
@@ -37,12 +37,12 @@ pub(crate) fn verify_tree_and_subtree_checksums(
         let table_pages_iter = AllPageNumbersBtreeIter::new(
             root,
             key_size,
-            <&DynamicCollection<()>>::fixed_width(),
+            DynamicCollection::<()>::fixed_width_with(value_size),
             mem,
         )?;
         for table_page in table_pages_iter {
             let page = mem.get_page(table_page?)?;
-            let subtree_roots = parse_subtree_roots(&page, key_size);
+            let subtree_roots = parse_subtree_roots(&page, key_size, value_size);
             for (sub_root, sub_root_checksum) in subtree_roots {
                 if !RawBtree::new(
                     Some((sub_root, sub_root_checksum)),
@@ -75,14 +75,14 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
         mem,
         freed_pages.clone(),
         key_size,
-        <&DynamicCollection<()>>::fixed_width(),
+        DynamicCollection::<()>::fixed_width_with(value_size),
     );
     tree.dirty_leaf_visitor(|mut leaf_page| {
         let mut sub_root_updates = vec![];
         let accessor = LeafAccessor::new(
             leaf_page.memory(),
             key_size,
-            <&DynamicCollection<()>>::fixed_width(),
+            DynamicCollection::<()>::fixed_width_with(value_size),
         );
         for i in 0..accessor.num_pairs() {
             let entry = accessor.entry(i).unwrap();
@@ -107,7 +107,7 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
         let mut mutator = LeafMutator::new(
             &mut leaf_page,
             key_size,
-            <&DynamicCollection<()>>::fixed_width(),
+            DynamicCollection::<()>::fixed_width_with(value_size),
         );
         for (i, key, (sub_root, checksum)) in sub_root_updates {
             let collection = DynamicCollection::<()>::make_subtree_data(sub_root, checksum);
@@ -126,6 +126,7 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
 pub(crate) fn parse_subtree_roots<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
 ) -> Vec<(PageNumber, Checksum)> {
     match page.memory()[0] {
         BRANCH => {
@@ -136,7 +137,7 @@ pub(crate) fn parse_subtree_roots<T: Page>(
             let accessor = LeafAccessor::new(
                 page.memory(),
                 fixed_key_size,
-                <&DynamicCollection<()>>::fixed_width(),
+                DynamicCollection::<()>::fixed_width_with(fixed_value_size),
             );
             for i in 0..accessor.num_pairs() {
                 let entry = accessor.entry(i).unwrap();
@@ -245,6 +246,10 @@ impl Into<u8> for DynamicCollectionType {
 ///
 /// (when type = 2) root (8 bytes): sub tree root page number
 /// (when type = 2) checksum (16 bytes): sub tree checksum
+///
+/// NOTE: Even though the [PhantomData] is zero-sized, the inner data DST must be placed last.
+/// See [Exotically Sized Types](https://doc.rust-lang.org/nomicon/exotic-sizes.html#dynamically-sized-types-dsts)
+/// section of the Rustonomicon for more details.
 #[repr(transparent)]
 pub(crate) struct DynamicCollection<V> {
     _value_type: PhantomData<V>,
@@ -330,6 +335,11 @@ impl<V> DynamicCollection<V> {
         result.extend_from_slice(Checksum::as_bytes(&checksum).as_ref());
 
         result
+    }
+
+    // TODO:
+    pub(crate) fn fixed_width_with(_value_width: Option<usize>) -> Option<usize> {
+        None
     }
 }
 
@@ -645,7 +655,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                         }
                         drop(builder);
                         drop(guard);
-                        let inline_data = DynamicCollection::<()>::make_inline_data(&data);
+                        let inline_data = DynamicCollection::<V>::make_inline_data(&data);
                         self.tree
                             .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                     } else {
@@ -666,7 +676,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                         assert_eq!(existed, found);
                         let (new_root, new_checksum) = subtree.get_root().unwrap();
                         let subtree_data =
-                            DynamicCollection::<()>::make_subtree_data(new_root, new_checksum);
+                            DynamicCollection::<V>::make_subtree_data(new_root, new_checksum);
                         self.tree
                             .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                     }
@@ -683,7 +693,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                     let existed = subtree.insert(value.borrow(), &())?.is_some();
                     let (new_root, new_checksum) = subtree.get_root().unwrap();
                     let subtree_data =
-                        DynamicCollection::<()>::make_subtree_data(new_root, new_checksum);
+                        DynamicCollection::<V>::make_subtree_data(new_root, new_checksum);
                     self.tree
                         .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
 
@@ -704,7 +714,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                 );
                 builder.append(value_bytes_ref, <() as RedbValue>::as_bytes(&()).as_ref());
                 drop(builder);
-                let inline_data = DynamicCollection::<()>::make_inline_data(&data);
+                let inline_data = DynamicCollection::<V>::make_inline_data(&data);
                 self.tree
                     .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
             } else {
@@ -713,7 +723,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                 subtree.insert(value.borrow(), &())?;
                 let (new_root, new_checksum) = subtree.get_root().unwrap();
                 let subtree_data =
-                    DynamicCollection::<()>::make_subtree_data(new_root, new_checksum);
+                    DynamicCollection::<V>::make_subtree_data(new_root, new_checksum);
                 self.tree
                     .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
             }
@@ -781,7 +791,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                         drop(builder);
                         drop(guard);
 
-                        let inline_data = DynamicCollection::<()>::make_inline_data(&new_data);
+                        let inline_data = DynamicCollection::<V>::make_inline_data(&new_data);
                         self.tree
                             .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                     }
@@ -808,9 +818,8 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                             );
                             let len = accessor.total_length();
                             if len < self.mem.get_page_size() / 2 {
-                                let inline_data = DynamicCollection::<()>::make_inline_data(
-                                    &page.memory()[..len],
-                                );
+                                let inline_data =
+                                    DynamicCollection::<V>::make_inline_data(&page.memory()[..len]);
                                 self.tree
                                     .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                                 drop(page);
@@ -818,7 +827,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                                     (*self.freed_pages).lock().unwrap().push(new_root);
                                 }
                             } else {
-                                let subtree_data = DynamicCollection::<()>::make_subtree_data(
+                                let subtree_data = DynamicCollection::<V>::make_subtree_data(
                                     new_root,
                                     new_checksum,
                                 );
@@ -828,7 +837,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                         }
                         BRANCH => {
                             let subtree_data =
-                                DynamicCollection::<()>::make_subtree_data(new_root, new_checksum);
+                                DynamicCollection::<V>::make_subtree_data(new_root, new_checksum);
                             self.tree
                                 .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                         }
