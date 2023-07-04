@@ -337,7 +337,6 @@ impl<V> DynamicCollection<V> {
         result
     }
 
-    // TODO:
     pub(crate) fn fixed_width_with(_value_width: Option<usize>) -> Option<usize> {
         None
     }
