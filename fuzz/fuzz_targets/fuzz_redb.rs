@@ -200,6 +200,18 @@ fn handle_multimap_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, BT
             }
             assert_eq!(reference_len as u64, table.len()?);
         }
+        FuzzOperation::PopFirst { .. } => {
+            // no-op. Multimap tables don't support this
+        }
+        FuzzOperation::PopLast { .. } => {
+            // no-op. Multimap tables don't support this
+        }
+        FuzzOperation::Drain { .. } => {
+            // no-op. Multimap tables don't support this
+        }
+        FuzzOperation::DrainFilter { .. } => {
+            // no-op. Multimap tables don't support this
+        }
         FuzzOperation::Range {
             start_key,
             len,
@@ -272,6 +284,78 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
         }
         FuzzOperation::Len {} => {
             assert_eq!(reference.len() as u64, table.len()?);
+        }
+        FuzzOperation::PopFirst { .. } => {
+            if let Some((key, _value)) = reference.first_key_value() {
+                let key = *key;
+                let value = reference.remove(&key).unwrap();
+                let removed = table.pop_first()?.unwrap();
+                assert_eq!(removed.0.value(), key);
+                assert_eq!(removed.1.value().len(), value);
+            } else {
+                assert!(table.pop_first()?.is_none());
+            }
+        }
+        FuzzOperation::PopLast { .. } => {
+            if let Some((key, _value)) = reference.last_key_value() {
+                let key = *key;
+                let value = reference.remove(&key).unwrap();
+                let removed = table.pop_last()?.unwrap();
+                assert_eq!(removed.0.value(), key);
+                assert_eq!(removed.1.value().len(), value);
+            } else {
+                assert!(table.pop_first()?.is_none());
+            }
+        }
+        FuzzOperation::Drain { start_key, len, reversed } => {
+            let start = start_key.value;
+            let end = start + len.value;
+            let mut reference_iter: Box<dyn Iterator<Item = (&u64, &usize)>> =
+                if *reversed {
+                    Box::new(reference.range(start..end).rev())
+                } else {
+                    Box::new(reference.range(start..end))
+                };
+            let mut iter: Box<dyn Iterator<Item = Result<(AccessGuard<u64>, AccessGuard<&[u8]>), redb::StorageError>>> = if *reversed {
+                Box::new(table.drain(start..end)?.rev())
+            } else {
+                Box::new(table.drain(start..end)?)
+            };
+            while let Some((ref_key, ref_value_len)) = reference_iter.next() {
+                let (key, value) = iter.next().unwrap()?;
+                assert_eq!(*ref_key, key.value());
+                assert_eq!(*ref_value_len, value.value().len());
+            }
+            drop(reference_iter);
+            reference.retain(|x, _| *x < start || *x >= end);
+            assert!(iter.next().is_none());
+        }
+        FuzzOperation::DrainFilter { start_key, len, modulus, reversed } => {
+            let start = start_key.value;
+            let end = start + len.value;
+            let modulus = modulus.value;
+            let mut reference_iter: Box<dyn Iterator<Item = (&u64, &usize)>> =
+                if *reversed {
+                    Box::new(reference.range(start..end).rev())
+                } else {
+                    Box::new(reference.range(start..end))
+                };
+            let mut iter: Box<dyn Iterator<Item = Result<(AccessGuard<u64>, AccessGuard<&[u8]>), redb::StorageError>>> = if *reversed {
+                Box::new(table.drain_filter(start..end, |x, _| x % modulus == 0)?.rev())
+            } else {
+                Box::new(table.drain_filter(start..end, |x, _| x % modulus == 0)?)
+            };
+            while let Some((ref_key, ref_value_len)) = reference_iter.next() {
+                if *ref_key % modulus != 0 {
+                    continue;
+                }
+                let (key, value) = iter.next().unwrap()?;
+                assert_eq!(*ref_key, key.value());
+                assert_eq!(*ref_value_len, value.value().len());
+            }
+            drop(reference_iter);
+            reference.retain(|x, _| (*x < start || *x >= end) || *x % modulus != 0);
+            assert!(iter.next().is_none());
         }
         FuzzOperation::Range {
             start_key,
