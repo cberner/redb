@@ -31,6 +31,24 @@ impl<const N: u64> Arbitrary<'_> for BoundedU64<N> {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct U64Between<const MIN: u64, const MAX: u64> {
+    pub value: u64
+}
+
+impl<const MIN: u64, const MAX: u64> Arbitrary<'_> for U64Between<MIN, MAX> {
+    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value: u64 = u.int_in_range(MIN..=MAX)?;
+        Ok(Self {
+            value
+        })
+    }
+
+    fn size_hint(_depth: usize) -> (usize, Option<usize>) {
+        (size_of::<u64>(), Some(size_of::<u64>()))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct BinomialDifferenceBoundedUSize<const N: usize> {
     pub value: usize
 }
@@ -110,6 +128,21 @@ pub(crate) enum FuzzOperation {
         value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,
     },
     Len {
+    },
+    PopFirst {
+    },
+    PopLast {
+    },
+    Drain {
+        start_key: BoundedU64<KEY_SPACE>,
+        len: BoundedU64<KEY_SPACE>,
+        reversed: bool,
+    },
+    DrainFilter {
+        start_key: BoundedU64<KEY_SPACE>,
+        len: BoundedU64<KEY_SPACE>,
+        modulus: U64Between<1, 8>,
+        reversed: bool,
     },
     Range {
         start_key: BoundedU64<KEY_SPACE>,
