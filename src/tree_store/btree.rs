@@ -522,7 +522,7 @@ impl<'a> RawBtree<'a> {
                 }
                 true
             }
-            _ => unreachable!(),
+            _ => false,
         })
     }
 }
