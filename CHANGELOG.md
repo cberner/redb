@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 1.0.5 - 2023-07-16
+* Fix a rare panic when recovering a database file after a crash
+* Minor performance improvement to write heavy workloads
+
 ## 1.0.4 - 2023-07-01
 * Fix serious data corruption issue when calling `drain()` or `drain_filter()` on a `Table` that had
   uncommitted data
