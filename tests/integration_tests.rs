@@ -1369,3 +1369,23 @@ fn compaction() {
     let file_size2 = tmpfile.as_file().metadata().unwrap().len();
     assert!(file_size2 < file_size);
 }
+
+fn require_send<T: Send>(_: T) {}
+fn require_sync<T: Sync + Send>(_: T) {}
+
+#[test]
+fn is_send() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let definition: TableDefinition<u32, &[u8]> = TableDefinition::new("x");
+
+    let txn = db.begin_write().unwrap();
+    let table = txn.open_table(definition).unwrap();
+    require_send(table);
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(definition).unwrap();
+    require_sync(table);
+    require_sync(txn);
+}
