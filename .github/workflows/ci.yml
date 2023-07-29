@@ -35,23 +35,10 @@ jobs:
         run: "! grep --include='*.rs' -RE 'to_be_bytes|from_be_bytes|dbg!' ."
         if: runner.os != 'Windows'
 
-      - name: Install packages
-        if: startsWith(matrix.os, 'ubuntu')
-        run: |
-          sudo apt update
-          sudo apt install -y python3 python3-pip python3-dev python3-venv gcc-multilib libclang-dev
-
-      - name: Install packages
-        if: startsWith(matrix.os, 'macos')
-        run: |
-          brew install python3
-
-      - name: Install packages
+      - name: Install Python
         uses: actions/setup-python@v4
-        if: startsWith(matrix.os, 'windows')
         with:
           python-version: "3.10"
-          architecture: "x64"
 
       - uses: actions-rs/toolchain@v1
         with:
