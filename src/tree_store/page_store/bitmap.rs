@@ -294,6 +294,7 @@ impl U64GroupedBitmap {
 
     pub fn new_empty(len: u32, capacity: u32) -> Self {
         let data = vec![0; Self::required_words(capacity)];
+        assert!(data.iter().all(|x| *x == 0));
         Self { len, data }
     }
 
