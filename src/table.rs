@@ -114,14 +114,6 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
         K: 'a,
         V: 'a,
     {
-        let value_len = V::as_bytes(value.borrow()).as_ref().len();
-        if value_len > MAX_VALUE_LENGTH {
-            return Err(StorageError::ValueTooLarge(value_len));
-        }
-        let key_len = K::as_bytes(key.borrow()).as_ref().len();
-        if key_len > MAX_VALUE_LENGTH {
-            return Err(StorageError::ValueTooLarge(key_len));
-        }
         self.tree.insert(key.borrow(), value.borrow())
     }
 

@@ -1,7 +1,7 @@
 use crate::tree_store::page_store::{
     xxh3_checksum, CachePriority, Page, PageImpl, PageMut, TransactionalMemory,
 };
-use crate::tree_store::PageNumber;
+use crate::tree_store::{PageNumber, MAX_VALUE_LENGTH};
 use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
 use crate::{Result, StorageError};
 use std::cmp::Ordering;
@@ -516,7 +516,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
             first_split_key_bytes,
         );
         for (key, value) in self.pairs.iter().take(division) {
-            builder.append(key, value);
+            builder.append(key, value)?;
         }
         drop(builder);
 
@@ -535,7 +535,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
             self.total_key_bytes - first_split_key_bytes,
         );
         for (key, value) in self.pairs[division..].iter() {
-            builder.append(key, value);
+            builder.append(key, value)?;
         }
         drop(builder);
 
@@ -556,7 +556,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
             self.total_key_bytes,
         );
         for (key, value) in self.pairs {
-            builder.append(key, value);
+            builder.append(key, value)?;
         }
         drop(builder);
         Ok(page)
@@ -663,7 +663,16 @@ impl<'a> RawLeafBuilder<'a> {
         ) as usize
     }
 
-    pub(crate) fn append(&mut self, key: &[u8], value: &[u8]) {
+    pub(crate) fn append(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        let key_len = key.len();
+        if key_len > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(key_len));
+        }
+        let value_len = value.len();
+        if value_len > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len));
+        }
+
         let key_offset = if self.pairs_written == 0 {
             self.key_section_start()
         } else {
@@ -698,6 +707,7 @@ impl<'a> RawLeafBuilder<'a> {
         }
         self.page[value_offset..(value_offset + value.len())].copy_from_slice(value);
         self.pairs_written += 1;
+        Ok(())
     }
 }
 

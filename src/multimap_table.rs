@@ -643,14 +643,14 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                                 builder.append(
                                     value_bytes_ref,
                                     <() as RedbValue>::as_bytes(&()).as_ref(),
-                                );
+                                )?;
                             }
                             let entry = accessor.entry(i).unwrap();
-                            builder.append(entry.key(), entry.value());
+                            builder.append(entry.key(), entry.value())?;
                         }
                         if position == accessor.num_pairs() {
                             builder
-                                .append(value_bytes_ref, <() as RedbValue>::as_bytes(&()).as_ref());
+                                .append(value_bytes_ref, <() as RedbValue>::as_bytes(&()).as_ref())?;
                         }
                         drop(builder);
                         drop(guard);
@@ -711,7 +711,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                     <() as RedbValue>::fixed_width(),
                     value_bytes_ref.len(),
                 );
-                builder.append(value_bytes_ref, <() as RedbValue>::as_bytes(&()).as_ref());
+                builder.append(value_bytes_ref, <() as RedbValue>::as_bytes(&()).as_ref())?;
                 drop(builder);
                 let inline_data = DynamicCollection::<V>::make_inline_data(&data);
                 self.tree
@@ -784,7 +784,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                         for i in 0..old_num_pairs {
                             if i != position {
                                 let entry = accessor.entry(i).unwrap();
-                                builder.append(entry.key(), entry.value());
+                                builder.append(entry.key(), entry.value())?;
                             }
                         }
                         drop(builder);
