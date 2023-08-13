@@ -287,6 +287,8 @@ impl std::error::Error for SavepointError {}
 pub enum CompactionError {
     /// A persistent savepoint exists
     PersistentSavepointExists,
+    /// A ephemeral savepoint exists
+    EphemeralSavepointExists,
     /// Error from underlying storage
     Storage(StorageError),
 }
@@ -295,6 +297,7 @@ impl From<CompactionError> for Error {
     fn from(err: CompactionError) -> Error {
         match err {
             CompactionError::PersistentSavepointExists => Error::PersistentSavepointExists,
+            CompactionError::EphemeralSavepointExists => Error::EphemeralSavepointExists,
             CompactionError::Storage(storage) => storage.into(),
         }
     }
@@ -313,6 +316,12 @@ impl Display for CompactionError {
                 write!(
                     f,
                     "Persistent savepoint exists. Operation cannot be performed."
+                )
+            }
+            CompactionError::EphemeralSavepointExists => {
+                write!(
+                    f,
+                    "Ephemeral savepoint exists. Operation cannot be performed."
                 )
             }
             CompactionError::Storage(storage) => storage.fmt(f),
@@ -415,6 +424,8 @@ pub enum Error {
     InvalidSavepoint,
     /// A persistent savepoint exists
     PersistentSavepointExists,
+    /// An Ephemeral savepoint exists
+    EphemeralSavepointExists,
     /// The Database is corrupted
     Corrupted(String),
     /// The database file is in an old file format and must be manually upgraded
@@ -523,6 +534,12 @@ impl Display for Error {
                 write!(
                     f,
                     "Persistent savepoint exists. Operation cannot be performed."
+                )
+            }
+            Error::EphemeralSavepointExists => {
+                write!(
+                    f,
+                    "Ephemeral savepoint exists. Operation cannot be performed."
                 )
             }
             Error::InvalidSavepoint => {

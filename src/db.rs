@@ -319,6 +319,14 @@ impl Database {
         if txn.list_persistent_savepoints()?.next().is_some() {
             return Err(CompactionError::PersistentSavepointExists);
         }
+        if self
+            .transaction_tracker
+            .lock()
+            .unwrap()
+            .any_savepoint_exists()
+        {
+            return Err(CompactionError::EphemeralSavepointExists);
+        }
         txn.set_durability(Durability::Paranoid);
         txn.commit().map_err(|e| e.into_storage_error())?;
         // Repeat, just in case executing list_persistent_savepoints() created a new table
