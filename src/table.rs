@@ -1,11 +1,11 @@
 use crate::sealed::Sealed;
 use crate::tree_store::{
     AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeMut, BtreeRangeIter, Checksum,
-    PageHint, PageNumber, TransactionalMemory, MAX_VALUE_LENGTH,
+    PageHint, PageNumber, TransactionalMemory,
 };
 use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
 use crate::Result;
-use crate::{AccessGuard, StorageError, WriteTransaction};
+use crate::{AccessGuard, WriteTransaction};
 use std::borrow::Borrow;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
@@ -142,13 +142,6 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValueMutInPlace + 'static> Table<'d
     where
         K: 'a,
     {
-        if value_length as usize > MAX_VALUE_LENGTH {
-            return Err(StorageError::ValueTooLarge(value_length as usize));
-        }
-        let key_len = K::as_bytes(key.borrow()).as_ref().len();
-        if key_len > MAX_VALUE_LENGTH {
-            return Err(StorageError::ValueTooLarge(key_len));
-        }
         self.tree.insert_reserve(key.borrow(), value_length)
     }
 }
