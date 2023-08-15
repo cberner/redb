@@ -1,8 +1,8 @@
-use std::{time::Instant, env::current_dir};
+use std::{env::current_dir, time::Instant};
 
-use rand::{rngs::StdRng, SeedableRng, Rng};
-use redb::{Database, Error, ReadableTable, TableDefinition, RedbValue};
-use serde_derive::{Serialize, Deserialize};
+use rand::{rngs::StdRng, Rng, SeedableRng};
+use redb::{Database, RedbValue, TableDefinition};
+use serde_derive::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 const TABLE: TableDefinition<u64, Dynamic> = TableDefinition::new("my_data");
@@ -11,9 +11,8 @@ const TABLE: TableDefinition<u64, Dynamic> = TableDefinition::new("my_data");
 struct DynamicData {
     int_part: u64,
     part1: Vec<u8>,
-    part2: Vec<u8>
+    part2: Vec<u8>,
 }
-
 
 #[derive(Debug)]
 struct Dynamic;
@@ -27,23 +26,25 @@ impl RedbValue for Dynamic {
         None
     }
 
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where
-    Self: 'a {
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
         bincode::deserialize(data).unwrap()
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'a,
-        Self: 'b {
-            bincode::serialize(value).unwrap()
+        Self: 'b,
+    {
+        bincode::serialize(value).unwrap()
     }
 
     fn type_name() -> redb::TypeName {
         redb::TypeName::new("Row")
     }
 }
-
 
 const ELEMENTS: u64 = 10_000;
 
@@ -56,7 +57,6 @@ fn gen_data(count: u64) -> Vec<u8> {
     random_data
 }
 
-
 fn main() {
     let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
     let db = Database::create(tmpfile).unwrap();
@@ -64,9 +64,9 @@ fn main() {
     let mut all_bytes = 0;
     let mut test_data = Vec::new();
     for key in 0..ELEMENTS {
-        let part1_data = key.to_be_bytes();
+        let part1_data = key.to_le_bytes();
         let part2_data = gen_data(key);
-        let dyn_data = DynamicData { 
+        let dyn_data = DynamicData {
             int_part: key,
             part1: part1_data.to_vec(),
             part2: part2_data.to_vec(),
@@ -78,18 +78,16 @@ fn main() {
     {
         let write_txn = db.begin_write().unwrap();
         let mut table = write_txn.open_table(TABLE).unwrap();
-        
+
         let start = Instant::now();
         {
             for dyn_data in test_data {
-                table
-                    .insert(dyn_data.int_part, &dyn_data)
-                    .unwrap();
+                table.insert(dyn_data.int_part, &dyn_data).unwrap();
             }
         }
         drop(table);
         write_txn.commit().unwrap();
-    
+
         let end = Instant::now();
         let duration = end - start;
         println!(
