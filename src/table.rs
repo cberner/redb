@@ -105,15 +105,11 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     /// Insert mapping of the given key to the given value
     ///
     /// Returns the old value, if the key was present in the table
-    pub fn insert<'a>(
+    pub fn insert<'k, 'v>(
         &mut self,
-        key: impl Borrow<K::SelfType<'a>>,
-        value: impl Borrow<V::SelfType<'a>>,
-    ) -> Result<Option<AccessGuard<V>>>
-    where
-        K: 'a,
-        V: 'a,
-    {
+        key: impl Borrow<K::SelfType<'k>>,
+        value: impl Borrow<V::SelfType<'v>>,
+    ) -> Result<Option<AccessGuard<V>>> {
         let value_len = V::as_bytes(value.borrow()).as_ref().len();
         if value_len > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(value_len));

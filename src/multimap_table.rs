@@ -585,15 +585,11 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
     /// Add the given value to the mapping of the key
     ///
     /// Returns `true` if the key-value pair was present
-    pub fn insert<'a>(
+    pub fn insert<'k, 'v>(
         &mut self,
-        key: impl Borrow<K::SelfType<'a>>,
-        value: impl Borrow<V::SelfType<'a>>,
-    ) -> Result<bool>
-    where
-        K: 'a,
-        V: 'a,
-    {
+        key: impl Borrow<K::SelfType<'k>>,
+        value: impl Borrow<V::SelfType<'v>>,
+    ) -> Result<bool> {
         let value_bytes = V::as_bytes(value.borrow());
         let value_bytes_ref = value_bytes.as_ref();
         if value_bytes_ref.len() > MAX_VALUE_LENGTH {

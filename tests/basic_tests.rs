@@ -1403,3 +1403,44 @@ fn signature_lifetimes() {
     }
     write_txn.commit().unwrap();
 }
+
+#[test]
+fn generic_signature_lifetimes() {
+    fn write_key_generic<K: RedbKey>(
+        table: TableDefinition<K, &[u8]>,
+        key: K::SelfType<'_>,
+        db: &Database,
+    ) {
+        let buf = [1, 2, 3];
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(table).unwrap();
+            table.insert(key, buf.as_slice()).unwrap();
+        }
+        write_txn.commit().unwrap();
+    }
+
+    fn read_key_generic<K: RedbKey>(
+        table: TableDefinition<K, &[u8]>,
+        key: K::SelfType<'_>,
+        db: &Database,
+    ) {
+        let buf = [1, 2, 3];
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(table).unwrap();
+        assert_eq!(table.get(key).unwrap().unwrap().value(), buf);
+    }
+
+    let tmpfile = create_tempfile();
+    let db = &Database::create(tmpfile.path()).unwrap();
+    {
+        let (table, key) = (TableDefinition::<&str, _>::new("&str"), "key");
+        write_key_generic(table, key, db);
+        read_key_generic(table, key, db);
+    }
+    {
+        let (table, key) = (TableDefinition::<(), _>::new("()"), ());
+        write_key_generic(table, key, db);
+        read_key_generic(table, key, db);
+    }
+}
