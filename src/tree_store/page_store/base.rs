@@ -71,9 +71,12 @@ impl PageNumber {
         if self.region < other.region {
             return true;
         }
+        if self.region > other.region {
+            return false;
+        }
         let self_order0 = self.page_index * 2u32.pow(self.page_order as u32);
         let other_order0 = other.page_index * 2u32.pow(other.page_order as u32);
-        assert_ne!(self_order0, other_order0);
+        assert_ne!(self_order0, other_order0, "{self:?} overlaps {other:?}");
         self_order0 < other_order0
     }
 
