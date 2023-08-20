@@ -463,6 +463,28 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
         }
     }
 
+    match run_compaction(&mut db, &mut savepoint_manager) {
+        Ok(_) => {}
+        Err(err) => {
+            if !matches!(err, Error::SimulatedIOFailure) {
+                return Err(err);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn run_compaction<T: Clone>(db: &mut Database, savepoint_manager: &mut SavepointManager<T>) -> Result<(), Error> {
+    savepoint_manager.savepoints.clear();
+    let txn = db.begin_write()?;
+    let ids: Vec<u64> = txn.list_persistent_savepoints()?.collect();
+    for id in ids {
+        txn.delete_persistent_savepoint(id)?;
+    }
+    txn.commit()?;
+    db.compact()?;
+
     Ok(())
 }
 
