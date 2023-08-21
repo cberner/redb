@@ -17,7 +17,7 @@ use std::marker::PhantomData;
 use std::ops::RangeFull;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::error::TransactionError;
 use crate::multimap_table::{parse_subtree_roots, DynamicCollection};
@@ -236,7 +236,8 @@ pub struct Database {
     mem: TransactionalMemory,
     next_transaction_id: AtomicTransactionId,
     transaction_tracker: Arc<Mutex<TransactionTracker>>,
-    pub(crate) live_write_transaction: Mutex<Option<TransactionId>>,
+    live_write_transaction: Mutex<Option<TransactionId>>,
+    live_write_transaction_available: Condvar,
 }
 
 impl Database {
@@ -251,6 +252,30 @@ impl Database {
     /// Opens an existing redb database.
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
+    }
+
+    pub(crate) fn start_write_transaction(&self) -> TransactionId {
+        let mut live_write_transaction = self.live_write_transaction.lock().unwrap();
+        while live_write_transaction.is_some() {
+            live_write_transaction = self
+                .live_write_transaction_available
+                .wait(live_write_transaction)
+                .unwrap();
+        }
+        assert!(live_write_transaction.is_none());
+        let transaction_id = self.next_transaction_id.next();
+        #[cfg(feature = "logging")]
+        info!("Beginning write transaction id={:?}", transaction_id);
+        *live_write_transaction = Some(transaction_id);
+
+        transaction_id
+    }
+
+    pub(crate) fn end_write_transaction(&self, id: TransactionId) {
+        let mut live_write_transaction = self.live_write_transaction.lock().unwrap();
+        assert_eq!(live_write_transaction.unwrap(), id);
+        *live_write_transaction = None;
+        self.live_write_transaction_available.notify_one();
     }
 
     pub(crate) fn get_memory(&self) -> &TransactionalMemory {
@@ -601,6 +626,7 @@ impl Database {
             next_transaction_id: AtomicTransactionId::new(next_transaction_id),
             transaction_tracker: Arc::new(Mutex::new(TransactionTracker::new())),
             live_write_transaction: Mutex::new(None),
+            live_write_transaction_available: Condvar::new(),
         };
 
         // Restore the tracker state for any persistent savepoints
@@ -646,10 +672,6 @@ impl Database {
             .unwrap()
             .allocate_savepoint();
         Ok((id, self.allocate_read_transaction()?))
-    }
-
-    pub(crate) fn increment_transaction_id(&self) -> TransactionId {
-        self.next_transaction_id.next()
     }
 
     /// Convenience method for [`Builder::new`]
