@@ -20,7 +20,7 @@ use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
 use std::ops::{RangeBounds, RangeFull};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::{panic, thread};
 
 const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), SavepointId> =
@@ -394,7 +394,6 @@ pub struct WriteTransaction<'db> {
     // Persistent savepoints created during this transaction
     created_persistent_savepoints: Mutex<HashSet<SavepointId>>,
     deleted_persistent_savepoints: Mutex<Vec<(SavepointId, TransactionId)>>,
-    live_write_transaction: MutexGuard<'db, Option<TransactionId>>,
 }
 
 impl<'db> WriteTransaction<'db> {
@@ -402,12 +401,7 @@ impl<'db> WriteTransaction<'db> {
         db: &'db Database,
         transaction_tracker: Arc<Mutex<TransactionTracker>>,
     ) -> Result<Self> {
-        let mut live_write_transaction = db.live_write_transaction.lock().unwrap();
-        assert!(live_write_transaction.is_none());
-        let transaction_id = db.increment_transaction_id();
-        #[cfg(feature = "logging")]
-        info!("Beginning write transaction id={:?}", transaction_id);
-        *live_write_transaction = Some(transaction_id);
+        let transaction_id = db.start_write_transaction();
 
         let root_page = db.get_memory().get_data_root();
         let system_page = db.get_memory().get_system_root();
@@ -442,7 +436,6 @@ impl<'db> WriteTransaction<'db> {
             durability: Durability::Immediate,
             created_persistent_savepoints: Mutex::new(Default::default()),
             deleted_persistent_savepoints: Mutex::new(vec![]),
-            live_write_transaction,
         })
     }
 
@@ -1110,7 +1103,7 @@ impl<'db> WriteTransaction<'db> {
 
 impl<'a> Drop for WriteTransaction<'a> {
     fn drop(&mut self) {
-        *self.live_write_transaction = None;
+        self.db.end_write_transaction(self.transaction_id);
         if !self.completed && !thread::panicking() && !self.mem.storage_failure() {
             #[allow(unused_variables)]
             if let Err(error) = self.abort_inner() {
