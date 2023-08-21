@@ -1,5 +1,11 @@
 # redb - Changelog
 
+## 1.1.0 - 2023-08-20
+* Fix panic when calling `compact()` on certain databases
+* Fix panic when calling `compact()` when an ephemeral `Savepoint` existed
+* Improve performance of `compact()`
+* Relax lifetime requirements on arguments to `insert()`
+
 ## 1.0.5 - 2023-07-16
 * Fix a rare panic when recovering a database file after a crash
 * Minor performance improvement to write heavy workloads
