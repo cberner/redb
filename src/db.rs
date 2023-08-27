@@ -784,6 +784,19 @@ impl Builder {
             Err(StorageError::Io(io::Error::from(ErrorKind::InvalidData)).into())
         }
     }
+
+    /// Open an existing or create a new database in the given `file`.
+    ///
+    /// The file must be empty or contain a valid database.
+    pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
+        Database::new(
+            file,
+            self.page_size,
+            self.region_size,
+            self.read_cache_size_bytes,
+            self.write_cache_size_bytes,
+        )
+    }
 }
 
 // This just makes it easier to throw `dbg` etc statements on `Result<Database>`
@@ -1081,5 +1094,14 @@ mod test {
 
         let final_file_size = tmpfile.as_file().metadata().unwrap().len();
         assert!(final_file_size < file_size);
+    }
+
+    #[test]
+    fn create_new_db_in_empty_file() {
+        let tmpfile = crate::create_tempfile();
+
+        let _db = Database::builder()
+            .create_file(tmpfile.into_file())
+            .unwrap();
     }
 }
