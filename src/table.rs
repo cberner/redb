@@ -63,8 +63,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
         // TODO: optimize this
         let last = self
             .iter()?
-            .rev()
-            .next()
+            .next_back()
             .map(|x| x.map(|(key, _)| K::as_bytes(&key.value()).as_ref().to_vec()));
         if let Some(owned_key) = last {
             let owned_key = owned_key?;
@@ -189,7 +188,7 @@ impl<K: RedbKey, V: RedbValue> Sealed for Table<'_, '_, K, V> {}
 impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Drop for Table<'db, 'txn, K, V> {
     fn drop(&mut self) {
         self.transaction
-            .close_table(&self.name, self.system, &mut self.tree);
+            .close_table(&self.name, self.system, &self.tree);
     }
 }
 

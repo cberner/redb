@@ -948,7 +948,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> Drop
 {
     fn drop(&mut self) {
         self.transaction
-            .close_table(&self.name, self.system, &mut self.tree);
+            .close_table(&self.name, self.system, &self.tree);
     }
 }
 
