@@ -110,7 +110,7 @@ impl TransactionalMemory {
         let region_size = min(region_size, (MAX_PAGE_INDEX as u64 + 1) * page_size as u64);
         assert!(region_size.is_power_of_two());
 
-        let mut storage = PagedCachedFile::new(
+        let storage = PagedCachedFile::new(
             file,
             page_size as u64,
             read_cache_size_bytes,
@@ -178,7 +178,7 @@ impl TransactionalMemory {
                 .write(0, DB_HEADER_SIZE, true, |_| CachePriority::High)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(false, false));
-            allocators.flush_to(tracker_page, layout, &mut storage)?;
+            allocators.flush_to(tracker_page, layout, &storage)?;
 
             storage.flush()?;
             // Write the magic number only after the data structure is initialized and written to disk
@@ -406,7 +406,7 @@ impl TransactionalMemory {
 
         state
             .allocators
-            .flush_to(tracker_page, state.header.layout(), &mut self.storage)?;
+            .flush_to(tracker_page, state.header.layout(), &self.storage)?;
 
         state.header.recovery_required = false;
         self.write_header(&state.header, false)?;
@@ -1083,7 +1083,7 @@ impl Drop for TransactionalMemory {
             .flush_to(
                 state.header.region_tracker(),
                 state.header.layout(),
-                &mut self.storage,
+                &self.storage,
             )
             .is_err()
         {

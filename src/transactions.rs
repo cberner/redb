@@ -644,7 +644,7 @@ impl<'db> WriteTransaction<'db> {
         &self,
         name: &str,
         system: bool,
-        table: &mut BtreeMut<K, V>,
+        table: &BtreeMut<K, V>,
     ) {
         if system {
             self.open_system_tables

@@ -177,7 +177,7 @@ impl Allocators {
         &self,
         region_tracker_page: PageNumber,
         layout: DatabaseLayout,
-        storage: &mut PagedCachedFile,
+        storage: &PagedCachedFile,
     ) -> Result {
         let page_size = layout.full_region_layout().page_size();
         let region_header_size =

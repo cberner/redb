@@ -368,7 +368,7 @@ impl Database {
 
     fn mark_persistent_savepoints(
         system_root: Option<(PageNumber, Checksum)>,
-        mem: &mut TransactionalMemory,
+        mem: &TransactionalMemory,
         oldest_unprocessed_free_transaction: TransactionId,
     ) -> Result {
         let freed_list = Arc::new(Mutex::new(vec![]));
