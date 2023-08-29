@@ -383,3 +383,37 @@ be_impl!(i64);
 be_impl!(i128);
 be_value!(f32);
 be_value!(f64);
+
+#[cfg(feature = "serialize")]
+#[macro_export]
+macro_rules! be_value_serialize {
+    ($t:ty) => {
+        impl RedbValue for $t {
+            type SelfType<'a> = Self;
+            type AsBytes<'a> = Vec<u8> where Self: 'a;
+
+            fn fixed_width() -> Option<usize> {
+                Some(std::mem::size_of::<$t>())
+            }
+
+            fn from_bytes<'a>(data: &'a [u8]) -> $t
+            where
+                Self: 'a,
+            {
+                bincode::deserialize(data).unwrap()
+            }
+
+            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+            where
+                Self: 'a,
+                Self: 'b,
+            {
+                bincode::serialize(value).unwrap()
+            }
+
+            fn type_name() -> TypeName {
+                TypeName::new(stringify!($t))
+            }
+        }
+    };
+}

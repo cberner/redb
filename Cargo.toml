@@ -18,9 +18,15 @@ crate-type = ["cdylib", "rlib"]
 pyo3-build-config = "0.19.0"
 
 [dependencies]
+bincode = { version = "1.3.3", optional = true }
 libc = "0.2.104"
-log = {version = "0.4.17", optional = true }
-pyo3 = {version = "0.19.0", features=["extension-module", "abi3-py37"], optional = true }
+log = { version = "0.4.17", optional = true }
+pyo3 = { version = "0.19.0", features = [
+    "extension-module",
+    "abi3-py37",
+], optional = true }
+redb-derive = { version = "0.1.0", optional = true }
+serde = { version = "1.0.188", optional = true }
 
 # Common test/bench dependencies
 [dev-dependencies]
@@ -43,6 +49,10 @@ comfy-table = "6.1.0"
 io-uring = "0.5.1"
 
 [features]
+# Enables serialization using serde and bincode
+serialize = ["serde", "bincode"]
+# Enables serialization using serde and bincode
+serialize-derive = ["serde", "bincode", "redb-derive"]
 # This feature is still experimental, and is not considered stable
 python = ["pyo3"]
 # Enables log messages

@@ -9,6 +9,8 @@
 // TODO remove this once wasi no longer requires nightly
 #![cfg_attr(target_os = "wasi", feature(wasi_ext))]
 
+#[cfg(feature = "serialize-derive")]
+pub use bincode::{deserialize, serialize};
 pub use db::{
     Builder, Database, MultimapTableDefinition, MultimapTableHandle, TableDefinition, TableHandle,
     UntypedMultimapTableHandle, UntypedTableHandle,
@@ -20,6 +22,8 @@ pub use error::{
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, ReadOnlyMultimapTable, ReadableMultimapTable,
 };
+#[cfg(feature = "serialize-derive")]
+pub use redb_derive::RedbValue;
 pub use table::{Drain, DrainFilter, Range, ReadOnlyTable, ReadableTable, Table};
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
 pub use tree_store::{AccessGuard, AccessGuardMut, Savepoint};
