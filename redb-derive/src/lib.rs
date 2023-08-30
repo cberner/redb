@@ -7,8 +7,10 @@ pub fn redb_value(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
 
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
     let expanded = quote! {
-        impl redb::RedbValue for #name {
+        impl #impl_generics redb::RedbValue for #name #ty_generics #where_clause {
             type SelfType<'a> = Self;
             type AsBytes<'a> = Vec<u8> where Self: 'a;
 
