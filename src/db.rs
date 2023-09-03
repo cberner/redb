@@ -12,7 +12,6 @@ use crate::{
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
-use std::io;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::ops::RangeFull;
@@ -769,20 +768,19 @@ impl Builder {
 
     /// Opens an existing redb database.
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
-        if !path.as_ref().exists() {
-            Err(StorageError::Io(ErrorKind::NotFound.into()).into())
-        } else if File::open(path.as_ref())?.metadata()?.len() > 0 {
-            let file = OpenOptions::new().read(true).write(true).open(path)?;
-            Database::new(
-                file,
-                self.page_size,
-                None,
-                self.read_cache_size_bytes,
-                self.write_cache_size_bytes,
-            )
-        } else {
-            Err(StorageError::Io(io::Error::from(ErrorKind::InvalidData)).into())
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+
+        if file.metadata()?.len() == 0 {
+            return Err(StorageError::Io(ErrorKind::InvalidData.into()).into());
         }
+
+        Database::new(
+            file,
+            self.page_size,
+            None,
+            self.read_cache_size_bytes,
+            self.write_cache_size_bytes,
+        )
     }
 
     /// Open an existing or create a new database in the given `file`.
