@@ -808,7 +808,10 @@ impl std::fmt::Debug for Database {
 
 #[cfg(test)]
 mod test {
-    use crate::{Database, Durability, ReadableTable, TableDefinition};
+    use crate::{
+        Database, DatabaseError, Durability, ReadableTable, StorageError, TableDefinition,
+    };
+    use std::io::ErrorKind;
 
     #[test]
     fn small_pages() {
@@ -1103,5 +1106,32 @@ mod test {
         let _db = Database::builder()
             .create_file(tmpfile.into_file())
             .unwrap();
+    }
+
+    #[test]
+    fn open_missing_file() {
+        let tmpfile = crate::create_tempfile();
+
+        let err = Database::builder()
+            .open(tmpfile.path().with_extension("missing"))
+            .unwrap_err();
+
+        match err {
+            DatabaseError::Storage(StorageError::Io(err)) if err.kind() == ErrorKind::NotFound => {}
+            err => panic!("Unexpected error for empty file: {}", err),
+        }
+    }
+
+    #[test]
+    fn open_empty_file() {
+        let tmpfile = crate::create_tempfile();
+
+        let err = Database::builder().open(tmpfile.path()).unwrap_err();
+
+        match err {
+            DatabaseError::Storage(StorageError::Io(err))
+                if err.kind() == ErrorKind::InvalidData => {}
+            err => panic!("Unexpected error for empty file: {}", err),
+        }
     }
 }
