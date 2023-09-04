@@ -10,6 +10,50 @@ use std::borrow::Borrow;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
 
+/// Informational storage stats about a table
+#[derive(Debug)]
+pub struct TableStats {
+    pub(crate) tree_height: u32,
+    pub(crate) leaf_pages: u64,
+    pub(crate) branch_pages: u64,
+    pub(crate) stored_leaf_bytes: u64,
+    pub(crate) metadata_bytes: u64,
+    pub(crate) fragmented_bytes: u64,
+}
+
+impl TableStats {
+    /// Maximum traversal distance to reach the deepest (key, value) pair, across all tables
+    pub fn tree_height(&self) -> u32 {
+        self.tree_height
+    }
+
+    /// Number of leaf pages that store user data
+    pub fn leaf_pages(&self) -> u64 {
+        self.leaf_pages
+    }
+
+    /// Number of branch pages in btrees that store user data
+    pub fn branch_pages(&self) -> u64 {
+        self.branch_pages
+    }
+
+    /// Number of bytes consumed by keys and values that have been inserted.
+    /// Does not include indexing overhead
+    pub fn stored_bytes(&self) -> u64 {
+        self.stored_leaf_bytes
+    }
+
+    /// Number of bytes consumed by keys in internal branch pages, plus other metadata
+    pub fn metadata_bytes(&self) -> u64 {
+        self.metadata_bytes
+    }
+
+    /// Number of bytes consumed by fragmentation, both in data pages and internal metadata tables
+    pub fn fragmented_bytes(&self) -> u64 {
+        self.fragmented_bytes
+    }
+}
+
 /// A table containing key-value mappings
 pub struct Table<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
     name: String,
@@ -174,6 +218,19 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V
         self.tree.range(&range).map(Range::new)
     }
 
+    fn stats(&self) -> Result<TableStats> {
+        let tree_stats = self.tree.stats()?;
+
+        Ok(TableStats {
+            tree_height: tree_stats.tree_height,
+            leaf_pages: tree_stats.leaf_pages,
+            branch_pages: tree_stats.branch_pages,
+            stored_leaf_bytes: tree_stats.stored_leaf_bytes,
+            metadata_bytes: tree_stats.metadata_bytes,
+            fragmented_bytes: tree_stats.fragmented_bytes,
+        })
+    }
+
     fn len(&self) -> Result<u64> {
         self.tree.len()
     }
@@ -235,6 +292,9 @@ pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static>: Sealed {
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a;
 
+    /// Retrieves information about storage usage for the table
+    fn stats(&self) -> Result<TableStats>;
+
     /// Returns the number of entries in the table
     fn len(&self) -> Result<u64>;
 
@@ -280,6 +340,19 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V>
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
         self.tree.range(&range).map(Range::new)
+    }
+
+    fn stats(&self) -> Result<TableStats> {
+        let tree_stats = self.tree.stats()?;
+
+        Ok(TableStats {
+            tree_height: tree_stats.tree_height,
+            leaf_pages: tree_stats.leaf_pages,
+            branch_pages: tree_stats.branch_pages,
+            stored_leaf_bytes: tree_stats.stored_leaf_bytes,
+            metadata_bytes: tree_stats.metadata_bytes,
+            fragmented_bytes: tree_stats.fragmented_bytes,
+        })
     }
 
     fn len(&self) -> Result<u64> {
