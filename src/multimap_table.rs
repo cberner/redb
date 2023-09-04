@@ -2,19 +2,150 @@ use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::sealed::Sealed;
 use crate::table::TableStats;
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, CachePriority, Checksum,
-    LeafAccessor, LeafMutator, Page, PageHint, PageNumber, RawBtree, RawLeafBuilder,
-    TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF, MAX_VALUE_LENGTH,
+    btree_stats, AllPageNumbersBtreeIter, BranchAccessor, Btree, BtreeMut, BtreeRangeIter,
+    BtreeStats, CachePriority, Checksum, LeafAccessor, LeafMutator, Page, PageHint, PageNumber,
+    RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF, MAX_VALUE_LENGTH,
 };
 use crate::types::{RedbKey, RedbValue, TypeName};
 use crate::{AccessGuard, Result, StorageError, WriteTransaction};
 use std::borrow::Borrow;
+use std::cmp::max;
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::mem;
 use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull};
 use std::sync::{Arc, Mutex};
+
+pub(crate) fn multimap_btree_stats(
+    root: Option<PageNumber>,
+    mem: &TransactionalMemory,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+) -> Result<BtreeStats> {
+    if let Some(root) = root {
+        multimap_stats_helper(root, mem, fixed_key_size, fixed_value_size)
+    } else {
+        Ok(BtreeStats {
+            tree_height: 0,
+            leaf_pages: 0,
+            branch_pages: 0,
+            stored_leaf_bytes: 0,
+            metadata_bytes: 0,
+            fragmented_bytes: 0,
+        })
+    }
+}
+
+fn multimap_stats_helper(
+    page_number: PageNumber,
+    mem: &TransactionalMemory,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+) -> Result<BtreeStats> {
+    let page = mem.get_page(page_number)?;
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(
+                page.memory(),
+                fixed_key_size,
+                DynamicCollection::<()>::fixed_width_with(fixed_value_size),
+            );
+            let mut leaf_bytes = 0u64;
+            let mut is_branch = false;
+            for i in 0..accessor.num_pairs() {
+                let entry = accessor.entry(i).unwrap();
+                let collection: &UntypedDynamicCollection =
+                    UntypedDynamicCollection::new(entry.value());
+                match collection.collection_type() {
+                    Inline => {
+                        let inline_accessor = LeafAccessor::new(
+                            collection.as_inline(),
+                            fixed_value_size,
+                            <() as RedbValue>::fixed_width(),
+                        );
+                        leaf_bytes +=
+                            inline_accessor.length_of_pairs(0, inline_accessor.num_pairs()) as u64;
+                    }
+                    Subtree => {
+                        is_branch = true;
+                    }
+                }
+            }
+            let mut overhead_bytes = (accessor.total_length() as u64) - leaf_bytes;
+            let mut fragmented_bytes = (page.memory().len() - accessor.total_length()) as u64;
+            let mut max_child_height = 0;
+            let (mut leaf_pages, mut branch_pages) = if is_branch { (0, 1) } else { (1, 0) };
+
+            for i in 0..accessor.num_pairs() {
+                let entry = accessor.entry(i).unwrap();
+                let collection: &UntypedDynamicCollection =
+                    UntypedDynamicCollection::new(entry.value());
+                match collection.collection_type() {
+                    Inline => {
+                        // data is inline, so it was already counted above
+                    }
+                    Subtree => {
+                        // this is a sub-tree, so traverse it
+                        let stats = btree_stats(
+                            Some(collection.as_subtree().0),
+                            mem,
+                            fixed_value_size,
+                            <() as RedbValue>::fixed_width(),
+                        )?;
+                        max_child_height = max(max_child_height, stats.tree_height);
+                        branch_pages += stats.branch_pages;
+                        leaf_pages += stats.leaf_pages;
+                        fragmented_bytes += stats.fragmented_bytes;
+                        overhead_bytes += stats.metadata_bytes;
+                        leaf_bytes += stats.stored_leaf_bytes;
+                    }
+                }
+            }
+
+            Ok(BtreeStats {
+                tree_height: max_child_height + 1,
+                leaf_pages,
+                branch_pages,
+                stored_leaf_bytes: leaf_bytes,
+                metadata_bytes: overhead_bytes,
+                fragmented_bytes,
+            })
+        }
+        BRANCH => {
+            let accessor = BranchAccessor::new(&page, fixed_key_size);
+            let mut max_child_height = 0;
+            let mut leaf_pages = 0;
+            let mut branch_pages = 1;
+            let mut stored_leaf_bytes = 0;
+            let mut metadata_bytes = accessor.total_length() as u64;
+            let mut fragmented_bytes = (page.memory().len() - accessor.total_length()) as u64;
+            for i in 0..accessor.count_children() {
+                if let Some(child) = accessor.child_page(i) {
+                    let stats =
+                        multimap_stats_helper(child, mem, fixed_key_size, fixed_value_size)?;
+                    max_child_height = max(max_child_height, stats.tree_height);
+                    leaf_pages += stats.leaf_pages;
+                    branch_pages += stats.branch_pages;
+                    stored_leaf_bytes += stats.stored_leaf_bytes;
+                    metadata_bytes += stats.metadata_bytes;
+                    fragmented_bytes += stats.fragmented_bytes;
+                }
+            }
+
+            Ok(BtreeStats {
+                tree_height: max_child_height + 1,
+                leaf_pages,
+                branch_pages,
+                stored_leaf_bytes,
+                metadata_bytes,
+                fragmented_bytes,
+            })
+        }
+        _ => unreachable!(),
+    }
+}
 
 // Verify all the checksums in the tree, including any Dynamic collection subtrees
 pub(crate) fn verify_tree_and_subtree_checksums(
@@ -390,6 +521,38 @@ impl<V: RedbKey> DynamicCollection<V> {
                 MultimapValue::new_subtree_free_on_drop(inner, freed_pages, pages, mem)
             }
         })
+    }
+}
+
+#[repr(transparent)]
+pub(crate) struct UntypedDynamicCollection {
+    data: [u8],
+}
+
+impl UntypedDynamicCollection {
+    fn new(data: &[u8]) -> &Self {
+        unsafe { mem::transmute(data) }
+    }
+
+    fn collection_type(&self) -> DynamicCollectionType {
+        DynamicCollectionType::from(self.data[0])
+    }
+
+    fn as_inline(&self) -> &[u8] {
+        debug_assert!(matches!(self.collection_type(), Inline));
+        &self.data[1..]
+    }
+
+    fn as_subtree(&self) -> (PageNumber, Checksum) {
+        debug_assert!(matches!(self.collection_type(), Subtree));
+        let offset = 1 + PageNumber::serialized_size();
+        let page_number = PageNumber::from_le_bytes(self.data[1..offset].try_into().unwrap());
+        let checksum = Checksum::from_le_bytes(
+            self.data[offset..(offset + size_of::<Checksum>())]
+                .try_into()
+                .unwrap(),
+        );
+        (page_number, checksum)
     }
 }
 
@@ -924,7 +1087,12 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTabl
     }
 
     fn stats(&self) -> Result<TableStats> {
-        let tree_stats = self.tree.stats()?;
+        let tree_stats = multimap_btree_stats(
+            self.tree.get_root().map(|(p, _)| p),
+            self.mem,
+            K::fixed_width(),
+            V::fixed_width(),
+        )?;
 
         Ok(TableStats {
             tree_height: tree_stats.tree_height,
@@ -1043,7 +1211,12 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, 
     }
 
     fn stats(&self) -> Result<TableStats> {
-        let tree_stats = self.tree.stats()?;
+        let tree_stats = multimap_btree_stats(
+            self.tree.get_root().map(|(p, _)| p),
+            self.mem,
+            K::fixed_width(),
+            V::fixed_width(),
+        )?;
 
         Ok(TableStats {
             tree_height: tree_stats.tree_height,

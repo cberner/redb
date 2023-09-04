@@ -1035,7 +1035,8 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
 }
 
 // Provides a simple zero-copy way to access a branch page
-pub(super) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
+// TODO: this should be pub(super) and the multimap btree stuff should be moved into this package
+pub(crate) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
     num_keys: usize,
     fixed_key_size: Option<usize>,
@@ -1043,7 +1044,7 @@ pub(super) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
 }
 
 impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
-    pub(super) fn new(page: &'b T, fixed_key_size: Option<usize>) -> Self {
+    pub(crate) fn new(page: &'b T, fixed_key_size: Option<usize>) -> Self {
         debug_assert_eq!(page.memory()[0], BRANCH);
         let num_keys = u16::from_le_bytes(page.memory()[2..4].try_into().unwrap()) as usize;
         BranchAccessor {
@@ -1137,7 +1138,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         Some(&self.page.memory()[offset..end])
     }
 
-    pub(super) fn count_children(&self) -> usize {
+    pub(crate) fn count_children(&self) -> usize {
         self.num_keys() + 1
     }
 
@@ -1154,7 +1155,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         ))
     }
 
-    pub(super) fn child_page(&self, n: usize) -> Option<PageNumber> {
+    pub(crate) fn child_page(&self, n: usize) -> Option<PageNumber> {
         if n >= self.count_children() {
             return None;
         }

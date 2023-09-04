@@ -859,6 +859,29 @@ fn regression21() {
 }
 
 #[test]
+fn multimap_stats() {
+    let tmpfile = create_tempfile();
+    let db = Database::builder().create(tmpfile.path()).unwrap();
+
+    let table_def: MultimapTableDefinition<u128, u128> = MultimapTableDefinition::new("x");
+
+    let mut last_size = 0;
+    for i in 0..1000 {
+        let mut txn = db.begin_write().unwrap();
+        txn.set_durability(Durability::None);
+        let mut table = txn.open_multimap_table(table_def).unwrap();
+        table.insert(0, i).unwrap();
+        drop(table);
+        txn.commit().unwrap();
+
+        let txn = db.begin_write().unwrap();
+        let bytes = txn.stats().unwrap().stored_bytes();
+        assert!(bytes > last_size, "{i}");
+        last_size = bytes;
+    }
+}
+
+#[test]
 fn no_savepoint_resurrection() {
     let tmpfile = create_tempfile();
 

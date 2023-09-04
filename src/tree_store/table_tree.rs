@@ -1,6 +1,6 @@
 use crate::error::TableError;
 use crate::multimap_table::{
-    finalize_tree_and_subtree_checksums, verify_tree_and_subtree_checksums,
+    finalize_tree_and_subtree_checksums, multimap_btree_stats, verify_tree_and_subtree_checksums,
 };
 use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
 use crate::tree_store::btree_base::Checksum;
@@ -746,18 +746,36 @@ impl<'txn> TableTree<'txn> {
             if let Some(updated_root) = self.pending_table_updates.get(entry.key()) {
                 definition.table_root = *updated_root;
             }
-            let subtree_stats = btree_stats(
-                definition.table_root.map(|(p, _)| p),
-                self.mem,
-                definition.fixed_key_size,
-                definition.fixed_value_size,
-            )?;
-            max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
-            total_stored_bytes += subtree_stats.stored_leaf_bytes;
-            total_metadata_bytes += subtree_stats.metadata_bytes;
-            total_fragmented += subtree_stats.fragmented_bytes;
-            branch_pages += subtree_stats.branch_pages;
-            leaf_pages += subtree_stats.leaf_pages;
+            match definition.get_type() {
+                TableType::Normal => {
+                    let subtree_stats = btree_stats(
+                        definition.table_root.map(|(p, _)| p),
+                        self.mem,
+                        definition.fixed_key_size,
+                        definition.fixed_value_size,
+                    )?;
+                    max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
+                    total_stored_bytes += subtree_stats.stored_leaf_bytes;
+                    total_metadata_bytes += subtree_stats.metadata_bytes;
+                    total_fragmented += subtree_stats.fragmented_bytes;
+                    branch_pages += subtree_stats.branch_pages;
+                    leaf_pages += subtree_stats.leaf_pages;
+                }
+                TableType::Multimap => {
+                    let subtree_stats = multimap_btree_stats(
+                        definition.table_root.map(|(p, _)| p),
+                        self.mem,
+                        definition.fixed_key_size,
+                        definition.fixed_value_size,
+                    )?;
+                    max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
+                    total_stored_bytes += subtree_stats.stored_leaf_bytes;
+                    total_metadata_bytes += subtree_stats.metadata_bytes;
+                    total_fragmented += subtree_stats.fragmented_bytes;
+                    branch_pages += subtree_stats.branch_pages;
+                    leaf_pages += subtree_stats.leaf_pages;
+                }
+            }
         }
         Ok(DatabaseStats {
             tree_height: master_tree_stats.tree_height + max_subtree_height,
