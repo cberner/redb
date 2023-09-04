@@ -558,6 +558,10 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
         })
     }
 
+    pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
+        self.root
+    }
+
     pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
         if let Some(ref root_page) = self.cached_root {
             self.get_helper(root_page.clone(), K::as_bytes(key).as_ref())
