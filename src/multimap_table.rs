@@ -14,6 +14,7 @@ use std::mem;
 use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull};
 use std::sync::{Arc, Mutex};
+use crate::table::TableStats;
 
 // Verify all the checksums in the tree, including any Dynamic collection subtrees
 pub(crate) fn verify_tree_and_subtree_checksums(
@@ -922,6 +923,19 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTabl
         Ok(MultimapRange::new(inner, self.mem))
     }
 
+    fn stats(&self) -> Result<TableStats> {
+        let tree_stats = self.tree.stats()?;
+
+        Ok(TableStats {
+            tree_height: tree_stats.tree_height,
+            leaf_pages: tree_stats.leaf_pages,
+            branch_pages: tree_stats.branch_pages,
+            stored_leaf_bytes: tree_stats.stored_leaf_bytes,
+            metadata_bytes: tree_stats.metadata_bytes,
+            fragmented_bytes: tree_stats.fragmented_bytes,
+        })
+    }
+
     /// Returns the number of key-value pairs in the table
     fn len(&self) -> Result<u64> {
         let mut count = 0;
@@ -962,6 +976,9 @@ pub trait ReadableMultimapTable<K: RedbKey + 'static, V: RedbKey + 'static>: Sea
     where
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a;
+
+    /// Retrieves information about storage usage for the table
+    fn stats(&self) -> Result<TableStats>;
 
     fn len(&self) -> Result<u64>;
 
@@ -1023,6 +1040,19 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, 
     {
         let inner = self.tree.range(&range)?;
         Ok(MultimapRange::new(inner, self.mem))
+    }
+
+    fn stats(&self) -> Result<TableStats> {
+        let tree_stats = self.tree.stats()?;
+
+        Ok(TableStats {
+            tree_height: tree_stats.tree_height,
+            leaf_pages: tree_stats.leaf_pages,
+            branch_pages: tree_stats.branch_pages,
+            stored_leaf_bytes: tree_stats.stored_leaf_bytes,
+            metadata_bytes: tree_stats.metadata_bytes,
+            fragmented_bytes: tree_stats.fragmented_bytes,
+        })
     }
 
     fn len(&self) -> Result<u64> {
