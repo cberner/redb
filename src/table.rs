@@ -22,7 +22,7 @@ pub struct TableStats {
 }
 
 impl TableStats {
-    /// Maximum traversal distance to reach the deepest (key, value) pair, across all tables
+    /// Maximum traversal distance to reach the deepest (key, value) pair in the table
     pub fn tree_height(&self) -> u32 {
         self.tree_height
     }
@@ -32,7 +32,7 @@ impl TableStats {
         self.leaf_pages
     }
 
-    /// Number of branch pages in btrees that store user data
+    /// Number of branch pages in the btree that store user data
     pub fn branch_pages(&self) -> u64 {
         self.branch_pages
     }
