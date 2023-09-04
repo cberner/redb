@@ -614,6 +614,15 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
         Ok(count)
     }
 
+    pub(crate) fn stats(&self) -> Result<BtreeStats> {
+        btree_stats(
+            self.root.map(|(p, _)| p),
+            self.mem,
+            K::fixed_width(),
+            V::fixed_width(),
+        )
+    }
+
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         if let Some((p, _)) = self.root {
