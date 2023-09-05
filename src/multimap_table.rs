@@ -1,5 +1,6 @@
 use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::sealed::Sealed;
+use crate::table::TableStats;
 use crate::tree_store::{
     AllPageNumbersBtreeIter, Btree, BtreeMut, BtreeRangeIter, CachePriority, Checksum,
     LeafAccessor, LeafMutator, Page, PageHint, PageNumber, RawBtree, RawLeafBuilder,
@@ -14,7 +15,6 @@ use std::mem;
 use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull};
 use std::sync::{Arc, Mutex};
-use crate::table::TableStats;
 
 // Verify all the checksums in the tree, including any Dynamic collection subtrees
 pub(crate) fn verify_tree_and_subtree_checksums(
