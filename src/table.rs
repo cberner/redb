@@ -77,6 +77,8 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     }
 
     /// Removes the specified range and returns the removed entries in an iterator
+    ///
+    /// The iterator will consume all items in the range on drop.
     pub fn drain<'a, KR>(&mut self, range: impl RangeBounds<KR> + 'a) -> Result<Drain<K, V>>
     where
         K: 'a,
@@ -87,6 +89,8 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
 
     /// Applies `predicate` to all key-value pairs in the specified range. All entries for which
     /// `predicate` evaluates to `true` are removed and returned in an iterator
+    ///
+    /// The iterator will consume all items in the range matching the predicate on drop.
     pub fn drain_filter<'a, KR, F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         range: impl RangeBounds<KR> + 'a,
