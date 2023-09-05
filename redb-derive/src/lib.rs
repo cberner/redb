@@ -2,14 +2,21 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
 
-#[proc_macro_derive(RedbValue, attributes(fixed_width))]
+#[proc_macro_derive(RedbValue, attributes(fixed_width, type_name))]
 pub fn redb_value(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
-    let width = match &input.attrs.get(0) {
-        Some(_) => quote!(Some(std::mem::size_of::<Self>())),
-        None => quote!(None),
-    };
+
+    let mut width = quote!(None);
+    let mut type_name = quote!(stringify!(#name));
+    for attr in input.attrs {
+        if attr.path().is_ident("fixed_width") {
+            width = quote!(Some(std::mem::size_of::<Self>()));
+        }
+        if attr.path().is_ident("type_name") {
+            type_name = attr.meta.require_list().unwrap().tokens.clone()
+        }
+    }
 
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
@@ -38,7 +45,7 @@ pub fn redb_value(input: TokenStream) -> TokenStream {
             }
 
             fn type_name() -> redb::TypeName {
-                redb::TypeName::new(stringify!($t))
+                redb::TypeName::new(#type_name)
             }
         }
     };
