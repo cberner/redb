@@ -42,7 +42,7 @@ jobs:
 
       - uses: actions-rs/toolchain@v1
         with:
-          toolchain: 1.67
+          toolchain: 1.66
           components: rustfmt, clippy
           default: true
 
