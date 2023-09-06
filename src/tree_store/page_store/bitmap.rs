@@ -66,7 +66,7 @@ impl BtreeBitmap {
     pub(crate) fn to_vec(&self) -> Vec<u8> {
         let mut result = vec![];
         let height: u32 = self.heights.len().try_into().unwrap();
-        result.extend(&height.to_le_bytes());
+        result.extend(height.to_le_bytes());
 
         let vecs: Vec<Vec<u8>> = self.heights.iter().map(|x| x.to_vec()).collect();
         let mut data_offset = END_OFFSETS + self.heights.len() * size_of::<u32>();
@@ -302,9 +302,9 @@ impl U64GroupedBitmap {
     // n bytes: serialized groups
     pub fn to_vec(&self) -> Vec<u8> {
         let mut result = vec![];
-        result.extend(&self.len.to_le_bytes());
+        result.extend(self.len.to_le_bytes());
         for x in self.data.iter() {
-            result.extend(&x.to_le_bytes());
+            result.extend(x.to_le_bytes());
         }
         result
     }
