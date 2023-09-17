@@ -797,7 +797,6 @@ impl Builder {
     }
 }
 
-// This just makes it easier to throw `dbg` etc statements on `Result<Database>`
 impl std::fmt::Debug for Database {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Database").finish()

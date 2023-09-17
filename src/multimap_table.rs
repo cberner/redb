@@ -713,7 +713,6 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> DoubleEndedIterator
 /// [Multimap tables](https://en.wikipedia.org/wiki/Multimap) may have multiple values associated with each key
 pub struct MultimapTable<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> {
     name: String,
-    system: bool,
     transaction: &'txn WriteTransaction<'db>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     tree: BtreeMut<'txn, K, &'static DynamicCollection<V>>,
@@ -724,7 +723,6 @@ pub struct MultimapTable<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> 
 impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, 'txn, K, V> {
     pub(crate) fn new(
         name: &str,
-        system: bool,
         table_root: Option<(PageNumber, Checksum)>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         mem: &'db TransactionalMemory,
@@ -732,7 +730,6 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
     ) -> MultimapTable<'db, 'txn, K, V> {
         MultimapTable {
             name: name.to_string(),
-            system,
             transaction,
             freed_pages: freed_pages.clone(),
             tree: BtreeMut::new(table_root, mem, freed_pages),
@@ -1129,8 +1126,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> Drop
     for MultimapTable<'db, 'txn, K, V>
 {
     fn drop(&mut self) {
-        self.transaction
-            .close_table(&self.name, self.system, &self.tree);
+        self.transaction.close_table(&self.name, &self.tree);
     }
 }
 
