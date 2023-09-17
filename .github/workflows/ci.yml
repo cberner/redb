@@ -69,7 +69,7 @@ jobs:
         run: just build test
 
       - name: Clippy
-        run: cargo clippy --all --all-targets
+        run: cargo clippy --all --all-targets -- -Dwarnings
 
       - name: Format
         run: cargo fmt --all -- --check
