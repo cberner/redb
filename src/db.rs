@@ -1116,7 +1116,7 @@ mod test {
 
         match err {
             DatabaseError::Storage(StorageError::Io(err)) if err.kind() == ErrorKind::NotFound => {}
-            err => panic!("Unexpected error for empty file: {}", err),
+            err => panic!("Unexpected error for empty file: {err}"),
         }
     }
 
@@ -1129,7 +1129,7 @@ mod test {
         match err {
             DatabaseError::Storage(StorageError::Io(err))
                 if err.kind() == ErrorKind::InvalidData => {}
-            err => panic!("Unexpected error for empty file: {}", err),
+            err => panic!("Unexpected error for empty file: {err}"),
         }
     }
 }
