@@ -57,7 +57,6 @@ impl TableStats {
 /// A table containing key-value mappings
 pub struct Table<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
     name: String,
-    system: bool,
     transaction: &'txn WriteTransaction<'db>,
     tree: BtreeMut<'txn, K, V>,
 }
@@ -65,7 +64,6 @@ pub struct Table<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
 impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K, V> {
     pub(crate) fn new(
         name: &str,
-        system: bool,
         table_root: Option<(PageNumber, Checksum)>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         mem: &'db TransactionalMemory,
@@ -73,7 +71,6 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     ) -> Table<'db, 'txn, K, V> {
         Table {
             name: name.to_string(),
-            system,
             transaction,
             tree: BtreeMut::new(table_root, mem, freed_pages),
         }
@@ -248,8 +245,7 @@ impl<K: RedbKey, V: RedbValue> Sealed for Table<'_, '_, K, V> {}
 
 impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Drop for Table<'db, 'txn, K, V> {
     fn drop(&mut self) {
-        self.transaction
-            .close_table(&self.name, self.system, &self.tree);
+        self.transaction.close_table(&self.name, &self.tree);
     }
 }
 
@@ -470,7 +466,7 @@ pub struct Range<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
 }
 
 impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Range<'a, K, V> {
-    fn new(inner: BtreeRangeIter<'a, K, V>) -> Self {
+    pub(super) fn new(inner: BtreeRangeIter<'a, K, V>) -> Self {
         Self { inner }
     }
 }
