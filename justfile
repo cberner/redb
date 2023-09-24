@@ -39,6 +39,9 @@ watch +args='test':
 fuzz: pre
     cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=100000
 
+fuzz_cmin:
+    cargo fuzz cmin --sanitizer=none fuzz_redb -- -max_len=100000
+
 fuzz_ci: pre
     cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=100000 -max_total_time=60
 
