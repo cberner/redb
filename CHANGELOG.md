@@ -1,5 +1,16 @@
 # redb - Changelog
 
+## 1.2.0 - 2023-09-24
+* Add `Builder::create_file()` which does the same thing as `create()` but
+  takes a `File` instead of a path
+* Add `stats()` to tables which provides informational statistics on the table's storage
+* Fix `WriteTransaction::stats()` to correctly count the storage used by multi-map tables
+* Fix panics that could occur when operating on savepoints concurrently from multiple threads
+  on the same `WriteTransaction`
+* Implement `Send` for `WriteTransaction`
+* Change MSRV to 1.66
+* Performance optimizations
+
 ## 1.1.0 - 2023-08-20
 * Fix panic when calling `compact()` on certain databases
 * Fix panic when calling `compact()` when an ephemeral `Savepoint` existed
