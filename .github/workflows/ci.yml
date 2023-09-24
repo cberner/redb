@@ -92,11 +92,12 @@ jobs:
           pip3 install maturin
           just test_py
 
-      - name: Run WASI tests
-        if: startsWith(matrix.os, 'macos')
-        run: |
-          rustup toolchain install nightly
-          rustup target add wasm32-wasi
-          brew install wasmtime
-          cargo install --force --version 0.1.27 cargo-wasi --locked
-          just test_wasi
+# Re-enable when this works on stable
+#      - name: Run WASI tests
+#        if: startsWith(matrix.os, 'macos')
+#        run: |
+#          rustup toolchain install nightly
+#          rustup target add wasm32-wasi
+#          brew install wasmtime
+#          cargo install --force --version 0.1.27 cargo-wasi --locked
+#          just test_wasi
