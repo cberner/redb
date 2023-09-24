@@ -168,7 +168,7 @@ fn uring_bench(path: &Path) {
                 };
                 let read_e =
                     io_uring::opcode::Readv::new(io_uring::types::Fd(file.as_raw_fd()), &iovec, 1)
-                        .offset(offset as i64)
+                        .offset(offset as u64)
                         .build()
                         .user_data(buffer_index as u64);
 
