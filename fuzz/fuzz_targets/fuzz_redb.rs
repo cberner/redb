@@ -355,7 +355,10 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
             }
             drop(reference_iter);
             reference.retain(|x, _| (*x < start || *x >= end) || *x % modulus != 0);
-            assert!(iter.next().is_none());
+            // This is basically assert!(iter.next().is_none()), but we also allow an Err such as SimulatedIOFailure
+            if let Some(Ok((_, _)))  = iter.next() {
+                panic!();
+            }
         }
         FuzzOperation::Range {
             start_key,
