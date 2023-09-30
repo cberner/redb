@@ -200,6 +200,8 @@ impl<T: RedbValue> RedbValue for Option<T> {
         if let Some(x) = value {
             result[0] = 1;
             result.extend_from_slice(T::as_bytes(x).as_ref());
+        } else if let Some(fixed_width) = T::fixed_width() {
+            result.extend_from_slice(&vec![0; fixed_width]);
         }
         result
     }
