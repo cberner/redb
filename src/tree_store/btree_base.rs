@@ -664,6 +664,12 @@ impl<'a> RawLeafBuilder<'a> {
     }
 
     pub(crate) fn append(&mut self, key: &[u8], value: &[u8]) {
+        if let Some(key_width) = self.fixed_key_size {
+            assert_eq!(key_width, key.len());
+        }
+        if let Some(value_width) = self.fixed_value_size {
+            assert_eq!(value_width, value.len());
+        }
         let key_offset = if self.pairs_written == 0 {
             self.key_section_start()
         } else {
