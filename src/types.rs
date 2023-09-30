@@ -211,6 +211,25 @@ impl<T: RedbValue> RedbValue for Option<T> {
     }
 }
 
+impl<T: RedbKey> RedbKey for Option<T> {
+    #[allow(clippy::collapsible_else_if)]
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        if data1[0] == 0 {
+            if data2[0] == 0 {
+                Ordering::Equal
+            } else {
+                Ordering::Less
+            }
+        } else {
+            if data2[0] == 0 {
+                Ordering::Greater
+            } else {
+                T::compare(&data1[1..], &data2[1..])
+            }
+        }
+    }
+}
+
 impl RedbValue for &[u8] {
     type SelfType<'a> = &'a [u8]
     where

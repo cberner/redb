@@ -999,20 +999,24 @@ fn option_type() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let definition: TableDefinition<u8, Option<u32>> = TableDefinition::new("x");
+    let definition: TableDefinition<Option<u8>, Option<u32>> = TableDefinition::new("x");
 
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(definition).unwrap();
-        table.insert(0, None).unwrap();
-        table.insert(1, Some(1)).unwrap();
+        table.insert(None, None).unwrap();
+        table.insert(None, Some(0)).unwrap();
+        table.insert(Some(1), Some(1)).unwrap();
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(definition).unwrap();
-    assert_eq!(table.get(0).unwrap().unwrap().value(), None);
-    assert_eq!(table.get(1).unwrap().unwrap().value(), Some(1));
+    assert_eq!(table.get(None).unwrap().unwrap().value(), Some(0));
+    assert_eq!(table.get(Some(1)).unwrap().unwrap().value(), Some(1));
+    let mut iter = table.iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), None);
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), Some(1));
 }
 
 #[test]
