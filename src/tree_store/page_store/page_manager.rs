@@ -582,6 +582,9 @@ impl TransactionalMemory {
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
         assert!(!self.needs_recovery.load(Ordering::Acquire));
 
+        self.allocated_since_commit.lock().unwrap().clear();
+        self.storage.write_barrier()?;
+
         let mut state = self.state.lock().unwrap();
         let secondary = state.header.secondary_slot_mut();
         secondary.transaction_id = transaction_id;
@@ -589,8 +592,6 @@ impl TransactionalMemory {
         secondary.system_root = system_root;
         secondary.freed_root = freed_root;
 
-        self.allocated_since_commit.lock().unwrap().clear();
-        self.storage.write_barrier()?;
         // TODO: maybe we can remove this flag and just update the in-memory DatabaseHeader state?
         self.read_from_secondary.store(true, Ordering::Release);
 
