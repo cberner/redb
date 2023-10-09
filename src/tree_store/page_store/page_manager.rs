@@ -521,16 +521,20 @@ impl TransactionalMemory {
         assert!(!self.needs_recovery.load(Ordering::Acquire));
 
         let mut state = self.state.lock().unwrap();
-
         // Trim surplus file space, before finalizing the commit
         let shrunk = self.try_shrink(&mut state)?;
+        // Copy the header so that we can release the state lock, while we flush the file
+        let mut header = state.header.clone();
+        drop(state);
 
-        let secondary = state.header.secondary_slot_mut();
+        let old_transaction_id = header.secondary_slot().transaction_id;
+        let secondary = header.secondary_slot_mut();
         secondary.transaction_id = transaction_id;
         secondary.user_root = data_root;
         secondary.system_root = system_root;
         secondary.freed_root = freed_root;
-        self.write_header(&state.header, false)?;
+
+        self.write_header(&header, false)?;
 
         // Use 2-phase commit, if checksums are disabled
         if two_phase {
@@ -542,17 +546,17 @@ impl TransactionalMemory {
         }
 
         // Swap the primary bit on-disk
-        self.write_header(&state.header, true)?;
+        self.write_header(&header, true)?;
         if eventual {
             self.storage.eventual_flush()?;
         } else {
             self.storage.flush()?;
         }
         // Only swap the in-memory primary bit after the fsync is successful
-        state.header.swap_primary_slot();
+        header.swap_primary_slot();
 
         if shrunk {
-            let result = self.storage.resize(state.header.layout().len());
+            let result = self.storage.resize(header.layout().len());
             if result.is_err() {
                 // TODO: it would be nice to have a more cohesive approach to setting this.
                 // we do it in commit() & rollback() on failure, but there are probably other places that need it
@@ -560,9 +564,18 @@ impl TransactionalMemory {
                 return result;
             }
         }
-
         self.allocated_since_commit.lock().unwrap().clear();
+
+        let mut state = self.state.lock().unwrap();
+        assert_eq!(
+            state.header.secondary_slot().transaction_id,
+            old_transaction_id
+        );
+        state.header = header;
         self.read_from_secondary.store(false, Ordering::Release);
+        // Hold lock until read_from_secondary is set to false, so that the new primary state is read.
+        // TODO: maybe we can remove the whole read_from_secondary flag?
+        drop(state);
 
         Ok(())
     }
