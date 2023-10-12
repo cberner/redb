@@ -352,7 +352,10 @@ impl Database {
             return Ok(true);
         }
 
-        Self::do_repair(&mut self.mem)?;
+        Self::do_repair(&mut self.mem, &|_| {}).map_err(|err| match err {
+            DatabaseError::Storage(storage_err) => storage_err,
+            _ => unreachable!(),
+        })?;
         self.mem.begin_writable()?;
 
         Ok(false)
@@ -567,18 +570,34 @@ impl Database {
         Ok(())
     }
 
-    fn do_repair(mem: &mut TransactionalMemory) -> Result {
+    fn do_repair(
+        mem: &mut TransactionalMemory,
+        repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
+    ) -> Result<(), DatabaseError> {
         if !Self::verify_primary_checksums(mem)? {
+            // 0.3 because the repair takes 3 full scans and the first is done now
+            let mut handle = RepairSession::new(0.3);
+            repair_callback(&mut handle);
+            if handle.aborted() {
+                return Err(DatabaseError::RepairAborted);
+            }
+
             mem.repair_primary_corrupted();
             // We need to invalidate the userspace cache, because walking the tree in verify_primary_checksums() may
             // have poisoned it with pages that just got rolled back by repair_primary_corrupted(), since
             // that rolls back a partially committed transaction.
             mem.clear_read_cache();
             if !Self::verify_primary_checksums(mem)? {
-                return Err(StorageError::Corrupted(
+                return Err(DatabaseError::Storage(StorageError::Corrupted(
                     "Failed to repair database. All roots are corrupted".to_string(),
-                ));
+                )));
             }
+        }
+        // 0.6 because the repair takes 3 full scans and the second is done now
+        let mut handle = RepairSession::new(0.6);
+        repair_callback(&mut handle);
+        if handle.aborted() {
+            return Err(DatabaseError::RepairAborted);
         }
 
         mem.begin_repair()?;
@@ -606,6 +625,13 @@ impl Database {
                 mem.get_last_committed_transaction_id()?
             };
         drop(freed_table);
+
+        // 0.9 because the repair takes 3 full scans and the third is done now. There is just some system tables left
+        let mut handle = RepairSession::new(0.9);
+        repair_callback(&mut handle);
+        if handle.aborted() {
+            return Err(DatabaseError::RepairAborted);
+        }
 
         let system_root = mem.get_system_root();
         if let Some((root, _)) = system_root {
@@ -638,6 +664,7 @@ impl Database {
         region_size: Option<u64>,
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
+        repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -653,7 +680,12 @@ impl Database {
         if mem.needs_repair()? {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
-            Self::do_repair(&mut mem)?;
+            let mut handle = RepairSession::new(0.0);
+            repair_callback(&mut handle);
+            if handle.aborted() {
+                return Err(DatabaseError::RepairAborted);
+            }
+            Self::do_repair(&mut mem, repair_callback)?;
         }
 
         mem.begin_writable()?;
@@ -745,12 +777,41 @@ impl Database {
     }
 }
 
+pub struct RepairSession {
+    progress: f64,
+    aborted: bool,
+}
+
+impl RepairSession {
+    pub(crate) fn new(progress: f64) -> Self {
+        Self {
+            progress,
+            aborted: false,
+        }
+    }
+
+    pub(crate) fn aborted(&self) -> bool {
+        self.aborted
+    }
+
+    /// Abort the repair process. The coorresponding call to [Builder::open] or [Builder::create] will return an error
+    pub fn abort(&mut self) {
+        self.aborted = true;
+    }
+
+    /// Returns an estimate of the repair progress in the range [0.0, 1.0). At 1.0 the repair is complete.
+    pub fn progress(&self) -> f64 {
+        self.progress
+    }
+}
+
 /// Configuration builder of a redb [Database].
 pub struct Builder {
     page_size: usize,
     region_size: Option<u64>,
     read_cache_size_bytes: usize,
     write_cache_size_bytes: usize,
+    repair_callback: Box<dyn Fn(&mut RepairSession)>,
 }
 
 impl Builder {
@@ -771,10 +832,26 @@ impl Builder {
             read_cache_size_bytes: 0,
             // TODO: Default should probably take into account the total system memory
             write_cache_size_bytes: 0,
+            repair_callback: Box::new(|_| {}),
         };
 
         result.set_cache_size(1024 * 1024 * 1024);
         result
+    }
+
+    /// Set a callback which will be invoked periodically in the event that the database file needs
+    /// to be repaired.
+    ///
+    /// The [RepairSession] argument can be used to control the repair process.
+    ///
+    /// If the database file needs repair, the callback will be invoked at least once.
+    /// There is no upper limit on the number of times it may be called.
+    pub fn set_repair_callback(
+        &mut self,
+        callback: impl Fn(&mut RepairSession) + 'static,
+    ) -> &mut Self {
+        self.repair_callback = Box::new(callback);
+        self
     }
 
     /// Set the internal page size of the database
@@ -823,6 +900,7 @@ impl Builder {
             self.region_size,
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
+            &self.repair_callback,
         )
     }
 
@@ -840,6 +918,7 @@ impl Builder {
             None,
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
+            &self.repair_callback,
         )
     }
 
@@ -853,6 +932,7 @@ impl Builder {
             self.region_size,
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
+            &self.repair_callback,
         )
     }
 
@@ -867,6 +947,7 @@ impl Builder {
             self.region_size,
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
+            &self.repair_callback,
         )
     }
 }

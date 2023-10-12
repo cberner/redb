@@ -187,6 +187,8 @@ impl std::error::Error for TableError {}
 pub enum DatabaseError {
     /// The Database is already open. Cannot acquire lock.
     DatabaseAlreadyOpen,
+    /// [crate::RepairSession::abort] was called.
+    RepairAborted,
     /// The database file is in an old file format and must be manually upgraded
     UpgradeRequired(u8),
     /// Error from underlying storage
@@ -197,6 +199,7 @@ impl From<DatabaseError> for Error {
     fn from(err: DatabaseError) -> Error {
         match err {
             DatabaseError::DatabaseAlreadyOpen => Error::DatabaseAlreadyOpen,
+            DatabaseError::RepairAborted => Error::RepairAborted,
             DatabaseError::UpgradeRequired(x) => Error::UpgradeRequired(x),
             DatabaseError::Storage(storage) => storage.into(),
         }
@@ -220,6 +223,9 @@ impl Display for DatabaseError {
         match self {
             DatabaseError::UpgradeRequired(actual) => {
                 write!(f, "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION}, but file is version {actual}")
+            }
+            DatabaseError::RepairAborted => {
+                write!(f, "Database repair aborted.")
             }
             DatabaseError::DatabaseAlreadyOpen => {
                 write!(f, "Database already open. Cannot acquire lock.")
@@ -413,6 +419,8 @@ pub enum Error {
     /// Savepoints become invalid when an older savepoint is restored after it was created,
     /// and savepoints cannot be created if the transaction is "dirty" (any tables have been opened)
     InvalidSavepoint,
+    /// [crate::RepairSession::abort] was called.
+    RepairAborted,
     /// A persistent savepoint exists
     PersistentSavepointExists,
     /// An Ephemeral savepoint exists
@@ -516,6 +524,9 @@ impl Display for Error {
             }
             Error::DatabaseAlreadyOpen => {
                 write!(f, "Database already open. Cannot acquire lock.")
+            }
+            Error::RepairAborted => {
+                write!(f, "Database repair aborted.")
             }
             Error::PersistentSavepointExists => {
                 write!(
