@@ -54,7 +54,7 @@
 //! [design]: https://github.com/cberner/redb/blob/master/docs/design.md
 
 pub use db::{
-    Builder, Database, MultimapTableDefinition, MultimapTableHandle, StorageBackend,
+    Builder, Database, MultimapTableDefinition, MultimapTableHandle, RepairSession, StorageBackend,
     TableDefinition, TableHandle, UntypedMultimapTableHandle, UntypedTableHandle,
 };
 pub use error::{

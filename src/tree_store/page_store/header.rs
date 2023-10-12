@@ -414,7 +414,7 @@ mod test {
     use crate::tree_store::page_store::TransactionalMemory;
     #[cfg(not(target_os = "windows"))]
     use crate::StorageError;
-    use crate::{Database, ReadableTable};
+    use crate::{Database, DatabaseError, ReadableTable};
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::mem::size_of;
@@ -570,6 +570,43 @@ mod test {
         .unwrap());
 
         Database::open(tmpfile.path()).unwrap();
+    }
+
+    #[test]
+    fn abort_repair() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
+        drop(db);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        let mut buffer = [0u8; 1];
+        file.read_exact(&mut buffer).unwrap();
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        buffer[0] |= RECOVERY_REQUIRED;
+        file.write_all(&buffer).unwrap();
+
+        assert!(TransactionalMemory::new(
+            Box::new(FileBackend::new(file).unwrap()),
+            PAGE_SIZE,
+            None,
+            0,
+            0
+        )
+        .unwrap()
+        .needs_repair()
+        .unwrap());
+
+        let err = Database::builder()
+            .set_repair_callback(|handle| handle.abort())
+            .open(tmpfile.path())
+            .unwrap_err();
+        assert!(matches!(err, DatabaseError::RepairAborted));
     }
 
     #[test]
