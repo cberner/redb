@@ -346,7 +346,7 @@ impl RedbKey for &str {
     }
 }
 
-macro_rules! be_value {
+macro_rules! le_value {
     ($t:ty) => {
         impl RedbValue for $t {
             type SelfType<'a> = $t;
@@ -380,9 +380,9 @@ macro_rules! be_value {
     };
 }
 
-macro_rules! be_impl {
+macro_rules! le_impl {
     ($t:ty) => {
-        be_value!($t);
+        le_value!($t);
 
         impl RedbKey for $t {
             fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
@@ -392,15 +392,15 @@ macro_rules! be_impl {
     };
 }
 
-be_impl!(u8);
-be_impl!(u16);
-be_impl!(u32);
-be_impl!(u64);
-be_impl!(u128);
-be_impl!(i8);
-be_impl!(i16);
-be_impl!(i32);
-be_impl!(i64);
-be_impl!(i128);
-be_value!(f32);
-be_value!(f64);
+le_impl!(u8);
+le_impl!(u16);
+le_impl!(u32);
+le_impl!(u64);
+le_impl!(u128);
+le_impl!(i8);
+le_impl!(i16);
+le_impl!(i32);
+le_impl!(i64);
+le_impl!(i128);
+le_value!(f32);
+le_value!(f64);
