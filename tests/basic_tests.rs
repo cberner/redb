@@ -1044,6 +1044,66 @@ fn array_type() {
 }
 
 #[test]
+fn vec_fixed_width_value_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u8, Vec<u64>> = TableDefinition::new("x");
+
+    let value = vec![0, 1, 2, 3];
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(0, &value).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(value, table.get(0).unwrap().unwrap().value());
+}
+
+#[test]
+fn vec_var_width_value_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u8, Vec<&str>> = TableDefinition::new("x");
+
+    let value = vec!["hello", "world"];
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(0, &value).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(value, table.get(0).unwrap().unwrap().value());
+}
+
+#[test]
+fn vec_vec_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u8, Vec<Vec<&str>>> = TableDefinition::new("x");
+
+    let value = vec![vec!["hello", "world"], vec!["this", "is", "a", "test"]];
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(0, &value).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(value, table.get(0).unwrap().unwrap().value());
+}
+
+#[test]
 fn range_lifetime() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();

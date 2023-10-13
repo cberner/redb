@@ -74,6 +74,7 @@ type Result<T = (), E = StorageError> = std::result::Result<T, E>;
 #[cfg(feature = "python")]
 pub use crate::python::redb;
 
+mod complex_types;
 mod db;
 mod error;
 mod multimap_table;
