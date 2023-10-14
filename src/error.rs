@@ -244,7 +244,10 @@ impl std::error::Error for DatabaseError {}
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SavepointError {
-    /// This savepoint is invalid because an older savepoint was restored after it was created
+    /// This savepoint is invalid or cannot be created.
+    ///
+    /// Savepoints become invalid when an older savepoint is restored after it was created,
+    /// and savepoints cannot be created if the transaction is "dirty" (any tables have been opened)
     InvalidSavepoint,
     /// Error from underlying storage
     Storage(StorageError),
@@ -269,10 +272,7 @@ impl Display for SavepointError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             SavepointError::InvalidSavepoint => {
-                write!(
-                    f,
-                    "Savepoint is invalid because an older savepoint was already restored."
-                )
+                write!(f, "Savepoint is invalid or cannot be created.")
             }
             SavepointError::Storage(storage) => storage.fmt(f),
         }
@@ -420,7 +420,10 @@ pub enum Error {
     SimulatedIOFailure,
     /// The Database is already open. Cannot acquire lock.
     DatabaseAlreadyOpen,
-    /// This savepoint is invalid because an older savepoint was restored after it was created
+    /// This savepoint is invalid or cannot be created.
+    ///
+    /// Savepoints become invalid when an older savepoint is restored after it was created,
+    /// and savepoints cannot be created if the transaction is "dirty" (any tables have been opened)
     InvalidSavepoint,
     /// A persistent savepoint exists
     PersistentSavepointExists,
@@ -543,10 +546,7 @@ impl Display for Error {
                 )
             }
             Error::InvalidSavepoint => {
-                write!(
-                    f,
-                    "Savepoint is invalid because an older savepoint was already restored."
-                )
+                write!(f, "Savepoint is invalid or cannot be created.")
             }
         }
     }
