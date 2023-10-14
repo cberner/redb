@@ -37,6 +37,29 @@ fn len() {
 }
 
 #[test]
+fn first_last() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(table.first().unwrap().is_none());
+        assert!(table.last().unwrap().is_none());
+        table.insert("a", "world1").unwrap();
+        assert_eq!(table.first().unwrap().unwrap().0.value(), "a");
+        assert_eq!(table.last().unwrap().unwrap().0.value(), "a");
+        table.insert("b", "world2").unwrap();
+        table.insert("c", "world3").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.first().unwrap().unwrap().0.value(), "a");
+    assert_eq!(table.last().unwrap().unwrap().0.value(), "c");
+}
+
+#[test]
 fn pop() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();

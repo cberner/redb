@@ -292,6 +292,16 @@ pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static>: Sealed {
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a;
 
+    /// Returns the first key-value pair in the table, if it exists
+    fn first(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+        self.iter()?.next().transpose()
+    }
+
+    /// Returns the last key-value pair in the table, if it exists
+    fn last(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+        self.iter()?.next_back().transpose()
+    }
+
     /// Retrieves information about storage usage for the table
     fn stats(&self) -> Result<TableStats>;
 
