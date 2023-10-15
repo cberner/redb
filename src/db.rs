@@ -408,7 +408,12 @@ impl Database {
             })?
         {
             let savepoint_table: ReadOnlyTable<SavepointId, SerializedSavepoint> =
-                ReadOnlyTable::new(savepoint_table_def.get_root(), PageHint::None, mem)?;
+                ReadOnlyTable::new(
+                    "internal savepoint table".to_string(),
+                    savepoint_table_def.get_root(),
+                    PageHint::None,
+                    mem,
+                )?;
             for result in savepoint_table.range::<SavepointId>(..)? {
                 let (_, savepoint_data) = result?;
                 let savepoint = savepoint_data
@@ -443,8 +448,12 @@ impl Database {
             mem.mark_pages_allocated(freed_pages_iter, true)?;
         }
 
-        let freed_table: ReadOnlyTable<FreedTableKey, FreedPageList<'static>> =
-            ReadOnlyTable::new(freed_root, PageHint::None, mem)?;
+        let freed_table: ReadOnlyTable<FreedTableKey, FreedPageList<'static>> = ReadOnlyTable::new(
+            "internal freed table".to_string(),
+            freed_root,
+            PageHint::None,
+            mem,
+        )?;
         let lookup_key = FreedTableKey {
             transaction_id: oldest_unprocessed_free_transaction.0,
             pagination_id: 0,
@@ -557,8 +566,12 @@ impl Database {
         let freed_root = mem.get_freed_root();
         // Allow processing of all transactions, since this is the main freed tree
         Self::mark_freed_tree(freed_root, mem, TransactionId(0))?;
-        let freed_table: ReadOnlyTable<FreedTableKey, FreedPageList<'static>> =
-            ReadOnlyTable::new(freed_root, PageHint::None, mem)?;
+        let freed_table: ReadOnlyTable<FreedTableKey, FreedPageList<'static>> = ReadOnlyTable::new(
+            "internal freed table".to_string(),
+            freed_root,
+            PageHint::None,
+            mem,
+        )?;
         // The persistent savepoints might hold references to older freed trees that are partially processed.
         // Make sure we don't reprocess those frees, as that would result in a double-free
         let oldest_unprocessed_transaction =
