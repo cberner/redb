@@ -1150,6 +1150,7 @@ impl<'db> ReadTransaction<'db> {
             .ok_or_else(|| TableError::TableDoesNotExist(definition.name().to_string()))?;
 
         Ok(ReadOnlyTable::new(
+            definition.name().to_string(),
             header.get_root(),
             PageHint::Clean,
             self.mem,

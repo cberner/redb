@@ -7,6 +7,7 @@ use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
 use crate::Result;
 use crate::{AccessGuard, StorageError, WriteTransaction};
 use std::borrow::Borrow;
+use std::fmt::{Debug, Formatter};
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
 
@@ -249,6 +250,55 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Drop for Table<'db
     }
 }
 
+fn debug_helper<K: RedbKey + 'static, V: RedbValue + 'static>(
+    f: &mut Formatter<'_>,
+    name: &str,
+    len: Result<u64>,
+    first: Result<Option<(AccessGuard<K>, AccessGuard<V>)>>,
+    last: Result<Option<(AccessGuard<K>, AccessGuard<V>)>>,
+) -> std::fmt::Result {
+    write!(f, "Table [ name: \"{}\", ", name)?;
+    if let Ok(len) = len {
+        if len == 0 {
+            write!(f, "No entries")?;
+        } else if len == 1 {
+            if let Ok(first) = first {
+                let (key, value) = first.as_ref().unwrap();
+                write!(f, "One key-value: {:?} = {:?}", key.value(), value.value())?;
+            } else {
+                write!(f, "I/O Error accessing table!")?;
+            }
+        } else {
+            if let Ok(first) = first {
+                let (key, value) = first.as_ref().unwrap();
+                write!(f, "first: {:?} = {:?}, ", key.value(), value.value())?;
+            } else {
+                write!(f, "I/O Error accessing table!")?;
+            }
+            if len > 2 {
+                write!(f, "...{} more entries..., ", len - 2)?;
+            }
+            if let Ok(last) = last {
+                let (key, value) = last.as_ref().unwrap();
+                write!(f, "last: {:?} = {:?}", key.value(), value.value())?;
+            } else {
+                write!(f, "I/O Error accessing table!")?;
+            }
+        }
+    } else {
+        write!(f, "I/O Error accessing table!")?;
+    }
+    write!(f, " ]")?;
+
+    Ok(())
+}
+
+impl<K: RedbKey + 'static, V: RedbValue + 'static> Debug for Table<'_, '_, K, V> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        debug_helper(f, &self.name, self.len(), self.first(), self.last())
+    }
+}
+
 pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static>: Sealed {
     /// Returns the value corresponding to the given key
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
@@ -319,16 +369,19 @@ pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static>: Sealed {
 
 /// A read-only table
 pub struct ReadOnlyTable<'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
+    name: String,
     tree: Btree<'txn, K, V>,
 }
 
 impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadOnlyTable<'txn, K, V> {
     pub(crate) fn new(
+        name: String,
         root_page: Option<(PageNumber, Checksum)>,
         hint: PageHint,
         mem: &'txn TransactionalMemory,
     ) -> Result<ReadOnlyTable<'txn, K, V>> {
         Ok(ReadOnlyTable {
+            name,
             tree: Btree::new(root_page, hint, mem)?,
         })
     }
@@ -375,6 +428,12 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V>
 }
 
 impl<K: RedbKey, V: RedbValue> Sealed for ReadOnlyTable<'_, K, V> {}
+
+impl<K: RedbKey + 'static, V: RedbValue + 'static> Debug for ReadOnlyTable<'_, K, V> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        debug_helper(f, &self.name, self.len(), self.first(), self.last())
+    }
+}
 
 pub struct Drain<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
     inner: BtreeDrain<'a, K, V>,
