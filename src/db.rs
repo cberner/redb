@@ -41,7 +41,7 @@ pub trait StorageBackend: 'static + Send + Sync {
 
     /// Sets the length of the storage.
     fn set_len(&self, len: u64) -> Result<(), io::Error>;
-    
+
     /// Syncs all buffered data with the persistent storage.
     fn sync_data(&self, eventual: bool) -> Result<(), io::Error>;
 

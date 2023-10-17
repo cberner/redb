@@ -76,12 +76,7 @@ impl StorageBackend for FileBackend {
             // Try to flush any pages in the page cache that are out of sync with disk.
             // See here for why: <https://github.com/cberner/redb/issues/450>
             unsafe {
-                libc::posix_fadvise64(
-                    self.file.as_raw_fd(),
-                    0,
-                    0,
-                    libc::POSIX_FADV_DONTNEED,
-                );
+                libc::posix_fadvise64(self.file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
             }
         }
         res
@@ -96,8 +91,7 @@ impl StorageBackend for FileBackend {
                 return Err(io::Error::last_os_error().into());
             }
             Ok(())
-        }
-        else {
+        } else {
             self.file.sync_data()
         }
     }

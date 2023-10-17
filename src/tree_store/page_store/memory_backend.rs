@@ -48,9 +48,11 @@ impl StorageBackend for MemoryBackend {
         let guard = self.read();
         if offset + len as u64 <= guard.len() as u64 {
             Ok(guard[offset as usize..offset as usize + len].to_owned())
-        }
-        else {
-            Err(io::Error::new(io::ErrorKind::InvalidInput, "Index out-of-range."))
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Index out-of-range.",
+            ))
         }
     }
 
@@ -62,8 +64,7 @@ impl StorageBackend for MemoryBackend {
             for _ in 0..additional {
                 guard.push(0);
             }
-        }
-        else {
+        } else {
             guard.truncate(len as usize);
         }
 
@@ -79,9 +80,11 @@ impl StorageBackend for MemoryBackend {
         if (offset + data.len() as u64) <= guard.len() as u64 {
             guard[offset as usize..offset as usize + data.len()].copy_from_slice(data);
             Ok(())
-        }
-        else {
-            Err(io::Error::new(io::ErrorKind::InvalidInput, "Index out-of-range."))
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Index out-of-range.",
+            ))
         }
     }
 }

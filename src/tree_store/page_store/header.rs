@@ -468,10 +468,16 @@ mod test {
         .unwrap();
         file.write_all(&[0; size_of::<u128>()]).unwrap();
 
-        assert!(TransactionalMemory::new(Box::new(FileBackend::new(file).unwrap()), PAGE_SIZE, None, 0, 0)
-            .unwrap()
-            .needs_repair()
-            .unwrap());
+        assert!(TransactionalMemory::new(
+            Box::new(FileBackend::new(file).unwrap()),
+            PAGE_SIZE,
+            None,
+            0,
+            0
+        )
+        .unwrap()
+        .needs_repair()
+        .unwrap());
 
         #[allow(unused_mut)]
         let mut db2 = Database::create(tmpfile.path()).unwrap();
@@ -551,10 +557,16 @@ mod test {
         buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
 
-        assert!(TransactionalMemory::new(Box::new(FileBackend::new(file).unwrap()), PAGE_SIZE, None, 0, 0)
-            .unwrap()
-            .needs_repair()
-            .unwrap());
+        assert!(TransactionalMemory::new(
+            Box::new(FileBackend::new(file).unwrap()),
+            PAGE_SIZE,
+            None,
+            0,
+            0
+        )
+        .unwrap()
+        .needs_repair()
+        .unwrap());
 
         Database::open(tmpfile.path()).unwrap();
     }
@@ -597,10 +609,16 @@ mod test {
         buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
 
-        assert!(TransactionalMemory::new(Box::new(FileBackend::new(file).unwrap()), PAGE_SIZE, None, 0, 0)
-            .unwrap()
-            .needs_repair()
-            .unwrap());
+        assert!(TransactionalMemory::new(
+            Box::new(FileBackend::new(file).unwrap()),
+            PAGE_SIZE,
+            None,
+            0,
+            0
+        )
+        .unwrap()
+        .needs_repair()
+        .unwrap());
 
         Database::open(tmpfile.path()).unwrap();
     }
