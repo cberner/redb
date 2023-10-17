@@ -11,10 +11,15 @@ use crate::{
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Display, Formatter};
+
+#[cfg(any(windows, unix, target_os = "wasi"))]
 use std::fs::{File, OpenOptions};
+use std::io;
+#[cfg(any(windows, unix, target_os = "wasi"))]
 use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::ops::RangeFull;
+#[cfg(any(windows, unix, target_os = "wasi"))]
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -25,6 +30,24 @@ use crate::sealed::Sealed;
 use crate::transactions::SAVEPOINT_TABLE;
 #[cfg(feature = "logging")]
 use log::{info, warn};
+
+/// Implements persistent storage for a database.
+pub trait StorageBackend: 'static + Send + Sync {
+    /// Gets the current length of the stoarge.
+    fn len(&self) -> Result<u64, io::Error>;
+
+    /// Reads the specified array of bytes from the storage.
+    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error>;
+
+    /// Sets the length of the storage.
+    fn set_len(&self, len: u64) -> Result<(), io::Error>;
+    
+    /// Syncs all buffered data with the persistent storage.
+    fn sync_data(&self, eventual: bool) -> Result<(), io::Error>;
+
+    /// Writes the specified array to the storage.
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error>;
+}
 
 struct AtomicTransactionId {
     inner: AtomicU64,
@@ -245,13 +268,20 @@ impl Database {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
+    #[cfg(any(windows, unix, target_os = "wasi"))]
     pub fn create(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().create(path)
     }
 
     /// Opens an existing redb database.
+    #[cfg(any(windows, unix, target_os = "wasi"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
+    }
+
+    /// Opens a redb database for the given backend.
+    pub fn open_backend(backend: impl StorageBackend) -> Result<Database, DatabaseError> {
+        Self::builder().open_backend(backend)
     }
 
     pub(crate) fn start_write_transaction(&self) -> TransactionId {
@@ -608,7 +638,7 @@ impl Database {
     }
 
     fn new(
-        file: File,
+        file: Box<dyn StorageBackend>,
         page_size: usize,
         region_size: Option<u64>,
         read_cache_size_bytes: usize,
@@ -785,6 +815,7 @@ impl Builder {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
+    #[cfg(any(windows, unix, target_os = "wasi"))]
     pub fn create(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new()
             .read(true)
@@ -793,7 +824,7 @@ impl Builder {
             .open(path)?;
 
         Database::new(
-            file,
+            Box::new(crate::FileBackend::new(file)?),
             self.page_size,
             self.region_size,
             self.read_cache_size_bytes,
@@ -802,6 +833,7 @@ impl Builder {
     }
 
     /// Opens an existing redb database.
+    #[cfg(any(windows, unix, target_os = "wasi"))]
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
@@ -810,7 +842,7 @@ impl Builder {
         }
 
         Database::new(
-            file,
+            Box::new(crate::FileBackend::new(file)?),
             self.page_size,
             None,
             self.read_cache_size_bytes,
@@ -821,9 +853,21 @@ impl Builder {
     /// Open an existing or create a new database in the given `file`.
     ///
     /// The file must be empty or contain a valid database.
+    #[cfg(any(windows, unix, target_os = "wasi"))]
     pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
         Database::new(
-            file,
+            Box::new(crate::FileBackend::new(file)?),
+            self.page_size,
+            self.region_size,
+            self.read_cache_size_bytes,
+            self.write_cache_size_bytes,
+        )
+    }
+
+    /// Opens the database with the given backend.
+    pub fn open_backend(&self, backend: impl StorageBackend) -> Result<Database, DatabaseError> {
+        Database::new(
+            Box::new(backend),
             self.page_size,
             self.region_size,
             self.read_cache_size_bytes,

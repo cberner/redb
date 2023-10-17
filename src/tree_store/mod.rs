@@ -12,7 +12,7 @@ pub(crate) use btree_base::{LeafAccessor, LeafMutator, RawLeafBuilder, BRANCH, L
 pub(crate) use btree_iters::{
     AllPageNumbersBtreeIter, BtreeDrain, BtreeDrainFilter, BtreeRangeIter,
 };
-pub use page_store::Savepoint;
+pub use page_store::{file_backend, MemoryBackend, Savepoint};
 pub(crate) use page_store::{
     CachePriority, Page, PageHint, PageNumber, SerializedSavepoint, TransactionalMemory,
     FILE_FORMAT_VERSION, MAX_VALUE_LENGTH, PAGE_SIZE,
