@@ -16,6 +16,7 @@ use std::os::unix::{fs::FileExt, io::AsRawFd};
 use std::os::wasi::{fs::FileExt, io::AsRawFd};
 
 /// Stores a database as a file on-disk.
+#[derive(Debug)]
 pub struct FileBackend {
     file: File,
 }

@@ -31,6 +31,7 @@ extern "system" {
 }
 
 /// Stores a database as a file on-disk.
+#[derive(Debug)]
 pub struct FileBackend {
     file: File,
 }
