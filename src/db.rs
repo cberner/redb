@@ -33,7 +33,7 @@ use log::{info, warn};
 
 /// Implements persistent storage for a database.
 pub trait StorageBackend: 'static + Send + Sync {
-    /// Gets the current length of the stoarge.
+    /// Gets the current length of the storage.
     fn len(&self) -> Result<u64, io::Error>;
 
     /// Reads the specified array of bytes from the storage.
