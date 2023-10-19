@@ -10,7 +10,7 @@ use crate::{
     StorageError,
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Debug, Formatter};
 
 #[cfg(any(windows, unix, target_os = "wasi"))]
 use std::fs::{File, OpenOptions};
@@ -32,7 +32,7 @@ use crate::transactions::SAVEPOINT_TABLE;
 use log::{info, warn};
 
 /// Implements persistent storage for a database.
-pub trait StorageBackend: 'static + Send + Sync {
+pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Gets the current length of the storage.
     fn len(&self) -> Result<u64, io::Error>;
 
