@@ -86,12 +86,13 @@ impl StorageBackend for FileBackend {
     #[cfg(target_os = "macos")]
     fn sync_data(&self, eventual: bool) -> Result<(), io::Error> {
         if eventual {
-            let code = unsafe { libc::fcntl(self.file.file().as_raw_fd(), libc::F_BARRIERFSYNC) };
+            let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
             if code == -1 {
-                self.set_fsync_failed(true);
-                return Err(io::Error::last_os_error().into());
+                Err(io::Error::last_os_error().into())
             }
-            Ok(())
+            else {
+                Ok(())
+            }
         } else {
             self.file.sync_data()
         }
