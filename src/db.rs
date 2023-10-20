@@ -10,7 +10,7 @@ use crate::{
     StorageError,
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
-use std::fmt::{Display, Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 
 #[cfg(any(windows, unix, target_os = "wasi"))]
 use std::fs::{File, OpenOptions};
