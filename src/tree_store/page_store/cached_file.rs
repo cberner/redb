@@ -328,7 +328,7 @@ impl PagedCachedFile {
         self.file.set_len(len).map_err(StorageError::from)
     }
 
-    pub(super) fn flush(&self, eventual: bool) -> Result {
+    pub(super) fn flush(&self, #[allow(unused_variables)] eventual: bool) -> Result {
         self.check_fsync_failure()?;
         self.flush_write_buffer()?;
         // Disable fsync when fuzzing, since it doesn't test crash consistency
