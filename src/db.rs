@@ -33,6 +33,11 @@ use log::{info, warn};
 
 /// Implements persistent storage for a database.
 pub trait StorageBackend: 'static + Debug + Send + Sync {
+    /// Whether the current storage backend is of zero length.
+    fn is_empty(&self) -> Result<bool, io::Error> {
+        Ok(self.len()? == 0)
+    }
+
     /// Gets the current length of the storage.
     fn len(&self) -> Result<u64, io::Error>;
 

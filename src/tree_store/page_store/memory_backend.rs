@@ -7,6 +7,15 @@ use std::sync::*;
 pub struct MemoryBackend(RwLock<Vec<u8>>);
 
 impl MemoryBackend {
+    fn out_of_range() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Index out-of-range.",
+        )
+    }
+}
+
+impl MemoryBackend {
     /// Creates a new, empty memory backend.
     pub fn new() -> Self {
         Self::default()
@@ -46,26 +55,25 @@ impl StorageBackend for MemoryBackend {
 
     fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
         let guard = self.read();
-        if offset + len as u64 <= guard.len() as u64 {
-            Ok(guard[offset as usize..offset as usize + len].to_owned())
+        let offset = usize::try_from(offset).map_err(|_| Self::out_of_range())?;
+        if offset + len <= guard.len() {
+            Ok(guard[offset..offset + len].to_owned())
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Index out-of-range.",
-            ))
+            Err(Self::out_of_range())
         }
     }
 
     fn set_len(&self, len: u64) -> Result<(), io::Error> {
         let mut guard = self.write();
-        if (guard.len() as u64) < len {
-            let additional = len as usize - guard.len();
+        let len = usize::try_from(len).map_err(|_| Self::out_of_range())?;
+        if guard.len() < len {
+            let additional = len - guard.len();
             guard.reserve(additional);
             for _ in 0..additional {
                 guard.push(0);
             }
         } else {
-            guard.truncate(len as usize);
+            guard.truncate(len);
         }
 
         Ok(())
@@ -77,14 +85,12 @@ impl StorageBackend for MemoryBackend {
 
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
         let mut guard = self.write();
-        if (offset + data.len() as u64) <= guard.len() as u64 {
-            guard[offset as usize..offset as usize + data.len()].copy_from_slice(data);
+        let offset = usize::try_from(offset).map_err(|_| Self::out_of_range())?;
+        if offset + data.len() <= guard.len() {
+            guard[offset..offset + data.len()].copy_from_slice(data);
             Ok(())
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Index out-of-range.",
-            ))
+            Err(Self::out_of_range())
         }
     }
 }
