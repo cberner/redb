@@ -8,10 +8,7 @@ pub struct MemoryBackend(RwLock<Vec<u8>>);
 
 impl MemoryBackend {
     fn out_of_range() -> io::Error {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Index out-of-range.",
-        )
+        io::Error::new(io::ErrorKind::InvalidInput, "Index out-of-range.")
     }
 }
 
