@@ -88,7 +88,7 @@ impl StorageBackend for FileBackend {
         if eventual {
             let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
             if code == -1 {
-                Err(io::Error::last_os_error().into())
+                Err(io::Error::last_os_error())
             } else {
                 Ok(())
             }
