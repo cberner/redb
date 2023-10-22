@@ -1,5 +1,13 @@
 # redb - Changelog
 
+## 1.3.0 - 2023-10-22
+* Implement `RedbKey` for `Option<T>`
+* Implement `RedbValue` for `Vec<T>`
+* Implement `Debug` for tables
+* Add `ReadableTable::first()` and `last()` which retrieve the first and last key-value pairs, respectively`
+* Reduce lock contention for mixed read-write workloads
+* Documentation improvements
+
 ## 1.2.0 - 2023-09-24
 * Add `Builder::create_file()` which does the same thing as `create()` but
   takes a `File` instead of a path
