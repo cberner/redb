@@ -4,28 +4,18 @@ use std::sync::*;
 
 /// Acts as temporal in-memory database storage.
 #[derive(Debug, Default)]
-pub struct MemoryBackend(RwLock<Vec<u8>>);
+pub struct InMemoryBackend(RwLock<Vec<u8>>);
 
-impl MemoryBackend {
+impl InMemoryBackend {
     fn out_of_range() -> io::Error {
         io::Error::new(io::ErrorKind::InvalidInput, "Index out-of-range.")
     }
 }
 
-impl MemoryBackend {
+impl InMemoryBackend {
     /// Creates a new, empty memory backend.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Creates a memory backend with the specified initial capacity.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self(RwLock::new(Vec::with_capacity(capacity)))
-    }
-
-    /// Obtains the inner memory for this backend.
-    pub fn into_inner(self) -> Vec<u8> {
-        self.0.into_inner().expect("Could not get inner vector.")
     }
 
     /// Gets a read guard for this backend.
@@ -39,13 +29,13 @@ impl MemoryBackend {
     }
 }
 
-impl From<Vec<u8>> for MemoryBackend {
+impl From<Vec<u8>> for InMemoryBackend {
     fn from(value: Vec<u8>) -> Self {
         Self(RwLock::new(value))
     }
 }
 
-impl StorageBackend for MemoryBackend {
+impl StorageBackend for InMemoryBackend {
     fn len(&self) -> Result<u64, io::Error> {
         Ok(self.read().len() as u64)
     }

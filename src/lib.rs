@@ -67,7 +67,7 @@ pub use multimap_table::{
 pub use table::{Drain, DrainFilter, Range, ReadOnlyTable, ReadableTable, Table};
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
 pub use tree_store::file_backend::FileBackend;
-pub use tree_store::{AccessGuard, AccessGuardMut, MemoryBackend, Savepoint};
+pub use tree_store::{AccessGuard, AccessGuardMut, InMemoryBackend, Savepoint};
 pub use types::{RedbKey, RedbValue, TypeName};
 
 type Result<T = (), E = StorageError> = std::result::Result<T, E>;

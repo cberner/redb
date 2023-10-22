@@ -275,11 +275,6 @@ impl Database {
         Self::builder().open(path)
     }
 
-    /// Opens a redb database for the given backend.
-    pub fn open_backend(backend: impl StorageBackend) -> Result<Database, DatabaseError> {
-        Self::builder().open_backend(backend)
-    }
-
     pub(crate) fn start_write_transaction(&self) -> TransactionId {
         let mut live_write_transaction = self.live_write_transaction.lock().unwrap();
         while live_write_transaction.is_some() {
@@ -857,8 +852,8 @@ impl Builder {
         )
     }
 
-    /// Opens the database with the given backend.
-    pub fn open_backend(&self, backend: impl StorageBackend) -> Result<Database, DatabaseError> {
+    /// Open an existing or create a new database with the given backend.
+    pub fn create_backend(&self, backend: impl StorageBackend) -> Result<Database, DatabaseError> {
         Database::new(
             Box::new(backend),
             self.page_size,
