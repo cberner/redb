@@ -665,21 +665,6 @@ impl TransactionalMemory {
         page_number: PageNumber,
         hint: PageHint,
     ) -> Result<PageImpl> {
-        // We must not retrieve an immutable reference to a page which already has a mutable ref to it
-        #[cfg(debug_assertions)]
-        {
-            debug_assert!(
-                !self.open_dirty_pages.lock().unwrap().contains(&page_number),
-                "{page_number:?}",
-            );
-            *(self
-                .read_page_ref_counts
-                .lock()
-                .unwrap()
-                .entry(page_number)
-                .or_default()) += 1;
-        }
-
         let range = page_number.address_range(
             self.page_size as u64,
             self.region_size,
@@ -690,6 +675,20 @@ impl TransactionalMemory {
         let mem = self
             .storage
             .read(range.start, len, hint, CachePriority::default_btree)?;
+
+        // We must not retrieve an immutable reference to a page which already has a mutable ref to it
+        #[cfg(debug_assertions)]
+        {
+            let dirty_pages = self.open_dirty_pages.lock().unwrap();
+            debug_assert!(!dirty_pages.contains(&page_number), "{page_number:?}");
+            *(self
+                .read_page_ref_counts
+                .lock()
+                .unwrap()
+                .entry(page_number)
+                .or_default()) += 1;
+            drop(dirty_pages);
+        }
 
         Ok(PageImpl {
             mem,
