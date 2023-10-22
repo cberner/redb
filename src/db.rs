@@ -12,14 +12,11 @@ use crate::{
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Debug, Display, Formatter};
 
-#[cfg(any(windows, unix, target_os = "wasi"))]
 use std::fs::{File, OpenOptions};
 use std::io;
-#[cfg(any(windows, unix, target_os = "wasi"))]
 use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::ops::RangeFull;
-#[cfg(any(windows, unix, target_os = "wasi"))]
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -273,13 +270,11 @@ impl Database {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
-    #[cfg(any(windows, unix, target_os = "wasi"))]
     pub fn create(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().create(path)
     }
 
     /// Opens an existing redb database.
-    #[cfg(any(windows, unix, target_os = "wasi"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
     }
@@ -820,7 +815,6 @@ impl Builder {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
-    #[cfg(any(windows, unix, target_os = "wasi"))]
     pub fn create(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new()
             .read(true)
@@ -838,7 +832,6 @@ impl Builder {
     }
 
     /// Opens an existing redb database.
-    #[cfg(any(windows, unix, target_os = "wasi"))]
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
@@ -858,7 +851,6 @@ impl Builder {
     /// Open an existing or create a new database in the given `file`.
     ///
     /// The file must be empty or contain a valid database.
-    #[cfg(any(windows, unix, target_os = "wasi"))]
     pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
         Database::new(
             Box::new(crate::FileBackend::new(file)?),

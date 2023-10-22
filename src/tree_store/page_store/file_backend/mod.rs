@@ -7,3 +7,8 @@ pub use unix::FileBackend;
 mod windows;
 #[cfg(windows)]
 pub use windows::FileBackend;
+
+#[cfg(not(any(windows, unix, target_os = "wasi")))]
+mod unsupported;
+#[cfg(not(any(windows, unix, target_os = "wasi")))]
+pub use unsupported::FileBackend;

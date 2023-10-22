@@ -66,7 +66,6 @@ pub use multimap_table::{
 };
 pub use table::{Drain, DrainFilter, Range, ReadOnlyTable, ReadableTable, Table};
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
-#[cfg(any(windows, unix, target_os = "wasi"))]
 pub use tree_store::file_backend::FileBackend;
 pub use tree_store::{AccessGuard, AccessGuardMut, MemoryBackend, Savepoint};
 pub use types::{RedbKey, RedbValue, TypeName};
