@@ -33,19 +33,19 @@ use log::{info, warn};
 /// Implements persistent storage for a database.
 pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Gets the current length of the storage.
-    fn len(&self) -> Result<u64, io::Error>;
+    fn len(&self) -> std::result::Result<u64, io::Error>;
 
     /// Reads the specified array of bytes from the storage.
-    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error>;
+    fn read(&self, offset: u64, len: usize) -> std::result::Result<Vec<u8>, io::Error>;
 
     /// Sets the length of the storage.
-    fn set_len(&self, len: u64) -> Result<(), io::Error>;
+    fn set_len(&self, len: u64) -> std::result::Result<(), io::Error>;
 
     /// Syncs all buffered data with the persistent storage.
-    fn sync_data(&self, eventual: bool) -> Result<(), io::Error>;
+    fn sync_data(&self, eventual: bool) -> std::result::Result<(), io::Error>;
 
     /// Writes the specified array to the storage.
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error>;
+    fn write(&self, offset: u64, data: &[u8]) -> std::result::Result<(), io::Error>;
 }
 
 struct AtomicTransactionId {
