@@ -26,7 +26,7 @@ impl FileBackend {
     // This is a no-op until we get flock in wasi-libc.
     // Delete this function when we get flock.
     #[cfg(target_os = "wasi")]
-    pub fn new(file: File) -> Result<Self> {
+    pub fn new(file: File) -> Result<Self, DatabaseError> {
         Ok(Self { file })
     }
 

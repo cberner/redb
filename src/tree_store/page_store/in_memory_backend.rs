@@ -29,12 +29,6 @@ impl InMemoryBackend {
     }
 }
 
-impl From<Vec<u8>> for InMemoryBackend {
-    fn from(value: Vec<u8>) -> Self {
-        Self(RwLock::new(value))
-    }
-}
-
 impl StorageBackend for InMemoryBackend {
     fn len(&self) -> Result<u64, io::Error> {
         Ok(self.read().len() as u64)
