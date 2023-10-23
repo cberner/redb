@@ -853,7 +853,10 @@ impl Builder {
     }
 
     /// Open an existing or create a new database with the given backend.
-    pub fn create_backend(&self, backend: impl StorageBackend) -> Result<Database, DatabaseError> {
+    pub fn create_with_backend(
+        &self,
+        backend: impl StorageBackend,
+    ) -> Result<Database, DatabaseError> {
         Database::new(
             Box::new(backend),
             self.page_size,
