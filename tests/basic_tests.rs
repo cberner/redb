@@ -1,3 +1,4 @@
+use redb::backends::InMemoryBackend;
 use redb::{
     Database, MultimapTableDefinition, MultimapTableHandle, Range, ReadableTable, RedbKey,
     RedbValue, TableDefinition, TableHandle, TypeName,
@@ -22,6 +23,25 @@ fn create_tempfile() -> tempfile::NamedTempFile {
 fn len() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+        table.insert("hello2", "world2").unwrap();
+        table.insert("hi", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 3);
+}
+
+#[test]
+fn in_memory() {
+    let db = Database::builder()
+        .create_with_backend(InMemoryBackend::new())
+        .unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
