@@ -25,6 +25,7 @@ use crate::error::TransactionError;
 use crate::multimap_table::{parse_subtree_roots, DynamicCollection};
 use crate::sealed::Sealed;
 use crate::transactions::SAVEPOINT_TABLE;
+use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
 use log::{info, warn};
 
@@ -814,7 +815,7 @@ impl Builder {
             .open(path)?;
 
         Database::new(
-            Box::new(crate::FileBackend::new(file)?),
+            Box::new(FileBackend::new(file)?),
             self.page_size,
             self.region_size,
             self.read_cache_size_bytes,
@@ -831,7 +832,7 @@ impl Builder {
         }
 
         Database::new(
-            Box::new(crate::FileBackend::new(file)?),
+            Box::new(FileBackend::new(file)?),
             self.page_size,
             None,
             self.read_cache_size_bytes,
@@ -844,7 +845,7 @@ impl Builder {
     /// The file must be empty or contain a valid database.
     pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
         Database::new(
-            Box::new(crate::FileBackend::new(file)?),
+            Box::new(FileBackend::new(file)?),
             self.page_size,
             self.region_size,
             self.read_cache_size_bytes,

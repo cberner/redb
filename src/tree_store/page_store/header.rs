@@ -405,6 +405,7 @@ impl TransactionHeader {
 
 #[cfg(test)]
 mod test {
+    use crate::backends::FileBackend;
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::header::{
         GOD_BYTE_OFFSET, MAGICNUMBER, PAGE_SIZE, PRIMARY_BIT, RECOVERY_REQUIRED,
@@ -413,7 +414,7 @@ mod test {
     use crate::tree_store::page_store::TransactionalMemory;
     #[cfg(not(target_os = "windows"))]
     use crate::StorageError;
-    use crate::{Database, FileBackend, ReadableTable};
+    use crate::{Database, ReadableTable};
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::mem::size_of;
