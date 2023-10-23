@@ -1,6 +1,6 @@
 #![allow(clippy::upper_case_acronyms)]
 
-use crate::{DatabaseError, Result};
+use crate::{DatabaseError, Result, StorageBackend};
 use std::fs::File;
 use std::io;
 use std::os::windows::fs::FileExt;
@@ -30,12 +30,15 @@ extern "system" {
     ) -> i32;
 }
 
-pub(crate) struct LockedFile {
+/// Stores a database as a file on-disk.
+#[derive(Debug)]
+pub struct FileBackend {
     file: File,
 }
 
-impl LockedFile {
-    pub(crate) fn new(file: File) -> Result<Self, DatabaseError> {
+impl FileBackend {
+    /// Creates a new backend which stores data to the given file.
+    pub fn new(file: File) -> Result<Self, DatabaseError> {
         let handle = file.as_raw_handle();
         unsafe {
             let result = LockFile(handle, 0, 0, u32::MAX, u32::MAX);
@@ -54,8 +57,14 @@ impl LockedFile {
 
         Ok(Self { file })
     }
+}
 
-    pub(crate) fn read(&self, mut offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
+impl StorageBackend for FileBackend {
+    fn len(&self) -> Result<u64, io::Error> {
+        Ok(self.file.metadata()?.len())
+    }
+
+    fn read(&self, mut offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
         let mut buffer = vec![0; len];
         let mut data_offset = 0;
         while data_offset < buffer.len() {
@@ -66,7 +75,15 @@ impl LockedFile {
         Ok(buffer)
     }
 
-    pub(crate) fn write(&self, mut offset: u64, data: &[u8]) -> Result<(), io::Error> {
+    fn set_len(&self, len: u64) -> Result<(), io::Error> {
+        self.file.set_len(len)
+    }
+
+    fn sync_data(&self, _: bool) -> Result<(), io::Error> {
+        self.file.sync_data()
+    }
+
+    fn write(&self, mut offset: u64, data: &[u8]) -> Result<(), io::Error> {
         let mut data_offset = 0;
         while data_offset < data.len() {
             let written = self.file.seek_write(&data[data_offset..], offset)?;
@@ -75,13 +92,9 @@ impl LockedFile {
         }
         Ok(())
     }
-
-    pub(crate) fn file(&self) -> &File {
-        &self.file
-    }
 }
 
-impl Drop for LockedFile {
+impl Drop for FileBackend {
     fn drop(&mut self) {
         unsafe { UnlockFile(self.file.as_raw_handle(), 0, 0, u32::MAX, u32::MAX) };
     }

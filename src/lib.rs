@@ -54,8 +54,8 @@
 //! [design]: https://github.com/cberner/redb/blob/master/docs/design.md
 
 pub use db::{
-    Builder, Database, MultimapTableDefinition, MultimapTableHandle, TableDefinition, TableHandle,
-    UntypedMultimapTableHandle, UntypedTableHandle,
+    Builder, Database, MultimapTableDefinition, MultimapTableHandle, StorageBackend,
+    TableDefinition, TableHandle, UntypedMultimapTableHandle, UntypedTableHandle,
 };
 pub use error::{
     CommitError, CompactionError, DatabaseError, Error, SavepointError, StorageError, TableError,
@@ -66,7 +66,8 @@ pub use multimap_table::{
 };
 pub use table::{Drain, DrainFilter, Range, ReadOnlyTable, ReadableTable, Table};
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
-pub use tree_store::{AccessGuard, AccessGuardMut, Savepoint};
+pub use tree_store::file_backend::FileBackend;
+pub use tree_store::{AccessGuard, AccessGuardMut, InMemoryBackend, Savepoint};
 pub use types::{RedbKey, RedbValue, TypeName};
 
 type Result<T = (), E = StorageError> = std::result::Result<T, E>;

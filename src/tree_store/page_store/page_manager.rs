@@ -8,6 +8,7 @@ use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
 use crate::tree_store::{Page, PageNumber};
+use crate::StorageBackend;
 use crate::{DatabaseError, Result, StorageError};
 #[cfg(feature = "logging")]
 use log::warn;
@@ -16,7 +17,6 @@ use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryInto;
-use std::fs::File;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -98,7 +98,7 @@ pub(crate) struct TransactionalMemory {
 impl TransactionalMemory {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        file: File,
+        file: Box<dyn StorageBackend>,
         page_size: usize,
         requested_region_size: Option<u64>,
         read_cache_size_bytes: usize,
@@ -180,14 +180,14 @@ impl TransactionalMemory {
                 .copy_from_slice(&header.to_bytes(false, false));
             allocators.flush_to(tracker_page, layout, &storage)?;
 
-            storage.flush()?;
+            storage.flush(false)?;
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
             storage
                 .write(0, DB_HEADER_SIZE, true, |_| CachePriority::High)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true, false));
-            storage.flush()?;
+            storage.flush(false)?;
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
         let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes);
@@ -244,7 +244,7 @@ impl TransactionalMemory {
                 .write(0, DB_HEADER_SIZE, true, |_| CachePriority::High)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true, false));
-            storage.flush()?;
+            storage.flush(false)?;
         }
 
         let layout = header.layout();
@@ -284,7 +284,7 @@ impl TransactionalMemory {
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result {
         assert!(self.allocated_since_commit.lock().unwrap().is_empty());
 
-        self.storage.flush()?;
+        self.storage.flush(false)?;
         self.storage.invalidate_cache_all();
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
@@ -319,7 +319,7 @@ impl TransactionalMemory {
                 .write(0, DB_HEADER_SIZE, true, |_| CachePriority::High)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true, false));
-            self.storage.flush()?;
+            self.storage.flush(false)?;
         }
 
         self.needs_recovery
@@ -335,7 +335,7 @@ impl TransactionalMemory {
         assert!(!state.header.recovery_required);
         state.header.recovery_required = true;
         self.write_header(&state.header, false)?;
-        self.storage.flush()
+        self.storage.flush(false)
     }
 
     pub(crate) fn needs_repair(&self) -> Result<bool> {
@@ -402,7 +402,7 @@ impl TransactionalMemory {
         let mut state = self.state.lock().unwrap();
         state.header.set_region_tracker(tracker_page);
         self.write_header(&state.header, false)?;
-        self.storage.flush()?;
+        self.storage.flush(false)?;
 
         state
             .allocators
@@ -410,7 +410,7 @@ impl TransactionalMemory {
 
         state.header.recovery_required = false;
         self.write_header(&state.header, false)?;
-        let result = self.storage.flush();
+        let result = self.storage.flush(false);
         self.needs_recovery.store(false, Ordering::Release);
 
         result
@@ -538,20 +538,12 @@ impl TransactionalMemory {
 
         // Use 2-phase commit, if checksums are disabled
         if two_phase {
-            if eventual {
-                self.storage.eventual_flush()?;
-            } else {
-                self.storage.flush()?;
-            }
+            self.storage.flush(eventual)?;
         }
 
         // Swap the primary bit on-disk
         self.write_header(&header, true)?;
-        if eventual {
-            self.storage.eventual_flush()?;
-        } else {
-            self.storage.flush()?;
-        }
+        self.storage.flush(eventual)?;
         // Only swap the in-memory primary bit after the fsync is successful
         header.swap_primary_slot();
 
@@ -1105,10 +1097,10 @@ impl Drop for TransactionalMemory {
             return;
         }
 
-        if self.storage.flush().is_ok() && !self.needs_recovery.load(Ordering::Acquire) {
+        if self.storage.flush(false).is_ok() && !self.needs_recovery.load(Ordering::Acquire) {
             state.header.recovery_required = false;
             let _ = self.write_header(&state.header, false);
-            let _ = self.storage.flush();
+            let _ = self.storage.flush(false);
         }
     }
 }

@@ -1,14 +1,10 @@
 use crate::tree_store::page_store::base::PageHint;
-use crate::tree_store::page_store::file_lock::LockedFile;
 use crate::tree_store::LEAF;
-use crate::{DatabaseError, Result, StorageError};
+use crate::{DatabaseError, Result, StorageBackend, StorageError};
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::io;
 use std::mem;
 use std::ops::{Index, IndexMut};
-#[cfg(any(target_os = "linux", all(unix, not(fuzzing))))]
-use std::os::unix::io::AsRawFd;
 use std::slice::SliceIndex;
 #[cfg(any(fuzzing, test, feature = "cache_metrics"))]
 use std::sync::atomic::AtomicU64;
@@ -225,7 +221,7 @@ impl PrioritizedWriteCache {
 }
 
 pub(super) struct PagedCachedFile {
-    file: LockedFile,
+    file: Box<dyn StorageBackend>,
     page_size: u64,
     max_read_cache_bytes: usize,
     read_cache_bytes: AtomicUsize,
@@ -245,7 +241,7 @@ pub(super) struct PagedCachedFile {
 
 impl PagedCachedFile {
     pub(super) fn new(
-        file: File,
+        file: Box<dyn StorageBackend>,
         page_size: u64,
         max_read_cache_bytes: usize,
         max_write_buffer_bytes: usize,
@@ -255,17 +251,8 @@ impl PagedCachedFile {
             read_cache.push(RwLock::new(PrioritizedCache::new()));
         }
 
-        let lock = LockedFile::new(file)?;
-
-        // Try to flush any pages in the page cache that are out of sync with disk.
-        // See here for why: <https://github.com/cberner/redb/issues/450>
-        #[cfg(target_os = "linux")]
-        unsafe {
-            libc::posix_fadvise64(lock.file().as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
-        }
-
         Ok(Self {
-            file: lock,
+            file,
             page_size,
             max_read_cache_bytes,
             read_cache_bytes: AtomicUsize::new(0),
@@ -284,7 +271,7 @@ impl PagedCachedFile {
     }
 
     pub(crate) fn raw_file_len(&self) -> Result<u64> {
-        Ok(self.file.file().metadata()?.len())
+        self.file.len().map_err(StorageError::from)
     }
 
     #[cfg(any(fuzzing, test))]
@@ -338,50 +325,19 @@ impl PagedCachedFile {
         // TODO: be more fine-grained about this invalidation
         self.invalidate_cache_all();
 
-        self.file.file().set_len(len).map_err(StorageError::from)
+        self.file.set_len(len).map_err(StorageError::from)
     }
 
-    pub(super) fn flush(&self) -> Result {
+    pub(super) fn flush(&self, #[allow(unused_variables)] eventual: bool) -> Result {
         self.check_fsync_failure()?;
         self.flush_write_buffer()?;
         // Disable fsync when fuzzing, since it doesn't test crash consistency
         #[cfg(not(fuzzing))]
         {
-            let res = self.file.file().sync_data().map_err(StorageError::from);
+            let res = self.file.sync_data(eventual).map_err(StorageError::from);
             if res.is_err() {
                 self.set_fsync_failed(true);
-                // Try to flush any pages in the page cache that are out of sync with disk.
-                // See here for why: <https://github.com/cberner/redb/issues/450>
-                #[cfg(target_os = "linux")]
-                unsafe {
-                    libc::posix_fadvise64(
-                        self.file.file().as_raw_fd(),
-                        0,
-                        0,
-                        libc::POSIX_FADV_DONTNEED,
-                    );
-                }
                 return res;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(super) fn eventual_flush(&self) -> Result {
-        self.check_fsync_failure()?;
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.flush()?;
-        }
-        #[cfg(all(target_os = "macos", not(fuzzing)))]
-        {
-            self.flush_write_buffer()?;
-            let code = unsafe { libc::fcntl(self.file.file().as_raw_fd(), libc::F_BARRIERFSYNC) };
-            if code == -1 {
-                self.set_fsync_failed(true);
-                return Err(io::Error::last_os_error().into());
             }
         }
 

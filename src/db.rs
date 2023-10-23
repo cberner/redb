@@ -10,8 +10,10 @@ use crate::{
     StorageError,
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
+
 use std::fs::{File, OpenOptions};
+use std::io;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::ops::RangeFull;
@@ -25,6 +27,25 @@ use crate::sealed::Sealed;
 use crate::transactions::SAVEPOINT_TABLE;
 #[cfg(feature = "logging")]
 use log::{info, warn};
+
+#[allow(clippy::len_without_is_empty)]
+/// Implements persistent storage for a database.
+pub trait StorageBackend: 'static + Debug + Send + Sync {
+    /// Gets the current length of the storage.
+    fn len(&self) -> Result<u64, io::Error>;
+
+    /// Reads the specified array of bytes from the storage.
+    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error>;
+
+    /// Sets the length of the storage.
+    fn set_len(&self, len: u64) -> Result<(), io::Error>;
+
+    /// Syncs all buffered data with the persistent storage.
+    fn sync_data(&self, eventual: bool) -> Result<(), io::Error>;
+
+    /// Writes the specified array to the storage.
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error>;
+}
 
 struct AtomicTransactionId {
     inner: AtomicU64,
@@ -608,7 +629,7 @@ impl Database {
     }
 
     fn new(
-        file: File,
+        file: Box<dyn StorageBackend>,
         page_size: usize,
         region_size: Option<u64>,
         read_cache_size_bytes: usize,
@@ -793,7 +814,7 @@ impl Builder {
             .open(path)?;
 
         Database::new(
-            file,
+            Box::new(crate::FileBackend::new(file)?),
             self.page_size,
             self.region_size,
             self.read_cache_size_bytes,
@@ -810,7 +831,7 @@ impl Builder {
         }
 
         Database::new(
-            file,
+            Box::new(crate::FileBackend::new(file)?),
             self.page_size,
             None,
             self.read_cache_size_bytes,
@@ -823,7 +844,18 @@ impl Builder {
     /// The file must be empty or contain a valid database.
     pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
         Database::new(
-            file,
+            Box::new(crate::FileBackend::new(file)?),
+            self.page_size,
+            self.region_size,
+            self.read_cache_size_bytes,
+            self.write_cache_size_bytes,
+        )
+    }
+
+    /// Open an existing or create a new database with the given backend.
+    pub fn create_backend(&self, backend: impl StorageBackend) -> Result<Database, DatabaseError> {
+        Database::new(
+            Box::new(backend),
             self.page_size,
             self.region_size,
             self.read_cache_size_bytes,
