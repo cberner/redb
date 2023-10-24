@@ -6,7 +6,7 @@ use std::io;
 use std::mem;
 use std::ops::{Index, IndexMut};
 use std::slice::SliceIndex;
-#[cfg(any(fuzzing, test, feature = "cache_metrics"))]
+#[cfg(feature = "cache_metrics")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -235,8 +235,6 @@ pub(super) struct PagedCachedFile {
     read_cache: Vec<RwLock<PrioritizedCache>>,
     // TODO: maybe move this cache to WriteTransaction?
     write_buffer: Mutex<PrioritizedWriteCache>,
-    #[cfg(any(fuzzing, test))]
-    crash_countdown: AtomicU64,
 }
 
 impl PagedCachedFile {
@@ -265,18 +263,11 @@ impl PagedCachedFile {
             fsync_failed: Default::default(),
             read_cache,
             write_buffer: Mutex::new(PrioritizedWriteCache::new()),
-            #[cfg(any(fuzzing, test))]
-            crash_countdown: AtomicU64::new(u64::MAX),
         })
     }
 
     pub(crate) fn raw_file_len(&self) -> Result<u64> {
         self.file.len().map_err(StorageError::from)
-    }
-
-    #[cfg(any(fuzzing, test))]
-    pub(crate) fn set_crash_countdown(&self, value: u64) {
-        self.crash_countdown.store(value, Ordering::Release);
     }
 
     const fn lock_stripes() -> usize {
@@ -293,18 +284,11 @@ impl PagedCachedFile {
     }
 
     #[inline]
-    #[cfg(not(fuzzing))]
     fn set_fsync_failed(&self, failed: bool) {
         self.fsync_failed.store(failed, Ordering::Release);
     }
 
     fn flush_write_buffer(&self) -> Result {
-        #[cfg(any(fuzzing, test))]
-        {
-            if self.crash_countdown.load(Ordering::Acquire) == 0 {
-                return Err(StorageError::SimulatedIOFailure);
-            }
-        }
         self.check_fsync_failure()?;
         let mut write_buffer = self.write_buffer.lock().unwrap();
 
@@ -331,14 +315,11 @@ impl PagedCachedFile {
     pub(super) fn flush(&self, #[allow(unused_variables)] eventual: bool) -> Result {
         self.check_fsync_failure()?;
         self.flush_write_buffer()?;
-        // Disable fsync when fuzzing, since it doesn't test crash consistency
-        #[cfg(not(fuzzing))]
-        {
-            let res = self.file.sync_data(eventual).map_err(StorageError::from);
-            if res.is_err() {
-                self.set_fsync_failed(true);
-                return res;
-            }
+
+        let res = self.file.sync_data(eventual).map_err(StorageError::from);
+        if res.is_err() {
+            self.set_fsync_failed(true);
+            return res;
         }
 
         Ok(())
@@ -351,12 +332,6 @@ impl PagedCachedFile {
 
     // Read directly from the file, ignoring any cached data
     pub(super) fn read_direct(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
-        #[cfg(any(fuzzing, test))]
-        {
-            if self.crash_countdown.load(Ordering::Acquire) == 0 {
-                return Err(StorageError::SimulatedIOFailure);
-            }
-        }
         self.check_fsync_failure()?;
         Ok(self.file.read(offset, len)?)
     }
@@ -486,13 +461,6 @@ impl PagedCachedFile {
         } else {
             let previous = self.write_buffer_bytes.fetch_add(len, Ordering::AcqRel);
             if previous + len > self.max_write_buffer_bytes {
-                #[cfg(any(fuzzing, test))]
-                {
-                    if self.crash_countdown.load(Ordering::Acquire) == 0 {
-                        return Err(StorageError::SimulatedIOFailure);
-                    }
-                    self.crash_countdown.fetch_sub(1, Ordering::AcqRel);
-                }
                 let mut removed_bytes = 0;
                 while removed_bytes < len {
                     if let Some((offset, buffer, removed_priority)) = lock.pop_lowest_priority() {

@@ -1,13 +1,16 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use redb::{AccessGuard, Database, Durability, Error, MultimapTable, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, Savepoint, Table, TableDefinition, WriteTransaction};
+use redb::{AccessGuard, Database, Durability, Error, MultimapTable, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, Savepoint, StorageBackend, Table, TableDefinition, WriteTransaction};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::io::{Read, Seek, SeekFrom};
+use std::fmt::Debug;
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::NamedTempFile;
 
 mod common;
 use common::*;
+use redb::backends::FileBackend;
 use crate::FuzzerSavepoint::{Ephemeral, NotYetDurablePersistent, Persistent};
 
 // These slow down the fuzzer, so don't create too many
@@ -15,6 +18,62 @@ const MAX_PERSISTENT_SAVEPOINTS: usize = 20;
 const TABLE_DEF: TableDefinition<u64, &[u8]> = TableDefinition::new("fuzz_table");
 const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, &[u8]> =
     MultimapTableDefinition::new("fuzz_multimap_table");
+
+#[derive(Debug)]
+struct FuzzerBackend {
+    inner: FileBackend,
+    countdown: AtomicU64,
+}
+
+impl FuzzerBackend {
+    fn new(backend: FileBackend, countdown: u64) -> Self {
+        Self {
+            inner: backend,
+            countdown: AtomicU64::new(countdown),
+        }
+    }
+
+    fn check_countdown(&self) -> Result<(), std::io::Error> {
+        if self.countdown.load(Ordering::SeqCst) == 0 {
+            return Err(std::io::Error::from(ErrorKind::Other));
+        }
+
+        Ok(())
+    }
+
+    fn decrement_countdown(&self) -> Result<(), std::io::Error> {
+        if self.countdown.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| if x > 0 { Some(x - 1) } else { None } ).is_err() {
+            return Err(std::io::Error::from(ErrorKind::Other));
+        }
+
+        Ok(())
+    }
+}
+
+impl StorageBackend for FuzzerBackend {
+    fn len(&self) -> Result<u64, std::io::Error> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
+        self.check_countdown()?;
+        self.inner.read(offset, len)
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        self.inner.set_len(len)
+    }
+
+    fn sync_data(&self, _eventual: bool) -> Result<(), std::io::Error> {
+        // No-op. The fuzzer doesn't test crashes, so fsync is unnecessary
+        Ok(())
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        self.decrement_countdown()?;
+        self.inner.write(offset, data)
+    }
+}
 
 enum FuzzerSavepoint<T: Clone> {
     Ephemeral(Savepoint, BTreeMap<u64, T>),
@@ -355,7 +414,7 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
             }
             drop(reference_iter);
             reference.retain(|x, _| (*x < start || *x >= end) || *x % modulus != 0);
-            // This is basically assert!(iter.next().is_none()), but we also allow an Err such as SimulatedIOFailure
+            // This is basically assert!(iter.next().is_none()), but we also allow an Err such as a simulated IO error
             if let Some(Ok((_, _)))  = iter.next() {
                 panic!();
             }
@@ -390,16 +449,35 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
     Ok(())
 }
 
+fn is_simulated_io_error(err: &redb::Error) -> bool {
+    match err {
+        Error::Io(io_err) => {
+            matches!(io_err.kind(), ErrorKind::Other)
+        },
+        _ => false
+    }
+}
+
 fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, &mut BTreeMap<u64, T>, &FuzzTransaction, &mut SavepointManager<T>) -> Result<(), redb::Error>) -> Result<(), redb::Error> {
     let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
+    let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap())?, config.crash_after_ops.value);
 
-    let mut db = Database::builder()
+    let result = Database::builder()
         .set_page_size(config.page_size.value)
         .set_cache_size(config.cache_size.value)
         .set_region_size(config.region_size.value as u64)
-        .create(redb_file.path())
-        .unwrap();
-    db.set_crash_countdown(config.crash_after_ops.value);
+        .create_with_backend(backend);
+    let mut db = match result {
+        Ok(db) => db,
+        Err(err) => {
+            let err: redb::Error = err.into();
+            if is_simulated_io_error(&err) {
+                return Ok(());
+            } else {
+                return Err(err);
+            }
+        }
+    };
 
     let mut savepoint_manager = SavepointManager::new();
     let mut reference = BTreeMap::new();
@@ -414,7 +492,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
                 }
             }
             Err(err) => {
-                if matches!(err, Error::SimulatedIOFailure) {
+                if is_simulated_io_error(&err) {
                     drop(db);
                     savepoint_manager.crash();
                     non_durable_reference = reference.clone();
@@ -426,11 +504,12 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
                     assert_ne!(god_byte[0] & 2, 0);
 
                     // Repair the database
+                    let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap()).unwrap(), u64::MAX);
                     db = Database::builder()
                         .set_page_size(config.page_size.value)
                         .set_cache_size(config.cache_size.value)
                         .set_region_size(config.region_size.value as u64)
-                        .create(redb_file.path())
+                        .create_with_backend(backend)
                         .unwrap();
                 } else {
                     return Err(err);
@@ -440,7 +519,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
 
         let result = apply(&db, &mut non_durable_reference, transaction, &mut savepoint_manager);
         if result.is_err() {
-            if matches!(result, Err(Error::SimulatedIOFailure)) {
+            if is_simulated_io_error(result.as_ref().err().unwrap()) {
                 drop(db);
                 savepoint_manager.crash();
                 non_durable_reference = reference.clone();
@@ -452,11 +531,12 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
                 assert_ne!(god_byte[0] & 2, 0);
 
                 // Repair the database
+                let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap()).unwrap(), u64::MAX);
                 db = Database::builder()
                     .set_page_size(config.page_size.value)
                     .set_cache_size(config.cache_size.value)
                     .set_region_size(config.region_size.value as u64)
-                    .create(redb_file.path())
+                    .create_with_backend(backend)
                     .unwrap();
             } else {
                 return result;
@@ -469,7 +549,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
     match run_compaction(&mut db, &mut savepoint_manager) {
         Ok(_) => {}
         Err(err) => {
-            if !matches!(err, Error::SimulatedIOFailure) {
+            if !is_simulated_io_error(&err) {
                 return Err(err);
             }
         }
