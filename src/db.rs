@@ -36,12 +36,20 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
     fn len(&self) -> std::result::Result<u64, io::Error>;
 
     /// Reads the specified array of bytes from the storage.
+    ///
+    /// If `len` + `offset` exceeds the length of the storage an appropriate `Error` should be returned or a panic may occur.
     fn read(&self, offset: u64, len: usize) -> std::result::Result<Vec<u8>, io::Error>;
 
     /// Sets the length of the storage.
+    ///
+    /// When extending the storage the new positions should be zero initialized.
     fn set_len(&self, len: u64) -> std::result::Result<(), io::Error>;
 
     /// Syncs all buffered data with the persistent storage.
+    ///
+    /// If `eventual` is true, data may become persistent at some point after this call returns,
+    /// but the storage must gaurantee that a write barrier is inserted: i.e. all writes before this
+    /// call to `sync_data()` will become persistent before any writes that occur after.
     fn sync_data(&self, eventual: bool) -> std::result::Result<(), io::Error>;
 
     /// Writes the specified array to the storage.
@@ -302,11 +310,6 @@ impl Database {
 
     pub(crate) fn get_memory(&self) -> &TransactionalMemory {
         &self.mem
-    }
-
-    #[cfg(any(fuzzing, test))]
-    pub fn set_crash_countdown(&self, value: u64) {
-        self.mem.set_crash_countdown(value);
     }
 
     pub(crate) fn verify_primary_checksums(mem: &TransactionalMemory) -> Result<bool> {
@@ -876,10 +879,117 @@ impl std::fmt::Debug for Database {
 
 #[cfg(test)]
 mod test {
+    use crate::backends::FileBackend;
     use crate::{
-        Database, DatabaseError, Durability, ReadableTable, StorageError, TableDefinition,
+        Database, DatabaseError, Durability, ReadableTable, StorageBackend, StorageError,
+        TableDefinition,
     };
     use std::io::ErrorKind;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Debug)]
+    struct FailingBackend {
+        inner: FileBackend,
+        countdown: AtomicU64,
+    }
+
+    impl FailingBackend {
+        fn new(backend: FileBackend, countdown: u64) -> Self {
+            Self {
+                inner: backend,
+                countdown: AtomicU64::new(countdown),
+            }
+        }
+
+        fn check_countdown(&self) -> Result<(), std::io::Error> {
+            if self.countdown.load(Ordering::SeqCst) == 0 {
+                return Err(std::io::Error::from(ErrorKind::Other));
+            }
+
+            Ok(())
+        }
+
+        fn decrement_countdown(&self) -> Result<(), std::io::Error> {
+            if self
+                .countdown
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
+                    if x > 0 {
+                        Some(x - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_err()
+            {
+                return Err(std::io::Error::from(ErrorKind::Other));
+            }
+
+            Ok(())
+        }
+    }
+
+    impl StorageBackend for FailingBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
+            self.check_countdown()?;
+            self.inner.read(offset, len)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self, eventual: bool) -> Result<(), std::io::Error> {
+            self.check_countdown()?;
+            self.inner.sync_data(eventual)
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            self.decrement_countdown()?;
+            self.inner.write(offset, data)
+        }
+    }
+
+    #[test]
+    fn crash_regression4() {
+        let tmpfile = crate::create_tempfile();
+
+        let backend = FailingBackend::new(
+            FileBackend::new(tmpfile.as_file().try_clone().unwrap()).unwrap(),
+            23,
+        );
+        let db = Database::builder()
+            .set_cache_size(12686)
+            .set_page_size(8 * 1024)
+            .set_region_size(32 * 4096)
+            .create_with_backend(backend)
+            .unwrap();
+
+        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+        let tx = db.begin_write().unwrap();
+        let _savepoint = tx.ephemeral_savepoint().unwrap();
+        let _persistent_savepoint = tx.persistent_savepoint().unwrap();
+        tx.commit().unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(table_def).unwrap();
+            let _ = table.insert_reserve(118821, 360).unwrap();
+        }
+        let result = tx.commit();
+        assert!(result.is_err());
+
+        drop(db);
+        Database::builder()
+            .set_cache_size(1024 * 1024)
+            .set_page_size(8 * 1024)
+            .set_region_size(32 * 4096)
+            .create(tmpfile.path())
+            .unwrap();
+    }
 
     #[test]
     fn small_pages() {
@@ -1060,60 +1170,6 @@ mod test {
             t.insert_reserve(&118749, 734).unwrap().as_mut().fill(0xFF);
         }
         tx.abort().unwrap();
-    }
-
-    #[test]
-    fn crash_regression3() {
-        let tmpfile = crate::create_tempfile();
-
-        let db = Database::builder()
-            .set_cache_size(1024 * 1024)
-            .set_page_size(16 * 1024)
-            .set_region_size(32 * 4096)
-            .create(tmpfile.path())
-            .unwrap();
-
-        let tx = db.begin_write().unwrap();
-        let savepoint = tx.ephemeral_savepoint().unwrap();
-        tx.commit().unwrap();
-
-        let mut tx = db.begin_write().unwrap();
-        tx.restore_savepoint(&savepoint).unwrap();
-        tx.commit().unwrap();
-    }
-
-    #[test]
-    fn crash_regression4() {
-        let tmpfile = crate::create_tempfile();
-
-        let db = Database::builder()
-            .set_cache_size(12686)
-            .set_page_size(8 * 1024)
-            .set_region_size(32 * 4096)
-            .create(tmpfile.path())
-            .unwrap();
-        db.set_crash_countdown(10);
-
-        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
-
-        let tx = db.begin_write().unwrap();
-        let _savepoint = tx.ephemeral_savepoint().unwrap();
-        let _persistent_savepoint = tx.persistent_savepoint().unwrap();
-        tx.commit().unwrap();
-        let tx = db.begin_write().unwrap();
-        {
-            let mut table = tx.open_table(table_def).unwrap();
-            let _ = table.insert_reserve(118821, 360);
-        }
-
-        drop(tx);
-        drop(db);
-        Database::builder()
-            .set_cache_size(1024 * 1024)
-            .set_page_size(8 * 1024)
-            .set_region_size(32 * 4096)
-            .create(tmpfile.path())
-            .unwrap();
     }
 
     #[test]

@@ -8,9 +8,6 @@ use std::{io, panic};
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum StorageError {
-    /// For use by fuzzer only
-    #[cfg(any(fuzzing, test))]
-    SimulatedIOFailure,
     /// The Database is corrupted
     Corrupted(String),
     /// The value being inserted exceeds the maximum of 3GiB
@@ -34,8 +31,6 @@ impl From<io::Error> for StorageError {
 impl From<StorageError> for Error {
     fn from(err: StorageError) -> Error {
         match err {
-            #[cfg(any(fuzzing, test))]
-            StorageError::SimulatedIOFailure => Error::SimulatedIOFailure,
             StorageError::Corrupted(msg) => Error::Corrupted(msg),
             StorageError::ValueTooLarge(x) => Error::ValueTooLarge(x),
             StorageError::Io(x) => Error::Io(x),
@@ -47,10 +42,6 @@ impl From<StorageError> for Error {
 impl Display for StorageError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            #[cfg(any(fuzzing, test))]
-            StorageError::SimulatedIOFailure => {
-                write!(f, "Fuzzer: Simulated I/O error")
-            }
             StorageError::Corrupted(msg) => {
                 write!(f, "DB corrupted: {msg}")
             }
@@ -415,9 +406,6 @@ impl std::error::Error for CommitError {}
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// For use by fuzzer only
-    #[cfg(any(fuzzing, test))]
-    SimulatedIOFailure,
     /// The Database is already open. Cannot acquire lock.
     DatabaseAlreadyOpen,
     /// This savepoint is invalid or cannot be created.
@@ -474,10 +462,6 @@ impl From<io::Error> for Error {
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            #[cfg(any(fuzzing, test))]
-            Error::SimulatedIOFailure => {
-                write!(f, "Fuzzer: Simulated I/O error")
-            }
             Error::Corrupted(msg) => {
                 write!(f, "DB corrupted: {msg}")
             }

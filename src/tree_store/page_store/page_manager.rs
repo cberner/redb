@@ -272,11 +272,6 @@ impl TransactionalMemory {
         })
     }
 
-    #[cfg(any(fuzzing, test))]
-    pub(crate) fn set_crash_countdown(&self, value: u64) {
-        self.storage.set_crash_countdown(value);
-    }
-
     pub(crate) fn clear_read_cache(&mut self) {
         self.storage.invalidate_cache_all()
     }
