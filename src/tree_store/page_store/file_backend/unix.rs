@@ -43,12 +43,6 @@ impl FileBackend {
                 Err(err.into())
             }
         } else {
-            // Try to flush any pages in the page cache that are out of sync with disk.
-            // See here for why: <https://github.com/cberner/redb/issues/450>
-            #[cfg(target_os = "linux")]
-            unsafe {
-                libc::posix_fadvise64(fd, 0, 0, libc::POSIX_FADV_DONTNEED);
-            }
             Ok(Self { file })
         }
     }
@@ -71,16 +65,7 @@ impl StorageBackend for FileBackend {
 
     #[cfg(not(target_os = "macos"))]
     fn sync_data(&self, _: bool) -> Result<(), io::Error> {
-        let res = self.file.sync_data();
-        #[cfg(target_os = "linux")]
-        if res.is_err() {
-            // Try to flush any pages in the page cache that are out of sync with disk.
-            // See here for why: <https://github.com/cberner/redb/issues/450>
-            unsafe {
-                libc::posix_fadvise64(self.file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
-            }
-        }
-        res
+        self.file.sync_data()
     }
 
     #[cfg(target_os = "macos")]
