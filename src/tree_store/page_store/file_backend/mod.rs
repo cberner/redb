@@ -9,6 +9,6 @@ mod windows;
 pub use windows::FileBackend;
 
 #[cfg(not(any(windows, unix, target_os = "wasi")))]
-mod unsupported;
+mod fallback;
 #[cfg(not(any(windows, unix, target_os = "wasi")))]
-pub use unsupported::FileBackend;
+pub use fallback::FileBackend;
