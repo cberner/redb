@@ -1038,6 +1038,33 @@ fn empty_type() {
 }
 
 #[test]
+#[allow(clippy::bool_assert_comparison)]
+fn bool_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<bool, bool> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(true, &false).unwrap();
+        table.insert(&false, false).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(false, table.get(&true).unwrap().unwrap().value());
+    assert_eq!(false, table.get(&false).unwrap().unwrap().value());
+
+    let mut iter = table.iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), false);
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), true);
+    assert!(iter.next().is_none());
+}
+
+#[test]
 fn option_type() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
