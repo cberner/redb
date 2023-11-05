@@ -168,6 +168,53 @@ impl RedbKey for () {
     }
 }
 
+impl RedbValue for bool {
+    type SelfType<'a> = bool
+        where
+            Self: 'a;
+    type AsBytes<'a> = &'a [u8]
+        where
+            Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(1)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> bool
+    where
+        Self: 'a,
+    {
+        match data[0] {
+            0 => false,
+            1 => true,
+            _ => unreachable!(),
+        }
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        match value {
+            true => &[1],
+            false => &[0],
+        }
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("bool")
+    }
+}
+
+impl RedbKey for bool {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        let value1 = Self::from_bytes(data1);
+        let value2 = Self::from_bytes(data2);
+        value1.cmp(&value2)
+    }
+}
+
 impl<T: RedbValue> RedbValue for Option<T> {
     type SelfType<'a> = Option<T::SelfType<'a>>
     where
