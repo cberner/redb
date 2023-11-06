@@ -294,7 +294,10 @@ fn handle_multimap_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, BT
                 assert_eq!(*ref_key, key.value());
                 assert_multimap_value_eq(value_iter, Some(ref_values))?;
             }
-            assert!(iter.next().is_none());
+            // This is basically assert!(iter.next().is_none()), but we also allow an Err such as a simulated IO error
+            if let Some(Ok((_, _)))  = iter.next() {
+                panic!();
+            }
         }
     }
 
@@ -387,7 +390,10 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
             }
             drop(reference_iter);
             reference.retain(|x, _| *x < start || *x >= end);
-            assert!(iter.next().is_none());
+            // This is basically assert!(iter.next().is_none()), but we also allow an Err such as a simulated IO error
+            if let Some(Ok((_, _)))  = iter.next() {
+                panic!();
+            }
         }
         FuzzOperation::DrainFilter { start_key, len, modulus, reversed } => {
             let start = start_key.value;
@@ -442,7 +448,10 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
                 assert_eq!(*ref_key, key.value());
                 assert_eq!(*ref_value_len, value.value().len());
             }
-            assert!(iter.next().is_none());
+            // This is basically assert!(iter.next().is_none()), but we also allow an Err such as a simulated IO error
+            if let Some(Ok((_, _)))  = iter.next() {
+                panic!();
+            }
         }
     }
 
@@ -660,7 +669,10 @@ fn assert_multimap_value_eq(
             assert_eq!(iter.next().unwrap()?.value().len(), *value);
         }
     }
-    assert!(iter.next().is_none());
+    // This is basically assert!(iter.next().is_none()), but we also allow an Err such as a simulated IO error
+    if let Some(Ok(_))  = iter.next() {
+        panic!();
+    }
 
     Ok(())
 }
