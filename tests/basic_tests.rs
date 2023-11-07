@@ -829,6 +829,18 @@ fn delete_open_table() {
 }
 
 #[test]
+fn delete_table() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(write_txn.delete_table(table).unwrap());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
 fn no_dirty_reads() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();

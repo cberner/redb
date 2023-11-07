@@ -774,10 +774,10 @@ impl<'db> WriteTransaction<'db> {
     ///
     /// Returns a bool indicating whether the table existed
     pub fn delete_table(&self, definition: impl TableHandle) -> Result<bool, TableError> {
-        self.tables
-            .lock()
-            .unwrap()
-            .delete_table(self, definition.name())
+        let name = definition.name().to_string();
+        // Drop the definition so that callers can pass in a `Table` or `MultimapTable` to delete, without getting a TableAlreadyOpen error
+        drop(definition);
+        self.tables.lock().unwrap().delete_table(self, &name)
     }
 
     /// Delete the given table
@@ -787,10 +787,13 @@ impl<'db> WriteTransaction<'db> {
         &self,
         definition: impl MultimapTableHandle,
     ) -> Result<bool, TableError> {
+        let name = definition.name().to_string();
+        // Drop the definition so that callers can pass in a `Table` or `MultimapTable` to delete, without getting a TableAlreadyOpen error
+        drop(definition);
         self.tables
             .lock()
             .unwrap()
-            .delete_multimap_table(self, definition.name())
+            .delete_multimap_table(self, &name)
     }
 
     /// List all the tables
