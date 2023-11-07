@@ -360,6 +360,39 @@ impl<'db> TableNamespace<'db> {
         ))
     }
 
+    #[track_caller]
+    fn inner_delete(&mut self, name: &str, table_type: TableType) -> Result<bool, TableError> {
+        if let Some(location) = self.open_tables.get(name) {
+            return Err(TableError::TableAlreadyOpen(name.to_string(), location));
+        }
+
+        self.table_tree.delete_table(name, table_type)
+    }
+
+    #[track_caller]
+    fn delete_table<'txn>(
+        &mut self,
+        transaction: &'txn WriteTransaction<'db>,
+        name: &str,
+    ) -> Result<bool, TableError> {
+        #[cfg(feature = "logging")]
+        info!("Deleting table: {}", name);
+        transaction.dirty.store(true, Ordering::Release);
+        self.inner_delete(name, TableType::Normal)
+    }
+
+    #[track_caller]
+    fn delete_multimap_table<'txn>(
+        &mut self,
+        transaction: &'txn WriteTransaction<'db>,
+        name: &str,
+    ) -> Result<bool, TableError> {
+        #[cfg(feature = "logging")]
+        info!("Deleting multimap table: {}", name);
+        transaction.dirty.store(true, Ordering::Release);
+        self.inner_delete(name, TableType::Multimap)
+    }
+
     pub(crate) fn close_table<K: RedbKey + 'static, V: RedbValue + 'static>(
         &mut self,
         name: &str,
@@ -741,14 +774,10 @@ impl<'db> WriteTransaction<'db> {
     ///
     /// Returns a bool indicating whether the table existed
     pub fn delete_table(&self, definition: impl TableHandle) -> Result<bool, TableError> {
-        #[cfg(feature = "logging")]
-        info!("Deleting table: {}", definition.name());
-        self.dirty.store(true, Ordering::Release);
         self.tables
             .lock()
             .unwrap()
-            .table_tree
-            .delete_table(definition.name(), TableType::Normal)
+            .delete_table(self, definition.name())
     }
 
     /// Delete the given table
@@ -758,14 +787,10 @@ impl<'db> WriteTransaction<'db> {
         &self,
         definition: impl MultimapTableHandle,
     ) -> Result<bool, TableError> {
-        #[cfg(feature = "logging")]
-        info!("Deleting multimap table: {}", definition.name());
-        self.dirty.store(true, Ordering::Release);
         self.tables
             .lock()
             .unwrap()
-            .table_tree
-            .delete_table(definition.name(), TableType::Multimap)
+            .delete_multimap_table(self, definition.name())
     }
 
     /// List all the tables
