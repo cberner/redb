@@ -171,7 +171,7 @@ impl TransactionalMemory {
                 PageNumber::new(0, page_number, required_order)
             };
 
-            let mut header = DatabaseHeader::new(layout, TransactionId(0), tracker_page);
+            let mut header = DatabaseHeader::new(layout, TransactionId::new(0), tracker_page);
 
             header.recovery_required = false;
             storage

@@ -63,13 +63,13 @@ struct AtomicTransactionId {
 impl AtomicTransactionId {
     fn new(last_id: TransactionId) -> Self {
         Self {
-            inner: AtomicU64::new(last_id.0),
+            inner: AtomicU64::new(last_id.raw_id()),
         }
     }
 
     fn next(&self) -> TransactionId {
         let id = self.inner.fetch_add(1, Ordering::AcqRel);
-        TransactionId(id)
+        TransactionId::new(id)
     }
 }
 
@@ -483,7 +483,7 @@ impl Database {
             mem,
         )?;
         let lookup_key = FreedTableKey {
-            transaction_id: oldest_unprocessed_free_transaction.0,
+            transaction_id: oldest_unprocessed_free_transaction.raw_id(),
             pagination_id: 0,
         };
         for result in freed_table.range::<FreedTableKey>(lookup_key..)? {
@@ -609,7 +609,7 @@ impl Database {
 
         let freed_root = mem.get_freed_root();
         // Allow processing of all transactions, since this is the main freed tree
-        Self::mark_freed_tree(freed_root, mem, TransactionId(0))?;
+        Self::mark_freed_tree(freed_root, mem, TransactionId::new(0))?;
         let freed_table: ReadOnlyTable<FreedTableKey, FreedPageList<'static>> = ReadOnlyTable::new(
             "internal freed table".to_string(),
             freed_root,
@@ -620,7 +620,7 @@ impl Database {
         // Make sure we don't reprocess those frees, as that would result in a double-free
         let oldest_unprocessed_transaction =
             if let Some(entry) = freed_table.range::<FreedTableKey>(..)?.next() {
-                TransactionId(entry?.0.value().transaction_id)
+                TransactionId::new(entry?.0.value().transaction_id)
             } else {
                 mem.get_last_committed_transaction_id()?
             };

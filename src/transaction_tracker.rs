@@ -5,9 +5,17 @@ use std::collections::btree_set::BTreeSet;
 use std::mem::size_of;
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
-pub(crate) struct TransactionId(pub u64);
+pub(crate) struct TransactionId(u64);
 
 impl TransactionId {
+    pub(crate) fn new(value: u64) -> TransactionId {
+        Self(value)
+    }
+
+    pub(crate) fn raw_id(&self) -> u64 {
+        self.0
+    }
+
     pub(crate) fn next(&self) -> TransactionId {
         TransactionId(self.0 + 1)
     }
