@@ -680,7 +680,7 @@ impl<'db> WriteTransaction<'db> {
         {
             entry?.key().transaction_id
         } else {
-            self.transaction_id.0
+            self.transaction_id.raw_id()
         };
 
         let mut freed_tree = BtreeMut::new(
@@ -1018,7 +1018,7 @@ impl<'db> WriteTransaction<'db> {
         // We assume below that PageNumber is length 8
         assert_eq!(PageNumber::serialized_size(), 8);
         let lookup_key = FreedTableKey {
-            transaction_id: oldest_live_read.0,
+            transaction_id: oldest_live_read.raw_id(),
             pagination_id: 0,
         };
 
@@ -1058,7 +1058,7 @@ impl<'db> WriteTransaction<'db> {
             let chunk_size = 100;
             let buffer_size = FreedPageList::required_bytes(chunk_size);
             let key = FreedTableKey {
-                transaction_id: self.transaction_id.0,
+                transaction_id: self.transaction_id.raw_id(),
                 pagination_id: pagination_counter,
             };
             let mut access_guard =

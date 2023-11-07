@@ -353,7 +353,7 @@ impl TransactionHeader {
         } else {
             None
         };
-        let transaction_id = TransactionId(get_u64(&data[TRANSACTION_ID_OFFSET..]));
+        let transaction_id = TransactionId::new(get_u64(&data[TRANSACTION_ID_OFFSET..]));
 
         let result = Self {
             version,
@@ -394,7 +394,7 @@ impl TransactionHeader {
                 .copy_from_slice(&checksum.to_le_bytes());
         }
         result[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
-            .copy_from_slice(&self.transaction_id.0.to_le_bytes());
+            .copy_from_slice(&self.transaction_id.raw_id().to_le_bytes());
         let checksum = xxh3_checksum(&result[..SLOT_CHECKSUM_OFFSET]);
         result[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
             .copy_from_slice(&checksum.to_le_bytes());

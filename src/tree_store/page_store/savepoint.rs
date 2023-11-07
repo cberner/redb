@@ -115,7 +115,7 @@ impl<'a> SerializedSavepoint<'a> {
     pub(crate) fn from_savepoint(savepoint: &Savepoint) -> Self {
         let mut result = vec![savepoint.version];
         result.extend(savepoint.id.0.to_le_bytes());
-        result.extend(savepoint.transaction_id.0.to_le_bytes());
+        result.extend(savepoint.transaction_id.raw_id().to_le_bytes());
 
         if let Some((root, checksum)) = savepoint.user_root {
             result.push(1);
@@ -291,7 +291,7 @@ impl<'a> SerializedSavepoint<'a> {
         Savepoint {
             version,
             id: SavepointId(id),
-            transaction_id: TransactionId(transaction_id),
+            transaction_id: TransactionId::new(transaction_id),
             user_root,
             system_root,
             freed_root,
