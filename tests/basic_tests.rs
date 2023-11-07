@@ -1,7 +1,7 @@
 use redb::backends::InMemoryBackend;
 use redb::{
     Database, MultimapTableDefinition, MultimapTableHandle, Range, ReadableTable, RedbKey,
-    RedbValue, TableDefinition, TableHandle, TypeName,
+    RedbValue, TableDefinition, TableError, TableHandle, TypeName,
 };
 use std::cmp::Ordering;
 #[cfg(not(target_os = "wasi"))]
@@ -810,6 +810,22 @@ fn delete() {
     let table = read_txn.open_table(STR_TABLE).unwrap();
     assert!(table.get("hello").unwrap().is_none());
     assert_eq!(table.len().unwrap(), 1);
+}
+
+#[test]
+fn delete_open_table() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(matches!(
+            write_txn.delete_table(STR_TABLE).unwrap_err(),
+            TableError::TableAlreadyOpen(_, _)
+        ));
+        drop(table);
+    }
+    write_txn.commit().unwrap();
 }
 
 #[test]
