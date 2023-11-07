@@ -4,8 +4,8 @@ use crate::tree_store::{
     PageHint, PageNumber, TransactionalMemory, MAX_VALUE_LENGTH,
 };
 use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
-use crate::Result;
 use crate::{AccessGuard, StorageError, WriteTransaction};
+use crate::{Result, TableHandle};
 use std::borrow::Borrow;
 use std::fmt::{Debug, Formatter};
 use std::ops::RangeBounds;
@@ -60,6 +60,12 @@ pub struct Table<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
     name: String,
     transaction: &'txn WriteTransaction<'db>,
     tree: BtreeMut<'txn, K, V>,
+}
+
+impl<K: RedbKey + 'static, V: RedbValue + 'static> TableHandle for Table<'_, '_, K, V> {
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K, V> {

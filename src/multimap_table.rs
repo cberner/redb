@@ -7,7 +7,7 @@ use crate::tree_store::{
     RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF, MAX_VALUE_LENGTH,
 };
 use crate::types::{RedbKey, RedbValue, TypeName};
-use crate::{AccessGuard, Result, StorageError, WriteTransaction};
+use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
 use std::borrow::Borrow;
 use std::cmp::max;
 use std::convert::TryInto;
@@ -720,6 +720,14 @@ pub struct MultimapTable<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> 
     _value_type: PhantomData<V>,
 }
 
+impl<K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableHandle
+    for MultimapTable<'_, '_, K, V>
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, 'txn, K, V> {
     pub(crate) fn new(
         name: &str,
@@ -1120,7 +1128,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTabl
     }
 }
 
-impl<K: RedbKey, V: RedbKey> Sealed for MultimapTable<'_, '_, K, V> {}
+impl<K: RedbKey + 'static, V: RedbKey + 'static> Sealed for MultimapTable<'_, '_, K, V> {}
 
 impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> Drop
     for MultimapTable<'db, 'txn, K, V>
