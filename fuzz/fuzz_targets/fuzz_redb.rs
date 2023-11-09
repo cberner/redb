@@ -5,6 +5,7 @@ use redb::{AccessGuard, Database, Durability, Error, MultimapTable, MultimapTabl
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Debug;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::NamedTempFile;
 
@@ -15,6 +16,8 @@ use crate::FuzzerSavepoint::{Ephemeral, NotYetDurablePersistent, Persistent};
 
 // These slow down the fuzzer, so don't create too many
 const MAX_PERSISTENT_SAVEPOINTS: usize = 20;
+// Table to count which transactions have been successfully committed so that the reference BtreeMap can be kept in sync
+const COUNTER_TABLE: TableDefinition<(), u64> = TableDefinition::new("transaction_counter");
 const TABLE_DEF: TableDefinition<u64, &[u8]> = TableDefinition::new("fuzz_table");
 const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, &[u8]> =
     MultimapTableDefinition::new("fuzz_multimap_table");
@@ -22,14 +25,14 @@ const MULTIMAP_TABLE_DEF: MultimapTableDefinition<u64, &[u8]> =
 #[derive(Debug)]
 struct FuzzerBackend {
     inner: FileBackend,
-    countdown: AtomicU64,
+    countdown: Arc<AtomicU64>,
 }
 
 impl FuzzerBackend {
-    fn new(backend: FileBackend, countdown: u64) -> Self {
+    fn new(backend: FileBackend) -> Self {
         Self {
             inner: backend,
-            countdown: AtomicU64::new(countdown),
+            countdown: Arc::new(AtomicU64::new(u64::MAX)),
         }
     }
 
@@ -467,32 +470,30 @@ fn is_simulated_io_error(err: &redb::Error) -> bool {
     }
 }
 
-fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, &mut BTreeMap<u64, T>, &FuzzTransaction, &mut SavepointManager<T>) -> Result<(), redb::Error>) -> Result<(), redb::Error> {
+fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransaction<'_>, &mut BTreeMap<u64, T>, &FuzzTransaction, &mut SavepointManager<T>) -> Result<(), redb::Error>) -> Result<(), redb::Error> {
     let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
-    let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap())?, config.crash_after_ops.value);
+    let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap())?);
+    let countdown = backend.countdown.clone();
 
-    let result = Database::builder()
+    let mut db = Database::builder()
         .set_page_size(config.page_size.value)
         .set_cache_size(config.cache_size.value)
         .set_region_size(config.region_size.value as u64)
-        .create_with_backend(backend);
-    let mut db = match result {
-        Ok(db) => db,
-        Err(err) => {
-            let err: redb::Error = err.into();
-            if is_simulated_io_error(&err) {
-                return Ok(());
-            } else {
-                return Err(err);
-            }
-        }
-    };
+        .create_with_backend(backend).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let mut table = txn.open_table(COUNTER_TABLE).unwrap();
+    table.insert((), 0)?;
+    drop(table);
+    txn.commit().unwrap();
+
+    countdown.store(config.crash_after_ops.value, Ordering::SeqCst);
 
     let mut savepoint_manager = SavepointManager::new();
     let mut reference = BTreeMap::new();
     let mut non_durable_reference = reference.clone();
 
-    for transaction in config.transactions.iter() {
+    for (txn_id, transaction) in config.transactions.iter().enumerate() {
         let result = handle_savepoints(db.begin_write().unwrap(), &mut non_durable_reference, transaction, &mut savepoint_manager);
         match result {
             Ok(durable) => {
@@ -513,7 +514,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
                     assert_ne!(god_byte[0] & 2, 0);
 
                     // Repair the database
-                    let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap()).unwrap(), u64::MAX);
+                    let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap()).unwrap());
                     db = Database::builder()
                         .set_page_size(config.page_size.value)
                         .set_cache_size(config.cache_size.value)
@@ -526,7 +527,21 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
             }
         }
 
-        let result = apply(&db, &mut non_durable_reference, transaction, &mut savepoint_manager);
+        // Disable IO error simulation while we update the transaction counter table
+        let old_countdown = countdown.swap(u64::MAX, Ordering::SeqCst);
+        let mut txn = db.begin_write().unwrap();
+        if !transaction.durable {
+            txn.set_durability(Durability::None);
+        }
+        let mut counter_table = txn.open_table(COUNTER_TABLE).unwrap();
+        let uncommitted_id = txn_id as u64 + 1;
+        counter_table.insert((), uncommitted_id)?;
+        drop(counter_table);
+        countdown.store(old_countdown, Ordering::SeqCst);
+
+        let mut uncommitted_reference = non_durable_reference.clone();
+
+        let result = apply(txn, &mut uncommitted_reference, transaction, &mut savepoint_manager);
         if result.is_err() {
             if is_simulated_io_error(result.as_ref().err().unwrap()) {
                 drop(db);
@@ -540,7 +555,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
                 assert_ne!(god_byte[0] & 2, 0);
 
                 // Repair the database
-                let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap()).unwrap(), u64::MAX);
+                let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap()).unwrap());
                 db = Database::builder()
                     .set_page_size(config.page_size.value)
                     .set_cache_size(config.cache_size.value)
@@ -550,8 +565,25 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(&Database, 
             } else {
                 return result;
             }
-        } else if transaction.durable && transaction.commit {
-            reference = non_durable_reference.clone();
+        }
+
+        // Disable IO error simulation
+        let old_countdown = countdown.swap(u64::MAX, Ordering::SeqCst);
+        let txn = db.begin_read().unwrap();
+        let counter_table = txn.open_table(COUNTER_TABLE).unwrap();
+        let last_committed = counter_table.get(()).unwrap().unwrap().value();
+        countdown.store(old_countdown, Ordering::SeqCst);
+
+        let commit_succeeded = last_committed == uncommitted_id;
+        if commit_succeeded {
+            assert!(transaction.commit);
+            savepoint_manager.commit(transaction.durable);
+            non_durable_reference = uncommitted_reference;
+            if transaction.durable {
+                reference = non_durable_reference.clone();
+            }
+        } else {
+            savepoint_manager.abort();
         }
     }
 
@@ -602,17 +634,11 @@ fn handle_savepoints<T: Clone>(mut txn: WriteTransaction, reference: &mut BTreeM
 
 }
 
-fn apply_crashable_transaction_multimap(db: &Database, reference: &mut BTreeMap<u64, BTreeSet<usize>>, transaction: &FuzzTransaction, savepoints: &mut SavepointManager<BTreeSet<usize>>) -> Result<(), redb::Error> {
-    let mut txn = db.begin_write().unwrap();
-    let mut local_reference = reference.clone();
-
-    if !transaction.durable {
-        txn.set_durability(Durability::None);
-    }
+fn apply_crashable_transaction_multimap(txn: WriteTransaction<'_>, uncommitted_reference: &mut BTreeMap<u64, BTreeSet<usize>>, transaction: &FuzzTransaction, savepoints: &mut SavepointManager<BTreeSet<usize>>) -> Result<(), redb::Error> {
     {
         let mut table = txn.open_multimap_table(MULTIMAP_TABLE_DEF)?;
         for op in transaction.ops.iter() {
-            handle_multimap_table_op(op, &mut local_reference, &mut table)?;
+            handle_multimap_table_op(op, uncommitted_reference, &mut table)?;
         }
     }
 
@@ -621,27 +647,18 @@ fn apply_crashable_transaction_multimap(db: &Database, reference: &mut BTreeMap<
             savepoints.gc_persistent_savepoints(&txn)?;
         }
         txn.commit()?;
-        savepoints.commit(transaction.durable);
-        *reference = local_reference;
     } else {
-        savepoints.abort();
         txn.abort()?;
     }
 
     Ok(())
 }
 
-fn apply_crashable_transaction(db: &Database, reference: &mut BTreeMap<u64, usize>, transaction: &FuzzTransaction, savepoints: &mut SavepointManager<usize>) -> Result<(), redb::Error> {
-    let mut txn = db.begin_write().unwrap();
-    let mut local_reference = reference.clone();
-
-    if !transaction.durable {
-        txn.set_durability(Durability::None);
-    }
+fn apply_crashable_transaction(txn: WriteTransaction<'_>, uncommitted_reference: &mut BTreeMap<u64, usize>, transaction: &FuzzTransaction, savepoints: &mut SavepointManager<usize>) -> Result<(), redb::Error> {
     {
         let mut table = txn.open_table(TABLE_DEF)?;
         for op in transaction.ops.iter() {
-            handle_table_op(op, &mut local_reference, &mut table)?;
+            handle_table_op(op, uncommitted_reference, &mut table)?;
         }
     }
 
@@ -650,10 +667,7 @@ fn apply_crashable_transaction(db: &Database, reference: &mut BTreeMap<u64, usiz
             savepoints.gc_persistent_savepoints(&txn)?;
         }
         txn.commit()?;
-        savepoints.commit(transaction.durable);
-        *reference = local_reference;
     } else {
-        savepoints.abort();
         txn.abort()?;
     }
 
