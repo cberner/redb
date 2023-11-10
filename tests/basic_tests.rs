@@ -1606,3 +1606,29 @@ fn generic_signature_lifetimes() {
         read_key_generic(table, key, db);
     }
 }
+
+#[test]
+fn char_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<char, char> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert('a', &'b').unwrap();
+        table.insert(&'b', 'a').unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!('a', table.get(&'b').unwrap().unwrap().value());
+    assert_eq!('b', table.get(&'a').unwrap().unwrap().value());
+
+    let mut iter = table.iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), 'a');
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), 'b');
+    assert!(iter.next().is_none());
+}
