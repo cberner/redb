@@ -393,6 +393,41 @@ impl RedbKey for &str {
     }
 }
 
+impl RedbValue for char {
+    type SelfType<'a> = char;
+    type AsBytes<'a> = [u8; 3] where Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(3)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> char
+    where
+        Self: 'a,
+    {
+        char::from_u32(u32::from_le_bytes([data[0], data[1], data[2], 0])).unwrap()
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> [u8; 3]
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        let bytes = u32::from(*value).to_le_bytes();
+        [bytes[0], bytes[1], bytes[2]]
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal(stringify!(char))
+    }
+}
+
+impl RedbKey for char {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
+    }
+}
+
 macro_rules! le_value {
     ($t:ty) => {
         impl RedbValue for $t {
