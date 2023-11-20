@@ -791,8 +791,12 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                         accessor.length_of_pairs(0, accessor.num_pairs()) + value_bytes_ref.len();
                     let new_key_bytes =
                         accessor.length_of_keys(0, accessor.num_pairs()) + value_bytes_ref.len();
-                    let required_inline_bytes =
-                        RawLeafBuilder::required_bytes(new_pairs, new_pair_bytes);
+                    let required_inline_bytes = RawLeafBuilder::required_bytes(
+                        new_pairs,
+                        new_pair_bytes,
+                        V::fixed_width(),
+                        <() as RedbValue>::fixed_width(),
+                    );
 
                     if required_inline_bytes < self.mem.get_page_size() / 2 {
                         let mut data = vec![0; required_inline_bytes];
@@ -866,7 +870,12 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
             }
         } else {
             drop(get_result);
-            let required_inline_bytes = RawLeafBuilder::required_bytes(1, value_bytes_ref.len());
+            let required_inline_bytes = RawLeafBuilder::required_bytes(
+                1,
+                value_bytes_ref.len(),
+                V::fixed_width(),
+                <() as RedbValue>::fixed_width(),
+            );
             if required_inline_bytes < self.mem.get_page_size() / 2 {
                 let mut data = vec![0; required_inline_bytes];
                 let mut builder = RawLeafBuilder::new(
@@ -935,6 +944,8 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                         let required = RawLeafBuilder::required_bytes(
                             old_num_pairs - 1,
                             old_pairs_len - removed_value_len,
+                            V::fixed_width(),
+                            <() as RedbValue>::fixed_width(),
                         );
                         let mut new_data = vec![0; required];
                         let new_key_len =

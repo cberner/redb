@@ -6,7 +6,7 @@ use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,
 };
 use crate::tree_store::page_store::{Page, PageImpl};
-use crate::tree_store::{AccessGuardMut, PageNumber, TransactionalMemory};
+use crate::tree_store::{AccessGuardMut, PageNumber, RawLeafBuilder, TransactionalMemory};
 use crate::types::{RedbKey, RedbValue};
 use crate::{AccessGuard, Result};
 use std::cmp::{max, min};
@@ -484,8 +484,12 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
         }
         let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
             - accessor.length_of_pairs(position, position + 1);
-        let new_required_bytes =
-            LeafBuilder::required_bytes(accessor.num_pairs() - 1, new_kv_bytes);
+        let new_required_bytes = RawLeafBuilder::required_bytes(
+            accessor.num_pairs() - 1,
+            new_kv_bytes,
+            K::fixed_width(),
+            V::fixed_width(),
+        );
         let uncommitted = self.mem.uncommitted(page.get_page_number());
 
         // Fast-path for dirty pages
