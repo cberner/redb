@@ -441,8 +441,13 @@ pub(super) struct LeafBuilder<'a, 'b> {
 }
 
 impl<'a, 'b> LeafBuilder<'a, 'b> {
-    pub(super) fn required_bytes(num_pairs: usize, keys_values_bytes: usize) -> usize {
-        RawLeafBuilder::required_bytes(num_pairs, keys_values_bytes)
+    pub(super) fn required_bytes(&self, num_pairs: usize, keys_values_bytes: usize) -> usize {
+        RawLeafBuilder::required_bytes(
+            num_pairs,
+            keys_values_bytes,
+            self.fixed_key_size,
+            self.fixed_value_size,
+        )
     }
 
     pub(super) fn new(
@@ -484,7 +489,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
     }
 
     pub(super) fn should_split(&self) -> bool {
-        let required_size = Self::required_bytes(
+        let required_size = self.required_bytes(
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
         );
@@ -506,7 +511,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         }
 
         let required_size =
-            Self::required_bytes(division, first_split_key_bytes + first_split_value_bytes);
+            self.required_bytes(division, first_split_key_bytes + first_split_value_bytes);
         let mut page1 = self.mem.allocate(required_size, CachePriority::Low)?;
         let mut builder = RawLeafBuilder::new(
             page1.memory_mut(),
@@ -520,7 +525,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         }
         drop(builder);
 
-        let required_size = Self::required_bytes(
+        let required_size = self.required_bytes(
             self.pairs.len() - division,
             self.total_key_bytes + self.total_value_bytes
                 - first_split_key_bytes
@@ -543,7 +548,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
     }
 
     pub(super) fn build(self) -> Result<PageMut<'b>> {
-        let required_size = Self::required_bytes(
+        let required_size = self.required_bytes(
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
         );
@@ -587,11 +592,21 @@ pub(crate) struct RawLeafBuilder<'a> {
 }
 
 impl<'a> RawLeafBuilder<'a> {
-    pub(crate) fn required_bytes(num_pairs: usize, keys_values_bytes: usize) -> usize {
+    pub(crate) fn required_bytes(
+        num_pairs: usize,
+        keys_values_bytes: usize,
+        key_size: Option<usize>,
+        value_size: Option<usize>,
+    ) -> usize {
         // Page id & header;
         let mut result = 4;
         // key & value lengths
-        result += num_pairs * 2 * size_of::<u32>();
+        if key_size.is_none() {
+            result += num_pairs * size_of::<u32>();
+        }
+        if value_size.is_none() {
+            result += num_pairs * size_of::<u32>();
+        }
         result += keys_values_bytes;
 
         result
@@ -609,7 +624,13 @@ impl<'a> RawLeafBuilder<'a> {
         #[cfg(debug_assertions)]
         {
             // Poison all the key & value offsets, in case the caller forgets to write them
-            let last = 4 + 2 * size_of::<u32>() * num_pairs;
+            let mut last = 4;
+            if fixed_key_size.is_none() {
+                last += size_of::<u32>() * num_pairs;
+            }
+            if fixed_value_size.is_none() {
+                last += size_of::<u32>() * num_pairs;
+            }
             for x in &mut page[4..last] {
                 *x = 0xFF;
             }
