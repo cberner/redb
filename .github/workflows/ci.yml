@@ -29,7 +29,7 @@ jobs:
                 ~/.cargo/registry/cache/
                 ~/.cargo/git/db/
                 target/
-            key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}-cargo-deny-0-12-2-cargo-fuzz-0-11-0-just-1-8-0
+            key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', '.github/workflows/*.yml') }}
 
       - name: Check for forbidden words
         run: "! grep --include='*.rs' -RE 'to_be_bytes|from_be_bytes|dbg!' ."
@@ -48,7 +48,7 @@ jobs:
 
       - name: Install cargo-deny
         if: steps.rust-cache.outputs.cache-hit != 'true'
-        run: cargo install --force --version 0.12.2 cargo-deny --locked
+        run: rustup run --install 1.70 cargo install --force --version 0.14.3 cargo-deny --locked
 
       - name: Install cargo-fuzz
         if: steps.rust-cache.outputs.cache-hit != 'true'
