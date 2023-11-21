@@ -15,7 +15,7 @@ use redb::backends::FileBackend;
 use crate::FuzzerSavepoint::{Ephemeral, NotYetDurablePersistent, Persistent};
 
 // These slow down the fuzzer, so don't create too many
-const MAX_PERSISTENT_SAVEPOINTS: usize = 20;
+const MAX_PERSISTENT_SAVEPOINTS: usize = 10;
 // Table to count which transactions have been successfully committed so that the reference BtreeMap can be kept in sync
 const COUNTER_TABLE: TableDefinition<(), u64> = TableDefinition::new("transaction_counter");
 const TABLE_DEF: TableDefinition<u64, &[u8]> = TableDefinition::new("fuzz_table");
