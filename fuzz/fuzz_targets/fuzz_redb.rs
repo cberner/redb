@@ -494,7 +494,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
     let mut non_durable_reference = reference.clone();
 
     for (txn_id, transaction) in config.transactions.iter().enumerate() {
-        let result = handle_savepoints(db.begin_write().unwrap(), &mut non_durable_reference, transaction, &mut savepoint_manager);
+        let result = handle_savepoints(db.begin_write().unwrap(), &mut non_durable_reference, transaction, &mut savepoint_manager, countdown.clone());
         match result {
             Ok(durable) => {
                 if durable {
@@ -613,7 +613,7 @@ fn run_compaction<T: Clone>(db: &mut Database, savepoint_manager: &mut Savepoint
 }
 
 // Returns true if a durable commit was made
-fn handle_savepoints<T: Clone>(mut txn: WriteTransaction, reference: &mut BTreeMap<u64, T>, transaction: &FuzzTransaction, savepoints: &mut SavepointManager<T>) -> Result<bool, redb::Error> {
+fn handle_savepoints<T: Clone>(mut txn: WriteTransaction, reference: &mut BTreeMap<u64, T>, transaction: &FuzzTransaction, savepoints: &mut SavepointManager<T>, countdown: Arc<AtomicU64>) -> Result<bool, redb::Error> {
     if transaction.create_ephemeral_savepoint {
         savepoints.ephemeral_savepoint(&txn, &reference)?;
     }
@@ -625,10 +625,18 @@ fn handle_savepoints<T: Clone>(mut txn: WriteTransaction, reference: &mut BTreeM
         if let Some(ref restore_to) = transaction.restore_savepoint {
             savepoints.restore_savepoint(restore_to.value, &mut txn, reference)?;
         }
+        // Disable simulated IO failures. It's tricky to handle commit failures here in the fuzzer,
+        // and it doesn't add value since we already fuzz failures on the main transaction path
+        let old_countdown = countdown.swap(u64::MAX, Ordering::SeqCst);
         txn.commit()?;
+        countdown.store(old_countdown, Ordering::SeqCst);
         Ok(true)
     } else {
+        // Disable simulated IO failures. It's tricky to handle commit failures here in the fuzzer,
+        // and it doesn't add value since we already fuzz failures on the main transaction path
+        let old_countdown = countdown.swap(u64::MAX, Ordering::SeqCst);
         txn.abort()?;
+        countdown.store(old_countdown, Ordering::SeqCst);
         Ok(false)
     }
 
