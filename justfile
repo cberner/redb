@@ -3,7 +3,7 @@ build: pre
     cargo doc
 
 pre:
-    cargo deny check licenses
+    cargo deny --all-features check licenses
     cargo fmt --all -- --check
     cargo clippy --all --all-targets
 
