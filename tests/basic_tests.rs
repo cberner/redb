@@ -38,6 +38,26 @@ fn len() {
 }
 
 #[test]
+fn table_stats() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+        table.insert("hello2", "world2").unwrap();
+        table.insert("hi", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    let untyped_table = read_txn.open_untyped_table(STR_TABLE).unwrap();
+    assert_eq!(table.stats().unwrap().tree_height(), 1);
+    assert_eq!(untyped_table.stats().unwrap().tree_height(), 1);
+}
+
+#[test]
 fn in_memory() {
     let db = Database::builder()
         .create_with_backend(InMemoryBackend::new())
