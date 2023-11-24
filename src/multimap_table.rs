@@ -1174,6 +1174,54 @@ pub trait ReadableMultimapTable<K: RedbKey + 'static, V: RedbKey + 'static>: Sea
     }
 }
 
+/// A read-only untyped multimap table
+pub struct ReadOnlyUntypedMultimapTable<'txn> {
+    tree: RawBtree<'txn>,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    mem: &'txn TransactionalMemory,
+}
+
+impl<'txn> ReadOnlyUntypedMultimapTable<'txn> {
+    pub(crate) fn new(
+        root_page: Option<(PageNumber, Checksum)>,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+        mem: &'txn TransactionalMemory,
+    ) -> Self {
+        Self {
+            tree: RawBtree::new(
+                root_page,
+                fixed_key_size,
+                DynamicCollection::<()>::fixed_width_with(fixed_value_size),
+                mem,
+            ),
+            fixed_key_size,
+            fixed_value_size,
+            mem,
+        }
+    }
+
+    /// Retrieves information about storage usage for the table
+    pub fn stats(&self) -> Result<TableStats> {
+        let tree_stats = multimap_btree_stats(
+            self.tree.get_root().map(|(p, _)| p),
+            self.mem,
+            self.fixed_key_size,
+            self.fixed_value_size,
+        )?;
+
+        Ok(TableStats {
+            tree_height: tree_stats.tree_height,
+            leaf_pages: tree_stats.leaf_pages,
+            branch_pages: tree_stats.branch_pages,
+            stored_leaf_bytes: tree_stats.stored_leaf_bytes,
+            metadata_bytes: tree_stats.metadata_bytes,
+            fragmented_bytes: tree_stats.fragmented_bytes,
+        })
+    }
+}
+
 /// A read-only multimap table
 pub struct ReadOnlyMultimapTable<'txn, K: RedbKey + 'static, V: RedbKey + 'static> {
     tree: Btree<'txn, K, &'static DynamicCollection<V>>,

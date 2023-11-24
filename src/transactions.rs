@@ -1,5 +1,7 @@
 use crate::error::CommitError;
+use crate::multimap_table::ReadOnlyUntypedMultimapTable;
 use crate::sealed::Sealed;
+use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeMut, Checksum, FreedPageList, FreedTableKey, InternalTableDefinition, PageHint,
@@ -1185,6 +1187,24 @@ impl<'db> ReadTransaction<'db> {
         )?)
     }
 
+    /// Open the given table without a type
+    pub fn open_untyped_table(
+        &self,
+        handle: impl TableHandle,
+    ) -> Result<ReadOnlyUntypedTable, TableError> {
+        let header = self
+            .tree
+            .get_table_untyped(handle.name(), TableType::Normal)?
+            .ok_or_else(|| TableError::TableDoesNotExist(handle.name().to_string()))?;
+
+        Ok(ReadOnlyUntypedTable::new(
+            header.get_root(),
+            header.get_fixed_key_size(),
+            header.get_fixed_value_size(),
+            self.mem,
+        ))
+    }
+
     /// Open the given table
     pub fn open_multimap_table<K: RedbKey + 'static, V: RedbKey + 'static>(
         &self,
@@ -1200,6 +1220,24 @@ impl<'db> ReadTransaction<'db> {
             PageHint::Clean,
             self.mem,
         )?)
+    }
+
+    /// Open the given table without a type
+    pub fn open_untyped_multimap_table(
+        &self,
+        handle: impl MultimapTableHandle,
+    ) -> Result<ReadOnlyUntypedMultimapTable, TableError> {
+        let header = self
+            .tree
+            .get_table_untyped(handle.name(), TableType::Multimap)?
+            .ok_or_else(|| TableError::TableDoesNotExist(handle.name().to_string()))?;
+
+        Ok(ReadOnlyUntypedMultimapTable::new(
+            header.get_root(),
+            header.get_fixed_key_size(),
+            header.get_fixed_value_size(),
+            self.mem,
+        ))
     }
 
     /// List all the tables

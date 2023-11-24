@@ -1,7 +1,7 @@
 use crate::sealed::Sealed;
 use crate::tree_store::{
     AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeMut, BtreeRangeIter, Checksum,
-    PageHint, PageNumber, TransactionalMemory, MAX_VALUE_LENGTH,
+    PageHint, PageNumber, RawBtree, TransactionalMemory, MAX_VALUE_LENGTH,
 };
 use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
 use crate::{AccessGuard, StorageError, WriteTransaction};
@@ -370,6 +370,38 @@ pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static>: Sealed {
     /// Returns a double-ended iterator over all elements in the table
     fn iter(&self) -> Result<Range<K, V>> {
         self.range::<K::SelfType<'_>>(..)
+    }
+}
+
+/// A read-only untyped table
+pub struct ReadOnlyUntypedTable<'txn> {
+    tree: RawBtree<'txn>,
+}
+
+impl<'txn> ReadOnlyUntypedTable<'txn> {
+    pub(crate) fn new(
+        root_page: Option<(PageNumber, Checksum)>,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+        mem: &'txn TransactionalMemory,
+    ) -> Self {
+        Self {
+            tree: RawBtree::new(root_page, fixed_key_size, fixed_value_size, mem),
+        }
+    }
+
+    /// Retrieves information about storage usage for the table
+    pub fn stats(&self) -> Result<TableStats> {
+        let tree_stats = self.tree.stats()?;
+
+        Ok(TableStats {
+            tree_height: tree_stats.tree_height,
+            leaf_pages: tree_stats.leaf_pages,
+            branch_pages: tree_stats.branch_pages,
+            stored_leaf_bytes: tree_stats.stored_leaf_bytes,
+            metadata_bytes: tree_stats.metadata_bytes,
+            fragmented_bytes: tree_stats.fragmented_bytes,
+        })
     }
 }
 

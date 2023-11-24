@@ -478,6 +478,19 @@ impl<'a> RawBtree<'a> {
         }
     }
 
+    pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
+        self.root
+    }
+
+    pub(crate) fn stats(&self) -> Result<BtreeStats> {
+        btree_stats(
+            self.root.map(|(p, _)| p),
+            self.mem,
+            self.fixed_key_size,
+            self.fixed_value_size,
+        )
+    }
+
     pub(crate) fn verify_checksum(&self) -> Result<bool> {
         if let Some((root, checksum)) = self.root {
             self.verify_checksum_helper(root, checksum)

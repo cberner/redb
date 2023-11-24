@@ -62,9 +62,13 @@ pub use error::{
     TransactionError,
 };
 pub use multimap_table::{
-    MultimapRange, MultimapTable, MultimapValue, ReadOnlyMultimapTable, ReadableMultimapTable,
+    MultimapRange, MultimapTable, MultimapValue, ReadOnlyMultimapTable,
+    ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
 };
-pub use table::{Drain, DrainFilter, Range, ReadOnlyTable, ReadableTable, Table, TableStats};
+pub use table::{
+    Drain, DrainFilter, Range, ReadOnlyTable, ReadOnlyUntypedTable, ReadableTable, Table,
+    TableStats,
+};
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
 pub use tree_store::{AccessGuard, AccessGuardMut, Savepoint};
 pub use types::{RedbKey, RedbValue, TypeName};
