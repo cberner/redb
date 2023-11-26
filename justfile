@@ -16,7 +16,7 @@ flamegraph:
 
 publish_py: test_py
     docker pull quay.io/pypa/manylinux2014_x86_64
-    docker run -it --rm -v `pwd`:/redb-ro:ro quay.io/pypa/manylinux2014_x86_64 /redb-ro/py_publish.sh
+    MATURIN_PYPI_TOKEN=$(cat ~/.pypi/redb_token) docker run -it --rm -e "MATURIN_PYPI_TOKEN" -v `pwd`:/redb-ro:ro quay.io/pypa/manylinux2014_x86_64 /redb-ro/publish_py.sh
 
 test_py: install_py
     python3 -m unittest discover
