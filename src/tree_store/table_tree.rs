@@ -6,7 +6,7 @@ use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, RawBtree, TransactionalMemory};
-use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace, TypeName};
+use crate::types::{MutInPlaceValue, RedbKey, RedbValue, TypeName};
 use crate::{DatabaseStats, Result};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -158,7 +158,7 @@ impl RedbValue for FreedPageList<'_> {
     }
 }
 
-impl RedbValueMutInPlace for FreedPageList<'_> {
+impl MutInPlaceValue for FreedPageList<'_> {
     type BaseRefType = FreedPageListMut;
 
     fn initialize(data: &mut [u8]) {

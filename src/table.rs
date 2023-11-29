@@ -3,7 +3,7 @@ use crate::tree_store::{
     AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeMut, BtreeRangeIter, Checksum,
     PageHint, PageNumber, RawBtree, TransactionalMemory, MAX_VALUE_LENGTH,
 };
-use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
+use crate::types::{MutInPlaceValue, RedbKey, RedbValue};
 use crate::{AccessGuard, StorageError, WriteTransaction};
 use crate::{Result, TableHandle};
 use std::borrow::Borrow;
@@ -186,7 +186,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     }
 }
 
-impl<'db, 'txn, K: RedbKey + 'static, V: RedbValueMutInPlace + 'static> Table<'db, 'txn, K, V> {
+impl<'db, 'txn, K: RedbKey + 'static, V: MutInPlaceValue + 'static> Table<'db, 'txn, K, V> {
     /// Reserve space to insert a key-value pair
     /// The returned reference will have length equal to value_length
     pub fn insert_reserve<'a>(
