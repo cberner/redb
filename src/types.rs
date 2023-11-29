@@ -101,7 +101,7 @@ pub trait RedbValue: Debug {
 
 /// Implementing this trait indicates that the type can be mutated in-place as a &mut [u8].
 /// This enables the .insert_reserve() method on Table
-pub trait RedbValueMutInPlace: RedbValue {
+pub trait MutInPlaceValue: RedbValue {
     /// The base type such that &mut [u8] can be safely transmuted to &mut BaseRefType
     type BaseRefType: Debug + ?Sized;
 
@@ -112,7 +112,7 @@ pub trait RedbValueMutInPlace: RedbValue {
     fn from_bytes_mut(data: &mut [u8]) -> &mut Self::BaseRefType;
 }
 
-impl RedbValueMutInPlace for &[u8] {
+impl MutInPlaceValue for &[u8] {
     type BaseRefType = [u8];
 
     fn initialize(_data: &mut [u8]) {

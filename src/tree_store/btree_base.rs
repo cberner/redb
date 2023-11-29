@@ -2,7 +2,7 @@ use crate::tree_store::page_store::{
     xxh3_checksum, CachePriority, Page, PageImpl, PageMut, TransactionalMemory,
 };
 use crate::tree_store::PageNumber;
-use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
+use crate::types::{MutInPlaceValue, RedbKey, RedbValue};
 use crate::{Result, StorageError};
 use std::cmp::Ordering;
 use std::marker::PhantomData;
@@ -204,7 +204,7 @@ impl<'a, V: RedbValue> AccessGuardMut<'a, V> {
     }
 }
 
-impl<'a, V: RedbValueMutInPlace> AsMut<V::BaseRefType> for AccessGuardMut<'a, V> {
+impl<'a, V: MutInPlaceValue> AsMut<V::BaseRefType> for AccessGuardMut<'a, V> {
     fn as_mut(&mut self) -> &mut V::BaseRefType {
         V::from_bytes_mut(&mut self.page.memory_mut()[self.offset..(self.offset + self.len)])
     }

@@ -8,7 +8,7 @@ use crate::tree_store::page_store::{CachePriority, Page, PageImpl, PageMut, Tran
 use crate::tree_store::{
     AccessGuardMut, AllPageNumbersBtreeIter, BtreeDrainFilter, BtreeRangeIter, PageHint, PageNumber,
 };
-use crate::types::{RedbKey, RedbValue, RedbValueMutInPlace};
+use crate::types::{MutInPlaceValue, RedbKey, RedbValue};
 use crate::{AccessGuard, Result};
 #[cfg(feature = "logging")]
 use log::trace;
@@ -429,7 +429,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
     }
 }
 
-impl<'a, K: RedbKey + 'a, V: RedbValueMutInPlace + 'a> BtreeMut<'a, K, V> {
+impl<'a, K: RedbKey + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
     /// Reserve space to insert a key-value pair
     /// The returned reference will have length equal to value_length
     // Return type has the same lifetime as &self, because the tree must not be modified until the mutable guard is dropped
