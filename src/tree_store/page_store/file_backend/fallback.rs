@@ -13,9 +13,9 @@ pub struct FileBackend {
 impl FileBackend {
     /// Creates a new backend which stores data to the given file.
     pub fn new(file: File) -> Result<Self, DatabaseError> {
-        Self {
+        Ok(Self {
             file: Mutex::new(file),
-        }
+        })
     }
 }
 
@@ -26,7 +26,7 @@ impl StorageBackend for FileBackend {
 
     fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
         let mut result = vec![0; len];
-        let file = self.file.lock().unwrap();
+        let mut file = self.file.lock().unwrap();
         file.seek(SeekFrom::Start(offset))?;
         file.read_exact(&mut result)?;
         Ok(result)
@@ -41,7 +41,7 @@ impl StorageBackend for FileBackend {
     }
 
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
-        let file = self.file.lock().unwrap();
+        let mut file = self.file.lock().unwrap();
         file.seek(SeekFrom::Start(offset))?;
         file.write_all(data)
     }
