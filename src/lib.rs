@@ -25,8 +25,15 @@
 //! - Savepoints and rollbacks
 //!
 //! # Example
-//!
+//! 
+//! Cargo.toml
+//! ```toml
+//! [dependencies]
+//! redb = "1.4"
 //! ```
+//! 
+//! src/main.rs
+//! ```rs
 //! use redb::{Database, Error, ReadableTable, TableDefinition};
 //!
 //! const TABLE: TableDefinition<&str, u64> = TableDefinition::new("my_data");
