@@ -64,7 +64,7 @@ enum OnDrop {
 }
 
 enum EitherPage<'a> {
-    Immutable(PageImpl<'a>),
+    Immutable(PageImpl),
     Mutable(PageMut<'a>),
     OwnedMemory(Vec<u8>),
 }
@@ -90,7 +90,7 @@ pub struct AccessGuard<'a, V: RedbValue> {
 
 impl<'a, V: RedbValue> AccessGuard<'a, V> {
     pub(super) fn new(
-        page: PageImpl<'a>,
+        page: PageImpl,
         offset: usize,
         len: usize,
         free_on_drop: bool,
@@ -111,7 +111,7 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
         }
     }
 
-    pub(crate) fn with_page(page: PageImpl<'a>, range: Range<usize>) -> Self {
+    pub(crate) fn with_page(page: PageImpl, range: Range<usize>) -> Self {
         Self {
             page: EitherPage::Immutable(page),
             offset: range.start,
@@ -761,7 +761,7 @@ impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
     }
 
     pub(super) fn sufficient_insert_inplace_space(
-        page: &'_ PageImpl<'_>,
+        page: &'_ PageImpl,
         position: usize,
         overwrite: bool,
         fixed_key_size: Option<usize>,

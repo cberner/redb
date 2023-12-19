@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
 // because the leaf node format uses 32bit offsets
@@ -85,7 +85,7 @@ pub(crate) struct TransactionalMemory {
     open_dirty_pages: Mutex<HashSet<PageNumber>>,
     // Reference counts of PageImpls that are outstanding
     #[cfg(debug_assertions)]
-    read_page_ref_counts: Mutex<HashMap<PageNumber, u64>>,
+    read_page_ref_counts: Arc<Mutex<HashMap<PageNumber, u64>>>,
     // Indicates that a non-durable commit has been made, so reads should be served from the secondary meta page
     read_from_secondary: AtomicBool,
     page_size: u32,
@@ -264,7 +264,7 @@ impl TransactionalMemory {
             #[cfg(debug_assertions)]
             open_dirty_pages: Mutex::new(HashSet::new()),
             #[cfg(debug_assertions)]
-            read_page_ref_counts: Mutex::new(HashMap::new()),
+            read_page_ref_counts: Arc::new(Mutex::new(HashMap::new())),
             read_from_secondary: AtomicBool::new(false),
             page_size: page_size.try_into().unwrap(),
             region_size,
@@ -681,9 +681,7 @@ impl TransactionalMemory {
             mem,
             page_number,
             #[cfg(debug_assertions)]
-            open_pages: &self.read_page_ref_counts,
-            #[cfg(not(debug_assertions))]
-            _debug_lifetime: Default::default(),
+            open_pages: self.read_page_ref_counts.clone(),
         })
     }
 

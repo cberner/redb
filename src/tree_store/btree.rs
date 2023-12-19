@@ -543,7 +543,7 @@ impl<'a> RawBtree<'a> {
 pub(crate) struct Btree<'a, K: RedbKey, V: RedbValue> {
     mem: &'a TransactionalMemory,
     // Cache of the root page to avoid repeated lookups
-    cached_root: Option<PageImpl<'a>>,
+    cached_root: Option<PageImpl>,
     root: Option<(PageNumber, Checksum)>,
     hint: PageHint,
     _key_type: PhantomData<K>,
@@ -584,7 +584,7 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
     }
 
     // Returns the value for the queried key, if present
-    fn get_helper(&self, page: PageImpl<'a>, query: &[u8]) -> Result<Option<AccessGuard<'a, V>>> {
+    fn get_helper(&self, page: PageImpl, query: &[u8]) -> Result<Option<AccessGuard<'a, V>>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
