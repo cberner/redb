@@ -1,3 +1,4 @@
+use crate::db::TransactionGuard;
 use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
 use crate::sealed::Sealed;
@@ -1148,24 +1149,18 @@ impl<'a> Drop for WriteTransaction<'a> {
 ///
 /// Read-only transactions may exist concurrently with writes
 pub struct ReadTransaction<'a> {
-    transaction_tracker: Arc<Mutex<TransactionTracker>>,
     mem: &'a TransactionalMemory,
     tree: TableTree<'a>,
-    transaction_id: TransactionId,
+    _guard: TransactionGuard,
 }
 
 impl<'db> ReadTransaction<'db> {
-    pub(crate) fn new(
-        mem: &'db TransactionalMemory,
-        transaction_tracker: Arc<Mutex<TransactionTracker>>,
-        transaction_id: TransactionId,
-    ) -> Self {
+    pub(crate) fn new(mem: &'db TransactionalMemory, guard: TransactionGuard) -> Self {
         let root_page = mem.get_data_root();
         Self {
-            transaction_tracker,
             mem,
             tree: TableTree::new(root_page, mem, Default::default()),
-            transaction_id,
+            _guard: guard,
         }
     }
 
@@ -1252,15 +1247,6 @@ impl<'db> ReadTransaction<'db> {
         self.tree
             .list_tables(TableType::Multimap)
             .map(|x| x.into_iter().map(UntypedMultimapTableHandle::new))
-    }
-}
-
-impl<'a> Drop for ReadTransaction<'a> {
-    fn drop(&mut self) {
-        self.transaction_tracker
-            .lock()
-            .unwrap()
-            .deallocate_read_transaction(self.transaction_id);
     }
 }
 
