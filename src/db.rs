@@ -232,6 +232,28 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> Display for MultimapTableDe
     }
 }
 
+pub(crate) struct TransactionGuard {
+    transaction_tracker: Arc<Mutex<TransactionTracker>>,
+    transaction_id: Option<TransactionId>,
+}
+
+impl TransactionGuard {
+    fn leak(mut self) -> TransactionId {
+        self.transaction_id.take().unwrap()
+    }
+}
+
+impl Drop for TransactionGuard {
+    fn drop(&mut self) {
+        if let Some(transaction_id) = self.transaction_id {
+            self.transaction_tracker
+                .lock()
+                .unwrap()
+                .deallocate_read_transaction(transaction_id);
+        }
+    }
+}
+
 /// Opened redb database file
 ///
 /// Use [`Self::begin_read`] to get a [`ReadTransaction`] object that can be used to read from the database
@@ -727,12 +749,15 @@ impl Database {
         Ok(db)
     }
 
-    fn allocate_read_transaction(&self) -> Result<TransactionId> {
+    fn allocate_read_transaction(&self) -> Result<TransactionGuard> {
         let mut guard = self.transaction_tracker.lock().unwrap();
         let id = self.mem.get_last_committed_transaction_id()?;
         guard.register_read_transaction(id);
 
-        Ok(id)
+        Ok(TransactionGuard {
+            transaction_tracker: self.transaction_tracker.clone(),
+            transaction_id: Some(id),
+        })
     }
 
     pub(crate) fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionId)> {
@@ -741,7 +766,7 @@ impl Database {
             .lock()
             .unwrap()
             .allocate_savepoint();
-        Ok((id, self.allocate_read_transaction()?))
+        Ok((id, self.allocate_read_transaction()?.leak()))
     }
 
     /// Convenience method for [`Builder::new`]
@@ -766,14 +791,10 @@ impl Database {
     /// Returns a [`ReadTransaction`] which may be used to read from the database. Read transactions
     /// may exist concurrently with writes
     pub fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
-        let id = self.allocate_read_transaction()?;
+        let guard = self.allocate_read_transaction()?;
         #[cfg(feature = "logging")]
-        info!("Beginning read transaction id={:?}", id);
-        Ok(ReadTransaction::new(
-            self.get_memory(),
-            self.transaction_tracker.clone(),
-            id,
-        ))
+        info!("Beginning read transaction id={:?}", guard.id());
+        Ok(ReadTransaction::new(self.get_memory(), guard))
     }
 }
 
