@@ -12,24 +12,24 @@ use std::ops::{Range, RangeBounds};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
-pub enum RangeIterState<'a> {
+pub enum RangeIterState {
     Leaf {
-        page: PageImpl<'a>,
+        page: PageImpl,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
         entry: usize,
-        parent: Option<Box<RangeIterState<'a>>>,
+        parent: Option<Box<RangeIterState>>,
     },
     Internal {
-        page: PageImpl<'a>,
+        page: PageImpl,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
         child: usize,
-        parent: Option<Box<RangeIterState<'a>>>,
+        parent: Option<Box<RangeIterState>>,
     },
 }
 
-impl<'a> RangeIterState<'a> {
+impl RangeIterState {
     fn page_number(&self) -> PageNumber {
         match self {
             Leaf { page, .. } => page.get_page_number(),
@@ -37,11 +37,7 @@ impl<'a> RangeIterState<'a> {
         }
     }
 
-    fn next(
-        self,
-        reverse: bool,
-        manager: &'a TransactionalMemory,
-    ) -> Result<Option<RangeIterState>> {
+    fn next(self, reverse: bool, manager: &TransactionalMemory) -> Result<Option<RangeIterState>> {
         match self {
             Leaf {
                 page,
@@ -127,7 +123,7 @@ impl<'a> RangeIterState<'a> {
         }
     }
 
-    fn get_entry<K: RedbKey, V: RedbValue>(&self) -> Option<EntryGuard<'a, K, V>> {
+    fn get_entry<K: RedbKey, V: RedbValue>(&self) -> Option<EntryGuard<K, V>> {
         match self {
             Leaf {
                 page,
@@ -146,16 +142,16 @@ impl<'a> RangeIterState<'a> {
     }
 }
 
-pub(crate) struct EntryGuard<'a, K: RedbKey, V: RedbValue> {
-    page: PageImpl<'a>,
+pub(crate) struct EntryGuard<K: RedbKey, V: RedbValue> {
+    page: PageImpl,
     key_range: Range<usize>,
     value_range: Range<usize>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey, V: RedbValue> EntryGuard<'a, K, V> {
-    fn new(page: PageImpl<'a>, key_range: Range<usize>, value_range: Range<usize>) -> Self {
+impl<K: RedbKey, V: RedbValue> EntryGuard<K, V> {
+    fn new(page: PageImpl, key_range: Range<usize>, value_range: Range<usize>) -> Self {
         Self {
             page,
             key_range,
@@ -177,13 +173,13 @@ impl<'a, K: RedbKey, V: RedbValue> EntryGuard<'a, K, V> {
         V::from_bytes(&self.page.memory()[self.value_range.clone()])
     }
 
-    pub(crate) fn into_raw(self) -> (PageImpl<'a>, Range<usize>, Range<usize>) {
+    pub(crate) fn into_raw(self) -> (PageImpl, Range<usize>, Range<usize>) {
         (self.page, self.key_range, self.value_range)
     }
 }
 
 pub(crate) struct AllPageNumbersBtreeIter<'a> {
-    next: Option<RangeIterState<'a>>,
+    next: Option<RangeIterState>,
     manager: &'a TransactionalMemory,
 }
 
@@ -271,7 +267,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeDrain<'a, K, V> {
 }
 
 impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Iterator for BtreeDrain<'a, K, V> {
-    type Item = Result<EntryGuard<'a, K, V>>;
+    type Item = Result<EntryGuard<K, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next()
@@ -345,7 +341,7 @@ impl<
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > Iterator for BtreeDrainFilter<'a, K, V, F>
 {
-    type Item = Result<EntryGuard<'a, K, V>>;
+    type Item = Result<EntryGuard<K, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut item = self.inner.next();
@@ -402,10 +398,10 @@ impl<
 }
 
 pub(crate) struct BtreeRangeIter<'a, K: RedbKey + 'a, V: RedbValue + 'a> {
-    left: Option<RangeIterState<'a>>, // Exclusive. The previous element returned
-    right: Option<RangeIterState<'a>>, // Exclusive. The previous element returned
-    include_left: bool,               // left is inclusive, instead of exclusive
-    include_right: bool,              // right is inclusive, instead of exclusive
+    left: Option<RangeIterState>, // Exclusive. The previous element returned
+    right: Option<RangeIterState>, // Exclusive. The previous element returned
+    include_left: bool,           // left is inclusive, instead of exclusive
+    include_right: bool,          // right is inclusive, instead of exclusive
     manager: &'a TransactionalMemory,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -487,7 +483,7 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeRangeIter<'a, K, V> {
 }
 
 impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> Iterator for BtreeRangeIter<'a, K, V> {
-    type Item = Result<EntryGuard<'a, K, V>>;
+    type Item = Result<EntryGuard<K, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let (
@@ -620,12 +616,12 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> DoubleEndedIterator for BtreeRangeI
     }
 }
 
-fn find_iter_unbounded<'a, K: RedbKey, V: RedbValue>(
-    page: PageImpl<'a>,
-    mut parent: Option<Box<RangeIterState<'a>>>,
+fn find_iter_unbounded<K: RedbKey, V: RedbValue>(
+    page: PageImpl,
+    mut parent: Option<Box<RangeIterState>>,
     reverse: bool,
-    manager: &'a TransactionalMemory,
-) -> Result<Option<RangeIterState<'a>>> {
+    manager: &TransactionalMemory,
+) -> Result<Option<RangeIterState>> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -666,13 +662,13 @@ fn find_iter_unbounded<'a, K: RedbKey, V: RedbValue>(
 
 // Returns a bool indicating whether the first entry pointed to by the state is included in the
 // queried range
-fn find_iter_left<'a, K: RedbKey, V: RedbValue>(
-    page: PageImpl<'a>,
-    mut parent: Option<Box<RangeIterState<'a>>>,
+fn find_iter_left<K: RedbKey, V: RedbValue>(
+    page: PageImpl,
+    mut parent: Option<Box<RangeIterState>>,
     query: &[u8],
     include_query: bool,
-    manager: &'a TransactionalMemory,
-) -> Result<(bool, Option<RangeIterState<'a>>)> {
+    manager: &TransactionalMemory,
+) -> Result<(bool, Option<RangeIterState>)> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -714,13 +710,13 @@ fn find_iter_left<'a, K: RedbKey, V: RedbValue>(
     }
 }
 
-fn find_iter_right<'a, K: RedbKey, V: RedbValue>(
-    page: PageImpl<'a>,
-    mut parent: Option<Box<RangeIterState<'a>>>,
+fn find_iter_right<K: RedbKey, V: RedbValue>(
+    page: PageImpl,
+    mut parent: Option<Box<RangeIterState>>,
     query: &[u8],
     include_query: bool,
-    manager: &'a TransactionalMemory,
-) -> Result<(bool, Option<RangeIterState<'a>>)> {
+    manager: &TransactionalMemory,
+) -> Result<(bool, Option<RangeIterState>)> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {

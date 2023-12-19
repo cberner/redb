@@ -170,7 +170,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
 
     fn insert_helper(
         &mut self,
-        page: PageImpl<'a>,
+        page: PageImpl,
         page_checksum: Checksum,
         key: &[u8],
         value: &[u8],
@@ -473,7 +473,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
 
     fn delete_leaf_helper(
         &mut self,
-        page: PageImpl<'a>,
+        page: PageImpl,
         checksum: Checksum,
         key: &[u8],
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
@@ -579,7 +579,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
 
     fn delete_branch_helper(
         &mut self,
-        page: PageImpl<'a>,
+        page: PageImpl,
         checksum: Checksum,
         key: &[u8],
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
@@ -875,7 +875,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
     // If key is not found, guaranteed not to modify the tree
     fn delete_helper(
         &mut self,
-        page: PageImpl<'a>,
+        page: PageImpl,
         checksum: Checksum,
         key: &[u8],
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
