@@ -63,13 +63,13 @@ enum OnDrop {
     },
 }
 
-enum EitherPage<'a> {
+enum EitherPage {
     Immutable(PageImpl),
-    Mutable(PageMut<'a>),
+    Mutable(PageMut),
     OwnedMemory(Vec<u8>),
 }
 
-impl<'a> EitherPage<'a> {
+impl EitherPage {
     fn memory(&self) -> &[u8] {
         match self {
             EitherPage::Immutable(page) => page.memory(),
@@ -80,7 +80,7 @@ impl<'a> EitherPage<'a> {
 }
 
 pub struct AccessGuard<'a, V: RedbValue> {
-    page: EitherPage<'a>,
+    page: EitherPage,
     offset: usize,
     len: usize,
     on_drop: OnDrop,
@@ -135,7 +135,7 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
     }
 
     pub(super) fn remove_on_drop(
-        page: PageMut<'a>,
+        page: PageMut,
         offset: usize,
         len: usize,
         position: usize,
@@ -187,19 +187,22 @@ impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
 }
 
 pub struct AccessGuardMut<'a, V: RedbValue> {
-    page: PageMut<'a>,
+    page: PageMut,
     offset: usize,
     len: usize,
     _value_type: PhantomData<V>,
+    // TODO: can this be removed?
+    _lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a, V: RedbValue> AccessGuardMut<'a, V> {
-    pub(crate) fn new(page: PageMut<'a>, offset: usize, len: usize) -> Self {
+    pub(crate) fn new(page: PageMut, offset: usize, len: usize) -> Self {
         AccessGuardMut {
             page,
             offset,
             len,
             _value_type: Default::default(),
+            _lifetime: Default::default(),
         }
     }
 }
@@ -496,7 +499,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         required_size > self.mem.get_page_size() && self.pairs.len() > 1
     }
 
-    pub(super) fn build_split(self) -> Result<(PageMut<'b>, &'a [u8], PageMut<'b>)> {
+    pub(super) fn build_split(self) -> Result<(PageMut, &'a [u8], PageMut)> {
         let total_size = self.total_key_bytes + self.total_value_bytes;
         let mut division = 0;
         let mut first_split_key_bytes = 0;
@@ -547,7 +550,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         Ok((page1, self.pairs[division - 1].0, page2))
     }
 
-    pub(super) fn build(self) -> Result<PageMut<'b>> {
+    pub(super) fn build(self) -> Result<PageMut> {
         let required_size = self.required_bytes(
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
@@ -740,15 +743,15 @@ impl<'a> Drop for RawLeafBuilder<'a> {
     }
 }
 
-pub(crate) struct LeafMutator<'a: 'b, 'b> {
-    page: &'b mut PageMut<'a>,
+pub(crate) struct LeafMutator<'b> {
+    page: &'b mut PageMut,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
 }
 
-impl<'a: 'b, 'b> LeafMutator<'a, 'b> {
+impl<'b> LeafMutator<'b> {
     pub(crate) fn new(
-        page: &'b mut PageMut<'a>,
+        page: &'b mut PageMut,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
     ) -> Self {
@@ -1256,7 +1259,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         }
     }
 
-    pub(super) fn build(self) -> Result<PageMut<'b>> {
+    pub(super) fn build(self) -> Result<PageMut> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
         let size = RawBranchBuilder::required_bytes(
             self.keys.len(),
@@ -1284,7 +1287,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         size > self.mem.get_page_size() && self.keys.len() >= 3
     }
 
-    pub(super) fn build_split(self) -> Result<(PageMut<'b>, &'a [u8], PageMut<'b>)> {
+    pub(super) fn build_split(self) -> Result<(PageMut, &'a [u8], PageMut)> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
         assert!(self.keys.len() >= 3);
         let division = self.keys.len() / 2;
@@ -1350,14 +1353,14 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
 // * 4 bytes: key end. Ending offset of the key, exclusive
 // repeating (num_keys times):
 // * n bytes: key data
-pub(super) struct RawBranchBuilder<'a: 'b, 'b> {
-    page: &'b mut PageMut<'a>,
+pub(super) struct RawBranchBuilder<'b> {
+    page: &'b mut PageMut,
     fixed_key_size: Option<usize>,
     num_keys: usize,
     keys_written: usize, // used for debugging
 }
 
-impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
+impl<'b> RawBranchBuilder<'b> {
     pub(super) fn required_bytes(
         num_keys: usize,
         size_of_keys: usize,
@@ -1377,7 +1380,7 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
 
     // Caller MUST write num_keys values
     pub(super) fn new(
-        page: &'b mut PageMut<'a>,
+        page: &'b mut PageMut,
         num_keys: usize,
         fixed_key_size: Option<usize>,
     ) -> Self {
@@ -1478,7 +1481,7 @@ impl<'a: 'b, 'b> RawBranchBuilder<'a, 'b> {
     }
 }
 
-impl<'a: 'b, 'b> Drop for RawBranchBuilder<'a, 'b> {
+impl<'b> Drop for RawBranchBuilder<'b> {
     fn drop(&mut self) {
         if !thread::panicking() {
             assert_eq!(self.keys_written, self.num_keys);
@@ -1486,12 +1489,12 @@ impl<'a: 'b, 'b> Drop for RawBranchBuilder<'a, 'b> {
     }
 }
 
-pub(super) struct BranchMutator<'a: 'b, 'b> {
-    page: &'b mut PageMut<'a>,
+pub(super) struct BranchMutator<'b> {
+    page: &'b mut PageMut,
 }
 
-impl<'a: 'b, 'b> BranchMutator<'a, 'b> {
-    pub(super) fn new(page: &'b mut PageMut<'a>) -> Self {
+impl<'b> BranchMutator<'b> {
+    pub(super) fn new(page: &'b mut PageMut) -> Self {
         assert_eq!(page.memory()[0], BRANCH);
         Self { page }
     }

@@ -82,7 +82,7 @@ pub(crate) struct TransactionalMemory {
     state: Mutex<InMemoryState>,
     // The number of PageMut which are outstanding
     #[cfg(debug_assertions)]
-    open_dirty_pages: Mutex<HashSet<PageNumber>>,
+    open_dirty_pages: Arc<Mutex<HashSet<PageNumber>>>,
     // Reference counts of PageImpls that are outstanding
     #[cfg(debug_assertions)]
     read_page_ref_counts: Arc<Mutex<HashMap<PageNumber, u64>>>,
@@ -262,7 +262,7 @@ impl TransactionalMemory {
             storage,
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
-            open_dirty_pages: Mutex::new(HashSet::new()),
+            open_dirty_pages: Arc::new(Mutex::new(HashSet::new())),
             #[cfg(debug_assertions)]
             read_page_ref_counts: Arc::new(Mutex::new(HashMap::new())),
             read_from_secondary: AtomicBool::new(false),
@@ -722,9 +722,7 @@ impl TransactionalMemory {
             mem,
             page_number,
             #[cfg(debug_assertions)]
-            open_pages: &self.open_dirty_pages,
-            #[cfg(not(debug_assertions))]
-            _debug_lifetime: Default::default(),
+            open_pages: self.open_dirty_pages.clone(),
         })
     }
 
@@ -885,9 +883,7 @@ impl TransactionalMemory {
             mem,
             page_number,
             #[cfg(debug_assertions)]
-            open_pages: &self.open_dirty_pages,
-            #[cfg(not(debug_assertions))]
-            _debug_lifetime: Default::default(),
+            open_pages: self.open_dirty_pages.clone(),
         })
     }
 
