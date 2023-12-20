@@ -11,6 +11,7 @@ use crate::types::{RedbKey, RedbValue};
 use crate::{AccessGuard, Result};
 use std::cmp::{max, min};
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 // TODO: it seems like Checksum can be removed from most/all of these, now that we're using deferred checksums
 #[derive(Debug)]
@@ -43,16 +44,17 @@ struct InsertionResult<'a, V: RedbValue> {
 pub(crate) struct MutateHelper<'a, 'b, K: RedbKey, V: RedbValue> {
     root: &'b mut Option<(PageNumber, Checksum)>,
     modify_uncommitted: bool,
-    mem: &'a TransactionalMemory,
+    mem: Arc<TransactionalMemory>,
     freed: &'b mut Vec<PageNumber>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
+    _lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
     pub(crate) fn new(
         root: &'b mut Option<(PageNumber, Checksum)>,
-        mem: &'a TransactionalMemory,
+        mem: Arc<TransactionalMemory>,
         freed: &'b mut Vec<PageNumber>,
     ) -> Self {
         Self {
@@ -62,6 +64,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
             freed,
             _key_type: Default::default(),
             _value_type: Default::default(),
+            _lifetime: Default::default(),
         }
     }
 
@@ -69,7 +72,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
     // It will still queue pages for future freeing in the freed vec
     pub(crate) fn new_do_not_modify(
         root: &'b mut Option<(PageNumber, Checksum)>,
-        mem: &'a TransactionalMemory,
+        mem: Arc<TransactionalMemory>,
         freed: &'b mut Vec<PageNumber>,
     ) -> Self {
         Self {
@@ -79,6 +82,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
             freed,
             _key_type: Default::default(),
             _value_type: Default::default(),
+            _lifetime: Default::default(),
         }
     }
 
@@ -104,7 +108,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                     let accessor =
                         LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                     let mut builder = LeafBuilder::new(
-                        self.mem,
+                        &self.mem,
                         accessor.num_pairs() - 1,
                         K::fixed_width(),
                         V::fixed_width(),
@@ -138,7 +142,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
             )?;
 
             let new_root = if let Some((key, page2, page2_checksum)) = result.additional_sibling {
-                let mut builder = BranchBuilder::new(self.mem, 2, K::fixed_width());
+                let mut builder = BranchBuilder::new(&self.mem, 2, K::fixed_width());
                 builder.push_child(result.new_root, result.root_checksum);
                 builder.push_key(&key);
                 builder.push_child(page2, page2_checksum);
@@ -153,7 +157,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
             let value_bytes = V::as_bytes(value);
             let key_bytes = key_bytes.as_ref();
             let value_bytes = value_bytes.as_ref();
-            let mut builder = LeafBuilder::new(self.mem, 1, K::fixed_width(), V::fixed_width());
+            let mut builder = LeafBuilder::new(&self.mem, 1, K::fixed_width(), V::fixed_width());
             builder.push(key_bytes, value_bytes);
             let page = builder.build()?;
 
@@ -186,7 +190,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                     && accessor.total_length() >= self.mem.get_page_size();
                 if !found && single_large_value {
                     let mut builder =
-                        LeafBuilder::new(self.mem, 1, K::fixed_width(), V::fixed_width());
+                        LeafBuilder::new(&self.mem, 1, K::fixed_width(), V::fixed_width());
                     builder.push(key, value);
                     let new_page = builder.build()?;
                     let new_page_number = new_page.get_page_number();
@@ -259,7 +263,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                 }
 
                 let mut builder = LeafBuilder::new(
-                    self.mem,
+                    &self.mem,
                     accessor.num_pairs() + 1,
                     K::fixed_width(),
                     V::fixed_width(),
@@ -292,7 +296,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                             start,
                             end - start,
                             free_on_drop,
-                            self.mem,
+                            self.mem.clone(),
                         ))
                     } else {
                         drop(page);
@@ -329,7 +333,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                             start,
                             end - start,
                             free_on_drop,
-                            self.mem,
+                            self.mem.clone(),
                         ))
                     } else {
                         drop(page);
@@ -400,7 +404,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
 
                 // A child was added, or we couldn't use the fast-path above
                 let mut builder =
-                    BranchBuilder::new(self.mem, accessor.count_children() + 1, K::fixed_width());
+                    BranchBuilder::new(&self.mem, accessor.count_children() + 1, K::fixed_width());
                 if child_index == 0 {
                     builder.push_child(sub_result.new_root, sub_result.root_checksum);
                     if let Some((ref index_key2, page2, page2_checksum)) =
@@ -509,7 +513,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                 end - start,
                 position,
                 K::fixed_width(),
-                self.mem,
+                self.mem.clone(),
             );
             return Ok((Subtree(page_number, DEFERRED), Some(guard)));
         }
@@ -524,7 +528,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
             }
         } else {
             let mut builder = LeafBuilder::new(
-                self.mem,
+                &self.mem,
                 accessor.num_pairs() - 1,
                 K::fixed_width(),
                 V::fixed_width(),
@@ -553,7 +557,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
             start,
             end - start,
             free_on_drop,
-            self.mem,
+            self.mem.clone(),
         ));
         Ok((result, guard))
     }
@@ -602,7 +606,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                     original_page_number
                 } else {
                     let mut builder =
-                        BranchBuilder::new(self.mem, accessor.count_children(), K::fixed_width());
+                        BranchBuilder::new(&self.mem, accessor.count_children(), K::fixed_width());
                     builder.push_all(&accessor);
                     builder.replace_child(child_index, new_child, new_child_checksum);
                     let new_page = builder.build()?;
@@ -613,7 +617,8 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
         }
 
         // Child is requesting to be merged with a sibling
-        let mut builder = BranchBuilder::new(self.mem, accessor.count_children(), K::fixed_width());
+        let mut builder =
+            BranchBuilder::new(&self.mem, accessor.count_children(), K::fixed_width());
 
         let final_result = match result {
             Subtree(_, _) => {
@@ -666,7 +671,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                 // Don't try to merge or rebalance, if the sibling contains a single large value
                 if single_large_value {
                     let mut child_builder = LeafBuilder::new(
-                        self.mem,
+                        &self.mem,
                         partial_child_accessor.num_pairs() - 1,
                         K::fixed_width(),
                         V::fixed_width(),
@@ -694,7 +699,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                     let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
                         let mut child_builder = LeafBuilder::new(
-                            self.mem,
+                            &self.mem,
                             partial_child_accessor.num_pairs() - 1
                                 + merge_with_accessor.num_pairs(),
                             K::fixed_width(),
@@ -756,7 +761,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                     let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
                         let mut child_builder = BranchBuilder::new(
-                            self.mem,
+                            &self.mem,
                             merge_with_accessor.count_children() + 1,
                             K::fixed_width(),
                         );
@@ -817,7 +822,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                     let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
                         let mut child_builder = BranchBuilder::new(
-                            self.mem,
+                            &self.mem,
                             merge_with_accessor.count_children()
                                 + partial_child_accessor.count_children(),
                             K::fixed_width(),

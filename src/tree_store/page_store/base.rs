@@ -5,8 +5,6 @@ use std::collections::HashMap;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
-#[cfg(not(debug_assertions))]
-use std::marker::PhantomData;
 use std::ops::Range;
 use std::sync::Arc;
 #[cfg(debug_assertions)]

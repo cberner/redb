@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+#[cfg(debug_assertions)]
+use std::sync::Arc;
+use std::sync::Mutex;
 
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
 // because the leaf node format uses 32bit offsets
@@ -272,7 +274,7 @@ impl TransactionalMemory {
         })
     }
 
-    pub(crate) fn clear_read_cache(&mut self) {
+    pub(crate) fn clear_read_cache(&self) {
         self.storage.invalidate_cache_all()
     }
 
@@ -385,7 +387,7 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn end_repair(&mut self) -> Result<()> {
+    pub(crate) fn end_repair(&self) -> Result<()> {
         let state = self.state.lock().unwrap();
         let tracker_len = state.allocators.region_tracker.to_vec().len();
         drop(state);

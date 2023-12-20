@@ -201,7 +201,7 @@ impl<'db, 's, K: RedbKey + 'static, V: RedbValue + 'static> SystemTable<'db, 's,
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-        mem: &'db TransactionalMemory,
+        mem: Arc<TransactionalMemory>,
         namespace: &'s mut SystemNamespace<'db>,
     ) -> SystemTable<'db, 's, K, V> {
         SystemTable {
@@ -283,7 +283,7 @@ impl<'db> SystemNamespace<'db> {
             definition.name(),
             root.get_root(),
             transaction.freed_pages.clone(),
-            transaction.mem,
+            transaction.mem.clone(),
             self,
         ))
     }
@@ -338,7 +338,7 @@ impl<'db> TableNamespace<'db> {
             definition.name(),
             root,
             transaction.freed_pages.clone(),
-            transaction.mem,
+            transaction.mem.clone(),
             transaction,
         ))
     }
@@ -358,7 +358,7 @@ impl<'db> TableNamespace<'db> {
             definition.name(),
             root,
             transaction.freed_pages.clone(),
-            transaction.mem,
+            transaction.mem.clone(),
             transaction,
         ))
     }
@@ -413,7 +413,7 @@ impl<'db> TableNamespace<'db> {
 pub struct WriteTransaction<'db> {
     db: &'db Database,
     transaction_tracker: Arc<Mutex<TransactionTracker>>,
-    mem: &'db TransactionalMemory,
+    mem: Arc<TransactionalMemory>,
     transaction_id: TransactionId,
     // The table of freed pages by transaction. FreedTableKey -> binary.
     // The binary blob is a length-prefixed array of PageNumber
@@ -600,7 +600,7 @@ impl<'db> WriteTransaction<'db> {
         let system_root = self.mem.get_system_root();
         let freed_root = self.mem.get_freed_root();
         let savepoint = Savepoint::new_ephemeral(
-            self.db.get_memory(),
+            &self.db.get_memory(),
             self.transaction_tracker.clone(),
             id,
             transaction_id,
@@ -668,7 +668,7 @@ impl<'db> WriteTransaction<'db> {
         *self.freed_pages.lock().unwrap() = freed_pages;
         self.tables.lock().unwrap().table_tree = TableTree::new(
             savepoint.get_user_root(),
-            self.mem,
+            self.mem.clone(),
             self.freed_pages.clone(),
         );
 
@@ -688,7 +688,7 @@ impl<'db> WriteTransaction<'db> {
 
         let mut freed_tree = BtreeMut::new(
             savepoint.get_freed_root(),
-            self.mem,
+            self.mem.clone(),
             self.post_commit_frees.clone(),
         );
         let lookup_key = FreedTableKey {
@@ -1124,7 +1124,7 @@ impl<'db> WriteTransaction<'db> {
         {
             eprintln!("Master tree:");
             let master_tree: Btree<&str, InternalTableDefinition> =
-                Btree::new(Some(page), PageHint::None, self.mem)?;
+                Btree::new(Some(page), PageHint::None, self.mem.clone())?;
             master_tree.print_debug(true)?;
         }
 
@@ -1149,16 +1149,16 @@ impl<'a> Drop for WriteTransaction<'a> {
 ///
 /// Read-only transactions may exist concurrently with writes
 pub struct ReadTransaction<'a> {
-    mem: &'a TransactionalMemory,
+    mem: Arc<TransactionalMemory>,
     tree: TableTree<'a>,
     _guard: TransactionGuard,
 }
 
 impl<'db> ReadTransaction<'db> {
-    pub(crate) fn new(mem: &'db TransactionalMemory, guard: TransactionGuard) -> Self {
+    pub(crate) fn new(mem: Arc<TransactionalMemory>, guard: TransactionGuard) -> Self {
         let root_page = mem.get_data_root();
         Self {
-            mem,
+            mem: mem.clone(),
             tree: TableTree::new(root_page, mem, Default::default()),
             _guard: guard,
         }
@@ -1178,7 +1178,7 @@ impl<'db> ReadTransaction<'db> {
             definition.name().to_string(),
             header.get_root(),
             PageHint::Clean,
-            self.mem,
+            self.mem.clone(),
         )?)
     }
 
@@ -1196,7 +1196,7 @@ impl<'db> ReadTransaction<'db> {
             header.get_root(),
             header.get_fixed_key_size(),
             header.get_fixed_value_size(),
-            self.mem,
+            self.mem.clone(),
         ))
     }
 
@@ -1213,7 +1213,7 @@ impl<'db> ReadTransaction<'db> {
         Ok(ReadOnlyMultimapTable::new(
             header.get_root(),
             PageHint::Clean,
-            self.mem,
+            self.mem.clone(),
         )?)
     }
 
@@ -1231,7 +1231,7 @@ impl<'db> ReadTransaction<'db> {
             header.get_root(),
             header.get_fixed_key_size(),
             header.get_fixed_value_size(),
-            self.mem,
+            self.mem.clone(),
         ))
     }
 
