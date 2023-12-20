@@ -207,7 +207,7 @@ impl Clone for PageImpl {
 }
 
 pub(crate) struct PageMut<'a> {
-    pub(super) mem: WritablePage<'a>,
+    pub(super) mem: WritablePage,
     pub(super) page_number: PageNumber,
     #[cfg(debug_assertions)]
     pub(super) open_pages: &'a Mutex<HashSet<PageNumber>>,
