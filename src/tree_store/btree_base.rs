@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range;
 use std::sync::Arc;
-use std::{mem, thread};
+use std::thread;
 
 pub(crate) const LEAF: u8 = 1;
 pub(crate) const BRANCH: u8 = 2;
@@ -57,7 +57,6 @@ pub(super) fn branch_checksum<T: Page>(
 
 enum OnDrop {
     None,
-    Free(PageNumber),
     RemoveEntry {
         position: usize,
         fixed_key_size: Option<usize>,
@@ -68,6 +67,7 @@ enum EitherPage {
     Immutable(PageImpl),
     Mutable(PageMut),
     OwnedMemory(Vec<u8>),
+    ArcMemory(Arc<Vec<u8>>),
 }
 
 impl EitherPage {
@@ -76,6 +76,7 @@ impl EitherPage {
             EitherPage::Immutable(page) => page.memory(),
             EitherPage::Mutable(page) => page.memory(),
             EitherPage::OwnedMemory(mem) => mem.as_slice(),
+            EitherPage::ArcMemory(mem) => mem.as_slice(),
         }
     }
 }
@@ -85,43 +86,29 @@ pub struct AccessGuard<'a, V: RedbValue> {
     offset: usize,
     len: usize,
     on_drop: OnDrop,
-    mem: Option<Arc<TransactionalMemory>>,
     _value_type: PhantomData<V>,
     // TODO: remove this?
     _lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a, V: RedbValue> AccessGuard<'a, V> {
-    pub(super) fn new(
-        page: PageImpl,
-        offset: usize,
-        len: usize,
-        free_on_drop: bool,
-        mem: Arc<TransactionalMemory>,
-    ) -> Self {
-        let page_number = page.get_page_number();
-        Self {
-            page: EitherPage::Immutable(page),
-            offset,
-            len,
-            on_drop: if free_on_drop {
-                OnDrop::Free(page_number)
-            } else {
-                OnDrop::None
-            },
-            mem: Some(mem),
-            _value_type: Default::default(),
-            _lifetime: Default::default(),
-        }
-    }
-
     pub(crate) fn with_page(page: PageImpl, range: Range<usize>) -> Self {
         Self {
             page: EitherPage::Immutable(page),
             offset: range.start,
             len: range.len(),
             on_drop: OnDrop::None,
-            mem: Option::<Arc<TransactionalMemory>>::None,
+            _value_type: Default::default(),
+            _lifetime: Default::default(),
+        }
+    }
+
+    pub(crate) fn with_arc_page(page: Arc<Vec<u8>>, range: Range<usize>) -> Self {
+        Self {
+            page: EitherPage::ArcMemory(page),
+            offset: range.start,
+            len: range.len(),
+            on_drop: OnDrop::None,
             _value_type: Default::default(),
             _lifetime: Default::default(),
         }
@@ -134,7 +121,6 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
             offset: 0,
             len,
             on_drop: OnDrop::None,
-            mem: Option::<Arc<TransactionalMemory>>::None,
             _value_type: Default::default(),
             _lifetime: Default::default(),
         }
@@ -146,7 +132,6 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
         len: usize,
         position: usize,
         fixed_key_size: Option<usize>,
-        mem: Arc<TransactionalMemory>,
     ) -> Self {
         Self {
             page: EitherPage::Mutable(page),
@@ -156,7 +141,6 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
                 position,
                 fixed_key_size,
             },
-            mem: Some(mem),
             _value_type: Default::default(),
             _lifetime: Default::default(),
         }
@@ -171,13 +155,6 @@ impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
     fn drop(&mut self) {
         match self.on_drop {
             OnDrop::None => {}
-            OnDrop::Free(page_number) => {
-                // Drop our reference to the page, so that it can be freed
-                let mut dummy = EitherPage::OwnedMemory(vec![]);
-                mem::swap(&mut self.page, &mut dummy);
-                drop(dummy);
-                self.mem.as_ref().unwrap().free(page_number);
-            }
             OnDrop::RemoveEntry {
                 position,
                 fixed_key_size,
