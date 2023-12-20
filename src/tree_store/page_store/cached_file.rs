@@ -28,14 +28,14 @@ impl CachePriority {
     }
 }
 
-pub(super) struct WritablePage<'a> {
-    buffer: &'a Mutex<PrioritizedWriteCache>,
+pub(super) struct WritablePage {
+    buffer: Arc<Mutex<PrioritizedWriteCache>>,
     offset: u64,
     data: Vec<u8>,
     priority: CachePriority,
 }
 
-impl<'a> WritablePage<'a> {
+impl WritablePage {
     pub(super) fn mem(&self) -> &[u8] {
         &self.data
     }
@@ -45,7 +45,7 @@ impl<'a> WritablePage<'a> {
     }
 }
 
-impl<'a> Drop for WritablePage<'a> {
+impl Drop for WritablePage {
     fn drop(&mut self) {
         let data = mem::take(&mut self.data);
         self.buffer
@@ -55,7 +55,7 @@ impl<'a> Drop for WritablePage<'a> {
     }
 }
 
-impl<'a, I: SliceIndex<[u8]>> Index<I> for WritablePage<'a> {
+impl<I: SliceIndex<[u8]>> Index<I> for WritablePage {
     type Output = I::Output;
 
     fn index(&self, index: I) -> &Self::Output {
@@ -63,7 +63,7 @@ impl<'a, I: SliceIndex<[u8]>> Index<I> for WritablePage<'a> {
     }
 }
 
-impl<'a, I: SliceIndex<[u8]>> IndexMut<I> for WritablePage<'a> {
+impl<I: SliceIndex<[u8]>> IndexMut<I> for WritablePage {
     fn index_mut(&mut self, index: I) -> &mut Self::Output {
         self.data.index_mut(index)
     }
@@ -234,7 +234,7 @@ pub(super) struct PagedCachedFile {
     fsync_failed: AtomicBool,
     read_cache: Vec<RwLock<PrioritizedCache>>,
     // TODO: maybe move this cache to WriteTransaction?
-    write_buffer: Mutex<PrioritizedWriteCache>,
+    write_buffer: Arc<Mutex<PrioritizedWriteCache>>,
 }
 
 impl PagedCachedFile {
@@ -262,7 +262,7 @@ impl PagedCachedFile {
             reads_hits: Default::default(),
             fsync_failed: Default::default(),
             read_cache,
-            write_buffer: Mutex::new(PrioritizedWriteCache::new()),
+            write_buffer: Arc::new(Mutex::new(PrioritizedWriteCache::new())),
         })
     }
 
@@ -491,7 +491,7 @@ impl PagedCachedFile {
         };
         let priority = cache_policy(&data);
         Ok(WritablePage {
-            buffer: &self.write_buffer,
+            buffer: self.write_buffer.clone(),
             offset,
             data,
             priority,
