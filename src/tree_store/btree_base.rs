@@ -8,6 +8,7 @@ use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range;
+use std::sync::Arc;
 use std::{mem, thread};
 
 pub(crate) const LEAF: u8 = 1;
@@ -84,8 +85,10 @@ pub struct AccessGuard<'a, V: RedbValue> {
     offset: usize,
     len: usize,
     on_drop: OnDrop,
-    mem: Option<&'a TransactionalMemory>,
+    mem: Option<Arc<TransactionalMemory>>,
     _value_type: PhantomData<V>,
+    // TODO: remove this?
+    _lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a, V: RedbValue> AccessGuard<'a, V> {
@@ -94,7 +97,7 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
         offset: usize,
         len: usize,
         free_on_drop: bool,
-        mem: &'a TransactionalMemory,
+        mem: Arc<TransactionalMemory>,
     ) -> Self {
         let page_number = page.get_page_number();
         Self {
@@ -108,6 +111,7 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
             },
             mem: Some(mem),
             _value_type: Default::default(),
+            _lifetime: Default::default(),
         }
     }
 
@@ -117,8 +121,9 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
             offset: range.start,
             len: range.len(),
             on_drop: OnDrop::None,
-            mem: None,
+            mem: Option::<Arc<TransactionalMemory>>::None,
             _value_type: Default::default(),
+            _lifetime: Default::default(),
         }
     }
 
@@ -129,8 +134,9 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
             offset: 0,
             len,
             on_drop: OnDrop::None,
-            mem: None,
+            mem: Option::<Arc<TransactionalMemory>>::None,
             _value_type: Default::default(),
+            _lifetime: Default::default(),
         }
     }
 
@@ -140,7 +146,7 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
         len: usize,
         position: usize,
         fixed_key_size: Option<usize>,
-        mem: &'a TransactionalMemory,
+        mem: Arc<TransactionalMemory>,
     ) -> Self {
         Self {
             page: EitherPage::Mutable(page),
@@ -152,6 +158,7 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
             },
             mem: Some(mem),
             _value_type: Default::default(),
+            _lifetime: Default::default(),
         }
     }
 
@@ -169,7 +176,7 @@ impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
                 let mut dummy = EitherPage::OwnedMemory(vec![]);
                 mem::swap(&mut self.page, &mut dummy);
                 drop(dummy);
-                self.mem.unwrap().free(page_number);
+                self.mem.as_ref().unwrap().free(page_number);
             }
             OnDrop::RemoveEntry {
                 position,

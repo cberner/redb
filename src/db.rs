@@ -285,7 +285,7 @@ impl Drop for TransactionGuard {
 /// # }
 /// ```
 pub struct Database {
-    mem: TransactionalMemory,
+    mem: Arc<TransactionalMemory>,
     next_transaction_id: AtomicTransactionId,
     transaction_tracker: Arc<Mutex<TransactionTracker>>,
     live_write_transaction: Mutex<Option<TransactionId>>,
@@ -330,18 +330,18 @@ impl Database {
         self.live_write_transaction_available.notify_one();
     }
 
-    pub(crate) fn get_memory(&self) -> &TransactionalMemory {
-        &self.mem
+    pub(crate) fn get_memory(&self) -> Arc<TransactionalMemory> {
+        self.mem.clone()
     }
 
-    pub(crate) fn verify_primary_checksums(mem: &TransactionalMemory) -> Result<bool> {
+    pub(crate) fn verify_primary_checksums(mem: Arc<TransactionalMemory>) -> Result<bool> {
         let fake_freed_pages = Arc::new(Mutex::new(vec![]));
-        let table_tree = TableTree::new(mem.get_data_root(), mem, fake_freed_pages.clone());
+        let table_tree = TableTree::new(mem.get_data_root(), mem.clone(), fake_freed_pages.clone());
         if !table_tree.verify_checksums()? {
             return Ok(false);
         }
         let system_table_tree =
-            TableTree::new(mem.get_system_root(), mem, fake_freed_pages.clone());
+            TableTree::new(mem.get_system_root(), mem.clone(), fake_freed_pages.clone());
         if !system_table_tree.verify_checksums()? {
             return Ok(false);
         }
@@ -352,7 +352,7 @@ impl Database {
                 Some((freed_root, freed_checksum)),
                 FreedTableKey::fixed_width(),
                 FreedPageList::fixed_width(),
-                mem,
+                mem.clone(),
             )
             .verify_checksum()?
             {
@@ -368,9 +368,11 @@ impl Database {
     /// Returns `Ok(true)` if the database passed integrity checks; `Ok(false)` if it failed but was repaired,
     /// and `Err(Corrupted)` if the check failed and the file could not be repaired
     pub fn check_integrity(&mut self) -> Result<bool> {
-        self.mem.clear_cache_and_reload()?;
+        Arc::get_mut(&mut self.mem)
+            .unwrap()
+            .clear_cache_and_reload()?;
 
-        if !self.mem.needs_repair()? && Self::verify_primary_checksums(&self.mem)? {
+        if !self.mem.needs_repair()? && Self::verify_primary_checksums(self.mem.clone())? {
             return Ok(true);
         }
 
@@ -442,11 +444,11 @@ impl Database {
 
     fn mark_persistent_savepoints(
         system_root: Option<(PageNumber, Checksum)>,
-        mem: &TransactionalMemory,
+        mem: Arc<TransactionalMemory>,
         oldest_unprocessed_free_transaction: TransactionId,
     ) -> Result {
         let freed_list = Arc::new(Mutex::new(vec![]));
-        let table_tree = TableTree::new(system_root, mem, freed_list);
+        let table_tree = TableTree::new(system_root, mem.clone(), freed_list);
         let fake_transaction_tracker = Arc::new(Mutex::new(TransactionTracker::new()));
         if let Some(savepoint_table_def) = table_tree
             .get_table::<SavepointId, SerializedSavepoint>(
@@ -462,7 +464,7 @@ impl Database {
                     "internal savepoint table".to_string(),
                     savepoint_table_def.get_root(),
                     PageHint::None,
-                    mem,
+                    mem.clone(),
                 )?;
             for result in savepoint_table.range::<SavepointId>(..)? {
                 let (_, savepoint_data) = result?;
@@ -470,11 +472,11 @@ impl Database {
                     .value()
                     .to_savepoint(fake_transaction_tracker.clone());
                 if let Some((root, _)) = savepoint.get_user_root() {
-                    Self::mark_tables_recursive(root, mem, true)?;
+                    Self::mark_tables_recursive(root, mem.clone(), true)?;
                 }
                 Self::mark_freed_tree(
                     savepoint.get_freed_root(),
-                    mem,
+                    mem.clone(),
                     oldest_unprocessed_free_transaction,
                 )?;
             }
@@ -485,7 +487,7 @@ impl Database {
 
     fn mark_freed_tree(
         freed_root: Option<(PageNumber, Checksum)>,
-        mem: &TransactionalMemory,
+        mem: Arc<TransactionalMemory>,
         oldest_unprocessed_free_transaction: TransactionId,
     ) -> Result {
         if let Some((root, _)) = freed_root {
@@ -493,7 +495,7 @@ impl Database {
                 root,
                 FreedTableKey::fixed_width(),
                 FreedPageList::fixed_width(),
-                mem,
+                mem.clone(),
             )?;
             mem.mark_pages_allocated(freed_pages_iter, true)?;
         }
@@ -502,7 +504,7 @@ impl Database {
             "internal freed table".to_string(),
             freed_root,
             PageHint::None,
-            mem,
+            mem.clone(),
         )?;
         let lookup_key = FreedTableKey {
             transaction_id: oldest_unprocessed_free_transaction.raw_id(),
@@ -522,17 +524,17 @@ impl Database {
 
     fn mark_tables_recursive(
         root: PageNumber,
-        mem: &TransactionalMemory,
+        mem: Arc<TransactionalMemory>,
         allow_duplicates: bool,
     ) -> Result {
         // Repair the allocator state
         // All pages in the master table
-        let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, mem)?;
+        let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, mem.clone())?;
         mem.mark_pages_allocated(master_pages_iter, allow_duplicates)?;
 
         // Iterate over all other tables
         let iter: BtreeRangeIter<&str, InternalTableDefinition> =
-            BtreeRangeIter::new::<RangeFull, &str>(&(..), Some(root), mem)?;
+            BtreeRangeIter::new::<RangeFull, &str>(&(..), Some(root), mem.clone())?;
 
         // Chain all the other tables to the master table iter
         for entry in iter {
@@ -544,7 +546,7 @@ impl Database {
                             table_root,
                             definition.get_fixed_key_size(),
                             definition.get_fixed_value_size(),
-                            mem,
+                            mem.clone(),
                         )?;
                         mem.mark_pages_allocated(table_pages_iter, allow_duplicates)?;
                     }
@@ -555,7 +557,7 @@ impl Database {
                             DynamicCollection::<()>::fixed_width_with(
                                 definition.get_fixed_value_size(),
                             ),
-                            mem,
+                            mem.clone(),
                         )?;
                         mem.mark_pages_allocated(table_pages_iter, allow_duplicates)?;
 
@@ -565,7 +567,7 @@ impl Database {
                             DynamicCollection::<()>::fixed_width_with(
                                 definition.get_fixed_value_size(),
                             ),
-                            mem,
+                            mem.clone(),
                         )?;
                         for table_page in table_pages_iter {
                             let page = mem.get_page(table_page?)?;
@@ -579,7 +581,7 @@ impl Database {
                                     sub_root,
                                     definition.get_fixed_value_size(),
                                     <()>::fixed_width(),
-                                    mem,
+                                    mem.clone(),
                                 )?;
                                 mem.mark_pages_allocated(sub_root_iter, allow_duplicates)?;
                             }
@@ -593,10 +595,10 @@ impl Database {
     }
 
     fn do_repair(
-        mem: &mut TransactionalMemory,
+        mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
     ) -> Result<(), DatabaseError> {
-        if !Self::verify_primary_checksums(mem)? {
+        if !Self::verify_primary_checksums(mem.clone())? {
             // 0.3 because the repair takes 3 full scans and the first is done now
             let mut handle = RepairSession::new(0.3);
             repair_callback(&mut handle);
@@ -609,7 +611,7 @@ impl Database {
             // have poisoned it with pages that just got rolled back by repair_primary_corrupted(), since
             // that rolls back a partially committed transaction.
             mem.clear_read_cache();
-            if !Self::verify_primary_checksums(mem)? {
+            if !Self::verify_primary_checksums(mem.clone())? {
                 return Err(DatabaseError::Storage(StorageError::Corrupted(
                     "Failed to repair database. All roots are corrupted".to_string(),
                 )));
@@ -626,17 +628,17 @@ impl Database {
 
         let data_root = mem.get_data_root();
         if let Some((root, _)) = data_root {
-            Self::mark_tables_recursive(root, mem, false)?;
+            Self::mark_tables_recursive(root, mem.clone(), false)?;
         }
 
         let freed_root = mem.get_freed_root();
         // Allow processing of all transactions, since this is the main freed tree
-        Self::mark_freed_tree(freed_root, mem, TransactionId::new(0))?;
+        Self::mark_freed_tree(freed_root, mem.clone(), TransactionId::new(0))?;
         let freed_table: ReadOnlyTable<FreedTableKey, FreedPageList<'static>> = ReadOnlyTable::new(
             "internal freed table".to_string(),
             freed_root,
             PageHint::None,
-            mem,
+            mem.clone(),
         )?;
         // The persistent savepoints might hold references to older freed trees that are partially processed.
         // Make sure we don't reprocess those frees, as that would result in a double-free
@@ -657,9 +659,9 @@ impl Database {
 
         let system_root = mem.get_system_root();
         if let Some((root, _)) = system_root {
-            Self::mark_tables_recursive(root, mem, false)?;
+            Self::mark_tables_recursive(root, mem.clone(), false)?;
         }
-        Self::mark_persistent_savepoints(system_root, mem, oldest_unprocessed_transaction)?;
+        Self::mark_persistent_savepoints(system_root, mem.clone(), oldest_unprocessed_transaction)?;
 
         mem.end_repair()?;
 
@@ -692,13 +694,14 @@ impl Database {
         let file_path = format!("{:?}", &file);
         #[cfg(feature = "logging")]
         info!("Opening database {:?}", &file_path);
-        let mut mem = TransactionalMemory::new(
+        let mem = TransactionalMemory::new(
             file,
             page_size,
             region_size,
             read_cache_size_bytes,
             write_cache_size_bytes,
         )?;
+        let mut mem = Arc::new(mem);
         if mem.needs_repair()? {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);

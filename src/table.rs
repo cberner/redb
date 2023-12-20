@@ -8,6 +8,7 @@ use crate::{AccessGuard, StorageError, WriteTransaction};
 use crate::{Result, TableHandle};
 use std::borrow::Borrow;
 use std::fmt::{Debug, Formatter};
+use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
 
@@ -73,7 +74,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-        mem: &'db TransactionalMemory,
+        mem: Arc<TransactionalMemory>,
         transaction: &'txn WriteTransaction<'db>,
     ) -> Table<'db, 'txn, K, V> {
         Table {
@@ -375,7 +376,8 @@ pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static>: Sealed {
 
 /// A read-only untyped table
 pub struct ReadOnlyUntypedTable<'txn> {
-    tree: RawBtree<'txn>,
+    tree: RawBtree,
+    _lifetime: PhantomData<&'txn ()>,
 }
 
 impl<'txn> ReadOnlyUntypedTable<'txn> {
@@ -383,10 +385,11 @@ impl<'txn> ReadOnlyUntypedTable<'txn> {
         root_page: Option<(PageNumber, Checksum)>,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
-        mem: &'txn TransactionalMemory,
+        mem: Arc<TransactionalMemory>,
     ) -> Self {
         Self {
             tree: RawBtree::new(root_page, fixed_key_size, fixed_value_size, mem),
+            _lifetime: Default::default(),
         }
     }
 
@@ -416,7 +419,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadOnlyTable<'txn, K, 
         name: String,
         root_page: Option<(PageNumber, Checksum)>,
         hint: PageHint,
-        mem: &'txn TransactionalMemory,
+        mem: Arc<TransactionalMemory>,
     ) -> Result<ReadOnlyTable<'txn, K, V>> {
         Ok(ReadOnlyTable {
             name,
@@ -474,12 +477,16 @@ impl<K: RedbKey + 'static, V: RedbValue + 'static> Debug for ReadOnlyTable<'_, K
 }
 
 pub struct Drain<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
-    inner: BtreeDrain<'a, K, V>,
+    inner: BtreeDrain<K, V>,
+    _lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Drain<'a, K, V> {
-    fn new(inner: BtreeDrain<'a, K, V>) -> Self {
-        Self { inner }
+    fn new(inner: BtreeDrain<K, V>) -> Self {
+        Self {
+            inner,
+            _lifetime: Default::default(),
+        }
     }
 }
 
@@ -515,7 +522,8 @@ pub struct DrainFilter<
     V: RedbValue + 'static,
     F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
 > {
-    inner: BtreeDrainFilter<'a, K, V, F>,
+    inner: BtreeDrainFilter<K, V, F>,
+    _lifetime: PhantomData<&'a ()>,
 }
 
 impl<
@@ -525,8 +533,11 @@ impl<
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > DrainFilter<'a, K, V, F>
 {
-    fn new(inner: BtreeDrainFilter<'a, K, V, F>) -> Self {
-        Self { inner }
+    fn new(inner: BtreeDrainFilter<K, V, F>) -> Self {
+        Self {
+            inner,
+            _lifetime: Default::default(),
+        }
     }
 }
 
@@ -569,12 +580,17 @@ impl<
 }
 
 pub struct Range<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
-    inner: BtreeRangeIter<'a, K, V>,
+    inner: BtreeRangeIter<K, V>,
+    // TODO: replace with TransactionGuard?
+    _lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Range<'a, K, V> {
-    pub(super) fn new(inner: BtreeRangeIter<'a, K, V>) -> Self {
-        Self { inner }
+    pub(super) fn new(inner: BtreeRangeIter<K, V>) -> Self {
+        Self {
+            inner,
+            _lifetime: Default::default(),
+        }
     }
 }
 

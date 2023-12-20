@@ -381,12 +381,12 @@ impl RedbValue for InternalTableDefinition {
     }
 }
 
-pub struct TableNameIter<'a> {
-    inner: BtreeRangeIter<'a, &'static str, InternalTableDefinition>,
+pub struct TableNameIter {
+    inner: BtreeRangeIter<&'static str, InternalTableDefinition>,
     table_type: TableType,
 }
 
-impl<'a> Iterator for TableNameIter<'a> {
+impl Iterator for TableNameIter {
     type Item = Result<String>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -408,7 +408,7 @@ impl<'a> Iterator for TableNameIter<'a> {
 
 pub(crate) struct TableTree<'txn> {
     tree: BtreeMut<'txn, &'static str, InternalTableDefinition>,
-    mem: &'txn TransactionalMemory,
+    mem: Arc<TransactionalMemory>,
     // Cached updates from tables that have been closed. These must be flushed to the btree
     pending_table_updates: HashMap<String, Option<(PageNumber, Checksum)>>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
@@ -417,11 +417,11 @@ pub(crate) struct TableTree<'txn> {
 impl<'txn> TableTree<'txn> {
     pub(crate) fn new(
         master_root: Option<(PageNumber, Checksum)>,
-        mem: &'txn TransactionalMemory,
+        mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     ) -> Self {
         Self {
-            tree: BtreeMut::new(master_root, mem, freed_pages.clone()),
+            tree: BtreeMut::new(master_root, mem.clone(), freed_pages.clone()),
             mem,
             pending_table_updates: Default::default(),
             freed_pages,
@@ -448,7 +448,7 @@ impl<'txn> TableTree<'txn> {
                     table_root,
                     definition.get_fixed_key_size(),
                     definition.get_fixed_value_size(),
-                    self.mem,
+                    self.mem.clone(),
                 )?;
 
                 for page in table_pages_iter {
@@ -496,7 +496,7 @@ impl<'txn> TableTree<'txn> {
                             Some((table_root, table_checksum)),
                             definition.get_fixed_key_size(),
                             definition.get_fixed_value_size(),
-                            self.mem,
+                            self.mem.clone(),
                         )
                         .verify_checksum()?
                         {
@@ -509,7 +509,7 @@ impl<'txn> TableTree<'txn> {
                         definition.get_root(),
                         definition.get_fixed_key_size(),
                         definition.get_fixed_value_size(),
-                        self.mem,
+                        self.mem.clone(),
                     )? {
                         return Ok(false);
                     }
@@ -532,7 +532,7 @@ impl<'txn> TableTree<'txn> {
             if definition.table_type == TableType::Normal {
                 let mut tree = UntypedBtreeMut::new(
                     table_root,
-                    self.mem,
+                    self.mem.clone(),
                     self.freed_pages.clone(),
                     definition.fixed_key_size,
                     definition.fixed_value_size,
@@ -544,7 +544,7 @@ impl<'txn> TableTree<'txn> {
                     table_root,
                     definition.fixed_key_size,
                     definition.fixed_value_size,
-                    self.mem,
+                    self.mem.clone(),
                 )?;
             }
             self.tree.insert(&name.as_str(), &definition)?;
@@ -656,7 +656,7 @@ impl<'txn> TableTree<'txn> {
                     table_root,
                     definition.fixed_key_size,
                     definition.fixed_value_size,
-                    self.mem,
+                    self.mem.clone(),
                 )?;
                 let mut freed_pages = self.freed_pages.lock().unwrap();
                 for page_number in iter {
@@ -709,7 +709,7 @@ impl<'txn> TableTree<'txn> {
 
             let mut tree = UntypedBtreeMut::new(
                 definition.table_root,
-                self.mem,
+                self.mem.clone(),
                 self.freed_pages.clone(),
                 definition.fixed_key_size,
                 definition.fixed_value_size,
@@ -750,7 +750,7 @@ impl<'txn> TableTree<'txn> {
                 TableType::Normal => {
                     let subtree_stats = btree_stats(
                         definition.table_root.map(|(p, _)| p),
-                        self.mem,
+                        &self.mem,
                         definition.fixed_key_size,
                         definition.fixed_value_size,
                     )?;
@@ -764,7 +764,7 @@ impl<'txn> TableTree<'txn> {
                 TableType::Multimap => {
                     let subtree_stats = multimap_btree_stats(
                         definition.table_root.map(|(p, _)| p),
-                        self.mem,
+                        &self.mem,
                         definition.fixed_key_size,
                         definition.fixed_value_size,
                     )?;
