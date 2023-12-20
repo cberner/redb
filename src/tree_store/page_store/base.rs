@@ -155,6 +155,12 @@ pub struct PageImpl {
     pub(super) open_pages: Arc<Mutex<HashMap<PageNumber, u64>>>,
 }
 
+impl PageImpl {
+    pub(crate) fn to_arc_vec(&self) -> Arc<Vec<u8>> {
+        self.mem.clone()
+    }
+}
+
 impl Debug for PageImpl {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!("PageImpl: page_number={:?}", self.page_number))

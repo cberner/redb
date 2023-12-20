@@ -21,7 +21,10 @@ enum DeletionResult {
     // A leaf with zero children
     DeletedLeaf,
     // A leaf with fewer entries than desired
-    PartialLeaf { deleted_pair: usize },
+    PartialLeaf {
+        page: Arc<Vec<u8>>,
+        deleted_pair: usize,
+    },
     // A branch page subtree with fewer children than desired
     PartialBranch(PageNumber, Checksum),
     // Indicates that the branch node was deleted, and includes the only remaining child
@@ -103,10 +106,8 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
             let new_root = match deletion_result {
                 Subtree(page, checksum) => Some((page, checksum)),
                 DeletedLeaf => None,
-                PartialLeaf { deleted_pair } => {
-                    let page = self.mem.get_page(p)?;
-                    let accessor =
-                        LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                PartialLeaf { page, deleted_pair } => {
+                    let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
                     let mut builder = LeafBuilder::new(
                         &self.mem,
                         accessor.num_pairs() - 1,
@@ -286,18 +287,15 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                     let page_number = page.get_page_number();
                     let existing_value = if found {
                         let (start, end) = accessor.value_range(position).unwrap();
-                        let free_on_drop =
-                            self.modify_uncommitted && self.mem.uncommitted(page_number);
-                        if !free_on_drop {
+                        if self.modify_uncommitted && self.mem.uncommitted(page_number) {
+                            let arc = page.to_arc_vec();
+                            drop(page);
+                            self.mem.free(page_number);
+                            Some(AccessGuard::with_arc_page(arc, start..end))
+                        } else {
                             self.freed.push(page_number);
+                            Some(AccessGuard::with_page(page, start..end))
                         }
-                        Some(AccessGuard::new(
-                            page,
-                            start,
-                            end - start,
-                            free_on_drop,
-                            self.mem.clone(),
-                        ))
                     } else {
                         drop(page);
                         self.conditional_free(page_number);
@@ -323,18 +321,15 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                     let page_number = page.get_page_number();
                     let existing_value = if found {
                         let (start, end) = accessor.value_range(position).unwrap();
-                        let free_on_drop =
-                            self.modify_uncommitted && self.mem.uncommitted(page_number);
-                        if !free_on_drop {
+                        if self.modify_uncommitted && self.mem.uncommitted(page_number) {
+                            let arc = page.to_arc_vec();
+                            drop(page);
+                            self.mem.free(page_number);
+                            Some(AccessGuard::with_arc_page(arc, start..end))
+                        } else {
                             self.freed.push(page_number);
+                            Some(AccessGuard::with_page(page, start..end))
                         }
-                        Some(AccessGuard::new(
-                            page,
-                            start,
-                            end - start,
-                            free_on_drop,
-                            self.mem.clone(),
-                        ))
                     } else {
                         drop(page);
                         self.conditional_free(page_number);
@@ -513,7 +508,6 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                 end - start,
                 position,
                 K::fixed_width(),
-                self.mem.clone(),
             );
             return Ok((Subtree(page_number, DEFERRED), Some(guard)));
         }
@@ -524,6 +518,7 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
             // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
             // full pages, so we use 33% instead of 50% to avoid oscillating
             PartialLeaf {
+                page: page.to_arc_vec(),
                 deleted_pair: position,
             }
         } else {
@@ -543,22 +538,20 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
             let new_page = builder.build()?;
             Subtree(new_page.get_page_number(), DEFERRED)
         };
-        let free_on_drop = if !uncommitted || !self.modify_uncommitted {
+        let (start, end) = accessor.value_range(position).unwrap();
+        drop(accessor);
+        let guard = if uncommitted && self.modify_uncommitted {
+            let page_number = page.get_page_number();
+            let arc = page.to_arc_vec();
+            drop(page);
+            self.mem.free(page_number);
+            Some(AccessGuard::with_arc_page(arc, start..end))
+        } else {
             // Won't be freed until the end of the transaction, so returning the page
             // in the AccessGuard below is still safe
             self.freed.push(page.get_page_number());
-            false
-        } else {
-            true
+            Some(AccessGuard::with_page(page, start..end))
         };
-        let (start, end) = accessor.value_range(position).unwrap();
-        let guard = Some(AccessGuard::new(
-            page,
-            start,
-            end - start,
-            free_on_drop,
-            self.mem.clone(),
-        ));
         Ok((result, guard))
     }
 
@@ -649,13 +642,12 @@ impl<'a, 'b, K: RedbKey, V: RedbValue> MutateHelper<'a, 'b, K, V> {
                 }
                 self.finalize_branch_builder(builder)?
             }
-            PartialLeaf { deleted_pair } => {
-                let partial_child_page = self.mem.get_page(child_page_number)?;
-                let partial_child_accessor = LeafAccessor::new(
-                    partial_child_page.memory(),
-                    K::fixed_width(),
-                    V::fixed_width(),
-                );
+            PartialLeaf {
+                page: partial_child_page,
+                deleted_pair,
+            } => {
+                let partial_child_accessor =
+                    LeafAccessor::new(&partial_child_page, K::fixed_width(), V::fixed_width());
                 debug_assert!(partial_child_accessor.num_pairs() > 1);
 
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
