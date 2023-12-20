@@ -206,22 +206,20 @@ impl Clone for PageImpl {
     }
 }
 
-pub(crate) struct PageMut<'a> {
+pub(crate) struct PageMut {
     pub(super) mem: WritablePage,
     pub(super) page_number: PageNumber,
     #[cfg(debug_assertions)]
-    pub(super) open_pages: &'a Mutex<HashSet<PageNumber>>,
-    #[cfg(not(debug_assertions))]
-    pub(super) _debug_lifetime: PhantomData<&'a ()>,
+    pub(super) open_pages: Arc<Mutex<HashSet<PageNumber>>>,
 }
 
-impl<'a> PageMut<'a> {
+impl PageMut {
     pub(crate) fn memory_mut(&mut self) -> &mut [u8] {
         self.mem.mem_mut()
     }
 }
 
-impl<'a> Page for PageMut<'a> {
+impl Page for PageMut {
     fn memory(&self) -> &[u8] {
         self.mem.mem()
     }
@@ -232,7 +230,7 @@ impl<'a> Page for PageMut<'a> {
 }
 
 #[cfg(debug_assertions)]
-impl<'a> Drop for PageMut<'a> {
+impl Drop for PageMut {
     fn drop(&mut self) {
         assert!(self.open_pages.lock().unwrap().remove(&self.page_number));
     }
