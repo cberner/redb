@@ -194,6 +194,7 @@ pub struct SystemTable<'db, 's, K: RedbKey + 'static, V: RedbValue + 'static> {
     name: String,
     namespace: &'s mut SystemNamespace<'db>,
     tree: BtreeMut<'s, K, V>,
+    transaction_guard: Arc<TransactionGuard>,
 }
 
 impl<'db, 's, K: RedbKey + 'static, V: RedbValue + 'static> SystemTable<'db, 's, K, V> {
@@ -201,6 +202,7 @@ impl<'db, 's, K: RedbKey + 'static, V: RedbValue + 'static> SystemTable<'db, 's,
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+        guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
         namespace: &'s mut SystemNamespace<'db>,
     ) -> SystemTable<'db, 's, K, V> {
@@ -208,6 +210,7 @@ impl<'db, 's, K: RedbKey + 'static, V: RedbValue + 'static> SystemTable<'db, 's,
             name: name.to_string(),
             namespace,
             tree: BtreeMut::new(table_root, mem, freed_pages),
+            transaction_guard: guard,
         }
     }
 
@@ -223,7 +226,9 @@ impl<'db, 's, K: RedbKey + 'static, V: RedbValue + 'static> SystemTable<'db, 's,
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree.range(&range).map(Range::new)
+        self.tree
+            .range(&range)
+            .map(|x| Range::new(x, self.transaction_guard.clone()))
     }
 
     pub fn insert<'k, 'v>(
@@ -261,6 +266,7 @@ impl<'db, 's, K: RedbKey + 'static, V: RedbValue + 'static> Drop for SystemTable
 
 struct SystemNamespace<'db> {
     table_tree: TableTree<'db>,
+    transaction_guard: Arc<TransactionGuard>,
 }
 
 impl<'db> SystemNamespace<'db> {
@@ -283,6 +289,7 @@ impl<'db> SystemNamespace<'db> {
             definition.name(),
             root.get_root(),
             transaction.freed_pages.clone(),
+            self.transaction_guard.clone(),
             transaction.mem.clone(),
             self,
         ))
@@ -414,7 +421,7 @@ pub struct WriteTransaction<'db> {
     db: &'db Database,
     transaction_tracker: Arc<TransactionTracker>,
     mem: Arc<TransactionalMemory>,
-    _transaction_guard: Arc<TransactionGuard>,
+    transaction_guard: Arc<TransactionGuard>,
     transaction_id: TransactionId,
     // The table of freed pages by transaction. FreedTableKey -> binary.
     // The binary blob is a length-prefixed array of PageNumber
@@ -440,6 +447,7 @@ impl<'db> WriteTransaction<'db> {
         transaction_tracker: Arc<TransactionTracker>,
     ) -> Result<Self> {
         let transaction_id = guard.id();
+        let guard = Arc::new(guard);
 
         let root_page = db.get_memory().get_data_root();
         let system_page = db.get_memory().get_system_root();
@@ -453,13 +461,14 @@ impl<'db> WriteTransaction<'db> {
         };
         let system_tables = SystemNamespace {
             table_tree: TableTree::new(system_page, db.get_memory(), freed_pages.clone()),
+            transaction_guard: guard.clone(),
         };
 
         Ok(Self {
             db,
             transaction_tracker,
             mem: db.get_memory(),
-            _transaction_guard: Arc::new(guard),
+            transaction_guard: guard,
             transaction_id,
             tables: Mutex::new(tables),
             system_tables: Mutex::new(system_tables),
@@ -516,6 +525,10 @@ impl<'db> WriteTransaction<'db> {
             .insert(savepoint.get_id());
 
         Ok(savepoint.get_id().0)
+    }
+
+    pub(crate) fn transaction_guard(&self) -> Arc<TransactionGuard> {
+        self.transaction_guard.clone()
     }
 
     pub(crate) fn next_persistent_savepoint_id(&self) -> Result<Option<SavepointId>> {
@@ -1136,7 +1149,7 @@ impl<'a> Drop for WriteTransaction<'a> {
 pub struct ReadTransaction<'a> {
     mem: Arc<TransactionalMemory>,
     tree: TableTree<'a>,
-    _guard: TransactionGuard,
+    transaction_guard: Arc<TransactionGuard>,
 }
 
 impl<'db> ReadTransaction<'db> {
@@ -1145,7 +1158,7 @@ impl<'db> ReadTransaction<'db> {
         Self {
             mem: mem.clone(),
             tree: TableTree::new(root_page, mem, Default::default()),
-            _guard: guard,
+            transaction_guard: Arc::new(guard),
         }
     }
 
@@ -1163,6 +1176,7 @@ impl<'db> ReadTransaction<'db> {
             definition.name().to_string(),
             header.get_root(),
             PageHint::Clean,
+            self.transaction_guard.clone(),
             self.mem.clone(),
         )?)
     }
@@ -1198,6 +1212,7 @@ impl<'db> ReadTransaction<'db> {
         Ok(ReadOnlyMultimapTable::new(
             header.get_root(),
             PageHint::Clean,
+            self.transaction_guard.clone(),
             self.mem.clone(),
         )?)
     }

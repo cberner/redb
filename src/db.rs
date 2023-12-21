@@ -215,7 +215,7 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> Display for MultimapTableDe
 }
 
 pub(crate) struct TransactionGuard {
-    transaction_tracker: Arc<TransactionTracker>,
+    transaction_tracker: Option<Arc<TransactionTracker>>,
     transaction_id: Option<TransactionId>,
     write_transaction: bool,
 }
@@ -226,7 +226,7 @@ impl TransactionGuard {
         tracker: Arc<TransactionTracker>,
     ) -> Self {
         Self {
-            transaction_tracker: tracker,
+            transaction_tracker: Some(tracker),
             transaction_id: Some(transaction_id),
             write_transaction: false,
         }
@@ -237,9 +237,18 @@ impl TransactionGuard {
         tracker: Arc<TransactionTracker>,
     ) -> Self {
         Self {
-            transaction_tracker: tracker,
+            transaction_tracker: Some(tracker),
             transaction_id: Some(transaction_id),
             write_transaction: true,
+        }
+    }
+
+    // TODO: remove this hack
+    pub(crate) fn fake() -> Self {
+        Self {
+            transaction_tracker: None,
+            transaction_id: None,
+            write_transaction: false,
         }
     }
 
@@ -254,12 +263,19 @@ impl TransactionGuard {
 
 impl Drop for TransactionGuard {
     fn drop(&mut self) {
+        if self.transaction_tracker.is_none() {
+            return;
+        }
         if let Some(transaction_id) = self.transaction_id {
             if self.write_transaction {
                 self.transaction_tracker
+                    .as_ref()
+                    .unwrap()
                     .end_write_transaction(transaction_id);
             } else {
                 self.transaction_tracker
+                    .as_ref()
+                    .unwrap()
                     .deallocate_read_transaction(transaction_id);
             }
         }
@@ -444,6 +460,7 @@ impl Database {
                     "internal savepoint table".to_string(),
                     savepoint_table_def.get_root(),
                     PageHint::None,
+                    Arc::new(TransactionGuard::fake()),
                     mem.clone(),
                 )?;
             for result in savepoint_table.range::<SavepointId>(..)? {
@@ -484,6 +501,7 @@ impl Database {
             "internal freed table".to_string(),
             freed_root,
             PageHint::None,
+            Arc::new(TransactionGuard::fake()),
             mem.clone(),
         )?;
         let lookup_key = FreedTableKey {
@@ -618,6 +636,7 @@ impl Database {
             "internal freed table".to_string(),
             freed_root,
             PageHint::None,
+            Arc::new(TransactionGuard::fake()),
             mem.clone(),
         )?;
         // The persistent savepoints might hold references to older freed trees that are partially processed.
