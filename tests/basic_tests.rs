@@ -1247,6 +1247,30 @@ fn range_lifetime() {
 }
 
 #[test]
+fn range_arc() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let mut iter = {
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(definition).unwrap();
+        let start = "hello".to_string();
+        table.range::<&str>(start.as_str()..).unwrap()
+    };
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
+    assert!(iter.next().is_none());
+}
+
+#[test]
 fn drain_lifetime() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();

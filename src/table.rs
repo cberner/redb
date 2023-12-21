@@ -439,6 +439,17 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadOnlyTable<'txn, K, 
             _lifetime: Default::default(),
         })
     }
+
+    /// This method is like [`ReadableTable::range()`], but the iterator is reference counted and keeps the transaction
+    /// alive until it is dropped.
+    pub fn range<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<Range<'static, K, V>>
+    where
+        KR: Borrow<K::SelfType<'a>>,
+    {
+        self.tree
+            .range(&range)
+            .map(|x| Range::new(x, self.transaction_guard.clone()))
+    }
 }
 
 impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V>
