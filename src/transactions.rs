@@ -412,8 +412,9 @@ impl<'db> TableNamespace<'db> {
 /// Only a single [`WriteTransaction`] may exist at a time
 pub struct WriteTransaction<'db> {
     db: &'db Database,
-    transaction_tracker: Arc<Mutex<TransactionTracker>>,
+    transaction_tracker: Arc<TransactionTracker>,
     mem: Arc<TransactionalMemory>,
+    _transaction_guard: Arc<TransactionGuard>,
     transaction_id: TransactionId,
     // The table of freed pages by transaction. FreedTableKey -> binary.
     // The binary blob is a length-prefixed array of PageNumber
@@ -435,9 +436,10 @@ pub struct WriteTransaction<'db> {
 impl<'db> WriteTransaction<'db> {
     pub(crate) fn new(
         db: &'db Database,
-        transaction_tracker: Arc<Mutex<TransactionTracker>>,
+        guard: TransactionGuard,
+        transaction_tracker: Arc<TransactionTracker>,
     ) -> Result<Self> {
-        let transaction_id = db.start_write_transaction();
+        let transaction_id = guard.id();
 
         let root_page = db.get_memory().get_data_root();
         let system_page = db.get_memory().get_system_root();
@@ -457,6 +459,7 @@ impl<'db> WriteTransaction<'db> {
             db,
             transaction_tracker,
             mem: db.get_memory(),
+            _transaction_guard: Arc::new(guard),
             transaction_id,
             tables: Mutex::new(tables),
             system_tables: Mutex::new(system_tables),
@@ -625,8 +628,6 @@ impl<'db> WriteTransaction<'db> {
 
         if !self
             .transaction_tracker
-            .lock()
-            .unwrap()
             .is_valid_savepoint(savepoint.get_id())
         {
             return Err(SavepointError::InvalidSavepoint);
@@ -708,8 +709,6 @@ impl<'db> WriteTransaction<'db> {
         // Invalidate all savepoints that are newer than the one being applied to prevent the user
         // from later trying to restore a savepoint "on another timeline"
         self.transaction_tracker
-            .lock()
-            .unwrap()
             .invalidate_savepoints_after(savepoint.get_id());
 
         for persistent_savepoint in self.list_persistent_savepoints()? {
@@ -846,8 +845,6 @@ impl<'db> WriteTransaction<'db> {
 
         for (savepoint, transaction) in self.deleted_persistent_savepoints.lock().unwrap().iter() {
             self.transaction_tracker
-                .lock()
-                .unwrap()
                 .deallocate_savepoint(*savepoint, *transaction);
         }
 
@@ -899,8 +896,6 @@ impl<'db> WriteTransaction<'db> {
     pub(crate) fn durable_commit(&mut self, eventual: bool, two_phase: bool) -> Result {
         let oldest_live_read = self
             .transaction_tracker
-            .lock()
-            .unwrap()
             .oldest_live_read_transaction()
             .unwrap_or(self.transaction_id);
 
@@ -923,11 +918,7 @@ impl<'db> WriteTransaction<'db> {
         // root of the freed-tree. Therefore, we must use the transactional free mechanism to free
         // those pages. If there are no save points then these can be immediately freed, which is
         // done at the end of this function.
-        let savepoint_exists = self
-            .transaction_tracker
-            .lock()
-            .unwrap()
-            .any_savepoint_exists();
+        let savepoint_exists = self.transaction_tracker.any_savepoint_exists();
         self.store_freed_pages(savepoint_exists)?;
 
         // Finalize freed table checksums, before doing the final commit
@@ -946,10 +937,7 @@ impl<'db> WriteTransaction<'db> {
         )?;
 
         // Mark any pending non-durable commits as fully committed.
-        self.transaction_tracker
-            .lock()
-            .unwrap()
-            .clear_pending_non_durable_commits();
+        self.transaction_tracker.clear_pending_non_durable_commits();
 
         // Immediately free the pages that were freed from the freed-tree itself. These are only
         // accessed by write transactions, so it's safe to free them as soon as the commit is done.
@@ -990,8 +978,6 @@ impl<'db> WriteTransaction<'db> {
         // Register this as a non-durable transaction to ensure that the freed pages we just pushed
         // are only processed after this has been persisted
         self.transaction_tracker
-            .lock()
-            .unwrap()
             .register_non_durable_commit(self.transaction_id);
         Ok(())
     }
@@ -1134,7 +1120,6 @@ impl<'db> WriteTransaction<'db> {
 
 impl<'a> Drop for WriteTransaction<'a> {
     fn drop(&mut self) {
-        self.db.end_write_transaction(self.transaction_id);
         if !self.completed && !thread::panicking() && !self.mem.storage_failure() {
             #[allow(unused_variables)]
             if let Err(error) = self.abort_inner() {

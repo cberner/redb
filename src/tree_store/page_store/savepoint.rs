@@ -3,7 +3,7 @@ use crate::tree_store::{Checksum, PageNumber, TransactionalMemory};
 use crate::{RedbValue, TypeName};
 use std::fmt::Debug;
 use std::mem::size_of;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // on-disk format:
 // * 1 byte: version
@@ -32,7 +32,7 @@ pub struct Savepoint {
     system_root: Option<(PageNumber, Checksum)>,
     freed_root: Option<(PageNumber, Checksum)>,
     regional_allocators: Vec<Vec<u8>>,
-    transaction_tracker: Arc<Mutex<TransactionTracker>>,
+    transaction_tracker: Arc<TransactionTracker>,
     ephemeral: bool,
 }
 
@@ -40,7 +40,7 @@ impl Savepoint {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_ephemeral(
         mem: &TransactionalMemory,
-        transaction_tracker: Arc<Mutex<TransactionTracker>>,
+        transaction_tracker: Arc<TransactionTracker>,
         id: SavepointId,
         transaction_id: TransactionId,
         user_root: Option<(PageNumber, Checksum)>,
@@ -85,7 +85,7 @@ impl Savepoint {
         &self.regional_allocators
     }
 
-    pub(crate) fn db_address(&self) -> *const Mutex<TransactionTracker> {
+    pub(crate) fn db_address(&self) -> *const TransactionTracker {
         self.transaction_tracker.as_ref() as *const _
     }
 
@@ -98,8 +98,6 @@ impl Drop for Savepoint {
     fn drop(&mut self) {
         if self.ephemeral {
             self.transaction_tracker
-                .lock()
-                .unwrap()
                 .deallocate_savepoint(self.get_id(), self.get_transaction_id());
         }
     }
@@ -174,10 +172,7 @@ impl<'a> SerializedSavepoint<'a> {
         }
     }
 
-    pub(crate) fn to_savepoint(
-        &self,
-        transaction_tracker: Arc<Mutex<TransactionTracker>>,
-    ) -> Savepoint {
+    pub(crate) fn to_savepoint(&self, transaction_tracker: Arc<TransactionTracker>) -> Savepoint {
         let data = self.data();
         let mut offset = 0;
         let version = data[offset];
