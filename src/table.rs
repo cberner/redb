@@ -1,3 +1,4 @@
+use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
 use crate::tree_store::{
     AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeMut, BtreeRangeIter, Checksum,
@@ -224,7 +225,9 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree.range(&range).map(Range::new)
+        self.tree
+            .range(&range)
+            .map(|x| Range::new(x, self.transaction.transaction_guard()))
     }
 
     fn stats(&self) -> Result<TableStats> {
@@ -412,6 +415,7 @@ impl<'txn> ReadOnlyUntypedTable<'txn> {
 pub struct ReadOnlyTable<'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
     name: String,
     tree: Btree<'txn, K, V>,
+    transaction_guard: Arc<TransactionGuard>,
 }
 
 impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadOnlyTable<'txn, K, V> {
@@ -419,11 +423,13 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadOnlyTable<'txn, K, 
         name: String,
         root_page: Option<(PageNumber, Checksum)>,
         hint: PageHint,
+        guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
     ) -> Result<ReadOnlyTable<'txn, K, V>> {
         Ok(ReadOnlyTable {
             name,
             tree: Btree::new(root_page, hint, mem)?,
+            transaction_guard: guard,
         })
     }
 }
@@ -443,7 +449,9 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V>
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree.range(&range).map(Range::new)
+        self.tree
+            .range(&range)
+            .map(|x| Range::new(x, self.transaction_guard.clone()))
     }
 
     fn stats(&self) -> Result<TableStats> {
@@ -581,14 +589,16 @@ impl<
 
 pub struct Range<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
     inner: BtreeRangeIter<K, V>,
+    _transaction_guard: Arc<TransactionGuard>,
     // TODO: replace with TransactionGuard?
     _lifetime: PhantomData<&'a ()>,
 }
 
 impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Range<'a, K, V> {
-    pub(super) fn new(inner: BtreeRangeIter<K, V>) -> Self {
+    pub(super) fn new(inner: BtreeRangeIter<K, V>, guard: Arc<TransactionGuard>) -> Self {
         Self {
             inner,
+            _transaction_guard: guard,
             _lifetime: Default::default(),
         }
     }
