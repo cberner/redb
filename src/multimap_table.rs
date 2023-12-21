@@ -1296,6 +1296,35 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadOnlyMultimapTable<'tx
             _lifetime: Default::default(),
         })
     }
+
+    /// This method is like [`ReadableMultimapTable::get()`], but the iterator is reference counted and keeps the transaction
+    /// alive until it is dropped.
+    pub fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'static, V>> {
+        let iter = if let Some(collection) = self.tree.get(key.borrow())? {
+            DynamicCollection::iter(collection, self.transaction_guard.clone(), self.mem.clone())?
+        } else {
+            MultimapValue::new_subtree(
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                self.transaction_guard.clone(),
+            )
+        };
+
+        Ok(iter)
+    }
+
+    /// This method is like [`ReadableMultimapTable::range()`], but the iterator is reference counted and keeps the transaction
+    /// alive until it is dropped.
+    pub fn range<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<MultimapRange<'static, K, V>>
+    where
+        KR: Borrow<K::SelfType<'a>>,
+    {
+        let inner = self.tree.range(&range)?;
+        Ok(MultimapRange::new(
+            inner,
+            self.transaction_guard.clone(),
+            self.mem.clone(),
+        ))
+    }
 }
 
 impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, V>

@@ -6,8 +6,7 @@ use crate::tree_store::{
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{
-    CompactionError, DatabaseError, Durability, ReadOnlyTable, ReadableTable, SavepointError,
-    StorageError,
+    CompactionError, DatabaseError, Durability, ReadOnlyTable, SavepointError, StorageError,
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Debug, Display, Formatter};
