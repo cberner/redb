@@ -769,7 +769,12 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
             name: name.to_string(),
             transaction,
             freed_pages: freed_pages.clone(),
-            tree: BtreeMut::new(table_root, mem.clone(), freed_pages),
+            tree: BtreeMut::new(
+                table_root,
+                transaction.transaction_guard(),
+                mem.clone(),
+                freed_pages,
+            ),
             mem,
             _value_type: Default::default(),
         }
@@ -866,6 +871,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                         // Don't bother computing the checksum, since we're about to modify the tree
                         let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
                             Some((page_number, 0)),
+                            self.transaction.transaction_guard(),
                             self.mem.clone(),
                             self.freed_pages.clone(),
                         );
@@ -883,6 +889,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                 Subtree => {
                     let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
                         Some(guard.value().as_subtree()),
+                        self.transaction.transaction_guard(),
                         self.mem.clone(),
                         self.freed_pages.clone(),
                     );
@@ -920,8 +927,12 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
                 self.tree
                     .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
             } else {
-                let mut subtree: BtreeMut<'_, V, ()> =
-                    BtreeMut::new(None, self.mem.clone(), self.freed_pages.clone());
+                let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
+                    None,
+                    self.transaction.transaction_guard(),
+                    self.mem.clone(),
+                    self.freed_pages.clone(),
+                );
                 subtree.insert(value.borrow(), &())?;
                 let (new_root, new_checksum) = subtree.get_root().unwrap();
                 let subtree_data =
@@ -1008,6 +1019,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
             Subtree => {
                 let mut subtree: BtreeMut<V, ()> = BtreeMut::new(
                     Some(v.as_subtree()),
+                    self.transaction.transaction_guard(),
                     self.mem.clone(),
                     self.freed_pages.clone(),
                 );
@@ -1262,10 +1274,11 @@ impl<'txn> ReadOnlyUntypedMultimapTable<'txn> {
 
 /// A read-only multimap table
 pub struct ReadOnlyMultimapTable<'txn, K: RedbKey + 'static, V: RedbKey + 'static> {
-    tree: Btree<'txn, K, &'static DynamicCollection<V>>,
+    tree: Btree<K, &'static DynamicCollection<V>>,
     mem: Arc<TransactionalMemory>,
     transaction_guard: Arc<TransactionGuard>,
     _value_type: PhantomData<V>,
+    _lifetime: PhantomData<&'txn ()>,
 }
 
 impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadOnlyMultimapTable<'txn, K, V> {
@@ -1276,10 +1289,11 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadOnlyMultimapTable<'tx
         mem: Arc<TransactionalMemory>,
     ) -> Result<ReadOnlyMultimapTable<'txn, K, V>> {
         Ok(ReadOnlyMultimapTable {
-            tree: Btree::new(root_page, hint, mem.clone())?,
+            tree: Btree::new(root_page, hint, guard.clone(), mem.clone())?,
             mem,
             transaction_guard: guard,
             _value_type: Default::default(),
+            _lifetime: Default::default(),
         })
     }
 }

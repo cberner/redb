@@ -1,3 +1,4 @@
+use crate::db::TransactionGuard;
 use crate::tree_store::btree_base::{
     branch_checksum, leaf_checksum, BranchAccessor, BranchMutator, Checksum, LeafAccessor, BRANCH,
     DEFERRED, LEAF,
@@ -218,6 +219,7 @@ impl UntypedBtreeMut {
 
 pub(crate) struct BtreeMut<'a, K: RedbKey, V: RedbValue> {
     mem: Arc<TransactionalMemory>,
+    transaction_guard: Arc<TransactionGuard>,
     root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     _key_type: PhantomData<K>,
@@ -228,11 +230,13 @@ pub(crate) struct BtreeMut<'a, K: RedbKey, V: RedbValue> {
 impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
     pub(crate) fn new(
         root: Option<(PageNumber, Checksum)>,
+        guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     ) -> Self {
         Self {
             mem,
+            transaction_guard: guard,
             root: Arc::new(Mutex::new(root)),
             freed_pages,
             _key_type: Default::default(),
@@ -342,8 +346,13 @@ impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
         )
     }
 
-    fn read_tree(&self) -> Result<Btree<'a, K, V>> {
-        Btree::new(self.get_root(), PageHint::None, self.mem.clone())
+    fn read_tree(&self) -> Result<Btree<K, V>> {
+        Btree::new(
+            self.get_root(),
+            PageHint::None,
+            self.transaction_guard.clone(),
+            self.mem.clone(),
+        )
     }
 
     pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'_, V>>> {
@@ -543,22 +552,22 @@ impl RawBtree {
     }
 }
 
-pub(crate) struct Btree<'a, K: RedbKey, V: RedbValue> {
+pub(crate) struct Btree<K: RedbKey, V: RedbValue> {
     mem: Arc<TransactionalMemory>,
+    _transaction_guard: Arc<TransactionGuard>,
     // Cache of the root page to avoid repeated lookups
     cached_root: Option<PageImpl>,
     root: Option<(PageNumber, Checksum)>,
     hint: PageHint,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
-    // TODO: can we remove this and replace it with a TransactionGuard?
-    _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
+impl<K: RedbKey, V: RedbValue> Btree<K, V> {
     pub(crate) fn new(
         root: Option<(PageNumber, Checksum)>,
         hint: PageHint,
+        guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
     ) -> Result<Self> {
         let cached_root = if let Some((r, _)) = root {
@@ -568,12 +577,12 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
         };
         Ok(Self {
             mem,
+            _transaction_guard: guard,
             cached_root,
             root,
             hint,
             _key_type: Default::default(),
             _value_type: Default::default(),
-            _lifetime: Default::default(),
         })
     }
 
@@ -581,7 +590,7 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
         self.root
     }
 
-    pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
+    pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'static, V>>> {
         if let Some(ref root_page) = self.cached_root {
             self.get_helper(root_page.clone(), K::as_bytes(key).as_ref())
         } else {
@@ -590,7 +599,7 @@ impl<'a, K: RedbKey, V: RedbValue> Btree<'a, K, V> {
     }
 
     // Returns the value for the queried key, if present
-    fn get_helper(&self, page: PageImpl, query: &[u8]) -> Result<Option<AccessGuard<'a, V>>> {
+    fn get_helper(&self, page: PageImpl, query: &[u8]) -> Result<Option<AccessGuard<'static, V>>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
