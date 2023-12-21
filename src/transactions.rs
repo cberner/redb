@@ -209,7 +209,7 @@ impl<'db, 's, K: RedbKey + 'static, V: RedbValue + 'static> SystemTable<'db, 's,
         SystemTable {
             name: name.to_string(),
             namespace,
-            tree: BtreeMut::new(table_root, mem, freed_pages),
+            tree: BtreeMut::new(table_root, guard.clone(), mem, freed_pages),
             transaction_guard: guard,
         }
     }
@@ -457,10 +457,20 @@ impl<'db> WriteTransaction<'db> {
 
         let tables = TableNamespace {
             open_tables: Default::default(),
-            table_tree: TableTree::new(root_page, db.get_memory(), freed_pages.clone()),
+            table_tree: TableTree::new(
+                root_page,
+                guard.clone(),
+                db.get_memory(),
+                freed_pages.clone(),
+            ),
         };
         let system_tables = SystemNamespace {
-            table_tree: TableTree::new(system_page, db.get_memory(), freed_pages.clone()),
+            table_tree: TableTree::new(
+                system_page,
+                guard.clone(),
+                db.get_memory(),
+                freed_pages.clone(),
+            ),
             transaction_guard: guard.clone(),
         };
 
@@ -468,12 +478,13 @@ impl<'db> WriteTransaction<'db> {
             db,
             transaction_tracker,
             mem: db.get_memory(),
-            transaction_guard: guard,
+            transaction_guard: guard.clone(),
             transaction_id,
             tables: Mutex::new(tables),
             system_tables: Mutex::new(system_tables),
             freed_tree: Mutex::new(BtreeMut::new(
                 freed_root,
+                guard,
                 db.get_memory(),
                 post_commit_frees.clone(),
             )),
@@ -682,6 +693,7 @@ impl<'db> WriteTransaction<'db> {
         *self.freed_pages.lock().unwrap() = freed_pages;
         self.tables.lock().unwrap().table_tree = TableTree::new(
             savepoint.get_user_root(),
+            self.transaction_guard.clone(),
             self.mem.clone(),
             self.freed_pages.clone(),
         );
@@ -702,6 +714,7 @@ impl<'db> WriteTransaction<'db> {
 
         let mut freed_tree = BtreeMut::new(
             savepoint.get_freed_root(),
+            self.transaction_guard.clone(),
             self.mem.clone(),
             self.post_commit_frees.clone(),
         );
@@ -1122,8 +1135,12 @@ impl<'db> WriteTransaction<'db> {
             .unwrap()
         {
             eprintln!("Master tree:");
-            let master_tree: Btree<&str, InternalTableDefinition> =
-                Btree::new(Some(page), PageHint::None, self.mem.clone())?;
+            let master_tree: Btree<&str, InternalTableDefinition> = Btree::new(
+                Some(page),
+                PageHint::None,
+                self.transaction_guard.clone(),
+                self.mem.clone(),
+            )?;
             master_tree.print_debug(true)?;
         }
 
@@ -1155,10 +1172,11 @@ pub struct ReadTransaction<'a> {
 impl<'db> ReadTransaction<'db> {
     pub(crate) fn new(mem: Arc<TransactionalMemory>, guard: TransactionGuard) -> Self {
         let root_page = mem.get_data_root();
+        let guard = Arc::new(guard);
         Self {
             mem: mem.clone(),
-            tree: TableTree::new(root_page, mem, Default::default()),
-            transaction_guard: Arc::new(guard),
+            tree: TableTree::new(root_page, guard.clone(), mem, Default::default()),
+            transaction_guard: guard,
         }
     }
 

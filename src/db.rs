@@ -337,12 +337,21 @@ impl Database {
 
     pub(crate) fn verify_primary_checksums(mem: Arc<TransactionalMemory>) -> Result<bool> {
         let fake_freed_pages = Arc::new(Mutex::new(vec![]));
-        let table_tree = TableTree::new(mem.get_data_root(), mem.clone(), fake_freed_pages.clone());
+        let table_tree = TableTree::new(
+            mem.get_data_root(),
+            Arc::new(TransactionGuard::fake()),
+            mem.clone(),
+            fake_freed_pages.clone(),
+        );
         if !table_tree.verify_checksums()? {
             return Ok(false);
         }
-        let system_table_tree =
-            TableTree::new(mem.get_system_root(), mem.clone(), fake_freed_pages.clone());
+        let system_table_tree = TableTree::new(
+            mem.get_system_root(),
+            Arc::new(TransactionGuard::fake()),
+            mem.clone(),
+            fake_freed_pages.clone(),
+        );
         if !system_table_tree.verify_checksums()? {
             return Ok(false);
         }
@@ -444,7 +453,12 @@ impl Database {
         oldest_unprocessed_free_transaction: TransactionId,
     ) -> Result {
         let freed_list = Arc::new(Mutex::new(vec![]));
-        let table_tree = TableTree::new(system_root, mem.clone(), freed_list);
+        let table_tree = TableTree::new(
+            system_root,
+            Arc::new(TransactionGuard::fake()),
+            mem.clone(),
+            freed_list,
+        );
         let fake_transaction_tracker = Arc::new(TransactionTracker::new(TransactionId::new(0)));
         if let Some(savepoint_table_def) = table_tree
             .get_table::<SavepointId, SerializedSavepoint>(

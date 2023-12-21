@@ -1,3 +1,4 @@
+use crate::db::TransactionGuard;
 use crate::error::TableError;
 use crate::multimap_table::{
     finalize_tree_and_subtree_checksums, multimap_btree_stats, verify_tree_and_subtree_checksums,
@@ -417,11 +418,12 @@ pub(crate) struct TableTree<'txn> {
 impl<'txn> TableTree<'txn> {
     pub(crate) fn new(
         master_root: Option<(PageNumber, Checksum)>,
+        guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     ) -> Self {
         Self {
-            tree: BtreeMut::new(master_root, mem.clone(), freed_pages.clone()),
+            tree: BtreeMut::new(master_root, guard, mem.clone(), freed_pages.clone()),
             mem,
             pending_table_updates: Default::default(),
             freed_pages,

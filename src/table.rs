@@ -81,7 +81,12 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
         Table {
             name: name.to_string(),
             transaction,
-            tree: BtreeMut::new(table_root, mem, freed_pages),
+            tree: BtreeMut::new(
+                table_root,
+                transaction.transaction_guard(),
+                mem,
+                freed_pages,
+            ),
         }
     }
 
@@ -414,8 +419,9 @@ impl<'txn> ReadOnlyUntypedTable<'txn> {
 /// A read-only table
 pub struct ReadOnlyTable<'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
     name: String,
-    tree: Btree<'txn, K, V>,
+    tree: Btree<K, V>,
     transaction_guard: Arc<TransactionGuard>,
+    _lifetime: PhantomData<&'txn ()>,
 }
 
 impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadOnlyTable<'txn, K, V> {
@@ -428,8 +434,9 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadOnlyTable<'txn, K, 
     ) -> Result<ReadOnlyTable<'txn, K, V>> {
         Ok(ReadOnlyTable {
             name,
-            tree: Btree::new(root_page, hint, mem)?,
+            tree: Btree::new(root_page, hint, guard.clone(), mem)?,
             transaction_guard: guard,
+            _lifetime: Default::default(),
         })
     }
 }
