@@ -235,47 +235,52 @@ macro_rules! tuple_impl {
     };
 }
 
-#[rustfmt::skip]
-tuple_impl!(
+tuple_impl! {
     T0, t0, 0
-    | T1, t1, 1);
-#[rustfmt::skip]
-tuple_impl!(
+    | T1, t1, 1
+}
+
+tuple_impl! {
     T0, t0, 0,
     T1, t1, 1
-    | T2, t2, 2);
-#[rustfmt::skip]
-tuple_impl!(
+    | T2, t2, 2
+}
+
+tuple_impl! {
     T0, t0, 0,
     T1, t1, 1,
     T2, t2, 2
-    | T3, t3, 3);
-#[rustfmt::skip]
-tuple_impl!(
+    | T3, t3, 3
+}
+
+tuple_impl! {
     T0, t0, 0,
     T1, t1, 1,
     T2, t2, 2,
     T3, t3, 3
-    | T4, t4, 4);
-#[rustfmt::skip]
-tuple_impl!(
+    | T4, t4, 4
+}
+
+tuple_impl! {
     T0, t0, 0,
     T1, t1, 1,
     T2, t2, 2,
     T3, t3, 3,
     T4, t4, 4
-    | T5, t5, 5);
-#[rustfmt::skip]
-tuple_impl!(
+    | T5, t5, 5
+}
+
+tuple_impl! {
     T0, t0, 0,
     T1, t1, 1,
     T2, t2, 2,
     T3, t3, 3,
     T4, t4, 4,
     T5, t5, 5
-    | T6, t6, 6);
-#[rustfmt::skip]
-tuple_impl!(
+    | T6, t6, 6
+}
+
+tuple_impl! {
     T0, t0, 0,
     T1, t1, 1,
     T2, t2, 2,
@@ -283,9 +288,10 @@ tuple_impl!(
     T4, t4, 4,
     T5, t5, 5,
     T6, t6, 6
-    | T7, t7, 7);
-#[rustfmt::skip]
-tuple_impl!(
+    | T7, t7, 7
+}
+
+tuple_impl! {
     T0, t0, 0,
     T1, t1, 1,
     T2, t2, 2,
@@ -294,9 +300,10 @@ tuple_impl!(
     T5, t5, 5,
     T6, t6, 6,
     T7, t7, 7
-    | T8, t8, 8);
-#[rustfmt::skip]
-tuple_impl!(
+    | T8, t8, 8
+}
+
+tuple_impl! {
     T0, t0, 0,
     T1, t1, 1,
     T2, t2, 2,
@@ -306,9 +313,10 @@ tuple_impl!(
     T6, t6, 6,
     T7, t7, 7,
     T8, t8, 8
-    | T9, t9, 9);
-#[rustfmt::skip]
-tuple_impl!(
+    | T9, t9, 9
+}
+
+tuple_impl! {
     T0, t0, 0,
     T1, t1, 1,
     T2, t2, 2,
@@ -319,9 +327,10 @@ tuple_impl!(
     T7, t7, 7,
     T8, t8, 8,
     T9, t9, 9
-    | T10, t10, 10);
-#[rustfmt::skip]
-tuple_impl!(
+    | T10, t10, 10
+}
+
+tuple_impl! {
     T0, t0, 0,
     T1, t1, 1,
     T2, t2, 2,
@@ -333,7 +342,8 @@ tuple_impl!(
     T8, t8, 8,
     T9, t9, 9,
     T10, t10, 10
-    | T11, t11, 11);
+    | T11, t11, 11
+}
 
 #[cfg(test)]
 mod test {
