@@ -1,6 +1,13 @@
 # redb - Changelog
 
 ## 1.4.0 - 2023-11-21
+* Export `TableStats` type
+* Export `MutInPlaceValue` which allows custom types to support `insert_reserve()`
+* Add untyped table API which allows metadata, such as table stats, to be retrieved for at table
+  without knowing its type at compile time
+* Fix compilation on uncommon platforms (those other than Unix and Windows)
+
+## 1.4.0 - 2023-11-21
 * Add `Builder::set_repair_callback()` which can be used to set a callback function that will be invoked if the database needs repair while opening it.
 * Add support for custom storage backends. This is done by implementing the `StorageBackend` trait and
   using the `Builder::create_with_backend` function. This allows the database to be stored in a location other
