@@ -1,6 +1,6 @@
 # redb - Changelog
 
-## 1.4.0 - 2023-11-21
+## 1.5.0 - 2024-01-15
 * Export `TableStats` type
 * Export `MutInPlaceValue` which allows custom types to support `insert_reserve()`
 * Add untyped table API which allows metadata, such as table stats, to be retrieved for at table
