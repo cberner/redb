@@ -243,7 +243,7 @@ impl Iterator for AllPageNumbersBtreeIter {
     }
 }
 
-pub(crate) struct BtreeDrain<K: RedbKey, V: RedbValue> {
+pub(crate) struct BtreeDrain<K: RedbKey + 'static, V: RedbValue + 'static> {
     inner: BtreeRangeIter<K, V>,
     free_on_drop: Vec<PageNumber>,
     master_free_list: Arc<Mutex<Vec<PageNumber>>>,
@@ -298,8 +298,8 @@ impl<K: RedbKey, V: RedbValue> Drop for BtreeDrain<K, V> {
 }
 
 pub(crate) struct BtreeDrainFilter<
-    K: RedbKey,
-    V: RedbValue,
+    K: RedbKey + 'static,
+    V: RedbValue + 'static,
     F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
 > {
     inner: BtreeRangeIter<K, V>,
@@ -380,7 +380,7 @@ impl<K: RedbKey, V: RedbValue, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>
     }
 }
 
-pub(crate) struct BtreeRangeIter<K: RedbKey, V: RedbValue> {
+pub(crate) struct BtreeRangeIter<K: RedbKey + 'static, V: RedbValue + 'static> {
     left: Option<RangeIterState>, // Exclusive. The previous element returned
     right: Option<RangeIterState>, // Exclusive. The previous element returned
     include_left: bool,           // left is inclusive, instead of exclusive
@@ -390,15 +390,12 @@ pub(crate) struct BtreeRangeIter<K: RedbKey, V: RedbValue> {
     _value_type: PhantomData<V>,
 }
 
-impl<K: RedbKey, V: RedbValue> BtreeRangeIter<K, V> {
-    pub(crate) fn new<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
+impl<K: RedbKey + 'static, V: RedbValue + 'static> BtreeRangeIter<K, V> {
+    pub(crate) fn new<'a, T: RangeBounds<KR>, KR: Borrow<K::SelfType<'a>>>(
         query_range: &'_ T,
         table_root: Option<PageNumber>,
         manager: Arc<TransactionalMemory>,
-    ) -> Result<Self>
-    where
-        K: 'a0,
-    {
+    ) -> Result<Self> {
         if let Some(root) = table_root {
             let (include_left, left) = match query_range.start_bound() {
                 Bound::Included(k) => find_iter_left::<K, V>(
