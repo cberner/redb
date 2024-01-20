@@ -6,7 +6,9 @@ use crate::multimap_table::{
 use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
 use crate::tree_store::btree_base::Checksum;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
-use crate::tree_store::{BtreeMut, BtreeRangeIter, PageNumber, RawBtree, TransactionalMemory};
+use crate::tree_store::{
+    Btree, BtreeMut, BtreeRangeIter, PageHint, PageNumber, RawBtree, TransactionalMemory,
+};
 use crate::types::{MutInPlaceValue, RedbKey, RedbValue, TypeName};
 use crate::{DatabaseStats, Result};
 use std::cmp::max;
@@ -407,15 +409,120 @@ impl Iterator for TableNameIter {
     }
 }
 
-pub(crate) struct TableTree<'txn> {
+pub(crate) struct TableTree {
+    tree: Btree<&'static str, InternalTableDefinition>,
+}
+
+impl TableTree {
+    pub(crate) fn new(
+        master_root: Option<(PageNumber, Checksum)>,
+        page_hint: PageHint,
+        guard: Arc<TransactionGuard>,
+        mem: Arc<TransactionalMemory>,
+    ) -> Result<Self> {
+        Ok(Self {
+            tree: Btree::new(master_root, page_hint, guard, mem)?,
+        })
+    }
+
+    // root_page: the root of the master table
+    pub(crate) fn list_tables(&self, table_type: TableType) -> Result<Vec<String>> {
+        let iter = self.tree.range::<RangeFull, &str>(&(..))?;
+        let iter = TableNameIter {
+            inner: iter,
+            table_type,
+        };
+        let mut result = vec![];
+        for table in iter {
+            result.push(table?);
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn get_table_untyped(
+        &self,
+        name: &str,
+        table_type: TableType,
+    ) -> Result<Option<InternalTableDefinition>, TableError> {
+        if let Some(guard) = self.tree.get(&name)? {
+            let definition = guard.value();
+            if definition.get_type() != table_type {
+                return if definition.get_type() == TableType::Multimap {
+                    Err(TableError::TableIsMultimap(name.to_string()))
+                } else {
+                    Err(TableError::TableIsNotMultimap(name.to_string()))
+                };
+            }
+            if definition.get_key_alignment() != ALIGNMENT {
+                return Err(TableError::TypeDefinitionChanged {
+                    name: definition.key_type.clone(),
+                    alignment: definition.get_key_alignment(),
+                    width: definition.get_fixed_key_size(),
+                });
+            }
+            if definition.get_value_alignment() != ALIGNMENT {
+                return Err(TableError::TypeDefinitionChanged {
+                    name: definition.value_type.clone(),
+                    alignment: definition.get_value_alignment(),
+                    width: definition.get_fixed_value_size(),
+                });
+            }
+
+            Ok(Some(definition))
+        } else {
+            Ok(None)
+        }
+    }
+
+    // root_page: the root of the master table
+    pub(crate) fn get_table<K: RedbKey, V: RedbValue>(
+        &self,
+        name: &str,
+        table_type: TableType,
+    ) -> Result<Option<InternalTableDefinition>, TableError> {
+        Ok(
+            if let Some(definition) = self.get_table_untyped(name, table_type)? {
+                // Do additional checks on the types to be sure they match
+                if definition.key_type != K::type_name() || definition.value_type != V::type_name()
+                {
+                    return Err(TableError::TableTypeMismatch {
+                        table: name.to_string(),
+                        key: definition.key_type,
+                        value: definition.value_type,
+                    });
+                }
+                if definition.get_fixed_key_size() != K::fixed_width() {
+                    return Err(TableError::TypeDefinitionChanged {
+                        name: K::type_name(),
+                        alignment: definition.get_key_alignment(),
+                        width: definition.get_fixed_key_size(),
+                    });
+                }
+                if definition.get_fixed_value_size() != V::fixed_width() {
+                    return Err(TableError::TypeDefinitionChanged {
+                        name: V::type_name(),
+                        alignment: definition.get_value_alignment(),
+                        width: definition.get_fixed_value_size(),
+                    });
+                }
+                Some(definition)
+            } else {
+                None
+            },
+        )
+    }
+}
+
+pub(crate) struct TableTreeMut<'txn> {
     tree: BtreeMut<'txn, &'static str, InternalTableDefinition>,
+    guard: Arc<TransactionGuard>,
     mem: Arc<TransactionalMemory>,
     // Cached updates from tables that have been closed. These must be flushed to the btree
     pending_table_updates: HashMap<String, Option<(PageNumber, Checksum)>>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
 }
 
-impl<'txn> TableTree<'txn> {
+impl<'txn> TableTreeMut<'txn> {
     pub(crate) fn new(
         master_root: Option<(PageNumber, Checksum)>,
         guard: Arc<TransactionGuard>,
@@ -423,7 +530,8 @@ impl<'txn> TableTree<'txn> {
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     ) -> Self {
         Self {
-            tree: BtreeMut::new(master_root, guard, mem.clone(), freed_pages.clone()),
+            tree: BtreeMut::new(master_root, guard.clone(), mem.clone(), freed_pages.clone()),
+            guard,
             mem,
             pending_table_updates: Default::default(),
             freed_pages,
@@ -557,16 +665,13 @@ impl<'txn> TableTree<'txn> {
 
     // root_page: the root of the master table
     pub(crate) fn list_tables(&self, table_type: TableType) -> Result<Vec<String>> {
-        let iter = self.tree.range::<RangeFull, &str>(&(..))?;
-        let iter = TableNameIter {
-            inner: iter,
-            table_type,
-        };
-        let mut result = vec![];
-        for table in iter {
-            result.push(table?);
-        }
-        Ok(result)
+        let tree = TableTree::new(
+            self.tree.get_root(),
+            PageHint::None,
+            self.guard.clone(),
+            self.mem.clone(),
+        )?;
+        tree.list_tables(table_type)
     }
 
     pub(crate) fn get_table_untyped(
@@ -574,38 +679,21 @@ impl<'txn> TableTree<'txn> {
         name: &str,
         table_type: TableType,
     ) -> Result<Option<InternalTableDefinition>, TableError> {
-        if let Some(guard) = self.tree.get(&name)? {
-            let mut definition = guard.value();
-            if definition.get_type() != table_type {
-                return if definition.get_type() == TableType::Multimap {
-                    Err(TableError::TableIsMultimap(name.to_string()))
-                } else {
-                    Err(TableError::TableIsNotMultimap(name.to_string()))
-                };
-            }
-            if definition.get_key_alignment() != ALIGNMENT {
-                return Err(TableError::TypeDefinitionChanged {
-                    name: definition.key_type.clone(),
-                    alignment: definition.get_key_alignment(),
-                    width: definition.get_fixed_key_size(),
-                });
-            }
-            if definition.get_value_alignment() != ALIGNMENT {
-                return Err(TableError::TypeDefinitionChanged {
-                    name: definition.value_type.clone(),
-                    alignment: definition.get_value_alignment(),
-                    width: definition.get_fixed_value_size(),
-                });
-            }
+        let tree = TableTree::new(
+            self.tree.get_root(),
+            PageHint::None,
+            self.guard.clone(),
+            self.mem.clone(),
+        )?;
+        let mut result = tree.get_table_untyped(name, table_type);
 
+        if let Ok(Some(definition)) = result.as_mut() {
             if let Some(updated_root) = self.pending_table_updates.get(name) {
                 definition.table_root = *updated_root;
             }
-
-            Ok(Some(definition))
-        } else {
-            Ok(None)
         }
+
+        result
     }
 
     // root_page: the root of the master table
@@ -614,36 +702,21 @@ impl<'txn> TableTree<'txn> {
         name: &str,
         table_type: TableType,
     ) -> Result<Option<InternalTableDefinition>, TableError> {
-        Ok(
-            if let Some(definition) = self.get_table_untyped(name, table_type)? {
-                // Do additional checks on the types to be sure they match
-                if definition.key_type != K::type_name() || definition.value_type != V::type_name()
-                {
-                    return Err(TableError::TableTypeMismatch {
-                        table: name.to_string(),
-                        key: definition.key_type,
-                        value: definition.value_type,
-                    });
-                }
-                if definition.get_fixed_key_size() != K::fixed_width() {
-                    return Err(TableError::TypeDefinitionChanged {
-                        name: K::type_name(),
-                        alignment: definition.get_key_alignment(),
-                        width: definition.get_fixed_key_size(),
-                    });
-                }
-                if definition.get_fixed_value_size() != V::fixed_width() {
-                    return Err(TableError::TypeDefinitionChanged {
-                        name: V::type_name(),
-                        alignment: definition.get_value_alignment(),
-                        width: definition.get_fixed_value_size(),
-                    });
-                }
-                Some(definition)
-            } else {
-                None
-            },
-        )
+        let tree = TableTree::new(
+            self.tree.get_root(),
+            PageHint::None,
+            self.guard.clone(),
+            self.mem.clone(),
+        )?;
+        let mut result = tree.get_table::<K, V>(name, table_type);
+
+        if let Ok(Some(definition)) = result.as_mut() {
+            if let Some(updated_root) = self.pending_table_updates.get(name) {
+                definition.table_root = *updated_root;
+            }
+        }
+
+        result
     }
 
     // root_page: the root of the master table

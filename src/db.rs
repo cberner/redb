@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeRangeIter, Checksum, FreedPageList, FreedTableKey,
-    InternalTableDefinition, PageHint, PageNumber, RawBtree, SerializedSavepoint, TableTree,
+    InternalTableDefinition, PageHint, PageNumber, RawBtree, SerializedSavepoint, TableTreeMut,
     TableType, TransactionalMemory, PAGE_SIZE,
 };
 use crate::types::{RedbKey, RedbValue};
@@ -337,7 +337,7 @@ impl Database {
 
     pub(crate) fn verify_primary_checksums(mem: Arc<TransactionalMemory>) -> Result<bool> {
         let fake_freed_pages = Arc::new(Mutex::new(vec![]));
-        let table_tree = TableTree::new(
+        let table_tree = TableTreeMut::new(
             mem.get_data_root(),
             Arc::new(TransactionGuard::fake()),
             mem.clone(),
@@ -346,7 +346,7 @@ impl Database {
         if !table_tree.verify_checksums()? {
             return Ok(false);
         }
-        let system_table_tree = TableTree::new(
+        let system_table_tree = TableTreeMut::new(
             mem.get_system_root(),
             Arc::new(TransactionGuard::fake()),
             mem.clone(),
@@ -453,7 +453,7 @@ impl Database {
         oldest_unprocessed_free_transaction: TransactionId,
     ) -> Result {
         let freed_list = Arc::new(Mutex::new(vec![]));
-        let table_tree = TableTree::new(
+        let table_tree = TableTreeMut::new(
             system_root,
             Arc::new(TransactionGuard::fake()),
             mem.clone(),
@@ -803,7 +803,7 @@ impl Database {
         let guard = self.allocate_read_transaction()?;
         #[cfg(feature = "logging")]
         info!("Beginning read transaction id={:?}", guard.id());
-        Ok(ReadTransaction::new(self.get_memory(), guard))
+        ReadTransaction::new(self.get_memory(), guard)
     }
 }
 
