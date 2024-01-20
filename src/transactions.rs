@@ -21,7 +21,7 @@ use log::{info, warn};
 use std::borrow::Borrow;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::ops::{RangeBounds, RangeFull};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1273,6 +1273,28 @@ impl<'a> ReadTransaction<'a> {
         self.tree
             .list_tables(TableType::Multimap)
             .map(|x| x.into_iter().map(UntypedMultimapTableHandle::new))
+    }
+}
+
+impl ReadTransaction<'static> {
+    /// Close the transaction
+    ///
+    /// Transactions are automatically closed when they and all objects referencing them have been dropped.
+    /// This method can be used to ensure that there are no outstanding objects remaining.
+    ///
+    /// Returns `ReadTransactionStillInUse` error if a table or other object retrieved from the transaction still references this transaction
+    pub fn close(self) -> Result<(), TransactionError> {
+        if Arc::strong_count(&self.transaction_guard) > 1 {
+            return Err(TransactionError::ReadTransactionStillInUse(self));
+        }
+        // No-op, just drop ourself
+        Ok(())
+    }
+}
+
+impl Debug for ReadTransaction<'static> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReadTransaction")
     }
 }
 
