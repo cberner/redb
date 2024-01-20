@@ -217,7 +217,7 @@ impl UntypedBtreeMut {
     }
 }
 
-pub(crate) struct BtreeMut<'a, K: RedbKey, V: RedbValue> {
+pub(crate) struct BtreeMut<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
     mem: Arc<TransactionalMemory>,
     transaction_guard: Arc<TransactionGuard>,
     root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
@@ -227,7 +227,7 @@ pub(crate) struct BtreeMut<'a, K: RedbKey, V: RedbValue> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, K: RedbKey + 'a, V: RedbValue + 'a> BtreeMut<'a, K, V> {
+impl<K: RedbKey + 'static, V: RedbValue + 'static> BtreeMut<'_, K, V> {
     pub(crate) fn new(
         root: Option<(PageNumber, Checksum)>,
         guard: Arc<TransactionGuard>,
@@ -552,7 +552,7 @@ impl RawBtree {
     }
 }
 
-pub(crate) struct Btree<K: RedbKey, V: RedbValue> {
+pub(crate) struct Btree<K: RedbKey + 'static, V: RedbValue + 'static> {
     mem: Arc<TransactionalMemory>,
     _transaction_guard: Arc<TransactionGuard>,
     // Cache of the root page to avoid repeated lookups
@@ -621,13 +621,10 @@ impl<K: RedbKey, V: RedbValue> Btree<K, V> {
         }
     }
 
-    pub(crate) fn range<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
+    pub(crate) fn range<'a0, T: RangeBounds<KR>, KR: Borrow<K::SelfType<'a0>>>(
         &self,
         range: &'_ T,
-    ) -> Result<BtreeRangeIter<K, V>>
-    where
-        K: 'a0,
-    {
+    ) -> Result<BtreeRangeIter<K, V>> {
         BtreeRangeIter::new(range, self.root.map(|(p, _)| p), self.mem.clone())
     }
 
