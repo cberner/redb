@@ -18,5 +18,5 @@ pub(crate) use page_store::{
     FILE_FORMAT_VERSION, MAX_VALUE_LENGTH, PAGE_SIZE,
 };
 pub(crate) use table_tree::{
-    FreedPageList, FreedTableKey, InternalTableDefinition, TableTree, TableType,
+    FreedPageList, FreedTableKey, InternalTableDefinition, TableTree, TableTreeMut, TableType,
 };

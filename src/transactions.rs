@@ -6,13 +6,15 @@ use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeMut, Checksum, FreedPageList, FreedTableKey, InternalTableDefinition, PageHint,
-    PageNumber, SerializedSavepoint, TableTree, TableType, TransactionalMemory, MAX_VALUE_LENGTH,
+    PageNumber, SerializedSavepoint, TableTree, TableTreeMut, TableType, TransactionalMemory,
+    MAX_VALUE_LENGTH,
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{
     AccessGuard, Database, MultimapTable, MultimapTableDefinition, MultimapTableHandle, Range,
     ReadOnlyMultimapTable, ReadOnlyTable, Result, Savepoint, SavepointError, StorageError, Table,
-    TableDefinition, TableError, TableHandle, UntypedMultimapTableHandle, UntypedTableHandle,
+    TableDefinition, TableError, TableHandle, TransactionError, UntypedMultimapTableHandle,
+    UntypedTableHandle,
 };
 #[cfg(feature = "logging")]
 use log::{info, warn};
@@ -265,7 +267,7 @@ impl<'db, 's, K: RedbKey + 'static, V: RedbValue + 'static> Drop for SystemTable
 }
 
 struct SystemNamespace<'db> {
-    table_tree: TableTree<'db>,
+    table_tree: TableTreeMut<'db>,
     transaction_guard: Arc<TransactionGuard>,
 }
 
@@ -307,7 +309,7 @@ impl<'db> SystemNamespace<'db> {
 
 struct TableNamespace<'db> {
     open_tables: HashMap<String, &'static panic::Location<'static>>,
-    table_tree: TableTree<'db>,
+    table_tree: TableTreeMut<'db>,
 }
 
 impl<'db> TableNamespace<'db> {
@@ -457,7 +459,7 @@ impl<'db> WriteTransaction<'db> {
 
         let tables = TableNamespace {
             open_tables: Default::default(),
-            table_tree: TableTree::new(
+            table_tree: TableTreeMut::new(
                 root_page,
                 guard.clone(),
                 db.get_memory(),
@@ -465,7 +467,7 @@ impl<'db> WriteTransaction<'db> {
             ),
         };
         let system_tables = SystemNamespace {
-            table_tree: TableTree::new(
+            table_tree: TableTreeMut::new(
                 system_page,
                 guard.clone(),
                 db.get_memory(),
@@ -691,7 +693,7 @@ impl<'db> WriteTransaction<'db> {
             }
         }
         *self.freed_pages.lock().unwrap() = freed_pages;
-        self.tables.lock().unwrap().table_tree = TableTree::new(
+        self.tables.lock().unwrap().table_tree = TableTreeMut::new(
             savepoint.get_user_root(),
             self.transaction_guard.clone(),
             self.mem.clone(),
@@ -1165,19 +1167,25 @@ impl<'a> Drop for WriteTransaction<'a> {
 /// Read-only transactions may exist concurrently with writes
 pub struct ReadTransaction<'a> {
     mem: Arc<TransactionalMemory>,
-    tree: TableTree<'a>,
+    tree: TableTree,
     transaction_guard: Arc<TransactionGuard>,
+    _lifetime: PhantomData<&'a ()>,
 }
 
 impl<'db> ReadTransaction<'db> {
-    pub(crate) fn new(mem: Arc<TransactionalMemory>, guard: TransactionGuard) -> Self {
+    pub(crate) fn new(
+        mem: Arc<TransactionalMemory>,
+        guard: TransactionGuard,
+    ) -> Result<Self, TransactionError> {
         let root_page = mem.get_data_root();
         let guard = Arc::new(guard);
-        Self {
+        Ok(Self {
             mem: mem.clone(),
-            tree: TableTree::new(root_page, guard.clone(), mem, Default::default()),
+            tree: TableTree::new(root_page, PageHint::Clean, guard.clone(), mem)
+                .map_err(TransactionError::Storage)?,
             transaction_guard: guard,
-        }
+            _lifetime: Default::default(),
+        })
     }
 
     /// Open the given table
