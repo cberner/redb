@@ -605,6 +605,7 @@ impl<
     }
 }
 
+#[derive(Clone)]
 pub struct Range<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
     inner: BtreeRangeIter<K, V>,
     _transaction_guard: Arc<TransactionGuard>,

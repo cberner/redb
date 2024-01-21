@@ -1271,6 +1271,27 @@ fn range_arc() {
 }
 
 #[test]
+fn range_clone() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert("hello", "world").unwrap();
+        let mut iter1 = table.iter().unwrap();
+        let mut iter2 = iter1.clone();
+        let (k1, v1) = iter1.next().unwrap().unwrap();
+        let (k2, v2) = iter2.next().unwrap().unwrap();
+        assert_eq!(k1.value(), k2.value());
+        assert_eq!(v1.value(), v2.value());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
 fn drain_lifetime() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
