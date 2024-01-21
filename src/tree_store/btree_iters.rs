@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use std::ops::{Range, RangeBounds};
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RangeIterState {
     Leaf {
         page: PageImpl,
@@ -380,6 +380,7 @@ impl<K: RedbKey, V: RedbValue, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct BtreeRangeIter<K: RedbKey + 'static, V: RedbValue + 'static> {
     left: Option<RangeIterState>, // Exclusive. The previous element returned
     right: Option<RangeIterState>, // Exclusive. The previous element returned
