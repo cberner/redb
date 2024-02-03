@@ -1,4 +1,4 @@
-use crate::types::{RedbValue, TypeName};
+use crate::types::{TypeName, Value};
 
 // Encode len as a varint and store it at the end of output
 fn encode_varint_len(len: usize, output: &mut Vec<u8>) {
@@ -32,7 +32,7 @@ fn decode_varint_len(data: &[u8]) -> (usize, usize) {
     }
 }
 
-impl<T: RedbValue> RedbValue for Vec<T> {
+impl<T: Value> Value for Vec<T> {
     type SelfType<'a> = Vec<T::SelfType<'a>>
     where
         Self: 'a;

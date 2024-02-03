@@ -2,7 +2,7 @@ use crate::tree_store::page_store::{
     xxh3_checksum, CachePriority, Page, PageImpl, PageMut, TransactionalMemory,
 };
 use crate::tree_store::PageNumber;
-use crate::types::{MutInPlaceValue, RedbKey, RedbValue};
+use crate::types::{MutInPlaceValue, RedbKey, Value};
 use crate::{Result, StorageError};
 use std::cmp::Ordering;
 use std::marker::PhantomData;
@@ -81,7 +81,7 @@ impl EitherPage {
     }
 }
 
-pub struct AccessGuard<'a, V: RedbValue> {
+pub struct AccessGuard<'a, V: Value> {
     page: EitherPage,
     offset: usize,
     len: usize,
@@ -91,7 +91,7 @@ pub struct AccessGuard<'a, V: RedbValue> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, V: RedbValue> AccessGuard<'a, V> {
+impl<'a, V: Value> AccessGuard<'a, V> {
     pub(crate) fn with_page(page: PageImpl, range: Range<usize>) -> Self {
         Self {
             page: EitherPage::Immutable(page),
@@ -151,7 +151,7 @@ impl<'a, V: RedbValue> AccessGuard<'a, V> {
     }
 }
 
-impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
+impl<'a, V: Value> Drop for AccessGuard<'a, V> {
     fn drop(&mut self) {
         match self.on_drop {
             OnDrop::None => {}
@@ -170,7 +170,7 @@ impl<'a, V: RedbValue> Drop for AccessGuard<'a, V> {
     }
 }
 
-pub struct AccessGuardMut<'a, V: RedbValue> {
+pub struct AccessGuardMut<'a, V: Value> {
     page: PageMut,
     offset: usize,
     len: usize,
@@ -179,7 +179,7 @@ pub struct AccessGuardMut<'a, V: RedbValue> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, V: RedbValue> AccessGuardMut<'a, V> {
+impl<'a, V: Value> AccessGuardMut<'a, V> {
     pub(crate) fn new(page: PageMut, offset: usize, len: usize) -> Self {
         AccessGuardMut {
             page,
@@ -243,7 +243,7 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
-    pub(super) fn print_node<K: RedbKey, V: RedbValue>(&self, include_value: bool) {
+    pub(super) fn print_node<K: RedbKey, V: Value>(&self, include_value: bool) {
         let mut i = 0;
         while let Some(entry) = self.entry(i) {
             eprint!(" key_{}={:?}", i, K::from_bytes(entry.key()));

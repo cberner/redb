@@ -1,6 +1,6 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{Checksum, PageNumber, TransactionalMemory};
-use crate::{RedbValue, TypeName};
+use crate::{TypeName, Value};
 use std::fmt::Debug;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -297,7 +297,7 @@ impl<'a> SerializedSavepoint<'a> {
     }
 }
 
-impl<'data> RedbValue for SerializedSavepoint<'data> {
+impl<'data> Value for SerializedSavepoint<'data> {
     type SelfType<'a> = SerializedSavepoint<'a> where Self: 'a;
     type AsBytes<'a> = &'a [u8] where Self: 'a;
 

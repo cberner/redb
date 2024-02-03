@@ -70,7 +70,7 @@ impl TypeName {
     }
 }
 
-pub trait RedbValue: Debug {
+pub trait Value: Debug {
     /// SelfType<'a> must be the same type as Self with all lifetimes replaced with 'a
     type SelfType<'a>: Debug + 'a
     where
@@ -101,7 +101,7 @@ pub trait RedbValue: Debug {
 
 /// Implementing this trait indicates that the type can be mutated in-place as a &mut [u8].
 /// This enables the .insert_reserve() method on Table
-pub trait MutInPlaceValue: RedbValue {
+pub trait MutInPlaceValue: Value {
     /// The base type such that &mut [u8] can be safely transmuted to &mut BaseRefType
     type BaseRefType: Debug + ?Sized;
 
@@ -124,12 +124,12 @@ impl MutInPlaceValue for &[u8] {
     }
 }
 
-pub trait RedbKey: RedbValue {
+pub trait RedbKey: Value {
     /// Compare data1 with data2
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering;
 }
 
-impl RedbValue for () {
+impl Value for () {
     type SelfType<'a> = ()
     where
         Self: 'a;
@@ -168,7 +168,7 @@ impl RedbKey for () {
     }
 }
 
-impl RedbValue for bool {
+impl Value for bool {
     type SelfType<'a> = bool
         where
             Self: 'a;
@@ -215,7 +215,7 @@ impl RedbKey for bool {
     }
 }
 
-impl<T: RedbValue> RedbValue for Option<T> {
+impl<T: Value> Value for Option<T> {
     type SelfType<'a> = Option<T::SelfType<'a>>
     where
         Self: 'a;
@@ -277,7 +277,7 @@ impl<T: RedbKey> RedbKey for Option<T> {
     }
 }
 
-impl RedbValue for &[u8] {
+impl Value for &[u8] {
     type SelfType<'a> = &'a [u8]
     where
         Self: 'a;
@@ -315,7 +315,7 @@ impl RedbKey for &[u8] {
     }
 }
 
-impl<const N: usize> RedbValue for &[u8; N] {
+impl<const N: usize> Value for &[u8; N] {
     type SelfType<'a> = &'a [u8; N]
     where
         Self: 'a;
@@ -353,7 +353,7 @@ impl<const N: usize> RedbKey for &[u8; N] {
     }
 }
 
-impl RedbValue for &str {
+impl Value for &str {
     type SelfType<'a> = &'a str
     where
         Self: 'a;
@@ -393,7 +393,7 @@ impl RedbKey for &str {
     }
 }
 
-impl RedbValue for char {
+impl Value for char {
     type SelfType<'a> = char;
     type AsBytes<'a> = [u8; 3] where Self: 'a;
 
@@ -430,7 +430,7 @@ impl RedbKey for char {
 
 macro_rules! le_value {
     ($t:ty) => {
-        impl RedbValue for $t {
+        impl Value for $t {
             type SelfType<'a> = $t;
             type AsBytes<'a> = [u8; std::mem::size_of::<$t>()] where Self: 'a;
 

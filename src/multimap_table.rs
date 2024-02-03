@@ -7,7 +7,7 @@ use crate::tree_store::{
     BtreeStats, CachePriority, Checksum, LeafAccessor, LeafMutator, Page, PageHint, PageNumber,
     RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF, MAX_VALUE_LENGTH,
 };
-use crate::types::{RedbKey, RedbValue, TypeName};
+use crate::types::{RedbKey, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
 use std::borrow::Borrow;
 use std::cmp::max;
@@ -64,7 +64,7 @@ fn multimap_stats_helper(
                         let inline_accessor = LeafAccessor::new(
                             collection.as_inline(),
                             fixed_value_size,
-                            <() as RedbValue>::fixed_width(),
+                            <() as Value>::fixed_width(),
                         );
                         leaf_bytes +=
                             inline_accessor.length_of_pairs(0, inline_accessor.num_pairs()) as u64;
@@ -93,7 +93,7 @@ fn multimap_stats_helper(
                             Some(collection.as_subtree().0),
                             mem,
                             fixed_value_size,
-                            <() as RedbValue>::fixed_width(),
+                            <() as Value>::fixed_width(),
                         )?;
                         max_child_height = max(max_child_height, stats.tree_height);
                         branch_pages += stats.branch_pages;
@@ -397,7 +397,7 @@ impl<V> std::fmt::Debug for DynamicCollection<V> {
     }
 }
 
-impl<V> RedbValue for &DynamicCollection<V> {
+impl<V> Value for &DynamicCollection<V> {
     type SelfType<'a> = &'a DynamicCollection<V>
     where
         Self: 'a;
@@ -483,11 +483,8 @@ impl<V: RedbKey> DynamicCollection<V> {
     ) -> Result<MultimapValue<'a, V>> {
         Ok(match collection.value().collection_type() {
             Inline => {
-                let leaf_iter = LeafKeyIter::new(
-                    collection,
-                    V::fixed_width(),
-                    <() as RedbValue>::fixed_width(),
-                );
+                let leaf_iter =
+                    LeafKeyIter::new(collection, V::fixed_width(), <() as Value>::fixed_width());
                 MultimapValue::new_inline(leaf_iter, guard)
             }
             Subtree => {
@@ -509,11 +506,8 @@ impl<V: RedbKey> DynamicCollection<V> {
     ) -> Result<MultimapValue<'a, V>> {
         Ok(match collection.value().collection_type() {
             Inline => {
-                let leaf_iter = LeafKeyIter::new(
-                    collection,
-                    V::fixed_width(),
-                    <() as RedbValue>::fixed_width(),
-                );
+                let leaf_iter =
+                    LeafKeyIter::new(collection, V::fixed_width(), <() as Value>::fixed_width());
                 MultimapValue::new_inline(leaf_iter, guard)
             }
             Subtree => {
@@ -811,7 +805,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V>
                     let accessor = LeafAccessor::new(
                         leaf_data,
                         V::fixed_width(),
-                        <() as RedbValue>::fixed_width(),
+                        <() as Value>::fixed_width(),
                     );
                     let (position, found) = accessor.position::<V>(value_bytes_ref);
                     if found {
@@ -827,7 +821,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V>
                         new_pairs,
                         new_pair_bytes,
                         V::fixed_width(),
-                        <() as RedbValue>::fixed_width(),
+                        <() as Value>::fixed_width(),
                     );
 
                     if required_inline_bytes < self.mem.get_page_size() / 2 {
@@ -836,22 +830,19 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V>
                             &mut data,
                             new_pairs,
                             V::fixed_width(),
-                            <() as RedbValue>::fixed_width(),
+                            <() as Value>::fixed_width(),
                             new_key_bytes,
                         );
                         for i in 0..accessor.num_pairs() {
                             if i == position {
-                                builder.append(
-                                    value_bytes_ref,
-                                    <() as RedbValue>::as_bytes(&()).as_ref(),
-                                );
+                                builder
+                                    .append(value_bytes_ref, <() as Value>::as_bytes(&()).as_ref());
                             }
                             let entry = accessor.entry(i).unwrap();
                             builder.append(entry.key(), entry.value());
                         }
                         if position == accessor.num_pairs() {
-                            builder
-                                .append(value_bytes_ref, <() as RedbValue>::as_bytes(&()).as_ref());
+                            builder.append(value_bytes_ref, <() as Value>::as_bytes(&()).as_ref());
                         }
                         drop(builder);
                         drop(guard);
@@ -908,7 +899,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V>
                 1,
                 value_bytes_ref.len(),
                 V::fixed_width(),
-                <() as RedbValue>::fixed_width(),
+                <() as Value>::fixed_width(),
             );
             if required_inline_bytes < self.mem.get_page_size() / 2 {
                 let mut data = vec![0; required_inline_bytes];
@@ -916,10 +907,10 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V>
                     &mut data,
                     1,
                     V::fixed_width(),
-                    <() as RedbValue>::fixed_width(),
+                    <() as Value>::fixed_width(),
                     value_bytes_ref.len(),
                 );
-                builder.append(value_bytes_ref, <() as RedbValue>::as_bytes(&()).as_ref());
+                builder.append(value_bytes_ref, <() as Value>::as_bytes(&()).as_ref());
                 drop(builder);
                 let inline_data = DynamicCollection::<V>::make_inline_data(&data);
                 self.tree
@@ -965,11 +956,8 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V>
         let existed = match v.collection_type() {
             Inline => {
                 let leaf_data = v.as_inline();
-                let accessor = LeafAccessor::new(
-                    leaf_data,
-                    V::fixed_width(),
-                    <() as RedbValue>::fixed_width(),
-                );
+                let accessor =
+                    LeafAccessor::new(leaf_data, V::fixed_width(), <() as Value>::fixed_width());
                 if let Some(position) = accessor.find_key::<V>(V::as_bytes(value.borrow()).as_ref())
                 {
                     let old_num_pairs = accessor.num_pairs();
@@ -983,7 +971,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V>
                             old_num_pairs - 1,
                             old_pairs_len - removed_value_len,
                             V::fixed_width(),
-                            <() as RedbValue>::fixed_width(),
+                            <() as Value>::fixed_width(),
                         );
                         let mut new_data = vec![0; required];
                         let new_key_len =
@@ -992,7 +980,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V>
                             &mut new_data,
                             old_num_pairs - 1,
                             V::fixed_width(),
-                            <() as RedbValue>::fixed_width(),
+                            <() as Value>::fixed_width(),
                             new_key_len,
                         );
                         for i in 0..old_num_pairs {
@@ -1031,7 +1019,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V>
                             let accessor = LeafAccessor::new(
                                 page.memory(),
                                 V::fixed_width(),
-                                <() as RedbValue>::fixed_width(),
+                                <() as Value>::fixed_width(),
                             );
                             let len = accessor.total_length();
                             if len < self.mem.get_page_size() / 2 {
@@ -1088,7 +1076,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V>
                 let all_pages = AllPageNumbersBtreeIter::new(
                     root,
                     V::fixed_width(),
-                    <() as RedbValue>::fixed_width(),
+                    <() as Value>::fixed_width(),
                     self.mem.clone(),
                 )?;
                 for page in all_pages {

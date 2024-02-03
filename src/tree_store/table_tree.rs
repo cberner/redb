@@ -9,7 +9,7 @@ use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{
     Btree, BtreeMut, BtreeRangeIter, PageHint, PageNumber, RawBtree, TransactionalMemory,
 };
-use crate::types::{MutInPlaceValue, RedbKey, RedbValue, TypeName};
+use crate::types::{MutInPlaceValue, RedbKey, TypeName, Value};
 use crate::{DatabaseStats, Result};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -28,7 +28,7 @@ pub(crate) struct FreedTableKey {
     pub(crate) pagination_id: u64,
 }
 
-impl RedbValue for FreedTableKey {
+impl Value for FreedTableKey {
     type SelfType<'a> = FreedTableKey
     where
         Self: 'a;
@@ -129,7 +129,7 @@ impl FreedPageListMut {
     }
 }
 
-impl RedbValue for FreedPageList<'_> {
+impl Value for FreedPageList<'_> {
     type SelfType<'a> = FreedPageList<'a>
         where
             Self: 'a;
@@ -239,7 +239,7 @@ impl InternalTableDefinition {
     }
 }
 
-impl RedbValue for InternalTableDefinition {
+impl Value for InternalTableDefinition {
     type SelfType<'a> = InternalTableDefinition;
     type AsBytes<'a> = Vec<u8>;
 
@@ -475,7 +475,7 @@ impl TableTree {
     }
 
     // root_page: the root of the master table
-    pub(crate) fn get_table<K: RedbKey, V: RedbValue>(
+    pub(crate) fn get_table<K: RedbKey, V: Value>(
         &self,
         name: &str,
         table_type: TableType,
@@ -697,7 +697,7 @@ impl<'txn> TableTreeMut<'txn> {
     }
 
     // root_page: the root of the master table
-    pub(crate) fn get_table<K: RedbKey, V: RedbValue>(
+    pub(crate) fn get_table<K: RedbKey, V: Value>(
         &self,
         name: &str,
         table_type: TableType,
@@ -750,7 +750,7 @@ impl<'txn> TableTreeMut<'txn> {
 
     // Returns a tuple of the table id and the new root page
     // root_page: the root of the master table
-    pub(crate) fn get_or_create_table<K: RedbKey, V: RedbValue>(
+    pub(crate) fn get_or_create_table<K: RedbKey, V: Value>(
         &mut self,
         name: &str,
         table_type: TableType,
@@ -869,7 +869,7 @@ impl<'txn> TableTreeMut<'txn> {
 mod test {
     use crate::tree_store::{InternalTableDefinition, TableType};
     use crate::types::TypeName;
-    use crate::RedbValue;
+    use crate::Value;
 
     #[test]
     fn round_trip() {

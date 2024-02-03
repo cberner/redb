@@ -1,4 +1,4 @@
-use crate::types::{RedbKey, RedbValue, TypeName};
+use crate::types::{RedbKey, TypeName, Value};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::mem::size_of;
@@ -184,7 +184,7 @@ macro_rules! compare_fixed_impl {
 
 macro_rules! tuple_impl {
     ( $($t:ident, $v:ident, $i:tt ),+ | $t_last:ident, $v_last:ident, $i_last:tt ) => {
-        impl<$($t: RedbValue,)+ $t_last: RedbValue> RedbValue for ($($t,)+ $t_last) {
+        impl<$($t: Value,)+ $t_last: Value> Value for ($($t,)+ $t_last) {
             type SelfType<'a> = (
                 $(<$t>::SelfType<'a>,)+
                 <$t_last>::SelfType<'a>,
@@ -347,7 +347,7 @@ tuple_impl! {
 
 #[cfg(test)]
 mod test {
-    use crate::types::RedbValue;
+    use crate::types::Value;
 
     #[test]
     fn width() {
