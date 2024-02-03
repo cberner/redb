@@ -86,7 +86,7 @@ impl<'a> RedbBenchDatabase<'a> {
 
 impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
     type W<'db> = RedbBenchWriteTransaction where Self: 'db;
-    type R<'db> = RedbBenchReadTransaction<'db> where Self: 'db;
+    type R<'db> = RedbBenchReadTransaction where Self: 'db;
 
     fn db_type_name() -> &'static str {
         "redb"
@@ -103,11 +103,11 @@ impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
     }
 }
 
-pub struct RedbBenchReadTransaction<'db> {
-    txn: redb::ReadTransaction<'db>,
+pub struct RedbBenchReadTransaction {
+    txn: redb::ReadTransaction,
 }
 
-impl<'db> BenchReadTransaction for RedbBenchReadTransaction<'db> {
+impl BenchReadTransaction for RedbBenchReadTransaction {
     type T<'txn> = RedbBenchReader<'txn> where Self: 'txn;
 
     fn get_reader(&self) -> Self::T<'_> {

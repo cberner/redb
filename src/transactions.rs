@@ -1180,14 +1180,13 @@ impl Drop for WriteTransaction {
 /// A read-only transaction
 ///
 /// Read-only transactions may exist concurrently with writes
-pub struct ReadTransaction<'a> {
+pub struct ReadTransaction {
     mem: Arc<TransactionalMemory>,
     tree: TableTree,
     transaction_guard: Arc<TransactionGuard>,
-    _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a> ReadTransaction<'a> {
+impl ReadTransaction {
     pub(crate) fn new(
         mem: Arc<TransactionalMemory>,
         guard: TransactionGuard,
@@ -1199,7 +1198,6 @@ impl<'a> ReadTransaction<'a> {
             tree: TableTree::new(root_page, PageHint::Clean, guard.clone(), mem)
                 .map_err(TransactionError::Storage)?,
             transaction_guard: guard,
-            _lifetime: Default::default(),
         })
     }
 
@@ -1289,9 +1287,7 @@ impl<'a> ReadTransaction<'a> {
             .list_tables(TableType::Multimap)
             .map(|x| x.into_iter().map(UntypedMultimapTableHandle::new))
     }
-}
 
-impl ReadTransaction<'static> {
     /// Close the transaction
     ///
     /// Transactions are automatically closed when they and all objects referencing them have been dropped.
@@ -1307,7 +1303,7 @@ impl ReadTransaction<'static> {
     }
 }
 
-impl Debug for ReadTransaction<'static> {
+impl Debug for ReadTransaction {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str("ReadTransaction")
     }
