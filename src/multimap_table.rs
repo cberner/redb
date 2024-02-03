@@ -7,7 +7,7 @@ use crate::tree_store::{
     BtreeStats, CachePriority, Checksum, LeafAccessor, LeafMutator, Page, PageHint, PageNumber,
     RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF, MAX_VALUE_LENGTH,
 };
-use crate::types::{RedbKey, TypeName, Value};
+use crate::types::{Key, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
 use std::borrow::Borrow;
 use std::cmp::max;
@@ -475,7 +475,7 @@ impl<V> DynamicCollection<V> {
     }
 }
 
-impl<V: RedbKey> DynamicCollection<V> {
+impl<V: Key> DynamicCollection<V> {
     fn iter<'a>(
         collection: AccessGuard<'a, &'static DynamicCollection<V>>,
         guard: Arc<TransactionGuard>,
@@ -555,12 +555,12 @@ impl UntypedDynamicCollection {
     }
 }
 
-enum ValueIterState<'a, V: RedbKey + 'static> {
+enum ValueIterState<'a, V: Key + 'static> {
     Subtree(BtreeRangeIter<V, ()>),
     InlineLeaf(LeafKeyIter<'a, V>),
 }
 
-pub struct MultimapValue<'a, V: RedbKey + 'static> {
+pub struct MultimapValue<'a, V: Key + 'static> {
     inner: Option<ValueIterState<'a, V>>,
     freed_pages: Option<Arc<Mutex<Vec<PageNumber>>>>,
     free_on_drop: Vec<PageNumber>,
@@ -569,7 +569,7 @@ pub struct MultimapValue<'a, V: RedbKey + 'static> {
     _value_type: PhantomData<V>,
 }
 
-impl<'a, V: RedbKey + 'static> MultimapValue<'a, V> {
+impl<'a, V: Key + 'static> MultimapValue<'a, V> {
     fn new_subtree(inner: BtreeRangeIter<V, ()>, guard: Arc<TransactionGuard>) -> Self {
         Self {
             inner: Some(ValueIterState::Subtree(inner)),
@@ -610,7 +610,7 @@ impl<'a, V: RedbKey + 'static> MultimapValue<'a, V> {
     }
 }
 
-impl<'a, V: RedbKey + 'static> Iterator for MultimapValue<'a, V> {
+impl<'a, V: Key + 'static> Iterator for MultimapValue<'a, V> {
     type Item = Result<AccessGuard<'a, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -628,7 +628,7 @@ impl<'a, V: RedbKey + 'static> Iterator for MultimapValue<'a, V> {
     }
 }
 
-impl<'a, V: RedbKey + 'static> DoubleEndedIterator for MultimapValue<'a, V> {
+impl<'a, V: Key + 'static> DoubleEndedIterator for MultimapValue<'a, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         // TODO: optimize out this copy
         let bytes = match self.inner.as_mut().unwrap() {
@@ -644,7 +644,7 @@ impl<'a, V: RedbKey + 'static> DoubleEndedIterator for MultimapValue<'a, V> {
     }
 }
 
-impl<'a, V: RedbKey + 'static> Drop for MultimapValue<'a, V> {
+impl<'a, V: Key + 'static> Drop for MultimapValue<'a, V> {
     fn drop(&mut self) {
         // Drop our references to the pages that are about to be freed
         drop(mem::take(&mut self.inner));
@@ -659,7 +659,7 @@ impl<'a, V: RedbKey + 'static> Drop for MultimapValue<'a, V> {
     }
 }
 
-pub struct MultimapRange<'a, K: RedbKey + 'static, V: RedbKey + 'static> {
+pub struct MultimapRange<'a, K: Key + 'static, V: Key + 'static> {
     inner: BtreeRangeIter<K, &'static DynamicCollection<V>>,
     mem: Arc<TransactionalMemory>,
     transaction_guard: Arc<TransactionGuard>,
@@ -668,7 +668,7 @@ pub struct MultimapRange<'a, K: RedbKey + 'static, V: RedbKey + 'static> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapRange<'a, K, V> {
+impl<'a, K: Key + 'static, V: Key + 'static> MultimapRange<'a, K, V> {
     fn new(
         inner: BtreeRangeIter<K, &'static DynamicCollection<V>>,
         guard: Arc<TransactionGuard>,
@@ -685,7 +685,7 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapRange<'a, K, V> {
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> Iterator for MultimapRange<'a, K, V> {
+impl<'a, K: Key + 'static, V: Key + 'static> Iterator for MultimapRange<'a, K, V> {
     type Item = Result<(AccessGuard<'a, K>, MultimapValue<'a, V>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -708,9 +708,7 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> Iterator for MultimapRange<
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> DoubleEndedIterator
-    for MultimapRange<'a, K, V>
-{
+impl<'a, K: Key + 'static, V: Key + 'static> DoubleEndedIterator for MultimapRange<'a, K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self.inner.next_back()? {
             Ok(entry) => {
@@ -734,7 +732,7 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> DoubleEndedIterator
 /// A multimap table
 ///
 /// [Multimap tables](https://en.wikipedia.org/wiki/Multimap) may have multiple values associated with each key
-pub struct MultimapTable<'txn, K: RedbKey + 'static, V: RedbKey + 'static> {
+pub struct MultimapTable<'txn, K: Key + 'static, V: Key + 'static> {
     name: String,
     transaction: &'txn WriteTransaction,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
@@ -743,13 +741,13 @@ pub struct MultimapTable<'txn, K: RedbKey + 'static, V: RedbKey + 'static> {
     _value_type: PhantomData<V>,
 }
 
-impl<K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableHandle for MultimapTable<'_, K, V> {
+impl<K: Key + 'static, V: Key + 'static> MultimapTableHandle for MultimapTable<'_, K, V> {
     fn name(&self) -> &str {
         &self.name
     }
 }
 
-impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V> {
+impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
     pub(crate) fn new(
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
@@ -1101,7 +1099,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V>
     }
 }
 
-impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, V>
+impl<'txn, K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
     for MultimapTable<'txn, K, V>
 {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
@@ -1173,15 +1171,15 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, 
     }
 }
 
-impl<K: RedbKey + 'static, V: RedbKey + 'static> Sealed for MultimapTable<'_, K, V> {}
+impl<K: Key + 'static, V: Key + 'static> Sealed for MultimapTable<'_, K, V> {}
 
-impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> Drop for MultimapTable<'txn, K, V> {
+impl<'txn, K: Key + 'static, V: Key + 'static> Drop for MultimapTable<'txn, K, V> {
     fn drop(&mut self) {
         self.transaction.close_table(&self.name, &self.tree);
     }
 }
 
-pub trait ReadableMultimapTable<K: RedbKey + 'static, V: RedbKey + 'static>: Sealed {
+pub trait ReadableMultimapTable<K: Key + 'static, V: Key + 'static>: Sealed {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<V>>
     where
@@ -1255,14 +1253,14 @@ impl ReadOnlyUntypedMultimapTable {
 }
 
 /// A read-only multimap table
-pub struct ReadOnlyMultimapTable<K: RedbKey + 'static, V: RedbKey + 'static> {
+pub struct ReadOnlyMultimapTable<K: Key + 'static, V: Key + 'static> {
     tree: Btree<K, &'static DynamicCollection<V>>,
     mem: Arc<TransactionalMemory>,
     transaction_guard: Arc<TransactionGuard>,
     _value_type: PhantomData<V>,
 }
 
-impl<K: RedbKey + 'static, V: RedbKey + 'static> ReadOnlyMultimapTable<K, V> {
+impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
     pub(crate) fn new(
         root_page: Option<(PageNumber, Checksum)>,
         hint: PageHint,
@@ -1307,7 +1305,7 @@ impl<K: RedbKey + 'static, V: RedbKey + 'static> ReadOnlyMultimapTable<K, V> {
     }
 }
 
-impl<K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, V>
+impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
     for ReadOnlyMultimapTable<K, V>
 {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
@@ -1375,4 +1373,4 @@ impl<K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, V>
     }
 }
 
-impl<K: RedbKey, V: RedbKey> Sealed for ReadOnlyMultimapTable<K, V> {}
+impl<K: Key, V: Key> Sealed for ReadOnlyMultimapTable<K, V> {}

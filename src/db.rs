@@ -4,7 +4,7 @@ use crate::tree_store::{
     InternalTableDefinition, PageHint, PageNumber, RawBtree, SerializedSavepoint, TableTreeMut,
     TableType, TransactionalMemory, PAGE_SIZE,
 };
-use crate::types::{RedbKey, Value};
+use crate::types::{Key, Value};
 use crate::{
     CompactionError, DatabaseError, Durability, ReadOnlyTable, SavepointError, StorageError,
 };
@@ -108,13 +108,13 @@ impl Sealed for UntypedMultimapTableHandle {}
 ///
 /// Note that the lifetime of the `K` and `V` type parameters does not impact the lifetimes of the data
 /// that is stored or retreived from the table
-pub struct TableDefinition<'a, K: RedbKey + 'static, V: Value + 'static> {
+pub struct TableDefinition<'a, K: Key + 'static, V: Value + 'static> {
     name: &'a str,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> TableDefinition<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> TableDefinition<'a, K, V> {
     /// Construct a new table with given `name`
     ///
     /// ## Invariant
@@ -130,23 +130,23 @@ impl<'a, K: RedbKey + 'static, V: Value + 'static> TableDefinition<'a, K, V> {
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> TableHandle for TableDefinition<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> TableHandle for TableDefinition<'a, K, V> {
     fn name(&self) -> &str {
         self.name
     }
 }
 
-impl<K: RedbKey, V: Value> Sealed for TableDefinition<'_, K, V> {}
+impl<K: Key, V: Value> Sealed for TableDefinition<'_, K, V> {}
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> Clone for TableDefinition<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> Clone for TableDefinition<'a, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> Copy for TableDefinition<'a, K, V> {}
+impl<'a, K: Key + 'static, V: Value + 'static> Copy for TableDefinition<'a, K, V> {}
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> Display for TableDefinition<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> Display for TableDefinition<'a, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -166,13 +166,13 @@ impl<'a, K: RedbKey + 'static, V: Value + 'static> Display for TableDefinition<'
 ///
 /// Note that the lifetime of the `K` and `V` type parameters does not impact the lifetimes of the data
 /// that is stored or retreived from the table
-pub struct MultimapTableDefinition<'a, K: RedbKey + 'static, V: RedbKey + 'static> {
+pub struct MultimapTableDefinition<'a, K: Key + 'static, V: Key + 'static> {
     name: &'a str,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableDefinition<'a, K, V> {
+impl<'a, K: Key + 'static, V: Key + 'static> MultimapTableDefinition<'a, K, V> {
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
         Self {
@@ -183,7 +183,7 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableDefinition<'a,
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableHandle
+impl<'a, K: Key + 'static, V: Key + 'static> MultimapTableHandle
     for MultimapTableDefinition<'a, K, V>
 {
     fn name(&self) -> &str {
@@ -191,17 +191,17 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableHandle
     }
 }
 
-impl<K: RedbKey, V: RedbKey> Sealed for MultimapTableDefinition<'_, K, V> {}
+impl<K: Key, V: Key> Sealed for MultimapTableDefinition<'_, K, V> {}
 
-impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> Clone for MultimapTableDefinition<'a, K, V> {
+impl<'a, K: Key + 'static, V: Key + 'static> Clone for MultimapTableDefinition<'a, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> Copy for MultimapTableDefinition<'a, K, V> {}
+impl<'a, K: Key + 'static, V: Key + 'static> Copy for MultimapTableDefinition<'a, K, V> {}
 
-impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> Display for MultimapTableDefinition<'a, K, V> {
+impl<'a, K: Key + 'static, V: Key + 'static> Display for MultimapTableDefinition<'a, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,

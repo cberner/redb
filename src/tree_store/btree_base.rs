@@ -2,7 +2,7 @@ use crate::tree_store::page_store::{
     xxh3_checksum, CachePriority, Page, PageImpl, PageMut, TransactionalMemory,
 };
 use crate::tree_store::PageNumber;
-use crate::types::{MutInPlaceValue, RedbKey, Value};
+use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
 use std::cmp::Ordering;
 use std::marker::PhantomData;
@@ -243,7 +243,7 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
-    pub(super) fn print_node<K: RedbKey, V: Value>(&self, include_value: bool) {
+    pub(super) fn print_node<K: Key, V: Value>(&self, include_value: bool) {
         let mut i = 0;
         while let Some(entry) = self.entry(i) {
             eprint!(" key_{}={:?}", i, K::from_bytes(entry.key()));
@@ -254,7 +254,7 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
-    pub(crate) fn position<K: RedbKey>(&self, query: &[u8]) -> (usize, bool) {
+    pub(crate) fn position<K: Key>(&self, query: &[u8]) -> (usize, bool) {
         // inclusive
         let mut min_entry = 0;
         // inclusive. Start past end, since it might be positioned beyond the end of the leaf
@@ -278,7 +278,7 @@ impl<'a> LeafAccessor<'a> {
         (min_entry, false)
     }
 
-    pub(crate) fn find_key<K: RedbKey>(&self, query: &[u8]) -> Option<usize> {
+    pub(crate) fn find_key<K: Key>(&self, query: &[u8]) -> Option<usize> {
         let (entry, found) = self.position::<K>(query);
         if found {
             Some(entry)
@@ -1069,7 +1069,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         }
     }
 
-    pub(super) fn print_node<K: RedbKey>(&self) {
+    pub(super) fn print_node<K: Key>(&self) {
         eprint!(
             "Internal[ (page={:?}), child_0={:?}",
             self.page.get_page_number(),
@@ -1090,7 +1090,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         self.key_end(self.num_keys() - 1)
     }
 
-    pub(super) fn child_for_key<K: RedbKey>(&self, query: &[u8]) -> (usize, PageNumber) {
+    pub(super) fn child_for_key<K: Key>(&self, query: &[u8]) -> (usize, PageNumber) {
         let mut min_child = 0; // inclusive
         let mut max_child = self.num_keys(); // inclusive
         while min_child < max_child {

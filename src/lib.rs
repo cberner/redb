@@ -71,7 +71,7 @@ pub use table::{
 };
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
 pub use tree_store::{AccessGuard, AccessGuardMut, Savepoint};
-pub use types::{MutInPlaceValue, RedbKey, TypeName, Value};
+pub use types::{Key, MutInPlaceValue, TypeName, Value};
 
 type Result<T = (), E = StorageError> = std::result::Result<T, E>;
 
