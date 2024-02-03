@@ -108,7 +108,7 @@ pub struct RedbBenchReadTransaction {
 }
 
 impl BenchReadTransaction for RedbBenchReadTransaction {
-    type T<'txn> = RedbBenchReader<'txn> where Self: 'txn;
+    type T<'txn> = RedbBenchReader where Self: 'txn;
 
     fn get_reader(&self) -> Self::T<'_> {
         let table = self.txn.open_table(X).unwrap();
@@ -116,11 +116,11 @@ impl BenchReadTransaction for RedbBenchReadTransaction {
     }
 }
 
-pub struct RedbBenchReader<'txn> {
-    table: redb::ReadOnlyTable<'txn, &'static [u8], &'static [u8]>,
+pub struct RedbBenchReader {
+    table: redb::ReadOnlyTable<&'static [u8], &'static [u8]>,
 }
 
-impl<'txn> BenchReader for RedbBenchReader<'txn> {
+impl BenchReader for RedbBenchReader {
     type Output<'out> = RedbAccessGuard<'out> where Self: 'out;
     type Iterator<'out> = RedbBenchIterator<'out> where Self: 'out;
 

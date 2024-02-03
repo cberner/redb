@@ -381,12 +381,11 @@ pub trait ReadableTable<K: RedbKey + 'static, V: RedbValue + 'static>: Sealed {
 }
 
 /// A read-only untyped table
-pub struct ReadOnlyUntypedTable<'txn> {
+pub struct ReadOnlyUntypedTable {
     tree: RawBtree,
-    _lifetime: PhantomData<&'txn ()>,
 }
 
-impl<'txn> ReadOnlyUntypedTable<'txn> {
+impl ReadOnlyUntypedTable {
     pub(crate) fn new(
         root_page: Option<(PageNumber, Checksum)>,
         fixed_key_size: Option<usize>,
@@ -395,7 +394,6 @@ impl<'txn> ReadOnlyUntypedTable<'txn> {
     ) -> Self {
         Self {
             tree: RawBtree::new(root_page, fixed_key_size, fixed_value_size, mem),
-            _lifetime: Default::default(),
         }
     }
 
@@ -415,26 +413,24 @@ impl<'txn> ReadOnlyUntypedTable<'txn> {
 }
 
 /// A read-only table
-pub struct ReadOnlyTable<'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
+pub struct ReadOnlyTable<K: RedbKey + 'static, V: RedbValue + 'static> {
     name: String,
     tree: Btree<K, V>,
     transaction_guard: Arc<TransactionGuard>,
-    _lifetime: PhantomData<&'txn ()>,
 }
 
-impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadOnlyTable<'txn, K, V> {
+impl<K: RedbKey + 'static, V: RedbValue + 'static> ReadOnlyTable<K, V> {
     pub(crate) fn new(
         name: String,
         root_page: Option<(PageNumber, Checksum)>,
         hint: PageHint,
         guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
-    ) -> Result<ReadOnlyTable<'txn, K, V>> {
+    ) -> Result<ReadOnlyTable<K, V>> {
         Ok(ReadOnlyTable {
             name,
             tree: Btree::new(root_page, hint, guard.clone(), mem)?,
             transaction_guard: guard,
-            _lifetime: Default::default(),
         })
     }
 
@@ -450,9 +446,7 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadOnlyTable<'txn, K, 
     }
 }
 
-impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V>
-    for ReadOnlyTable<'txn, K, V>
-{
+impl<K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V> for ReadOnlyTable<K, V> {
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
     where
         K: 'a,
@@ -492,9 +486,9 @@ impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V>
     }
 }
 
-impl<K: RedbKey, V: RedbValue> Sealed for ReadOnlyTable<'_, K, V> {}
+impl<K: RedbKey, V: RedbValue> Sealed for ReadOnlyTable<K, V> {}
 
-impl<K: RedbKey + 'static, V: RedbValue + 'static> Debug for ReadOnlyTable<'_, K, V> {
+impl<K: RedbKey + 'static, V: RedbValue + 'static> Debug for ReadOnlyTable<K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         debug_helper(f, &self.name, self.len(), self.first(), self.last())
     }
