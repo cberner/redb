@@ -1205,7 +1205,7 @@ impl ReadTransaction {
     pub fn open_table<K: RedbKey + 'static, V: RedbValue + 'static>(
         &self,
         definition: TableDefinition<K, V>,
-    ) -> Result<ReadOnlyTable<'static, K, V>, TableError> {
+    ) -> Result<ReadOnlyTable<K, V>, TableError> {
         let header = self
             .tree
             .get_table::<K, V>(definition.name(), TableType::Normal)?
@@ -1224,7 +1224,7 @@ impl ReadTransaction {
     pub fn open_untyped_table(
         &self,
         handle: impl TableHandle,
-    ) -> Result<ReadOnlyUntypedTable<'static>, TableError> {
+    ) -> Result<ReadOnlyUntypedTable, TableError> {
         let header = self
             .tree
             .get_table_untyped(handle.name(), TableType::Normal)?
@@ -1242,7 +1242,7 @@ impl ReadTransaction {
     pub fn open_multimap_table<K: RedbKey + 'static, V: RedbKey + 'static>(
         &self,
         definition: MultimapTableDefinition<K, V>,
-    ) -> Result<ReadOnlyMultimapTable<'static, K, V>, TableError> {
+    ) -> Result<ReadOnlyMultimapTable<K, V>, TableError> {
         let header = self
             .tree
             .get_table::<K, V>(definition.name(), TableType::Multimap)?
@@ -1260,7 +1260,7 @@ impl ReadTransaction {
     pub fn open_untyped_multimap_table(
         &self,
         handle: impl MultimapTableHandle,
-    ) -> Result<ReadOnlyUntypedMultimapTable<'static>, TableError> {
+    ) -> Result<ReadOnlyUntypedMultimapTable, TableError> {
         let header = self
             .tree
             .get_table_untyped(handle.name(), TableType::Multimap)?

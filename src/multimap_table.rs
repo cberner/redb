@@ -1219,15 +1219,14 @@ pub trait ReadableMultimapTable<K: RedbKey + 'static, V: RedbKey + 'static>: Sea
 }
 
 /// A read-only untyped multimap table
-pub struct ReadOnlyUntypedMultimapTable<'txn> {
+pub struct ReadOnlyUntypedMultimapTable {
     tree: RawBtree,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
     mem: Arc<TransactionalMemory>,
-    _lifetime: PhantomData<&'txn ()>,
 }
 
-impl<'txn> ReadOnlyUntypedMultimapTable<'txn> {
+impl ReadOnlyUntypedMultimapTable {
     pub(crate) fn new(
         root_page: Option<(PageNumber, Checksum)>,
         fixed_key_size: Option<usize>,
@@ -1244,7 +1243,6 @@ impl<'txn> ReadOnlyUntypedMultimapTable<'txn> {
             fixed_key_size,
             fixed_value_size,
             mem,
-            _lifetime: Default::default(),
         }
     }
 
@@ -1269,27 +1267,25 @@ impl<'txn> ReadOnlyUntypedMultimapTable<'txn> {
 }
 
 /// A read-only multimap table
-pub struct ReadOnlyMultimapTable<'txn, K: RedbKey + 'static, V: RedbKey + 'static> {
+pub struct ReadOnlyMultimapTable<K: RedbKey + 'static, V: RedbKey + 'static> {
     tree: Btree<K, &'static DynamicCollection<V>>,
     mem: Arc<TransactionalMemory>,
     transaction_guard: Arc<TransactionGuard>,
     _value_type: PhantomData<V>,
-    _lifetime: PhantomData<&'txn ()>,
 }
 
-impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadOnlyMultimapTable<'txn, K, V> {
+impl<K: RedbKey + 'static, V: RedbKey + 'static> ReadOnlyMultimapTable<K, V> {
     pub(crate) fn new(
         root_page: Option<(PageNumber, Checksum)>,
         hint: PageHint,
         guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
-    ) -> Result<ReadOnlyMultimapTable<'txn, K, V>> {
+    ) -> Result<ReadOnlyMultimapTable<K, V>> {
         Ok(ReadOnlyMultimapTable {
             tree: Btree::new(root_page, hint, guard.clone(), mem.clone())?,
             mem,
             transaction_guard: guard,
             _value_type: Default::default(),
-            _lifetime: Default::default(),
         })
     }
 
@@ -1323,8 +1319,8 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadOnlyMultimapTable<'tx
     }
 }
 
-impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, V>
-    for ReadOnlyMultimapTable<'txn, K, V>
+impl<K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, V>
+    for ReadOnlyMultimapTable<K, V>
 {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<V>>
@@ -1391,4 +1387,4 @@ impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, 
     }
 }
 
-impl<K: RedbKey, V: RedbKey> Sealed for ReadOnlyMultimapTable<'_, K, V> {}
+impl<K: RedbKey, V: RedbKey> Sealed for ReadOnlyMultimapTable<K, V> {}
