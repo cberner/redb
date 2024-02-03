@@ -3,7 +3,7 @@ use crate::tree_store::btree_base::{BRANCH, LEAF};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::PageNumber;
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{RedbKey, Value};
 use crate::Result;
 use std::borrow::Borrow;
 use std::collections::Bound;
@@ -123,7 +123,7 @@ impl RangeIterState {
         }
     }
 
-    fn get_entry<K: RedbKey, V: RedbValue>(&self) -> Option<EntryGuard<K, V>> {
+    fn get_entry<K: RedbKey, V: Value>(&self) -> Option<EntryGuard<K, V>> {
         match self {
             Leaf {
                 page,
@@ -142,7 +142,7 @@ impl RangeIterState {
     }
 }
 
-pub(crate) struct EntryGuard<K: RedbKey, V: RedbValue> {
+pub(crate) struct EntryGuard<K: RedbKey, V: Value> {
     page: PageImpl,
     key_range: Range<usize>,
     value_range: Range<usize>,
@@ -150,7 +150,7 @@ pub(crate) struct EntryGuard<K: RedbKey, V: RedbValue> {
     _value_type: PhantomData<V>,
 }
 
-impl<K: RedbKey, V: RedbValue> EntryGuard<K, V> {
+impl<K: RedbKey, V: Value> EntryGuard<K, V> {
     fn new(page: PageImpl, key_range: Range<usize>, value_range: Range<usize>) -> Self {
         Self {
             page,
@@ -243,14 +243,14 @@ impl Iterator for AllPageNumbersBtreeIter {
     }
 }
 
-pub(crate) struct BtreeDrain<K: RedbKey + 'static, V: RedbValue + 'static> {
+pub(crate) struct BtreeDrain<K: RedbKey + 'static, V: Value + 'static> {
     inner: BtreeRangeIter<K, V>,
     free_on_drop: Vec<PageNumber>,
     master_free_list: Arc<Mutex<Vec<PageNumber>>>,
     mem: Arc<TransactionalMemory>,
 }
 
-impl<K: RedbKey, V: RedbValue> BtreeDrain<K, V> {
+impl<K: RedbKey, V: Value> BtreeDrain<K, V> {
     pub(crate) fn new(
         inner: BtreeRangeIter<K, V>,
         free_on_drop: Vec<PageNumber>,
@@ -266,7 +266,7 @@ impl<K: RedbKey, V: RedbValue> BtreeDrain<K, V> {
     }
 }
 
-impl<K: RedbKey, V: RedbValue> Iterator for BtreeDrain<K, V> {
+impl<K: RedbKey, V: Value> Iterator for BtreeDrain<K, V> {
     type Item = Result<EntryGuard<K, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -274,13 +274,13 @@ impl<K: RedbKey, V: RedbValue> Iterator for BtreeDrain<K, V> {
     }
 }
 
-impl<K: RedbKey, V: RedbValue> DoubleEndedIterator for BtreeDrain<K, V> {
+impl<K: RedbKey, V: Value> DoubleEndedIterator for BtreeDrain<K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.inner.next_back()
     }
 }
 
-impl<K: RedbKey, V: RedbValue> Drop for BtreeDrain<K, V> {
+impl<K: RedbKey, V: Value> Drop for BtreeDrain<K, V> {
     fn drop(&mut self) {
         // Ensure that the iter is entirely consumed, so that it doesn't have any references to the pages
         // to be freed
@@ -299,7 +299,7 @@ impl<K: RedbKey, V: RedbValue> Drop for BtreeDrain<K, V> {
 
 pub(crate) struct BtreeDrainFilter<
     K: RedbKey + 'static,
-    V: RedbValue + 'static,
+    V: Value + 'static,
     F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
 > {
     inner: BtreeRangeIter<K, V>,
@@ -309,7 +309,7 @@ pub(crate) struct BtreeDrainFilter<
     mem: Arc<TransactionalMemory>,
 }
 
-impl<K: RedbKey, V: RedbValue, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>
+impl<K: RedbKey, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>
     BtreeDrainFilter<K, V, F>
 {
     pub(crate) fn new(
@@ -329,7 +329,7 @@ impl<K: RedbKey, V: RedbValue, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>
     }
 }
 
-impl<K: RedbKey, V: RedbValue, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool> Iterator
+impl<K: RedbKey, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool> Iterator
     for BtreeDrainFilter<K, V, F>
 {
     type Item = Result<EntryGuard<K, V>>;
@@ -346,7 +346,7 @@ impl<K: RedbKey, V: RedbValue, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>
     }
 }
 
-impl<K: RedbKey, V: RedbValue, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>
+impl<K: RedbKey, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>
     DoubleEndedIterator for BtreeDrainFilter<K, V, F>
 {
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -361,7 +361,7 @@ impl<K: RedbKey, V: RedbValue, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>
     }
 }
 
-impl<K: RedbKey, V: RedbValue, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool> Drop
+impl<K: RedbKey, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool> Drop
     for BtreeDrainFilter<K, V, F>
 {
     fn drop(&mut self) {
@@ -381,7 +381,7 @@ impl<K: RedbKey, V: RedbValue, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>
 }
 
 #[derive(Clone)]
-pub(crate) struct BtreeRangeIter<K: RedbKey + 'static, V: RedbValue + 'static> {
+pub(crate) struct BtreeRangeIter<K: RedbKey + 'static, V: Value + 'static> {
     left: Option<RangeIterState>, // Exclusive. The previous element returned
     right: Option<RangeIterState>, // Exclusive. The previous element returned
     include_left: bool,           // left is inclusive, instead of exclusive
@@ -391,7 +391,7 @@ pub(crate) struct BtreeRangeIter<K: RedbKey + 'static, V: RedbValue + 'static> {
     _value_type: PhantomData<V>,
 }
 
-impl<K: RedbKey + 'static, V: RedbValue + 'static> BtreeRangeIter<K, V> {
+impl<K: RedbKey + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
     pub(crate) fn new<'a, T: RangeBounds<KR>, KR: Borrow<K::SelfType<'a>>>(
         query_range: &'_ T,
         table_root: Option<PageNumber>,
@@ -467,7 +467,7 @@ impl<K: RedbKey + 'static, V: RedbValue + 'static> BtreeRangeIter<K, V> {
     }
 }
 
-impl<K: RedbKey, V: RedbValue> Iterator for BtreeRangeIter<K, V> {
+impl<K: RedbKey, V: Value> Iterator for BtreeRangeIter<K, V> {
     type Item = Result<EntryGuard<K, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -535,7 +535,7 @@ impl<K: RedbKey, V: RedbValue> Iterator for BtreeRangeIter<K, V> {
     }
 }
 
-impl<K: RedbKey, V: RedbValue> DoubleEndedIterator for BtreeRangeIter<K, V> {
+impl<K: RedbKey, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let (
             Some(Leaf {
@@ -601,7 +601,7 @@ impl<K: RedbKey, V: RedbValue> DoubleEndedIterator for BtreeRangeIter<K, V> {
     }
 }
 
-fn find_iter_unbounded<K: RedbKey, V: RedbValue>(
+fn find_iter_unbounded<K: RedbKey, V: Value>(
     page: PageImpl,
     mut parent: Option<Box<RangeIterState>>,
     reverse: bool,
@@ -647,7 +647,7 @@ fn find_iter_unbounded<K: RedbKey, V: RedbValue>(
 
 // Returns a bool indicating whether the first entry pointed to by the state is included in the
 // queried range
-fn find_iter_left<K: RedbKey, V: RedbValue>(
+fn find_iter_left<K: RedbKey, V: Value>(
     page: PageImpl,
     mut parent: Option<Box<RangeIterState>>,
     query: &[u8],
@@ -695,7 +695,7 @@ fn find_iter_left<K: RedbKey, V: RedbValue>(
     }
 }
 
-fn find_iter_right<K: RedbKey, V: RedbValue>(
+fn find_iter_right<K: RedbKey, V: Value>(
     page: PageImpl,
     mut parent: Option<Box<RangeIterState>>,
     query: &[u8],

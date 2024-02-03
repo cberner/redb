@@ -1,5 +1,5 @@
 use crate::tree_store::TransactionalMemory;
-use crate::{RedbKey, RedbValue, Result, Savepoint, TypeName};
+use crate::{RedbKey, Result, Savepoint, TypeName, Value};
 #[cfg(feature = "logging")]
 use log::info;
 use std::cmp::Ordering;
@@ -48,7 +48,7 @@ impl SavepointId {
     }
 }
 
-impl RedbValue for SavepointId {
+impl Value for SavepointId {
     type SelfType<'a> = SavepointId;
     type AsBytes<'a> = [u8; size_of::<u64>()];
 

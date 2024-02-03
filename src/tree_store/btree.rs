@@ -9,7 +9,7 @@ use crate::tree_store::page_store::{CachePriority, Page, PageImpl, PageMut, Tran
 use crate::tree_store::{
     AccessGuardMut, AllPageNumbersBtreeIter, BtreeDrainFilter, BtreeRangeIter, PageHint, PageNumber,
 };
-use crate::types::{MutInPlaceValue, RedbKey, RedbValue};
+use crate::types::{MutInPlaceValue, RedbKey, Value};
 use crate::{AccessGuard, Result};
 #[cfg(feature = "logging")]
 use log::trace;
@@ -217,7 +217,7 @@ impl UntypedBtreeMut {
     }
 }
 
-pub(crate) struct BtreeMut<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
+pub(crate) struct BtreeMut<'a, K: RedbKey + 'static, V: Value + 'static> {
     mem: Arc<TransactionalMemory>,
     transaction_guard: Arc<TransactionGuard>,
     root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
@@ -227,7 +227,7 @@ pub(crate) struct BtreeMut<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<K: RedbKey + 'static, V: RedbValue + 'static> BtreeMut<'_, K, V> {
+impl<K: RedbKey + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     pub(crate) fn new(
         root: Option<(PageNumber, Checksum)>,
         guard: Arc<TransactionGuard>,
@@ -552,7 +552,7 @@ impl RawBtree {
     }
 }
 
-pub(crate) struct Btree<K: RedbKey + 'static, V: RedbValue + 'static> {
+pub(crate) struct Btree<K: RedbKey + 'static, V: Value + 'static> {
     mem: Arc<TransactionalMemory>,
     _transaction_guard: Arc<TransactionGuard>,
     // Cache of the root page to avoid repeated lookups
@@ -563,7 +563,7 @@ pub(crate) struct Btree<K: RedbKey + 'static, V: RedbValue + 'static> {
     _value_type: PhantomData<V>,
 }
 
-impl<K: RedbKey, V: RedbValue> Btree<K, V> {
+impl<K: RedbKey, V: Value> Btree<K, V> {
     pub(crate) fn new(
         root: Option<(PageNumber, Checksum)>,
         hint: PageHint,

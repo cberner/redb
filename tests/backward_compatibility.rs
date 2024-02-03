@@ -2,10 +2,10 @@ use redb::ReadableTable;
 
 const ELEMENTS: usize = 3;
 
-trait TestData: redb::RedbValue + redb1::RedbValue {
+trait TestData: redb::Value + redb1::RedbValue {
     fn gen1() -> [<Self as redb1::RedbValue>::SelfType<'static>; ELEMENTS];
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS];
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS];
 }
 
 impl TestData for u8 {
@@ -13,7 +13,7 @@ impl TestData for u8 {
         [0, 1, 2]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [0, 1, 2]
     }
 }
@@ -23,7 +23,7 @@ impl TestData for u16 {
         [0, 1, 2]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [0, 1, 2]
     }
 }
@@ -33,7 +33,7 @@ impl TestData for u32 {
         [0, 1, 2]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [0, 1, 2]
     }
 }
@@ -43,7 +43,7 @@ impl TestData for u64 {
         [0, 1, 2]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [0, 1, 2]
     }
 }
@@ -53,7 +53,7 @@ impl TestData for u128 {
         [0, 1, 2]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [0, 1, 2]
     }
 }
@@ -63,7 +63,7 @@ impl TestData for i8 {
         [-1, 1, 2]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [-1, 1, 2]
     }
 }
@@ -73,7 +73,7 @@ impl TestData for i16 {
         [-1, 1, 2]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [-1, 1, 2]
     }
 }
@@ -83,7 +83,7 @@ impl TestData for i32 {
         [-1, 1, 2]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [-1, 1, 2]
     }
 }
@@ -93,7 +93,7 @@ impl TestData for i64 {
         [-1, 1, 2]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [-1, 1, 2]
     }
 }
@@ -103,7 +103,7 @@ impl TestData for i128 {
         [-1, 1, 2]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [-1, 1, 2]
     }
 }
@@ -113,7 +113,7 @@ impl TestData for f32 {
         [f32::NAN, f32::INFINITY, f32::MIN_POSITIVE]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [f32::NAN, f32::INFINITY, f32::MIN_POSITIVE]
     }
 }
@@ -123,7 +123,7 @@ impl TestData for f64 {
         [f64::MIN, f64::NEG_INFINITY, f64::MAX]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [f64::MIN, f64::NEG_INFINITY, f64::MAX]
     }
 }
@@ -133,7 +133,7 @@ impl TestData for () {
         [(), (), ()]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [(), (), ()]
     }
 }
@@ -143,7 +143,7 @@ impl TestData for &'static str {
         ["hello", "world1", "hi"]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         ["hello", "world1", "hi"]
     }
 }
@@ -153,7 +153,7 @@ impl TestData for &'static [u8] {
         [b"test", b"bytes", b"now"]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [b"test", b"bytes", b"now"]
     }
 }
@@ -163,7 +163,7 @@ impl TestData for &'static [u8; 5] {
         [b"test1", b"bytes", b"now12"]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [b"test1", b"bytes", b"now12"]
     }
 }
@@ -173,7 +173,7 @@ impl TestData for Option<u64> {
         [None, Some(0), Some(7)]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [None, Some(0), Some(7)]
     }
 }
@@ -183,7 +183,7 @@ impl TestData for (u64, &'static str) {
         [(0, "hi"), (1, "bye"), (2, "byte")]
     }
 
-    fn gen() -> [<Self as redb::RedbValue>::SelfType<'static>; ELEMENTS] {
+    fn gen() -> [<Self as redb::Value>::SelfType<'static>; ELEMENTS] {
         [(0, "hi"), (1, "bye"), (2, "byte")]
     }
 }
@@ -218,9 +218,9 @@ fn test_helper<K: TestData + redb::RedbKey + redb1::RedbKey + 'static, V: TestDa
     for i in 0..ELEMENTS {
         let result = table.get(&K::gen()[i]).unwrap().unwrap();
         let value = result.value();
-        let bytes = <V as redb::RedbValue>::as_bytes(&value);
+        let bytes = <V as redb::Value>::as_bytes(&value);
         let expected = &V::gen()[i];
-        let expected_bytes = <V as redb::RedbValue>::as_bytes(expected);
+        let expected_bytes = <V as redb::Value>::as_bytes(expected);
         assert_eq!(bytes.as_ref(), expected_bytes.as_ref());
     }
 }

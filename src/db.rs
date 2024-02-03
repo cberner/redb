@@ -4,7 +4,7 @@ use crate::tree_store::{
     InternalTableDefinition, PageHint, PageNumber, RawBtree, SerializedSavepoint, TableTreeMut,
     TableType, TransactionalMemory, PAGE_SIZE,
 };
-use crate::types::{RedbKey, RedbValue};
+use crate::types::{RedbKey, Value};
 use crate::{
     CompactionError, DatabaseError, Durability, ReadOnlyTable, SavepointError, StorageError,
 };
@@ -108,13 +108,13 @@ impl Sealed for UntypedMultimapTableHandle {}
 ///
 /// Note that the lifetime of the `K` and `V` type parameters does not impact the lifetimes of the data
 /// that is stored or retreived from the table
-pub struct TableDefinition<'a, K: RedbKey + 'static, V: RedbValue + 'static> {
+pub struct TableDefinition<'a, K: RedbKey + 'static, V: Value + 'static> {
     name: &'a str,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> TableDefinition<'a, K, V> {
+impl<'a, K: RedbKey + 'static, V: Value + 'static> TableDefinition<'a, K, V> {
     /// Construct a new table with given `name`
     ///
     /// ## Invariant
@@ -130,23 +130,23 @@ impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> TableDefinition<'a, K, V>
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> TableHandle for TableDefinition<'a, K, V> {
+impl<'a, K: RedbKey + 'static, V: Value + 'static> TableHandle for TableDefinition<'a, K, V> {
     fn name(&self) -> &str {
         self.name
     }
 }
 
-impl<K: RedbKey, V: RedbValue> Sealed for TableDefinition<'_, K, V> {}
+impl<K: RedbKey, V: Value> Sealed for TableDefinition<'_, K, V> {}
 
-impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Clone for TableDefinition<'a, K, V> {
+impl<'a, K: RedbKey + 'static, V: Value + 'static> Clone for TableDefinition<'a, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Copy for TableDefinition<'a, K, V> {}
+impl<'a, K: RedbKey + 'static, V: Value + 'static> Copy for TableDefinition<'a, K, V> {}
 
-impl<'a, K: RedbKey + 'static, V: RedbValue + 'static> Display for TableDefinition<'a, K, V> {
+impl<'a, K: RedbKey + 'static, V: Value + 'static> Display for TableDefinition<'a, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,

@@ -1,7 +1,7 @@
 use redb::backends::InMemoryBackend;
 use redb::{
     Database, MultimapTableDefinition, MultimapTableHandle, Range, ReadableTable, RedbKey,
-    RedbValue, TableDefinition, TableError, TableHandle, TypeName,
+    TableDefinition, TableError, TableHandle, TypeName, Value,
 };
 use std::cmp::Ordering;
 #[cfg(not(target_os = "wasi"))]
@@ -1346,7 +1346,7 @@ fn custom_ordering() {
     #[derive(Debug)]
     struct ReverseKey(Vec<u8>);
 
-    impl RedbValue for ReverseKey {
+    impl Value for ReverseKey {
         type SelfType<'a> = ReverseKey
         where
         Self: 'a;
