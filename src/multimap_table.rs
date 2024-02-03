@@ -1,7 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::sealed::Sealed;
-use crate::table::TableStats;
+use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
     btree_stats, AllPageNumbersBtreeIter, BranchAccessor, Btree, BtreeMut, BtreeRangeIter,
     BtreeStats, CachePriority, Checksum, LeafAccessor, LeafMutator, Page, PageHint, PageNumber,
@@ -1099,6 +1099,39 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
     }
 }
 
+impl<'txn, K: Key + 'static, V: Key + 'static> ReadableTableMetadata for MultimapTable<'txn, K, V> {
+    fn stats(&self) -> Result<TableStats> {
+        let tree_stats = multimap_btree_stats(
+            self.tree.get_root().map(|(p, _)| p),
+            &self.mem,
+            K::fixed_width(),
+            V::fixed_width(),
+        )?;
+
+        Ok(TableStats {
+            tree_height: tree_stats.tree_height,
+            leaf_pages: tree_stats.leaf_pages,
+            branch_pages: tree_stats.branch_pages,
+            stored_leaf_bytes: tree_stats.stored_leaf_bytes,
+            metadata_bytes: tree_stats.metadata_bytes,
+            fragmented_bytes: tree_stats.fragmented_bytes,
+        })
+    }
+
+    /// Returns the number of key-value pairs in the table
+    fn len(&self) -> Result<u64> {
+        let mut count = 0;
+        for item in self.iter()? {
+            let (_, values) = item?;
+            for v in values {
+                v?;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+}
+
 impl<'txn, K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
     for MultimapTable<'txn, K, V>
 {
@@ -1133,42 +1166,6 @@ impl<'txn, K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
             self.mem.clone(),
         ))
     }
-
-    fn stats(&self) -> Result<TableStats> {
-        let tree_stats = multimap_btree_stats(
-            self.tree.get_root().map(|(p, _)| p),
-            &self.mem,
-            K::fixed_width(),
-            V::fixed_width(),
-        )?;
-
-        Ok(TableStats {
-            tree_height: tree_stats.tree_height,
-            leaf_pages: tree_stats.leaf_pages,
-            branch_pages: tree_stats.branch_pages,
-            stored_leaf_bytes: tree_stats.stored_leaf_bytes,
-            metadata_bytes: tree_stats.metadata_bytes,
-            fragmented_bytes: tree_stats.fragmented_bytes,
-        })
-    }
-
-    /// Returns the number of key-value pairs in the table
-    fn len(&self) -> Result<u64> {
-        let mut count = 0;
-        for item in self.iter()? {
-            let (_, values) = item?;
-            for v in values {
-                v?;
-                count += 1;
-            }
-        }
-        Ok(count)
-    }
-
-    /// Returns `true` if the table is empty
-    fn is_empty(&self) -> Result<bool> {
-        self.len().map(|x| x == 0)
-    }
 }
 
 impl<K: Key + 'static, V: Key + 'static> Sealed for MultimapTable<'_, K, V> {}
@@ -1179,7 +1176,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> Drop for MultimapTable<'txn, K, V
     }
 }
 
-pub trait ReadableMultimapTable<K: Key + 'static, V: Key + 'static>: Sealed {
+pub trait ReadableMultimapTable<K: Key + 'static, V: Key + 'static>: ReadableTableMetadata {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<V>>
     where
@@ -1189,13 +1186,6 @@ pub trait ReadableMultimapTable<K: Key + 'static, V: Key + 'static>: Sealed {
     where
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a;
-
-    /// Retrieves information about storage usage for the table
-    fn stats(&self) -> Result<TableStats>;
-
-    fn len(&self) -> Result<u64>;
-
-    fn is_empty(&self) -> Result<bool>;
 
     /// Returns an double-ended iterator over all elements in the table. Values are in ascending
     /// order.
@@ -1305,6 +1295,38 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
     }
 }
 
+impl<K: Key + 'static, V: Key + 'static> ReadableTableMetadata for ReadOnlyMultimapTable<K, V> {
+    fn stats(&self) -> Result<TableStats> {
+        let tree_stats = multimap_btree_stats(
+            self.tree.get_root().map(|(p, _)| p),
+            &self.mem,
+            K::fixed_width(),
+            V::fixed_width(),
+        )?;
+
+        Ok(TableStats {
+            tree_height: tree_stats.tree_height,
+            leaf_pages: tree_stats.leaf_pages,
+            branch_pages: tree_stats.branch_pages,
+            stored_leaf_bytes: tree_stats.stored_leaf_bytes,
+            metadata_bytes: tree_stats.metadata_bytes,
+            fragmented_bytes: tree_stats.fragmented_bytes,
+        })
+    }
+
+    fn len(&self) -> Result<u64> {
+        let mut count = 0;
+        for item in self.iter()? {
+            let (_, values) = item?;
+            for v in values {
+                v?;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+}
+
 impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
     for ReadOnlyMultimapTable<K, V>
 {
@@ -1336,40 +1358,6 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
             self.transaction_guard.clone(),
             self.mem.clone(),
         ))
-    }
-
-    fn stats(&self) -> Result<TableStats> {
-        let tree_stats = multimap_btree_stats(
-            self.tree.get_root().map(|(p, _)| p),
-            &self.mem,
-            K::fixed_width(),
-            V::fixed_width(),
-        )?;
-
-        Ok(TableStats {
-            tree_height: tree_stats.tree_height,
-            leaf_pages: tree_stats.leaf_pages,
-            branch_pages: tree_stats.branch_pages,
-            stored_leaf_bytes: tree_stats.stored_leaf_bytes,
-            metadata_bytes: tree_stats.metadata_bytes,
-            fragmented_bytes: tree_stats.fragmented_bytes,
-        })
-    }
-
-    fn len(&self) -> Result<u64> {
-        let mut count = 0;
-        for item in self.iter()? {
-            let (_, values) = item?;
-            for v in values {
-                v?;
-                count += 1;
-            }
-        }
-        Ok(count)
-    }
-
-    fn is_empty(&self) -> Result<bool> {
-        self.len().map(|x| x == 0)
     }
 }
 

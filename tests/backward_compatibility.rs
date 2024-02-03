@@ -1,4 +1,4 @@
-use redb::ReadableTable;
+use redb::{ReadableTable, ReadableTableMetadata};
 
 const ELEMENTS: usize = 3;
 
