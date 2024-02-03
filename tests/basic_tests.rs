@@ -1,7 +1,7 @@
 use redb::backends::InMemoryBackend;
 use redb::{
     Database, Key, MultimapTableDefinition, MultimapTableHandle, Range, ReadableTable,
-    TableDefinition, TableError, TableHandle, TypeName, Value,
+    ReadableTableMetadata, TableDefinition, TableError, TableHandle, TypeName, Value,
 };
 use std::cmp::Ordering;
 #[cfg(not(target_os = "wasi"))]

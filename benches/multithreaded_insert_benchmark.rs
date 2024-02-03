@@ -4,7 +4,7 @@ use tempfile::NamedTempFile;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTableMetadata, TableDefinition};
 use std::time::Instant;
 
 const ELEMENTS: u64 = 1_000_000;

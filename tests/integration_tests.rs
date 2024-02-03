@@ -4,7 +4,8 @@ use std::io::ErrorKind;
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use redb::{
-    Builder, Database, Durability, MultimapTableDefinition, ReadableTable, TableDefinition,
+    Builder, Database, Durability, MultimapTableDefinition, ReadableTable, ReadableTableMetadata,
+    TableDefinition,
 };
 use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 

@@ -215,24 +215,7 @@ impl<'txn, K: Key + 'static, V: MutInPlaceValue + 'static> Table<'txn, K, V> {
     }
 }
 
-impl<'txn, K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'txn, K, V> {
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
-    where
-        K: 'a,
-    {
-        self.tree.get(key.borrow())
-    }
-
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<K, V>>
-    where
-        K: 'a,
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
-        self.tree
-            .range(&range)
-            .map(|x| Range::new(x, self.transaction.transaction_guard()))
-    }
-
+impl<'txn, K: Key + 'static, V: Value + 'static> ReadableTableMetadata for Table<'txn, K, V> {
     fn stats(&self) -> Result<TableStats> {
         let tree_stats = self.tree.stats()?;
 
@@ -249,9 +232,24 @@ impl<'txn, K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'
     fn len(&self) -> Result<u64> {
         self.tree.len()
     }
+}
 
-    fn is_empty(&self) -> Result<bool> {
-        self.len().map(|x| x == 0)
+impl<'txn, K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'txn, K, V> {
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
+    where
+        K: 'a,
+    {
+        self.tree.get(key.borrow())
+    }
+
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<K, V>>
+    where
+        K: 'a,
+        KR: Borrow<K::SelfType<'a>> + 'a,
+    {
+        self.tree
+            .range(&range)
+            .map(|x| Range::new(x, self.transaction.transaction_guard()))
     }
 }
 
@@ -312,7 +310,20 @@ impl<K: Key + 'static, V: Value + 'static> Debug for Table<'_, K, V> {
     }
 }
 
-pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: Sealed {
+pub trait ReadableTableMetadata: Sealed {
+    /// Retrieves information about storage usage for the table
+    fn stats(&self) -> Result<TableStats>;
+
+    /// Returns the number of entries in the table
+    fn len(&self) -> Result<u64>;
+
+    /// Returns `true` if the table is empty
+    fn is_empty(&self) -> Result<bool> {
+        Ok(self.len()? == 0)
+    }
+}
+
+pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMetadata {
     /// Returns the value corresponding to the given key
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
     where
@@ -364,15 +375,6 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: Sealed {
     fn last(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
         self.iter()?.next_back().transpose()
     }
-
-    /// Retrieves information about storage usage for the table
-    fn stats(&self) -> Result<TableStats>;
-
-    /// Returns the number of entries in the table
-    fn len(&self) -> Result<u64>;
-
-    /// Returns `true` if the table is empty
-    fn is_empty(&self) -> Result<bool>;
 
     /// Returns a double-ended iterator over all elements in the table
     fn iter(&self) -> Result<Range<K, V>> {
@@ -446,24 +448,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
     }
 }
 
-impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable<K, V> {
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
-    where
-        K: 'a,
-    {
-        self.tree.get(key.borrow())
-    }
-
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<K, V>>
-    where
-        K: 'a,
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
-        self.tree
-            .range(&range)
-            .map(|x| Range::new(x, self.transaction_guard.clone()))
-    }
-
+impl<K: Key + 'static, V: Value + 'static> ReadableTableMetadata for ReadOnlyTable<K, V> {
     fn stats(&self) -> Result<TableStats> {
         let tree_stats = self.tree.stats()?;
 
@@ -480,9 +465,24 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
     fn len(&self) -> Result<u64> {
         self.tree.len()
     }
+}
 
-    fn is_empty(&self) -> Result<bool> {
-        self.len().map(|x| x == 0)
+impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable<K, V> {
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
+    where
+        K: 'a,
+    {
+        self.tree.get(key.borrow())
+    }
+
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<K, V>>
+    where
+        K: 'a,
+        KR: Borrow<K::SelfType<'a>> + 'a,
+    {
+        self.tree
+            .range(&range)
+            .map(|x| Range::new(x, self.transaction_guard.clone()))
     }
 }
 

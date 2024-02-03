@@ -1,4 +1,6 @@
-use redb::{Database, MultimapTableDefinition, ReadableMultimapTable, TableError};
+use redb::{
+    Database, MultimapTableDefinition, ReadableMultimapTable, ReadableTableMetadata, TableError,
+};
 
 const STR_TABLE: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("str_to_str");
 const SLICE_U64_TABLE: MultimapTableDefinition<&[u8], u64> =
