@@ -1507,7 +1507,6 @@ fn concurrent_write_transactions_block() {
     let (sender, receiver) = sync::mpsc::channel();
 
     let t = {
-        let db = db.clone();
         std::thread::spawn(move || {
             sender.send(()).unwrap();
             db.begin_write().unwrap().commit().unwrap();

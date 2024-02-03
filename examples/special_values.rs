@@ -35,15 +35,15 @@ impl SpecialValuesDb {
 }
 
 struct SpecialValuesTransaction<'db> {
-    inner: WriteTransaction<'db>,
+    inner: WriteTransaction,
     file: &'db mut File,
 }
 
 impl<'db> SpecialValuesTransaction<'db> {
-    fn open_table<'txn, K: RedbKey + 'static, V: RedbValue + 'static>(
-        &'txn mut self,
+    fn open_table<K: RedbKey + 'static, V: RedbValue + 'static>(
+        &mut self,
         table: TableDefinition<K, V>,
-    ) -> SpecialValuesTable<'db, 'txn, K, V> {
+    ) -> SpecialValuesTable<K, V> {
         let def: TableDefinition<K, (u64, u64)> = TableDefinition::new(table.name());
         SpecialValuesTable {
             inner: self.inner.open_table(def).unwrap(),
@@ -58,13 +58,13 @@ impl<'db> SpecialValuesTransaction<'db> {
     }
 }
 
-struct SpecialValuesTable<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
-    inner: Table<'db, 'txn, K, (u64, u64)>,
+struct SpecialValuesTable<'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
+    inner: Table<'txn, K, (u64, u64)>,
     file: &'txn mut File,
     _value_type: PhantomData<V>,
 }
 
-impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> SpecialValuesTable<'db, 'txn, K, V> {
+impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> SpecialValuesTable<'txn, K, V> {
     fn insert(&mut self, key: K::SelfType<'_>, value: V::SelfType<'_>) {
         // Append to end of file
         let offset = self.file.seek(SeekFrom::End(0)).unwrap();

@@ -740,31 +740,29 @@ impl<'a, K: RedbKey + 'static, V: RedbKey + 'static> DoubleEndedIterator
 /// A multimap table
 ///
 /// [Multimap tables](https://en.wikipedia.org/wiki/Multimap) may have multiple values associated with each key
-pub struct MultimapTable<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> {
+pub struct MultimapTable<'txn, K: RedbKey + 'static, V: RedbKey + 'static> {
     name: String,
-    transaction: &'txn WriteTransaction<'db>,
+    transaction: &'txn WriteTransaction,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     tree: BtreeMut<'txn, K, &'static DynamicCollection<V>>,
     mem: Arc<TransactionalMemory>,
     _value_type: PhantomData<V>,
 }
 
-impl<K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableHandle
-    for MultimapTable<'_, '_, K, V>
-{
+impl<K: RedbKey + 'static, V: RedbKey + 'static> MultimapTableHandle for MultimapTable<'_, K, V> {
     fn name(&self) -> &str {
         &self.name
     }
 }
 
-impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, 'txn, K, V> {
+impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'txn, K, V> {
     pub(crate) fn new(
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         mem: Arc<TransactionalMemory>,
-        transaction: &'txn WriteTransaction<'db>,
-    ) -> MultimapTable<'db, 'txn, K, V> {
+        transaction: &'txn WriteTransaction,
+    ) -> MultimapTable<'txn, K, V> {
         MultimapTable {
             name: name.to_string(),
             transaction,
@@ -1115,8 +1113,8 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> MultimapTable<'db, '
     }
 }
 
-impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, V>
-    for MultimapTable<'db, 'txn, K, V>
+impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTable<K, V>
+    for MultimapTable<'txn, K, V>
 {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<V>>
@@ -1187,11 +1185,9 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> ReadableMultimapTabl
     }
 }
 
-impl<K: RedbKey + 'static, V: RedbKey + 'static> Sealed for MultimapTable<'_, '_, K, V> {}
+impl<K: RedbKey + 'static, V: RedbKey + 'static> Sealed for MultimapTable<'_, K, V> {}
 
-impl<'db, 'txn, K: RedbKey + 'static, V: RedbKey + 'static> Drop
-    for MultimapTable<'db, 'txn, K, V>
-{
+impl<'txn, K: RedbKey + 'static, V: RedbKey + 'static> Drop for MultimapTable<'txn, K, V> {
     fn drop(&mut self) {
         self.transaction.close_table(&self.name, &self.tree);
     }

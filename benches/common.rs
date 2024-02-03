@@ -85,7 +85,7 @@ impl<'a> RedbBenchDatabase<'a> {
 }
 
 impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
-    type W<'db> = RedbBenchWriteTransaction<'db> where Self: 'db;
+    type W<'db> = RedbBenchWriteTransaction where Self: 'db;
     type R<'db> = RedbBenchReadTransaction<'db> where Self: 'db;
 
     fn db_type_name() -> &'static str {
@@ -165,12 +165,12 @@ impl<'a> AsRef<[u8]> for RedbAccessGuard<'a> {
     }
 }
 
-pub struct RedbBenchWriteTransaction<'db> {
-    txn: redb::WriteTransaction<'db>,
+pub struct RedbBenchWriteTransaction {
+    txn: redb::WriteTransaction,
 }
 
-impl<'db> BenchWriteTransaction for RedbBenchWriteTransaction<'db> {
-    type W<'txn> = RedbBenchInserter<'db, 'txn> where Self: 'txn;
+impl BenchWriteTransaction for RedbBenchWriteTransaction {
+    type W<'txn> = RedbBenchInserter<'txn> where Self: 'txn;
 
     fn get_inserter(&mut self) -> Self::W<'_> {
         let table = self.txn.open_table(X).unwrap();
@@ -182,11 +182,11 @@ impl<'db> BenchWriteTransaction for RedbBenchWriteTransaction<'db> {
     }
 }
 
-pub struct RedbBenchInserter<'db, 'txn> {
-    table: redb::Table<'db, 'txn, &'static [u8], &'static [u8]>,
+pub struct RedbBenchInserter<'txn> {
+    table: redb::Table<'txn, &'static [u8], &'static [u8]>,
 }
 
-impl BenchInserter for RedbBenchInserter<'_, '_> {
+impl BenchInserter for RedbBenchInserter<'_> {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.table.insert(key, value).map(|_| ()).map_err(|_| ())
     }
