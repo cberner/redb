@@ -124,7 +124,7 @@ impl MutInPlaceValue for &[u8] {
     }
 }
 
-pub trait RedbKey: Value {
+pub trait Key: Value {
     /// Compare data1 with data2
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering;
 }
@@ -162,7 +162,7 @@ impl Value for () {
     }
 }
 
-impl RedbKey for () {
+impl Key for () {
     fn compare(_data1: &[u8], _data2: &[u8]) -> Ordering {
         Ordering::Equal
     }
@@ -207,7 +207,7 @@ impl Value for bool {
     }
 }
 
-impl RedbKey for bool {
+impl Key for bool {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         let value1 = Self::from_bytes(data1);
         let value2 = Self::from_bytes(data2);
@@ -258,7 +258,7 @@ impl<T: Value> Value for Option<T> {
     }
 }
 
-impl<T: RedbKey> RedbKey for Option<T> {
+impl<T: Key> Key for Option<T> {
     #[allow(clippy::collapsible_else_if)]
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         if data1[0] == 0 {
@@ -309,7 +309,7 @@ impl Value for &[u8] {
     }
 }
 
-impl RedbKey for &[u8] {
+impl Key for &[u8] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         data1.cmp(data2)
     }
@@ -347,7 +347,7 @@ impl<const N: usize> Value for &[u8; N] {
     }
 }
 
-impl<const N: usize> RedbKey for &[u8; N] {
+impl<const N: usize> Key for &[u8; N] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         data1.cmp(data2)
     }
@@ -385,7 +385,7 @@ impl Value for &str {
     }
 }
 
-impl RedbKey for &str {
+impl Key for &str {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         let str1 = Self::from_bytes(data1);
         let str2 = Self::from_bytes(data2);
@@ -422,7 +422,7 @@ impl Value for char {
     }
 }
 
-impl RedbKey for char {
+impl Key for char {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
     }
@@ -466,7 +466,7 @@ macro_rules! le_impl {
     ($t:ty) => {
         le_value!($t);
 
-        impl RedbKey for $t {
+        impl Key for $t {
             fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
                 Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
             }

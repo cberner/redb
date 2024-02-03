@@ -1,5 +1,5 @@
 use crate::tree_store::TransactionalMemory;
-use crate::{RedbKey, Result, Savepoint, TypeName, Value};
+use crate::{Key, Result, Savepoint, TypeName, Value};
 #[cfg(feature = "logging")]
 use log::info;
 use std::cmp::Ordering;
@@ -76,7 +76,7 @@ impl Value for SavepointId {
     }
 }
 
-impl RedbKey for SavepointId {
+impl Key for SavepointId {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         Self::from_bytes(data1).0.cmp(&Self::from_bytes(data2).0)
     }

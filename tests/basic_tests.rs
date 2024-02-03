@@ -1,6 +1,6 @@
 use redb::backends::InMemoryBackend;
 use redb::{
-    Database, MultimapTableDefinition, MultimapTableHandle, Range, ReadableTable, RedbKey,
+    Database, Key, MultimapTableDefinition, MultimapTableHandle, Range, ReadableTable,
     TableDefinition, TableError, TableHandle, TypeName, Value,
 };
 use std::cmp::Ordering;
@@ -1378,7 +1378,7 @@ fn custom_ordering() {
         }
     }
 
-    impl RedbKey for ReverseKey {
+    impl Key for ReverseKey {
         fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
             data2.cmp(data1)
         }
@@ -1632,7 +1632,7 @@ fn signature_lifetimes() {
 
 #[test]
 fn generic_signature_lifetimes() {
-    fn write_key_generic<K: RedbKey>(
+    fn write_key_generic<K: Key>(
         table: TableDefinition<K, &[u8]>,
         key: K::SelfType<'_>,
         db: &Database,
@@ -1646,7 +1646,7 @@ fn generic_signature_lifetimes() {
         write_txn.commit().unwrap();
     }
 
-    fn read_key_generic<K: RedbKey>(
+    fn read_key_generic<K: Key>(
         table: TableDefinition<K, &[u8]>,
         key: K::SelfType<'_>,
         db: &Database,

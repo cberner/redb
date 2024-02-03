@@ -196,7 +196,7 @@ fn create_tempfile() -> tempfile::NamedTempFile {
     }
 }
 
-fn test_helper<K: TestData + redb::RedbKey + redb1::RedbKey + 'static, V: TestData + 'static>() {
+fn test_helper<K: TestData + redb::Key + redb1::RedbKey + 'static, V: TestData + 'static>() {
     let tmpfile = create_tempfile();
     let db = redb1::Database::create(tmpfile.path()).unwrap();
     let table_def: redb1::TableDefinition<K, V> = redb1::TableDefinition::new("table");

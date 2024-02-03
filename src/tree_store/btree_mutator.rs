@@ -7,7 +7,7 @@ use crate::tree_store::btree_mutator::DeletionResult::{
 };
 use crate::tree_store::page_store::{Page, PageImpl};
 use crate::tree_store::{AccessGuardMut, PageNumber, RawLeafBuilder, TransactionalMemory};
-use crate::types::{RedbKey, Value};
+use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
 use std::cmp::{max, min};
 use std::marker::PhantomData;
@@ -44,7 +44,7 @@ struct InsertionResult<'a, V: Value> {
     old_value: Option<AccessGuard<'a, V>>,
 }
 
-pub(crate) struct MutateHelper<'a, 'b, K: RedbKey, V: Value> {
+pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
     root: &'b mut Option<(PageNumber, Checksum)>,
     modify_uncommitted: bool,
     mem: Arc<TransactionalMemory>,
@@ -54,7 +54,7 @@ pub(crate) struct MutateHelper<'a, 'b, K: RedbKey, V: Value> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, 'b, K: RedbKey, V: Value> MutateHelper<'a, 'b, K, V> {
+impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
     pub(crate) fn new(
         root: &'b mut Option<(PageNumber, Checksum)>,
         mem: Arc<TransactionalMemory>,

@@ -9,7 +9,7 @@ use crate::tree_store::{
     PageNumber, SerializedSavepoint, TableTree, TableTreeMut, TableType, TransactionalMemory,
     MAX_VALUE_LENGTH,
 };
-use crate::types::{RedbKey, Value};
+use crate::types::{Key, Value};
 use crate::{
     AccessGuard, MultimapTable, MultimapTableDefinition, MultimapTableHandle, Range,
     ReadOnlyMultimapTable, ReadOnlyTable, Result, Savepoint, SavepointError, StorageError, Table,
@@ -33,13 +33,13 @@ const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), SavepointId> =
 pub(crate) const SAVEPOINT_TABLE: SystemTableDefinition<SavepointId, SerializedSavepoint> =
     SystemTableDefinition::new("persistent_savepoints");
 
-pub struct SystemTableDefinition<'a, K: RedbKey + 'static, V: Value + 'static> {
+pub struct SystemTableDefinition<'a, K: Key + 'static, V: Value + 'static> {
     name: &'a str,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> SystemTableDefinition<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> SystemTableDefinition<'a, K, V> {
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
         Self {
@@ -50,23 +50,23 @@ impl<'a, K: RedbKey + 'static, V: Value + 'static> SystemTableDefinition<'a, K, 
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> TableHandle for SystemTableDefinition<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> TableHandle for SystemTableDefinition<'a, K, V> {
     fn name(&self) -> &str {
         self.name
     }
 }
 
-impl<K: RedbKey, V: Value> Sealed for SystemTableDefinition<'_, K, V> {}
+impl<K: Key, V: Value> Sealed for SystemTableDefinition<'_, K, V> {}
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> Clone for SystemTableDefinition<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> Clone for SystemTableDefinition<'a, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> Copy for SystemTableDefinition<'a, K, V> {}
+impl<'a, K: Key + 'static, V: Value + 'static> Copy for SystemTableDefinition<'a, K, V> {}
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> Display for SystemTableDefinition<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> Display for SystemTableDefinition<'a, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -190,14 +190,14 @@ pub enum Durability {
 }
 
 // Like a Table but only one may be open at a time to avoid possible races
-pub struct SystemTable<'db, 's, K: RedbKey + 'static, V: Value + 'static> {
+pub struct SystemTable<'db, 's, K: Key + 'static, V: Value + 'static> {
     name: String,
     namespace: &'s mut SystemNamespace<'db>,
     tree: BtreeMut<'s, K, V>,
     transaction_guard: Arc<TransactionGuard>,
 }
 
-impl<'db, 's, K: RedbKey + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
+impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
     fn new(
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
@@ -258,7 +258,7 @@ impl<'db, 's, K: RedbKey + 'static, V: Value + 'static> SystemTable<'db, 's, K, 
     }
 }
 
-impl<'db, 's, K: RedbKey + 'static, V: Value + 'static> Drop for SystemTable<'db, 's, K, V> {
+impl<'db, 's, K: Key + 'static, V: Value + 'static> Drop for SystemTable<'db, 's, K, V> {
     fn drop(&mut self) {
         self.namespace.close_table(&self.name, &self.tree);
     }
@@ -270,7 +270,7 @@ struct SystemNamespace<'db> {
 }
 
 impl<'db> SystemNamespace<'db> {
-    fn open_system_table<'txn, 's, K: RedbKey + 'static, V: Value + 'static>(
+    fn open_system_table<'txn, 's, K: Key + 'static, V: Value + 'static>(
         &'s mut self,
         transaction: &'txn WriteTransaction,
         definition: SystemTableDefinition<K, V>,
@@ -295,7 +295,7 @@ impl<'db> SystemNamespace<'db> {
         ))
     }
 
-    fn close_table<K: RedbKey + 'static, V: Value + 'static>(
+    fn close_table<K: Key + 'static, V: Value + 'static>(
         &mut self,
         name: &str,
         table: &BtreeMut<K, V>,
@@ -312,7 +312,7 @@ struct TableNamespace<'db> {
 
 impl<'db> TableNamespace<'db> {
     #[track_caller]
-    fn inner_open<K: RedbKey + 'static, V: Value + 'static>(
+    fn inner_open<K: Key + 'static, V: Value + 'static>(
         &mut self,
         name: &str,
         table_type: TableType,
@@ -331,7 +331,7 @@ impl<'db> TableNamespace<'db> {
     }
 
     #[track_caller]
-    pub fn open_multimap_table<'txn, K: RedbKey + 'static, V: RedbKey + 'static>(
+    pub fn open_multimap_table<'txn, K: Key + 'static, V: Key + 'static>(
         &mut self,
         transaction: &'txn WriteTransaction,
         definition: MultimapTableDefinition<K, V>,
@@ -351,7 +351,7 @@ impl<'db> TableNamespace<'db> {
     }
 
     #[track_caller]
-    pub fn open_table<'txn, K: RedbKey + 'static, V: Value + 'static>(
+    pub fn open_table<'txn, K: Key + 'static, V: Value + 'static>(
         &mut self,
         transaction: &'txn WriteTransaction,
         definition: TableDefinition<K, V>,
@@ -403,7 +403,7 @@ impl<'db> TableNamespace<'db> {
         self.inner_delete(name, TableType::Multimap)
     }
 
-    pub(crate) fn close_table<K: RedbKey + 'static, V: Value + 'static>(
+    pub(crate) fn close_table<K: Key + 'static, V: Value + 'static>(
         &mut self,
         name: &str,
         table: &BtreeMut<K, V>,
@@ -784,7 +784,7 @@ impl WriteTransaction {
     ///
     /// The table will be created if it does not exist
     #[track_caller]
-    pub fn open_table<'txn, K: RedbKey + 'static, V: Value + 'static>(
+    pub fn open_table<'txn, K: Key + 'static, V: Value + 'static>(
         &'txn self,
         definition: TableDefinition<K, V>,
     ) -> Result<Table<'txn, K, V>, TableError> {
@@ -795,7 +795,7 @@ impl WriteTransaction {
     ///
     /// The table will be created if it does not exist
     #[track_caller]
-    pub fn open_multimap_table<'txn, K: RedbKey + 'static, V: RedbKey + 'static>(
+    pub fn open_multimap_table<'txn, K: Key + 'static, V: Key + 'static>(
         &'txn self,
         definition: MultimapTableDefinition<K, V>,
     ) -> Result<MultimapTable<'txn, K, V>, TableError> {
@@ -805,7 +805,7 @@ impl WriteTransaction {
             .open_multimap_table(self, definition)
     }
 
-    pub(crate) fn close_table<K: RedbKey + 'static, V: Value + 'static>(
+    pub(crate) fn close_table<K: Key + 'static, V: Value + 'static>(
         &self,
         name: &str,
         table: &BtreeMut<K, V>,
@@ -1200,7 +1200,7 @@ impl ReadTransaction {
     }
 
     /// Open the given table
-    pub fn open_table<K: RedbKey + 'static, V: Value + 'static>(
+    pub fn open_table<K: Key + 'static, V: Value + 'static>(
         &self,
         definition: TableDefinition<K, V>,
     ) -> Result<ReadOnlyTable<K, V>, TableError> {
@@ -1237,7 +1237,7 @@ impl ReadTransaction {
     }
 
     /// Open the given table
-    pub fn open_multimap_table<K: RedbKey + 'static, V: RedbKey + 'static>(
+    pub fn open_multimap_table<K: Key + 'static, V: Key + 'static>(
         &self,
         definition: MultimapTableDefinition<K, V>,
     ) -> Result<ReadOnlyMultimapTable<K, V>, TableError> {

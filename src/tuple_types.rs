@@ -1,4 +1,4 @@
-use crate::types::{RedbKey, TypeName, Value};
+use crate::types::{Key, TypeName, Value};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::mem::size_of;
@@ -34,7 +34,7 @@ fn parse_lens<const N: usize>(data: &[u8]) -> [usize; N] {
     result
 }
 
-fn not_equal<T: RedbKey>(data1: &[u8], data2: &[u8]) -> Option<Ordering> {
+fn not_equal<T: Key>(data1: &[u8], data2: &[u8]) -> Option<Ordering> {
     match T::compare(data1, data2) {
         Ordering::Less => Some(Ordering::Less),
         Ordering::Equal => None,
@@ -223,7 +223,7 @@ macro_rules! tuple_impl {
             }
         }
 
-        impl<$($t: RedbKey,)+ $t_last: RedbKey> RedbKey for ($($t,)+ $t_last) {
+        impl<$($t: Key,)+ $t_last: Key> Key for ($($t,)+ $t_last) {
             fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
                 if Self::fixed_width().is_some() {
                     compare_fixed_impl!(data1, data2, $($t,)+ $t_last)

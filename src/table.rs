@@ -4,7 +4,7 @@ use crate::tree_store::{
     AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeMut, BtreeRangeIter, Checksum,
     PageHint, PageNumber, RawBtree, TransactionalMemory, MAX_VALUE_LENGTH,
 };
-use crate::types::{MutInPlaceValue, RedbKey, Value};
+use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, StorageError, WriteTransaction};
 use crate::{Result, TableHandle};
 use std::borrow::Borrow;
@@ -58,19 +58,19 @@ impl TableStats {
 }
 
 /// A table containing key-value mappings
-pub struct Table<'txn, K: RedbKey + 'static, V: Value + 'static> {
+pub struct Table<'txn, K: Key + 'static, V: Value + 'static> {
     name: String,
     transaction: &'txn WriteTransaction,
     tree: BtreeMut<'txn, K, V>,
 }
 
-impl<K: RedbKey + 'static, V: Value + 'static> TableHandle for Table<'_, K, V> {
+impl<K: Key + 'static, V: Value + 'static> TableHandle for Table<'_, K, V> {
     fn name(&self) -> &str {
         &self.name
     }
 }
 
-impl<'txn, K: RedbKey + 'static, V: Value + 'static> Table<'txn, K, V> {
+impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     pub(crate) fn new(
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
@@ -193,7 +193,7 @@ impl<'txn, K: RedbKey + 'static, V: Value + 'static> Table<'txn, K, V> {
     }
 }
 
-impl<'txn, K: RedbKey + 'static, V: MutInPlaceValue + 'static> Table<'txn, K, V> {
+impl<'txn, K: Key + 'static, V: MutInPlaceValue + 'static> Table<'txn, K, V> {
     /// Reserve space to insert a key-value pair
     /// The returned reference will have length equal to value_length
     pub fn insert_reserve<'a>(
@@ -215,7 +215,7 @@ impl<'txn, K: RedbKey + 'static, V: MutInPlaceValue + 'static> Table<'txn, K, V>
     }
 }
 
-impl<'txn, K: RedbKey + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'txn, K, V> {
+impl<'txn, K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'txn, K, V> {
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
     where
         K: 'a,
@@ -255,15 +255,15 @@ impl<'txn, K: RedbKey + 'static, V: Value + 'static> ReadableTable<K, V> for Tab
     }
 }
 
-impl<K: RedbKey, V: Value> Sealed for Table<'_, K, V> {}
+impl<K: Key, V: Value> Sealed for Table<'_, K, V> {}
 
-impl<'txn, K: RedbKey + 'static, V: Value + 'static> Drop for Table<'txn, K, V> {
+impl<'txn, K: Key + 'static, V: Value + 'static> Drop for Table<'txn, K, V> {
     fn drop(&mut self) {
         self.transaction.close_table(&self.name, &self.tree);
     }
 }
 
-fn debug_helper<K: RedbKey + 'static, V: Value + 'static>(
+fn debug_helper<K: Key + 'static, V: Value + 'static>(
     f: &mut Formatter<'_>,
     name: &str,
     len: Result<u64>,
@@ -306,13 +306,13 @@ fn debug_helper<K: RedbKey + 'static, V: Value + 'static>(
     Ok(())
 }
 
-impl<K: RedbKey + 'static, V: Value + 'static> Debug for Table<'_, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Debug for Table<'_, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         debug_helper(f, &self.name, self.len(), self.first(), self.last())
     }
 }
 
-pub trait ReadableTable<K: RedbKey + 'static, V: Value + 'static>: Sealed {
+pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: Sealed {
     /// Returns the value corresponding to the given key
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
     where
@@ -413,13 +413,13 @@ impl ReadOnlyUntypedTable {
 }
 
 /// A read-only table
-pub struct ReadOnlyTable<K: RedbKey + 'static, V: Value + 'static> {
+pub struct ReadOnlyTable<K: Key + 'static, V: Value + 'static> {
     name: String,
     tree: Btree<K, V>,
     transaction_guard: Arc<TransactionGuard>,
 }
 
-impl<K: RedbKey + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
+impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
     pub(crate) fn new(
         name: String,
         root_page: Option<(PageNumber, Checksum)>,
@@ -446,7 +446,7 @@ impl<K: RedbKey + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
     }
 }
 
-impl<K: RedbKey + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable<K, V> {
+impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable<K, V> {
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
     where
         K: 'a,
@@ -486,20 +486,20 @@ impl<K: RedbKey + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyT
     }
 }
 
-impl<K: RedbKey, V: Value> Sealed for ReadOnlyTable<K, V> {}
+impl<K: Key, V: Value> Sealed for ReadOnlyTable<K, V> {}
 
-impl<K: RedbKey + 'static, V: Value + 'static> Debug for ReadOnlyTable<K, V> {
+impl<K: Key + 'static, V: Value + 'static> Debug for ReadOnlyTable<K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         debug_helper(f, &self.name, self.len(), self.first(), self.last())
     }
 }
 
-pub struct Drain<'a, K: RedbKey + 'static, V: Value + 'static> {
+pub struct Drain<'a, K: Key + 'static, V: Value + 'static> {
     inner: BtreeDrain<K, V>,
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> Drain<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> Drain<'a, K, V> {
     fn new(inner: BtreeDrain<K, V>) -> Self {
         Self {
             inner,
@@ -508,7 +508,7 @@ impl<'a, K: RedbKey + 'static, V: Value + 'static> Drain<'a, K, V> {
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> Iterator for Drain<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> Iterator for Drain<'a, K, V> {
     type Item = Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -522,7 +522,7 @@ impl<'a, K: RedbKey + 'static, V: Value + 'static> Iterator for Drain<'a, K, V> 
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> DoubleEndedIterator for Drain<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> DoubleEndedIterator for Drain<'a, K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;
         Some(entry.map(|entry| {
@@ -536,7 +536,7 @@ impl<'a, K: RedbKey + 'static, V: Value + 'static> DoubleEndedIterator for Drain
 
 pub struct DrainFilter<
     'a,
-    K: RedbKey + 'static,
+    K: Key + 'static,
     V: Value + 'static,
     F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
 > {
@@ -546,7 +546,7 @@ pub struct DrainFilter<
 
 impl<
         'a,
-        K: RedbKey + 'static,
+        K: Key + 'static,
         V: Value + 'static,
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > DrainFilter<'a, K, V, F>
@@ -561,7 +561,7 @@ impl<
 
 impl<
         'a,
-        K: RedbKey + 'static,
+        K: Key + 'static,
         V: Value + 'static,
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > Iterator for DrainFilter<'a, K, V, F>
@@ -581,7 +581,7 @@ impl<
 
 impl<
         'a,
-        K: RedbKey + 'static,
+        K: Key + 'static,
         V: Value + 'static,
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > DoubleEndedIterator for DrainFilter<'a, K, V, F>
@@ -598,14 +598,14 @@ impl<
 }
 
 #[derive(Clone)]
-pub struct Range<'a, K: RedbKey + 'static, V: Value + 'static> {
+pub struct Range<'a, K: Key + 'static, V: Value + 'static> {
     inner: BtreeRangeIter<K, V>,
     _transaction_guard: Arc<TransactionGuard>,
     // TODO: replace with TransactionGuard?
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> Range<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> Range<'a, K, V> {
     pub(super) fn new(inner: BtreeRangeIter<K, V>, guard: Arc<TransactionGuard>) -> Self {
         Self {
             inner,
@@ -615,7 +615,7 @@ impl<'a, K: RedbKey + 'static, V: Value + 'static> Range<'a, K, V> {
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> Iterator for Range<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> Iterator for Range<'a, K, V> {
     type Item = Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -630,7 +630,7 @@ impl<'a, K: RedbKey + 'static, V: Value + 'static> Iterator for Range<'a, K, V> 
     }
 }
 
-impl<'a, K: RedbKey + 'static, V: Value + 'static> DoubleEndedIterator for Range<'a, K, V> {
+impl<'a, K: Key + 'static, V: Value + 'static> DoubleEndedIterator for Range<'a, K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.inner.next_back().map(|x| {
             x.map(|entry| {
