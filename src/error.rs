@@ -335,7 +335,7 @@ pub enum TransactionError {
     /// Error from underlying storage
     Storage(StorageError),
     /// The transaction is still referenced by a table or other object
-    ReadTransactionStillInUse(ReadTransaction<'static>),
+    ReadTransactionStillInUse(ReadTransaction),
 }
 
 impl TransactionError {
@@ -463,7 +463,7 @@ pub enum Error {
     Io(io::Error),
     LockPoisoned(&'static panic::Location<'static>),
     /// The transaction is still referenced by a table or other object
-    ReadTransactionStillInUse(ReadTransaction<'static>),
+    ReadTransactionStillInUse(ReadTransaction),
 }
 
 impl<T> From<PoisonError<T>> for Error {

@@ -794,7 +794,7 @@ impl Database {
     ///
     /// Returns a [`ReadTransaction`] which may be used to read from the database. Read transactions
     /// may exist concurrently with writes
-    pub fn begin_read(&self) -> Result<ReadTransaction<'static>, TransactionError> {
+    pub fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
         let guard = self.allocate_read_transaction()?;
         #[cfg(feature = "logging")]
         info!("Beginning read transaction id={:?}", guard.id());
