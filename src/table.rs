@@ -58,26 +58,26 @@ impl TableStats {
 }
 
 /// A table containing key-value mappings
-pub struct Table<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
+pub struct Table<'txn, K: RedbKey + 'static, V: RedbValue + 'static> {
     name: String,
-    transaction: &'txn WriteTransaction<'db>,
+    transaction: &'txn WriteTransaction,
     tree: BtreeMut<'txn, K, V>,
 }
 
-impl<K: RedbKey + 'static, V: RedbValue + 'static> TableHandle for Table<'_, '_, K, V> {
+impl<K: RedbKey + 'static, V: RedbValue + 'static> TableHandle for Table<'_, K, V> {
     fn name(&self) -> &str {
         &self.name
     }
 }
 
-impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K, V> {
+impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'txn, K, V> {
     pub(crate) fn new(
         name: &str,
         table_root: Option<(PageNumber, Checksum)>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         mem: Arc<TransactionalMemory>,
-        transaction: &'txn WriteTransaction<'db>,
-    ) -> Table<'db, 'txn, K, V> {
+        transaction: &'txn WriteTransaction,
+    ) -> Table<'txn, K, V> {
         Table {
             name: name.to_string(),
             transaction,
@@ -193,7 +193,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Table<'db, 'txn, K
     }
 }
 
-impl<'db, 'txn, K: RedbKey + 'static, V: MutInPlaceValue + 'static> Table<'db, 'txn, K, V> {
+impl<'txn, K: RedbKey + 'static, V: MutInPlaceValue + 'static> Table<'txn, K, V> {
     /// Reserve space to insert a key-value pair
     /// The returned reference will have length equal to value_length
     pub fn insert_reserve<'a>(
@@ -215,9 +215,7 @@ impl<'db, 'txn, K: RedbKey + 'static, V: MutInPlaceValue + 'static> Table<'db, '
     }
 }
 
-impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V>
-    for Table<'db, 'txn, K, V>
-{
+impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V> for Table<'txn, K, V> {
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
     where
         K: 'a,
@@ -257,9 +255,9 @@ impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> ReadableTable<K, V
     }
 }
 
-impl<K: RedbKey, V: RedbValue> Sealed for Table<'_, '_, K, V> {}
+impl<K: RedbKey, V: RedbValue> Sealed for Table<'_, K, V> {}
 
-impl<'db, 'txn, K: RedbKey + 'static, V: RedbValue + 'static> Drop for Table<'db, 'txn, K, V> {
+impl<'txn, K: RedbKey + 'static, V: RedbValue + 'static> Drop for Table<'txn, K, V> {
     fn drop(&mut self) {
         self.transaction.close_table(&self.name, &self.tree);
     }
@@ -308,7 +306,7 @@ fn debug_helper<K: RedbKey + 'static, V: RedbValue + 'static>(
     Ok(())
 }
 
-impl<K: RedbKey + 'static, V: RedbValue + 'static> Debug for Table<'_, '_, K, V> {
+impl<K: RedbKey + 'static, V: RedbValue + 'static> Debug for Table<'_, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         debug_helper(f, &self.name, self.len(), self.first(), self.last())
     }

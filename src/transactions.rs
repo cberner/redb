@@ -11,7 +11,7 @@ use crate::tree_store::{
 };
 use crate::types::{RedbKey, RedbValue};
 use crate::{
-    AccessGuard, Database, MultimapTable, MultimapTableDefinition, MultimapTableHandle, Range,
+    AccessGuard, MultimapTable, MultimapTableDefinition, MultimapTableHandle, Range,
     ReadOnlyMultimapTable, ReadOnlyTable, Result, Savepoint, SavepointError, StorageError, Table,
     TableDefinition, TableError, TableHandle, TransactionError, UntypedMultimapTableHandle,
     UntypedTableHandle,
@@ -274,7 +274,7 @@ struct SystemNamespace<'db> {
 impl<'db> SystemNamespace<'db> {
     fn open_system_table<'txn, 's, K: RedbKey + 'static, V: RedbValue + 'static>(
         &'s mut self,
-        transaction: &'txn WriteTransaction<'db>,
+        transaction: &'txn WriteTransaction,
         definition: SystemTableDefinition<K, V>,
     ) -> Result<SystemTable<'db, 's, K, V>> {
         #[cfg(feature = "logging")]
@@ -335,9 +335,9 @@ impl<'db> TableNamespace<'db> {
     #[track_caller]
     pub fn open_multimap_table<'txn, K: RedbKey + 'static, V: RedbKey + 'static>(
         &mut self,
-        transaction: &'txn WriteTransaction<'db>,
+        transaction: &'txn WriteTransaction,
         definition: MultimapTableDefinition<K, V>,
-    ) -> Result<MultimapTable<'db, 'txn, K, V>, TableError> {
+    ) -> Result<MultimapTable<'txn, K, V>, TableError> {
         #[cfg(feature = "logging")]
         info!("Opening multimap table: {}", definition);
         let root = self.inner_open::<K, V>(definition.name(), TableType::Multimap)?;
@@ -355,9 +355,9 @@ impl<'db> TableNamespace<'db> {
     #[track_caller]
     pub fn open_table<'txn, K: RedbKey + 'static, V: RedbValue + 'static>(
         &mut self,
-        transaction: &'txn WriteTransaction<'db>,
+        transaction: &'txn WriteTransaction,
         definition: TableDefinition<K, V>,
-    ) -> Result<Table<'db, 'txn, K, V>, TableError> {
+    ) -> Result<Table<'txn, K, V>, TableError> {
         #[cfg(feature = "logging")]
         info!("Opening table: {}", definition);
         let root = self.inner_open::<K, V>(definition.name(), TableType::Normal)?;
@@ -384,7 +384,7 @@ impl<'db> TableNamespace<'db> {
     #[track_caller]
     fn delete_table<'txn>(
         &mut self,
-        transaction: &'txn WriteTransaction<'db>,
+        transaction: &'txn WriteTransaction,
         name: &str,
     ) -> Result<bool, TableError> {
         #[cfg(feature = "logging")]
@@ -396,7 +396,7 @@ impl<'db> TableNamespace<'db> {
     #[track_caller]
     fn delete_multimap_table<'txn>(
         &mut self,
-        transaction: &'txn WriteTransaction<'db>,
+        transaction: &'txn WriteTransaction,
         name: &str,
     ) -> Result<bool, TableError> {
         #[cfg(feature = "logging")]
@@ -419,21 +419,20 @@ impl<'db> TableNamespace<'db> {
 /// A read/write transaction
 ///
 /// Only a single [`WriteTransaction`] may exist at a time
-pub struct WriteTransaction<'db> {
-    db: &'db Database,
+pub struct WriteTransaction {
     transaction_tracker: Arc<TransactionTracker>,
     mem: Arc<TransactionalMemory>,
     transaction_guard: Arc<TransactionGuard>,
     transaction_id: TransactionId,
     // The table of freed pages by transaction. FreedTableKey -> binary.
     // The binary blob is a length-prefixed array of PageNumber
-    freed_tree: Mutex<BtreeMut<'db, FreedTableKey, FreedPageList<'static>>>,
+    freed_tree: Mutex<BtreeMut<'static, FreedTableKey, FreedPageList<'static>>>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     // Pages that were freed from the freed-tree. These can be freed immediately after commit(),
     // since read transactions do not access the freed-tree
     post_commit_frees: Arc<Mutex<Vec<PageNumber>>>,
-    tables: Mutex<TableNamespace<'db>>,
-    system_tables: Mutex<SystemNamespace<'db>>,
+    tables: Mutex<TableNamespace<'static>>,
+    system_tables: Mutex<SystemNamespace<'static>>,
     completed: bool,
     dirty: AtomicBool,
     durability: Durability,
@@ -442,18 +441,18 @@ pub struct WriteTransaction<'db> {
     deleted_persistent_savepoints: Mutex<Vec<(SavepointId, TransactionId)>>,
 }
 
-impl<'db> WriteTransaction<'db> {
+impl WriteTransaction {
     pub(crate) fn new(
-        db: &'db Database,
         guard: TransactionGuard,
         transaction_tracker: Arc<TransactionTracker>,
+        mem: Arc<TransactionalMemory>,
     ) -> Result<Self> {
         let transaction_id = guard.id();
         let guard = Arc::new(guard);
 
-        let root_page = db.get_memory().get_data_root();
-        let system_page = db.get_memory().get_system_root();
-        let freed_root = db.get_memory().get_freed_root();
+        let root_page = mem.get_data_root();
+        let system_page = mem.get_system_root();
+        let freed_root = mem.get_freed_root();
         let freed_pages = Arc::new(Mutex::new(vec![]));
         let post_commit_frees = Arc::new(Mutex::new(vec![]));
 
@@ -462,7 +461,7 @@ impl<'db> WriteTransaction<'db> {
             table_tree: TableTreeMut::new(
                 root_page,
                 guard.clone(),
-                db.get_memory(),
+                mem.clone(),
                 freed_pages.clone(),
             ),
         };
@@ -470,16 +469,15 @@ impl<'db> WriteTransaction<'db> {
             table_tree: TableTreeMut::new(
                 system_page,
                 guard.clone(),
-                db.get_memory(),
+                mem.clone(),
                 freed_pages.clone(),
             ),
             transaction_guard: guard.clone(),
         };
 
         Ok(Self {
-            db,
             transaction_tracker,
-            mem: db.get_memory(),
+            mem: mem.clone(),
             transaction_guard: guard.clone(),
             transaction_id,
             tables: Mutex::new(tables),
@@ -487,7 +485,7 @@ impl<'db> WriteTransaction<'db> {
             freed_tree: Mutex::new(BtreeMut::new(
                 freed_root,
                 guard,
-                db.get_memory(),
+                mem,
                 post_commit_frees.clone(),
             )),
             freed_pages,
@@ -607,6 +605,23 @@ impl<'db> WriteTransaction<'db> {
         Ok(savepoints.into_iter())
     }
 
+    // TODO: deduplicate this with the one in Database
+    fn allocate_read_transaction(&self) -> Result<TransactionGuard> {
+        let id = self
+            .transaction_tracker
+            .register_read_transaction(&self.mem)?;
+
+        Ok(TransactionGuard::new_read(
+            id,
+            self.transaction_tracker.clone(),
+        ))
+    }
+
+    fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionId)> {
+        let id = self.transaction_tracker.allocate_savepoint();
+        Ok((id, self.allocate_read_transaction()?.leak()))
+    }
+
     /// Creates a snapshot of the current database state, which can be used to rollback the database
     ///
     /// This savepoint will be freed as soon as the returned `[Savepoint]` is dropped.
@@ -617,7 +632,7 @@ impl<'db> WriteTransaction<'db> {
             return Err(SavepointError::InvalidSavepoint);
         }
 
-        let (id, transaction_id) = self.db.allocate_savepoint()?;
+        let (id, transaction_id) = self.allocate_savepoint()?;
         #[cfg(feature = "logging")]
         info!(
             "Creating savepoint id={:?}, txn_id={:?}",
@@ -629,7 +644,7 @@ impl<'db> WriteTransaction<'db> {
         let system_root = self.mem.get_system_root();
         let freed_root = self.mem.get_freed_root();
         let savepoint = Savepoint::new_ephemeral(
-            &self.db.get_memory(),
+            &self.mem,
             self.transaction_tracker.clone(),
             id,
             transaction_id,
@@ -666,7 +681,7 @@ impl<'db> WriteTransaction<'db> {
         );
         // Restoring a savepoint that reverted a file format or checksum type change could corrupt
         // the database
-        assert_eq!(self.db.get_memory().get_version(), savepoint.get_version());
+        assert_eq!(self.mem.get_version(), savepoint.get_version());
         self.dirty.store(true, Ordering::Release);
 
         let allocated_since_savepoint = self
@@ -774,7 +789,7 @@ impl<'db> WriteTransaction<'db> {
     pub fn open_table<'txn, K: RedbKey + 'static, V: RedbValue + 'static>(
         &'txn self,
         definition: TableDefinition<K, V>,
-    ) -> Result<Table<'db, 'txn, K, V>, TableError> {
+    ) -> Result<Table<'txn, K, V>, TableError> {
         self.tables.lock().unwrap().open_table(self, definition)
     }
 
@@ -785,7 +800,7 @@ impl<'db> WriteTransaction<'db> {
     pub fn open_multimap_table<'txn, K: RedbKey + 'static, V: RedbKey + 'static>(
         &'txn self,
         definition: MultimapTableDefinition<K, V>,
-    ) -> Result<MultimapTable<'db, 'txn, K, V>, TableError> {
+    ) -> Result<MultimapTable<'txn, K, V>, TableError> {
         self.tables
             .lock()
             .unwrap()
@@ -1150,7 +1165,7 @@ impl<'db> WriteTransaction<'db> {
     }
 }
 
-impl<'a> Drop for WriteTransaction<'a> {
+impl Drop for WriteTransaction {
     fn drop(&mut self) {
         if !self.completed && !thread::panicking() && !self.mem.storage_failure() {
             #[allow(unused_variables)]

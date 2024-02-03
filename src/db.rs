@@ -255,7 +255,7 @@ impl TransactionGuard {
         self.transaction_id.unwrap()
     }
 
-    fn leak(mut self) -> TransactionId {
+    pub(crate) fn leak(mut self) -> TransactionId {
         self.transaction_id.take().unwrap()
     }
 }
@@ -768,11 +768,6 @@ impl Database {
         ))
     }
 
-    pub(crate) fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionId)> {
-        let id = self.transaction_tracker.allocate_savepoint();
-        Ok((id, self.allocate_read_transaction()?.leak()))
-    }
-
     /// Convenience method for [`Builder::new`]
     pub fn builder() -> Builder {
         Builder::new()
@@ -788,7 +783,8 @@ impl Database {
             self.transaction_tracker.start_write_transaction(),
             self.transaction_tracker.clone(),
         );
-        WriteTransaction::new(self, guard, self.transaction_tracker.clone()).map_err(|e| e.into())
+        WriteTransaction::new(guard, self.transaction_tracker.clone(), self.mem.clone())
+            .map_err(|e| e.into())
     }
 
     /// Begins a read transaction

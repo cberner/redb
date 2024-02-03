@@ -470,7 +470,7 @@ fn is_simulated_io_error(err: &redb::Error) -> bool {
     }
 }
 
-fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransaction<'_>, &mut BTreeMap<u64, T>, &FuzzTransaction, &mut SavepointManager<T>) -> Result<(), redb::Error>) -> Result<(), redb::Error> {
+fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransaction, &mut BTreeMap<u64, T>, &FuzzTransaction, &mut SavepointManager<T>) -> Result<(), redb::Error>) -> Result<(), redb::Error> {
     let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
     let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap())?);
     let countdown = backend.countdown.clone();
@@ -642,7 +642,7 @@ fn handle_savepoints<T: Clone>(mut txn: WriteTransaction, reference: &mut BTreeM
 
 }
 
-fn apply_crashable_transaction_multimap(txn: WriteTransaction<'_>, uncommitted_reference: &mut BTreeMap<u64, BTreeSet<usize>>, transaction: &FuzzTransaction, savepoints: &mut SavepointManager<BTreeSet<usize>>) -> Result<(), redb::Error> {
+fn apply_crashable_transaction_multimap(txn: WriteTransaction, uncommitted_reference: &mut BTreeMap<u64, BTreeSet<usize>>, transaction: &FuzzTransaction, savepoints: &mut SavepointManager<BTreeSet<usize>>) -> Result<(), redb::Error> {
     {
         let mut table = txn.open_multimap_table(MULTIMAP_TABLE_DEF)?;
         for op in transaction.ops.iter() {
@@ -662,7 +662,7 @@ fn apply_crashable_transaction_multimap(txn: WriteTransaction<'_>, uncommitted_r
     Ok(())
 }
 
-fn apply_crashable_transaction(txn: WriteTransaction<'_>, uncommitted_reference: &mut BTreeMap<u64, usize>, transaction: &FuzzTransaction, savepoints: &mut SavepointManager<usize>) -> Result<(), redb::Error> {
+fn apply_crashable_transaction(txn: WriteTransaction, uncommitted_reference: &mut BTreeMap<u64, usize>, transaction: &FuzzTransaction, savepoints: &mut SavepointManager<usize>) -> Result<(), redb::Error> {
     {
         let mut table = txn.open_table(TABLE_DEF)?;
         for op in transaction.ops.iter() {
