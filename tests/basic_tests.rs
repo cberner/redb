@@ -35,6 +35,8 @@ fn len() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(STR_TABLE).unwrap();
     assert_eq!(table.len().unwrap(), 3);
+    let untyped_table = read_txn.open_untyped_table(STR_TABLE).unwrap();
+    assert_eq!(untyped_table.len().unwrap(), 3);
 }
 
 #[test]

@@ -3,9 +3,10 @@ use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::sealed::Sealed;
 use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
-    btree_stats, AllPageNumbersBtreeIter, BranchAccessor, Btree, BtreeMut, BtreeRangeIter,
-    BtreeStats, CachePriority, Checksum, LeafAccessor, LeafMutator, Page, PageHint, PageNumber,
-    RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF, MAX_VALUE_LENGTH,
+    btree_len, btree_stats, AllPageNumbersBtreeIter, BranchAccessor, Btree, BtreeMut,
+    BtreeRangeIter, BtreeStats, CachePriority, Checksum, LeafAccessor, LeafMutator, Page, PageHint,
+    PageNumber, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF,
+    MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
@@ -17,6 +18,74 @@ use std::mem;
 use std::mem::size_of;
 use std::ops::{RangeBounds, RangeFull};
 use std::sync::{Arc, Mutex};
+
+pub(crate) fn multimap_btree_len(
+    root: Option<PageNumber>,
+    mem: &TransactionalMemory,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+) -> Result<u64> {
+    if let Some(root) = root {
+        multimap_len_helper(root, mem, fixed_key_size, fixed_value_size)
+    } else {
+        Ok(0)
+    }
+}
+
+fn multimap_len_helper(
+    page_number: PageNumber,
+    mem: &TransactionalMemory,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+) -> Result<u64> {
+    let page = mem.get_page(page_number)?;
+    let node_mem = page.memory();
+    let mut len = 0;
+    match node_mem[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(
+                page.memory(),
+                fixed_key_size,
+                DynamicCollection::<()>::fixed_width_with(fixed_value_size),
+            );
+            for i in 0..accessor.num_pairs() {
+                let entry = accessor.entry(i).unwrap();
+                let collection: &UntypedDynamicCollection =
+                    UntypedDynamicCollection::new(entry.value());
+                match collection.collection_type() {
+                    Inline => {
+                        let inline_accessor = LeafAccessor::new(
+                            collection.as_inline(),
+                            fixed_value_size,
+                            <() as Value>::fixed_width(),
+                        );
+                        len += inline_accessor.num_pairs() as u64;
+                    }
+                    Subtree => {
+                        // this is a sub-tree, so traverse it
+                        len += btree_len(
+                            Some(collection.as_subtree().0),
+                            mem,
+                            fixed_value_size,
+                            <() as Value>::fixed_width(),
+                        )?;
+                    }
+                }
+            }
+        }
+        BRANCH => {
+            let accessor = BranchAccessor::new(&page, fixed_key_size);
+            for i in 0..accessor.count_children() {
+                if let Some(child) = accessor.child_page(i) {
+                    len += multimap_len_helper(child, mem, fixed_key_size, fixed_value_size)?;
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    Ok(len)
+}
 
 pub(crate) fn multimap_btree_stats(
     root: Option<PageNumber>,
@@ -1202,6 +1271,38 @@ pub struct ReadOnlyUntypedMultimapTable {
     mem: Arc<TransactionalMemory>,
 }
 
+impl Sealed for ReadOnlyUntypedMultimapTable {}
+
+impl ReadableTableMetadata for ReadOnlyUntypedMultimapTable {
+    /// Retrieves information about storage usage for the table
+    fn stats(&self) -> Result<TableStats> {
+        let tree_stats = multimap_btree_stats(
+            self.tree.get_root().map(|(p, _)| p),
+            &self.mem,
+            self.fixed_key_size,
+            self.fixed_value_size,
+        )?;
+
+        Ok(TableStats {
+            tree_height: tree_stats.tree_height,
+            leaf_pages: tree_stats.leaf_pages,
+            branch_pages: tree_stats.branch_pages,
+            stored_leaf_bytes: tree_stats.stored_leaf_bytes,
+            metadata_bytes: tree_stats.metadata_bytes,
+            fragmented_bytes: tree_stats.fragmented_bytes,
+        })
+    }
+
+    fn len(&self) -> Result<u64> {
+        multimap_btree_len(
+            self.tree.get_root().map(|(p, _)| p),
+            &self.mem,
+            self.fixed_key_size,
+            self.fixed_value_size,
+        )
+    }
+}
+
 impl ReadOnlyUntypedMultimapTable {
     pub(crate) fn new(
         root_page: Option<(PageNumber, Checksum)>,
@@ -1220,25 +1321,6 @@ impl ReadOnlyUntypedMultimapTable {
             fixed_value_size,
             mem,
         }
-    }
-
-    /// Retrieves information about storage usage for the table
-    pub fn stats(&self) -> Result<TableStats> {
-        let tree_stats = multimap_btree_stats(
-            self.tree.get_root().map(|(p, _)| p),
-            &self.mem,
-            self.fixed_key_size,
-            self.fixed_value_size,
-        )?;
-
-        Ok(TableStats {
-            tree_height: tree_stats.tree_height,
-            leaf_pages: tree_stats.leaf_pages,
-            branch_pages: tree_stats.branch_pages,
-            stored_leaf_bytes: tree_stats.stored_leaf_bytes,
-            metadata_bytes: tree_stats.metadata_bytes,
-            fragmented_bytes: tree_stats.fragmented_bytes,
-        })
     }
 }
 

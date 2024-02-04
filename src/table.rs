@@ -387,20 +387,11 @@ pub struct ReadOnlyUntypedTable {
     tree: RawBtree,
 }
 
-impl ReadOnlyUntypedTable {
-    pub(crate) fn new(
-        root_page: Option<(PageNumber, Checksum)>,
-        fixed_key_size: Option<usize>,
-        fixed_value_size: Option<usize>,
-        mem: Arc<TransactionalMemory>,
-    ) -> Self {
-        Self {
-            tree: RawBtree::new(root_page, fixed_key_size, fixed_value_size, mem),
-        }
-    }
+impl Sealed for ReadOnlyUntypedTable {}
 
+impl ReadableTableMetadata for ReadOnlyUntypedTable {
     /// Retrieves information about storage usage for the table
-    pub fn stats(&self) -> Result<TableStats> {
+    fn stats(&self) -> Result<TableStats> {
         let tree_stats = self.tree.stats()?;
 
         Ok(TableStats {
@@ -411,6 +402,23 @@ impl ReadOnlyUntypedTable {
             metadata_bytes: tree_stats.metadata_bytes,
             fragmented_bytes: tree_stats.fragmented_bytes,
         })
+    }
+
+    fn len(&self) -> Result<u64> {
+        self.tree.len()
+    }
+}
+
+impl ReadOnlyUntypedTable {
+    pub(crate) fn new(
+        root_page: Option<(PageNumber, Checksum)>,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+        mem: Arc<TransactionalMemory>,
+    ) -> Self {
+        Self {
+            tree: RawBtree::new(root_page, fixed_key_size, fixed_value_size, mem),
+        }
     }
 }
 
