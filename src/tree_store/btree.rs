@@ -220,7 +220,7 @@ impl UntypedBtreeMut {
 pub(crate) struct BtreeMut<'a, K: Key + 'static, V: Value + 'static> {
     mem: Arc<TransactionalMemory>,
     transaction_guard: Arc<TransactionGuard>,
-    root: Arc<Mutex<Option<(PageNumber, Checksum)>>>,
+    root: Option<(PageNumber, Checksum)>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -237,7 +237,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         Self {
             mem,
             transaction_guard: guard,
-            root: Arc::new(Mutex::new(root)),
+            root,
             freed_pages,
             _key_type: Default::default(),
             _value_type: Default::default(),
@@ -264,12 +264,12 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             V::fixed_width(),
         );
         tree.finalize_dirty_checksums()?;
-        *self.root.lock().unwrap() = tree.get_root();
+        self.root = tree.get_root();
         Ok(())
     }
 
     pub(crate) fn all_pages_iter(&self) -> Result<Option<AllPageNumbersBtreeIter>> {
-        if let Some((root, _)) = *self.root.lock().unwrap() {
+        if let Some((root, _)) = self.root {
             Ok(Some(AllPageNumbersBtreeIter::new(
                 root,
                 K::fixed_width(),
@@ -282,7 +282,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     }
 
     pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
-        *(*self.root).lock().unwrap()
+        self.root
     }
 
     pub(crate) fn relocate(&mut self) -> Result<bool> {
@@ -294,7 +294,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             V::fixed_width(),
         );
         if tree.relocate()? {
-            *self.root.lock().unwrap() = tree.get_root();
+            self.root = tree.get_root();
             Ok(true)
         } else {
             Ok(false)
@@ -314,9 +314,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             V::as_bytes(value).as_ref().len()
         );
         let mut freed_pages = self.freed_pages.lock().unwrap();
-        let mut root = self.root.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> =
-            MutateHelper::new(&mut root, self.mem.clone(), freed_pages.as_mut());
+            MutateHelper::new(&mut self.root, self.mem.clone(), freed_pages.as_mut());
         let (old_value, _) = operation.insert(key, value)?;
         Ok(old_value)
     }
@@ -324,10 +323,9 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     pub(crate) fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<V>>> {
         #[cfg(feature = "logging")]
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
-        let mut root = self.root.lock().unwrap();
         let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> =
-            MutateHelper::new(&mut root, self.mem.clone(), freed_pages.as_mut());
+            MutateHelper::new(&mut self.root, self.mem.clone(), freed_pages.as_mut());
         let result = operation.delete(key)?;
         Ok(result)
     }
@@ -379,9 +377,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         let iter = self.range(range)?;
         let return_iter = self.range(range)?;
         let mut free_on_drop = vec![];
-        let mut root = self.root.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> =
-            MutateHelper::new_do_not_modify(&mut root, self.mem.clone(), &mut free_on_drop);
+            MutateHelper::new_do_not_modify(&mut self.root, self.mem.clone(), &mut free_on_drop);
         for entry in iter {
             // TODO: optimize so that we don't have to call delete in a loop
             assert!(operation.delete(&entry?.key())?.is_some());
@@ -413,9 +410,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         let iter = self.range(range)?;
         let return_iter = self.range(range)?;
         let mut free_on_drop = vec![];
-        let mut root = self.root.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> =
-            MutateHelper::new_do_not_modify(&mut root, self.mem.clone(), &mut free_on_drop);
+            MutateHelper::new_do_not_modify(&mut self.root, self.mem.clone(), &mut free_on_drop);
         for entry in iter {
             // TODO: optimize so that we don't have to call delete in a loop
             let entry = entry?;
@@ -456,14 +452,12 @@ impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
             key,
             value_length
         );
-        let mut root = self.root.lock().unwrap();
         let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut value = vec![0u8; value_length as usize];
         V::initialize(&mut value);
         let mut operation =
-            MutateHelper::<K, V>::new(&mut root, self.mem.clone(), freed_pages.as_mut());
+            MutateHelper::<K, V>::new(&mut self.root, self.mem.clone(), freed_pages.as_mut());
         let (_, guard) = operation.insert(key, &V::from_bytes(&value))?;
-        drop(root);
         Ok(guard)
     }
 }
