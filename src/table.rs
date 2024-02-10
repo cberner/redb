@@ -257,7 +257,11 @@ impl<K: Key, V: Value> Sealed for Table<'_, K, V> {}
 
 impl<'txn, K: Key + 'static, V: Value + 'static> Drop for Table<'txn, K, V> {
     fn drop(&mut self) {
-        self.transaction.close_table(&self.name, &self.tree);
+        self.transaction.close_table(
+            &self.name,
+            &self.tree,
+            self.tree.get_root().map(|x| x.length).unwrap_or_default(),
+        );
     }
 }
 

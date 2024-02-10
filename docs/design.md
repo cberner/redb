@@ -41,16 +41,16 @@ database file.
 | user root page number                                                                          |
 | user root checksum                                                                             |
 | user root checksum (cont.)                                                                     |
+| user root length                                                                               |
 | system root page number                                                                        |
 | system root checksum                                                                           |
 | system root checksum (cont.)                                                                   |
+| system root length                                                                             |
 | freed root page number                                                                         |
 | freed checksum                                                                                 |
 | freed checksum (cont.)                                                                         |
+| freed root length                                                                              |
 | transaction id                                                                                 |
-| padding                                                                                        |
-| padding                                                                                        |
-| padding                                                                                        |
 | slot checksum                                                                                  |
 | slot checksum (cont.)                                                                          |
 ----------------------------------------- Commit slot 1 ------------------------------------------
@@ -117,12 +117,14 @@ This field is only valid when the database does not need recovery. Otherwise it 
 * 4 bytes: padding to 64-bit aligned
 * 8 bytes: user root page
 * 16 bytes: user root checksum
+* 8 bytes: user root length
 * 8 bytes: system root page
 * 16 bytes: system root checksum
+* 8 bytes: system root length
 * 8 bytes: freed table root page
 * 16 bytes: freed table root checksum
+* 8 bytes: freed root length
 * 8 bytes: last committed transaction id
-* 24 bytes: padding
 * 16 bytes: slot checksum
 
 `version` the file format version of the database. This is stored in the transaction data, so that it can be atomically
@@ -132,13 +134,19 @@ changed during an upgrade.
 
 `user root checksum` stores the XXH3_128bit checksum of the user root page, which in turn stores the checksum of its child pages.
 
+`user root length` is the number of tables in the user table tree. This field is new in file format v2.
+
 `system root page` is the page number of the root of the system table tree.
 
 `system root checksum` stores the XXH3_128bit checksum of the system root page, which in turn stores the checksum of its child pages.
 
+`system root length` is the number of tables in the system table tree. This field is new in file format v2.
+
 `freed table root page` is the page of the root of the pending free table.
 
 `freed table root checksum` stores the XXH3_128bit checksum of the freed table root page, which in turn stores the checksum of its child pages.
+
+`freed root length` is the length of the freed tree. This field is new in file format v2.
 
 `slot checksum` is the XXH3_128bit checksum of all the preceding fields in the transaction slot.
 

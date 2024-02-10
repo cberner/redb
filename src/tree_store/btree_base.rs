@@ -59,14 +59,55 @@ pub(super) fn branch_checksum<T: Page>(
 pub(crate) struct BtreeHeader {
     pub(crate) root: PageNumber,
     pub(crate) checksum: Checksum,
+    pub(crate) length: u64,
 }
 
 impl BtreeHeader {
-    pub(crate) fn new(page_number: PageNumber, checksum: Checksum) -> Self {
+    pub(crate) fn new(root: PageNumber, checksum: Checksum, length: u64) -> Self {
         Self {
-            root: page_number,
+            root,
             checksum,
+            length,
         }
+    }
+
+    pub(crate) const fn serialized_size() -> usize {
+        PageNumber::serialized_size() + size_of::<Checksum>() + size_of::<u64>()
+    }
+
+    pub(crate) fn from_le_bytes(bytes: [u8; Self::serialized_size()]) -> Self {
+        let root =
+            PageNumber::from_le_bytes(bytes[..PageNumber::serialized_size()].try_into().unwrap());
+        let mut offset = PageNumber::serialized_size();
+        let checksum = Checksum::from_le_bytes(
+            bytes[offset..(offset + size_of::<Checksum>())]
+                .try_into()
+                .unwrap(),
+        );
+        offset += size_of::<Checksum>();
+        let length = u64::from_le_bytes(
+            bytes[offset..(offset + size_of::<u64>())]
+                .try_into()
+                .unwrap(),
+        );
+
+        Self {
+            root,
+            checksum,
+            length,
+        }
+    }
+
+    pub(crate) fn to_le_bytes(self) -> [u8; Self::serialized_size()] {
+        let mut result = [0; Self::serialized_size()];
+        result[..PageNumber::serialized_size()].copy_from_slice(&self.root.to_le_bytes());
+        result[PageNumber::serialized_size()
+            ..(PageNumber::serialized_size() + size_of::<Checksum>())]
+            .copy_from_slice(&self.checksum.to_le_bytes());
+        result[(PageNumber::serialized_size() + size_of::<Checksum>())..]
+            .copy_from_slice(&self.length.to_le_bytes());
+
+        result
     }
 }
 

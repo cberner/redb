@@ -1,5 +1,21 @@
 # redb - Changelog
 
+## 2.0.0 - 2024-XX-XX
+### Major file format change
+2.0.0 uses a new file format that optimizes `len()` to be constant time. This means that it is not
+backwards compatible with 1.x. To upgrade, consider using a pattern like that in XXX test.
+### Other changes
+* `check_integrity()` now returns a `DatabaseError` instead of `StorageError`
+* Refactor table metadata methods into a new `ReadableTableMetadata` trait
+* Rename `RedbKey` to `Key`
+* Rename `RedbValue` to `Value`
+* Remove lifetimes from read-only tables
+* Remove lifetime from `WriteTransaction` and `ReadTransaction`
+* impl `Clone` for `Range`
+* Add `range()` returning a `Range` with the `'static` lifetime to read-only tables
+* Add `get()` returning a range with the `'static` lifetime to read-only multimap tables
+* Add `close()` method to `ReadTransaction`
+
 ## 1.5.0 - 2024-01-15
 * Export `TableStats` type
 * Export `MutInPlaceValue` which allows custom types to support `insert_reserve()`

@@ -32,7 +32,10 @@ const MIN_DESIRED_USABLE_BYTES: u64 = 1024 * 1024;
 
 pub(super) const INITIAL_REGIONS: u32 = 1000; // Enough for a 4TiB database
 
-pub(crate) const FILE_FORMAT_VERSION: u8 = 1;
+// Original file format. No lengths stored with btrees
+pub(crate) const FILE_FORMAT_VERSION1: u8 = 1;
+// New file format. All btrees have a separate length stored in their header for constant time access
+pub(crate) const FILE_FORMAT_VERSION2: u8 = 2;
 
 fn ceil_log2(x: usize) -> u8 {
     if x.is_power_of_two() {
@@ -173,7 +176,12 @@ impl TransactionalMemory {
                 PageNumber::new(0, page_number, required_order)
             };
 
-            let mut header = DatabaseHeader::new(layout, TransactionId::new(0), tracker_page);
+            let mut header = DatabaseHeader::new(
+                layout,
+                TransactionId::new(0),
+                FILE_FORMAT_VERSION2,
+                tracker_page,
+            );
 
             header.recovery_required = false;
             storage
@@ -192,30 +200,9 @@ impl TransactionalMemory {
             storage.flush(false)?;
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
-        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes);
+        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
 
         assert_eq!(header.page_size() as usize, page_size);
-        let version = header.primary_slot().version;
-        if version > FILE_FORMAT_VERSION {
-            return Err(StorageError::Corrupted(format!(
-                "Expected file format version {FILE_FORMAT_VERSION}, found {version}",
-            ))
-            .into());
-        }
-        if version < FILE_FORMAT_VERSION {
-            return Err(DatabaseError::UpgradeRequired(version));
-        }
-        let version = header.secondary_slot().version;
-        if version > FILE_FORMAT_VERSION {
-            return Err(StorageError::Corrupted(format!(
-                "Expected file format version {FILE_FORMAT_VERSION}, found {version}",
-            ))
-            .into());
-        }
-        if version < FILE_FORMAT_VERSION {
-            return Err(DatabaseError::UpgradeRequired(version));
-        }
-
         assert!(storage.raw_file_len()? >= header.layout().len());
         let needs_recovery =
             header.recovery_required || header.layout().len() != storage.raw_file_len()?;
@@ -278,14 +265,14 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all()
     }
 
-    pub(crate) fn clear_cache_and_reload(&mut self) -> Result {
+    pub(crate) fn clear_cache_and_reload(&mut self) -> Result<(), DatabaseError> {
         assert!(self.allocated_since_commit.lock().unwrap().is_empty());
 
         self.storage.flush(false)?;
         self.storage.invalidate_cache_all();
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
-        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes);
+        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
         // TODO: should probably consolidate this logic with Self::new()
         if header.recovery_required {
             let layout = header.layout();
@@ -310,7 +297,7 @@ impl TransactionalMemory {
                 }
             }
             if repair_info.invalid_magic_number {
-                return Err(StorageError::Corrupted("Invalid magic number".to_string()));
+                return Err(StorageError::Corrupted("Invalid magic number".to_string()).into());
             }
             self.storage
                 .write(0, DB_HEADER_SIZE, true, |_| CachePriority::High)?
