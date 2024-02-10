@@ -102,11 +102,17 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
     }
 
     pub(crate) fn delete(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
-        if let Some(BtreeHeader { root: p, checksum }) = *self.root {
+        if let Some(BtreeHeader {
+            root: p,
+            checksum,
+            length,
+        }) = *self.root
+        {
             let (deletion_result, found) =
                 self.delete_helper(self.mem.get_page(p)?, checksum, K::as_bytes(key).as_ref())?;
+            let new_length = if found.is_some() { length - 1 } else { length };
             let new_root = match deletion_result {
-                Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum)),
+                Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum, new_length)),
                 DeletedLeaf => None,
                 PartialLeaf { page, deleted_pair } => {
                     let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
@@ -118,13 +124,18 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     );
                     builder.push_all_except(&accessor, Some(deleted_pair));
                     let page = builder.build()?;
-                    Some(BtreeHeader::new(page.get_page_number(), DEFERRED))
+                    assert_eq!(new_length, accessor.num_pairs() as u64 - 1);
+                    Some(BtreeHeader::new(
+                        page.get_page_number(),
+                        DEFERRED,
+                        new_length,
+                    ))
                 }
                 PartialBranch(page_number, checksum) => {
-                    Some(BtreeHeader::new(page_number, checksum))
+                    Some(BtreeHeader::new(page_number, checksum, new_length))
                 }
                 DeletedBranch(remaining_child, checksum) => {
-                    Some(BtreeHeader::new(remaining_child, checksum))
+                    Some(BtreeHeader::new(remaining_child, checksum, new_length))
                 }
             };
             *self.root = new_root;
@@ -140,8 +151,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
     ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMut<'a, V>)> {
-        let (new_root, old_value, guard) = if let Some(BtreeHeader { root: p, checksum }) =
-            *self.root
+        let (new_root, old_value, guard) = if let Some(BtreeHeader {
+            root: p,
+            checksum,
+            length,
+        }) = *self.root
         {
             let result = self.insert_helper(
                 self.mem.get_page(p)?,
@@ -150,15 +164,21 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 V::as_bytes(value).as_ref(),
             )?;
 
+            let new_length = if result.old_value.is_some() {
+                length
+            } else {
+                length + 1
+            };
+
             let new_root = if let Some((key, page2, page2_checksum)) = result.additional_sibling {
                 let mut builder = BranchBuilder::new(&self.mem, 2, K::fixed_width());
                 builder.push_child(result.new_root, result.root_checksum);
                 builder.push_key(&key);
                 builder.push_child(page2, page2_checksum);
                 let new_page = builder.build()?;
-                BtreeHeader::new(new_page.get_page_number(), DEFERRED)
+                BtreeHeader::new(new_page.get_page_number(), DEFERRED, new_length)
             } else {
-                BtreeHeader::new(result.new_root, result.root_checksum)
+                BtreeHeader::new(result.new_root, result.root_checksum, new_length)
             };
             (new_root, result.old_value, result.inserted_value)
         } else {
@@ -175,7 +195,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             let page_num = page.get_page_number();
             let guard = AccessGuardMut::new(page, offset, value_bytes.len());
 
-            (BtreeHeader::new(page_num, DEFERRED), None, guard)
+            (BtreeHeader::new(page_num, DEFERRED, 1), None, guard)
         };
         *self.root = Some(new_root);
         Ok((old_value, guard))

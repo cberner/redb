@@ -1,5 +1,6 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
-use crate::tree_store::{BtreeHeader, Checksum, PageNumber, TransactionalMemory};
+use crate::tree_store::page_store::page_manager::FILE_FORMAT_VERSION2;
+use crate::tree_store::{BtreeHeader, TransactionalMemory};
 use crate::{TypeName, Value};
 use std::fmt::Debug;
 use std::mem::size_of;
@@ -111,38 +112,33 @@ pub(crate) enum SerializedSavepoint<'a> {
 
 impl<'a> SerializedSavepoint<'a> {
     pub(crate) fn from_savepoint(savepoint: &Savepoint) -> Self {
+        assert_eq!(savepoint.version, FILE_FORMAT_VERSION2);
         let mut result = vec![savepoint.version];
         result.extend(savepoint.id.0.to_le_bytes());
         result.extend(savepoint.transaction_id.raw_id().to_le_bytes());
 
-        if let Some(BtreeHeader { root, checksum }) = savepoint.user_root {
+        if let Some(header) = savepoint.user_root {
             result.push(1);
-            result.extend(root.to_le_bytes());
-            result.extend(checksum.to_le_bytes());
+            result.extend(header.to_le_bytes());
         } else {
             result.push(0);
-            result.extend([0; PageNumber::serialized_size()]);
-            result.extend((0 as Checksum).to_le_bytes());
+            result.extend([0; BtreeHeader::serialized_size()]);
         }
 
-        if let Some(BtreeHeader { root, checksum }) = savepoint.system_root {
+        if let Some(header) = savepoint.system_root {
             result.push(1);
-            result.extend(root.to_le_bytes());
-            result.extend(checksum.to_le_bytes());
+            result.extend(header.to_le_bytes());
         } else {
             result.push(0);
-            result.extend([0; PageNumber::serialized_size()]);
-            result.extend((0 as Checksum).to_le_bytes());
+            result.extend([0; BtreeHeader::serialized_size()]);
         }
 
-        if let Some(BtreeHeader { root, checksum }) = savepoint.freed_root {
+        if let Some(header) = savepoint.freed_root {
             result.push(1);
-            result.extend(root.to_le_bytes());
-            result.extend(checksum.to_le_bytes());
+            result.extend(header.to_le_bytes());
         } else {
             result.push(0);
-            result.extend([0; PageNumber::serialized_size()]);
-            result.extend((0 as Checksum).to_le_bytes());
+            result.extend([0; BtreeHeader::serialized_size()]);
         }
 
         result.extend(
@@ -176,6 +172,7 @@ impl<'a> SerializedSavepoint<'a> {
         let data = self.data();
         let mut offset = 0;
         let version = data[offset];
+        assert_eq!(version, FILE_FORMAT_VERSION2);
         offset += size_of::<u8>();
 
         let id = u64::from_le_bytes(
@@ -196,70 +193,43 @@ impl<'a> SerializedSavepoint<'a> {
         assert!(not_null == 0 || not_null == 1);
         offset += 1;
         let user_root = if not_null == 1 {
-            let page_number = PageNumber::from_le_bytes(
-                data[offset..(offset + PageNumber::serialized_size())]
+            Some(BtreeHeader::from_le_bytes(
+                data[offset..(offset + BtreeHeader::serialized_size())]
                     .try_into()
                     .unwrap(),
-            );
-            offset += PageNumber::serialized_size();
-            let checksum = Checksum::from_le_bytes(
-                data[offset..(offset + size_of::<Checksum>())]
-                    .try_into()
-                    .unwrap(),
-            );
-            offset += size_of::<Checksum>();
-            Some(BtreeHeader::new(page_number, checksum))
+            ))
         } else {
-            offset += PageNumber::serialized_size();
-            offset += size_of::<Checksum>();
             None
         };
+        offset += BtreeHeader::serialized_size();
 
         let not_null = data[offset];
         assert!(not_null == 0 || not_null == 1);
         offset += 1;
         let system_root = if not_null == 1 {
-            let page_number = PageNumber::from_le_bytes(
-                data[offset..(offset + PageNumber::serialized_size())]
+            Some(BtreeHeader::from_le_bytes(
+                data[offset..(offset + BtreeHeader::serialized_size())]
                     .try_into()
                     .unwrap(),
-            );
-            offset += PageNumber::serialized_size();
-            let checksum = Checksum::from_le_bytes(
-                data[offset..(offset + size_of::<Checksum>())]
-                    .try_into()
-                    .unwrap(),
-            );
-            offset += size_of::<Checksum>();
-            Some(BtreeHeader::new(page_number, checksum))
+            ))
         } else {
-            offset += PageNumber::serialized_size();
-            offset += size_of::<Checksum>();
             None
         };
+        offset += BtreeHeader::serialized_size();
 
         let not_null = data[offset];
         assert!(not_null == 0 || not_null == 1);
         offset += 1;
         let freed_root = if not_null == 1 {
-            let page_number = PageNumber::from_le_bytes(
-                data[offset..(offset + PageNumber::serialized_size())]
+            Some(BtreeHeader::from_le_bytes(
+                data[offset..(offset + BtreeHeader::serialized_size())]
                     .try_into()
                     .unwrap(),
-            );
-            offset += PageNumber::serialized_size();
-            let checksum = Checksum::from_le_bytes(
-                data[offset..(offset + size_of::<Checksum>())]
-                    .try_into()
-                    .unwrap(),
-            );
-            offset += size_of::<Checksum>();
-            Some(BtreeHeader::new(page_number, checksum))
+            ))
         } else {
-            offset += PageNumber::serialized_size();
-            offset += size_of::<Checksum>();
             None
         };
+        offset += BtreeHeader::serialized_size();
 
         let regions = u32::from_le_bytes(
             data[offset..(offset + size_of::<u32>())]

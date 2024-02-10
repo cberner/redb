@@ -16,7 +16,7 @@ use log::trace;
 use std::borrow::Borrow;
 use std::cmp::max;
 use std::marker::PhantomData;
-use std::ops::{RangeBounds, RangeFull};
+use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
 
 pub(crate) struct BtreeStats {
@@ -63,6 +63,7 @@ impl UntypedBtreeMut {
         if let Some(BtreeHeader {
             root: ref p,
             ref mut checksum,
+            length: _,
         }) = root
         {
             if !self.mem.uncommitted(*p) {
@@ -168,7 +169,7 @@ impl UntypedBtreeMut {
     pub(crate) fn relocate(&mut self) -> Result<bool> {
         if let Some(root) = self.get_root() {
             if let Some((new_root, new_checksum)) = self.relocate_helper(root.root)? {
-                self.root = Some(BtreeHeader::new(new_root, new_checksum));
+                self.root = Some(BtreeHeader::new(new_root, new_checksum, root.length));
                 return Ok(true);
             }
         }
@@ -502,12 +503,7 @@ impl RawBtree {
     }
 
     pub(crate) fn len(&self) -> Result<u64> {
-        btree_len(
-            self.root.map(|x| x.root),
-            &self.mem,
-            self.fixed_key_size,
-            self.fixed_value_size,
-        )
+        Ok(self.root.map(|x| x.length).unwrap_or(0))
     }
 
     pub(crate) fn verify_checksum(&self) -> Result<bool> {
@@ -636,17 +632,7 @@ impl<K: Key, V: Value> Btree<K, V> {
     }
 
     pub(crate) fn len(&self) -> Result<u64> {
-        let iter: BtreeRangeIter<K, V> = BtreeRangeIter::new::<RangeFull, K::SelfType<'_>>(
-            &(..),
-            self.root.map(|x| x.root),
-            self.mem.clone(),
-        )?;
-        let mut count = 0;
-        for v in iter {
-            v?;
-            count += 1;
-        }
-        Ok(count)
+        Ok(self.root.map(|x| x.length).unwrap_or(0))
     }
 
     pub(crate) fn stats(&self) -> Result<BtreeStats> {
@@ -692,41 +678,6 @@ impl<K: Key, V: Value> Btree<K, V> {
         }
 
         Ok(())
-    }
-}
-
-pub(crate) fn btree_len(
-    root: Option<PageNumber>,
-    mem: &TransactionalMemory,
-    fixed_key_size: Option<usize>,
-    fixed_value_size: Option<usize>,
-) -> Result<u64> {
-    if let Some(root) = root {
-        let page = mem.get_page(root)?;
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
-                Ok(accessor.num_pairs() as u64)
-            }
-            BRANCH => {
-                let accessor = BranchAccessor::new(&page, fixed_key_size);
-                let mut len = 0;
-                for i in 0..accessor.count_children() {
-                    len += btree_len(
-                        accessor.child_page(i),
-                        mem,
-                        fixed_key_size,
-                        fixed_value_size,
-                    )?;
-                }
-
-                Ok(len)
-            }
-            _ => unreachable!(),
-        }
-    } else {
-        Ok(0)
     }
 }
 

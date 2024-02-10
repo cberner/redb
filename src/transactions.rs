@@ -260,7 +260,11 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
 
 impl<'db, 's, K: Key + 'static, V: Value + 'static> Drop for SystemTable<'db, 's, K, V> {
     fn drop(&mut self) {
-        self.namespace.close_table(&self.name, &self.tree);
+        self.namespace.close_table(
+            &self.name,
+            &self.tree,
+            self.tree.get_root().map(|x| x.length).unwrap_or_default(),
+        );
     }
 }
 
@@ -299,9 +303,10 @@ impl<'db> SystemNamespace<'db> {
         &mut self,
         name: &str,
         table: &BtreeMut<K, V>,
+        length: u64,
     ) {
         self.table_tree
-            .stage_update_table_root(name, table.get_root());
+            .stage_update_table_root(name, table.get_root(), length);
     }
 }
 
@@ -316,7 +321,7 @@ impl<'db> TableNamespace<'db> {
         &mut self,
         name: &str,
         table_type: TableType,
-    ) -> Result<Option<BtreeHeader>, TableError> {
+    ) -> Result<(Option<BtreeHeader>, u64), TableError> {
         if let Some(location) = self.open_tables.get(name) {
             return Err(TableError::TableAlreadyOpen(name.to_string(), location));
         }
@@ -327,7 +332,7 @@ impl<'db> TableNamespace<'db> {
         self.open_tables
             .insert(name.to_string(), panic::Location::caller());
 
-        Ok(internal_table.get_root())
+        Ok((internal_table.get_root(), internal_table.get_length()))
     }
 
     #[track_caller]
@@ -338,12 +343,13 @@ impl<'db> TableNamespace<'db> {
     ) -> Result<MultimapTable<'txn, K, V>, TableError> {
         #[cfg(feature = "logging")]
         info!("Opening multimap table: {}", definition);
-        let root = self.inner_open::<K, V>(definition.name(), TableType::Multimap)?;
+        let (root, length) = self.inner_open::<K, V>(definition.name(), TableType::Multimap)?;
         transaction.dirty.store(true, Ordering::Release);
 
         Ok(MultimapTable::new(
             definition.name(),
             root,
+            length,
             transaction.freed_pages.clone(),
             transaction.mem.clone(),
             transaction,
@@ -358,7 +364,7 @@ impl<'db> TableNamespace<'db> {
     ) -> Result<Table<'txn, K, V>, TableError> {
         #[cfg(feature = "logging")]
         info!("Opening table: {}", definition);
-        let root = self.inner_open::<K, V>(definition.name(), TableType::Normal)?;
+        let (root, _) = self.inner_open::<K, V>(definition.name(), TableType::Normal)?;
         transaction.dirty.store(true, Ordering::Release);
 
         Ok(Table::new(
@@ -407,10 +413,11 @@ impl<'db> TableNamespace<'db> {
         &mut self,
         name: &str,
         table: &BtreeMut<K, V>,
+        length: u64,
     ) {
         self.open_tables.remove(name).unwrap();
         self.table_tree
-            .stage_update_table_root(name, table.get_root());
+            .stage_update_table_root(name, table.get_root(), length);
     }
 }
 
@@ -809,8 +816,9 @@ impl WriteTransaction {
         &self,
         name: &str,
         table: &BtreeMut<K, V>,
+        length: u64,
     ) {
-        self.tables.lock().unwrap().close_table(name, table);
+        self.tables.lock().unwrap().close_table(name, table, length);
     }
 
     /// Delete the given table
@@ -1141,14 +1149,8 @@ impl WriteTransaction {
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self) -> Result {
         // Flush any pending updates to make sure we get the latest root
-        if let Some(page) = self
-            .tables
-            .lock()
-            .unwrap()
-            .table_tree
-            .flush_table_root_updates()
-            .unwrap()
-        {
+        let mut tables = self.tables.lock().unwrap();
+        if let Some(page) = tables.table_tree.flush_table_root_updates().unwrap() {
             eprintln!("Master tree:");
             let master_tree: Btree<&str, InternalTableDefinition> = Btree::new(
                 Some(page),
@@ -1248,6 +1250,7 @@ impl ReadTransaction {
 
         Ok(ReadOnlyMultimapTable::new(
             header.get_root(),
+            header.get_length(),
             PageHint::Clean,
             self.transaction_guard.clone(),
             self.mem.clone(),
@@ -1266,6 +1269,7 @@ impl ReadTransaction {
 
         Ok(ReadOnlyUntypedMultimapTable::new(
             header.get_root(),
+            header.get_length(),
             header.get_fixed_key_size(),
             header.get_fixed_value_size(),
             self.mem.clone(),
@@ -1288,7 +1292,8 @@ impl ReadTransaction {
 
     /// Close the transaction
     ///
-    /// Transactions are automatically closed when they and all objects referencing them have been dropped.
+    /// Transactions are automatically closed when they and all objects referencing them have been dropped,
+    /// so this method does not normally need to be called.
     /// This method can be used to ensure that there are no outstanding objects remaining.
     ///
     /// Returns `ReadTransactionStillInUse` error if a table or other object retrieved from the transaction still references this transaction

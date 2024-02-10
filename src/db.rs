@@ -376,7 +376,7 @@ impl Database {
     ///
     /// Returns `Ok(true)` if the database passed integrity checks; `Ok(false)` if it failed but was repaired,
     /// and `Err(Corrupted)` if the check failed and the file could not be repaired
-    pub fn check_integrity(&mut self) -> Result<bool> {
+    pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
         Arc::get_mut(&mut self.mem)
             .unwrap()
             .clear_cache_and_reload()?;

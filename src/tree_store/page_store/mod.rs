@@ -15,7 +15,7 @@ mod xxh3;
 pub(crate) use base::{Page, PageHint, PageNumber, MAX_VALUE_LENGTH};
 pub(crate) use header::PAGE_SIZE;
 pub use in_memory_backend::InMemoryBackend;
-pub(crate) use page_manager::{xxh3_checksum, TransactionalMemory, FILE_FORMAT_VERSION};
+pub(crate) use page_manager::{xxh3_checksum, TransactionalMemory, FILE_FORMAT_VERSION2};
 pub use savepoint::Savepoint;
 pub(crate) use savepoint::SerializedSavepoint;
 

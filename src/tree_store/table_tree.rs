@@ -4,7 +4,7 @@ use crate::multimap_table::{
     finalize_tree_and_subtree_checksums, multimap_btree_stats, verify_tree_and_subtree_checksums,
 };
 use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
-use crate::tree_store::btree_base::{BtreeHeader, Checksum};
+use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{
     Btree, BtreeMut, BtreeRangeIter, PageHint, PageNumber, RawBtree, TransactionalMemory,
@@ -181,12 +181,21 @@ pub(crate) enum TableType {
     Multimap,
 }
 
+impl TableType {
+    fn is_legacy(value: u8) -> bool {
+        value == 1 || value == 2
+    }
+}
+
 #[allow(clippy::from_over_into)]
 impl Into<u8> for TableType {
     fn into(self) -> u8 {
         match self {
-            TableType::Normal => 1,
-            TableType::Multimap => 2,
+            // 1 & 2 were used in the v1 file format
+            // TableType::Normal => 1,
+            // TableType::Multimap => 2,
+            TableType::Normal => 3,
+            TableType::Multimap => 4,
         }
     }
 }
@@ -194,8 +203,8 @@ impl Into<u8> for TableType {
 impl From<u8> for TableType {
     fn from(value: u8) -> Self {
         match value {
-            1 => TableType::Normal,
-            2 => TableType::Multimap,
+            3 => TableType::Normal,
+            4 => TableType::Multimap,
             _ => unreachable!(),
         }
     }
@@ -205,6 +214,7 @@ impl From<u8> for TableType {
 pub(crate) struct InternalTableDefinition {
     table_root: Option<BtreeHeader>,
     table_type: TableType,
+    table_length: u64,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
     key_alignment: usize,
@@ -216,6 +226,10 @@ pub(crate) struct InternalTableDefinition {
 impl InternalTableDefinition {
     pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
         self.table_root
+    }
+
+    pub(crate) fn get_length(&self) -> u64 {
+        self.table_length
     }
 
     pub(crate) fn get_fixed_key_size(&self) -> Option<usize> {
@@ -253,30 +267,30 @@ impl Value for InternalTableDefinition {
     {
         debug_assert!(data.len() > 22);
         let mut offset = 0;
+        let legacy = TableType::is_legacy(data[offset]);
+        assert!(!legacy);
         let table_type = TableType::from(data[offset]);
         offset += 1;
+
+        let table_length = u64::from_le_bytes(
+            data[offset..(offset + size_of::<u64>())]
+                .try_into()
+                .unwrap(),
+        );
+        offset += size_of::<u64>();
 
         let non_null = data[offset] != 0;
         offset += 1;
         let table_root = if non_null {
-            let table_root = PageNumber::from_le_bytes(
-                data[offset..(offset + PageNumber::serialized_size())]
+            Some(BtreeHeader::from_le_bytes(
+                data[offset..(offset + BtreeHeader::serialized_size())]
                     .try_into()
                     .unwrap(),
-            );
-            offset += PageNumber::serialized_size();
-            let checksum = Checksum::from_le_bytes(
-                data[offset..(offset + size_of::<Checksum>())]
-                    .try_into()
-                    .unwrap(),
-            );
-            offset += size_of::<Checksum>();
-            Some(BtreeHeader::new(table_root, checksum))
+            ))
         } else {
-            offset += PageNumber::serialized_size();
-            offset += size_of::<Checksum>();
             None
         };
+        offset += BtreeHeader::serialized_size();
 
         let non_null = data[offset] != 0;
         offset += 1;
@@ -331,6 +345,7 @@ impl Value for InternalTableDefinition {
         InternalTableDefinition {
             table_root,
             table_type,
+            table_length,
             fixed_key_size,
             fixed_value_size,
             key_alignment,
@@ -346,14 +361,13 @@ impl Value for InternalTableDefinition {
         Self: 'b,
     {
         let mut result = vec![value.table_type.into()];
-        if let Some(BtreeHeader { root, checksum }) = value.table_root {
+        result.extend_from_slice(&value.table_length.to_le_bytes());
+        if let Some(header) = value.table_root {
             result.push(1);
-            result.extend_from_slice(&root.to_le_bytes());
-            result.extend_from_slice(&checksum.to_le_bytes());
+            result.extend_from_slice(&header.to_le_bytes());
         } else {
             result.push(0);
-            result.extend_from_slice(&[0; PageNumber::serialized_size()]);
-            result.extend_from_slice(&[0; size_of::<Checksum>()]);
+            result.extend_from_slice(&[0; BtreeHeader::serialized_size()]);
         }
         if let Some(fixed) = value.fixed_key_size {
             result.push(1);
@@ -518,7 +532,7 @@ pub(crate) struct TableTreeMut<'txn> {
     guard: Arc<TransactionGuard>,
     mem: Arc<TransactionalMemory>,
     // Cached updates from tables that have been closed. These must be flushed to the btree
-    pending_table_updates: HashMap<String, Option<BtreeHeader>>,
+    pending_table_updates: HashMap<String, (Option<BtreeHeader>, u64)>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
 }
 
@@ -575,9 +589,14 @@ impl<'txn> TableTreeMut<'txn> {
     }
 
     // Queues an update to the table root
-    pub(crate) fn stage_update_table_root(&mut self, name: &str, table_root: Option<BtreeHeader>) {
+    pub(crate) fn stage_update_table_root(
+        &mut self,
+        name: &str,
+        table_root: Option<BtreeHeader>,
+        length: u64,
+    ) {
         self.pending_table_updates
-            .insert(name.to_string(), table_root);
+            .insert(name.to_string(), (table_root, length));
     }
 
     pub(crate) fn clear_table_root_updates(&mut self) {
@@ -627,13 +646,14 @@ impl<'txn> TableTreeMut<'txn> {
     }
 
     pub(crate) fn flush_table_root_updates(&mut self) -> Result<Option<BtreeHeader>> {
-        for (name, table_root) in self.pending_table_updates.drain() {
+        for (name, (table_root, table_length)) in self.pending_table_updates.drain() {
             // Bypass .get_table() since the table types are dynamic
             let mut definition = self.tree.get(&name.as_str())?.unwrap().value();
             // No-op if the root has not changed
             if definition.table_root == table_root {
                 continue;
             }
+            definition.table_length = table_length;
             // Finalize any dirty checksums
             if definition.table_type == TableType::Normal {
                 let mut tree = UntypedBtreeMut::new(
@@ -684,8 +704,9 @@ impl<'txn> TableTreeMut<'txn> {
         let mut result = tree.get_table_untyped(name, table_type);
 
         if let Ok(Some(definition)) = result.as_mut() {
-            if let Some(updated_root) = self.pending_table_updates.get(name) {
+            if let Some((updated_root, updated_length)) = self.pending_table_updates.get(name) {
                 definition.table_root = *updated_root;
+                definition.table_length = *updated_length;
             }
         }
 
@@ -707,8 +728,9 @@ impl<'txn> TableTreeMut<'txn> {
         let mut result = tree.get_table::<K, V>(name, table_type);
 
         if let Ok(Some(definition)) = result.as_mut() {
-            if let Some(updated_root) = self.pending_table_updates.get(name) {
+            if let Some((updated_root, updated_length)) = self.pending_table_updates.get(name) {
                 definition.table_root = *updated_root;
+                definition.table_length = *updated_length;
             }
         }
 
@@ -758,6 +780,7 @@ impl<'txn> TableTreeMut<'txn> {
         let table = InternalTableDefinition {
             table_root: None,
             table_type,
+            table_length: 0,
             fixed_key_size: K::fixed_width(),
             fixed_value_size: V::fixed_width(),
             key_alignment: ALIGNMENT,
@@ -774,8 +797,11 @@ impl<'txn> TableTreeMut<'txn> {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let mut definition = entry.value();
-            if let Some(updated_root) = self.pending_table_updates.get(entry.key()) {
+            if let Some((updated_root, updated_length)) =
+                self.pending_table_updates.get(entry.key())
+            {
                 definition.table_root = *updated_root;
+                definition.table_length = *updated_length;
             }
 
             let mut tree = UntypedBtreeMut::new(
@@ -787,8 +813,10 @@ impl<'txn> TableTreeMut<'txn> {
             );
             if tree.relocate()? {
                 progress = true;
-                self.pending_table_updates
-                    .insert(entry.key().to_string(), tree.get_root());
+                self.pending_table_updates.insert(
+                    entry.key().to_string(),
+                    (tree.get_root(), definition.table_length),
+                );
             }
         }
 
@@ -814,7 +842,7 @@ impl<'txn> TableTreeMut<'txn> {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let mut definition = entry.value();
-            if let Some(updated_root) = self.pending_table_updates.get(entry.key()) {
+            if let Some((updated_root, _)) = self.pending_table_updates.get(entry.key()) {
                 definition.table_root = *updated_root;
             }
             match definition.get_type() {
@@ -872,6 +900,7 @@ mod test {
         let x = InternalTableDefinition {
             table_root: None,
             table_type: TableType::Multimap,
+            table_length: 0,
             fixed_key_size: None,
             fixed_value_size: Some(5),
             key_alignment: 6,
