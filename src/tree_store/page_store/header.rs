@@ -1,4 +1,5 @@
 use crate::transaction_tracker::TransactionId;
+use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::page_manager::{xxh3_checksum, FILE_FORMAT_VERSION};
 use crate::tree_store::{Checksum, PageNumber};
@@ -207,8 +208,12 @@ impl DatabaseHeader {
                 .try_into()
                 .unwrap(),
         );
-        let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(&data[TRANSACTION_0_OFFSET..]);
-        let (slot1, slot1_corrupted) = TransactionHeader::from_bytes(&data[TRANSACTION_1_OFFSET..]);
+        let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(
+            &data[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + TRANSACTION_SIZE)],
+        );
+        let (slot1, slot1_corrupted) = TransactionHeader::from_bytes(
+            &data[TRANSACTION_1_OFFSET..(TRANSACTION_1_OFFSET + TRANSACTION_SIZE)],
+        );
         let (primary_corrupted, secondary_corrupted) = if primary_slot == 0 {
             (slot0_corrupted, slot1_corrupted)
         } else {
@@ -276,9 +281,9 @@ impl DatabaseHeader {
 #[derive(Clone)]
 pub(super) struct TransactionHeader {
     pub(super) version: u8,
-    pub(super) user_root: Option<(PageNumber, Checksum)>,
-    pub(super) system_root: Option<(PageNumber, Checksum)>,
-    pub(super) freed_root: Option<(PageNumber, Checksum)>,
+    pub(super) user_root: Option<BtreeHeader>,
+    pub(super) system_root: Option<BtreeHeader>,
+    pub(super) freed_root: Option<BtreeHeader>,
     pub(super) transaction_id: TransactionId,
 }
 
@@ -316,7 +321,7 @@ impl TransactionHeader {
                     .try_into()
                     .unwrap(),
             );
-            Some((page, checksum))
+            Some(BtreeHeader::new(page, checksum))
         } else {
             None
         };
@@ -333,7 +338,7 @@ impl TransactionHeader {
                     .try_into()
                     .unwrap(),
             );
-            Some((page, checksum))
+            Some(BtreeHeader::new(page, checksum))
         } else {
             None
         };
@@ -349,7 +354,7 @@ impl TransactionHeader {
                     .try_into()
                     .unwrap(),
             );
-            Some((page, checksum))
+            Some(BtreeHeader::new(page, checksum))
         } else {
             None
         };
@@ -369,26 +374,26 @@ impl TransactionHeader {
     pub(super) fn to_bytes(&self) -> [u8; TRANSACTION_SIZE] {
         let mut result = [0; TRANSACTION_SIZE];
         result[VERSION_OFFSET] = self.version;
-        if let Some((page, checksum)) = self.user_root {
+        if let Some(BtreeHeader { root, checksum }) = self.user_root {
             result[USER_ROOT_NON_NULL_OFFSET] = 1;
             result[USER_ROOT_PAGE_OFFSET..(USER_ROOT_PAGE_OFFSET + PageNumber::serialized_size())]
-                .copy_from_slice(&page.to_le_bytes());
+                .copy_from_slice(&root.to_le_bytes());
             result[USER_ROOT_CHECKSUM_OFFSET..(USER_ROOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
                 .copy_from_slice(&checksum.to_le_bytes());
         }
-        if let Some((page, checksum)) = self.system_root {
+        if let Some(BtreeHeader { root, checksum }) = self.system_root {
             result[SYSTEM_ROOT_NON_NULL_OFFSET] = 1;
             result[SYSTEM_ROOT_PAGE_OFFSET
                 ..(SYSTEM_ROOT_PAGE_OFFSET + PageNumber::serialized_size())]
-                .copy_from_slice(&page.to_le_bytes());
+                .copy_from_slice(&root.to_le_bytes());
             result[SYSTEM_ROOT_CHECKSUM_OFFSET
                 ..(SYSTEM_ROOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
                 .copy_from_slice(&checksum.to_le_bytes());
         }
-        if let Some((page, checksum)) = self.freed_root {
+        if let Some(BtreeHeader { root, checksum }) = self.freed_root {
             result[FREED_ROOT_NON_NULL_OFFSET] = 1;
             result[FREED_ROOT_OFFSET..(FREED_ROOT_OFFSET + PageNumber::serialized_size())]
-                .copy_from_slice(&page.to_le_bytes());
+                .copy_from_slice(&root.to_le_bytes());
             result
                 [FREED_ROOT_CHECKSUM_OFFSET..(FREED_ROOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
                 .copy_from_slice(&checksum.to_le_bytes());

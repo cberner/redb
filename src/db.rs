@@ -1,6 +1,6 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, BtreeRangeIter, Checksum, FreedPageList, FreedTableKey,
+    AllPageNumbersBtreeIter, BtreeHeader, BtreeRangeIter, FreedPageList, FreedTableKey,
     InternalTableDefinition, PageHint, PageNumber, RawBtree, SerializedSavepoint, TableTreeMut,
     TableType, TransactionalMemory, PAGE_SIZE,
 };
@@ -356,9 +356,9 @@ impl Database {
         }
         assert!(fake_freed_pages.lock().unwrap().is_empty());
 
-        if let Some((freed_root, freed_checksum)) = mem.get_freed_root() {
+        if let Some(header) = mem.get_freed_root() {
             if !RawBtree::new(
-                Some((freed_root, freed_checksum)),
+                Some(header),
                 FreedTableKey::fixed_width(),
                 FreedPageList::fixed_width(),
                 mem.clone(),
@@ -447,7 +447,7 @@ impl Database {
     }
 
     fn mark_persistent_savepoints(
-        system_root: Option<(PageNumber, Checksum)>,
+        system_root: Option<BtreeHeader>,
         mem: Arc<TransactionalMemory>,
         oldest_unprocessed_free_transaction: TransactionId,
     ) -> Result {
@@ -481,8 +481,8 @@ impl Database {
                 let savepoint = savepoint_data
                     .value()
                     .to_savepoint(fake_transaction_tracker.clone());
-                if let Some((root, _)) = savepoint.get_user_root() {
-                    Self::mark_tables_recursive(root, mem.clone(), true)?;
+                if let Some(header) = savepoint.get_user_root() {
+                    Self::mark_tables_recursive(header.root, mem.clone(), true)?;
                 }
                 Self::mark_freed_tree(
                     savepoint.get_freed_root(),
@@ -496,13 +496,13 @@ impl Database {
     }
 
     fn mark_freed_tree(
-        freed_root: Option<(PageNumber, Checksum)>,
+        freed_root: Option<BtreeHeader>,
         mem: Arc<TransactionalMemory>,
         oldest_unprocessed_free_transaction: TransactionId,
     ) -> Result {
-        if let Some((root, _)) = freed_root {
+        if let Some(header) = freed_root {
             let freed_pages_iter = AllPageNumbersBtreeIter::new(
-                root,
+                header.root,
                 FreedTableKey::fixed_width(),
                 FreedPageList::fixed_width(),
                 mem.clone(),
@@ -550,11 +550,11 @@ impl Database {
         // Chain all the other tables to the master table iter
         for entry in iter {
             let definition = entry?.value();
-            if let Some((table_root, _)) = definition.get_root() {
+            if let Some(header) = definition.get_root() {
                 match definition.get_type() {
                     TableType::Normal => {
                         let table_pages_iter = AllPageNumbersBtreeIter::new(
-                            table_root,
+                            header.root,
                             definition.get_fixed_key_size(),
                             definition.get_fixed_value_size(),
                             mem.clone(),
@@ -563,7 +563,7 @@ impl Database {
                     }
                     TableType::Multimap => {
                         let table_pages_iter = AllPageNumbersBtreeIter::new(
-                            table_root,
+                            header.root,
                             definition.get_fixed_key_size(),
                             DynamicCollection::<()>::fixed_width_with(
                                 definition.get_fixed_value_size(),
@@ -573,7 +573,7 @@ impl Database {
                         mem.mark_pages_allocated(table_pages_iter, allow_duplicates)?;
 
                         let table_pages_iter = AllPageNumbersBtreeIter::new(
-                            table_root,
+                            header.root,
                             definition.get_fixed_key_size(),
                             DynamicCollection::<()>::fixed_width_with(
                                 definition.get_fixed_value_size(),
@@ -587,9 +587,9 @@ impl Database {
                                 definition.get_fixed_key_size(),
                                 definition.get_fixed_value_size(),
                             );
-                            for (sub_root, _) in subtree_roots {
+                            for subtree_header in subtree_roots {
                                 let sub_root_iter = AllPageNumbersBtreeIter::new(
-                                    sub_root,
+                                    subtree_header.root,
                                     definition.get_fixed_value_size(),
                                     <()>::fixed_width(),
                                     mem.clone(),
@@ -638,8 +638,8 @@ impl Database {
         mem.begin_repair()?;
 
         let data_root = mem.get_data_root();
-        if let Some((root, _)) = data_root {
-            Self::mark_tables_recursive(root, mem.clone(), false)?;
+        if let Some(header) = data_root {
+            Self::mark_tables_recursive(header.root, mem.clone(), false)?;
         }
 
         let freed_root = mem.get_freed_root();
@@ -670,8 +670,8 @@ impl Database {
         }
 
         let system_root = mem.get_system_root();
-        if let Some((root, _)) = system_root {
-            Self::mark_tables_recursive(root, mem.clone(), false)?;
+        if let Some(header) = system_root {
+            Self::mark_tables_recursive(header.root, mem.clone(), false)?;
         }
         Self::mark_persistent_savepoints(system_root, mem.clone(), oldest_unprocessed_transaction)?;
 

@@ -5,7 +5,7 @@ use crate::sealed::Sealed;
 use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
-    Btree, BtreeMut, Checksum, FreedPageList, FreedTableKey, InternalTableDefinition, PageHint,
+    Btree, BtreeHeader, BtreeMut, FreedPageList, FreedTableKey, InternalTableDefinition, PageHint,
     PageNumber, SerializedSavepoint, TableTree, TableTreeMut, TableType, TransactionalMemory,
     MAX_VALUE_LENGTH,
 };
@@ -200,7 +200,7 @@ pub struct SystemTable<'db, 's, K: Key + 'static, V: Value + 'static> {
 impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
     fn new(
         name: &str,
-        table_root: Option<(PageNumber, Checksum)>,
+        table_root: Option<BtreeHeader>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
@@ -316,7 +316,7 @@ impl<'db> TableNamespace<'db> {
         &mut self,
         name: &str,
         table_type: TableType,
-    ) -> Result<Option<(PageNumber, Checksum)>, TableError> {
+    ) -> Result<Option<BtreeHeader>, TableError> {
         if let Some(location) = self.open_tables.get(name) {
             return Err(TableError::TableAlreadyOpen(name.to_string(), location));
         }

@@ -1,7 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::tree_store::btree_base::{
-    branch_checksum, leaf_checksum, BranchAccessor, BranchMutator, Checksum, LeafAccessor, BRANCH,
-    DEFERRED, LEAF,
+    branch_checksum, leaf_checksum, BranchAccessor, BranchMutator, BtreeHeader, Checksum,
+    LeafAccessor, BRANCH, DEFERRED, LEAF,
 };
 use crate::tree_store::btree_iters::BtreeDrain;
 use crate::tree_store::btree_mutator::MutateHelper;
@@ -30,7 +30,7 @@ pub(crate) struct BtreeStats {
 
 pub(crate) struct UntypedBtreeMut {
     mem: Arc<TransactionalMemory>,
-    root: Option<(PageNumber, Checksum)>,
+    root: Option<BtreeHeader>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     key_width: Option<usize>,
     value_width: Option<usize>,
@@ -38,7 +38,7 @@ pub(crate) struct UntypedBtreeMut {
 
 impl UntypedBtreeMut {
     pub(crate) fn new(
-        root: Option<(PageNumber, Checksum)>,
+        root: Option<BtreeHeader>,
         mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         key_width: Option<usize>,
@@ -53,20 +53,24 @@ impl UntypedBtreeMut {
         }
     }
 
-    pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
+    pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
         self.root
     }
 
     // Recomputes the checksum for all pages that are uncommitted
     pub(crate) fn finalize_dirty_checksums(&mut self) -> Result {
         let mut root = self.root;
-        if let Some((ref page_number, ref mut checksum)) = root {
-            if !self.mem.uncommitted(*page_number) {
+        if let Some(BtreeHeader {
+            root: ref p,
+            ref mut checksum,
+        }) = root
+        {
+            if !self.mem.uncommitted(*p) {
                 // root page is clean
                 return Ok(());
             }
 
-            *checksum = self.finalize_dirty_checksums_helper(*page_number)?;
+            *checksum = self.finalize_dirty_checksums_helper(*p)?;
             self.root = root;
         }
 
@@ -112,20 +116,20 @@ impl UntypedBtreeMut {
     where
         F: Fn(PageMut) -> Result,
     {
-        if let Some((ref page_number, _)) = self.root {
-            if !self.mem.uncommitted(*page_number) {
+        if let Some(page_number) = self.root.map(|x| x.root) {
+            if !self.mem.uncommitted(page_number) {
                 // root page is clean
                 return Ok(());
             }
 
-            let page = self.mem.get_page_mut(*page_number)?;
+            let page = self.mem.get_page_mut(page_number)?;
             match page.memory()[0] {
                 LEAF => {
                     visitor(page)?;
                 }
                 BRANCH => {
                     drop(page);
-                    self.dirty_leaf_visitor_helper(*page_number, &visitor)?;
+                    self.dirty_leaf_visitor_helper(page_number, &visitor)?;
                 }
                 _ => unreachable!(),
             }
@@ -163,8 +167,8 @@ impl UntypedBtreeMut {
     // Relocate the btree to lower pages
     pub(crate) fn relocate(&mut self) -> Result<bool> {
         if let Some(root) = self.get_root() {
-            if let Some(new_root) = self.relocate_helper(root.0)? {
-                self.root = Some(new_root);
+            if let Some((new_root, new_checksum)) = self.relocate_helper(root.root)? {
+                self.root = Some(BtreeHeader::new(new_root, new_checksum));
                 return Ok(true);
             }
         }
@@ -220,7 +224,7 @@ impl UntypedBtreeMut {
 pub(crate) struct BtreeMut<'a, K: Key + 'static, V: Value + 'static> {
     mem: Arc<TransactionalMemory>,
     transaction_guard: Arc<TransactionGuard>,
-    root: Option<(PageNumber, Checksum)>,
+    root: Option<BtreeHeader>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -229,7 +233,7 @@ pub(crate) struct BtreeMut<'a, K: Key + 'static, V: Value + 'static> {
 
 impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     pub(crate) fn new(
-        root: Option<(PageNumber, Checksum)>,
+        root: Option<BtreeHeader>,
         guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
@@ -269,7 +273,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     }
 
     pub(crate) fn all_pages_iter(&self) -> Result<Option<AllPageNumbersBtreeIter>> {
-        if let Some((root, _)) = self.root {
+        if let Some(root) = self.root.map(|x| x.root) {
             Ok(Some(AllPageNumbersBtreeIter::new(
                 root,
                 K::fixed_width(),
@@ -281,7 +285,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         }
     }
 
-    pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
+    pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
         self.root
     }
 
@@ -337,7 +341,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
 
     pub(crate) fn stats(&self) -> Result<BtreeStats> {
         btree_stats(
-            self.get_root().map(|(p, _)| p),
+            self.get_root().map(|x| x.root),
             &self.mem,
             K::fixed_width(),
             V::fixed_width(),
@@ -464,14 +468,14 @@ impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
 
 pub(crate) struct RawBtree {
     mem: Arc<TransactionalMemory>,
-    root: Option<(PageNumber, Checksum)>,
+    root: Option<BtreeHeader>,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
 }
 
 impl RawBtree {
     pub(crate) fn new(
-        root: Option<(PageNumber, Checksum)>,
+        root: Option<BtreeHeader>,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
         mem: Arc<TransactionalMemory>,
@@ -484,13 +488,13 @@ impl RawBtree {
         }
     }
 
-    pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
+    pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
         self.root
     }
 
     pub(crate) fn stats(&self) -> Result<BtreeStats> {
         btree_stats(
-            self.root.map(|(p, _)| p),
+            self.root.map(|x| x.root),
             &self.mem,
             self.fixed_key_size,
             self.fixed_value_size,
@@ -499,7 +503,7 @@ impl RawBtree {
 
     pub(crate) fn len(&self) -> Result<u64> {
         btree_len(
-            self.root.map(|(p, _)| p),
+            self.root.map(|x| x.root),
             &self.mem,
             self.fixed_key_size,
             self.fixed_value_size,
@@ -507,8 +511,8 @@ impl RawBtree {
     }
 
     pub(crate) fn verify_checksum(&self) -> Result<bool> {
-        if let Some((root, checksum)) = self.root {
-            self.verify_checksum_helper(root, checksum)
+        if let Some(header) = self.root {
+            self.verify_checksum_helper(header.root, header.checksum)
         } else {
             Ok(true)
         }
@@ -560,7 +564,7 @@ pub(crate) struct Btree<K: Key + 'static, V: Value + 'static> {
     _transaction_guard: Arc<TransactionGuard>,
     // Cache of the root page to avoid repeated lookups
     cached_root: Option<PageImpl>,
-    root: Option<(PageNumber, Checksum)>,
+    root: Option<BtreeHeader>,
     hint: PageHint,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -568,13 +572,13 @@ pub(crate) struct Btree<K: Key + 'static, V: Value + 'static> {
 
 impl<K: Key, V: Value> Btree<K, V> {
     pub(crate) fn new(
-        root: Option<(PageNumber, Checksum)>,
+        root: Option<BtreeHeader>,
         hint: PageHint,
         guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
     ) -> Result<Self> {
-        let cached_root = if let Some((r, _)) = root {
-            Some(mem.get_page_extended(r, hint)?)
+        let cached_root = if let Some(header) = root {
+            Some(mem.get_page_extended(header.root, hint)?)
         } else {
             None
         };
@@ -589,7 +593,7 @@ impl<K: Key, V: Value> Btree<K, V> {
         })
     }
 
-    pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
+    pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
         self.root
     }
 
@@ -628,13 +632,13 @@ impl<K: Key, V: Value> Btree<K, V> {
         &self,
         range: &'_ T,
     ) -> Result<BtreeRangeIter<K, V>> {
-        BtreeRangeIter::new(range, self.root.map(|(p, _)| p), self.mem.clone())
+        BtreeRangeIter::new(range, self.root.map(|x| x.root), self.mem.clone())
     }
 
     pub(crate) fn len(&self) -> Result<u64> {
         let iter: BtreeRangeIter<K, V> = BtreeRangeIter::new::<RangeFull, K::SelfType<'_>>(
             &(..),
-            self.root.map(|(p, _)| p),
+            self.root.map(|x| x.root),
             self.mem.clone(),
         )?;
         let mut count = 0;
@@ -647,7 +651,7 @@ impl<K: Key, V: Value> Btree<K, V> {
 
     pub(crate) fn stats(&self) -> Result<BtreeStats> {
         btree_stats(
-            self.root.map(|(p, _)| p),
+            self.root.map(|x| x.root),
             &self.mem,
             K::fixed_width(),
             V::fixed_width(),
@@ -656,7 +660,7 @@ impl<K: Key, V: Value> Btree<K, V> {
 
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
-        if let Some((p, _)) = self.root {
+        if let Some(p) = self.root.map(|x| x.root) {
             let mut pages = vec![self.mem.get_page(p)?];
             while !pages.is_empty() {
                 let mut next_children = vec![];

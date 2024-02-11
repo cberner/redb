@@ -6,7 +6,9 @@ use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,
 };
 use crate::tree_store::page_store::{Page, PageImpl};
-use crate::tree_store::{AccessGuardMut, PageNumber, RawLeafBuilder, TransactionalMemory};
+use crate::tree_store::{
+    AccessGuardMut, BtreeHeader, PageNumber, RawLeafBuilder, TransactionalMemory,
+};
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
 use std::cmp::{max, min};
@@ -45,7 +47,7 @@ struct InsertionResult<'a, V: Value> {
 }
 
 pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
-    root: &'b mut Option<(PageNumber, Checksum)>,
+    root: &'b mut Option<BtreeHeader>,
     modify_uncommitted: bool,
     mem: Arc<TransactionalMemory>,
     freed: &'b mut Vec<PageNumber>,
@@ -56,7 +58,7 @@ pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
 
 impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
     pub(crate) fn new(
-        root: &'b mut Option<(PageNumber, Checksum)>,
+        root: &'b mut Option<BtreeHeader>,
         mem: Arc<TransactionalMemory>,
         freed: &'b mut Vec<PageNumber>,
     ) -> Self {
@@ -74,7 +76,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
     // Creates a new mutator which will not modify any existing uncommitted pages, or free any existing pages.
     // It will still queue pages for future freeing in the freed vec
     pub(crate) fn new_do_not_modify(
-        root: &'b mut Option<(PageNumber, Checksum)>,
+        root: &'b mut Option<BtreeHeader>,
         mem: Arc<TransactionalMemory>,
         freed: &'b mut Vec<PageNumber>,
     ) -> Self {
@@ -100,11 +102,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
     }
 
     pub(crate) fn delete(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
-        if let Some((p, checksum)) = *self.root {
+        if let Some(BtreeHeader { root: p, checksum }) = *self.root {
             let (deletion_result, found) =
                 self.delete_helper(self.mem.get_page(p)?, checksum, K::as_bytes(key).as_ref())?;
             let new_root = match deletion_result {
-                Subtree(page, checksum) => Some((page, checksum)),
+                Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum)),
                 DeletedLeaf => None,
                 PartialLeaf { page, deleted_pair } => {
                     let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
@@ -116,10 +118,14 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     );
                     builder.push_all_except(&accessor, Some(deleted_pair));
                     let page = builder.build()?;
-                    Some((page.get_page_number(), DEFERRED))
+                    Some(BtreeHeader::new(page.get_page_number(), DEFERRED))
                 }
-                PartialBranch(page_number, checksum) => Some((page_number, checksum)),
-                DeletedBranch(remaining_child, checksum) => Some((remaining_child, checksum)),
+                PartialBranch(page_number, checksum) => {
+                    Some(BtreeHeader::new(page_number, checksum))
+                }
+                DeletedBranch(remaining_child, checksum) => {
+                    Some(BtreeHeader::new(remaining_child, checksum))
+                }
             };
             *self.root = new_root;
             Ok(found)
@@ -134,7 +140,9 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
     ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMut<'a, V>)> {
-        let (new_root, old_value, guard) = if let Some((p, checksum)) = *self.root {
+        let (new_root, old_value, guard) = if let Some(BtreeHeader { root: p, checksum }) =
+            *self.root
+        {
             let result = self.insert_helper(
                 self.mem.get_page(p)?,
                 checksum,
@@ -148,9 +156,9 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 builder.push_key(&key);
                 builder.push_child(page2, page2_checksum);
                 let new_page = builder.build()?;
-                (new_page.get_page_number(), DEFERRED)
+                BtreeHeader::new(new_page.get_page_number(), DEFERRED)
             } else {
-                (result.new_root, result.root_checksum)
+                BtreeHeader::new(result.new_root, result.root_checksum)
             };
             (new_root, result.old_value, result.inserted_value)
         } else {
@@ -167,7 +175,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             let page_num = page.get_page_number();
             let guard = AccessGuardMut::new(page, offset, value_bytes.len());
 
-            ((page_num, DEFERRED), None, guard)
+            (BtreeHeader::new(page_num, DEFERRED), None, guard)
         };
         *self.root = Some(new_root);
         Ok((old_value, guard))

@@ -1,5 +1,5 @@
 use crate::transaction_tracker::TransactionId;
-use crate::tree_store::btree_base::Checksum;
+use crate::tree_store::btree_base::{BtreeHeader, Checksum};
 use crate::tree_store::page_store::base::{PageHint, MAX_PAGE_INDEX};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::{CachePriority, PagedCachedFile};
@@ -480,9 +480,9 @@ impl TransactionalMemory {
     // Commit all outstanding changes and make them visible as the primary
     pub(crate) fn commit(
         &self,
-        data_root: Option<(PageNumber, Checksum)>,
-        system_root: Option<(PageNumber, Checksum)>,
-        freed_root: Option<(PageNumber, Checksum)>,
+        data_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+        freed_root: Option<BtreeHeader>,
         transaction_id: TransactionId,
         eventual: bool,
         two_phase: bool,
@@ -503,9 +503,9 @@ impl TransactionalMemory {
 
     fn commit_inner(
         &self,
-        data_root: Option<(PageNumber, Checksum)>,
-        system_root: Option<(PageNumber, Checksum)>,
-        freed_root: Option<(PageNumber, Checksum)>,
+        data_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+        freed_root: Option<BtreeHeader>,
         transaction_id: TransactionId,
         eventual: bool,
         two_phase: bool,
@@ -572,9 +572,9 @@ impl TransactionalMemory {
     // Make changes visible, without a durability guarantee
     pub(crate) fn non_durable_commit(
         &self,
-        data_root: Option<(PageNumber, Checksum)>,
-        system_root: Option<(PageNumber, Checksum)>,
-        freed_root: Option<(PageNumber, Checksum)>,
+        data_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+        freed_root: Option<BtreeHeader>,
         transaction_id: TransactionId,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
@@ -737,7 +737,7 @@ impl TransactionalMemory {
         }
     }
 
-    pub(crate) fn get_data_root(&self) -> Option<(PageNumber, Checksum)> {
+    pub(crate) fn get_data_root(&self) -> Option<BtreeHeader> {
         let state = self.state.lock().unwrap();
         if self.read_from_secondary.load(Ordering::Acquire) {
             state.header.secondary_slot().user_root
@@ -746,7 +746,7 @@ impl TransactionalMemory {
         }
     }
 
-    pub(crate) fn get_system_root(&self) -> Option<(PageNumber, Checksum)> {
+    pub(crate) fn get_system_root(&self) -> Option<BtreeHeader> {
         let state = self.state.lock().unwrap();
         if self.read_from_secondary.load(Ordering::Acquire) {
             state.header.secondary_slot().system_root
@@ -755,7 +755,7 @@ impl TransactionalMemory {
         }
     }
 
-    pub(crate) fn get_freed_root(&self) -> Option<(PageNumber, Checksum)> {
+    pub(crate) fn get_freed_root(&self) -> Option<BtreeHeader> {
         let state = self.state.lock().unwrap();
         if self.read_from_secondary.load(Ordering::Acquire) {
             state.header.secondary_slot().freed_root

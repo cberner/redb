@@ -4,7 +4,7 @@ use crate::multimap_table::{
     finalize_tree_and_subtree_checksums, multimap_btree_stats, verify_tree_and_subtree_checksums,
 };
 use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
-use crate::tree_store::btree_base::Checksum;
+use crate::tree_store::btree_base::{BtreeHeader, Checksum};
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::{
     Btree, BtreeMut, BtreeRangeIter, PageHint, PageNumber, RawBtree, TransactionalMemory,
@@ -203,7 +203,7 @@ impl From<u8> for TableType {
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct InternalTableDefinition {
-    table_root: Option<(PageNumber, Checksum)>,
+    table_root: Option<BtreeHeader>,
     table_type: TableType,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
@@ -214,7 +214,7 @@ pub(crate) struct InternalTableDefinition {
 }
 
 impl InternalTableDefinition {
-    pub(crate) fn get_root(&self) -> Option<(PageNumber, Checksum)> {
+    pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
         self.table_root
     }
 
@@ -271,7 +271,7 @@ impl Value for InternalTableDefinition {
                     .unwrap(),
             );
             offset += size_of::<Checksum>();
-            Some((table_root, checksum))
+            Some(BtreeHeader::new(table_root, checksum))
         } else {
             offset += PageNumber::serialized_size();
             offset += size_of::<Checksum>();
@@ -346,7 +346,7 @@ impl Value for InternalTableDefinition {
         Self: 'b,
     {
         let mut result = vec![value.table_type.into()];
-        if let Some((root, checksum)) = value.table_root {
+        if let Some(BtreeHeader { root, checksum }) = value.table_root {
             result.push(1);
             result.extend_from_slice(&root.to_le_bytes());
             result.extend_from_slice(&checksum.to_le_bytes());
@@ -415,7 +415,7 @@ pub(crate) struct TableTree {
 
 impl TableTree {
     pub(crate) fn new(
-        master_root: Option<(PageNumber, Checksum)>,
+        master_root: Option<BtreeHeader>,
         page_hint: PageHint,
         guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
@@ -518,13 +518,13 @@ pub(crate) struct TableTreeMut<'txn> {
     guard: Arc<TransactionGuard>,
     mem: Arc<TransactionalMemory>,
     // Cached updates from tables that have been closed. These must be flushed to the btree
-    pending_table_updates: HashMap<String, Option<(PageNumber, Checksum)>>,
+    pending_table_updates: HashMap<String, Option<BtreeHeader>>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
 }
 
 impl<'txn> TableTreeMut<'txn> {
     pub(crate) fn new(
-        master_root: Option<(PageNumber, Checksum)>,
+        master_root: Option<BtreeHeader>,
         guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
@@ -553,9 +553,9 @@ impl<'txn> TableTreeMut<'txn> {
                 .get_table_untyped(&entry, TableType::Normal)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
                 .unwrap();
-            if let Some((table_root, _)) = definition.get_root() {
+            if let Some(header) = definition.get_root() {
                 let table_pages_iter = AllPageNumbersBtreeIter::new(
-                    table_root,
+                    header.root,
                     definition.get_fixed_key_size(),
                     definition.get_fixed_value_size(),
                     self.mem.clone(),
@@ -575,11 +575,7 @@ impl<'txn> TableTreeMut<'txn> {
     }
 
     // Queues an update to the table root
-    pub(crate) fn stage_update_table_root(
-        &mut self,
-        name: &str,
-        table_root: Option<(PageNumber, Checksum)>,
-    ) {
+    pub(crate) fn stage_update_table_root(&mut self, name: &str, table_root: Option<BtreeHeader>) {
         self.pending_table_updates
             .insert(name.to_string(), table_root);
     }
@@ -601,9 +597,9 @@ impl<'txn> TableTreeMut<'txn> {
             // Maybe InternalTableDefinition should be an enum for normal and multimap, instead
             match definition.get_type() {
                 TableType::Normal => {
-                    if let Some((table_root, table_checksum)) = definition.get_root() {
+                    if let Some(header) = definition.get_root() {
                         if !RawBtree::new(
-                            Some((table_root, table_checksum)),
+                            Some(header),
                             definition.get_fixed_key_size(),
                             definition.get_fixed_value_size(),
                             self.mem.clone(),
@@ -630,7 +626,7 @@ impl<'txn> TableTreeMut<'txn> {
         Ok(true)
     }
 
-    pub(crate) fn flush_table_root_updates(&mut self) -> Result<Option<(PageNumber, Checksum)>> {
+    pub(crate) fn flush_table_root_updates(&mut self) -> Result<Option<BtreeHeader>> {
         for (name, table_root) in self.pending_table_updates.drain() {
             // Bypass .get_table() since the table types are dynamic
             let mut definition = self.tree.get(&name.as_str())?.unwrap().value();
@@ -726,9 +722,9 @@ impl<'txn> TableTreeMut<'txn> {
         table_type: TableType,
     ) -> Result<bool, TableError> {
         if let Some(definition) = self.get_table_untyped(name, table_type)? {
-            if let Some((table_root, _)) = definition.get_root() {
+            if let Some(header) = definition.get_root() {
                 let iter = AllPageNumbersBtreeIter::new(
-                    table_root,
+                    header.root,
                     definition.fixed_key_size,
                     definition.fixed_value_size,
                     self.mem.clone(),
@@ -824,7 +820,7 @@ impl<'txn> TableTreeMut<'txn> {
             match definition.get_type() {
                 TableType::Normal => {
                     let subtree_stats = btree_stats(
-                        definition.table_root.map(|(p, _)| p),
+                        definition.table_root.map(|x| x.root),
                         &self.mem,
                         definition.fixed_key_size,
                         definition.fixed_value_size,
@@ -838,7 +834,7 @@ impl<'txn> TableTreeMut<'txn> {
                 }
                 TableType::Multimap => {
                     let subtree_stats = multimap_btree_stats(
-                        definition.table_root.map(|(p, _)| p),
+                        definition.table_root.map(|x| x.root),
                         &self.mem,
                         definition.fixed_key_size,
                         definition.fixed_value_size,

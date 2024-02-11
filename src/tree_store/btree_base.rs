@@ -55,6 +55,21 @@ pub(super) fn branch_checksum<T: Page>(
     }
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) struct BtreeHeader {
+    pub(crate) root: PageNumber,
+    pub(crate) checksum: Checksum,
+}
+
+impl BtreeHeader {
+    pub(crate) fn new(page_number: PageNumber, checksum: Checksum) -> Self {
+        Self {
+            root: page_number,
+            checksum,
+        }
+    }
+}
+
 enum OnDrop {
     None,
     RemoveEntry {
