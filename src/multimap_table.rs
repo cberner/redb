@@ -3,7 +3,7 @@ use crate::multimap_table::DynamicCollectionType::{Inline, Subtree};
 use crate::sealed::Sealed;
 use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
-    btree_len, btree_stats, AllPageNumbersBtreeIter, BranchAccessor, Btree, BtreeMut,
+    btree_len, btree_stats, AllPageNumbersBtreeIter, BranchAccessor, Btree, BtreeHeader, BtreeMut,
     BtreeRangeIter, BtreeStats, CachePriority, Checksum, LeafAccessor, LeafMutator, Page, PageHint,
     PageNumber, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF,
     MAX_VALUE_LENGTH,
@@ -219,14 +219,14 @@ fn multimap_stats_helper(
 
 // Verify all the checksums in the tree, including any Dynamic collection subtrees
 pub(crate) fn verify_tree_and_subtree_checksums(
-    root: Option<(PageNumber, Checksum)>,
+    root: Option<BtreeHeader>,
     key_size: Option<usize>,
     value_size: Option<usize>,
     mem: Arc<TransactionalMemory>,
 ) -> Result<bool> {
-    if let Some((root, root_checksum)) = root {
+    if let Some(header) = root {
         if !RawBtree::new(
-            Some((root, root_checksum)),
+            Some(header),
             key_size,
             DynamicCollection::<()>::fixed_width_with(value_size),
             mem.clone(),
@@ -237,7 +237,7 @@ pub(crate) fn verify_tree_and_subtree_checksums(
         }
 
         let table_pages_iter = AllPageNumbersBtreeIter::new(
-            root,
+            header.root,
             key_size,
             DynamicCollection::<()>::fixed_width_with(value_size),
             mem.clone(),
@@ -245,14 +245,9 @@ pub(crate) fn verify_tree_and_subtree_checksums(
         for table_page in table_pages_iter {
             let page = mem.get_page(table_page?)?;
             let subtree_roots = parse_subtree_roots(&page, key_size, value_size);
-            for (sub_root, sub_root_checksum) in subtree_roots {
-                if !RawBtree::new(
-                    Some((sub_root, sub_root_checksum)),
-                    value_size,
-                    <()>::fixed_width(),
-                    mem.clone(),
-                )
-                .verify_checksum()?
+            for header in subtree_roots {
+                if !RawBtree::new(Some(header), value_size, <()>::fixed_width(), mem.clone())
+                    .verify_checksum()?
                 {
                     return Ok(false);
                 }
@@ -266,11 +261,11 @@ pub(crate) fn verify_tree_and_subtree_checksums(
 // Finalize all the checksums in the tree, including any Dynamic collection subtrees
 // Returns the root checksum
 pub(crate) fn finalize_tree_and_subtree_checksums(
-    root: Option<(PageNumber, Checksum)>,
+    root: Option<BtreeHeader>,
     key_size: Option<usize>,
     value_size: Option<usize>,
     mem: Arc<TransactionalMemory>,
-) -> Result<Option<(PageNumber, Checksum)>> {
+) -> Result<Option<BtreeHeader>> {
     let freed_pages = Arc::new(Mutex::new(vec![]));
     let mut tree = UntypedBtreeMut::new(
         root,
@@ -291,7 +286,7 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
             let collection = <&DynamicCollection<()>>::from_bytes(entry.value());
             if matches!(collection.collection_type(), DynamicCollectionType::Subtree) {
                 let sub_root = collection.as_subtree();
-                if mem.uncommitted(sub_root.0) {
+                if mem.uncommitted(sub_root.root) {
                     let mut subtree = UntypedBtreeMut::new(
                         Some(sub_root),
                         mem.clone(),
@@ -311,8 +306,8 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
             key_size,
             DynamicCollection::<()>::fixed_width_with(value_size),
         );
-        for (i, key, (sub_root, checksum)) in sub_root_updates {
-            let collection = DynamicCollection::<()>::make_subtree_data(sub_root, checksum);
+        for (i, key, sub_root) in sub_root_updates {
+            let collection = DynamicCollection::<()>::make_subtree_data(sub_root);
             mutator.insert(i, true, &key, &collection);
         }
 
@@ -329,7 +324,7 @@ pub(crate) fn parse_subtree_roots<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
-) -> Vec<(PageNumber, Checksum)> {
+) -> Vec<BtreeHeader> {
     match page.memory()[0] {
         BRANCH => {
             vec![]
@@ -512,7 +507,7 @@ impl<V> DynamicCollection<V> {
         &self.data[1..]
     }
 
-    fn as_subtree(&self) -> (PageNumber, Checksum) {
+    fn as_subtree(&self) -> BtreeHeader {
         debug_assert!(matches!(self.collection_type(), Subtree));
         let offset = 1 + PageNumber::serialized_size();
         let page_number = PageNumber::from_le_bytes(self.data[1..offset].try_into().unwrap());
@@ -521,7 +516,7 @@ impl<V> DynamicCollection<V> {
                 .try_into()
                 .unwrap(),
         );
-        (page_number, checksum)
+        BtreeHeader::new(page_number, checksum)
     }
 
     fn make_inline_data(data: &[u8]) -> Vec<u8> {
@@ -531,7 +526,8 @@ impl<V> DynamicCollection<V> {
         result
     }
 
-    fn make_subtree_data(root: PageNumber, checksum: Checksum) -> Vec<u8> {
+    fn make_subtree_data(header: BtreeHeader) -> Vec<u8> {
+        let BtreeHeader { root, checksum } = header;
         let mut result = vec![Subtree.into()];
         result.extend_from_slice(&root.to_le_bytes());
         result.extend_from_slice(Checksum::as_bytes(&checksum).as_ref());
@@ -557,7 +553,7 @@ impl<V: Key> DynamicCollection<V> {
                 MultimapValue::new_inline(leaf_iter, guard)
             }
             Subtree => {
-                let root = collection.value().as_subtree().0;
+                let root = collection.value().as_subtree().root;
                 MultimapValue::new_subtree(
                     BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), Some(root), mem)?,
                     guard,
@@ -580,7 +576,7 @@ impl<V: Key> DynamicCollection<V> {
                 MultimapValue::new_inline(leaf_iter, guard)
             }
             Subtree => {
-                let root = collection.value().as_subtree().0;
+                let root = collection.value().as_subtree().root;
                 let inner = BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     Some(root),
@@ -819,7 +815,7 @@ impl<K: Key + 'static, V: Key + 'static> MultimapTableHandle for MultimapTable<'
 impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
     pub(crate) fn new(
         name: &str,
-        table_root: Option<(PageNumber, Checksum)>,
+        table_root: Option<BtreeHeader>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         mem: Arc<TransactionalMemory>,
         transaction: &'txn WriteTransaction,
@@ -926,16 +922,15 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
 
                         // Don't bother computing the checksum, since we're about to modify the tree
                         let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
-                            Some((page_number, 0)),
+                            Some(BtreeHeader::new(page_number, 0)),
                             self.transaction.transaction_guard(),
                             self.mem.clone(),
                             self.freed_pages.clone(),
                         );
                         let existed = subtree.insert(value.borrow(), &())?.is_some();
                         assert_eq!(existed, found);
-                        let (new_root, new_checksum) = subtree.get_root().unwrap();
                         let subtree_data =
-                            DynamicCollection::<V>::make_subtree_data(new_root, new_checksum);
+                            DynamicCollection::<V>::make_subtree_data(subtree.get_root().unwrap());
                         self.tree
                             .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                     }
@@ -951,9 +946,8 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     );
                     drop(guard);
                     let existed = subtree.insert(value.borrow(), &())?.is_some();
-                    let (new_root, new_checksum) = subtree.get_root().unwrap();
                     let subtree_data =
-                        DynamicCollection::<V>::make_subtree_data(new_root, new_checksum);
+                        DynamicCollection::<V>::make_subtree_data(subtree.get_root().unwrap());
                     self.tree
                         .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
 
@@ -990,9 +984,8 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     self.freed_pages.clone(),
                 );
                 subtree.insert(value.borrow(), &())?;
-                let (new_root, new_checksum) = subtree.get_root().unwrap();
                 let subtree_data =
-                    DynamicCollection::<V>::make_subtree_data(new_root, new_checksum);
+                    DynamicCollection::<V>::make_subtree_data(subtree.get_root().unwrap());
                 self.tree
                     .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
             }
@@ -1079,7 +1072,11 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 drop(guard);
                 let existed = subtree.remove(value.borrow())?.is_some();
 
-                if let Some((new_root, new_checksum)) = subtree.get_root() {
+                if let Some(BtreeHeader {
+                    root: new_root,
+                    checksum: new_checksum,
+                }) = subtree.get_root()
+                {
                     let page = self.mem.get_page(new_root)?;
                     match page.memory()[0] {
                         LEAF => {
@@ -1100,16 +1097,16 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                                 }
                             } else {
                                 let subtree_data = DynamicCollection::<V>::make_subtree_data(
-                                    new_root,
-                                    new_checksum,
+                                    BtreeHeader::new(new_root, new_checksum),
                                 );
                                 self.tree
                                     .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                             }
                         }
                         BRANCH => {
-                            let subtree_data =
-                                DynamicCollection::<V>::make_subtree_data(new_root, new_checksum);
+                            let subtree_data = DynamicCollection::<V>::make_subtree_data(
+                                BtreeHeader::new(new_root, new_checksum),
+                            );
                             self.tree
                                 .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                         }
@@ -1139,7 +1136,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 collection.value().collection_type(),
                 DynamicCollectionType::Subtree
             ) {
-                let root = collection.value().as_subtree().0;
+                let root = collection.value().as_subtree().root;
                 let all_pages = AllPageNumbersBtreeIter::new(
                     root,
                     V::fixed_width(),
@@ -1171,7 +1168,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
 impl<'txn, K: Key + 'static, V: Key + 'static> ReadableTableMetadata for MultimapTable<'txn, K, V> {
     fn stats(&self) -> Result<TableStats> {
         let tree_stats = multimap_btree_stats(
-            self.tree.get_root().map(|(p, _)| p),
+            self.tree.get_root().map(|x| x.root),
             &self.mem,
             K::fixed_width(),
             V::fixed_width(),
@@ -1277,7 +1274,7 @@ impl ReadableTableMetadata for ReadOnlyUntypedMultimapTable {
     /// Retrieves information about storage usage for the table
     fn stats(&self) -> Result<TableStats> {
         let tree_stats = multimap_btree_stats(
-            self.tree.get_root().map(|(p, _)| p),
+            self.tree.get_root().map(|x| x.root),
             &self.mem,
             self.fixed_key_size,
             self.fixed_value_size,
@@ -1295,7 +1292,7 @@ impl ReadableTableMetadata for ReadOnlyUntypedMultimapTable {
 
     fn len(&self) -> Result<u64> {
         multimap_btree_len(
-            self.tree.get_root().map(|(p, _)| p),
+            self.tree.get_root().map(|x| x.root),
             &self.mem,
             self.fixed_key_size,
             self.fixed_value_size,
@@ -1305,7 +1302,7 @@ impl ReadableTableMetadata for ReadOnlyUntypedMultimapTable {
 
 impl ReadOnlyUntypedMultimapTable {
     pub(crate) fn new(
-        root_page: Option<(PageNumber, Checksum)>,
+        root_page: Option<BtreeHeader>,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
         mem: Arc<TransactionalMemory>,
@@ -1334,7 +1331,7 @@ pub struct ReadOnlyMultimapTable<K: Key + 'static, V: Key + 'static> {
 
 impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
     pub(crate) fn new(
-        root_page: Option<(PageNumber, Checksum)>,
+        root_page: Option<BtreeHeader>,
         hint: PageHint,
         guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
@@ -1380,7 +1377,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
 impl<K: Key + 'static, V: Key + 'static> ReadableTableMetadata for ReadOnlyMultimapTable<K, V> {
     fn stats(&self) -> Result<TableStats> {
         let tree_stats = multimap_btree_stats(
-            self.tree.get_root().map(|(p, _)| p),
+            self.tree.get_root().map(|x| x.root),
             &self.mem,
             K::fixed_width(),
             V::fixed_width(),

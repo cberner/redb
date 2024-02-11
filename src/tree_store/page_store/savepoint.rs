@@ -1,5 +1,5 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
-use crate::tree_store::{Checksum, PageNumber, TransactionalMemory};
+use crate::tree_store::{BtreeHeader, Checksum, PageNumber, TransactionalMemory};
 use crate::{TypeName, Value};
 use std::fmt::Debug;
 use std::mem::size_of;
@@ -27,10 +27,10 @@ pub struct Savepoint {
     // Each savepoint has an associated read transaction id to ensure that any pages it references
     // are not freed
     transaction_id: TransactionId,
-    user_root: Option<(PageNumber, Checksum)>,
+    user_root: Option<BtreeHeader>,
     // For future use. This is not used in the restoration protocol.
-    system_root: Option<(PageNumber, Checksum)>,
-    freed_root: Option<(PageNumber, Checksum)>,
+    system_root: Option<BtreeHeader>,
+    freed_root: Option<BtreeHeader>,
     regional_allocators: Vec<Vec<u8>>,
     transaction_tracker: Arc<TransactionTracker>,
     ephemeral: bool,
@@ -43,9 +43,9 @@ impl Savepoint {
         transaction_tracker: Arc<TransactionTracker>,
         id: SavepointId,
         transaction_id: TransactionId,
-        user_root: Option<(PageNumber, Checksum)>,
-        system_root: Option<(PageNumber, Checksum)>,
-        freed_root: Option<(PageNumber, Checksum)>,
+        user_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+        freed_root: Option<BtreeHeader>,
         regional_allocators: Vec<Vec<u8>>,
     ) -> Self {
         Self {
@@ -73,11 +73,11 @@ impl Savepoint {
         self.transaction_id
     }
 
-    pub(crate) fn get_user_root(&self) -> Option<(PageNumber, Checksum)> {
+    pub(crate) fn get_user_root(&self) -> Option<BtreeHeader> {
         self.user_root
     }
 
-    pub(crate) fn get_freed_root(&self) -> Option<(PageNumber, Checksum)> {
+    pub(crate) fn get_freed_root(&self) -> Option<BtreeHeader> {
         self.freed_root
     }
 
@@ -115,7 +115,7 @@ impl<'a> SerializedSavepoint<'a> {
         result.extend(savepoint.id.0.to_le_bytes());
         result.extend(savepoint.transaction_id.raw_id().to_le_bytes());
 
-        if let Some((root, checksum)) = savepoint.user_root {
+        if let Some(BtreeHeader { root, checksum }) = savepoint.user_root {
             result.push(1);
             result.extend(root.to_le_bytes());
             result.extend(checksum.to_le_bytes());
@@ -125,7 +125,7 @@ impl<'a> SerializedSavepoint<'a> {
             result.extend((0 as Checksum).to_le_bytes());
         }
 
-        if let Some((root, checksum)) = savepoint.system_root {
+        if let Some(BtreeHeader { root, checksum }) = savepoint.system_root {
             result.push(1);
             result.extend(root.to_le_bytes());
             result.extend(checksum.to_le_bytes());
@@ -135,7 +135,7 @@ impl<'a> SerializedSavepoint<'a> {
             result.extend((0 as Checksum).to_le_bytes());
         }
 
-        if let Some((root, checksum)) = savepoint.freed_root {
+        if let Some(BtreeHeader { root, checksum }) = savepoint.freed_root {
             result.push(1);
             result.extend(root.to_le_bytes());
             result.extend(checksum.to_le_bytes());
@@ -208,7 +208,7 @@ impl<'a> SerializedSavepoint<'a> {
                     .unwrap(),
             );
             offset += size_of::<Checksum>();
-            Some((page_number, checksum))
+            Some(BtreeHeader::new(page_number, checksum))
         } else {
             offset += PageNumber::serialized_size();
             offset += size_of::<Checksum>();
@@ -231,7 +231,7 @@ impl<'a> SerializedSavepoint<'a> {
                     .unwrap(),
             );
             offset += size_of::<Checksum>();
-            Some((page_number, checksum))
+            Some(BtreeHeader::new(page_number, checksum))
         } else {
             offset += PageNumber::serialized_size();
             offset += size_of::<Checksum>();
@@ -254,7 +254,7 @@ impl<'a> SerializedSavepoint<'a> {
                     .unwrap(),
             );
             offset += size_of::<Checksum>();
-            Some((page_number, checksum))
+            Some(BtreeHeader::new(page_number, checksum))
         } else {
             offset += PageNumber::serialized_size();
             offset += size_of::<Checksum>();

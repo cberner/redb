@@ -1,7 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
 use crate::tree_store::{
-    AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeMut, BtreeRangeIter, Checksum,
+    AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeHeader, BtreeMut, BtreeRangeIter,
     PageHint, PageNumber, RawBtree, TransactionalMemory, MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
@@ -73,7 +73,7 @@ impl<K: Key + 'static, V: Value + 'static> TableHandle for Table<'_, K, V> {
 impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     pub(crate) fn new(
         name: &str,
-        table_root: Option<(PageNumber, Checksum)>,
+        table_root: Option<BtreeHeader>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         mem: Arc<TransactionalMemory>,
         transaction: &'txn WriteTransaction,
@@ -411,7 +411,7 @@ impl ReadableTableMetadata for ReadOnlyUntypedTable {
 
 impl ReadOnlyUntypedTable {
     pub(crate) fn new(
-        root_page: Option<(PageNumber, Checksum)>,
+        root_page: Option<BtreeHeader>,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
         mem: Arc<TransactionalMemory>,
@@ -432,7 +432,7 @@ pub struct ReadOnlyTable<K: Key + 'static, V: Value + 'static> {
 impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
     pub(crate) fn new(
         name: String,
-        root_page: Option<(PageNumber, Checksum)>,
+        root_page: Option<BtreeHeader>,
         hint: PageHint,
         guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,

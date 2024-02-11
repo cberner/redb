@@ -9,8 +9,9 @@ pub(crate) use btree::{
     btree_len, btree_stats, Btree, BtreeMut, BtreeStats, RawBtree, UntypedBtreeMut,
 };
 pub use btree_base::{AccessGuard, AccessGuardMut};
-pub(crate) use btree_base::{BranchAccessor, Checksum};
-pub(crate) use btree_base::{LeafAccessor, LeafMutator, RawLeafBuilder, BRANCH, LEAF};
+pub(crate) use btree_base::{
+    BranchAccessor, BtreeHeader, Checksum, LeafAccessor, LeafMutator, RawLeafBuilder, BRANCH, LEAF,
+};
 pub(crate) use btree_iters::{
     AllPageNumbersBtreeIter, BtreeDrain, BtreeDrainFilter, BtreeRangeIter,
 };
