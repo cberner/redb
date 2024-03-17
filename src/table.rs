@@ -1,8 +1,8 @@
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
 use crate::tree_store::{
-    AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeExtractIf, BtreeHeader, BtreeMut,
-    BtreeRangeIter, PageHint, PageNumber, RawBtree, TransactionalMemory, MAX_VALUE_LENGTH,
+    AccessGuardMut, Btree, BtreeExtractIf, BtreeHeader, BtreeMut, BtreeRangeIter, PageHint,
+    PageNumber, RawBtree, TransactionalMemory, MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, StorageError, WriteTransaction};
@@ -129,35 +129,6 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         } else {
             Ok(None)
         }
-    }
-
-    /// Removes the specified range and returns the removed entries in an iterator
-    ///
-    /// The iterator will consume all items in the range on drop.
-    pub fn drain<'a, KR>(&mut self, range: impl RangeBounds<KR> + 'a) -> Result<Drain<K, V>>
-    where
-        K: 'a,
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
-        self.tree.drain(&range).map(Drain::new)
-    }
-
-    /// Applies `predicate` to all key-value pairs in the specified range. All entries for which
-    /// `predicate` evaluates to `true` are removed and returned in an iterator
-    ///
-    /// The iterator will consume all items in the range matching the predicate on drop.
-    pub fn drain_filter<'a, KR, F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
-        &mut self,
-        range: impl RangeBounds<KR> + 'a,
-        predicate: F,
-    ) -> Result<DrainFilter<K, V, F>>
-    where
-        K: 'a,
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
-        self.tree
-            .drain_filter(&range, predicate)
-            .map(DrainFilter::new)
     }
 
     /// Applies `predicate` to all key-value pairs. All entries for which
@@ -564,46 +535,6 @@ impl<K: Key + 'static, V: Value + 'static> Debug for ReadOnlyTable<K, V> {
     }
 }
 
-pub struct Drain<'a, K: Key + 'static, V: Value + 'static> {
-    inner: BtreeDrain<K, V>,
-    _lifetime: PhantomData<&'a ()>,
-}
-
-impl<'a, K: Key + 'static, V: Value + 'static> Drain<'a, K, V> {
-    fn new(inner: BtreeDrain<K, V>) -> Self {
-        Self {
-            inner,
-            _lifetime: Default::default(),
-        }
-    }
-}
-
-impl<'a, K: Key + 'static, V: Value + 'static> Iterator for Drain<'a, K, V> {
-    type Item = Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let entry = self.inner.next()?;
-        Some(entry.map(|entry| {
-            let (page, key_range, value_range) = entry.into_raw();
-            let key = AccessGuard::with_page(page.clone(), key_range);
-            let value = AccessGuard::with_page(page, value_range);
-            (key, value)
-        }))
-    }
-}
-
-impl<'a, K: Key + 'static, V: Value + 'static> DoubleEndedIterator for Drain<'a, K, V> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        let entry = self.inner.next_back()?;
-        Some(entry.map(|entry| {
-            let (page, key_range, value_range) = entry.into_raw();
-            let key = AccessGuard::with_page(page.clone(), key_range);
-            let value = AccessGuard::with_page(page, value_range);
-            (key, value)
-        }))
-    }
-}
-
 pub struct ExtractIf<
     'a,
     K: Key + 'static,
@@ -651,69 +582,6 @@ impl<
         V: Value + 'static,
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     > DoubleEndedIterator for ExtractIf<'a, K, V, F>
-{
-    fn next_back(&mut self) -> Option<Self::Item> {
-        let entry = self.inner.next_back()?;
-        Some(entry.map(|entry| {
-            let (page, key_range, value_range) = entry.into_raw();
-            let key = AccessGuard::with_page(page.clone(), key_range);
-            let value = AccessGuard::with_page(page, value_range);
-            (key, value)
-        }))
-    }
-}
-
-pub struct DrainFilter<
-    'a,
-    K: Key + 'static,
-    V: Value + 'static,
-    F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-> {
-    inner: BtreeDrainFilter<K, V, F>,
-    _lifetime: PhantomData<&'a ()>,
-}
-
-impl<
-        'a,
-        K: Key + 'static,
-        V: Value + 'static,
-        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    > DrainFilter<'a, K, V, F>
-{
-    fn new(inner: BtreeDrainFilter<K, V, F>) -> Self {
-        Self {
-            inner,
-            _lifetime: Default::default(),
-        }
-    }
-}
-
-impl<
-        'a,
-        K: Key + 'static,
-        V: Value + 'static,
-        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    > Iterator for DrainFilter<'a, K, V, F>
-{
-    type Item = Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let entry = self.inner.next()?;
-        Some(entry.map(|entry| {
-            let (page, key_range, value_range) = entry.into_raw();
-            let key = AccessGuard::with_page(page.clone(), key_range);
-            let value = AccessGuard::with_page(page, value_range);
-            (key, value)
-        }))
-    }
-}
-
-impl<
-        'a,
-        K: Key + 'static,
-        V: Value + 'static,
-        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    > DoubleEndedIterator for DrainFilter<'a, K, V, F>
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;

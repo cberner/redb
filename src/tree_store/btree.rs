@@ -3,11 +3,11 @@ use crate::tree_store::btree_base::{
     branch_checksum, leaf_checksum, BranchAccessor, BranchMutator, BtreeHeader, Checksum,
     LeafAccessor, BRANCH, DEFERRED, LEAF,
 };
-use crate::tree_store::btree_iters::{BtreeDrain, BtreeExtractIf};
+use crate::tree_store::btree_iters::BtreeExtractIf;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{CachePriority, Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::{
-    AccessGuardMut, AllPageNumbersBtreeIter, BtreeDrainFilter, BtreeRangeIter, PageHint, PageNumber,
+    AccessGuardMut, AllPageNumbersBtreeIter, BtreeRangeIter, PageHint, PageNumber,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result};
@@ -372,33 +372,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         self.read_tree()?.range(range)
     }
 
-    pub(crate) fn drain<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
-        &mut self,
-        range: &'_ T,
-    ) -> Result<BtreeDrain<K, V>>
-    where
-        K: 'a0,
-    {
-        let iter = self.range(range)?;
-        let return_iter = self.range(range)?;
-        let mut free_on_drop = vec![];
-        let mut operation: MutateHelper<'_, '_, K, V> =
-            MutateHelper::new_do_not_modify(&mut self.root, self.mem.clone(), &mut free_on_drop);
-        for entry in iter {
-            // TODO: optimize so that we don't have to call delete in a loop
-            assert!(operation.delete(&entry?.key())?.is_some());
-        }
-
-        let result = BtreeDrain::new(
-            return_iter,
-            free_on_drop,
-            self.freed_pages.clone(),
-            self.mem.clone(),
-        );
-
-        Ok(result)
-    }
-
     pub(crate) fn extract_from_if<
         'a,
         'a0,
@@ -419,43 +392,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             &mut self.root,
             iter,
             predicate,
-            self.freed_pages.clone(),
-            self.mem.clone(),
-        );
-
-        Ok(result)
-    }
-
-    pub(crate) fn drain_filter<
-        'a0,
-        T: RangeBounds<KR> + 'a0,
-        KR: Borrow<K::SelfType<'a0>> + 'a0,
-        F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    >(
-        &mut self,
-        range: &'_ T,
-        predicate: F,
-    ) -> Result<BtreeDrainFilter<K, V, F>>
-    where
-        K: 'a0,
-    {
-        let iter = self.range(range)?;
-        let return_iter = self.range(range)?;
-        let mut free_on_drop = vec![];
-        let mut operation: MutateHelper<'_, '_, K, V> =
-            MutateHelper::new_do_not_modify(&mut self.root, self.mem.clone(), &mut free_on_drop);
-        for entry in iter {
-            // TODO: optimize so that we don't have to call delete in a loop
-            let entry = entry?;
-            if predicate(entry.key(), entry.value()) {
-                assert!(operation.delete(&entry.key())?.is_some());
-            }
-        }
-
-        let result = BtreeDrainFilter::new(
-            return_iter,
-            predicate,
-            free_on_drop,
             self.freed_pages.clone(),
             self.mem.clone(),
         );
