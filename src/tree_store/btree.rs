@@ -436,9 +436,9 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         Ok(result)
     }
 
-    pub(crate) fn retain_in<'a, KR, F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+    pub(crate) fn retain_in<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
-        predicate: F,
+        mut predicate: F,
         range: impl RangeBounds<KR> + 'a,
     ) -> Result
     where

@@ -163,7 +163,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// Applies `predicate` to all key-value pairs. All entries for which
     /// `predicate` evaluates to `false` are removed.
     ///
-    pub fn retain<F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+    pub fn retain<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         predicate: F,
     ) -> Result {
@@ -173,7 +173,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// Applies `predicate` to all key-value pairs in the range `start..end`. All entries for which
     /// `predicate` evaluates to `false` are removed.
     ///
-    pub fn retain_in<'a, KR, F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+    pub fn retain_in<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         predicate: F,
         range: impl RangeBounds<KR> + 'a,
