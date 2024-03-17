@@ -16,6 +16,10 @@ backwards compatible with 1.x. To upgrade, consider using a pattern like that in
 * Add `get()` returning a range with the `'static` lifetime to read-only multimap tables
 * Add `close()` method to `ReadTransaction`
 
+## 1.5.1 - 2024-03-16
+* Fix `check_integrity()` so that it returns `Ok(true)` when no repairs were preformed. Previously,
+  it returned `Ok(false)`
+
 ## 1.5.0 - 2024-01-15
 * Export `TableStats` type
 * Export `MutInPlaceValue` which allows custom types to support `insert_reserve()`
