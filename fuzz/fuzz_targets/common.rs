@@ -144,6 +144,14 @@ pub(crate) enum FuzzOperation {
         modulus: U64Between<1, 8>,
         reversed: bool,
     },
+    Retain {
+        modulus: U64Between<1, 8>,
+    },
+    RetainIn {
+        start_key: BoundedU64<KEY_SPACE>,
+        len: BoundedU64<KEY_SPACE>,
+        modulus: U64Between<1, 8>,
+    },
     Range {
         start_key: BoundedU64<KEY_SPACE>,
         len: BoundedU64<KEY_SPACE>,

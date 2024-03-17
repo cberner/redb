@@ -160,6 +160,30 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
             .map(DrainFilter::new)
     }
 
+    /// Applies `predicate` to all key-value pairs. All entries for which
+    /// `predicate` evaluates to `false` are removed.
+    ///
+    pub fn retain<F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+        &mut self,
+        predicate: F,
+    ) -> Result {
+        self.tree.retain_in::<K::SelfType<'_>, F>(predicate, ..)
+    }
+
+    /// Applies `predicate` to all key-value pairs in the range `start..end`. All entries for which
+    /// `predicate` evaluates to `false` are removed.
+    ///
+    pub fn retain_in<'a, KR, F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+        &mut self,
+        predicate: F,
+        range: impl RangeBounds<KR> + 'a,
+    ) -> Result
+    where
+        KR: Borrow<K::SelfType<'a>> + 'a,
+    {
+        self.tree.retain_in(predicate, range)
+    }
+
     /// Insert mapping of the given key to the given value
     ///
     /// Returns the old value, if the key was present in the table

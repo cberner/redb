@@ -274,6 +274,12 @@ fn handle_multimap_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, BT
         FuzzOperation::DrainFilter { .. } => {
             // no-op. Multimap tables don't support this
         }
+        FuzzOperation::Retain { .. } => {
+            // no-op. Multimap tables don't support this
+        }
+        FuzzOperation::RetainIn { .. } => {
+            // no-op. Multimap tables don't support this
+        }
         FuzzOperation::Range {
             start_key,
             len,
@@ -427,6 +433,18 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
             if let Some(Ok((_, _)))  = iter.next() {
                 panic!();
             }
+        }
+        FuzzOperation::RetainIn { start_key, len, modulus } => {
+            let start = start_key.value;
+            let end = start + len.value;
+            let modulus = modulus.value;
+            table.retain_in(|x, _| x % modulus == 0, start..end)?;
+            reference.retain(|x, _| (*x < start || *x >= end) || *x % modulus == 0);
+        }
+        FuzzOperation::Retain { modulus } => {
+            let modulus = modulus.value;
+            table.retain(|x, _| x % modulus == 0)?;
+            reference.retain(|x, _| *x % modulus == 0);
         }
         FuzzOperation::Range {
             start_key,
