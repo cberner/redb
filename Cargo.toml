@@ -33,7 +33,8 @@ redb1 = { version = "=1.0.0", package = "redb" }
 
 # Just benchmarking dependencies
 [target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
-ctrlc = "3.2.3"
+# Pinned to compatibility with MSRV
+ctrlc = "=3.2.3"
 fastrand = "2.0.0"
 lmdb-rkv = "0.14.0"
 sanakirja = "=1.3.3"
