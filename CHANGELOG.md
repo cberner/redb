@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 1.5.1 - 2024-03-16
+* Fix `check_integrity()` so that it returns `Ok(true)` when no repairs were preformed. Previously,
+  it returned `Ok(false)`
+
 ## 1.5.0 - 2024-01-15
 * Export `TableStats` type
 * Export `MutInPlaceValue` which allows custom types to support `insert_reserve()`
