@@ -4,6 +4,7 @@ use crate::tree_store::page_store::cached_file::{CachePriority, PagedCachedFile}
 use crate::tree_store::page_store::header::DatabaseHeader;
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, MAX_MAX_PAGE_ORDER};
+use crate::tree_store::page_store::xxh3_checksum;
 use crate::tree_store::PageNumber;
 use crate::Result;
 use std::cmp;
@@ -135,6 +136,14 @@ impl Allocators {
             region_tracker,
             region_allocators,
         }
+    }
+
+    pub(crate) fn xxh3_hash(&self) -> u128 {
+        let mut result = xxh3_checksum(&self.region_tracker.to_vec());
+        for allocator in self.region_allocators.iter() {
+            result ^= xxh3_checksum(&allocator.to_vec());
+        }
+        result
     }
 
     pub(super) fn from_bytes(header: &DatabaseHeader, storage: &PagedCachedFile) -> Result<Self> {
