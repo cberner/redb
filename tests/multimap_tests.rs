@@ -249,6 +249,7 @@ fn delete() {
 
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_multimap_table(STR_TABLE).unwrap();
+    assert_eq!(3, table.get("hello").unwrap().len());
     assert_eq!(
         vec![
             "world".to_string(),

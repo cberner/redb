@@ -687,10 +687,12 @@ fn assert_multimap_value_eq(
     reference: Option<&BTreeSet<usize>>,
 ) -> Result<(), redb::Error> {
     if let Some(values) = reference {
+        assert_eq!(values.len() as u64, iter.len());
         for value in values.iter() {
             assert_eq!(iter.next().unwrap()?.value().len(), *value);
         }
     }
+    assert!(iter.is_empty());
     // This is basically assert!(iter.next().is_none()), but we also allow an Err such as a simulated IO error
     if let Some(Ok(_))  = iter.next() {
         panic!();

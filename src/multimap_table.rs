@@ -505,6 +505,7 @@ impl<V: Key> DynamicCollection<V> {
                 let root = collection.value().as_subtree().root;
                 MultimapValue::new_subtree(
                     BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), Some(root), mem)?,
+                    collection.value().get_num_values(),
                     guard,
                 )
             }
@@ -518,6 +519,7 @@ impl<V: Key> DynamicCollection<V> {
         guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
     ) -> Result<MultimapValue<'a, V>> {
+        let num_values = collection.value().get_num_values();
         Ok(match collection.value().collection_type() {
             Inline => {
                 let leaf_iter =
@@ -531,7 +533,14 @@ impl<V: Key> DynamicCollection<V> {
                     Some(root),
                     mem.clone(),
                 )?;
-                MultimapValue::new_subtree_free_on_drop(inner, freed_pages, pages, guard, mem)
+                MultimapValue::new_subtree_free_on_drop(
+                    inner,
+                    num_values,
+                    freed_pages,
+                    pages,
+                    guard,
+                    mem,
+                )
             }
         })
     }
@@ -573,6 +582,7 @@ enum ValueIterState<'a, V: Key + 'static> {
 
 pub struct MultimapValue<'a, V: Key + 'static> {
     inner: Option<ValueIterState<'a, V>>,
+    remaining: u64,
     freed_pages: Option<Arc<Mutex<Vec<PageNumber>>>>,
     free_on_drop: Vec<PageNumber>,
     _transaction_guard: Arc<TransactionGuard>,
@@ -581,9 +591,14 @@ pub struct MultimapValue<'a, V: Key + 'static> {
 }
 
 impl<'a, V: Key + 'static> MultimapValue<'a, V> {
-    fn new_subtree(inner: BtreeRangeIter<V, ()>, guard: Arc<TransactionGuard>) -> Self {
+    fn new_subtree(
+        inner: BtreeRangeIter<V, ()>,
+        num_values: u64,
+        guard: Arc<TransactionGuard>,
+    ) -> Self {
         Self {
             inner: Some(ValueIterState::Subtree(inner)),
+            remaining: num_values,
             freed_pages: None,
             free_on_drop: vec![],
             _transaction_guard: guard,
@@ -594,6 +609,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
 
     fn new_subtree_free_on_drop(
         inner: BtreeRangeIter<V, ()>,
+        num_values: u64,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         pages: Vec<PageNumber>,
         guard: Arc<TransactionGuard>,
@@ -601,6 +617,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
     ) -> Self {
         Self {
             inner: Some(ValueIterState::Subtree(inner)),
+            remaining: num_values,
             freed_pages: Some(freed_pages),
             free_on_drop: pages,
             _transaction_guard: guard,
@@ -610,14 +627,27 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
     }
 
     fn new_inline(inner: LeafKeyIter<'a, V>, guard: Arc<TransactionGuard>) -> Self {
+        let remaining = inner.inline_collection.value().get_num_values();
         Self {
             inner: Some(ValueIterState::InlineLeaf(inner)),
+            remaining,
             freed_pages: None,
             free_on_drop: vec![],
             _transaction_guard: guard,
             mem: None,
             _value_type: Default::default(),
         }
+    }
+
+    /// Returns the number of times this iterator will return `Some(Ok(_))`
+    ///
+    /// Note that `Some` may be returned from `next()` more than `len()` times if `Some(Err(_))` is returned
+    pub fn len(&self) -> u64 {
+        self.remaining
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -635,6 +665,7 @@ impl<'a, V: Key + 'static> Iterator for MultimapValue<'a, V> {
             },
             ValueIterState::InlineLeaf(ref mut iter) => iter.next_key()?.to_vec(),
         };
+        self.remaining -= 1;
         Some(Ok(AccessGuard::with_owned_value(bytes)))
     }
 }
@@ -1122,6 +1153,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
         } else {
             MultimapValue::new_subtree(
                 BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                0,
                 self.transaction.transaction_guard(),
             )
         };
@@ -1169,6 +1201,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
         } else {
             MultimapValue::new_subtree(
                 BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                0,
                 guard,
             )
         };
@@ -1311,6 +1344,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
         } else {
             MultimapValue::new_subtree(
                 BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                0,
                 self.transaction_guard.clone(),
             )
         };
@@ -1370,6 +1404,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
         } else {
             MultimapValue::new_subtree(
                 BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                0,
                 self.transaction_guard.clone(),
             )
         };
