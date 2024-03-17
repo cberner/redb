@@ -276,7 +276,7 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all()
     }
 
-    pub(crate) fn clear_cache_and_reload(&mut self) -> Result {
+    pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool> {
         assert!(self.allocated_since_commit.lock().unwrap().is_empty());
 
         self.storage.flush(false)?;
@@ -284,19 +284,13 @@ impl TransactionalMemory {
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
         let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes);
-        // TODO: should probably consolidate this logic with Self::new()
+        // TODO: This ends up always being true because this is called from check_integrity() once the db is already open
+        // TODO: Also we should recheck the layout
+        let mut was_clean = true;
         if header.recovery_required {
-            let layout = header.layout();
-            let region_max_pages = layout.full_region_layout().num_pages();
-            let region_header_pages = layout.full_region_layout().get_header_pages();
-            header.set_layout(DatabaseLayout::recalculate(
-                self.storage.raw_file_len()?,
-                region_header_pages,
-                region_max_pages,
-                self.page_size,
-            ));
             if repair_info.primary_corrupted {
                 header.swap_primary_slot();
+                was_clean = false;
             } else {
                 // If the secondary is a valid commit, verify that the primary is newer. This handles an edge case where:
                 // * the primary bit is flipped to the secondary
@@ -305,6 +299,7 @@ impl TransactionalMemory {
                     header.secondary_slot().transaction_id > header.primary_slot().transaction_id;
                 if secondary_newer && !repair_info.secondary_corrupted {
                     header.swap_primary_slot();
+                    was_clean = false;
                 }
             }
             if repair_info.invalid_magic_number {
@@ -319,10 +314,9 @@ impl TransactionalMemory {
 
         self.needs_recovery
             .store(header.recovery_required, Ordering::Release);
-        let state = InMemoryState::from_bytes(header.clone(), &self.storage)?;
-        *self.state.lock().unwrap() = state;
+        self.state.lock().unwrap().header = header;
 
-        Ok(())
+        Ok(was_clean)
     }
 
     pub(crate) fn begin_writable(&self) -> Result {
@@ -335,6 +329,10 @@ impl TransactionalMemory {
 
     pub(crate) fn needs_repair(&self) -> Result<bool> {
         Ok(self.state.lock().unwrap().header.recovery_required)
+    }
+
+    pub(crate) fn allocator_hash(&self) -> u128 {
+        self.state.lock().unwrap().allocators.xxh3_hash()
     }
 
     // TODO: need a clearer distinction between this and needs_repair()
@@ -385,20 +383,32 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn end_repair(&mut self) -> Result<()> {
-        let state = self.state.lock().unwrap();
+    pub(crate) fn end_repair(&self) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
         let tracker_len = state.allocators.region_tracker.to_vec().len();
-        drop(state);
-        // Allocate a new tracker page, since the old one will have been overwritten
-        let tracker_page = self
-            .allocate(tracker_len, CachePriority::High)?
-            .get_page_number();
+        let tracker_page = state.header.region_tracker();
+
+        let allocator = state.get_region_mut(tracker_page.region);
+        // Allocate a new tracker page, if the old one was overwritten or is too small
+        if allocator.is_allocated(tracker_page.page_index, tracker_page.page_order)
+            || tracker_page.page_size_bytes(self.page_size) < tracker_len as u64
+        {
+            drop(state);
+            let new_tracker_page = self
+                .allocate(tracker_len, CachePriority::High)?
+                .get_page_number();
+
+            let mut state = self.state.lock().unwrap();
+            state.header.set_region_tracker(new_tracker_page);
+            self.write_header(&state.header, false)?;
+            self.storage.flush(false)?;
+        } else {
+            allocator.record_alloc(tracker_page.page_index, tracker_page.page_order);
+            drop(state);
+        }
 
         let mut state = self.state.lock().unwrap();
-        state.header.set_region_tracker(tracker_page);
-        self.write_header(&state.header, false)?;
-        self.storage.flush(false)?;
-
+        let tracker_page = state.header.region_tracker();
         state
             .allocators
             .flush_to(tracker_page, state.header.layout(), &self.storage)?;

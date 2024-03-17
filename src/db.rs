@@ -341,24 +341,33 @@ impl Database {
         Ok(true)
     }
 
-    /// Check the integrity of the database file, and repair it if possible.
+    /// Force a check of the integrity of the database file, and repair it if possible.
+    ///
+    /// Note: Calling this function is unnecessary during normal operation. redb will automatically
+    /// detect and recover from crashes, power loss, and other unclean shutdowns. This function is
+    /// quite slow and should only be used when you suspect the database file may have been modified
+    /// externally to redb, or that a redb bug may have left the database in a corrupted state.
     ///
     /// Returns `Ok(true)` if the database passed integrity checks; `Ok(false)` if it failed but was repaired,
     /// and `Err(Corrupted)` if the check failed and the file could not be repaired
     pub fn check_integrity(&mut self) -> Result<bool> {
-        self.mem.clear_cache_and_reload()?;
+        let allocator_hash = self.mem.allocator_hash();
+        let mut was_clean = self.mem.clear_cache_and_reload()?;
 
-        if !self.mem.needs_repair()? && Self::verify_primary_checksums(&self.mem)? {
-            return Ok(true);
+        if !Self::verify_primary_checksums(&self.mem)? {
+            was_clean = false;
         }
 
         Self::do_repair(&mut self.mem, &|_| {}).map_err(|err| match err {
             DatabaseError::Storage(storage_err) => storage_err,
             _ => unreachable!(),
         })?;
+        if allocator_hash != self.mem.allocator_hash() {
+            was_clean = false;
+        }
         self.mem.begin_writable()?;
 
-        Ok(false)
+        Ok(was_clean)
     }
 
     /// Compacts the database file
