@@ -193,6 +193,75 @@ fn drain() {
 }
 
 #[test]
+fn retain() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+        // Test retain uncommitted data
+        table.retain(|k, _| k >= 5).unwrap();
+        for i in 0..5 {
+            assert!(table.insert(&i, &i).unwrap().is_none());
+        }
+        assert_eq!(table.len().unwrap(), 10);
+
+        // Test matching on the value
+        table.retain(|_, v| v >= 5).unwrap();
+        for i in 0..5 {
+            assert!(table.insert(&i, &i).unwrap().is_none());
+        }
+        assert_eq!(table.len().unwrap(), 10);
+
+        // Test retain_in
+        table.retain_in(|_, _| false, ..5).unwrap();
+        for i in 0..5 {
+            assert!(table.insert(&i, &i).unwrap().is_none());
+        }
+        assert_eq!(table.len().unwrap(), 10);
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 10);
+        table.retain(|x, _| x >= 5).unwrap();
+        assert_eq!(table.len().unwrap(), 5);
+
+        let mut i = 5u64;
+        for item in table.range(0..10).unwrap() {
+            let (k, v) = item.unwrap();
+            assert_eq!(i, k.value());
+            assert_eq!(i, v.value());
+            i += 1;
+        }
+    }
+    write_txn.abort().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.retain(|x, _| x % 2 == 0).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_write().unwrap();
+    {
+        let table = read_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 5);
+        for entry in table.iter().unwrap() {
+            let (k, v) = entry.unwrap();
+            assert_eq!(k.value() % 2, 0);
+            assert_eq!(k.value(), v.value());
+        }
+    }
+}
+
+#[test]
 fn drain_filter() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();

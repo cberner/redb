@@ -436,6 +436,29 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         Ok(result)
     }
 
+    pub(crate) fn retain_in<'a, KR, F: for<'f> Fn(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+        &mut self,
+        predicate: F,
+        range: impl RangeBounds<KR> + 'a,
+    ) -> Result
+    where
+        KR: Borrow<K::SelfType<'a>> + 'a,
+    {
+        let iter = self.range(&range)?;
+        let mut freed = vec![];
+        let mut operation: MutateHelper<'_, '_, K, V> =
+            MutateHelper::new_do_not_modify(&mut self.root, self.mem.clone(), &mut freed);
+        for entry in iter {
+            let entry = entry?;
+            if !predicate(entry.key(), entry.value()) {
+                assert!(operation.delete(&entry.key())?.is_some());
+            }
+        }
+        self.freed_pages.lock().unwrap().extend_from_slice(&freed);
+
+        Ok(())
+    }
+
     pub(crate) fn len(&self) -> Result<u64> {
         self.read_tree()?.len()
     }
