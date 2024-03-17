@@ -450,7 +450,7 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
             let start = start_key.value;
             let end = start + len.value;
             let modulus = modulus.value;
-            table.retain_in(|x, _| x % modulus == 0, start..end)?;
+            table.retain_in(start..end, |x, _| x % modulus == 0)?;
             reference.retain(|x, _| (*x < start || *x >= end) || *x % modulus == 0);
         }
         FuzzOperation::Retain { modulus } => {
