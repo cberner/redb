@@ -180,8 +180,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     ///
     pub fn retain_in<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
-        predicate: F,
         range: impl RangeBounds<KR> + 'a,
+        predicate: F,
     ) -> Result
     where
         KR: Borrow<K::SelfType<'a>> + 'a,

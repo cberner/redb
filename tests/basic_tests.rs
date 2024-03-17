@@ -231,7 +231,7 @@ fn retain() {
         assert_eq!(table.len().unwrap(), 10);
 
         // Test retain_in
-        table.retain_in(|_, _| false, ..5).unwrap();
+        table.retain_in(..5, |_, _| false).unwrap();
         for i in 0..5 {
             assert!(table.insert(&i, &i).unwrap().is_none());
         }
