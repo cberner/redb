@@ -1,8 +1,8 @@
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
 use crate::tree_store::{
-    AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeHeader, BtreeMut, BtreeRangeIter,
-    PageHint, PageNumber, RawBtree, TransactionalMemory, MAX_VALUE_LENGTH,
+    AccessGuardMut, Btree, BtreeDrain, BtreeDrainFilter, BtreeExtractIf, BtreeHeader, BtreeMut,
+    BtreeRangeIter, PageHint, PageNumber, RawBtree, TransactionalMemory, MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, StorageError, WriteTransaction};
@@ -158,6 +158,40 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         self.tree
             .drain_filter(&range, predicate)
             .map(DrainFilter::new)
+    }
+
+    /// Applies `predicate` to all key-value pairs. All entries for which
+    /// `predicate` evaluates to `true` are returned in an iterator, and those which are read from the iterator are removed
+    ///
+    /// Note: values not read from the iterator will not be removed
+    pub fn extract_if<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+        &mut self,
+        predicate: F,
+    ) -> Result<ExtractIf<K, V, F>> {
+        self.extract_from_if::<K::SelfType<'_>, F>(.., predicate)
+    }
+
+    /// Applies `predicate` to all key-value pairs in the specified range. All entries for which
+    /// `predicate` evaluates to `true` are returned in an iterator, and those which are read from the iterator are removed
+    ///
+    /// Note: values not read from the iterator will not be removed
+    pub fn extract_from_if<
+        'a,
+        'a0,
+        KR,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    >(
+        &'a mut self,
+        range: impl RangeBounds<KR> + 'a0,
+        predicate: F,
+    ) -> Result<ExtractIf<'a, K, V, F>>
+    where
+        K: 'a0,
+        KR: Borrow<K::SelfType<'a0>> + 'a0,
+    {
+        self.tree
+            .extract_from_if(&range, predicate)
+            .map(ExtractIf::new)
     }
 
     /// Applies `predicate` to all key-value pairs. All entries for which
@@ -559,6 +593,65 @@ impl<'a, K: Key + 'static, V: Value + 'static> Iterator for Drain<'a, K, V> {
 }
 
 impl<'a, K: Key + 'static, V: Value + 'static> DoubleEndedIterator for Drain<'a, K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let entry = self.inner.next_back()?;
+        Some(entry.map(|entry| {
+            let (page, key_range, value_range) = entry.into_raw();
+            let key = AccessGuard::with_page(page.clone(), key_range);
+            let value = AccessGuard::with_page(page, value_range);
+            (key, value)
+        }))
+    }
+}
+
+pub struct ExtractIf<
+    'a,
+    K: Key + 'static,
+    V: Value + 'static,
+    F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+> {
+    inner: BtreeExtractIf<'a, K, V, F>,
+}
+
+impl<
+        'a,
+        K: Key + 'static,
+        V: Value + 'static,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    > ExtractIf<'a, K, V, F>
+{
+    fn new(inner: BtreeExtractIf<'a, K, V, F>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<
+        'a,
+        K: Key + 'static,
+        V: Value + 'static,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    > Iterator for ExtractIf<'a, K, V, F>
+{
+    type Item = Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let entry = self.inner.next()?;
+        Some(entry.map(|entry| {
+            let (page, key_range, value_range) = entry.into_raw();
+            let key = AccessGuard::with_page(page.clone(), key_range);
+            let value = AccessGuard::with_page(page, value_range);
+            (key, value)
+        }))
+    }
+}
+
+impl<
+        'a,
+        K: Key + 'static,
+        V: Value + 'static,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    > DoubleEndedIterator for ExtractIf<'a, K, V, F>
+{
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;
         Some(entry.map(|entry| {

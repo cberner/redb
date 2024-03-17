@@ -66,7 +66,7 @@ pub use multimap_table::{
     ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
 };
 pub use table::{
-    Drain, DrainFilter, Range, ReadOnlyTable, ReadOnlyUntypedTable, ReadableTable,
+    Drain, DrainFilter, ExtractIf, Range, ReadOnlyTable, ReadOnlyUntypedTable, ReadableTable,
     ReadableTableMetadata, Table, TableStats,
 };
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};

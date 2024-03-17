@@ -11,7 +11,7 @@ pub(crate) use btree_base::{
     BranchAccessor, BtreeHeader, Checksum, LeafAccessor, LeafMutator, RawLeafBuilder, BRANCH, LEAF,
 };
 pub(crate) use btree_iters::{
-    AllPageNumbersBtreeIter, BtreeDrain, BtreeDrainFilter, BtreeRangeIter,
+    AllPageNumbersBtreeIter, BtreeDrain, BtreeDrainFilter, BtreeExtractIf, BtreeRangeIter,
 };
 pub use page_store::{file_backend, InMemoryBackend, Savepoint};
 pub(crate) use page_store::{

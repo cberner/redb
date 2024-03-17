@@ -193,6 +193,69 @@ fn drain() {
 }
 
 #[test]
+fn extract_if() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+        // Test retain uncommitted data
+        let mut extracted = table.extract_if(|k, _| k >= 5).unwrap();
+        assert_eq!(extracted.next().unwrap().unwrap().0.value(), 5);
+        drop(extracted);
+        assert_eq!(table.len().unwrap(), 9);
+
+        let mut extracted = table.extract_from_if(5.., |k, _| k < 8).unwrap();
+        assert_eq!(extracted.next().unwrap().unwrap().0.value(), 6);
+        assert_eq!(extracted.next().unwrap().unwrap().0.value(), 7);
+        assert!(extracted.next().is_none());
+        drop(extracted);
+        assert_eq!(table.len().unwrap(), 7);
+
+        for i in 5..8 {
+            assert!(table.insert(&i, &i).unwrap().is_none());
+        }
+        assert_eq!(table.len().unwrap(), 10);
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 10);
+        let mut extracted = table.extract_if(|_, _| true).unwrap();
+        assert_eq!(extracted.next().unwrap().unwrap().1.value(), 0);
+        drop(extracted);
+        assert_eq!(table.len().unwrap(), 9);
+    }
+    write_txn.abort().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 10);
+        for _ in table.extract_if(|x, _| x % 2 != 0).unwrap() {}
+        table.extract_if(|_, _| true).unwrap().rev().next();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_write().unwrap();
+    {
+        let table = read_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 4);
+        let mut iter = table.iter().unwrap();
+        for x in [0, 2, 4, 6] {
+            let (k, v) = iter.next().unwrap().unwrap();
+            assert_eq!(k.value(), x);
+            assert_eq!(k.value(), v.value());
+        }
+    }
+}
+
+#[test]
 fn retain() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
@@ -1686,6 +1749,13 @@ fn signature_lifetimes() {
         let _ = {
             let key = "hi".to_string();
             table.range(key.as_str()..).unwrap()
+        };
+
+        let _ = { table.extract_if(|_, _| true).unwrap() };
+
+        let _ = {
+            let key = "hi".to_string();
+            table.extract_from_if(key.as_str().., |_, _| true).unwrap()
         };
 
         let _ = {

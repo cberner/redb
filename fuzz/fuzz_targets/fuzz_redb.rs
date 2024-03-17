@@ -274,6 +274,12 @@ fn handle_multimap_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, BT
         FuzzOperation::DrainFilter { .. } => {
             // no-op. Multimap tables don't support this
         }
+        FuzzOperation::ExtractIf { .. } => {
+            // no-op. Multimap tables don't support this
+        }
+        FuzzOperation::ExtractFromIf { .. } => {
+            // no-op. Multimap tables don't support this
+        }
         FuzzOperation::Retain { .. } => {
             // no-op. Multimap tables don't support this
         }
@@ -432,6 +438,74 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
             // This is basically assert!(iter.next().is_none()), but we also allow an Err such as a simulated IO error
             if let Some(Ok((_, _)))  = iter.next() {
                 panic!();
+            }
+        }
+        FuzzOperation::ExtractIf { take, modulus, reversed } => {
+            let modulus = modulus.value;
+            let mut reference_iter: Box<dyn Iterator<Item = (&u64, &usize)>> =
+                if *reversed {
+                    Box::new(reference.iter().rev().take(take.value))
+                } else {
+                    Box::new(reference.iter().take(take.value))
+                };
+            let mut iter: Box<dyn Iterator<Item = Result<(AccessGuard<u64>, AccessGuard<&[u8]>), redb::StorageError>>> = if *reversed {
+                Box::new(table.extract_if(|x, _| x % modulus == 0)?.rev())
+            } else {
+                Box::new(table.extract_if(|x, _| x % modulus == 0)?)
+            };
+            let mut remaining = take.value;
+            let mut remove_from_reference = vec![];
+            while let Some((ref_key, ref_value_len)) = reference_iter.next() {
+                if *ref_key % modulus != 0 {
+                    continue;
+                }
+                if remaining == 0 {
+                    break;
+                }
+                remaining -= 1;
+                let (key, value) = iter.next().unwrap()?;
+                remove_from_reference.push(*ref_key);
+                assert_eq!(*ref_key, key.value());
+                assert_eq!(*ref_value_len, value.value().len());
+            }
+            drop(reference_iter);
+            for x in remove_from_reference {
+                reference.remove(&x);
+            }
+        }
+        FuzzOperation::ExtractFromIf { start_key, range_len, take, modulus, reversed } => {
+            let start = start_key.value;
+            let end = start + range_len.value;
+            let modulus = modulus.value;
+            let mut reference_iter: Box<dyn Iterator<Item = (&u64, &usize)>> =
+                if *reversed {
+                    Box::new(reference.range(start..end).rev().take(take.value))
+                } else {
+                    Box::new(reference.range(start..end).take(take.value))
+                };
+            let mut iter: Box<dyn Iterator<Item = Result<(AccessGuard<u64>, AccessGuard<&[u8]>), redb::StorageError>>> = if *reversed {
+                Box::new(table.extract_from_if(start..end, |x, _| x % modulus == 0)?.rev())
+            } else {
+                Box::new(table.extract_from_if(start..end, |x, _| x % modulus == 0)?)
+            };
+            let mut remaining = take.value;
+            let mut remove_from_reference = vec![];
+            while let Some((ref_key, ref_value_len)) = reference_iter.next() {
+                if *ref_key % modulus != 0 {
+                    continue;
+                }
+                if remaining == 0 {
+                    break;
+                }
+                remaining -= 1;
+                let (key, value) = iter.next().unwrap()?;
+                remove_from_reference.push(*ref_key);
+                assert_eq!(*ref_key, key.value());
+                assert_eq!(*ref_value_len, value.value().len());
+            }
+            drop(reference_iter);
+            for x in remove_from_reference {
+                reference.remove(&x);
             }
         }
         FuzzOperation::RetainIn { start_key, len, modulus } => {

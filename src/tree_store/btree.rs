@@ -3,7 +3,7 @@ use crate::tree_store::btree_base::{
     branch_checksum, leaf_checksum, BranchAccessor, BranchMutator, BtreeHeader, Checksum,
     LeafAccessor, BRANCH, DEFERRED, LEAF,
 };
-use crate::tree_store::btree_iters::BtreeDrain;
+use crate::tree_store::btree_iters::{BtreeDrain, BtreeExtractIf};
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{CachePriority, Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::{
@@ -392,6 +392,33 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         let result = BtreeDrain::new(
             return_iter,
             free_on_drop,
+            self.freed_pages.clone(),
+            self.mem.clone(),
+        );
+
+        Ok(result)
+    }
+
+    pub(crate) fn extract_from_if<
+        'a,
+        'a0,
+        T: RangeBounds<KR> + 'a0,
+        KR: Borrow<K::SelfType<'a0>> + 'a0,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    >(
+        &'a mut self,
+        range: &'_ T,
+        predicate: F,
+    ) -> Result<BtreeExtractIf<'a, K, V, F>>
+    where
+        K: 'a0,
+    {
+        let iter = self.range(range)?;
+
+        let result = BtreeExtractIf::new(
+            &mut self.root,
+            iter,
+            predicate,
             self.freed_pages.clone(),
             self.mem.clone(),
         );
