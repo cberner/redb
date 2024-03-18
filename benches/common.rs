@@ -551,10 +551,12 @@ impl<'a> SanakirjaBenchDatabase<'a> {
     #[allow(dead_code)]
     pub fn new(db: &'a sanakirja::Env) -> Self {
         let mut txn = sanakirja::Env::mut_txn_begin(db).unwrap();
-        let table =
+        // XXX: There's no documentation on why this method is unsafe, so let's just hope we upheld the requirements for it to be safe!
+        let table = unsafe {
             sanakirja::btree::create_db_::<_, [u8], [u8], page_unsized::Page<[u8], [u8]>>(&mut txn)
-                .unwrap();
-        txn.set_root(0, table.db);
+                .unwrap()
+        };
+        txn.set_root(0, table.db.into());
         txn.commit().unwrap();
         Self { db }
     }
@@ -610,7 +612,7 @@ impl BenchInserter for SanakirjaBenchInserter<'_, '_> {
         let result = sanakirja::btree::put(self.txn, &mut self.table, key, value)
             .map_err(|_| ())
             .map(|_| ());
-        self.txn.set_root(0, self.table.db);
+        self.txn.set_root(0, self.table.db.into());
         result
     }
 
@@ -618,7 +620,7 @@ impl BenchInserter for SanakirjaBenchInserter<'_, '_> {
         let result = sanakirja::btree::del(self.txn, &mut self.table, key, None)
             .map_err(|_| ())
             .map(|_| ());
-        self.txn.set_root(0, self.table.db);
+        self.txn.set_root(0, self.table.db.into());
         result
     }
 }
