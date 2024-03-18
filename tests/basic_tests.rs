@@ -1,3 +1,4 @@
+use rand::random;
 use redb::backends::InMemoryBackend;
 use redb::{
     Database, Key, MultimapTableDefinition, MultimapTableHandle, Range, ReadableTable,
@@ -725,6 +726,61 @@ fn tuple12_type() {
             .unwrap()
             .value(),
         (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn generic_array_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def1: TableDefinition<[u8; 3], [u64; 2]> = TableDefinition::new("table1");
+    let table_def2: TableDefinition<[(u8, &str); 2], [Option<&str>; 2]> =
+        TableDefinition::new("table2");
+    let table_def3: TableDefinition<[&[u8]; 2], [f32; 2]> = TableDefinition::new("table3");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table1 = write_txn.open_table(table_def1).unwrap();
+        let mut table2 = write_txn.open_table(table_def2).unwrap();
+        let mut table3 = write_txn.open_table(table_def3).unwrap();
+        table1.insert([0, 1, 2], &[4, 5]).unwrap();
+        table2
+            .insert([(0, "hi"), (1, "world")], [None, Some("test")])
+            .unwrap();
+        table3
+            .insert([b"hi".as_slice(), b"world".as_slice()], [4.0, 5.0])
+            .unwrap();
+        table3
+            .insert([b"longlong".as_slice(), b"longlong".as_slice()], [0.0, 0.0])
+            .unwrap();
+        table3
+            .insert([b"s".as_slice(), b"s".as_slice()], [0.0, 0.0])
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table1 = read_txn.open_table(table_def1).unwrap();
+    let table2 = read_txn.open_table(table_def2).unwrap();
+    let table3 = read_txn.open_table(table_def3).unwrap();
+    assert_eq!(table1.get(&[0, 1, 2]).unwrap().unwrap().value(), [4, 5]);
+    assert_eq!(
+        table2
+            .get(&[(0, "hi"), (1, "world")])
+            .unwrap()
+            .unwrap()
+            .value(),
+        [None, Some("test")]
+    );
+    assert_eq!(
+        table3
+            .get(&[b"hi".as_slice(), b"world".as_slice()])
+            .unwrap()
+            .unwrap()
+            .value(),
+        [4.0, 5.0]
     );
 }
 
@@ -1624,4 +1680,30 @@ fn char_type() {
     assert_eq!(iter.next().unwrap().unwrap().0.value(), 'a');
     assert_eq!(iter.next().unwrap().unwrap().0.value(), 'b');
     assert!(iter.next().is_none());
+}
+
+// Test that &[u8; N] and [u8; N] are effectively the same
+#[test]
+fn u8_array_serialization() {
+    assert_eq!(
+        <&[u8; 7] as Value>::type_name(),
+        <[u8; 7] as Value>::type_name()
+    );
+    let fixed_value: u128 = random();
+    let fixed_serialized = fixed_value.to_le_bytes();
+    for _ in 0..1000 {
+        let x: u128 = random();
+        let x_serialized = x.to_le_bytes();
+        let ref_x_serialized = &x_serialized;
+        let u8_ref_serialized = <&[u8; 16] as Value>::as_bytes(&ref_x_serialized);
+        let u8_generic_serialized = <[u8; 16] as Value>::as_bytes(&x_serialized);
+        assert_eq!(
+            u8_ref_serialized.as_slice(),
+            u8_generic_serialized.as_slice()
+        );
+        assert_eq!(u8_ref_serialized.as_slice(), x_serialized.as_slice());
+        let ref_order = <&[u8; 16] as Key>::compare(&x_serialized, &fixed_serialized);
+        let generic_order = <[u8; 16] as Key>::compare(&x_serialized, &fixed_serialized);
+        assert_eq!(ref_order, generic_order);
+    }
 }
