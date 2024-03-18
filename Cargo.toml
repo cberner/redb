@@ -40,7 +40,7 @@ lmdb-rkv = "0.14.0"
 sanakirja = "=1.4.1"
 sanakirja-core = "=1.4.1"
 sled = "0.34.7"
-rocksdb = "0.21.0"
+rocksdb = "0.22.0"
 libc = "0.2.99"
 comfy-table = "7.0.1"
 
