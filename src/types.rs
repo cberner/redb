@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::fmt::Debug;
+use std::mem::size_of;
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 enum TypeClassification {
@@ -350,6 +351,101 @@ impl<const N: usize> Value for &[u8; N] {
 impl<const N: usize> Key for &[u8; N] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         data1.cmp(data2)
+    }
+}
+
+impl<const N: usize, T: Value> Value for [T; N] {
+    type SelfType<'a> = [T::SelfType<'a>; N]
+        where
+            Self: 'a;
+    type AsBytes<'a> = Vec<u8>
+        where
+            Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        T::fixed_width().map(|x| x * N)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> [T::SelfType<'a>; N]
+    where
+        Self: 'a,
+    {
+        let mut result = Vec::with_capacity(N);
+        if let Some(fixed) = T::fixed_width() {
+            for i in 0..N {
+                result.push(T::from_bytes(&data[fixed * i..fixed * (i + 1)]));
+            }
+        } else {
+            // Set offset to the first data item
+            let mut start = size_of::<u32>() * N;
+            for i in 0..N {
+                let range = size_of::<u32>() * i..size_of::<u32>() * (i + 1);
+                let end = u32::from_le_bytes(data[range].try_into().unwrap()) as usize;
+                result.push(T::from_bytes(&data[start..end]));
+                start = end;
+            }
+        }
+        result.try_into().unwrap()
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        if let Some(fixed) = T::fixed_width() {
+            let mut result = Vec::with_capacity(fixed * N);
+            for item in value.iter() {
+                result.extend_from_slice(T::as_bytes(item).as_ref());
+            }
+            result
+        } else {
+            // Reserve space for the end offsets
+            let mut result = vec![0u8; size_of::<u32>() * N];
+            for i in 0..N {
+                result.extend_from_slice(T::as_bytes(&value[i]).as_ref());
+                let end: u32 = result.len().try_into().unwrap();
+                result[size_of::<u32>() * i..size_of::<u32>() * (i + 1)]
+                    .copy_from_slice(&end.to_le_bytes());
+            }
+            result
+        }
+    }
+
+    fn type_name() -> TypeName {
+        // Uses the same type name as [T;N] so that tables are compatible with [u8;N] and &[u8;N] types
+        // This requires that the binary encoding be the same
+        TypeName::internal(&format!("[{};{N}]", T::type_name().name()))
+    }
+}
+
+impl<const N: usize, T: Key> Key for [T; N] {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        if let Some(fixed) = T::fixed_width() {
+            for i in 0..N {
+                let range = fixed * i..fixed * (i + 1);
+                let comparison = T::compare(&data1[range.clone()], &data2[range]);
+                if !comparison.is_eq() {
+                    return comparison;
+                }
+            }
+        } else {
+            // Set offset to the first data item
+            let mut start1 = size_of::<u32>() * N;
+            let mut start2 = size_of::<u32>() * N;
+            for i in 0..N {
+                let range = size_of::<u32>() * i..size_of::<u32>() * (i + 1);
+                let end1 = u32::from_le_bytes(data1[range.clone()].try_into().unwrap()) as usize;
+                let end2 = u32::from_le_bytes(data2[range].try_into().unwrap()) as usize;
+                let comparison = T::compare(&data1[start1..end1], &data2[start2..end2]);
+                if !comparison.is_eq() {
+                    return comparison;
+                }
+                start1 = end1;
+                start2 = end2;
+            }
+        }
+        Ordering::Equal
     }
 }
 
