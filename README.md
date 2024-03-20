@@ -44,6 +44,11 @@ but redb has not been widely deployed in production systems (at least to my know
 * Crash-safe by default
 * Savepoints and rollbacks
 
+## Development
+To run all the tests and benchmarks a few extra dependencies are required:
+* `cargo install cargo-deny --locked`
+* `apt install libclang-dev`
+
 ## Benchmarks
 redb has similar performance to other top embedded key-value stores such as lmdb and rocksdb
 
