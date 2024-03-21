@@ -143,7 +143,7 @@ pub struct AccessGuard<'a, V: Value> {
     len: usize,
     on_drop: OnDrop,
     _value_type: PhantomData<V>,
-    // TODO: remove this?
+    // Used so that logical references into a Table respect the appropriate lifetime
     _lifetime: PhantomData<&'a ()>,
 }
 
@@ -231,7 +231,7 @@ pub struct AccessGuardMut<'a, V: Value> {
     offset: usize,
     len: usize,
     _value_type: PhantomData<V>,
-    // TODO: can this be removed?
+    // Used so that logical references into a Table respect the appropriate lifetime
     _lifetime: PhantomData<&'a ()>,
 }
 
