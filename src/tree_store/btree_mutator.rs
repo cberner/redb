@@ -33,7 +33,7 @@ enum DeletionResult {
     DeletedBranch(PageNumber, Checksum),
 }
 
-struct InsertionResult<'a, V: Value> {
+struct InsertionResult<'a, V: Value + 'static> {
     // the new root page
     new_root: PageNumber,
     // checksum of the root page

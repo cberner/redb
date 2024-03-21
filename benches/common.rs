@@ -150,11 +150,11 @@ impl BenchIterator for RedbBenchIterator<'_> {
 }
 
 pub struct RedbAccessGuard<'a> {
-    inner: AccessGuard<'a, &'a [u8]>,
+    inner: AccessGuard<'a, &'static [u8]>,
 }
 
 impl<'a> RedbAccessGuard<'a> {
-    fn new(inner: AccessGuard<'a, &'a [u8]>) -> Self {
+    fn new(inner: AccessGuard<'a, &'static [u8]>) -> Self {
         Self { inner }
     }
 }
