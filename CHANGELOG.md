@@ -16,6 +16,7 @@ backwards compatible with 1.x. To upgrade, consider using a pattern like that in
 * Remove lifetime from `WriteTransaction` and `ReadTransaction`
 * Remove `drain()` and `drain_filter()` from `Table`
 * impl `Clone` for `Range`
+* Add support for `[T;N]` as a `Value` or `Key` as appropriate for the type `T`
 * Add `len()` and `is_empty()` to `MultimapValue`
 * Add `retain()` and `retain_in()` to `Table`
 * Add `extract_if()` and `extract_from_if()` to `Table`
