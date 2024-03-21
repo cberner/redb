@@ -983,10 +983,10 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
     /// Removes the given key-value pair
     ///
     /// Returns `true` if the key-value pair was present
-    pub fn remove<'a>(
+    pub fn remove<'k, 'v>(
         &mut self,
-        key: impl Borrow<K::SelfType<'a>>,
-        value: impl Borrow<V::SelfType<'a>>,
+        key: impl Borrow<K::SelfType<'k>>,
+        value: impl Borrow<V::SelfType<'v>>,
     ) -> Result<bool> {
         let get_result = self.tree.get(key.borrow())?;
         if get_result.is_none() {
