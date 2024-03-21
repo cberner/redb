@@ -598,7 +598,7 @@ impl<
 pub struct Range<'a, K: Key + 'static, V: Value + 'static> {
     inner: BtreeRangeIter<K, V>,
     _transaction_guard: Arc<TransactionGuard>,
-    // TODO: replace with TransactionGuard?
+    // This lifetime is here so that `&` can be held on `Table` preventing concurrent mutation
     _lifetime: PhantomData<&'a ()>,
 }
 
