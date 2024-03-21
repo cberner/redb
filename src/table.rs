@@ -157,7 +157,6 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         predicate: F,
     ) -> Result<ExtractIf<'a, K, V, F>>
     where
-        K: 'a0,
         KR: Borrow<K::SelfType<'a0>> + 'a0,
     {
         self.tree
@@ -214,10 +213,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     pub fn remove<'a>(
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
-    ) -> Result<Option<AccessGuard<V>>>
-    where
-        K: 'a,
-    {
+    ) -> Result<Option<AccessGuard<V>>> {
         self.tree.remove(key.borrow())
     }
 }
@@ -229,10 +225,7 @@ impl<'txn, K: Key + 'static, V: MutInPlaceValue + 'static> Table<'txn, K, V> {
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
         value_length: u32,
-    ) -> Result<AccessGuardMut<V>>
-    where
-        K: 'a,
-    {
+    ) -> Result<AccessGuardMut<V>> {
         if value_length as usize > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(value_length as usize));
         }
@@ -264,16 +257,12 @@ impl<'txn, K: Key + 'static, V: Value + 'static> ReadableTableMetadata for Table
 }
 
 impl<'txn, K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'txn, K, V> {
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
-    where
-        K: 'a,
-    {
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>> {
         self.tree.get(key.borrow())
     }
 
     fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<K, V>>
     where
-        K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
         self.tree
@@ -358,9 +347,7 @@ pub trait ReadableTableMetadata: Sealed {
 
 pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMetadata {
     /// Returns the value corresponding to the given key
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
-    where
-        K: 'a;
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>;
 
     /// Returns a double-ended iterator over a range of elements in the table
     ///
@@ -396,7 +383,6 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     /// ```
     fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<K, V>>
     where
-        K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a;
 
     /// Returns the first key-value pair in the table, if it exists
@@ -509,16 +495,12 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTableMetadata for ReadOnlyTab
 }
 
 impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable<K, V> {
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
-    where
-        K: 'a,
-    {
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>> {
         self.tree.get(key.borrow())
     }
 
     fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<K, V>>
     where
-        K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
         self.tree
