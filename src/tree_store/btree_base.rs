@@ -137,7 +137,7 @@ impl EitherPage {
     }
 }
 
-pub struct AccessGuard<'a, V: Value> {
+pub struct AccessGuard<'a, V: Value + 'static> {
     page: EitherPage,
     offset: usize,
     len: usize,
@@ -147,7 +147,7 @@ pub struct AccessGuard<'a, V: Value> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, V: Value> AccessGuard<'a, V> {
+impl<'a, V: Value + 'static> AccessGuard<'a, V> {
     pub(crate) fn with_page(page: PageImpl, range: Range<usize>) -> Self {
         Self {
             page: EitherPage::Immutable(page),
@@ -207,7 +207,7 @@ impl<'a, V: Value> AccessGuard<'a, V> {
     }
 }
 
-impl<'a, V: Value> Drop for AccessGuard<'a, V> {
+impl<'a, V: Value + 'static> Drop for AccessGuard<'a, V> {
     fn drop(&mut self) {
         match self.on_drop {
             OnDrop::None => {}
@@ -226,7 +226,7 @@ impl<'a, V: Value> Drop for AccessGuard<'a, V> {
     }
 }
 
-pub struct AccessGuardMut<'a, V: Value> {
+pub struct AccessGuardMut<'a, V: Value + 'static> {
     page: PageMut,
     offset: usize,
     len: usize,
@@ -235,7 +235,7 @@ pub struct AccessGuardMut<'a, V: Value> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, V: Value> AccessGuardMut<'a, V> {
+impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
     pub(crate) fn new(page: PageMut, offset: usize, len: usize) -> Self {
         AccessGuardMut {
             page,
@@ -247,7 +247,7 @@ impl<'a, V: Value> AccessGuardMut<'a, V> {
     }
 }
 
-impl<'a, V: MutInPlaceValue> AsMut<V::BaseRefType> for AccessGuardMut<'a, V> {
+impl<'a, V: MutInPlaceValue + 'static> AsMut<V::BaseRefType> for AccessGuardMut<'a, V> {
     fn as_mut(&mut self) -> &mut V::BaseRefType {
         V::from_bytes_mut(&mut self.page.memory_mut()[self.offset..(self.offset + self.len)])
     }
