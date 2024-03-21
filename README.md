@@ -47,6 +47,7 @@ but redb has not been widely deployed in production systems (at least to my know
 ## Development
 To run all the tests and benchmarks a few extra dependencies are required:
 * `cargo install cargo-deny --locked`
+* `cargo install cargo-fuzz --locked`
 * `apt install libclang-dev`
 
 ## Benchmarks
