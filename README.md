@@ -67,6 +67,7 @@ redb has similar performance to other top embedded key-value stores such as lmdb
 | random reads (16 threads) | 131ms  | 47ms   | 476ms   | 148ms  | 3500ms    |
 | random reads (32 threads) | 118ms  | 44ms   | 412ms   | 129ms  | 4313ms    |
 | removals                  | 2184ms | 784ms  | 2451ms  | 2047ms | 1344ms    |
+
 Source code for benchmark [here](./benches/lmdb_benchmark.rs). Results collected on a Ryzen 5900X with Samsung 980 PRO NVMe.
 
 ## License
