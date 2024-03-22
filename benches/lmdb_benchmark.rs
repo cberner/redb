@@ -148,6 +148,16 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, Duration)> {
 
     let txn = db.read_transaction();
     {
+        {
+            let start = Instant::now();
+            let len = txn.get_reader().len();
+            assert_eq!(len, ELEMENTS as u64 + 100_000 + 100);
+            let end = Instant::now();
+            let duration = end - start;
+            println!("{}: len() in {}ms", T::db_type_name(), duration.as_millis());
+            results.push(("len()".to_string(), duration));
+        }
+
         for _ in 0..ITERATIONS {
             let mut rng = make_rng();
             let start = Instant::now();
