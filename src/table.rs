@@ -146,18 +146,13 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// `predicate` evaluates to `true` are returned in an iterator, and those which are read from the iterator are removed
     ///
     /// Note: values not read from the iterator will not be removed
-    pub fn extract_from_if<
-        'a,
-        'a0,
-        KR,
-        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    >(
-        &'a mut self,
-        range: impl RangeBounds<KR> + 'a0,
+    pub fn extract_from_if<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+        &mut self,
+        range: impl RangeBounds<KR> + 'a,
         predicate: F,
-    ) -> Result<ExtractIf<'a, K, V, F>>
+    ) -> Result<ExtractIf<K, V, F>>
     where
-        KR: Borrow<K::SelfType<'a0>> + 'a0,
+        KR: Borrow<K::SelfType<'a>> + 'a,
     {
         self.tree
             .extract_from_if(&range, predicate)
