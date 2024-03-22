@@ -21,7 +21,7 @@ backwards compatible with 1.x. To upgrade, consider using a pattern like that in
 * Add `retain()` and `retain_in()` to `Table`
 * Add `extract_if()` and `extract_from_if()` to `Table`
 * Add `range()` returning a `Range` with the `'static` lifetime to read-only tables
-* Add `get()` returning a range with the `'static` lifetime to read-only multimap tables
+* Add `get()` returning a range with the `'static` lifetime to read-only tables
 * Add `close()` method to `ReadTransaction`
 
 ## 1.5.1 - 2024-03-16

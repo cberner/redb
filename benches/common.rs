@@ -1,5 +1,4 @@
-use redb::{AccessGuard, ReadableTable};
-use redb::{ReadableTableMetadata, TableDefinition};
+use redb::{AccessGuard, ReadableTableMetadata, TableDefinition};
 use rocksdb::{Direction, IteratorMode, TransactionDB, TransactionOptions, WriteOptions};
 use sanakirja::btree::page_unsized;
 use sanakirja::{Commit, RootDb};

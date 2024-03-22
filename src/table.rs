@@ -458,6 +458,13 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         })
     }
 
+    pub fn get<'a>(
+        &self,
+        key: impl Borrow<K::SelfType<'a>>,
+    ) -> Result<Option<AccessGuard<'static, V>>> {
+        self.tree.get(key.borrow())
+    }
+
     /// This method is like [`ReadableTable::range()`], but the iterator is reference counted and keeps the transaction
     /// alive until it is dropped.
     pub fn range<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<Range<'static, K, V>>
