@@ -30,6 +30,8 @@ rand = "0.8"
 tempfile = "3.5.0"
 # for backwards compatibility testing - pin at 1.0.0
 redb1 = { version = "=1.0.0", package = "redb" }
+# for backwards compatibility testing - pin at 2.0.0
+redb2 = { version = "=2.0.0", package = "redb" }
 
 # Just benchmarking dependencies
 [target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
