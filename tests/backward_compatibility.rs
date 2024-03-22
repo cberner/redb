@@ -1,4 +1,4 @@
-use redb::{DatabaseError, ReadableTable, ReadableTableMetadata};
+use redb::{DatabaseError, ReadableTableMetadata};
 use redb1::ReadableTable as ReadableTable1;
 
 const ELEMENTS: usize = 3;
