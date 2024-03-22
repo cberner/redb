@@ -1,20 +1,20 @@
 # redb - Changelog
 
-## 2.0.0 - 2024-XX-XX
+## 2.0.0 - 2024-03-22
 
 ### Major file format change
 2.0.0 uses a new file format that optimizes `len()` to be constant time. This means that it is not
-backwards compatible with 1.x. To upgrade, consider using a pattern like that in
+backwards compatible with 1.x. To upgrade, consider using a pattern like that shown in the
 [upgrade_v1_to_v2](https://github.com/cberner/redb/blob/222a37f4600588261b0983eebcd074bb69d6e5a0/tests/backward_compatibility.rs#L282-L299) test.
 
 ### Other changes
-* `check_integrity()` now returns a `DatabaseError` instead of `StorageError`
-* Refactor table metadata methods into a new `ReadableTableMetadata` trait
+* `check_integrity()` now returns a `DatabaseError` instead of a `StorageError`
+* Table metadata methods have moved to a new `ReadableTableMetadata` trait
 * Rename `RedbKey` to `Key`
 * Rename `RedbValue` to `Value`
 * Remove lifetimes from read-only tables
 * Remove lifetime from `WriteTransaction` and `ReadTransaction`
-* Remove `drain()` and `drain_filter()` from `Table`
+* Remove `drain()` and `drain_filter()` from `Table`. Use `retain`, `retain_in`, `extract_if` or `extract_from_if` instead
 * impl `Clone` for `Range`
 * Add support for `[T;N]` as a `Value` or `Key` as appropriate for the type `T`
 * Add `len()` and `is_empty()` to `MultimapValue`
