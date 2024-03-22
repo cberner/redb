@@ -1,5 +1,5 @@
-use redb::TableDefinition;
 use redb::{AccessGuard, ReadableTable};
+use redb::{ReadableTableMetadata, TableDefinition};
 use rocksdb::{Direction, IteratorMode, TransactionDB, TransactionOptions, WriteOptions};
 use sanakirja::btree::page_unsized;
 use sanakirja::{Commit, RootDb};
@@ -52,6 +52,7 @@ pub trait BenchReadTransaction {
     fn get_reader(&self) -> Self::T<'_>;
 }
 
+#[allow(clippy::len_without_is_empty)]
 pub trait BenchReader {
     type Output<'out>: AsRef<[u8]> + 'out
     where
@@ -63,6 +64,8 @@ pub trait BenchReader {
     fn get<'a>(&'a self, key: &[u8]) -> Option<Self::Output<'a>>;
 
     fn range_from<'a>(&'a self, start: &'a [u8]) -> Self::Iterator<'a>;
+
+    fn len(&self) -> u64;
 }
 
 pub trait BenchIterator {
@@ -131,6 +134,10 @@ impl BenchReader for RedbBenchReader {
     fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
         let iter = self.table.range(key..).unwrap();
         RedbBenchIterator { iter }
+    }
+
+    fn len(&self) -> u64 {
+        self.table.len().unwrap()
     }
 }
 
@@ -254,6 +261,10 @@ impl<'db> BenchReader for SledBenchReader<'db> {
     fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
         let iter = self.db.range(key..);
         SledBenchIterator { iter }
+    }
+
+    fn len(&self) -> u64 {
+        self.db.len() as u64
     }
 }
 
@@ -416,6 +427,11 @@ impl<'txn, 'db> BenchReader for LmdbRkvBenchReader<'txn, 'db> {
 
         LmdbRkvBenchIterator { iter }
     }
+
+    fn len(&self) -> u64 {
+        use lmdb::Transaction;
+        self.txn.stat(self.db).unwrap().entries() as u64
+    }
 }
 
 pub struct LmdbRkvBenchIterator<'a> {
@@ -525,6 +541,10 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
             .iterator(IteratorMode::From(key, Direction::Forward));
 
         RocksdbBenchIterator { iter }
+    }
+
+    fn len(&self) -> u64 {
+        self.snapshot.iterator(IteratorMode::Start).count() as u64
     }
 }
 
@@ -661,6 +681,12 @@ impl<'db, 'txn> BenchReader for SanakirjaBenchReader<'db, 'txn> {
         let iter = sanakirja::btree::iter(self.txn, &self.table, Some((key, None))).unwrap();
 
         SanakirjaBenchIterator { iter }
+    }
+
+    fn len(&self) -> u64 {
+        sanakirja::btree::iter(self.txn, &self.table, None)
+            .unwrap()
+            .count() as u64
     }
 }
 
