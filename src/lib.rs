@@ -53,6 +53,8 @@
 //! [lmdb]: https://www.lmdb.tech/doc/
 //! [design]: https://github.com/cberner/redb/blob/master/docs/design.md
 
+#[cfg(feature = "bincode")]
+pub use as_bincode::AsBincode;
 pub use as_raw::{AsRaw, Name};
 pub use db::{
     Builder, Database, MultimapTableDefinition, MultimapTableHandle, RepairSession, StorageBackend,
@@ -79,6 +81,8 @@ type Result<T = (), E = StorageError> = std::result::Result<T, E>;
 #[cfg(feature = "python")]
 pub use crate::python::redb;
 
+#[cfg(feature = "bincode")]
+pub mod as_bincode;
 pub mod as_raw;
 pub mod backends;
 mod complex_types;
