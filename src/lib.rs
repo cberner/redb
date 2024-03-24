@@ -53,6 +53,7 @@
 //! [lmdb]: https://www.lmdb.tech/doc/
 //! [design]: https://github.com/cberner/redb/blob/master/docs/design.md
 
+pub use as_raw::{AsRaw, Name};
 pub use db::{
     Builder, Database, MultimapTableDefinition, MultimapTableHandle, RepairSession, StorageBackend,
     TableDefinition, TableHandle, UntypedMultimapTableHandle, UntypedTableHandle,
@@ -78,6 +79,7 @@ type Result<T = (), E = StorageError> = std::result::Result<T, E>;
 #[cfg(feature = "python")]
 pub use crate::python::redb;
 
+pub mod as_raw;
 pub mod backends;
 mod complex_types;
 mod db;
