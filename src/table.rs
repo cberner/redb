@@ -185,7 +185,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
 
     /// Insert mapping of the given key to the given value
     ///
-    /// Returns the old value, if the key was present in the table
+    /// If key is already present it is replaced
+    ///
+    /// Returns the old value, if the key was present in the table, otherwise None is returned
     pub fn insert<'k, 'v>(
         &mut self,
         key: impl Borrow<K::SelfType<'k>>,
@@ -215,6 +217,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
 
 impl<'txn, K: Key + 'static, V: MutInPlaceValue + 'static> Table<'txn, K, V> {
     /// Reserve space to insert a key-value pair
+    ///
+    /// If key is already present it is replaced
+    ///
     /// The returned reference will have length equal to value_length
     pub fn insert_reserve<'a>(
         &mut self,
