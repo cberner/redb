@@ -489,6 +489,46 @@ impl Key for &str {
     }
 }
 
+impl Value for String {
+    type SelfType<'a> = String
+    where
+        Self: 'a;
+    type AsBytes<'a> = &'a str
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> String
+    where
+        Self: 'a,
+    {
+        std::str::from_utf8(data).unwrap().to_string()
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a str
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        value.as_str()
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("String")
+    }
+}
+
+impl Key for String {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        let str1 = std::str::from_utf8(data1).unwrap();
+        let str2 = std::str::from_utf8(data2).unwrap();
+        str1.cmp(str2)
+    }
+}
+
 impl Value for char {
     type SelfType<'a> = char;
     type AsBytes<'a> = [u8; 3] where Self: 'a;

@@ -1151,6 +1151,38 @@ fn str_type() {
 }
 
 #[test]
+fn string_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<String, String> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table
+            .insert("hello".to_string(), "world".to_string())
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(
+        "world",
+        table.get("hello".to_string()).unwrap().unwrap().value()
+    );
+
+    let mut iter = table.iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
+    assert!(iter.next().is_none());
+
+    let mut iter: Range<String, String> = table.range("a".to_string().."z".to_string()).unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
+    assert!(iter.next().is_none());
+}
+
+#[test]
 fn empty_type() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
