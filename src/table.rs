@@ -332,7 +332,7 @@ impl<K: Key + 'static, V: Value + 'static> Debug for Table<'_, K, V> {
     }
 }
 
-pub trait ReadableTableMetadata: Sealed {
+pub trait ReadableTableMetadata {
     /// Retrieves information about storage usage for the table
     fn stats(&self) -> Result<TableStats>;
 
