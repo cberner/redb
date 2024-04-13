@@ -1,11 +1,14 @@
+use std::borrow::Borrow;
 use std::fs;
 use std::io::ErrorKind;
+use std::marker::PhantomData;
+use std::ops::RangeBounds;
 
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use redb::{
-    Builder, Database, Durability, MultimapTableDefinition, ReadableTable, ReadableTableMetadata,
-    TableDefinition,
+    AccessGuard, Builder, Database, Durability, Key, MultimapRange, MultimapTableDefinition,
+    MultimapValue, Range, ReadableTable, ReadableTableMetadata, TableDefinition, TableStats, Value,
 };
 use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 
@@ -1449,4 +1452,122 @@ fn is_send() {
     let table = txn.open_table(definition).unwrap();
     require_sync(&table);
     require_sync(&txn);
+}
+
+struct DelegatingTable<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> {
+    inner: T,
+    _key: PhantomData<K>,
+    _value: PhantomData<V>,
+}
+
+impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTable<K, V>
+    for DelegatingTable<K, V, T>
+{
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> redb::Result<Option<AccessGuard<V>>> {
+        self.inner.get(key)
+    }
+
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> redb::Result<Range<K, V>>
+    where
+        KR: Borrow<K::SelfType<'a>> + 'a,
+    {
+        self.inner.range(range)
+    }
+}
+
+impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTableMetadata
+    for DelegatingTable<K, V, T>
+{
+    fn stats(&self) -> redb::Result<TableStats> {
+        self.inner.stats()
+    }
+
+    fn len(&self) -> redb::Result<u64> {
+        self.inner.len()
+    }
+}
+
+struct DelegatingMultimapTable<K: Key + 'static, V: Key + 'static, T: ReadableMultimapTable<K, V>> {
+    inner: T,
+    _key: PhantomData<K>,
+    _value: PhantomData<V>,
+}
+
+impl<K: Key + 'static, V: Key + 'static, T: ReadableMultimapTable<K, V>> ReadableMultimapTable<K, V>
+    for DelegatingMultimapTable<K, V, T>
+{
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> redb::Result<MultimapValue<V>> {
+        self.inner.get(key)
+    }
+
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> redb::Result<MultimapRange<K, V>>
+    where
+        KR: Borrow<K::SelfType<'a>> + 'a,
+    {
+        self.inner.range(range)
+    }
+}
+
+impl<K: Key + 'static, V: Key + 'static, T: ReadableMultimapTable<K, V>> ReadableTableMetadata
+    for DelegatingMultimapTable<K, V, T>
+{
+    fn stats(&self) -> redb::Result<TableStats> {
+        self.inner.stats()
+    }
+
+    fn len(&self) -> redb::Result<u64> {
+        self.inner.len()
+    }
+}
+
+#[test]
+fn custom_table_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let definition: TableDefinition<u32, &str> = TableDefinition::new("x");
+    let definition_multimap: MultimapTableDefinition<u32, &str> =
+        MultimapTableDefinition::new("multi");
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        table.insert(0, "hello").unwrap();
+        let mut table = txn.open_multimap_table(definition_multimap).unwrap();
+        table.insert(1, "world").unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    let table = DelegatingTable {
+        inner: txn.open_table(definition).unwrap(),
+        _key: Default::default(),
+        _value: Default::default(),
+    };
+    assert_eq!("hello", table.get(0).unwrap().unwrap().value());
+    let table = DelegatingMultimapTable {
+        inner: txn.open_multimap_table(definition_multimap).unwrap(),
+        _key: Default::default(),
+        _value: Default::default(),
+    };
+    assert_eq!(
+        "world",
+        table.get(1).unwrap().next().unwrap().unwrap().value()
+    );
+
+    let txn = db.begin_write().unwrap();
+    let table = DelegatingTable {
+        inner: txn.open_table(definition).unwrap(),
+        _key: Default::default(),
+        _value: Default::default(),
+    };
+    assert_eq!("hello", table.get(0).unwrap().unwrap().value());
+    let table = DelegatingMultimapTable {
+        inner: txn.open_multimap_table(definition_multimap).unwrap(),
+        _key: Default::default(),
+        _value: Default::default(),
+    };
+    assert_eq!(
+        "world",
+        table.get(1).unwrap().next().unwrap().unwrap().value()
+    );
 }
