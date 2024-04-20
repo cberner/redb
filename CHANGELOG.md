@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 2.1.0 - 2024-04-20
+* Implement `Key` and `Value` for `String`
+* Allow users to implement `ReadableTableMetadata`, `ReadableTable`, and `ReadableMultimapTable`
+
 ## 2.0.0 - 2024-03-22
 
 ### Major file format change
