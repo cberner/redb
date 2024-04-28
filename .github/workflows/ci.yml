@@ -46,6 +46,12 @@ jobs:
           components: rustfmt, clippy
           default: true
 
+      - name: OSX x86 rust
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          # For some reason this is required to run the fuzzer on OSX
+          rustup target add x86_64-apple-darwin
+
       - name: Install cargo-deny
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: rustup run --install 1.74 cargo install --force --version 0.14.17 cargo-deny --locked
