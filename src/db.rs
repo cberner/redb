@@ -407,6 +407,13 @@ impl Database {
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
     pub fn compact(&mut self) -> Result<bool, CompactionError> {
+        if self
+            .transaction_tracker
+            .oldest_live_read_transaction()
+            .is_some()
+        {
+            return Err(CompactionError::TransactionInProgress);
+        }
         // Commit to free up any pending free pages
         // Use 2-phase commit to avoid any possible security issues. Plus this compaction is going to be so slow that it doesn't matter
         let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
