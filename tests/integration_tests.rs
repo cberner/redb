@@ -7,8 +7,9 @@ use std::ops::RangeBounds;
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use redb::{
-    AccessGuard, Builder, Database, Durability, Key, MultimapRange, MultimapTableDefinition,
-    MultimapValue, Range, ReadableTable, ReadableTableMetadata, TableDefinition, TableStats, Value,
+    AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
+    MultimapTableDefinition, MultimapValue, Range, ReadableTable, ReadableTableMetadata,
+    TableDefinition, TableStats, Value,
 };
 use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 
@@ -865,6 +866,31 @@ fn regression20() {
 
         txn.commit().unwrap();
     }
+}
+
+#[test]
+fn regression21() {
+    let tmpfile = create_tempfile();
+
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let write_tx = db.begin_write().unwrap();
+    let read_tx = db.begin_read().unwrap();
+
+    let mut write_table = write_tx
+        .open_table::<&str, &str>(TableDefinition::new("example"))
+        .unwrap();
+
+    write_table.insert("example", "example").unwrap();
+
+    drop(write_table);
+
+    write_tx.commit().unwrap();
+    assert!(matches!(
+        db.compact().unwrap_err(),
+        CompactionError::TransactionInProgress
+    ));
+    drop(read_tx);
 }
 
 #[test]

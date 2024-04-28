@@ -286,6 +286,8 @@ pub enum CompactionError {
     PersistentSavepointExists,
     /// A ephemeral savepoint exists
     EphemeralSavepointExists,
+    /// A transaction is still in-progress
+    TransactionInProgress,
     /// Error from underlying storage
     Storage(StorageError),
 }
@@ -295,6 +297,7 @@ impl From<CompactionError> for Error {
         match err {
             CompactionError::PersistentSavepointExists => Error::PersistentSavepointExists,
             CompactionError::EphemeralSavepointExists => Error::EphemeralSavepointExists,
+            CompactionError::TransactionInProgress => Error::TransactionInProgress,
             CompactionError::Storage(storage) => storage.into(),
         }
     }
@@ -319,6 +322,12 @@ impl Display for CompactionError {
                 write!(
                     f,
                     "Ephemeral savepoint exists. Operation cannot be performed."
+                )
+            }
+            CompactionError::TransactionInProgress => {
+                write!(
+                    f,
+                    "A transaction is still in progress. Operation cannot be performed."
                 )
             }
             CompactionError::Storage(storage) => storage.fmt(f),
@@ -434,6 +443,8 @@ pub enum Error {
     PersistentSavepointExists,
     /// An Ephemeral savepoint exists
     EphemeralSavepointExists,
+    /// A transaction is still in-progress
+    TransactionInProgress,
     /// The Database is corrupted
     Corrupted(String),
     /// The database file is in an old file format and must be manually upgraded
@@ -549,6 +560,12 @@ impl Display for Error {
                 write!(
                     f,
                     "Ephemeral savepoint exists. Operation cannot be performed."
+                )
+            }
+            Error::TransactionInProgress => {
+                write!(
+                    f,
+                    "A transaction is still in progress. Operation cannot be performed."
                 )
             }
             Error::InvalidSavepoint => {
