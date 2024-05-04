@@ -149,14 +149,14 @@ pub(crate) trait Page {
 }
 
 pub struct PageImpl {
-    pub(super) mem: Arc<Vec<u8>>,
+    pub(super) mem: Arc<[u8]>,
     pub(super) page_number: PageNumber,
     #[cfg(debug_assertions)]
     pub(super) open_pages: Arc<Mutex<HashMap<PageNumber, u64>>>,
 }
 
 impl PageImpl {
-    pub(crate) fn to_arc_vec(&self) -> Arc<Vec<u8>> {
+    pub(crate) fn to_arc(&self) -> Arc<[u8]> {
         self.mem.clone()
     }
 }

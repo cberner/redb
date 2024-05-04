@@ -123,7 +123,7 @@ enum EitherPage {
     Immutable(PageImpl),
     Mutable(PageMut),
     OwnedMemory(Vec<u8>),
-    ArcMemory(Arc<Vec<u8>>),
+    ArcMemory(Arc<[u8]>),
 }
 
 impl EitherPage {
@@ -132,7 +132,7 @@ impl EitherPage {
             EitherPage::Immutable(page) => page.memory(),
             EitherPage::Mutable(page) => page.memory(),
             EitherPage::OwnedMemory(mem) => mem.as_slice(),
-            EitherPage::ArcMemory(mem) => mem.as_slice(),
+            EitherPage::ArcMemory(mem) => mem,
         }
     }
 }
@@ -159,7 +159,7 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
         }
     }
 
-    pub(crate) fn with_arc_page(page: Arc<Vec<u8>>, range: Range<usize>) -> Self {
+    pub(crate) fn with_arc_page(page: Arc<[u8]>, range: Range<usize>) -> Self {
         Self {
             page: EitherPage::ArcMemory(page),
             offset: range.start,
