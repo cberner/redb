@@ -386,9 +386,9 @@ impl<'db> TableNamespace<'db> {
     }
 
     #[track_caller]
-    fn delete_table<'txn>(
+    fn delete_table(
         &mut self,
-        transaction: &'txn WriteTransaction,
+        transaction: &WriteTransaction,
         name: &str,
     ) -> Result<bool, TableError> {
         #[cfg(feature = "logging")]
@@ -398,9 +398,9 @@ impl<'db> TableNamespace<'db> {
     }
 
     #[track_caller]
-    fn delete_multimap_table<'txn>(
+    fn delete_multimap_table(
         &mut self,
-        transaction: &'txn WriteTransaction,
+        transaction: &WriteTransaction,
         name: &str,
     ) -> Result<bool, TableError> {
         #[cfg(feature = "logging")]

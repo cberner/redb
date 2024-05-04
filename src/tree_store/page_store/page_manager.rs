@@ -946,8 +946,8 @@ impl TransactionalMemory {
 
     fn grow(&self, state: &mut InMemoryState, required_order_allocation: u8) -> Result<()> {
         let layout = state.header.layout();
-        let required_growth = 2u64.pow(required_order_allocation.try_into().unwrap())
-            * state.header.page_size() as u64;
+        let required_growth =
+            2u64.pow(required_order_allocation.into()) * state.header.page_size() as u64;
         let max_region_size = (state.header.layout().full_region_layout().num_pages() as u64)
             * (state.header.page_size() as u64);
         let next_desired_size = if layout.num_full_regions() > 0 {

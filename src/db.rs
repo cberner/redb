@@ -933,6 +933,7 @@ impl Builder {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
 
         Database::new(
