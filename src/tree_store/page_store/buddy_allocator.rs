@@ -164,7 +164,7 @@ impl BuddyAllocator {
     pub(crate) fn count_free_pages(&self) -> u32 {
         let mut pages = 0;
         for order in 0..=self.max_order {
-            pages += self.get_order_free(order).count_unset() * 2u32.pow(order.try_into().unwrap());
+            pages += self.get_order_free(order).count_unset() * 2u32.pow(order.into());
         }
         pages
     }

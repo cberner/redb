@@ -90,10 +90,10 @@ impl PrioritizedCache {
         priority: CachePriority,
     ) -> Option<Arc<Vec<u8>>> {
         if matches!(priority, CachePriority::Low) {
-            debug_assert!(self.cache.get(&key).is_none());
+            debug_assert!(!self.cache.contains_key(&key));
             self.low_pri_cache.insert(key, value)
         } else {
-            debug_assert!(self.low_pri_cache.get(&key).is_none());
+            debug_assert!(!self.low_pri_cache.contains_key(&key));
             self.cache.insert(key, value)
         }
     }
@@ -140,10 +140,10 @@ impl PrioritizedWriteCache {
     fn insert(&mut self, key: u64, value: Arc<Vec<u8>>, priority: CachePriority) {
         if matches!(priority, CachePriority::Low) {
             assert!(self.low_pri_cache.insert(key, Some(value)).is_none());
-            debug_assert!(self.cache.get(&key).is_none());
+            debug_assert!(!self.cache.contains_key(&key));
         } else {
             assert!(self.cache.insert(key, Some(value)).is_none());
-            debug_assert!(self.low_pri_cache.get(&key).is_none());
+            debug_assert!(!self.low_pri_cache.contains_key(&key));
         }
     }
 
