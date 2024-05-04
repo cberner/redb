@@ -24,7 +24,7 @@ enum DeletionResult {
     DeletedLeaf,
     // A leaf with fewer entries than desired
     PartialLeaf {
-        page: Arc<Vec<u8>>,
+        page: Arc<[u8]>,
         deleted_pair: usize,
     },
     // A branch page subtree with fewer children than desired
@@ -316,7 +316,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let existing_value = if found {
                         let (start, end) = accessor.value_range(position).unwrap();
                         if self.modify_uncommitted && self.mem.uncommitted(page_number) {
-                            let arc = page.to_arc_vec();
+                            let arc = page.to_arc();
                             drop(page);
                             self.mem.free(page_number);
                             Some(AccessGuard::with_arc_page(arc, start..end))
@@ -350,7 +350,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let existing_value = if found {
                         let (start, end) = accessor.value_range(position).unwrap();
                         if self.modify_uncommitted && self.mem.uncommitted(page_number) {
-                            let arc = page.to_arc_vec();
+                            let arc = page.to_arc();
                             drop(page);
                             self.mem.free(page_number);
                             Some(AccessGuard::with_arc_page(arc, start..end))
@@ -546,7 +546,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
             // full pages, so we use 33% instead of 50% to avoid oscillating
             PartialLeaf {
-                page: page.to_arc_vec(),
+                page: page.to_arc(),
                 deleted_pair: position,
             }
         } else {
@@ -570,7 +570,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         drop(accessor);
         let guard = if uncommitted && self.modify_uncommitted {
             let page_number = page.get_page_number();
-            let arc = page.to_arc_vec();
+            let arc = page.to_arc();
             drop(page);
             self.mem.free(page_number);
             Some(AccessGuard::with_arc_page(arc, start..end))
