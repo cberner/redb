@@ -30,27 +30,26 @@ impl CachePriority {
 pub(super) struct WritablePage {
     buffer: Arc<Mutex<PrioritizedWriteCache>>,
     offset: u64,
-    data: Option<Arc<[u8]>>,
+    data: Arc<[u8]>,
     priority: CachePriority,
 }
 
 impl WritablePage {
     pub(super) fn mem(&self) -> &[u8] {
-        self.data.as_ref().unwrap()
+        &self.data
     }
 
     pub(super) fn mem_mut(&mut self) -> &mut [u8] {
-        Arc::get_mut(self.data.as_mut().unwrap()).unwrap()
+        Arc::get_mut(&mut self.data).unwrap()
     }
 }
 
 impl Drop for WritablePage {
     fn drop(&mut self) {
-        let data = self.data.take().unwrap();
         self.buffer
             .lock()
             .unwrap()
-            .return_value(&self.offset, data, self.priority);
+            .return_value(&self.offset, self.data.clone(), self.priority);
     }
 }
 
@@ -487,7 +486,7 @@ impl PagedCachedFile {
         Ok(WritablePage {
             buffer: self.write_buffer.clone(),
             offset,
-            data: Some(data),
+            data,
             priority,
         })
     }
