@@ -303,6 +303,7 @@ impl PagedCachedFile {
             } else {
                 self.read_cache_bytes
                     .fetch_sub(buffer.len(), Ordering::AcqRel);
+                break;
             }
         }
         for (offset, buffer) in write_buffer.low_pri_cache.iter_mut() {
@@ -318,6 +319,7 @@ impl PagedCachedFile {
             } else {
                 self.read_cache_bytes
                     .fetch_sub(buffer.len(), Ordering::AcqRel);
+                break;
             }
         }
         self.write_buffer_bytes.store(0, Ordering::Release);
