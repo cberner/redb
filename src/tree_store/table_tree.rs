@@ -439,6 +439,10 @@ impl TableTree {
         })
     }
 
+    pub(crate) fn clone_transaction_guard(&self) -> Arc<TransactionGuard> {
+        self.tree.clone_transaction_guard()
+    }
+
     // root_page: the root of the master table
     pub(crate) fn list_tables(&self, table_type: TableType) -> Result<Vec<String>> {
         let iter = self.tree.range::<RangeFull, &str>(&(..))?;

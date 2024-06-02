@@ -543,7 +543,7 @@ impl RawBtree {
 
 pub(crate) struct Btree<K: Key + 'static, V: Value + 'static> {
     mem: Arc<TransactionalMemory>,
-    _transaction_guard: Arc<TransactionGuard>,
+    transaction_guard: Arc<TransactionGuard>,
     // Cache of the root page to avoid repeated lookups
     cached_root: Option<PageImpl>,
     root: Option<BtreeHeader>,
@@ -566,13 +566,17 @@ impl<K: Key, V: Value> Btree<K, V> {
         };
         Ok(Self {
             mem,
-            _transaction_guard: guard,
+            transaction_guard: guard,
             cached_root,
             root,
             hint,
             _key_type: Default::default(),
             _value_type: Default::default(),
         })
+    }
+
+    pub(crate) fn clone_transaction_guard(&self) -> Arc<TransactionGuard> {
+        self.transaction_guard.clone()
     }
 
     pub(crate) fn get_root(&self) -> Option<BtreeHeader> {

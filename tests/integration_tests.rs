@@ -9,7 +9,7 @@ use rand::Rng;
 use redb::{
     AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
     MultimapTableDefinition, MultimapValue, Range, ReadableTable, ReadableTableMetadata,
-    TableDefinition, TableStats, Value,
+    TableDefinition, TableStats, TransactionError, Value,
 };
 use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 
@@ -251,6 +251,27 @@ fn many_pairs() {
     drop(table);
 
     wtx.commit().unwrap();
+}
+
+#[test]
+fn explicit_close() {
+    let tmpfile = create_tempfile();
+    const TABLE: TableDefinition<u32, u32> = TableDefinition::new("TABLE");
+    let db = Database::create(tmpfile.path()).unwrap();
+    let wtx = db.begin_write().unwrap();
+    wtx.open_table(TABLE).unwrap();
+    wtx.commit().unwrap();
+
+    let tx = db.begin_read().unwrap();
+    let table = tx.open_table(TABLE).unwrap();
+    assert!(matches!(
+        tx.close(),
+        Err(TransactionError::ReadTransactionStillInUse(_))
+    ));
+    drop(table);
+
+    let tx2 = db.begin_read().unwrap();
+    tx2.close().unwrap();
 }
 
 #[test]
