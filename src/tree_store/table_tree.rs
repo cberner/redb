@@ -439,8 +439,8 @@ impl TableTree {
         })
     }
 
-    pub(crate) fn clone_transaction_guard(&self) -> Arc<TransactionGuard> {
-        self.tree.clone_transaction_guard()
+    pub(crate) fn transaction_guard(&self) -> &Arc<TransactionGuard> {
+        self.tree.transaction_guard()
     }
 
     // root_page: the root of the master table
