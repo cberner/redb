@@ -1213,7 +1213,7 @@ impl ReadTransaction {
             definition.name().to_string(),
             header.get_root(),
             PageHint::Clean,
-            self.tree.clone_transaction_guard(),
+            self.tree.transaction_guard().clone(),
             self.mem.clone(),
         )?)
     }
@@ -1250,7 +1250,7 @@ impl ReadTransaction {
             header.get_root(),
             header.get_length(),
             PageHint::Clean,
-            self.tree.clone_transaction_guard(),
+            self.tree.transaction_guard().clone(),
             self.mem.clone(),
         )?)
     }
@@ -1296,9 +1296,7 @@ impl ReadTransaction {
     ///
     /// Returns `ReadTransactionStillInUse` error if a table or other object retrieved from the transaction still references this transaction
     pub fn close(self) -> Result<(), TransactionError> {
-        let cloned = self.tree.clone_transaction_guard();
-        // Check for count greater than 2 because we just cloned the guard to get a reference to it
-        if Arc::strong_count(&cloned) > 2 {
+        if Arc::strong_count(self.tree.transaction_guard()) > 1 {
             return Err(TransactionError::ReadTransactionStillInUse(self));
         }
         // No-op, just drop ourself

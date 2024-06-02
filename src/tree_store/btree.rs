@@ -575,8 +575,8 @@ impl<K: Key, V: Value> Btree<K, V> {
         })
     }
 
-    pub(crate) fn clone_transaction_guard(&self) -> Arc<TransactionGuard> {
-        self.transaction_guard.clone()
+    pub(crate) fn transaction_guard(&self) -> &Arc<TransactionGuard> {
+        &self.transaction_guard
     }
 
     pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
