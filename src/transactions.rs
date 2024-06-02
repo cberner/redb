@@ -1183,7 +1183,6 @@ impl Drop for WriteTransaction {
 pub struct ReadTransaction {
     mem: Arc<TransactionalMemory>,
     tree: TableTree,
-    transaction_guard: Arc<TransactionGuard>,
 }
 
 impl ReadTransaction {
@@ -1195,9 +1194,8 @@ impl ReadTransaction {
         let guard = Arc::new(guard);
         Ok(Self {
             mem: mem.clone(),
-            tree: TableTree::new(root_page, PageHint::Clean, guard.clone(), mem)
+            tree: TableTree::new(root_page, PageHint::Clean, guard, mem)
                 .map_err(TransactionError::Storage)?,
-            transaction_guard: guard,
         })
     }
 
@@ -1215,7 +1213,7 @@ impl ReadTransaction {
             definition.name().to_string(),
             header.get_root(),
             PageHint::Clean,
-            self.transaction_guard.clone(),
+            self.tree.clone_transaction_guard(),
             self.mem.clone(),
         )?)
     }
@@ -1252,7 +1250,7 @@ impl ReadTransaction {
             header.get_root(),
             header.get_length(),
             PageHint::Clean,
-            self.transaction_guard.clone(),
+            self.tree.clone_transaction_guard(),
             self.mem.clone(),
         )?)
     }
@@ -1298,7 +1296,9 @@ impl ReadTransaction {
     ///
     /// Returns `ReadTransactionStillInUse` error if a table or other object retrieved from the transaction still references this transaction
     pub fn close(self) -> Result<(), TransactionError> {
-        if Arc::strong_count(&self.transaction_guard) > 1 {
+        let cloned = self.tree.clone_transaction_guard();
+        // Check for count greater than 2 because we just cloned the guard to get a reference to it
+        if Arc::strong_count(&cloned) > 2 {
             return Err(TransactionError::ReadTransactionStillInUse(self));
         }
         // No-op, just drop ourself
