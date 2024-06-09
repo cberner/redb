@@ -1,5 +1,10 @@
 # redb - Changelog
 
+## 2.1.1 - 2024-06-09
+* Fix panic that occurred when calling `compact()` when a read transaction was in progress
+* Fix `ReadTransaction::close()` to return `Ok` when it succeeds
+* Performance optimizations
+
 ## 2.1.0 - 2024-04-20
 * Implement `Key` and `Value` for `String`
 * Allow users to implement `ReadableTableMetadata`, `ReadableTable`, and `ReadableMultimapTable`
