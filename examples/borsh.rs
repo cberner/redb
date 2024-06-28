@@ -1,7 +1,7 @@
 //! Example of making any Borsh type to be Value or Key using BorshSchema
 
-use core::cmp::Ordering;
 use core::fmt::Debug;
+use core::{cmp::Ordering, ops::RangeInclusive};
 
 use borsh::{
     schema::{BorshSchemaContainer, Declaration},
@@ -76,6 +76,8 @@ where
     where
         Self: 'a;
 
+    /// Width of a fixed type, or None for variable width.
+    /// Uses Borsh schema to determine if the type is fixed width.
     fn fixed_width<'a>() -> Option<usize> {
         let schema = BorshSchemaContainer::for_type::<Self::SelfType<'c>>();
         is_fixed_width(&schema, schema.declaration())
@@ -98,6 +100,8 @@ where
         writer
     }
 
+    /// Globally unique identifier for this type.
+    /// Returns the type name Borsh schema declaration for `T`.
     fn type_name() -> TypeName {
         let schema = BorshSchemaContainer::for_type::<Self::SelfType<'c>>();
         redb::TypeName::new(schema.declaration())
@@ -123,7 +127,7 @@ fn is_fixed_width(schema: &BorshSchemaContainer, declaration: &Declaration) -> O
             length_width,
             length_range,
             elements,
-        } if length_range.end() == length_range.start() && *length_width == 0 => {
+        } if is_fixed_width_sequence(length_range, length_width) => {
             let fixed_witdh = is_fixed_width(schema, elements);
             fixed_witdh.map(|width| width * *length_range.end() as usize)
         }
@@ -138,6 +142,10 @@ fn is_fixed_width(schema: &BorshSchemaContainer, declaration: &Declaration) -> O
         }
         _ => None,
     }
+}
+
+fn is_fixed_width_sequence(length_range: &RangeInclusive<u64>, length_width: &u8) -> bool {
+    length_range.end() == length_range.start() && *length_width == 0
 }
 
 fn are_fixed_width<'a>(
@@ -159,6 +167,9 @@ impl<'c, T> Key for Borsh<T>
 where
     T: Debug + BorshDeserialize + Ord + BorshSerialize + BorshSchema + 'c,
 {
+    /// Panics in case of deserialization error.
+    /// Data integrity should be guaranteed by the database
+    /// and data migration should be handled properly.
     fn compare(mut data1: &[u8], mut data2: &[u8]) -> Ordering {
         Self::SelfType::<'c>::deserialize(&mut data1)
             .expect("valid data")
