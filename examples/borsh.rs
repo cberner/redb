@@ -3,7 +3,10 @@
 use core::cmp::Ordering;
 use core::fmt::Debug;
 
-use borsh::{schema::BorshSchemaContainer, BorshDeserialize, BorshSchema, BorshSerialize};
+use borsh::{
+    schema::{BorshSchemaContainer, Declaration},
+    BorshDeserialize, BorshSchema, BorshSerialize,
+};
 use redb::{Database, Error, Key, Range, TableDefinition, TypeName, Value};
 
 #[derive(Debug, BorshDeserialize, BorshSerialize, BorshSchema, PartialEq, Eq, PartialOrd, Ord)]
@@ -75,14 +78,7 @@ where
 
     fn fixed_width<'a>() -> Option<usize> {
         let schema = BorshSchemaContainer::for_type::<Self::SelfType<'c>>();
-        match schema
-            .get_definition(schema.declaration())
-            .expect("must have definition")
-        {
-            borsh::schema::Definition::Primitive(size) => Some(*size as usize),
-            // here we can match on other branches recursiverly and output fixed with sequences, stuctures, enums and tuples.
-            _ => None,
-        }
+        is_fixed_width(&schema, schema.declaration())
     }
 
     fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
@@ -103,8 +99,61 @@ where
     }
 
     fn type_name() -> TypeName {
-        redb::TypeName::new(BorshSchemaContainer::for_type::<Self::SelfType<'c>>().declaration())
+        let schema = BorshSchemaContainer::for_type::<Self::SelfType<'c>>();
+        redb::TypeName::new(schema.declaration())
     }
+}
+
+fn is_fixed_width(schema: &BorshSchemaContainer, declaration: &Declaration) -> Option<usize> {
+    use borsh::schema::Definition::*;
+    match schema
+        .get_definition(declaration)
+        .expect("must have definition")
+    {
+        Primitive(size) => Some(*size as usize),
+        // fixed sequence
+        Sequence {
+            length_width,
+            length_range,
+            elements,
+        } if length_range.end() == length_range.start() && *length_width == 0 => {
+            let fixed_witdh = is_fixed_width(schema, elements);
+            fixed_witdh.map(|width| width * *length_range.end() as usize)
+        }
+        Tuple { elements } => are_fixed_width(schema, elements),
+        Enum {
+            tag_width,
+            variants,
+        } => {
+            let max_width =
+                are_fixed_width(schema, variants.iter().map(|(_, _, element)| element))?;
+            Some(max_width + *tag_width as usize)
+        }
+        // TODO: uncomment after fix https://github.com/cberner/redb/issues/818
+        // Struct { fields } => match fields {
+        //     borsh::schema::Fields::NamedFields(fields) => {
+        //         are_fixed_width(schema, fields.iter().map(|(_, field)| field))
+        //     }
+        //     borsh::schema::Fields::UnnamedFields(fields) => are_fixed_width(schema, fields),
+        //     borsh::schema::Fields::Empty => Some(0),
+        // },
+        _ => None,
+    }
+}
+
+fn are_fixed_width<'a>(
+    schema: &BorshSchemaContainer,
+    elements: impl IntoIterator<Item = &'a String>,
+) -> Option<usize> {
+    let mut width = 0;
+    for element in elements {
+        if let Some(element_width) = is_fixed_width(schema, element) {
+            width += element_width;
+        } else {
+            return None;
+        }
+    }
+    Some(width)
 }
 
 impl<'c, T> Key for Borsh<T>
