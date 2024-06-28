@@ -111,6 +111,13 @@ fn is_fixed_width(schema: &BorshSchemaContainer, declaration: &Declaration) -> O
         .expect("must have definition")
     {
         Primitive(size) => Some(*size as usize),
+        Struct { fields } => match fields {
+            borsh::schema::Fields::NamedFields(fields) => {
+                are_fixed_width(schema, fields.iter().map(|(_, field)| field))
+            }
+            borsh::schema::Fields::UnnamedFields(fields) => are_fixed_width(schema, fields),
+            borsh::schema::Fields::Empty => Some(0),
+        },
         // fixed sequence
         Sequence {
             length_width,
@@ -129,14 +136,6 @@ fn is_fixed_width(schema: &BorshSchemaContainer, declaration: &Declaration) -> O
                 are_fixed_width(schema, variants.iter().map(|(_, _, element)| element))?;
             Some(max_width + *tag_width as usize)
         }
-        // TODO: uncomment after fix https://github.com/cberner/redb/issues/818
-        // Struct { fields } => match fields {
-        //     borsh::schema::Fields::NamedFields(fields) => {
-        //         are_fixed_width(schema, fields.iter().map(|(_, field)| field))
-        //     }
-        //     borsh::schema::Fields::UnnamedFields(fields) => are_fixed_width(schema, fields),
-        //     borsh::schema::Fields::Empty => Some(0),
-        // },
         _ => None,
     }
 }
