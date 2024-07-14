@@ -6,7 +6,7 @@ use crate::tree_store::{
     btree_stats, AllPageNumbersBtreeIter, BranchAccessor, Btree, BtreeHeader, BtreeMut,
     BtreeRangeIter, BtreeStats, CachePriority, Checksum, LeafAccessor, LeafMutator, Page, PageHint,
     PageNumber, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF,
-    MAX_VALUE_LENGTH,
+    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
@@ -833,9 +833,12 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
         if value_bytes_ref.len() > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(value_bytes_ref.len()));
         }
-        let key_bytes = K::as_bytes(key.borrow());
-        if key_bytes.as_ref().len() > MAX_VALUE_LENGTH {
-            return Err(StorageError::ValueTooLarge(key_bytes.as_ref().len()));
+        let key_len = K::as_bytes(key.borrow()).as_ref().len();
+        if key_len > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(key_len));
+        }
+        if value_bytes_ref.len() + key_len > MAX_PAIR_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_bytes_ref.len() + key_len));
         }
         let get_result = self.tree.get(key.borrow())?;
         let existed = if get_result.is_some() {

@@ -12,7 +12,7 @@ mod savepoint;
 #[allow(dead_code)]
 mod xxh3;
 
-pub(crate) use base::{Page, PageHint, PageNumber, MAX_VALUE_LENGTH};
+pub(crate) use base::{Page, PageHint, PageNumber, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH};
 pub(crate) use header::PAGE_SIZE;
 pub use in_memory_backend::InMemoryBackend;
 pub(crate) use page_manager::{xxh3_checksum, TransactionalMemory, FILE_FORMAT_VERSION2};

@@ -7,7 +7,7 @@ use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker}
 use crate::tree_store::{
     Btree, BtreeHeader, BtreeMut, FreedPageList, FreedTableKey, InternalTableDefinition, PageHint,
     PageNumber, SerializedSavepoint, TableTree, TableTreeMut, TableType, TransactionalMemory,
-    MAX_VALUE_LENGTH,
+    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -243,6 +243,9 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
         let key_len = K::as_bytes(key.borrow()).as_ref().len();
         if key_len > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(key_len));
+        }
+        if value_len + key_len > MAX_PAIR_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len + key_len));
         }
         self.tree.insert(key.borrow(), value.borrow())
     }

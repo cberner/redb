@@ -2,7 +2,7 @@ use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
 use crate::tree_store::{
     AccessGuardMut, Btree, BtreeExtractIf, BtreeHeader, BtreeMut, BtreeRangeIter, PageHint,
-    PageNumber, RawBtree, TransactionalMemory, MAX_VALUE_LENGTH,
+    PageNumber, RawBtree, TransactionalMemory, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, StorageError, WriteTransaction};
@@ -201,6 +201,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         if key_len > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(key_len));
         }
+        if value_len + key_len > MAX_PAIR_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len + key_len));
+        }
         self.tree.insert(key.borrow(), value.borrow())
     }
 
@@ -232,6 +235,9 @@ impl<'txn, K: Key + 'static, V: MutInPlaceValue + 'static> Table<'txn, K, V> {
         let key_len = K::as_bytes(key.borrow()).as_ref().len();
         if key_len > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(key_len));
+        }
+        if value_length as usize + key_len > MAX_PAIR_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_length as usize + key_len));
         }
         self.tree.insert_reserve(key.borrow(), value_length)
     }

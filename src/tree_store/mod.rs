@@ -14,7 +14,7 @@ pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeExtractIf, BtreeRange
 pub use page_store::{file_backend, InMemoryBackend, Savepoint};
 pub(crate) use page_store::{
     CachePriority, Page, PageHint, PageNumber, SerializedSavepoint, TransactionalMemory,
-    FILE_FORMAT_VERSION2, MAX_VALUE_LENGTH, PAGE_SIZE,
+    FILE_FORMAT_VERSION2, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE,
 };
 pub(crate) use table_tree::{
     FreedPageList, FreedTableKey, InternalTableDefinition, TableTree, TableTreeMut, TableType,
