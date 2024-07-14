@@ -230,6 +230,44 @@ fn large_values() {
     txn.commit().unwrap();
 }
 
+// Note: this test requires > 3GiB of memory
+#[test]
+fn value_too_large() {
+    let tmpfile = create_tempfile();
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+
+    let small_value = vec![0u8; 1024];
+    let too_big_value = vec![0u8; 3 * 1024 * 1024 * 1024 + 1];
+    {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
+        assert!(matches!(
+            table.insert(small_value.as_slice(), too_big_value.as_slice()),
+            Err(StorageError::ValueTooLarge(_))
+        ));
+        assert!(matches!(
+            table.insert(too_big_value.as_slice(), small_value.as_slice()),
+            Err(StorageError::ValueTooLarge(_))
+        ));
+        assert!(matches!(
+            table.insert(too_big_value.as_slice(), too_big_value.as_slice()),
+            Err(StorageError::ValueTooLarge(_))
+        ));
+        drop(too_big_value);
+        let almost_big_value = vec![0u8; 2 * 1024 * 1024 * 1024];
+        assert!(matches!(
+            table.insert(almost_big_value.as_slice(), almost_big_value.as_slice()),
+            Err(StorageError::ValueTooLarge(_))
+        ));
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(SLICE_TABLE).unwrap();
+    assert!(table.is_empty().unwrap());
+}
+
 #[test]
 fn many_pairs() {
     let tmpfile = create_tempfile();
