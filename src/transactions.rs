@@ -141,7 +141,7 @@ pub enum Durability {
     /// commit with a higher durability level.
     ///
     /// Note: Pages are only freed during commits with higher durability levels. Exclusively using
-    /// this function may result in Error::OutOfSpace.
+    /// this durability level will result in rapid growth of the database file.
     None,
     /// Commits with this durability level have been queued for persitance to disk, and should be
     /// persistent some time after [WriteTransaction::commit] returns.
