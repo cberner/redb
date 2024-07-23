@@ -1,7 +1,7 @@
 use crate::tree_store::TransactionalMemory;
 use crate::{Key, Result, Savepoint, TypeName, Value};
 #[cfg(feature = "logging")]
-use log::info;
+use log::debug;
 use std::cmp::Ordering;
 use std::collections::btree_map::BTreeMap;
 use std::collections::btree_set::BTreeSet;
@@ -123,7 +123,7 @@ impl TransactionTracker {
         assert!(state.live_write_transaction.is_none());
         let transaction_id = state.next_transaction_id.increment();
         #[cfg(feature = "logging")]
-        info!("Beginning write transaction id={:?}", transaction_id);
+        debug!("Beginning write transaction id={:?}", transaction_id);
         state.live_write_transaction = Some(transaction_id);
 
         transaction_id

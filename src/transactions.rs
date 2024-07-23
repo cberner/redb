@@ -17,7 +17,7 @@ use crate::{
     UntypedTableHandle,
 };
 #[cfg(feature = "logging")]
-use log::{info, warn};
+use log::{debug, warn};
 use std::borrow::Borrow;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
@@ -283,7 +283,7 @@ impl<'db> SystemNamespace<'db> {
         definition: SystemTableDefinition<K, V>,
     ) -> Result<SystemTable<'db, 's, K, V>> {
         #[cfg(feature = "logging")]
-        info!("Opening system table: {}", definition);
+        debug!("Opening system table: {}", definition);
         let root = self
             .table_tree
             .get_or_create_table::<K, V>(definition.name(), TableType::Normal)
@@ -345,7 +345,7 @@ impl<'db> TableNamespace<'db> {
         definition: MultimapTableDefinition<K, V>,
     ) -> Result<MultimapTable<'txn, K, V>, TableError> {
         #[cfg(feature = "logging")]
-        info!("Opening multimap table: {}", definition);
+        debug!("Opening multimap table: {}", definition);
         let (root, length) = self.inner_open::<K, V>(definition.name(), TableType::Multimap)?;
         transaction.dirty.store(true, Ordering::Release);
 
@@ -366,7 +366,7 @@ impl<'db> TableNamespace<'db> {
         definition: TableDefinition<K, V>,
     ) -> Result<Table<'txn, K, V>, TableError> {
         #[cfg(feature = "logging")]
-        info!("Opening table: {}", definition);
+        debug!("Opening table: {}", definition);
         let (root, _) = self.inner_open::<K, V>(definition.name(), TableType::Normal)?;
         transaction.dirty.store(true, Ordering::Release);
 
@@ -395,7 +395,7 @@ impl<'db> TableNamespace<'db> {
         name: &str,
     ) -> Result<bool, TableError> {
         #[cfg(feature = "logging")]
-        info!("Deleting table: {}", name);
+        debug!("Deleting table: {}", name);
         transaction.dirty.store(true, Ordering::Release);
         self.inner_delete(name, TableType::Normal)
     }
@@ -407,7 +407,7 @@ impl<'db> TableNamespace<'db> {
         name: &str,
     ) -> Result<bool, TableError> {
         #[cfg(feature = "logging")]
-        info!("Deleting multimap table: {}", name);
+        debug!("Deleting multimap table: {}", name);
         transaction.dirty.store(true, Ordering::Release);
         self.inner_delete(name, TableType::Multimap)
     }
@@ -642,7 +642,7 @@ impl WriteTransaction {
 
         let (id, transaction_id) = self.allocate_savepoint()?;
         #[cfg(feature = "logging")]
-        info!(
+        debug!(
             "Creating savepoint id={:?}, txn_id={:?}",
             id, transaction_id
         );
@@ -682,7 +682,7 @@ impl WriteTransaction {
             return Err(SavepointError::InvalidSavepoint);
         }
         #[cfg(feature = "logging")]
-        info!(
+        debug!(
             "Beginning savepoint restore (id={:?}) in transaction id={:?}",
             savepoint.get_id(),
             self.transaction_id
@@ -884,7 +884,7 @@ impl WriteTransaction {
 
     fn commit_inner(&mut self) -> Result<(), CommitError> {
         #[cfg(feature = "logging")]
-        info!(
+        debug!(
             "Committing transaction id={:?} with durability={:?}",
             self.transaction_id, self.durability
         );
@@ -901,7 +901,7 @@ impl WriteTransaction {
         }
 
         #[cfg(feature = "logging")]
-        info!(
+        debug!(
             "Finished commit of transaction id={:?}",
             self.transaction_id
         );
@@ -920,7 +920,7 @@ impl WriteTransaction {
 
     fn abort_inner(&mut self) -> Result {
         #[cfg(feature = "logging")]
-        info!("Aborting transaction id={:?}", self.transaction_id);
+        debug!("Aborting transaction id={:?}", self.transaction_id);
         for savepoint in self.created_persistent_savepoints.lock().unwrap().iter() {
             match self.delete_persistent_savepoint(savepoint.0) {
                 Ok(_) => {}
@@ -941,7 +941,7 @@ impl WriteTransaction {
             .clear_table_root_updates();
         self.mem.rollback_uncommitted_writes()?;
         #[cfg(feature = "logging")]
-        info!("Finished abort of transaction id={:?}", self.transaction_id);
+        debug!("Finished abort of transaction id={:?}", self.transaction_id);
         Ok(())
     }
 
