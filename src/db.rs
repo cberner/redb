@@ -25,7 +25,7 @@ use crate::sealed::Sealed;
 use crate::transactions::SAVEPOINT_TABLE;
 use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
-use log::{info, warn};
+use log::{debug, info, warn};
 
 #[allow(clippy::len_without_is_empty)]
 /// Implements persistent storage for a database.
@@ -813,7 +813,7 @@ impl Database {
     pub fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
         let guard = self.allocate_read_transaction()?;
         #[cfg(feature = "logging")]
-        info!("Beginning read transaction id={:?}", guard.id());
+        debug!("Beginning read transaction id={:?}", guard.id());
         ReadTransaction::new(self.get_memory(), guard)
     }
 }
