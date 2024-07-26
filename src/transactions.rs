@@ -946,9 +946,10 @@ impl WriteTransaction {
     }
 
     pub(crate) fn durable_commit(&mut self, eventual: bool, two_phase: bool) -> Result {
-        let oldest_live_read = self
+        let free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_transaction()
+            .map(|x| x.next())
             .unwrap_or(self.transaction_id);
 
         let user_root = self
@@ -965,7 +966,7 @@ impl WriteTransaction {
             .table_tree
             .flush_table_root_updates()?;
 
-        self.process_freed_pages(oldest_live_read)?;
+        self.process_freed_pages(free_until_transaction)?;
         // If a savepoint exists it might reference the freed-tree, since it holds a reference to the
         // root of the freed-tree. Therefore, we must use the transactional free mechanism to free
         // those pages. If there are no save points then these can be immediately freed, which is
@@ -1055,11 +1056,11 @@ impl WriteTransaction {
 
     // NOTE: must be called before store_freed_pages() during commit, since this can create
     // more pages freed by the current transaction
-    fn process_freed_pages(&mut self, oldest_live_read: TransactionId) -> Result {
+    fn process_freed_pages(&mut self, free_until: TransactionId) -> Result {
         // We assume below that PageNumber is length 8
         assert_eq!(PageNumber::serialized_size(), 8);
         let lookup_key = FreedTableKey {
-            transaction_id: oldest_live_read.raw_id(),
+            transaction_id: free_until.raw_id(),
             pagination_id: 0,
         };
 
