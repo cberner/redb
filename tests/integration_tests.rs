@@ -953,6 +953,56 @@ fn regression21() {
 }
 
 #[test]
+fn regression22() {
+    let tmpfile = create_tempfile();
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.remove(0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Extra commit to finalize the cleanup of the freed pages
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let allocated_pages = txn.stats().unwrap().allocated_pages();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.remove(0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+
+    // Extra commit to finalize the cleanup of the freed pages. The read transaction should not
+    // block the freeing, but there was a bug where it did.
+    db.begin_write().unwrap().commit().unwrap();
+
+    drop(read_txn);
+
+    let txn = db.begin_write().unwrap();
+    assert_eq!(allocated_pages, txn.stats().unwrap().allocated_pages());
+}
+
+#[test]
 fn check_integrity_clean() {
     let tmpfile = create_tempfile();
 
