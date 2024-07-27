@@ -423,6 +423,10 @@ impl TransactionalMemory {
         result
     }
 
+    pub(crate) fn region_tracker_page(&self) -> PageNumber {
+        self.state.lock().unwrap().header.region_tracker()
+    }
+
     // Relocates the region tracker to a lower page, if possible
     // Returns true if the page was moved
     pub(crate) fn relocate_region_tracker(&self) -> Result<bool> {
