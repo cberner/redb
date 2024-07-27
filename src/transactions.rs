@@ -735,11 +735,7 @@ impl WriteTransaction {
             if referenced_by_system_tree.contains(&page) {
                 continue;
             }
-            if self.mem.uncommitted(page) {
-                self.mem.free(page);
-            } else {
-                freed_pages.push(page);
-            }
+            freed_pages.push(page);
         }
         *self.freed_pages.lock().unwrap() = freed_pages;
         self.tables.lock().unwrap().table_tree = TableTreeMut::new(
@@ -779,12 +775,8 @@ impl WriteTransaction {
                     && !freed_pages_hash.contains(&page)
                     && !referenced_by_system_tree.contains(&page)
                 {
-                    if self.mem.uncommitted(page) {
-                        self.mem.free(page);
-                    } else {
-                        freed_pages.push(page);
-                        freed_pages_hash.insert(page);
-                    }
+                    freed_pages.push(page);
+                    freed_pages_hash.insert(page);
                 }
             }
         }
