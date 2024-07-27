@@ -1003,6 +1003,73 @@ fn regression22() {
 }
 
 #[test]
+fn regression23() {
+    let tmpfile = create_tempfile();
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        // List the savepoints to ensure the system table is created and occupies a page
+        #[allow(unused_must_use)]
+        {
+            txn.list_persistent_savepoints().unwrap();
+        }
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.remove(0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Extra commit to finalize the cleanup of the freed pages
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let allocated_pages = txn.stats().unwrap().allocated_pages();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.remove(0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    txn.restore_savepoint(&savepoint).unwrap();
+    txn.commit().unwrap();
+    drop(savepoint);
+
+    // Extra commit to finalize the cleanup of the freed pages.
+    // There was a bug where the restoration of the savepoint would leak pages
+    db.begin_write().unwrap().commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    assert_eq!(allocated_pages, txn.stats().unwrap().allocated_pages());
+}
+
+#[test]
 fn check_integrity_clean() {
     let tmpfile = create_tempfile();
 

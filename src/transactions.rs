@@ -692,6 +692,18 @@ impl WriteTransaction {
         assert_eq!(self.mem.get_version(), savepoint.get_version());
         self.dirty.store(true, Ordering::Release);
 
+        // Restoring a savepoint needs to accomplish the following:
+        // 1) restore the table tree. This is trivial, since we have the old root
+        // 2) update the system tree to remove invalid persistent savepoints.
+        // 3) free all pages that were allocated since the savepoint and are unreachable
+        //    from the restored table tree root. This is non-trivial, since we want to avoid walking
+        //    the entire table tree, and we cannot simply restore the old allocator state as there
+        //    could be read transactions that reference this data.
+        // 3a) First we free all allocated pages that were not allocated in the savepoint,
+        //     except those referenced by the system table
+        // 3b) We re-process the freed table referenced by the savepoint, but ignore any pages that
+        //     are already free
+
         let allocated_since_savepoint = self
             .mem
             .pages_allocated_since_raw_state(savepoint.get_regional_allocator_states());
@@ -748,10 +760,35 @@ impl WriteTransaction {
             transaction_id: oldest_unprocessed_transaction,
             pagination_id: 0,
         };
+        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut freed_pages_hash = HashSet::new();
+        freed_pages_hash.extend(freed_pages.iter());
         let mut to_remove = vec![];
         for entry in freed_tree.range(&(..lookup_key))? {
-            to_remove.push(entry?.key());
+            let item = entry?;
+            to_remove.push(item.key());
+            let pages: FreedPageList = item.value();
+            for i in 0..pages.len() {
+                let page = pages.get(i);
+                if self.mem.is_page_out_of_bounds(page) {
+                    // Page no longer exists because the database file shrank
+                    continue;
+                }
+                // Re-process the freed pages, but ignore any that would be double-frees
+                if self.mem.is_allocated(page)
+                    && !freed_pages_hash.contains(&page)
+                    && !referenced_by_system_tree.contains(&page)
+                {
+                    if self.mem.uncommitted(page) {
+                        self.mem.free(page);
+                    } else {
+                        freed_pages.push(page);
+                        freed_pages_hash.insert(page);
+                    }
+                }
+            }
         }
+        drop(freed_pages);
         for key in to_remove {
             freed_tree.remove(&key)?;
         }
