@@ -709,12 +709,14 @@ impl WriteTransaction {
             .pages_allocated_since_raw_state(savepoint.get_regional_allocator_states());
 
         // We don't want to rollback the system tree, so keep any pages it references
-        let referenced_by_system_tree = self
+        let mut whitelist = self
             .system_tables
             .lock()
             .unwrap()
             .table_tree
             .all_referenced_pages()?;
+        // The tracker page could have changed too. Don't erase it.
+        whitelist.insert(self.mem.region_tracker_page());
 
         // Find the oldest transaction in the current freed tree, for use below. We do this before
         // freeing pages to ensure that this tree is still valid
@@ -732,7 +734,7 @@ impl WriteTransaction {
 
         let mut freed_pages = vec![];
         for page in allocated_since_savepoint {
-            if referenced_by_system_tree.contains(&page) {
+            if whitelist.contains(&page) {
                 continue;
             }
             freed_pages.push(page);
@@ -773,7 +775,7 @@ impl WriteTransaction {
                 // Re-process the freed pages, but ignore any that would be double-frees
                 if self.mem.is_allocated(page)
                     && !freed_pages_hash.contains(&page)
-                    && !referenced_by_system_tree.contains(&page)
+                    && !whitelist.contains(&page)
                 {
                     freed_pages.push(page);
                     freed_pages_hash.insert(page);
