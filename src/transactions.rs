@@ -704,6 +704,20 @@ impl WriteTransaction {
             .table_tree
             .all_referenced_pages()?;
 
+        // Find the oldest transaction in the current freed tree, for use below. We do this before
+        // freeing pages to ensure that this tree is still valid
+        let oldest_unprocessed_transaction = if let Some(entry) = self
+            .freed_tree
+            .lock()
+            .unwrap()
+            .range::<RangeFull, FreedTableKey>(&(..))?
+            .next()
+        {
+            entry?.key().transaction_id
+        } else {
+            self.transaction_id.raw_id()
+        };
+
         let mut freed_pages = vec![];
         for page in allocated_since_savepoint {
             if referenced_by_system_tree.contains(&page) {
@@ -724,19 +738,6 @@ impl WriteTransaction {
         );
 
         // Remove any freed pages that have already been processed. Otherwise this would result in a double free
-        // We assume below that PageNumber is length 8
-        let oldest_unprocessed_transaction = if let Some(entry) = self
-            .freed_tree
-            .lock()
-            .unwrap()
-            .range::<RangeFull, FreedTableKey>(&(..))?
-            .next()
-        {
-            entry?.key().transaction_id
-        } else {
-            self.transaction_id.raw_id()
-        };
-
         let mut freed_tree = BtreeMut::new(
             savepoint.get_freed_root(),
             self.transaction_guard.clone(),
