@@ -341,6 +341,19 @@ impl TransactionalMemory {
         Ok(())
     }
 
+    // Returns true if the page is beyond the last region: i.e. it no longer exists
+    pub(crate) fn is_page_out_of_bounds(&self, page: PageNumber) -> bool {
+        let state = self.state.lock().unwrap();
+        page.region as usize >= state.allocators.region_allocators.len()
+    }
+
+    pub(crate) fn is_allocated(&self, page: PageNumber) -> bool {
+        let state = self.state.lock().unwrap();
+        let allocator = state.get_region(page.region);
+
+        allocator.is_allocated(page.page_index, page.page_order)
+    }
+
     pub(crate) fn mark_pages_allocated(
         &self,
         allocated_pages: impl Iterator<Item = Result<PageNumber>>,
