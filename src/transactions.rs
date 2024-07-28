@@ -1163,12 +1163,21 @@ impl WriteTransaction {
         let tables = self.tables.lock().unwrap();
         let table_tree = &tables.table_tree;
         let data_tree_stats = table_tree.stats()?;
+
+        let system_tables = self.system_tables.lock().unwrap();
+        let system_table_tree = &system_tables.table_tree;
+        let system_tree_stats = system_table_tree.stats()?;
+
         let freed_tree_stats = self.freed_tree.lock().unwrap().stats()?;
+
         let total_metadata_bytes = data_tree_stats.metadata_bytes()
+            + system_tree_stats.metadata_bytes
+            + system_tree_stats.stored_leaf_bytes
             + freed_tree_stats.metadata_bytes
             + freed_tree_stats.stored_leaf_bytes;
-        let total_fragmented =
-            data_tree_stats.fragmented_bytes() + freed_tree_stats.fragmented_bytes;
+        let total_fragmented = data_tree_stats.fragmented_bytes()
+            + system_tree_stats.fragmented_bytes
+            + freed_tree_stats.fragmented_bytes;
 
         Ok(DatabaseStats {
             tree_height: data_tree_stats.tree_height(),
