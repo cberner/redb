@@ -511,6 +511,21 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
         .set_region_size(config.region_size.value as u64)
         .create_with_backend(backend).unwrap();
 
+    // Disable IO error simulation while we get a baseline number of allocated pages
+    let old_countdown = countdown.swap(u64::MAX, Ordering::SeqCst);
+    let txn = db.begin_write().unwrap();
+    // Touch the savepoints tables to be sure they get created, so that they occupy pages
+    let id = txn.persistent_savepoint().unwrap();
+    txn.delete_persistent_savepoint(id).unwrap();
+    #[allow(unused_must_use)]
+    {
+        txn.list_persistent_savepoints().unwrap();
+    }
+    txn.commit().unwrap();
+    db.begin_write().unwrap().commit().unwrap();
+    let baseline_allocated_pages = db.begin_write().unwrap().stats().unwrap().allocated_pages();
+    countdown.store(old_countdown, Ordering::SeqCst);
+
     let txn = db.begin_write().unwrap();
     let mut table = txn.open_table(COUNTER_TABLE).unwrap();
     table.insert((), 0)?;
@@ -625,6 +640,51 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
             }
         }
     }
+
+    // Repair the database, if needed, and disable IO error simulation
+    countdown.swap(u64::MAX, Ordering::SeqCst);
+    drop(db);
+    let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap()).unwrap());
+    db = Database::builder()
+        .set_page_size(config.page_size.value)
+        .set_cache_size(config.cache_size.value)
+        .set_region_size(config.region_size.value as u64)
+        .create_with_backend(backend)
+        .unwrap();
+
+    // Check for leaked pages
+    let read_txn = db.begin_read().unwrap();
+    let txn = db.begin_write().unwrap();
+    for table in read_txn.list_tables().unwrap() {
+        assert!(txn.delete_table(table).unwrap());
+    }
+    for table in read_txn.list_multimap_tables().unwrap() {
+        assert!(txn.delete_multimap_table(table).unwrap());
+    }
+    savepoint_manager.savepoints.clear();
+    for id in txn.list_persistent_savepoints().unwrap() {
+        txn.delete_persistent_savepoint(id).unwrap();
+    }
+    drop(read_txn);
+    txn.commit().unwrap();
+
+    // Clear out the freed table
+    let mut allocated_pages = db.begin_write().unwrap().stats().unwrap().allocated_pages();
+    loop {
+        db.begin_write().unwrap().commit().unwrap();
+        let new_allocated_pages = db.begin_write().unwrap().stats().unwrap().allocated_pages();
+        if new_allocated_pages == allocated_pages {
+            break;
+        } else {
+            allocated_pages = new_allocated_pages;
+        }
+    }
+
+    let allocated_pages = db.begin_write().unwrap().stats().unwrap().allocated_pages();
+    assert_eq!(allocated_pages, baseline_allocated_pages, "Found {} allocated pages at shutdown, expected {}", allocated_pages, baseline_allocated_pages);
+
+    // TODO: enable this assert
+    // assert!(db.check_integrity().unwrap());
 
     Ok(())
 }
