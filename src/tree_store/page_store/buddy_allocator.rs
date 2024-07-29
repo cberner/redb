@@ -494,7 +494,12 @@ impl BuddyAllocator {
     /// data must have been initialized by Self::init_new()
     pub(crate) fn free(&mut self, page_number: u32, order: u8) {
         debug_assert!(self.get_order_free_mut(order).get(page_number));
-        debug_assert!(self.get_order_allocated(order).get(page_number));
+        debug_assert!(
+            self.get_order_allocated(order).get(page_number),
+            "Attempted to free page {}, order {}, which is not allocated",
+            page_number,
+            order
+        );
 
         self.get_order_allocated_mut(order).clear(page_number);
 
