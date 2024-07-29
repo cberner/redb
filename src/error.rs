@@ -13,6 +13,7 @@ pub enum StorageError {
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
     Io(io::Error),
+    PreviousIo,
     LockPoisoned(&'static panic::Location<'static>),
 }
 
@@ -34,6 +35,7 @@ impl From<StorageError> for Error {
             StorageError::Corrupted(msg) => Error::Corrupted(msg),
             StorageError::ValueTooLarge(x) => Error::ValueTooLarge(x),
             StorageError::Io(x) => Error::Io(x),
+            StorageError::PreviousIo => Error::PreviousIo,
             StorageError::LockPoisoned(location) => Error::LockPoisoned(location),
         }
     }
@@ -54,6 +56,12 @@ impl Display for StorageError {
             }
             StorageError::Io(err) => {
                 write!(f, "I/O error: {err}")
+            }
+            StorageError::PreviousIo => {
+                write!(
+                    f,
+                    "Previous I/O error occurred. Please close and re-open the database."
+                )
             }
             StorageError::LockPoisoned(location) => {
                 write!(f, "Poisoned internal lock: {location}")
@@ -472,6 +480,8 @@ pub enum Error {
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
     TableAlreadyOpen(String, &'static panic::Location<'static>),
     Io(io::Error),
+    /// A previous IO error occurred. The database must be closed and re-opened
+    PreviousIo,
     LockPoisoned(&'static panic::Location<'static>),
     /// The transaction is still referenced by a table or other object
     ReadTransactionStillInUse(ReadTransaction),
@@ -540,6 +550,12 @@ impl Display for Error {
             }
             Error::Io(err) => {
                 write!(f, "I/O error: {err}")
+            }
+            Error::PreviousIo => {
+                write!(
+                    f,
+                    "Previous I/O error occurred. Please close and re-open the database."
+                )
             }
             Error::LockPoisoned(location) => {
                 write!(f, "Poisoned internal lock: {location}")

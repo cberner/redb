@@ -1004,23 +1004,24 @@ impl std::fmt::Debug for Database {
 mod test {
     use crate::backends::FileBackend;
     use crate::{
-        Database, DatabaseError, Durability, ReadableTable, StorageBackend, StorageError,
-        TableDefinition,
+        CommitError, Database, DatabaseError, Durability, ReadableTable, StorageBackend,
+        StorageError, TableDefinition,
     };
-    use std::io::ErrorKind;
+    use std::io::{ErrorKind, Read, Seek, SeekFrom};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
     #[derive(Debug)]
     struct FailingBackend {
         inner: FileBackend,
-        countdown: AtomicU64,
+        countdown: Arc<AtomicU64>,
     }
 
     impl FailingBackend {
         fn new(backend: FileBackend, countdown: u64) -> Self {
             Self {
                 inner: backend,
-                countdown: AtomicU64::new(countdown),
+                countdown: Arc::new(AtomicU64::new(countdown)),
             }
         }
 
@@ -1112,6 +1113,57 @@ mod test {
             .set_region_size(32 * 4096)
             .create(tmpfile.path())
             .unwrap();
+    }
+
+    #[test]
+    fn transient_io_error() {
+        let tmpfile = crate::create_tempfile();
+
+        let backend = FailingBackend::new(
+            FileBackend::new(tmpfile.as_file().try_clone().unwrap()).unwrap(),
+            u64::MAX,
+        );
+        let countdown = backend.countdown.clone();
+        let db = Database::builder()
+            .set_cache_size(0)
+            .create_with_backend(backend)
+            .unwrap();
+
+        let table_def: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+        // Create some garbage
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(table_def).unwrap();
+            table.insert(0, 0).unwrap();
+        }
+        tx.commit().unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(table_def).unwrap();
+            table.insert(0, 1).unwrap();
+        }
+        tx.commit().unwrap();
+
+        let tx = db.begin_write().unwrap();
+        // Cause an error in the commit
+        countdown.store(0, Ordering::SeqCst);
+        let result = tx.commit().err().unwrap();
+        assert!(matches!(result, CommitError::Storage(StorageError::Io(_))));
+        let result = db.begin_write().unwrap().commit().err().unwrap();
+        assert!(matches!(
+            result,
+            CommitError::Storage(StorageError::PreviousIo)
+        ));
+        // Simulate a transient error
+        countdown.store(u64::MAX, Ordering::SeqCst);
+        drop(db);
+
+        // Check that recovery flag is set, even though the error has "cleared"
+        tmpfile.as_file().seek(SeekFrom::Start(9)).unwrap();
+        let mut god_byte = vec![0u8];
+        assert_eq!(tmpfile.as_file().read(&mut god_byte).unwrap(), 1);
+        assert_ne!(god_byte[0] & 2, 0);
     }
 
     #[test]

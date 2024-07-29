@@ -2,7 +2,6 @@ use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::LEAF;
 use crate::{DatabaseError, Result, StorageBackend, StorageError};
 use std::collections::BTreeMap;
-use std::io;
 use std::ops::{Index, IndexMut};
 use std::slice::SliceIndex;
 #[cfg(feature = "cache_metrics")]
@@ -213,8 +212,76 @@ impl PrioritizedWriteCache {
     }
 }
 
-pub(super) struct PagedCachedFile {
+#[derive(Debug)]
+struct CheckedBackend {
     file: Box<dyn StorageBackend>,
+    io_failed: AtomicBool,
+}
+
+impl CheckedBackend {
+    fn new(file: Box<dyn StorageBackend>) -> Self {
+        Self {
+            file,
+            io_failed: AtomicBool::new(false),
+        }
+    }
+
+    fn check_failure(&self) -> Result<()> {
+        if self.io_failed.load(Ordering::Acquire) {
+            Err(StorageError::PreviousIo)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn len(&self) -> Result<u64> {
+        self.check_failure()?;
+        let result = self.file.len();
+        if result.is_err() {
+            self.io_failed.store(true, Ordering::Release);
+        }
+        result.map_err(StorageError::from)
+    }
+
+    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
+        self.check_failure()?;
+        let result = self.file.read(offset, len);
+        if result.is_err() {
+            self.io_failed.store(true, Ordering::Release);
+        }
+        result.map_err(StorageError::from)
+    }
+
+    fn set_len(&self, len: u64) -> Result<()> {
+        self.check_failure()?;
+        let result = self.file.set_len(len);
+        if result.is_err() {
+            self.io_failed.store(true, Ordering::Release);
+        }
+        result.map_err(StorageError::from)
+    }
+
+    fn sync_data(&self, eventual: bool) -> Result<()> {
+        self.check_failure()?;
+        let result = self.file.sync_data(eventual);
+        if result.is_err() {
+            self.io_failed.store(true, Ordering::Release);
+        }
+        result.map_err(StorageError::from)
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+        self.check_failure()?;
+        let result = self.file.write(offset, data);
+        if result.is_err() {
+            self.io_failed.store(true, Ordering::Release);
+        }
+        result.map_err(StorageError::from)
+    }
+}
+
+pub(super) struct PagedCachedFile {
+    file: CheckedBackend,
     page_size: u64,
     max_read_cache_bytes: usize,
     read_cache_bytes: AtomicUsize,
@@ -224,7 +291,6 @@ pub(super) struct PagedCachedFile {
     reads_total: AtomicU64,
     #[cfg(feature = "cache_metrics")]
     reads_hits: AtomicU64,
-    fsync_failed: AtomicBool,
     read_cache: Box<[RwLock<PrioritizedCache>]>,
     // TODO: maybe move this cache to WriteTransaction?
     write_buffer: Arc<Mutex<PrioritizedWriteCache>>,
@@ -242,7 +308,7 @@ impl PagedCachedFile {
             .collect();
 
         Ok(Self {
-            file,
+            file: CheckedBackend::new(file),
             page_size,
             max_read_cache_bytes,
             read_cache_bytes: AtomicUsize::new(0),
@@ -252,36 +318,20 @@ impl PagedCachedFile {
             reads_total: Default::default(),
             #[cfg(feature = "cache_metrics")]
             reads_hits: Default::default(),
-            fsync_failed: Default::default(),
             read_cache,
             write_buffer: Arc::new(Mutex::new(PrioritizedWriteCache::new())),
         })
     }
 
     pub(crate) fn raw_file_len(&self) -> Result<u64> {
-        self.file.len().map_err(StorageError::from)
+        self.file.len()
     }
 
     const fn lock_stripes() -> u64 {
         131
     }
 
-    #[inline]
-    fn check_fsync_failure(&self) -> Result<()> {
-        if self.fsync_failed.load(Ordering::Acquire) {
-            Err(StorageError::Io(io::Error::from(io::ErrorKind::Other)))
-        } else {
-            Ok(())
-        }
-    }
-
-    #[inline]
-    fn set_fsync_failed(&self, failed: bool) {
-        self.fsync_failed.store(failed, Ordering::Release);
-    }
-
     fn flush_write_buffer(&self) -> Result {
-        self.check_fsync_failure()?;
         let mut write_buffer = self.write_buffer.lock().unwrap();
 
         for (offset, buffer) in write_buffer.cache.iter() {
@@ -333,20 +383,13 @@ impl PagedCachedFile {
         // TODO: be more fine-grained about this invalidation
         self.invalidate_cache_all();
 
-        self.file.set_len(len).map_err(StorageError::from)
+        self.file.set_len(len)
     }
 
     pub(super) fn flush(&self, #[allow(unused_variables)] eventual: bool) -> Result {
-        self.check_fsync_failure()?;
         self.flush_write_buffer()?;
 
-        let res = self.file.sync_data(eventual).map_err(StorageError::from);
-        if res.is_err() {
-            self.set_fsync_failed(true);
-            return res;
-        }
-
-        Ok(())
+        self.file.sync_data(eventual)
     }
 
     // Make writes visible to readers, but does not guarantee any durability
@@ -356,8 +399,7 @@ impl PagedCachedFile {
 
     // Read directly from the file, ignoring any cached data
     pub(super) fn read_direct(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
-        self.check_fsync_failure()?;
-        Ok(self.file.read(offset, len)?)
+        self.file.read(offset, len)
     }
 
     // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
@@ -369,7 +411,6 @@ impl PagedCachedFile {
         hint: PageHint,
         cache_policy: impl Fn(&[u8]) -> CachePriority,
     ) -> Result<Arc<[u8]>> {
-        self.check_fsync_failure()?;
         debug_assert_eq!(0, offset % self.page_size);
         #[cfg(feature = "cache_metrics")]
         self.reads_total.fetch_add(1, Ordering::AcqRel);
@@ -457,7 +498,6 @@ impl PagedCachedFile {
         overwrite: bool,
         cache_policy: impl Fn(&[u8]) -> CachePriority,
     ) -> Result<WritablePage> {
-        self.check_fsync_failure()?;
         assert_eq!(0, offset % self.page_size);
         let mut lock = self.write_buffer.lock().unwrap();
 
