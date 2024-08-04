@@ -307,7 +307,15 @@ fn main() {
 
     let rocksdb_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
-        let db = rocksdb::TransactionDB::open_default(tmpfile.path()).unwrap();
+
+        let mut bb = rocksdb::BlockBasedOptions::default();
+        bb.set_block_cache(&rocksdb::Cache::new_lru_cache(4 * 1_024 * 1_024 * 1_024));
+
+        let mut opts = rocksdb::Options::default();
+        opts.set_block_based_table_factory(&bb);
+        opts.create_if_missing(true);
+
+        let db = rocksdb::TransactionDB::open(&opts, &Default::default(), tmpfile.path()).unwrap();
         let table = RocksdbBenchDatabase::new(&db);
         benchmark(table)
     };
