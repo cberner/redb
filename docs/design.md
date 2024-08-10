@@ -395,6 +395,83 @@ Savepoints come in two varieties:
 2. Persistent. These savepoints are persisted in the database file and therefore across restarts.
    They are stored in a table inside the system table tree. They must be explicitly deallocated.
 
+## Epoch based reclamation
+As described above transactions and savepoints rely on epoch based reclamation of pages to ensure
+that pages are only freed after they are no longer referenced. Care must be taken to ensure that a
+page which is still referenced is never freed. The high level design is described below:
+
+### Definitions
+* Transaction states:
+  * Uncommitted. An in-progress write transaction
+  * Committed. A committed write transaction
+  * Aborted. An aborted write transaction
+  * Orphaned. A read or write transaction which is no longer referenced
+  * Reclaimed. A write transaction which became orphaned and all of its pending free pages have
+    been reclaimed
+* Dirty page: a page that is allocated and the transaction in which it was allocated has not committed yet
+* Committed page: a page that is allocated and the transaction in which it was allocated has committed
+* Pending free page: a page that is allocated that is no longer reachable from the data tree or system
+  tree roots, as of the associated transaction. These are stored in the freed tree.
+
+### Invariants
+The following invariants must be maintained
+* Committed pages are never modified in-place
+* Committed pages may only be freed by transitioning into the "pending free page" state, and after
+  the associated transaction and all prior transactions have reached the Orphaned state
+* Pages will only contain page pointers to pages in the same, or an earlier, transaction. This follows
+  from the fact that committed pages are never modified, and transaction ids being monotonically increasing
+* Freed tree must only contain pages in the pending free page state
+
+### Key operations
+#### Modification during write transactions
+Write transactions uphold the required invariants through a very simple mechanism. All modifications
+to commited pages are performed copy-on-write. That is a new page is allocated, modifications are
+made in the new page, and a new b-tree is constructed to reference the new page. Dirty pages are
+allowed to be modified in-place -- usually accomplished by freeing them.
+The normal tables, system tables, and also the freed tree use this approach.
+When a transaction aborts, all pages it allocated are immediately freed.
+
+#### Savepoint restore
+Restoring a savepoint brings all normal tables back to the state they were in when the savepoint was
+captured. The system tables are unaffected, and the freed tree needs to be put into a consistent
+state.
+Restoring the normal tables is trivial, since the savepoint captures the data root.
+
+The freed table needs to be updated in two ways:
+1) the restored data root from the savepoint must reference only committed pages, so we remove all
+   pending free pages that are referenced by the savepoint's data root
+2) all pages that become unreachable by restoring the savepoint data root must be added to the freed
+   table
+
+Simple method. We rewrite the freed table to remove any pending free pages which are
+referenced by the savepoint's data root, and then add the difference of the pages referenced by the
+current data root and the savepoint's data root.
+
+Fast method. A file format change will be required, but in the future the freed tree can be split
+into one for frees from the data tree and one for frees from the system tree and freed tree itself.
+Then (1) can be accomplished by evicting all entries from the data freed tree which are associated
+with transactions after the savepoint. Then an "allocation tree" will be added to track allocations
+in the data tree for each transaction, as an optimization this will be written only when a savepoint
+exists. Then, (2) will be accomplished by moving all allocations from transactions after the
+savepoint into the pending free state.
+
+#### Database repair
+To repair the database after an unclean shutdown we must:
+1) Update the super header to reference the last fully committed transaction
+2) Update the allocator state, so that it is consistent with all the database roots in the above
+   transaction
+
+For (1), if the primary commit slot is invalid we switch to the secondary slot.
+
+For (2), we rebuild the allocator state by walking the following trees and marking all referenced
+pages as allocated:
+* data tree
+* system tree
+* freed tree, and all pending free pages contained within
+All pages referenced by a savepoint must be contained in the above, because it is either:
+a) referenced directly by the data, system, or freed tree -- i.e. it's a committed page
+b) it is not referenced, in which case it is in the pending free state and is contained in the freed tree
+
 # Assumptions about underlying media
 redb is designed to be safe even in the event of power failure or on poorly behaved media.
 Therefore, we make only a few assumptions about the guarantees provided by the underlying filesystem:
