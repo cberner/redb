@@ -82,10 +82,6 @@ impl Savepoint {
         self.freed_root
     }
 
-    pub(crate) fn get_regional_allocator_states(&self) -> &[Vec<u8>] {
-        &self.regional_allocators
-    }
-
     pub(crate) fn db_address(&self) -> *const TransactionTracker {
         self.transaction_tracker.as_ref() as *const _
     }

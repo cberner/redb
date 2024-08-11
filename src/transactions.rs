@@ -23,7 +23,7 @@ use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
-use std::ops::{RangeBounds, RangeFull};
+use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{panic, thread};
@@ -694,56 +694,28 @@ impl WriteTransaction {
 
         // Restoring a savepoint needs to accomplish the following:
         // 1) restore the table tree. This is trivial, since we have the old root
-        // 2) update the system tree to remove invalid persistent savepoints.
-        // 3) free all pages that were allocated since the savepoint and are unreachable
-        //    from the restored table tree root. This is non-trivial, since we want to avoid walking
-        //    the entire table tree, and we cannot simply restore the old allocator state as there
-        //    could be read transactions that reference this data.
-        // 3a) First we free all allocated pages that were not allocated in the savepoint,
-        //     except those referenced by the system table
-        // 3b) We re-process the freed table referenced by the savepoint, but ignore any pages that
-        //     are already free
+        // 1a) we also filter the freed tree to remove any pages referenced by the old root
+        // 2) free all pages that were allocated since the savepoint and are unreachable
+        //    from the restored table tree root. Here we diff the reachable pages from the old
+        //    and new roots
+        // 3) update the system tree to remove invalid persistent savepoints.
 
-        let allocated_since_savepoint = self
-            .mem
-            .pages_allocated_since_raw_state(savepoint.get_regional_allocator_states());
-
-        // We don't want to rollback the system tree, so keep any pages it references
-        let mut whitelist = self
-            .system_tables
+        let old_table_tree = TableTreeMut::new(
+            savepoint.get_user_root(),
+            self.transaction_guard.clone(),
+            self.mem.clone(),
+            self.freed_pages.clone(),
+        );
+        // TODO: traversing these can be very slow in a large database. Speed this up.
+        let current_root_pages = self
+            .tables
             .lock()
             .unwrap()
             .table_tree
             .all_referenced_pages()?;
-        // The tracker page could have changed too. Don't erase it.
-        whitelist.insert(self.mem.region_tracker_page());
+        let old_root_pages = old_table_tree.all_referenced_pages()?;
 
-        // Find the oldest transaction in the current freed tree, for use below. We do this before
-        // freeing pages to ensure that this tree is still valid
-        let oldest_unprocessed_transaction = if let Some(entry) = self
-            .freed_tree
-            .lock()
-            .unwrap()
-            .range::<RangeFull, FreedTableKey>(&(..))?
-            .next()
-        {
-            entry?.key().transaction_id
-        } else {
-            self.transaction_id.raw_id()
-        };
-
-        let mut freed_pages = vec![];
-        for page in allocated_since_savepoint {
-            if whitelist.contains(&page) {
-                continue;
-            }
-            if self.mem.uncommitted(page) {
-                self.mem.free(page);
-            } else {
-                freed_pages.push(page);
-            }
-        }
-        *self.freed_pages.lock().unwrap() = freed_pages;
+        // 1) restore the table tree
         self.tables.lock().unwrap().table_tree = TableTreeMut::new(
             savepoint.get_user_root(),
             self.transaction_guard.clone(),
@@ -751,57 +723,82 @@ impl WriteTransaction {
             self.freed_pages.clone(),
         );
 
-        // Remove any freed pages that have already been processed. Otherwise this would result in a double free
-        let mut freed_tree = BtreeMut::new(
-            savepoint.get_freed_root(),
-            self.transaction_guard.clone(),
-            self.mem.clone(),
-            self.post_commit_frees.clone(),
-        );
-        let lookup_key = FreedTableKey {
-            transaction_id: oldest_unprocessed_transaction,
-            pagination_id: 0,
-        };
-        let mut freed_pages = self.freed_pages.lock().unwrap();
-        let mut freed_pages_hash = HashSet::new();
-        freed_pages_hash.extend(freed_pages.iter());
-        let mut to_remove = vec![];
-        for entry in freed_tree.range(&(..lookup_key))? {
-            let item = entry?;
-            to_remove.push(item.key());
-            let pages: FreedPageList = item.value();
-            for i in 0..pages.len() {
-                let page = pages.get(i);
-                if self.mem.is_page_out_of_bounds(page) {
-                    // Page no longer exists because the database file shrank
-                    continue;
-                }
-                // Re-process the freed pages, but ignore any that would be double-frees
-                if self.mem.is_allocated(page)
-                    && !freed_pages_hash.contains(&page)
-                    && !whitelist.contains(&page)
-                {
-                    if self.mem.uncommitted(page) {
-                        self.mem.free(page);
-                    } else {
-                        freed_pages.push(page);
-                        freed_pages_hash.insert(page);
+        // 1a) filter any pages referenced by the old data root to bring them back to the committed state
+        let mut txn_id = savepoint.get_transaction_id().raw_id();
+        let mut freed_tree = self.freed_tree.lock().unwrap();
+        loop {
+            let lower = FreedTableKey {
+                transaction_id: txn_id,
+                pagination_id: 0,
+            };
+
+            if freed_tree.range(&(lower..))?.next().is_none() {
+                break;
+            }
+            let lower = FreedTableKey {
+                transaction_id: txn_id,
+                pagination_id: 0,
+            };
+            let upper = FreedTableKey {
+                transaction_id: txn_id + 1,
+                pagination_id: 0,
+            };
+
+            // Find all the pending pages for this txn and filter them
+            let mut pending_pages = vec![];
+            for entry in freed_tree.extract_from_if(&(lower..upper), |_, _| true)? {
+                let item = entry?;
+                for i in 0..item.value().len() {
+                    let p = item.value().get(i);
+                    if !old_root_pages[p.region as usize].is_allocated(p.page_index, p.page_order) {
+                        pending_pages.push(p);
                     }
+                }
+            }
+
+            let mut pagination_counter = 0u64;
+            while !pending_pages.is_empty() {
+                let chunk_size = 100;
+                let buffer_size = FreedPageList::required_bytes(chunk_size);
+                let key = FreedTableKey {
+                    transaction_id: txn_id,
+                    pagination_id: pagination_counter,
+                };
+                let mut access_guard =
+                    freed_tree.insert_reserve(&key, buffer_size.try_into().unwrap())?;
+
+                let len = pending_pages.len();
+                access_guard.as_mut().clear();
+                for page in pending_pages.drain(len - min(len, chunk_size)..) {
+                    access_guard.as_mut().push_back(page);
+                }
+                drop(access_guard);
+
+                pagination_counter += 1;
+            }
+
+            txn_id += 1;
+        }
+
+        // 2) free all pages that became unreachable
+        let mut freed_pages = self.freed_pages.lock().unwrap();
+        for i in 0..current_root_pages.len() {
+            let mut pages = vec![];
+            current_root_pages[i].difference(i.try_into().unwrap(), &old_root_pages[i], &mut pages);
+            for page in pages {
+                if self.mem.uncommitted(page) {
+                    self.mem.free(page);
+                } else {
+                    freed_pages.push(page);
                 }
             }
         }
         drop(freed_pages);
-        for key in to_remove {
-            freed_tree.remove(&key)?;
-        }
 
-        *self.freed_tree.lock().unwrap() = freed_tree;
-
-        // Invalidate all savepoints that are newer than the one being applied to prevent the user
+        // 3) Invalidate all savepoints that are newer than the one being applied to prevent the user
         // from later trying to restore a savepoint "on another timeline"
         self.transaction_tracker
             .invalidate_savepoints_after(savepoint.get_id());
-
         for persistent_savepoint in self.list_persistent_savepoints()? {
             if persistent_savepoint > savepoint.get_id().0 {
                 self.delete_persistent_savepoint(persistent_savepoint)?;

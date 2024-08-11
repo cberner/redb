@@ -112,6 +112,19 @@ impl RegionTracker {
     }
 }
 
+pub(crate) fn new_allocators(layout: DatabaseLayout) -> Vec<BuddyAllocator> {
+    let mut result = vec![];
+    for i in 0..layout.num_regions() {
+        let region_layout = layout.region_layout(i);
+        let allocator = BuddyAllocator::new(
+            region_layout.num_pages(),
+            layout.full_region_layout().num_pages(),
+        );
+        result.push(allocator);
+    }
+    result
+}
+
 pub(super) struct Allocators {
     pub(super) region_tracker: RegionTracker,
     pub(super) region_allocators: Vec<BuddyAllocator>,
@@ -136,6 +149,16 @@ impl Allocators {
             region_tracker,
             region_allocators,
         }
+    }
+
+    // TODO: remove this at some point. It is useful for debugging though.
+    #[allow(dead_code)]
+    pub(super) fn print_all_allocated(&self) {
+        let mut pages = vec![];
+        for (i, allocator) in self.region_allocators.iter().enumerate() {
+            allocator.get_allocated_pages(i.try_into().unwrap(), &mut pages);
+        }
+        println!("Allocated pages: {pages:?}");
     }
 
     pub(crate) fn xxh3_hash(&self) -> u128 {

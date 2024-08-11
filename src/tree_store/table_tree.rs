@@ -1,18 +1,20 @@
 use crate::db::TransactionGuard;
 use crate::error::TableError;
 use crate::multimap_table::{
-    finalize_tree_and_subtree_checksums, multimap_btree_stats, verify_tree_and_subtree_checksums,
+    finalize_tree_and_subtree_checksums, multimap_btree_stats, parse_subtree_roots,
+    verify_tree_and_subtree_checksums, DynamicCollection,
 };
 use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
 use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
+use crate::tree_store::page_store::{new_allocators, BuddyAllocator};
 use crate::tree_store::{
     Btree, BtreeMut, BtreeRangeIter, PageHint, PageNumber, RawBtree, TransactionalMemory,
 };
 use crate::types::{Key, MutInPlaceValue, TypeName, Value};
 use crate::{DatabaseStats, Result};
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::mem;
 use std::mem::size_of;
 use std::ops::RangeFull;
@@ -556,12 +558,14 @@ impl<'txn> TableTreeMut<'txn> {
         }
     }
 
-    pub(crate) fn all_referenced_pages(&self) -> Result<HashSet<PageNumber>> {
+    pub(crate) fn all_referenced_pages(&self) -> Result<Vec<BuddyAllocator>> {
+        let mut result = new_allocators(self.mem.get_layout());
+
         // All the pages in the table tree itself
-        let mut result = HashSet::new();
         if let Some(iter) = self.tree.all_pages_iter()? {
             for page in iter {
-                result.insert(page?);
+                let page = page?;
+                result[page.region as usize].record_alloc(page.page_index, page.page_order);
             }
         }
 
@@ -580,13 +584,57 @@ impl<'txn> TableTreeMut<'txn> {
                 )?;
 
                 for page in table_pages_iter {
-                    result.insert(page?);
+                    let page = page?;
+                    result[page.region as usize].record_alloc(page.page_index, page.page_order);
                 }
             }
         }
 
-        if !self.list_tables(TableType::Multimap)?.is_empty() {
-            unimplemented!("Walking all multimap references is not currently supported");
+        for entry in self.list_tables(TableType::Multimap)? {
+            let definition = self
+                .get_table_untyped(&entry, TableType::Multimap)
+                .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
+                .unwrap();
+            if let Some(header) = definition.get_root() {
+                let table_pages_iter = AllPageNumbersBtreeIter::new(
+                    header.root,
+                    definition.get_fixed_key_size(),
+                    DynamicCollection::<()>::fixed_width_with(definition.get_fixed_value_size()),
+                    self.mem.clone(),
+                )?;
+                for page in table_pages_iter {
+                    let page = page?;
+                    result[page.region as usize].record_alloc(page.page_index, page.page_order);
+                }
+
+                let table_pages_iter = AllPageNumbersBtreeIter::new(
+                    header.root,
+                    definition.get_fixed_key_size(),
+                    DynamicCollection::<()>::fixed_width_with(definition.get_fixed_value_size()),
+                    self.mem.clone(),
+                )?;
+                for table_page in table_pages_iter {
+                    let page = self.mem.get_page(table_page?)?;
+                    let subtree_roots = parse_subtree_roots(
+                        &page,
+                        definition.get_fixed_key_size(),
+                        definition.get_fixed_value_size(),
+                    );
+                    for subtree_header in subtree_roots {
+                        let sub_root_iter = AllPageNumbersBtreeIter::new(
+                            subtree_header.root,
+                            definition.get_fixed_value_size(),
+                            <()>::fixed_width(),
+                            self.mem.clone(),
+                        )?;
+                        for page in sub_root_iter {
+                            let page = page?;
+                            result[page.region as usize]
+                                .record_alloc(page.page_index, page.page_order);
+                        }
+                    }
+                }
+            }
         }
 
         Ok(result)

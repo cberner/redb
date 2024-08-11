@@ -341,19 +341,6 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    // Returns true if the page is beyond the last region: i.e. it no longer exists
-    pub(crate) fn is_page_out_of_bounds(&self, page: PageNumber) -> bool {
-        let state = self.state.lock().unwrap();
-        page.region as usize >= state.allocators.region_allocators.len()
-    }
-
-    pub(crate) fn is_allocated(&self, page: PageNumber) -> bool {
-        let state = self.state.lock().unwrap();
-        let allocator = state.get_region(page.region);
-
-        allocator.is_allocated(page.page_index, page.page_order)
-    }
-
     pub(crate) fn mark_pages_allocated(
         &self,
         allocated_pages: impl Iterator<Item = Result<PageNumber>>,
@@ -423,10 +410,6 @@ impl TransactionalMemory {
         result
     }
 
-    pub(crate) fn region_tracker_page(&self) -> PageNumber {
-        self.state.lock().unwrap().header.region_tracker()
-    }
-
     // Relocates the region tracker to a lower page, if possible
     // Returns true if the page was moved
     pub(crate) fn relocate_region_tracker(&self) -> Result<bool> {
@@ -463,32 +446,6 @@ impl TransactionalMemory {
         }
 
         regional_allocators
-    }
-
-    // Diffs region_states, which must be the result of calling get_raw_allocator_states(), against
-    // the currently allocated set of pages
-    pub(crate) fn pages_allocated_since_raw_state(
-        &self,
-        region_states: &[Vec<u8>],
-    ) -> Vec<PageNumber> {
-        let mut result = vec![];
-        let state = self.state.lock().unwrap();
-
-        for i in 0..state.header.layout().num_regions() {
-            let current_state = state.get_region(i);
-            if let Some(old_state) = region_states.get(i as usize) {
-                current_state.get_allocated_pages_since_savepoint(i, old_state, &mut result);
-            } else {
-                // This region didn't exist, so everything is newly allocated
-                current_state.get_allocated_pages(i, &mut result);
-            }
-        }
-
-        // Don't include the region tracker, since we manage that internally to the TranscationalMemory
-        // Otherwise restoring a savepoint would free it.
-        result.retain(|x| *x != state.header.region_tracker());
-
-        result
     }
 
     // Commit all outstanding changes and make them visible as the primary
@@ -776,6 +733,10 @@ impl TransactionalMemory {
         } else {
             state.header.primary_slot().freed_root
         }
+    }
+
+    pub(crate) fn get_layout(&self) -> DatabaseLayout {
+        self.state.lock().unwrap().header.layout()
     }
 
     pub(crate) fn get_last_committed_transaction_id(&self) -> Result<TransactionId> {
