@@ -410,6 +410,13 @@ impl TransactionalMemory {
         result
     }
 
+    pub(crate) fn is_allocated(&self, page: PageNumber) -> bool {
+        let state = self.state.lock().unwrap();
+        let allocator = state.get_region(page.region);
+
+        allocator.is_allocated(page.page_index, page.page_order)
+    }
+
     // Relocates the region tracker to a lower page, if possible
     // Returns true if the page was moved
     pub(crate) fn relocate_region_tracker(&self) -> Result<bool> {
