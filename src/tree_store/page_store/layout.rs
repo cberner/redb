@@ -83,7 +83,7 @@ impl RegionLayout {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct DatabaseLayout {
+pub(crate) struct DatabaseLayout {
     full_region_layout: RegionLayout,
     num_full_regions: u32,
     trailing_partial_region: Option<RegionLayout>,

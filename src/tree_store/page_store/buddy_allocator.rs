@@ -225,34 +225,23 @@ impl BuddyAllocator {
         result
     }
 
-    pub(crate) fn get_allocated_pages_since_savepoint(
+    pub(crate) fn difference(
         &self,
         region: u32,
-        state: &[u8],
+        other: &BuddyAllocator,
         output: &mut Vec<PageNumber>,
     ) {
-        let max_order = state[0];
-        let num_pages = u32::from_le_bytes(state[1..5].try_into().unwrap());
+        let num_pages = other.len();
 
-        let mut data_start = 5 + size_of::<u32>() * (max_order as usize + 1);
-
-        for order in 0..=max_order {
-            let offset_index = 5 + size_of::<u32>() * (order as usize);
-            let data_end = u32::from_le_bytes(
-                state[offset_index..(offset_index + size_of::<u32>())]
-                    .try_into()
-                    .unwrap(),
-            ) as usize;
-            let bytes = &state[data_start..data_end];
-            let savepoint_allocated = U64GroupedBitmap::from_bytes(bytes);
+        for order in 0..=self.max_order {
+            let other_allocated = other.get_order_allocated(order);
             let self_allocated = self.get_order_allocated(order);
-            for i in self_allocated.difference(&savepoint_allocated) {
+            for i in self_allocated.difference(other_allocated) {
                 if i >= num_pages {
                     break;
                 }
                 output.push(PageNumber::new(region, i, order));
             }
-            data_start = data_end;
         }
     }
 
