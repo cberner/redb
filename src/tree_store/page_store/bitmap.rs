@@ -346,6 +346,7 @@ impl U64GroupedBitmap {
         U64GroupedBitmapDifference::new(&self.data, &exclusion.data)
     }
 
+    #[allow(dead_code)]
     pub fn iter(&self) -> U64GroupedBitmapIter {
         U64GroupedBitmapIter::new(self.len, &self.data)
     }

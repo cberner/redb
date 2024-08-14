@@ -245,6 +245,7 @@ impl BuddyAllocator {
         }
     }
 
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn get_allocated_pages(&self, region: u32, output: &mut Vec<PageNumber>) {
         for order in 0..=self.max_order {
             let allocated = self.get_order_allocated(order);

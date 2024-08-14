@@ -523,7 +523,9 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
     }
     txn.commit().unwrap();
     db.begin_write().unwrap().commit().unwrap();
-    let baseline_allocated_pages = db.begin_write().unwrap().stats().unwrap().allocated_pages();
+    let txn = db.begin_write().unwrap();
+    let baseline_allocated_pages = txn.stats().unwrap().allocated_pages();
+    txn.abort().unwrap();
     countdown.store(old_countdown, Ordering::SeqCst);
 
     let txn = db.begin_write().unwrap();
@@ -680,7 +682,9 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
         }
     }
 
-    let allocated_pages = db.begin_write().unwrap().stats().unwrap().allocated_pages();
+    let txn = db.begin_write().unwrap();
+    let allocated_pages = txn.stats().unwrap().allocated_pages();
+    txn.abort().unwrap();
     assert_eq!(allocated_pages, baseline_allocated_pages, "Found {} allocated pages at shutdown, expected {}", allocated_pages, baseline_allocated_pages);
 
     // TODO: enable this assert
