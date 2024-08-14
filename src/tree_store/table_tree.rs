@@ -796,17 +796,65 @@ impl<'txn> TableTreeMut<'txn> {
         table_type: TableType,
     ) -> Result<bool, TableError> {
         if let Some(definition) = self.get_table_untyped(name, table_type)? {
-            if let Some(header) = definition.get_root() {
-                let iter = AllPageNumbersBtreeIter::new(
-                    header.root,
-                    definition.fixed_key_size,
-                    definition.fixed_value_size,
-                    self.mem.clone(),
-                )?;
-                let mut freed_pages = self.freed_pages.lock().unwrap();
-                for page_number in iter {
-                    freed_pages.push(page_number?);
+            if definition.table_type == TableType::Normal {
+                if let Some(header) = definition.get_root() {
+                    let iter = AllPageNumbersBtreeIter::new(
+                        header.root,
+                        definition.fixed_key_size,
+                        definition.fixed_value_size,
+                        self.mem.clone(),
+                    )?;
+                    let mut freed_pages = self.freed_pages.lock().unwrap();
+                    for page_number in iter {
+                        freed_pages.push(page_number?);
+                    }
                 }
+            } else if definition.table_type == TableType::Multimap {
+                if let Some(header) = definition.get_root() {
+                    let mut freed_pages = self.freed_pages.lock().unwrap();
+                    // Delete all the pages in the subtrees
+                    let table_pages_iter = AllPageNumbersBtreeIter::new(
+                        header.root,
+                        definition.get_fixed_key_size(),
+                        DynamicCollection::<()>::fixed_width_with(
+                            definition.get_fixed_value_size(),
+                        ),
+                        self.mem.clone(),
+                    )?;
+                    for table_page in table_pages_iter {
+                        let page = self.mem.get_page(table_page?)?;
+                        let subtree_roots = parse_subtree_roots(
+                            &page,
+                            definition.get_fixed_key_size(),
+                            definition.get_fixed_value_size(),
+                        );
+                        for subtree_header in subtree_roots {
+                            let sub_root_iter = AllPageNumbersBtreeIter::new(
+                                subtree_header.root,
+                                definition.get_fixed_value_size(),
+                                <()>::fixed_width(),
+                                self.mem.clone(),
+                            )?;
+                            for page in sub_root_iter {
+                                freed_pages.push(page?);
+                            }
+                        }
+                    }
+                    // Now free the multimap table itself
+                    let table_pages_iter = AllPageNumbersBtreeIter::new(
+                        header.root,
+                        definition.get_fixed_key_size(),
+                        DynamicCollection::<()>::fixed_width_with(
+                            definition.get_fixed_value_size(),
+                        ),
+                        self.mem.clone(),
+                    )?;
+                    for table_page in table_pages_iter {
+                        freed_pages.push(table_page?);
+                    }
+                }
+            } else {
+                unreachable!()
             }
 
             self.pending_table_updates.remove(name);

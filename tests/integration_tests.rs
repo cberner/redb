@@ -1070,6 +1070,60 @@ fn regression23() {
 }
 
 #[test]
+fn regression24() {
+    let tmpfile = create_tempfile();
+
+    let table_def: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("x");
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        // Touch the savepoints tables to be sure they get created, so that they occupy pages
+        let id = txn.persistent_savepoint().unwrap();
+        txn.delete_persistent_savepoint(id).unwrap();
+        // List the savepoints to ensure the system table is created and occupies a page
+        #[allow(unused_must_use)]
+        {
+            txn.list_persistent_savepoints().unwrap();
+        }
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        txn.delete_table(U64_TABLE).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Extra commit to finalize the cleanup of the freed pages
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let allocated_pages = txn.stats().unwrap().allocated_pages();
+    {
+        let mut table = txn.open_multimap_table(table_def).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        txn.delete_multimap_table(table_def).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Extra commit to finalize the cleanup of the freed pages.
+    // There was a bug where deleting a multimap table leaked pages
+    db.begin_write().unwrap().commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    assert_eq!(allocated_pages, txn.stats().unwrap().allocated_pages());
+}
+
+#[test]
 fn check_integrity_clean() {
     let tmpfile = create_tempfile();
 
