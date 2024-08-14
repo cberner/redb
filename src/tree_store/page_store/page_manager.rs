@@ -261,6 +261,16 @@ impl TransactionalMemory {
         })
     }
 
+    #[cfg(any(test, fuzzing))]
+    pub(crate) fn all_allocated_pages(&self) -> Vec<PageNumber> {
+        self.state.lock().unwrap().allocators.all_allocated()
+    }
+
+    #[cfg(any(test, fuzzing))]
+    pub(crate) fn tracker_page(&self) -> PageNumber {
+        self.state.lock().unwrap().header.region_tracker()
+    }
+
     pub(crate) fn clear_read_cache(&self) {
         self.storage.invalidate_cache_all()
     }

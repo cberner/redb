@@ -24,6 +24,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
+#[cfg(any(test, fuzzing))]
+use std::ops::RangeFull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{panic, thread};
@@ -504,6 +506,82 @@ impl WriteTransaction {
             created_persistent_savepoints: Mutex::new(Default::default()),
             deleted_persistent_savepoints: Mutex::new(vec![]),
         })
+    }
+
+    #[cfg(any(test, fuzzing))]
+    pub fn print_allocated_page_debug(&self) {
+        let mut all_allocated: HashSet<PageNumber> =
+            HashSet::from_iter(self.mem.all_allocated_pages());
+
+        let tracker = self.mem.tracker_page();
+        all_allocated.remove(&tracker);
+        println!("Tracker page");
+        println!("{tracker:?}");
+
+        let table_allocators = self
+            .tables
+            .lock()
+            .unwrap()
+            .table_tree
+            .all_referenced_pages()
+            .unwrap();
+        let mut table_pages = vec![];
+        for (i, allocator) in table_allocators.iter().enumerate() {
+            allocator.get_allocated_pages(i.try_into().unwrap(), &mut table_pages);
+        }
+        println!("Tables");
+        for p in table_pages {
+            all_allocated.remove(&p);
+            println!("{p:?}")
+        }
+
+        let system_table_allocators = self
+            .system_tables
+            .lock()
+            .unwrap()
+            .table_tree
+            .all_referenced_pages()
+            .unwrap();
+        let mut system_table_pages = vec![];
+        for (i, allocator) in system_table_allocators.iter().enumerate() {
+            allocator.get_allocated_pages(i.try_into().unwrap(), &mut system_table_pages);
+        }
+        println!("System tables");
+        for p in system_table_pages {
+            all_allocated.remove(&p);
+            println!("{p:?}")
+        }
+
+        println!("Free table");
+        if let Some(freed_iter) = self.freed_tree.lock().unwrap().all_pages_iter().unwrap() {
+            for p in freed_iter {
+                let p = p.unwrap();
+                all_allocated.remove(&p);
+                println!("{p:?}")
+            }
+        }
+        println!("Pending free (i.e. in freed table)");
+        for entry in self
+            .freed_tree
+            .lock()
+            .unwrap()
+            .range::<RangeFull, FreedTableKey>(&(..))
+            .unwrap()
+        {
+            let entry = entry.unwrap();
+            let value = entry.value();
+            for i in 0..value.len() {
+                let p = value.get(i);
+                all_allocated.remove(&p);
+                println!("{p:?}")
+            }
+        }
+        if !all_allocated.is_empty() {
+            println!("Leaked pages");
+            for p in all_allocated {
+                println!("{p:?}");
+            }
+        }
     }
 
     /// Creates a snapshot of the current database state, which can be used to rollback the database.

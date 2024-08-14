@@ -151,14 +151,13 @@ impl Allocators {
         }
     }
 
-    // TODO: remove this at some point. It is useful for debugging though.
-    #[allow(dead_code)]
-    pub(super) fn print_all_allocated(&self) {
+    #[cfg(any(test, fuzzing))]
+    pub(super) fn all_allocated(&self) -> Vec<PageNumber> {
         let mut pages = vec![];
         for (i, allocator) in self.region_allocators.iter().enumerate() {
             allocator.get_allocated_pages(i.try_into().unwrap(), &mut pages);
         }
-        println!("Allocated pages: {pages:?}");
+        pages
     }
 
     pub(crate) fn xxh3_hash(&self) -> u128 {
