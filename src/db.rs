@@ -780,6 +780,8 @@ impl Database {
             transaction_id,
             false,
             true,
+            // don't trim the database file, because we want the allocator hash to match exactly
+            false,
         )?;
 
         Ok(())
