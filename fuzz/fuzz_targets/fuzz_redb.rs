@@ -687,8 +687,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
     txn.abort().unwrap();
     assert_eq!(allocated_pages, baseline_allocated_pages, "Found {} allocated pages at shutdown, expected {}", allocated_pages, baseline_allocated_pages);
 
-    // TODO: enable this assert
-    // assert!(db.check_integrity().unwrap());
+    assert!(db.check_integrity().unwrap());
 
     Ok(())
 }
