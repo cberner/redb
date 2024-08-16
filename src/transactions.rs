@@ -1024,6 +1024,7 @@ impl WriteTransaction {
             self.transaction_id,
             eventual,
             two_phase,
+            true,
         )?;
 
         // Mark any pending non-durable commits as fully committed.
