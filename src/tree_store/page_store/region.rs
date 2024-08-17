@@ -162,7 +162,9 @@ impl Allocators {
     }
 
     pub(crate) fn xxh3_hash(&self) -> u128 {
-        let mut result = xxh3_checksum(&self.region_tracker.to_vec());
+        // Ignore the region tracker because it is an optimistic cache, and so may not match
+        // between repairs of the allocators
+        let mut result = 0;
         for allocator in self.region_allocators.iter() {
             result ^= xxh3_checksum(&allocator.to_vec());
         }
