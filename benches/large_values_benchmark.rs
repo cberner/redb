@@ -76,9 +76,13 @@ fn main() {
 
     let lmdb_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
-        let env = lmdb::Environment::new().open(tmpfile.path()).unwrap();
-        env.set_map_size(10 * 4096 * 1024 * 1024).unwrap();
-        let table = LmdbRkvBenchDatabase::new(&env);
+        let env = unsafe {
+            heed::EnvOpenOptions::new()
+                .map_size(10 * 4096 * 1024 * 1024)
+                .open(tmpfile.path())
+                .unwrap()
+        };
+        let table = HeedBenchDatabase::new(&env);
         benchmark(table)
     };
 
