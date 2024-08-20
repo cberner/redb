@@ -1,6 +1,5 @@
 use tempfile::{NamedTempFile, TempDir};
 
-use lmdb::Transaction;
 use rand::prelude::SliceRandom;
 use rand::Rng;
 use std::env::current_dir;
@@ -56,22 +55,28 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
 }
 
 fn lmdb_bench(path: &Path) {
-    let env = lmdb::Environment::new().open(path).unwrap();
-    env.set_map_size(4096 * 1024 * 1024).unwrap();
+    let env = unsafe {
+        heed::EnvOpenOptions::new()
+            .map_size(4096 * 1024 * 1024)
+            .open(path)
+            .unwrap()
+    };
 
     let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
     let pairs_len = pairs.len();
 
-    let db = env.open_db(None).unwrap();
+    let db: heed::Database<heed::types::Bytes, heed::types::Bytes> = env
+        .open_database(&env.read_txn().unwrap(), None)
+        .unwrap()
+        .unwrap();
     {
         let start = SystemTime::now();
-        let mut txn = env.begin_rw_txn().unwrap();
+        let mut txn = env.write_txn().unwrap();
         {
             for i in 0..ELEMENTS {
                 let (key, value) = &mut pairs[i % pairs_len];
                 key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-                txn.put(db, &key, &value, lmdb::WriteFlags::empty())
-                    .unwrap();
+                db.put(&mut txn, key, value).unwrap();
             }
         }
         txn.commit().unwrap();
@@ -83,7 +88,7 @@ fn lmdb_bench(path: &Path) {
         let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
         key_order.shuffle(&mut rand::thread_rng());
 
-        let txn = env.begin_ro_txn().unwrap();
+        let txn = env.read_txn().unwrap();
         {
             for _ in 0..ITERATIONS {
                 let start = SystemTime::now();
@@ -92,7 +97,7 @@ fn lmdb_bench(path: &Path) {
                 for &i in &key_order {
                     let (key, value) = &mut pairs[i % pairs_len];
                     key[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-                    let result: &[u8] = txn.get(db, &key).unwrap();
+                    let result: &[u8] = db.get(&txn, key).unwrap().unwrap();
                     checksum += result[0] as u64;
                     expected_checksum += value[0] as u64;
                 }
