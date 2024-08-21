@@ -4,6 +4,7 @@ use sanakirja::btree::page_unsized;
 use sanakirja::{Commit, RootDb};
 use std::fs;
 use std::fs::File;
+use std::ops::Bound;
 use std::path::Path;
 
 #[allow(dead_code)]
@@ -321,123 +322,119 @@ impl<'a> BenchInserter for SledBenchInserter<'a> {
     }
 }
 
-pub struct LmdbRkvBenchDatabase<'a> {
-    env: &'a lmdb::Environment,
-    db: lmdb::Database,
+pub struct HeedBenchDatabase<'a> {
+    env: &'a heed::Env,
+    db: heed::Database<heed::types::Bytes, heed::types::Bytes>,
 }
 
-impl<'a> LmdbRkvBenchDatabase<'a> {
-    pub fn new(env: &'a lmdb::Environment) -> Self {
-        let db = env.open_db(None).unwrap();
-        LmdbRkvBenchDatabase { env, db }
+impl<'a> HeedBenchDatabase<'a> {
+    pub fn new(env: &'a heed::Env) -> Self {
+        let mut tx = env.write_txn().unwrap();
+        let db = env.create_database(&mut tx, None).unwrap();
+        Self { env, db }
     }
 }
 
-impl<'a> BenchDatabase for LmdbRkvBenchDatabase<'a> {
-    type W<'db> = LmdbRkvBenchWriteTransaction<'db> where Self: 'db;
-    type R<'db> = LmdbRkvBenchReadTransaction<'db> where Self: 'db;
+impl<'a> BenchDatabase for HeedBenchDatabase<'a> {
+    type W<'db> = HeedBenchWriteTransaction<'db> where Self: 'db;
+    type R<'db> = HeedBenchReadTransaction<'db> where Self: 'db;
 
     fn db_type_name() -> &'static str {
-        "lmdb-rkv"
+        "heed"
     }
 
     fn write_transaction(&self) -> Self::W<'_> {
-        let txn = self.env.begin_rw_txn().unwrap();
-        LmdbRkvBenchWriteTransaction { db: self.db, txn }
+        let txn = self.env.write_txn().unwrap();
+        Self::W { db: self.db, txn }
     }
 
     fn read_transaction(&self) -> Self::R<'_> {
-        let txn = self.env.begin_ro_txn().unwrap();
-        LmdbRkvBenchReadTransaction { db: self.db, txn }
+        let txn = self.env.read_txn().unwrap();
+        Self::R { db: self.db, txn }
     }
 }
 
-pub struct LmdbRkvBenchWriteTransaction<'db> {
-    db: lmdb::Database,
-    txn: lmdb::RwTransaction<'db>,
+pub struct HeedBenchWriteTransaction<'db> {
+    db: heed::Database<heed::types::Bytes, heed::types::Bytes>,
+    txn: heed::RwTxn<'db>,
 }
 
-impl<'db> BenchWriteTransaction for LmdbRkvBenchWriteTransaction<'db> {
-    type W<'txn> = LmdbRkvBenchInserter<'txn, 'db> where Self: 'txn;
+impl<'db> BenchWriteTransaction for HeedBenchWriteTransaction<'db> {
+    type W<'txn> = HeedBenchInserter<'txn, 'db> where Self: 'txn;
 
     fn get_inserter(&mut self) -> Self::W<'_> {
-        LmdbRkvBenchInserter {
+        Self::W {
             db: self.db,
             txn: &mut self.txn,
         }
     }
 
     fn commit(self) -> Result<(), ()> {
-        use lmdb::Transaction;
         self.txn.commit().map_err(|_| ())
     }
 }
 
-pub struct LmdbRkvBenchInserter<'txn, 'db> {
-    db: lmdb::Database,
-    txn: &'txn mut lmdb::RwTransaction<'db>,
+pub struct HeedBenchInserter<'txn, 'db> {
+    db: heed::Database<heed::types::Bytes, heed::types::Bytes>,
+    txn: &'txn mut heed::RwTxn<'db>,
 }
 
-impl BenchInserter for LmdbRkvBenchInserter<'_, '_> {
+impl BenchInserter for HeedBenchInserter<'_, '_> {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
-        self.txn
-            .put(self.db, &key, &value, lmdb::WriteFlags::empty())
-            .map_err(|_| ())
+        self.db.put(self.txn, key, value).map_err(|_| ())
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
-        self.txn.del(self.db, &key, None).map_err(|_| ())
+        self.db.delete(self.txn, key).map(|_| ()).map_err(|_| ())
     }
 }
 
-pub struct LmdbRkvBenchReadTransaction<'db> {
-    db: lmdb::Database,
-    txn: lmdb::RoTransaction<'db>,
+pub struct HeedBenchReadTransaction<'db> {
+    db: heed::Database<heed::types::Bytes, heed::types::Bytes>,
+    txn: heed::RoTxn<'db>,
 }
 
-impl<'db> BenchReadTransaction for LmdbRkvBenchReadTransaction<'db> {
-    type T<'txn> = LmdbRkvBenchReader<'txn, 'db> where Self: 'txn;
+impl<'db> BenchReadTransaction for HeedBenchReadTransaction<'db> {
+    type T<'txn> = HeedBenchReader<'txn, 'db> where Self: 'txn;
 
     fn get_reader(&self) -> Self::T<'_> {
-        LmdbRkvBenchReader {
+        Self::T {
             db: self.db,
             txn: &self.txn,
         }
     }
 }
 
-pub struct LmdbRkvBenchReader<'txn, 'db> {
-    db: lmdb::Database,
-    txn: &'txn lmdb::RoTransaction<'db>,
+pub struct HeedBenchReader<'txn, 'db> {
+    db: heed::Database<heed::types::Bytes, heed::types::Bytes>,
+    txn: &'txn heed::RoTxn<'db>,
 }
 
-impl<'txn, 'db> BenchReader for LmdbRkvBenchReader<'txn, 'db> {
+impl<'txn, 'db> BenchReader for HeedBenchReader<'txn, 'db> {
     type Output<'out> = &'out [u8] where Self: 'out;
-    type Iterator<'out> = LmdbRkvBenchIterator<'out> where Self: 'out;
+    type Iterator<'out> = HeedBenchIterator<'out> where Self: 'out;
 
     fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        use lmdb::Transaction;
-        self.txn.get(self.db, &key).ok()
+        self.db.get(self.txn, key).unwrap()
     }
 
     fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
-        use lmdb::{Cursor, Transaction};
-        let iter = self.txn.open_ro_cursor(self.db).unwrap().iter_from(key);
+        let range = (Bound::Included(key), Bound::Unbounded);
+        let iter = self.db.range(self.txn, &range).unwrap();
 
-        LmdbRkvBenchIterator { iter }
+        Self::Iterator { iter }
     }
 
     fn len(&self) -> u64 {
-        use lmdb::Transaction;
-        self.txn.stat(self.db).unwrap().entries() as u64
+        self.db.stat(self.txn).unwrap().entries as u64
     }
 }
 
-pub struct LmdbRkvBenchIterator<'a> {
-    iter: lmdb::Iter<'a>,
+pub struct HeedBenchIterator<'a> {
+    iter: heed::RoRange<'a, heed::types::Bytes, heed::types::Bytes>,
 }
 
-impl BenchIterator for LmdbRkvBenchIterator<'_> {
+impl BenchIterator for HeedBenchIterator<'_> {
     type Output<'out> = &'out [u8] where Self: 'out;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
