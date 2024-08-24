@@ -450,6 +450,7 @@ fn main() {
     }
 
     let mut table = comfy_table::Table::new();
+    table.load_preset(comfy_table::presets::ASCII_MARKDOWN);
     table.set_width(100);
     table.set_header(["", "redb", "lmdb", "rocksdb", "sled", "sanakirja"]);
     for row in rows {
