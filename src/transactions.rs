@@ -286,7 +286,7 @@ impl<'db> SystemNamespace<'db> {
     ) -> Result<SystemTable<'db, 's, K, V>> {
         #[cfg(feature = "logging")]
         debug!("Opening system table: {}", definition);
-        let root = self
+        let (root, _) = self
             .table_tree
             .get_or_create_table::<K, V>(definition.name(), TableType::Normal)
             .map_err(|e| {
@@ -296,7 +296,7 @@ impl<'db> SystemNamespace<'db> {
 
         Ok(SystemTable::new(
             definition.name(),
-            root.get_root(),
+            root,
             transaction.freed_pages.clone(),
             self.transaction_guard.clone(),
             transaction.mem.clone(),
@@ -331,13 +331,13 @@ impl<'db> TableNamespace<'db> {
             return Err(TableError::TableAlreadyOpen(name.to_string(), location));
         }
 
-        let internal_table = self
+        let root = self
             .table_tree
             .get_or_create_table::<K, V>(name, table_type)?;
         self.open_tables
             .insert(name.to_string(), panic::Location::caller());
 
-        Ok((internal_table.get_root(), internal_table.get_length()))
+        Ok(root)
     }
 
     #[track_caller]
@@ -1338,13 +1338,16 @@ impl ReadTransaction {
             .get_table::<K, V>(definition.name(), TableType::Normal)?
             .ok_or_else(|| TableError::TableDoesNotExist(definition.name().to_string()))?;
 
-        Ok(ReadOnlyTable::new(
-            definition.name().to_string(),
-            header.get_root(),
-            PageHint::Clean,
-            self.tree.transaction_guard().clone(),
-            self.mem.clone(),
-        )?)
+        match header {
+            InternalTableDefinition::Normal { table_root, .. } => Ok(ReadOnlyTable::new(
+                definition.name().to_string(),
+                table_root,
+                PageHint::Clean,
+                self.tree.transaction_guard().clone(),
+                self.mem.clone(),
+            )?),
+            InternalTableDefinition::Multimap { .. } => unreachable!(),
+        }
     }
 
     /// Open the given table without a type
@@ -1357,12 +1360,20 @@ impl ReadTransaction {
             .get_table_untyped(handle.name(), TableType::Normal)?
             .ok_or_else(|| TableError::TableDoesNotExist(handle.name().to_string()))?;
 
-        Ok(ReadOnlyUntypedTable::new(
-            header.get_root(),
-            header.get_fixed_key_size(),
-            header.get_fixed_value_size(),
-            self.mem.clone(),
-        ))
+        match header {
+            InternalTableDefinition::Normal {
+                table_root,
+                fixed_key_size,
+                fixed_value_size,
+                ..
+            } => Ok(ReadOnlyUntypedTable::new(
+                table_root,
+                fixed_key_size,
+                fixed_value_size,
+                self.mem.clone(),
+            )),
+            InternalTableDefinition::Multimap { .. } => unreachable!(),
+        }
     }
 
     /// Open the given table
@@ -1375,13 +1386,20 @@ impl ReadTransaction {
             .get_table::<K, V>(definition.name(), TableType::Multimap)?
             .ok_or_else(|| TableError::TableDoesNotExist(definition.name().to_string()))?;
 
-        Ok(ReadOnlyMultimapTable::new(
-            header.get_root(),
-            header.get_length(),
-            PageHint::Clean,
-            self.tree.transaction_guard().clone(),
-            self.mem.clone(),
-        )?)
+        match header {
+            InternalTableDefinition::Normal { .. } => unreachable!(),
+            InternalTableDefinition::Multimap {
+                table_root,
+                table_length,
+                ..
+            } => Ok(ReadOnlyMultimapTable::new(
+                table_root,
+                table_length,
+                PageHint::Clean,
+                self.tree.transaction_guard().clone(),
+                self.mem.clone(),
+            )?),
+        }
     }
 
     /// Open the given table without a type
@@ -1394,13 +1412,22 @@ impl ReadTransaction {
             .get_table_untyped(handle.name(), TableType::Multimap)?
             .ok_or_else(|| TableError::TableDoesNotExist(handle.name().to_string()))?;
 
-        Ok(ReadOnlyUntypedMultimapTable::new(
-            header.get_root(),
-            header.get_length(),
-            header.get_fixed_key_size(),
-            header.get_fixed_value_size(),
-            self.mem.clone(),
-        ))
+        match header {
+            InternalTableDefinition::Normal { .. } => unreachable!(),
+            InternalTableDefinition::Multimap {
+                table_root,
+                table_length,
+                fixed_key_size,
+                fixed_value_size,
+                ..
+            } => Ok(ReadOnlyUntypedMultimapTable::new(
+                table_root,
+                table_length,
+                fixed_key_size,
+                fixed_value_size,
+                self.mem.clone(),
+            )),
+        }
     }
 
     /// List all the tables

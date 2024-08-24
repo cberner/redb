@@ -20,7 +20,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::error::TransactionError;
-use crate::multimap_table::{parse_subtree_roots, DynamicCollection};
 use crate::sealed::Sealed;
 use crate::transactions::SAVEPOINT_TABLE;
 use crate::tree_store::file_backend::FileBackend;
@@ -483,10 +482,16 @@ impl Database {
                 e.into_storage_error_or_corrupted("Persistent savepoint table corrupted")
             })?
         {
+            let savepoint_table_root =
+                if let InternalTableDefinition::Normal { table_root, .. } = savepoint_table_def {
+                    table_root
+                } else {
+                    unreachable!()
+                };
             let savepoint_table: ReadOnlyTable<SavepointId, SerializedSavepoint> =
                 ReadOnlyTable::new(
                     "internal savepoint table".to_string(),
-                    savepoint_table_def.get_root(),
+                    savepoint_table_root,
                     PageHint::None,
                     Arc::new(TransactionGuard::fake()),
                     mem.clone(),
@@ -563,65 +568,10 @@ impl Database {
         // Chain all the other tables to the master table iter
         for entry in iter {
             let definition = entry?.value();
-            if let Some(header) = definition.get_root() {
-                match definition.get_type() {
-                    TableType::Normal => {
-                        let table_pages_iter = AllPageNumbersBtreeIter::new(
-                            header.root,
-                            definition.get_fixed_key_size(),
-                            definition.get_fixed_value_size(),
-                            mem.clone(),
-                        )?;
-                        for result in table_pages_iter {
-                            let page = result?;
-                            assert!(mem.is_allocated(page));
-                        }
-                    }
-                    TableType::Multimap => {
-                        let table_pages_iter = AllPageNumbersBtreeIter::new(
-                            header.root,
-                            definition.get_fixed_key_size(),
-                            DynamicCollection::<()>::fixed_width_with(
-                                definition.get_fixed_value_size(),
-                            ),
-                            mem.clone(),
-                        )?;
-                        for result in table_pages_iter {
-                            let page = result?;
-                            assert!(mem.is_allocated(page));
-                        }
-
-                        let table_pages_iter = AllPageNumbersBtreeIter::new(
-                            header.root,
-                            definition.get_fixed_key_size(),
-                            DynamicCollection::<()>::fixed_width_with(
-                                definition.get_fixed_value_size(),
-                            ),
-                            mem.clone(),
-                        )?;
-                        for table_page in table_pages_iter {
-                            let page = mem.get_page(table_page?)?;
-                            let subtree_roots = parse_subtree_roots(
-                                &page,
-                                definition.get_fixed_key_size(),
-                                definition.get_fixed_value_size(),
-                            );
-                            for subtree_header in subtree_roots {
-                                let sub_root_iter = AllPageNumbersBtreeIter::new(
-                                    subtree_header.root,
-                                    definition.get_fixed_value_size(),
-                                    <()>::fixed_width(),
-                                    mem.clone(),
-                                )?;
-                                for result in sub_root_iter {
-                                    let page = result?;
-                                    assert!(mem.is_allocated(page));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            definition.visit_all_pages(mem.clone(), |page_number| {
+                assert!(mem.is_allocated(page_number));
+                Ok(())
+            })?;
         }
 
         Ok(())
@@ -644,56 +594,11 @@ impl Database {
         // Chain all the other tables to the master table iter
         for entry in iter {
             let definition = entry?.value();
-            if let Some(header) = definition.get_root() {
-                match definition.get_type() {
-                    TableType::Normal => {
-                        let table_pages_iter = AllPageNumbersBtreeIter::new(
-                            header.root,
-                            definition.get_fixed_key_size(),
-                            definition.get_fixed_value_size(),
-                            mem.clone(),
-                        )?;
-                        mem.mark_pages_allocated(table_pages_iter, allow_duplicates)?;
-                    }
-                    TableType::Multimap => {
-                        let table_pages_iter = AllPageNumbersBtreeIter::new(
-                            header.root,
-                            definition.get_fixed_key_size(),
-                            DynamicCollection::<()>::fixed_width_with(
-                                definition.get_fixed_value_size(),
-                            ),
-                            mem.clone(),
-                        )?;
-                        mem.mark_pages_allocated(table_pages_iter, allow_duplicates)?;
-
-                        let table_pages_iter = AllPageNumbersBtreeIter::new(
-                            header.root,
-                            definition.get_fixed_key_size(),
-                            DynamicCollection::<()>::fixed_width_with(
-                                definition.get_fixed_value_size(),
-                            ),
-                            mem.clone(),
-                        )?;
-                        for table_page in table_pages_iter {
-                            let page = mem.get_page(table_page?)?;
-                            let subtree_roots = parse_subtree_roots(
-                                &page,
-                                definition.get_fixed_key_size(),
-                                definition.get_fixed_value_size(),
-                            );
-                            for subtree_header in subtree_roots {
-                                let sub_root_iter = AllPageNumbersBtreeIter::new(
-                                    subtree_header.root,
-                                    definition.get_fixed_value_size(),
-                                    <()>::fixed_width(),
-                                    mem.clone(),
-                                )?;
-                                mem.mark_pages_allocated(sub_root_iter, allow_duplicates)?;
-                            }
-                        }
-                    }
-                }
-            }
+            definition.visit_all_pages(mem.clone(), |page_number| {
+                // TODO: simplify mark_pages_allocated()
+                mem.mark_pages_allocated([Ok(page_number)].into_iter(), allow_duplicates)?;
+                Ok(())
+            })?;
         }
 
         Ok(())
