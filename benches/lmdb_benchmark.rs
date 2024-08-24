@@ -416,15 +416,36 @@ fn main() {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [
+    let results = [
         redb_latency_results,
         lmdb_results,
         rocksdb_results,
         sled_results,
         sanakirja_results,
-    ] {
-        for (i, (_benchmark, duration)) in results.iter().enumerate() {
-            rows[i].push(format!("{}ms", duration.as_millis()));
+    ];
+
+    let mut identified_smallests = vec![vec![false; results.len()]; rows.len()];
+    for i in 0..rows.len() {
+        let mut smallest = None;
+        for j in 0..results.len() {
+            let (_, rt) = &results[j][i];
+            smallest = match smallest {
+                Some((_, prev)) if rt < prev => Some((j, rt)),
+                Some((pi, prev)) => Some((pi, prev)),
+                None => Some((j, rt)),
+            };
+        }
+        let (j, _rt) = smallest.unwrap();
+        identified_smallests[i][j] = true;
+    }
+
+    for (j, results) in results.iter().enumerate() {
+        for (i, (_benchmark, result_type)) in results.iter().enumerate() {
+            rows[i].push(if identified_smallests[i][j] {
+                format!("**{result_type}**")
+            } else {
+                result_type.to_string()
+            });
         }
     }
 
