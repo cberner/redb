@@ -1,6 +1,6 @@
 #[cfg(not(target_os = "wasi"))]
 mod multithreading_test {
-    use redb::{Database, ReadableTableMetadata, TableDefinition};
+    use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
     use std::sync::Arc;
     use std::thread;
 
@@ -69,5 +69,47 @@ mod multithreading_test {
         assert_eq!(table.len().unwrap(), 2);
         let table = read_txn.open_table(DEF2).unwrap();
         assert_eq!(table.len().unwrap(), 2);
+    }
+
+    #[test]
+    fn multithreaded_re_read() {
+        let tmpfile = create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+
+        const DEF1: TableDefinition<&str, &str> = TableDefinition::new("x");
+        const DEF2: TableDefinition<&str, &str> = TableDefinition::new("y");
+        const DEF3: TableDefinition<&str, &str> = TableDefinition::new("z");
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table1 = write_txn.open_table(DEF1).unwrap();
+            let mut table2 = write_txn.open_table(DEF2).unwrap();
+            let mut table3 = write_txn.open_table(DEF3).unwrap();
+            table1.insert("hello", "world").unwrap();
+
+            thread::scope(|s| {
+                s.spawn(|| {
+                    let value = table1.get("hello").unwrap().unwrap();
+                    table2.insert("hello2", value.value()).unwrap();
+                });
+            });
+            thread::scope(|s| {
+                s.spawn(|| {
+                    let value = table1.get("hello").unwrap().unwrap();
+                    table3.insert("hello2", value.value()).unwrap();
+                });
+            });
+
+            assert_eq!(table2.get("hello2").unwrap().unwrap().value(), "world");
+            assert_eq!(table3.get("hello2").unwrap().unwrap().value(), "world");
+        }
+        write_txn.commit().unwrap();
+
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(DEF1).unwrap();
+        assert_eq!(table.len().unwrap(), 1);
+        let table = read_txn.open_table(DEF2).unwrap();
+        assert_eq!(table.len().unwrap(), 1);
+        let table = read_txn.open_table(DEF3).unwrap();
+        assert_eq!(table.len().unwrap(), 1);
     }
 }
