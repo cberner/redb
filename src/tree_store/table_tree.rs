@@ -1,15 +1,14 @@
 use crate::db::TransactionGuard;
 use crate::error::TableError;
 use crate::multimap_table::{
-    finalize_tree_and_subtree_checksums, multimap_btree_stats, parse_subtree_roots,
-    verify_tree_and_subtree_checksums, DynamicCollection,
+    finalize_tree_and_subtree_checksums, multimap_btree_stats, verify_tree_and_subtree_checksums,
 };
 use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
 use crate::tree_store::btree_base::BtreeHeader;
-use crate::tree_store::btree_iters::AllPageNumbersBtreeIter;
 use crate::tree_store::page_store::{new_allocators, BuddyAllocator};
 use crate::tree_store::{
-    Btree, BtreeMut, BtreeRangeIter, PageHint, PageNumber, RawBtree, TransactionalMemory,
+    Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageHint, PageNumber, RawBtree,
+    TableType, TransactionalMemory,
 };
 use crate::types::{Key, MutInPlaceValue, TypeName, Value};
 use crate::{DatabaseStats, Result};
@@ -19,10 +18,6 @@ use std::mem;
 use std::mem::size_of;
 use std::ops::RangeFull;
 use std::sync::{Arc, Mutex};
-
-// Forward compatibility feature in case alignment can be supported in the future
-// See https://github.com/cberner/redb/issues/360
-const ALIGNMENT: usize = 1;
 
 #[derive(Debug)]
 pub(crate) struct FreedTableKey {
@@ -177,229 +172,6 @@ impl MutInPlaceValue for FreedPageList<'_> {
     }
 }
 
-#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
-pub(crate) enum TableType {
-    Normal,
-    Multimap,
-}
-
-impl TableType {
-    fn is_legacy(value: u8) -> bool {
-        value == 1 || value == 2
-    }
-}
-
-#[allow(clippy::from_over_into)]
-impl Into<u8> for TableType {
-    fn into(self) -> u8 {
-        match self {
-            // 1 & 2 were used in the v1 file format
-            // TableType::Normal => 1,
-            // TableType::Multimap => 2,
-            TableType::Normal => 3,
-            TableType::Multimap => 4,
-        }
-    }
-}
-
-impl From<u8> for TableType {
-    fn from(value: u8) -> Self {
-        match value {
-            3 => TableType::Normal,
-            4 => TableType::Multimap,
-            _ => unreachable!(),
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub(crate) struct InternalTableDefinition {
-    table_root: Option<BtreeHeader>,
-    table_type: TableType,
-    table_length: u64,
-    fixed_key_size: Option<usize>,
-    fixed_value_size: Option<usize>,
-    key_alignment: usize,
-    value_alignment: usize,
-    key_type: TypeName,
-    value_type: TypeName,
-}
-
-impl InternalTableDefinition {
-    pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
-        self.table_root
-    }
-
-    pub(crate) fn get_length(&self) -> u64 {
-        self.table_length
-    }
-
-    pub(crate) fn get_fixed_key_size(&self) -> Option<usize> {
-        self.fixed_key_size
-    }
-
-    pub(crate) fn get_fixed_value_size(&self) -> Option<usize> {
-        self.fixed_value_size
-    }
-
-    pub(crate) fn get_key_alignment(&self) -> usize {
-        self.key_alignment
-    }
-
-    pub(crate) fn get_value_alignment(&self) -> usize {
-        self.value_alignment
-    }
-
-    pub(crate) fn get_type(&self) -> TableType {
-        self.table_type
-    }
-}
-
-impl Value for InternalTableDefinition {
-    type SelfType<'a> = InternalTableDefinition;
-    type AsBytes<'a> = Vec<u8>;
-
-    fn fixed_width() -> Option<usize> {
-        None
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> Self
-    where
-        Self: 'a,
-    {
-        debug_assert!(data.len() > 22);
-        let mut offset = 0;
-        let legacy = TableType::is_legacy(data[offset]);
-        assert!(!legacy);
-        let table_type = TableType::from(data[offset]);
-        offset += 1;
-
-        let table_length = u64::from_le_bytes(
-            data[offset..(offset + size_of::<u64>())]
-                .try_into()
-                .unwrap(),
-        );
-        offset += size_of::<u64>();
-
-        let non_null = data[offset] != 0;
-        offset += 1;
-        let table_root = if non_null {
-            Some(BtreeHeader::from_le_bytes(
-                data[offset..(offset + BtreeHeader::serialized_size())]
-                    .try_into()
-                    .unwrap(),
-            ))
-        } else {
-            None
-        };
-        offset += BtreeHeader::serialized_size();
-
-        let non_null = data[offset] != 0;
-        offset += 1;
-        let fixed_key_size = if non_null {
-            let fixed = u32::from_le_bytes(
-                data[offset..(offset + size_of::<u32>())]
-                    .try_into()
-                    .unwrap(),
-            ) as usize;
-            Some(fixed)
-        } else {
-            None
-        };
-        offset += size_of::<u32>();
-
-        let non_null = data[offset] != 0;
-        offset += 1;
-        let fixed_value_size = if non_null {
-            let fixed = u32::from_le_bytes(
-                data[offset..(offset + size_of::<u32>())]
-                    .try_into()
-                    .unwrap(),
-            ) as usize;
-            Some(fixed)
-        } else {
-            None
-        };
-        offset += size_of::<u32>();
-        let key_alignment = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-        let value_alignment = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-
-        let key_type_len = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-        let key_type = TypeName::from_bytes(&data[offset..(offset + key_type_len)]);
-        offset += key_type_len;
-        let value_type = TypeName::from_bytes(&data[offset..]);
-
-        InternalTableDefinition {
-            table_root,
-            table_type,
-            table_length,
-            fixed_key_size,
-            fixed_value_size,
-            key_alignment,
-            value_alignment,
-            key_type,
-            value_type,
-        }
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
-    where
-        Self: 'a,
-        Self: 'b,
-    {
-        let mut result = vec![value.table_type.into()];
-        result.extend_from_slice(&value.table_length.to_le_bytes());
-        if let Some(header) = value.table_root {
-            result.push(1);
-            result.extend_from_slice(&header.to_le_bytes());
-        } else {
-            result.push(0);
-            result.extend_from_slice(&[0; BtreeHeader::serialized_size()]);
-        }
-        if let Some(fixed) = value.fixed_key_size {
-            result.push(1);
-            result.extend_from_slice(&u32::try_from(fixed).unwrap().to_le_bytes());
-        } else {
-            result.push(0);
-            result.extend_from_slice(&[0; size_of::<u32>()])
-        }
-        if let Some(fixed) = value.fixed_value_size {
-            result.push(1);
-            result.extend_from_slice(&u32::try_from(fixed).unwrap().to_le_bytes());
-        } else {
-            result.push(0);
-            result.extend_from_slice(&[0; size_of::<u32>()])
-        }
-        result.extend_from_slice(&u32::try_from(value.key_alignment).unwrap().to_le_bytes());
-        result.extend_from_slice(&u32::try_from(value.value_alignment).unwrap().to_le_bytes());
-        let key_type_bytes = value.key_type.to_bytes();
-        result.extend_from_slice(&u32::try_from(key_type_bytes.len()).unwrap().to_le_bytes());
-        result.extend_from_slice(&key_type_bytes);
-        result.extend_from_slice(&value.value_type.to_bytes());
-
-        result
-    }
-
-    fn type_name() -> TypeName {
-        TypeName::internal("redb::InternalTableDefinition")
-    }
-}
-
 pub struct TableNameIter {
     inner: BtreeRangeIter<&'static str, InternalTableDefinition>,
     table_type: TableType,
@@ -412,7 +184,7 @@ impl Iterator for TableNameIter {
         for entry in self.inner.by_ref() {
             match entry {
                 Ok(entry) => {
-                    if entry.value().table_type == self.table_type {
+                    if entry.value().get_type() == self.table_type {
                         return Some(Ok(entry.key().to_string()));
                     }
                 }
@@ -466,28 +238,7 @@ impl TableTree {
     ) -> Result<Option<InternalTableDefinition>, TableError> {
         if let Some(guard) = self.tree.get(&name)? {
             let definition = guard.value();
-            if definition.get_type() != table_type {
-                return if definition.get_type() == TableType::Multimap {
-                    Err(TableError::TableIsMultimap(name.to_string()))
-                } else {
-                    Err(TableError::TableIsNotMultimap(name.to_string()))
-                };
-            }
-            if definition.get_key_alignment() != ALIGNMENT {
-                return Err(TableError::TypeDefinitionChanged {
-                    name: definition.key_type.clone(),
-                    alignment: definition.get_key_alignment(),
-                    width: definition.get_fixed_key_size(),
-                });
-            }
-            if definition.get_value_alignment() != ALIGNMENT {
-                return Err(TableError::TypeDefinitionChanged {
-                    name: definition.value_type.clone(),
-                    alignment: definition.get_value_alignment(),
-                    width: definition.get_fixed_value_size(),
-                });
-            }
-
+            definition.check_match_untyped(table_type, name)?;
             Ok(Some(definition))
         } else {
             Ok(None)
@@ -503,28 +254,7 @@ impl TableTree {
         Ok(
             if let Some(definition) = self.get_table_untyped(name, table_type)? {
                 // Do additional checks on the types to be sure they match
-                if definition.key_type != K::type_name() || definition.value_type != V::type_name()
-                {
-                    return Err(TableError::TableTypeMismatch {
-                        table: name.to_string(),
-                        key: definition.key_type,
-                        value: definition.value_type,
-                    });
-                }
-                if definition.get_fixed_key_size() != K::fixed_width() {
-                    return Err(TableError::TypeDefinitionChanged {
-                        name: K::type_name(),
-                        alignment: definition.get_key_alignment(),
-                        width: definition.get_fixed_key_size(),
-                    });
-                }
-                if definition.get_fixed_value_size() != V::fixed_width() {
-                    return Err(TableError::TypeDefinitionChanged {
-                        name: V::type_name(),
-                        alignment: definition.get_value_alignment(),
-                        width: definition.get_fixed_value_size(),
-                    });
-                }
+                definition.check_match::<K, V>(table_type, name)?;
                 Some(definition)
             } else {
                 None
@@ -575,19 +305,10 @@ impl<'txn> TableTreeMut<'txn> {
                 .get_table_untyped(&entry, TableType::Normal)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
                 .unwrap();
-            if let Some(header) = definition.get_root() {
-                let table_pages_iter = AllPageNumbersBtreeIter::new(
-                    header.root,
-                    definition.get_fixed_key_size(),
-                    definition.get_fixed_value_size(),
-                    self.mem.clone(),
-                )?;
-
-                for page in table_pages_iter {
-                    let page = page?;
-                    result[page.region as usize].record_alloc(page.page_index, page.page_order);
-                }
-            }
+            definition.visit_all_pages(self.mem.clone(), |page| {
+                result[page.region as usize].record_alloc(page.page_index, page.page_order);
+                Ok(())
+            })?;
         }
 
         for entry in self.list_tables(TableType::Multimap)? {
@@ -595,46 +316,10 @@ impl<'txn> TableTreeMut<'txn> {
                 .get_table_untyped(&entry, TableType::Multimap)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
                 .unwrap();
-            if let Some(header) = definition.get_root() {
-                let table_pages_iter = AllPageNumbersBtreeIter::new(
-                    header.root,
-                    definition.get_fixed_key_size(),
-                    DynamicCollection::<()>::fixed_width_with(definition.get_fixed_value_size()),
-                    self.mem.clone(),
-                )?;
-                for page in table_pages_iter {
-                    let page = page?;
-                    result[page.region as usize].record_alloc(page.page_index, page.page_order);
-                }
-
-                let table_pages_iter = AllPageNumbersBtreeIter::new(
-                    header.root,
-                    definition.get_fixed_key_size(),
-                    DynamicCollection::<()>::fixed_width_with(definition.get_fixed_value_size()),
-                    self.mem.clone(),
-                )?;
-                for table_page in table_pages_iter {
-                    let page = self.mem.get_page(table_page?)?;
-                    let subtree_roots = parse_subtree_roots(
-                        &page,
-                        definition.get_fixed_key_size(),
-                        definition.get_fixed_value_size(),
-                    );
-                    for subtree_header in subtree_roots {
-                        let sub_root_iter = AllPageNumbersBtreeIter::new(
-                            subtree_header.root,
-                            definition.get_fixed_value_size(),
-                            <()>::fixed_width(),
-                            self.mem.clone(),
-                        )?;
-                        for page in sub_root_iter {
-                            let page = page?;
-                            result[page.region as usize]
-                                .record_alloc(page.page_index, page.page_order);
-                        }
-                    }
-                }
-            }
+            definition.visit_all_pages(self.mem.clone(), |page| {
+                result[page.region as usize].record_alloc(page.page_index, page.page_order);
+                Ok(())
+            })?;
         }
 
         Ok(result)
@@ -664,15 +349,18 @@ impl<'txn> TableTreeMut<'txn> {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let definition = entry.value();
-            // TODO: all these matches on table_type() are pretty errorprone, because you can call .get_fixed_value_size() on either.
-            // Maybe InternalTableDefinition should be an enum for normal and multimap, instead
-            match definition.get_type() {
-                TableType::Normal => {
-                    if let Some(header) = definition.get_root() {
+            match definition {
+                InternalTableDefinition::Normal {
+                    table_root,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => {
+                    if let Some(header) = table_root {
                         if !RawBtree::new(
                             Some(header),
-                            definition.get_fixed_key_size(),
-                            definition.get_fixed_value_size(),
+                            fixed_key_size,
+                            fixed_value_size,
                             self.mem.clone(),
                         )
                         .verify_checksum()?
@@ -681,11 +369,16 @@ impl<'txn> TableTreeMut<'txn> {
                         }
                     }
                 }
-                TableType::Multimap => {
+                InternalTableDefinition::Multimap {
+                    table_root,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => {
                     if !verify_tree_and_subtree_checksums(
-                        definition.get_root(),
-                        definition.get_fixed_key_size(),
-                        definition.get_fixed_value_size(),
+                        table_root,
+                        fixed_key_size,
+                        fixed_value_size,
                         self.mem.clone(),
                     )? {
                         return Ok(false);
@@ -698,32 +391,53 @@ impl<'txn> TableTreeMut<'txn> {
     }
 
     pub(crate) fn flush_table_root_updates(&mut self) -> Result<Option<BtreeHeader>> {
-        for (name, (table_root, table_length)) in self.pending_table_updates.drain() {
+        for (name, (new_root, new_length)) in self.pending_table_updates.drain() {
             // Bypass .get_table() since the table types are dynamic
             let mut definition = self.tree.get(&name.as_str())?.unwrap().value();
             // No-op if the root has not changed
-            if definition.table_root == table_root {
-                continue;
+            match definition {
+                InternalTableDefinition::Normal { table_root, .. }
+                | InternalTableDefinition::Multimap { table_root, .. } => {
+                    if table_root == new_root {
+                        continue;
+                    }
+                }
             }
-            definition.table_length = table_length;
             // Finalize any dirty checksums
-            if definition.table_type == TableType::Normal {
-                let mut tree = UntypedBtreeMut::new(
-                    table_root,
-                    self.mem.clone(),
-                    self.freed_pages.clone(),
-                    definition.fixed_key_size,
-                    definition.fixed_value_size,
-                );
-                tree.finalize_dirty_checksums()?;
-                definition.table_root = tree.get_root();
-            } else {
-                definition.table_root = finalize_tree_and_subtree_checksums(
-                    table_root,
-                    definition.fixed_key_size,
-                    definition.fixed_value_size,
-                    self.mem.clone(),
-                )?;
+            match definition {
+                InternalTableDefinition::Normal {
+                    ref mut table_root,
+                    ref mut table_length,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => {
+                    let mut tree = UntypedBtreeMut::new(
+                        new_root,
+                        self.mem.clone(),
+                        self.freed_pages.clone(),
+                        fixed_key_size,
+                        fixed_value_size,
+                    );
+                    tree.finalize_dirty_checksums()?;
+                    *table_root = tree.get_root();
+                    *table_length = new_length;
+                }
+                InternalTableDefinition::Multimap {
+                    ref mut table_root,
+                    ref mut table_length,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => {
+                    *table_root = finalize_tree_and_subtree_checksums(
+                        new_root,
+                        fixed_key_size,
+                        fixed_value_size,
+                        self.mem.clone(),
+                    )?;
+                    *table_length = new_length;
+                }
             }
             self.tree.insert(&name.as_str(), &definition)?;
         }
@@ -757,8 +471,7 @@ impl<'txn> TableTreeMut<'txn> {
 
         if let Ok(Some(definition)) = result.as_mut() {
             if let Some((updated_root, updated_length)) = self.pending_table_updates.get(name) {
-                definition.table_root = *updated_root;
-                definition.table_length = *updated_length;
+                definition.set_header(*updated_root, *updated_length);
             }
         }
 
@@ -781,8 +494,7 @@ impl<'txn> TableTreeMut<'txn> {
 
         if let Ok(Some(definition)) = result.as_mut() {
             if let Some((updated_root, updated_length)) = self.pending_table_updates.get(name) {
-                definition.table_root = *updated_root;
-                definition.table_length = *updated_length;
+                definition.set_header(*updated_root, *updated_length);
             }
         }
 
@@ -796,66 +508,12 @@ impl<'txn> TableTreeMut<'txn> {
         table_type: TableType,
     ) -> Result<bool, TableError> {
         if let Some(definition) = self.get_table_untyped(name, table_type)? {
-            if definition.table_type == TableType::Normal {
-                if let Some(header) = definition.get_root() {
-                    let iter = AllPageNumbersBtreeIter::new(
-                        header.root,
-                        definition.fixed_key_size,
-                        definition.fixed_value_size,
-                        self.mem.clone(),
-                    )?;
-                    let mut freed_pages = self.freed_pages.lock().unwrap();
-                    for page_number in iter {
-                        freed_pages.push(page_number?);
-                    }
-                }
-            } else if definition.table_type == TableType::Multimap {
-                if let Some(header) = definition.get_root() {
-                    let mut freed_pages = self.freed_pages.lock().unwrap();
-                    // Delete all the pages in the subtrees
-                    let table_pages_iter = AllPageNumbersBtreeIter::new(
-                        header.root,
-                        definition.get_fixed_key_size(),
-                        DynamicCollection::<()>::fixed_width_with(
-                            definition.get_fixed_value_size(),
-                        ),
-                        self.mem.clone(),
-                    )?;
-                    for table_page in table_pages_iter {
-                        let page = self.mem.get_page(table_page?)?;
-                        let subtree_roots = parse_subtree_roots(
-                            &page,
-                            definition.get_fixed_key_size(),
-                            definition.get_fixed_value_size(),
-                        );
-                        for subtree_header in subtree_roots {
-                            let sub_root_iter = AllPageNumbersBtreeIter::new(
-                                subtree_header.root,
-                                definition.get_fixed_value_size(),
-                                <()>::fixed_width(),
-                                self.mem.clone(),
-                            )?;
-                            for page in sub_root_iter {
-                                freed_pages.push(page?);
-                            }
-                        }
-                    }
-                    // Now free the multimap table itself
-                    let table_pages_iter = AllPageNumbersBtreeIter::new(
-                        header.root,
-                        definition.get_fixed_key_size(),
-                        DynamicCollection::<()>::fixed_width_with(
-                            definition.get_fixed_value_size(),
-                        ),
-                        self.mem.clone(),
-                    )?;
-                    for table_page in table_pages_iter {
-                        freed_pages.push(table_page?);
-                    }
-                }
-            } else {
-                unreachable!()
-            }
+            let mut freed_pages = self.freed_pages.lock().unwrap();
+            definition.visit_all_pages(self.mem.clone(), |page_number| {
+                freed_pages.push(page_number);
+                Ok(())
+            })?;
+            drop(freed_pages);
 
             self.pending_table_updates.remove(name);
 
@@ -866,30 +524,31 @@ impl<'txn> TableTreeMut<'txn> {
         Ok(false)
     }
 
-    // Returns a tuple of the table id and the new root page
-    // root_page: the root of the master table
     pub(crate) fn get_or_create_table<K: Key, V: Value>(
         &mut self,
         name: &str,
         table_type: TableType,
-    ) -> Result<InternalTableDefinition, TableError> {
-        if let Some(found) = self.get_table::<K, V>(name, table_type)? {
-            return Ok(found);
-        }
-
-        let table = InternalTableDefinition {
-            table_root: None,
-            table_type,
-            table_length: 0,
-            fixed_key_size: K::fixed_width(),
-            fixed_value_size: V::fixed_width(),
-            key_alignment: ALIGNMENT,
-            value_alignment: ALIGNMENT,
-            key_type: K::type_name(),
-            value_type: V::type_name(),
+    ) -> Result<(Option<BtreeHeader>, u64), TableError> {
+        let table = if let Some(found) = self.get_table::<K, V>(name, table_type)? {
+            found
+        } else {
+            let table = InternalTableDefinition::new::<K, V>(table_type, None, 0);
+            self.tree.insert(&name, &table)?;
+            table
         };
-        self.tree.insert(&name, &table)?;
-        Ok(table)
+
+        match table {
+            InternalTableDefinition::Normal {
+                table_root,
+                table_length,
+                ..
+            }
+            | InternalTableDefinition::Multimap {
+                table_root,
+                table_length,
+                ..
+            } => Ok((table_root, table_length)),
+        }
     }
 
     pub(crate) fn compact_tables(&mut self) -> Result<bool> {
@@ -900,23 +559,15 @@ impl<'txn> TableTreeMut<'txn> {
             if let Some((updated_root, updated_length)) =
                 self.pending_table_updates.get(entry.key())
             {
-                definition.table_root = *updated_root;
-                definition.table_length = *updated_length;
+                definition.set_header(*updated_root, *updated_length);
             }
 
-            let mut tree = UntypedBtreeMut::new(
-                definition.table_root,
-                self.mem.clone(),
-                self.freed_pages.clone(),
-                definition.fixed_key_size,
-                definition.fixed_value_size,
-            );
-            if tree.relocate()? {
+            if let Some(new_root) =
+                definition.relocate_tree(self.mem.clone(), self.freed_pages.clone())?
+            {
                 progress = true;
-                self.pending_table_updates.insert(
-                    entry.key().to_string(),
-                    (tree.get_root(), definition.table_length),
-                );
+                self.pending_table_updates
+                    .insert(entry.key().to_string(), (new_root, definition.get_length()));
             }
         }
 
@@ -942,16 +593,21 @@ impl<'txn> TableTreeMut<'txn> {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let mut definition = entry.value();
-            if let Some((updated_root, _)) = self.pending_table_updates.get(entry.key()) {
-                definition.table_root = *updated_root;
+            if let Some((updated_root, length)) = self.pending_table_updates.get(entry.key()) {
+                definition.set_header(*updated_root, *length);
             }
-            match definition.get_type() {
-                TableType::Normal => {
+            match definition {
+                InternalTableDefinition::Normal {
+                    table_root,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => {
                     let subtree_stats = btree_stats(
-                        definition.table_root.map(|x| x.root),
+                        table_root.map(|x| x.root),
                         &self.mem,
-                        definition.fixed_key_size,
-                        definition.fixed_value_size,
+                        fixed_key_size,
+                        fixed_value_size,
                     )?;
                     max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
                     total_stored_bytes += subtree_stats.stored_leaf_bytes;
@@ -960,12 +616,17 @@ impl<'txn> TableTreeMut<'txn> {
                     branch_pages += subtree_stats.branch_pages;
                     leaf_pages += subtree_stats.leaf_pages;
                 }
-                TableType::Multimap => {
+                InternalTableDefinition::Multimap {
+                    table_root,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => {
                     let subtree_stats = multimap_btree_stats(
-                        definition.table_root.map(|x| x.root),
+                        table_root.map(|x| x.root),
                         &self.mem,
-                        definition.fixed_key_size,
-                        definition.fixed_value_size,
+                        fixed_key_size,
+                        fixed_value_size,
                     )?;
                     max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
                     total_stored_bytes += subtree_stats.stored_leaf_bytes;
@@ -991,15 +652,14 @@ impl<'txn> TableTreeMut<'txn> {
 
 #[cfg(test)]
 mod test {
-    use crate::tree_store::{InternalTableDefinition, TableType};
+    use crate::tree_store::table_tree_base::InternalTableDefinition;
     use crate::types::TypeName;
     use crate::Value;
 
     #[test]
     fn round_trip() {
-        let x = InternalTableDefinition {
+        let x = InternalTableDefinition::Multimap {
             table_root: None,
-            table_type: TableType::Multimap,
             table_length: 0,
             fixed_key_size: None,
             fixed_value_size: Some(5),
