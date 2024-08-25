@@ -187,16 +187,11 @@ impl UntypedBtreeMut {
             CachePriority::default_btree(old_page.memory()),
         )?;
         let new_page_number = new_page.get_page_number();
-        // TODO: we should only bail out if we're at a leaf page. Branch pages still need to process their children
-        if !new_page_number.is_before(page_number) {
-            drop(new_page);
-            self.mem.free(new_page_number);
-            return Ok(None);
-        }
 
         new_page.memory_mut().copy_from_slice(old_page.memory());
 
         let node_mem = old_page.memory();
+        let mut changed = false;
         match node_mem[0] {
             LEAF => {
                 // No-op
@@ -208,18 +203,25 @@ impl UntypedBtreeMut {
                     let child = accessor.child_page(i).unwrap();
                     if let Some((new_child, new_checksum)) = self.relocate_helper(child)? {
                         mutator.write_child_page(i, new_child, new_checksum);
+                        changed = true;
                     }
                 }
             }
             _ => unreachable!(),
         }
 
-        let mut freed_pages = self.freed_pages.lock().unwrap();
-        if !self.mem.free_if_uncommitted(page_number) {
-            freed_pages.push(page_number);
-        }
+        if changed || new_page_number.is_before(page_number) {
+            let mut freed_pages = self.freed_pages.lock().unwrap();
+            if !self.mem.free_if_uncommitted(page_number) {
+                freed_pages.push(page_number);
+            }
 
-        Ok(Some((new_page_number, DEFERRED)))
+            Ok(Some((new_page_number, DEFERRED)))
+        } else {
+            drop(new_page);
+            self.mem.free(new_page_number);
+            Ok(None)
+        }
     }
 }
 
