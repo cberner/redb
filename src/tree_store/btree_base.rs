@@ -1212,7 +1212,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         self.num_keys() + 1
     }
 
-    pub(super) fn child_checksum(&self, n: usize) -> Option<Checksum> {
+    pub(crate) fn child_checksum(&self, n: usize) -> Option<Checksum> {
         if n >= self.count_children() {
             return None;
         }
@@ -1529,12 +1529,12 @@ impl<'b> Drop for RawBranchBuilder<'b> {
     }
 }
 
-pub(super) struct BranchMutator<'b> {
+pub(crate) struct BranchMutator<'b> {
     page: &'b mut PageMut,
 }
 
 impl<'b> BranchMutator<'b> {
-    pub(super) fn new(page: &'b mut PageMut) -> Self {
+    pub(crate) fn new(page: &'b mut PageMut) -> Self {
         assert_eq!(page.memory()[0], BRANCH);
         Self { page }
     }
@@ -1543,7 +1543,7 @@ impl<'b> BranchMutator<'b> {
         u16::from_le_bytes(self.page.memory()[2..4].try_into().unwrap()) as usize
     }
 
-    pub(super) fn write_child_page(
+    pub(crate) fn write_child_page(
         &mut self,
         i: usize,
         page_number: PageNumber,
