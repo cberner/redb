@@ -3,10 +3,10 @@ use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
 use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
-    btree_stats, AllPageNumbersBtreeIter, BranchAccessor, Btree, BtreeHeader, BtreeMut,
-    BtreeRangeIter, BtreeStats, CachePriority, Checksum, LeafAccessor, LeafMutator, Page, PageHint,
-    PageNumber, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH, LEAF,
-    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
+    btree_stats, AllPageNumbersBtreeIter, BranchAccessor, BranchMutator, Btree, BtreeHeader,
+    BtreeMut, BtreeRangeIter, BtreeStats, CachePriority, Checksum, LeafAccessor, LeafMutator, Page,
+    PageHint, PageNumber, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH,
+    DEFERRED, LEAF, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
@@ -188,6 +188,96 @@ pub(crate) fn verify_tree_and_subtree_checksums(
     }
 
     Ok(true)
+}
+
+// Relocate all subtrees to lower index pages, if possible
+pub(crate) fn relocate_subtrees(
+    root: (PageNumber, Checksum),
+    key_size: Option<usize>,
+    value_size: Option<usize>,
+    mem: Arc<TransactionalMemory>,
+    freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+) -> Result<(PageNumber, Checksum)> {
+    let old_page = mem.get_page(root.0)?;
+    let mut new_page = mem.allocate_lowest(
+        old_page.memory().len(),
+        CachePriority::default_btree(old_page.memory()),
+    )?;
+
+    let new_page_number = new_page.get_page_number();
+    new_page.memory_mut().copy_from_slice(old_page.memory());
+
+    let mut changed = false;
+
+    match old_page.memory()[0] {
+        LEAF => {
+            let accessor = LeafAccessor::new(
+                old_page.memory(),
+                key_size,
+                UntypedDynamicCollection::fixed_width_with(value_size),
+            );
+            // TODO: maybe there's a better abstraction, so that we don't need to call into this low-level method?
+            let mut mutator = LeafMutator::new(
+                &mut new_page,
+                key_size,
+                UntypedDynamicCollection::fixed_width_with(value_size),
+            );
+            for i in 0..accessor.num_pairs() {
+                let entry = accessor.entry(i).unwrap();
+                let collection = UntypedDynamicCollection::from_bytes(entry.value());
+                if matches!(collection.collection_type(), SubtreeV2) {
+                    let sub_root = collection.as_subtree();
+                    let mut tree = UntypedBtreeMut::new(
+                        Some(sub_root),
+                        mem.clone(),
+                        freed_pages.clone(),
+                        value_size,
+                        <() as Value>::fixed_width(),
+                    );
+                    if tree.relocate()? {
+                        let new_collection =
+                            UntypedDynamicCollection::make_subtree_data(tree.get_root().unwrap());
+                        mutator.insert(i, true, entry.key(), &new_collection);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        BRANCH => {
+            let accessor = BranchAccessor::new(&old_page, key_size);
+            let mut mutator = BranchMutator::new(&mut new_page);
+            for i in 0..accessor.count_children() {
+                if let Some(child) = accessor.child_page(i) {
+                    let child_checksum = accessor.child_checksum(i).unwrap();
+                    let (new_child, new_checksum) = relocate_subtrees(
+                        (child, child_checksum),
+                        key_size,
+                        value_size,
+                        mem.clone(),
+                        freed_pages.clone(),
+                    )?;
+                    mutator.write_child_page(i, new_child, new_checksum);
+                    if new_child != child {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    if changed || new_page_number.is_before(old_page.get_page_number()) {
+        let old_page_number = old_page.get_page_number();
+        drop(old_page);
+        if !mem.free_if_uncommitted(old_page_number) {
+            freed_pages.lock().unwrap().push(old_page_number);
+        }
+        Ok((new_page_number, DEFERRED))
+    } else {
+        drop(new_page);
+        mem.free(new_page_number);
+        Ok(root)
+    }
 }
 
 // Finalize all the checksums in the tree, including any Dynamic collection subtrees
@@ -552,8 +642,22 @@ pub(crate) struct UntypedDynamicCollection {
 }
 
 impl UntypedDynamicCollection {
+    pub(crate) fn fixed_width_with(_value_width: Option<usize>) -> Option<usize> {
+        None
+    }
+
     fn new(data: &[u8]) -> &Self {
         unsafe { mem::transmute(data) }
+    }
+
+    fn make_subtree_data(header: BtreeHeader) -> Vec<u8> {
+        let mut result = vec![SubtreeV2.into()];
+        result.extend_from_slice(&header.to_le_bytes());
+        result
+    }
+
+    fn from_bytes(data: &[u8]) -> &Self {
+        Self::new(data)
     }
 
     fn collection_type(&self) -> DynamicCollectionType {

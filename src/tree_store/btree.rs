@@ -187,6 +187,7 @@ impl UntypedBtreeMut {
             CachePriority::default_btree(old_page.memory()),
         )?;
         let new_page_number = new_page.get_page_number();
+        // TODO: we should only bail out if we're at a leaf page. Branch pages still need to process their children
         if !new_page_number.is_before(page_number) {
             drop(new_page);
             self.mem.free(new_page_number);

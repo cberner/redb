@@ -1,4 +1,4 @@
-use crate::multimap_table::{parse_subtree_roots, DynamicCollection};
+use crate::multimap_table::{parse_subtree_roots, relocate_subtrees, DynamicCollection};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeHeader, PageNumber, TransactionalMemory, UntypedBtreeMut,
 };
@@ -262,15 +262,38 @@ impl InternalTableDefinition {
         mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     ) -> Result<Option<Option<BtreeHeader>>> {
-        // TODO: this does not correctly handle multimap subtrees
+        let original_root = self.private_get_root();
+        let relocated_root = match self {
+            InternalTableDefinition::Normal { table_root, .. } => *table_root,
+            InternalTableDefinition::Multimap {
+                table_root,
+                fixed_key_size,
+                fixed_value_size,
+                ..
+            } => {
+                if let Some(header) = table_root {
+                    let (page_number, checksum) = relocate_subtrees(
+                        (header.root, header.checksum),
+                        *fixed_key_size,
+                        *fixed_value_size,
+                        mem.clone(),
+                        freed_pages.clone(),
+                    )?;
+                    Some(BtreeHeader::new(page_number, checksum, header.length))
+                } else {
+                    None
+                }
+            }
+        };
         let mut tree = UntypedBtreeMut::new(
-            self.private_get_root(),
+            relocated_root,
             mem,
             freed_pages,
             self.private_get_fixed_key_size(),
             self.private_get_fixed_value_size(),
         );
-        if tree.relocate()? {
+        tree.relocate()?;
+        if tree.get_root() != original_root {
             self.set_header(tree.get_root(), self.get_length());
             Ok(Some(tree.get_root()))
         } else {

@@ -9,7 +9,8 @@ mod table_tree_base;
 pub(crate) use btree::{btree_stats, Btree, BtreeMut, BtreeStats, RawBtree, UntypedBtreeMut};
 pub use btree_base::{AccessGuard, AccessGuardMut};
 pub(crate) use btree_base::{
-    BranchAccessor, BtreeHeader, Checksum, LeafAccessor, LeafMutator, RawLeafBuilder, BRANCH, LEAF,
+    BranchAccessor, BranchMutator, BtreeHeader, Checksum, LeafAccessor, LeafMutator,
+    RawLeafBuilder, BRANCH, DEFERRED, LEAF,
 };
 pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeExtractIf, BtreeRangeIter};
 pub use page_store::{file_backend, InMemoryBackend, Savepoint};
