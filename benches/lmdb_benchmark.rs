@@ -1,5 +1,6 @@
 use std::env::current_dir;
 use std::mem::size_of;
+use std::path::Path;
 use std::sync::Arc;
 use std::{fs, process, thread};
 use tempfile::{NamedTempFile, TempDir};
@@ -70,7 +71,7 @@ fn make_rng_shards(shards: usize, elements: usize) -> Vec<fastrand::Rng> {
     rngs
 }
 
-fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, Duration)> {
+fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, ResultType)> {
     let mut rng = make_rng();
     let mut results = Vec::new();
     let db = Arc::new(db);
@@ -95,7 +96,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, Duration)> {
         ELEMENTS,
         duration.as_millis()
     );
-    results.push(("bulk load".to_string(), duration));
+    results.push(("bulk load".to_string(), ResultType::Duration(duration)));
 
     let start = Instant::now();
     let writes = 100;
@@ -118,7 +119,10 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, Duration)> {
         writes,
         duration.as_millis()
     );
-    results.push(("individual writes".to_string(), duration));
+    results.push((
+        "individual writes".to_string(),
+        ResultType::Duration(duration),
+    ));
 
     let start = Instant::now();
     let batch_size = 1000;
@@ -144,7 +148,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, Duration)> {
         batch_size,
         duration.as_millis()
     );
-    results.push(("batch writes".to_string(), duration));
+    results.push(("batch writes".to_string(), ResultType::Duration(duration)));
 
     let txn = db.read_transaction();
     {
@@ -155,7 +159,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, Duration)> {
             let end = Instant::now();
             let duration = end - start;
             println!("{}: len() in {}ms", T::db_type_name(), duration.as_millis());
-            results.push(("len()".to_string(), duration));
+            results.push(("len()".to_string(), ResultType::Duration(duration)));
         }
 
         for _ in 0..ITERATIONS {
@@ -179,7 +183,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, Duration)> {
                 ELEMENTS,
                 duration.as_millis()
             );
-            results.push(("random reads".to_string(), duration));
+            results.push(("random reads".to_string(), ResultType::Duration(duration)));
         }
 
         for _ in 0..ITERATIONS {
@@ -208,7 +212,10 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, Duration)> {
                 ELEMENTS * num_scan,
                 duration.as_millis()
             );
-            results.push(("random range reads".to_string(), duration));
+            results.push((
+                "random range reads".to_string(),
+                ResultType::Duration(duration),
+            ));
         }
     }
     drop(txn);
@@ -246,7 +253,10 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, Duration)> {
             ELEMENTS,
             duration.as_millis()
         );
-        results.push((format!("random reads ({num_threads} threads)"), duration));
+        results.push((
+            format!("random reads ({num_threads} threads)"),
+            ResultType::Duration(duration),
+        ));
     }
 
     let start = Instant::now();
@@ -271,9 +281,38 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, Duration)> {
         deletes,
         duration.as_millis()
     );
-    results.push(("removals".to_string(), duration));
+    results.push(("removals".to_string(), ResultType::Duration(duration)));
 
     results
+}
+
+fn database_size(path: &Path) -> u64 {
+    let mut size = 0u64;
+    for result in walkdir::WalkDir::new(path) {
+        let entry = result.unwrap();
+        size += entry.metadata().unwrap().len();
+    }
+    size
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ResultType {
+    Duration(Duration),
+    SizeInBytes(u64),
+}
+
+impl std::fmt::Display for ResultType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use byte_unit::{Byte, UnitType};
+
+        match self {
+            ResultType::Duration(d) => write!(f, "{d:.2?}"),
+            ResultType::SizeInBytes(s) => {
+                let b = Byte::from_u64(*s).get_appropriate_unit(UnitType::Binary);
+                write!(f, "{b:.2}")
+            }
+        }
+    }
 }
 
 fn main() {
@@ -294,7 +333,13 @@ fn main() {
             .create(tmpfile.path())
             .unwrap();
         let table = RedbBenchDatabase::new(&db);
-        benchmark(table)
+        let mut results = benchmark(table);
+        let size = database_size(tmpfile.path());
+        results.push((
+            "size after bench".to_string(),
+            ResultType::SizeInBytes(size),
+        ));
+        results
     };
 
     let lmdb_results = {
@@ -306,7 +351,13 @@ fn main() {
                 .unwrap()
         };
         let table = HeedBenchDatabase::new(&env);
-        benchmark(table)
+        let mut results = benchmark(table);
+        let size = database_size(tmpfile.path());
+        results.push((
+            "size after bench".to_string(),
+            ResultType::SizeInBytes(size),
+        ));
+        results
     };
 
     let rocksdb_results = {
@@ -321,14 +372,26 @@ fn main() {
 
         let db = rocksdb::TransactionDB::open(&opts, &Default::default(), tmpfile.path()).unwrap();
         let table = RocksdbBenchDatabase::new(&db);
-        benchmark(table)
+        let mut results = benchmark(table);
+        let size = database_size(tmpfile.path());
+        results.push((
+            "size after bench".to_string(),
+            ResultType::SizeInBytes(size),
+        ));
+        results
     };
 
     let sled_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
         let db = sled::Config::new().path(tmpfile.path()).open().unwrap();
         let table = SledBenchDatabase::new(&db, tmpfile.path());
-        benchmark(table)
+        let mut results = benchmark(table);
+        let size = database_size(tmpfile.path());
+        results.push((
+            "size after bench".to_string(),
+            ResultType::SizeInBytes(size),
+        ));
+        results
     };
 
     let sanakirja_results = {
@@ -336,7 +399,13 @@ fn main() {
         fs::remove_file(tmpfile.path()).unwrap();
         let db = sanakirja::Env::new(tmpfile.path(), 4096 * 1024 * 1024, 2).unwrap();
         let table = SanakirjaBenchDatabase::new(&db);
-        benchmark(table)
+        let mut results = benchmark(table);
+        let size = database_size(tmpfile.path());
+        results.push((
+            "size after bench".to_string(),
+            ResultType::SizeInBytes(size),
+        ));
+        results
     };
 
     fs::remove_dir_all(&tmpdir).unwrap();
@@ -347,19 +416,41 @@ fn main() {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [
+    let results = [
         redb_latency_results,
         lmdb_results,
         rocksdb_results,
         sled_results,
         sanakirja_results,
-    ] {
-        for (i, (_benchmark, duration)) in results.iter().enumerate() {
-            rows[i].push(format!("{}ms", duration.as_millis()));
+    ];
+
+    let mut identified_smallests = vec![vec![false; results.len()]; rows.len()];
+    for (i, identified_smallests_row) in identified_smallests.iter_mut().enumerate() {
+        let mut smallest = None;
+        for (j, _) in identified_smallests_row.iter().enumerate() {
+            let (_, rt) = &results[j][i];
+            smallest = match smallest {
+                Some((_, prev)) if rt < prev => Some((j, rt)),
+                Some((pi, prev)) => Some((pi, prev)),
+                None => Some((j, rt)),
+            };
+        }
+        let (j, _rt) = smallest.unwrap();
+        identified_smallests_row[j] = true;
+    }
+
+    for (j, results) in results.iter().enumerate() {
+        for (i, (_benchmark, result_type)) in results.iter().enumerate() {
+            rows[i].push(if identified_smallests[i][j] {
+                format!("**{result_type}**")
+            } else {
+                result_type.to_string()
+            });
         }
     }
 
     let mut table = comfy_table::Table::new();
+    table.load_preset(comfy_table::presets::ASCII_MARKDOWN);
     table.set_width(100);
     table.set_header(["", "redb", "lmdb", "rocksdb", "sled", "sanakirja"]);
     for row in rows {
