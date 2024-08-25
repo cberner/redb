@@ -425,9 +425,9 @@ fn main() {
     ];
 
     let mut identified_smallests = vec![vec![false; results.len()]; rows.len()];
-    for i in 0..rows.len() {
+    for (i, identified_smallests_row) in identified_smallests.iter_mut().enumerate() {
         let mut smallest = None;
-        for j in 0..results.len() {
+        for (j, _) in identified_smallests_row.iter().enumerate() {
             let (_, rt) = &results[j][i];
             smallest = match smallest {
                 Some((_, prev)) if rt < prev => Some((j, rt)),
@@ -436,7 +436,7 @@ fn main() {
             };
         }
         let (j, _rt) = smallest.unwrap();
-        identified_smallests[i][j] = true;
+        identified_smallests_row[j] = true;
     }
 
     for (j, results) in results.iter().enumerate() {
