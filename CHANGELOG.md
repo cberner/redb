@@ -1,5 +1,30 @@
 # redb - Changelog
 
+## 2.1.2 - 2024-08-25
+### Major fixes:
+* Fix leak of database space that could occur when calling `restore_savepoint()`
+* Fix leak of database space when calling `delete_multimap_table()`
+* Fix database corruption which could occur when restoring a savepoint. This edge case is rare,
+  and could only occur if the database was less than approximately 4TiB when the savepoint was
+  created, and greater than 4TiB when the savepoint was restored
+* Fix edge case where a transient I/O error that occurred during transaction commit, but then did
+  not reoccur when the `Database` was dropped, could cause database corruption
+
+**Important: If your application has called `restore_savepoint()`, `delete_multimap_table()`,
+or you suspect it may have experienced a transient I/O error during transaction commit.
+It is recommended that you run `check_integrity()` after upgrading to this version.
+This will both detect corruption and clean up any leaked space.**
+
+### Other changes and fixes:
+* Optimize page freeing to reduce the size of the database file
+* Fix several cases where `check_integrity()` would return `Ok(false)` instead of `Ok(true)`
+* Fix some cases where `compact()` did not fully compact the database
+* Make the metadata overhead returned by `WriteTransaction::stats()` more accurate
+* Return `StorageError::ValueTooLarge` when a key-value pair exceeds a total of 3.75GiB.
+  Previously, a panic would occur for key-value pairs that were approximately 4GiB.
+* Downgrade several `info!` log messages to `debug!`
+* Improve documentation
+
 ## 2.1.1 - 2024-06-09
 * Fix panic that occurred when calling `compact()` when a read transaction was in progress
 * Fix `ReadTransaction::close()` to return `Ok` when it succeeds
