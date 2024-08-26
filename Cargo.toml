@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 version = "2.1.1"
 edition = "2021"
 rust-version = "1.66"
-authors = ["Christopher Berner <christopherberner@gmail.com>"]
+authors = ["Christopher Berner <me@cberner.com>"]
 exclude = ["fuzz/"]
 
 [lib]
