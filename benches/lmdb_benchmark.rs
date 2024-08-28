@@ -297,6 +297,7 @@ fn database_size(path: &Path) -> u64 {
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ResultType {
+    NA,
     Duration(Duration),
     SizeInBytes(u64),
 }
@@ -306,6 +307,7 @@ impl std::fmt::Display for ResultType {
         use byte_unit::{Byte, UnitType};
 
         match self {
+            ResultType::NA => write!(f, "N/A"),
             ResultType::Duration(d) => write!(f, "{d:.2?}"),
             ResultType::SizeInBytes(s) => {
                 let b = Byte::from_u64(*s).get_appropriate_unit(UnitType::Binary);
@@ -328,12 +330,20 @@ fn main() {
 
     let redb_latency_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
-        let db = redb::Database::builder()
+        let mut db = redb::Database::builder()
             .set_cache_size(4 * 1024 * 1024 * 1024)
             .create(tmpfile.path())
             .unwrap();
         let table = RedbBenchDatabase::new(&db);
         let mut results = benchmark(table);
+
+        let start = Instant::now();
+        db.compact().unwrap();
+        let end = Instant::now();
+        let duration = end - start;
+        println!("redb: Compacted in {}ms", duration.as_millis());
+        results.push(("compaction".to_string(), ResultType::Duration(duration)));
+
         let size = database_size(tmpfile.path());
         results.push((
             "size after bench".to_string(),
@@ -352,6 +362,7 @@ fn main() {
         };
         let table = HeedBenchDatabase::new(&env);
         let mut results = benchmark(table);
+        results.push(("compaction".to_string(), ResultType::NA));
         let size = database_size(tmpfile.path());
         results.push((
             "size after bench".to_string(),
@@ -373,6 +384,7 @@ fn main() {
         let db = rocksdb::TransactionDB::open(&opts, &Default::default(), tmpfile.path()).unwrap();
         let table = RocksdbBenchDatabase::new(&db);
         let mut results = benchmark(table);
+        results.push(("compaction".to_string(), ResultType::NA));
         let size = database_size(tmpfile.path());
         results.push((
             "size after bench".to_string(),
@@ -386,6 +398,7 @@ fn main() {
         let db = sled::Config::new().path(tmpfile.path()).open().unwrap();
         let table = SledBenchDatabase::new(&db, tmpfile.path());
         let mut results = benchmark(table);
+        results.push(("compaction".to_string(), ResultType::NA));
         let size = database_size(tmpfile.path());
         results.push((
             "size after bench".to_string(),
@@ -400,6 +413,7 @@ fn main() {
         let db = sanakirja::Env::new(tmpfile.path(), 4096 * 1024 * 1024, 2).unwrap();
         let table = SanakirjaBenchDatabase::new(&db);
         let mut results = benchmark(table);
+        results.push(("compaction".to_string(), ResultType::NA));
         let size = database_size(tmpfile.path());
         results.push((
             "size after bench".to_string(),
