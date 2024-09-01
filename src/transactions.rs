@@ -1166,6 +1166,11 @@ impl WriteTransaction {
         if table_tree.compact_tables()? {
             progress = true;
         }
+        let mut system_tables = self.system_tables.lock().unwrap();
+        let system_table_tree = &mut system_tables.table_tree;
+        if system_table_tree.compact_tables()? {
+            progress = true;
+        }
 
         Ok(progress)
     }
