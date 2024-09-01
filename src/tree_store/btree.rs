@@ -28,6 +28,102 @@ pub(crate) struct BtreeStats {
     pub(crate) fragmented_bytes: u64,
 }
 
+pub(crate) struct PagePath {
+    path: Vec<PageNumber>,
+}
+
+impl PagePath {
+    pub(crate) fn new_root(page_number: PageNumber) -> Self {
+        Self {
+            path: vec![page_number],
+        }
+    }
+
+    pub(crate) fn with_child(&self, page_number: PageNumber) -> Self {
+        let mut path = self.path.clone();
+        path.push(page_number);
+        Self { path }
+    }
+
+    pub(crate) fn with_subpath(&self, other: &Self) -> Self {
+        let mut path = self.path.clone();
+        path.extend(&other.path);
+        Self { path }
+    }
+
+    pub(crate) fn n_parent(&self, n: usize) -> Option<PageNumber> {
+        if n > self.path.len() - 1 {
+            None
+        } else {
+            Some(self.path[self.path.len() - 1 - n])
+        }
+    }
+
+    pub(crate) fn page_number(&self) -> PageNumber {
+        self.path[self.path.len() - 1]
+    }
+}
+
+pub(crate) struct UntypedBtree {
+    mem: Arc<TransactionalMemory>,
+    root: Option<BtreeHeader>,
+    key_width: Option<usize>,
+    _value_width: Option<usize>,
+}
+
+impl UntypedBtree {
+    pub(crate) fn new(
+        root: Option<BtreeHeader>,
+        mem: Arc<TransactionalMemory>,
+        key_width: Option<usize>,
+        value_width: Option<usize>,
+    ) -> Self {
+        Self {
+            mem,
+            root,
+            key_width,
+            _value_width: value_width,
+        }
+    }
+
+    // Applies visitor to pages in the tree
+    pub(crate) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
+    where
+        F: FnMut(&PagePath) -> Result,
+    {
+        if let Some(page_number) = self.root.map(|x| x.root) {
+            self.visit_pages_helper(PagePath::new_root(page_number), &mut visitor)?;
+        }
+
+        Ok(())
+    }
+
+    fn visit_pages_helper<F>(&self, path: PagePath, visitor: &mut F) -> Result
+    where
+        F: FnMut(&PagePath) -> Result,
+    {
+        visitor(&path)?;
+        let page = self.mem.get_page(path.page_number())?;
+
+        match page.memory()[0] {
+            LEAF => {
+                // No-op
+            }
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, self.key_width);
+                for i in 0..accessor.count_children() {
+                    let child_page = accessor.child_page(i).unwrap();
+                    let child_path = path.with_child(child_page);
+                    self.visit_pages_helper(child_path, visitor)?;
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+}
+
 pub(crate) struct UntypedBtreeMut {
     mem: Arc<TransactionalMemory>,
     root: Option<BtreeHeader>,
@@ -276,6 +372,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn all_pages_iter(&self) -> Result<Option<AllPageNumbersBtreeIter>> {
         if let Some(root) = self.root.map(|x| x.root) {
             Ok(Some(AllPageNumbersBtreeIter::new(
@@ -287,6 +384,19 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         } else {
             Ok(None)
         }
+    }
+
+    pub(crate) fn visit_all_pages<F>(&self, visitor: F) -> Result
+    where
+        F: FnMut(&PagePath) -> Result,
+    {
+        let tree = UntypedBtree::new(
+            self.root,
+            self.mem.clone(),
+            K::fixed_width(),
+            V::fixed_width(),
+        );
+        tree.visit_all_pages(visitor)
     }
 
     pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
