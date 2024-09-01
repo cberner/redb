@@ -568,8 +568,8 @@ impl Database {
         // Chain all the other tables to the master table iter
         for entry in iter {
             let definition = entry?.value();
-            definition.visit_all_pages(mem.clone(), |page_number| {
-                assert!(mem.is_allocated(page_number));
+            definition.visit_all_pages(mem.clone(), |path| {
+                assert!(mem.is_allocated(path.page_number()));
                 Ok(())
             })?;
         }
@@ -594,9 +594,9 @@ impl Database {
         // Chain all the other tables to the master table iter
         for entry in iter {
             let definition = entry?.value();
-            definition.visit_all_pages(mem.clone(), |page_number| {
+            definition.visit_all_pages(mem.clone(), |path| {
                 // TODO: simplify mark_pages_allocated()
-                mem.mark_pages_allocated([Ok(page_number)].into_iter(), allow_duplicates)?;
+                mem.mark_pages_allocated([Ok(path.page_number())].into_iter(), allow_duplicates)?;
                 Ok(())
             })?;
         }

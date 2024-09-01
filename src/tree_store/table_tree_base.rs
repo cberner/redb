@@ -1,6 +1,6 @@
-use crate::multimap_table::{parse_subtree_roots, relocate_subtrees, DynamicCollection};
+use crate::multimap_table::{relocate_subtrees, UntypedMultiBtree};
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, BtreeHeader, PageNumber, TransactionalMemory, UntypedBtreeMut,
+    BtreeHeader, PageNumber, PagePath, TransactionalMemory, UntypedBtree, UntypedBtreeMut,
 };
 use crate::{Key, Result, TableError, TypeName, Value};
 use std::mem::size_of;
@@ -183,13 +183,9 @@ impl InternalTableDefinition {
         Ok(())
     }
 
-    pub(crate) fn visit_all_pages<'a, F>(
-        &self,
-        mem: Arc<TransactionalMemory>,
-        mut visitor: F,
-    ) -> Result
+    pub(crate) fn visit_all_pages<'a, F>(&self, mem: Arc<TransactionalMemory>, visitor: F) -> Result
     where
-        F: FnMut(PageNumber) -> Result + 'a,
+        F: FnMut(&PagePath) -> Result + 'a,
     {
         match self {
             InternalTableDefinition::Normal {
@@ -198,18 +194,8 @@ impl InternalTableDefinition {
                 fixed_value_size,
                 ..
             } => {
-                if let Some(header) = table_root {
-                    let table_pages_iter = AllPageNumbersBtreeIter::new(
-                        header.root,
-                        *fixed_key_size,
-                        *fixed_value_size,
-                        mem,
-                    )?;
-
-                    for page in table_pages_iter {
-                        visitor(page?)?;
-                    }
-                }
+                let tree = UntypedBtree::new(*table_root, mem, *fixed_key_size, *fixed_value_size);
+                tree.visit_all_pages(visitor)?;
             }
             InternalTableDefinition::Multimap {
                 table_root,
@@ -217,40 +203,9 @@ impl InternalTableDefinition {
                 fixed_value_size,
                 ..
             } => {
-                if let Some(header) = table_root {
-                    let table_pages_iter = AllPageNumbersBtreeIter::new(
-                        header.root,
-                        *fixed_key_size,
-                        DynamicCollection::<()>::fixed_width_with(*fixed_value_size),
-                        mem.clone(),
-                    )?;
-                    for page in table_pages_iter {
-                        visitor(page?)?;
-                    }
-
-                    let table_pages_iter = AllPageNumbersBtreeIter::new(
-                        header.root,
-                        *fixed_key_size,
-                        DynamicCollection::<()>::fixed_width_with(*fixed_value_size),
-                        mem.clone(),
-                    )?;
-                    for table_page in table_pages_iter {
-                        let page = mem.get_page(table_page?)?;
-                        let subtree_roots =
-                            parse_subtree_roots(&page, *fixed_key_size, *fixed_value_size);
-                        for subtree_header in subtree_roots {
-                            let sub_root_iter = AllPageNumbersBtreeIter::new(
-                                subtree_header.root,
-                                *fixed_value_size,
-                                <()>::fixed_width(),
-                                mem.clone(),
-                            )?;
-                            for page in sub_root_iter {
-                                visitor(page?)?;
-                            }
-                        }
-                    }
-                }
+                let tree =
+                    UntypedMultiBtree::new(*table_root, mem, *fixed_key_size, *fixed_value_size);
+                tree.visit_all_pages(visitor)?;
             }
         }
 

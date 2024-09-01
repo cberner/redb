@@ -5,8 +5,8 @@ use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
     btree_stats, AllPageNumbersBtreeIter, BranchAccessor, BranchMutator, Btree, BtreeHeader,
     BtreeMut, BtreeRangeIter, BtreeStats, CachePriority, Checksum, LeafAccessor, LeafMutator, Page,
-    PageHint, PageNumber, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtreeMut, BRANCH,
-    DEFERRED, LEAF, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
+    PageHint, PageNumber, PagePath, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtree,
+    UntypedBtreeMut, BRANCH, DEFERRED, LEAF, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
@@ -342,7 +342,7 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
     Ok(tree.get_root())
 }
 
-pub(crate) fn parse_subtree_roots<T: Page>(
+fn parse_subtree_roots<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
@@ -369,6 +369,69 @@ pub(crate) fn parse_subtree_roots<T: Page>(
             result
         }
         _ => unreachable!(),
+    }
+}
+
+pub(crate) struct UntypedMultiBtree {
+    mem: Arc<TransactionalMemory>,
+    root: Option<BtreeHeader>,
+    key_width: Option<usize>,
+    value_width: Option<usize>,
+}
+
+impl UntypedMultiBtree {
+    pub(crate) fn new(
+        root: Option<BtreeHeader>,
+        mem: Arc<TransactionalMemory>,
+        key_width: Option<usize>,
+        value_width: Option<usize>,
+    ) -> Self {
+        Self {
+            mem,
+            root,
+            key_width,
+            value_width,
+        }
+    }
+
+    // Applies visitor to pages in the tree
+    pub(crate) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
+    where
+        F: FnMut(&PagePath) -> Result,
+    {
+        let tree = UntypedBtree::new(
+            self.root,
+            self.mem.clone(),
+            self.key_width,
+            UntypedDynamicCollection::fixed_width_with(self.value_width),
+        );
+        tree.visit_all_pages(|path| {
+            visitor(path)?;
+            let page = self.mem.get_page(path.page_number())?;
+            match page.memory()[0] {
+                LEAF => {
+                    for header in parse_subtree_roots(&page, self.key_width, self.value_width) {
+                        let subtree = UntypedBtree::new(
+                            Some(header),
+                            self.mem.clone(),
+                            self.value_width,
+                            <() as Value>::fixed_width(),
+                        );
+                        subtree.visit_all_pages(|subpath| {
+                            let full_path = path.with_subpath(subpath);
+                            visitor(&full_path)
+                        })?;
+                    }
+                }
+                BRANCH => {
+                    // No-op. The tree.visit_pages() call will process this sub-tree
+                }
+                _ => unreachable!(),
+            }
+            Ok(())
+        })?;
+
+        Ok(())
     }
 }
 
@@ -474,7 +537,7 @@ impl Into<u8> for DynamicCollectionType {
 /// See [Exotically Sized Types](https://doc.rust-lang.org/nomicon/exotic-sizes.html#dynamically-sized-types-dsts)
 /// section of the Rustonomicon for more details.
 #[repr(transparent)]
-pub(crate) struct DynamicCollection<V: Key> {
+struct DynamicCollection<V: Key> {
     _value_type: PhantomData<V>,
     data: [u8],
 }
@@ -637,7 +700,7 @@ impl<V: Key> DynamicCollection<V> {
 }
 
 #[repr(transparent)]
-pub(crate) struct UntypedDynamicCollection {
+struct UntypedDynamicCollection {
     data: [u8],
 }
 

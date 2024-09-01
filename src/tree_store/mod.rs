@@ -6,7 +6,9 @@ mod page_store;
 mod table_tree;
 mod table_tree_base;
 
-pub(crate) use btree::{btree_stats, Btree, BtreeMut, BtreeStats, RawBtree, UntypedBtreeMut};
+pub(crate) use btree::{
+    btree_stats, Btree, BtreeMut, BtreeStats, PagePath, RawBtree, UntypedBtree, UntypedBtreeMut,
+};
 pub use btree_base::{AccessGuard, AccessGuardMut};
 pub(crate) use btree_base::{
     BranchAccessor, BranchMutator, BtreeHeader, Checksum, LeafAccessor, LeafMutator,
