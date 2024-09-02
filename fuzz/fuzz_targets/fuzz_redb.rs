@@ -55,6 +55,7 @@ impl FuzzerBackend {
 
 impl StorageBackend for FuzzerBackend {
     fn len(&self) -> Result<u64, std::io::Error> {
+        self.check_countdown()?;
         self.inner.len()
     }
 
@@ -64,10 +65,12 @@ impl StorageBackend for FuzzerBackend {
     }
 
     fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        self.decrement_countdown()?;
         self.inner.set_len(len)
     }
 
     fn sync_data(&self, _eventual: bool) -> Result<(), std::io::Error> {
+        self.decrement_countdown()?;
         // No-op. The fuzzer doesn't test crashes, so fsync is unnecessary
         Ok(())
     }
