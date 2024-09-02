@@ -3,6 +3,7 @@ use crate::tree_store::{
     BtreeHeader, PageNumber, PagePath, TransactionalMemory, UntypedBtree, UntypedBtreeMut,
 };
 use crate::{Key, Result, TableError, TypeName, Value};
+use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::{Arc, Mutex};
 
@@ -216,6 +217,7 @@ impl InternalTableDefinition {
         &mut self,
         mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+        relocation_map: &HashMap<PageNumber, PageNumber>,
     ) -> Result<Option<Option<BtreeHeader>>> {
         let original_root = self.private_get_root();
         let relocated_root = match self {
@@ -233,6 +235,7 @@ impl InternalTableDefinition {
                         *fixed_value_size,
                         mem.clone(),
                         freed_pages.clone(),
+                        relocation_map,
                     )?;
                     Some(BtreeHeader::new(page_number, checksum, header.length))
                 } else {
@@ -247,7 +250,7 @@ impl InternalTableDefinition {
             self.private_get_fixed_key_size(),
             self.private_get_fixed_value_size(),
         );
-        tree.relocate()?;
+        tree.relocate(relocation_map)?;
         if tree.get_root() != original_root {
             self.set_header(tree.get_root(), self.get_length());
             Ok(Some(tree.get_root()))

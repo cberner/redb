@@ -5,7 +5,7 @@ use crate::tree_store::btree_base::{
 };
 use crate::tree_store::btree_iters::BtreeExtractIf;
 use crate::tree_store::btree_mutator::MutateHelper;
-use crate::tree_store::page_store::{CachePriority, Page, PageImpl, PageMut, TransactionalMemory};
+use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::{
     AccessGuardMut, AllPageNumbersBtreeIter, BtreeRangeIter, PageHint, PageNumber,
 };
@@ -15,6 +15,7 @@ use crate::{AccessGuard, Result};
 use log::trace;
 use std::borrow::Borrow;
 use std::cmp::max;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
@@ -28,6 +29,7 @@ pub(crate) struct BtreeStats {
     pub(crate) fragmented_bytes: u64,
 }
 
+#[derive(Clone)]
 pub(crate) struct PagePath {
     path: Vec<PageNumber>,
 }
@@ -51,12 +53,8 @@ impl PagePath {
         Self { path }
     }
 
-    pub(crate) fn n_parent(&self, n: usize) -> Option<PageNumber> {
-        if n > self.path.len() - 1 {
-            None
-        } else {
-            Some(self.path[self.path.len() - 1 - n])
-        }
+    pub(crate) fn parents(&self) -> &[PageNumber] {
+        &self.path[..self.path.len() - 1]
     }
 
     pub(crate) fn page_number(&self) -> PageNumber {
@@ -261,10 +259,14 @@ impl UntypedBtreeMut {
         Ok(())
     }
 
-    // Relocate the btree to lower pages
-    pub(crate) fn relocate(&mut self) -> Result<bool> {
+    pub(crate) fn relocate(
+        &mut self,
+        relocation_map: &HashMap<PageNumber, PageNumber>,
+    ) -> Result<bool> {
         if let Some(root) = self.get_root() {
-            if let Some((new_root, new_checksum)) = self.relocate_helper(root.root)? {
+            if let Some((new_root, new_checksum)) =
+                self.relocate_helper(root.root, relocation_map)?
+            {
                 self.root = Some(BtreeHeader::new(new_root, new_checksum, root.length));
                 return Ok(true);
             }
@@ -272,22 +274,21 @@ impl UntypedBtreeMut {
         Ok(false)
     }
 
-    // Relocates the given page to a lower page if possible, and returns the new page number
+    // Relocates the given subtree to the pages specified in relocation_map
     fn relocate_helper(
         &mut self,
         page_number: PageNumber,
+        relocation_map: &HashMap<PageNumber, PageNumber>,
     ) -> Result<Option<(PageNumber, Checksum)>> {
         let old_page = self.mem.get_page(page_number)?;
-        let mut new_page = self.mem.allocate_lowest(
-            old_page.memory().len(),
-            CachePriority::default_btree(old_page.memory()),
-        )?;
-        let new_page_number = new_page.get_page_number();
-
+        let mut new_page = if let Some(new_page_number) = relocation_map.get(&page_number) {
+            self.mem.get_page_mut(*new_page_number)?
+        } else {
+            return Ok(None);
+        };
         new_page.memory_mut().copy_from_slice(old_page.memory());
 
         let node_mem = old_page.memory();
-        let mut changed = false;
         match node_mem[0] {
             LEAF => {
                 // No-op
@@ -297,27 +298,22 @@ impl UntypedBtreeMut {
                 let mut mutator = BranchMutator::new(&mut new_page);
                 for i in 0..accessor.count_children() {
                     let child = accessor.child_page(i).unwrap();
-                    if let Some((new_child, new_checksum)) = self.relocate_helper(child)? {
+                    if let Some((new_child, new_checksum)) =
+                        self.relocate_helper(child, relocation_map)?
+                    {
                         mutator.write_child_page(i, new_child, new_checksum);
-                        changed = true;
                     }
                 }
             }
             _ => unreachable!(),
         }
 
-        if changed || new_page_number.is_before(page_number) {
-            let mut freed_pages = self.freed_pages.lock().unwrap();
-            if !self.mem.free_if_uncommitted(page_number) {
-                freed_pages.push(page_number);
-            }
-
-            Ok(Some((new_page_number, DEFERRED)))
-        } else {
-            drop(new_page);
-            self.mem.free(new_page_number);
-            Ok(None)
+        let mut freed_pages = self.freed_pages.lock().unwrap();
+        if !self.mem.free_if_uncommitted(page_number) {
+            freed_pages.push(page_number);
         }
+
+        Ok(Some((new_page.get_page_number(), DEFERRED)))
     }
 }
 
@@ -403,7 +399,10 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         self.root
     }
 
-    pub(crate) fn relocate(&mut self) -> Result<bool> {
+    pub(crate) fn relocate(
+        &mut self,
+        relocation_map: &HashMap<PageNumber, PageNumber>,
+    ) -> Result<bool> {
         let mut tree = UntypedBtreeMut::new(
             self.get_root(),
             self.mem.clone(),
@@ -411,7 +410,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             K::fixed_width(),
             V::fixed_width(),
         );
-        if tree.relocate()? {
+        if tree.relocate(relocation_map)? {
             self.root = tree.get_root();
             Ok(true)
         } else {

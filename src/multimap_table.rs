@@ -12,6 +12,7 @@ use crate::types::{Key, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
 use std::borrow::Borrow;
 use std::cmp::max;
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::mem;
@@ -197,17 +198,16 @@ pub(crate) fn relocate_subtrees(
     value_size: Option<usize>,
     mem: Arc<TransactionalMemory>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+    relocation_map: &HashMap<PageNumber, PageNumber>,
 ) -> Result<(PageNumber, Checksum)> {
     let old_page = mem.get_page(root.0)?;
-    let mut new_page = mem.allocate_lowest(
-        old_page.memory().len(),
-        CachePriority::default_btree(old_page.memory()),
-    )?;
-
+    let mut new_page = if let Some(new_page_number) = relocation_map.get(&root.0) {
+        mem.get_page_mut(*new_page_number)?
+    } else {
+        return Ok(root);
+    };
     let new_page_number = new_page.get_page_number();
     new_page.memory_mut().copy_from_slice(old_page.memory());
-
-    let mut changed = false;
 
     match old_page.memory()[0] {
         LEAF => {
@@ -234,11 +234,11 @@ pub(crate) fn relocate_subtrees(
                         value_size,
                         <() as Value>::fixed_width(),
                     );
-                    if tree.relocate()? {
+                    tree.relocate(relocation_map)?;
+                    if sub_root != tree.get_root().unwrap() {
                         let new_collection =
                             UntypedDynamicCollection::make_subtree_data(tree.get_root().unwrap());
                         mutator.insert(i, true, entry.key(), &new_collection);
-                        changed = true;
                     }
                 }
             }
@@ -255,29 +255,21 @@ pub(crate) fn relocate_subtrees(
                         value_size,
                         mem.clone(),
                         freed_pages.clone(),
+                        relocation_map,
                     )?;
                     mutator.write_child_page(i, new_child, new_checksum);
-                    if new_child != child {
-                        changed = true;
-                    }
                 }
             }
         }
         _ => unreachable!(),
     }
 
-    if changed || new_page_number.is_before(old_page.get_page_number()) {
-        let old_page_number = old_page.get_page_number();
-        drop(old_page);
-        if !mem.free_if_uncommitted(old_page_number) {
-            freed_pages.lock().unwrap().push(old_page_number);
-        }
-        Ok((new_page_number, DEFERRED))
-    } else {
-        drop(new_page);
-        mem.free(new_page_number);
-        Ok(root)
+    let old_page_number = old_page.get_page_number();
+    drop(old_page);
+    if !mem.free_if_uncommitted(old_page_number) {
+        freed_pages.lock().unwrap().push(old_page_number);
     }
+    Ok((new_page_number, DEFERRED))
 }
 
 // Finalize all the checksums in the tree, including any Dynamic collection subtrees

@@ -5,9 +5,9 @@ use crate::sealed::Sealed;
 use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
-    Btree, BtreeHeader, BtreeMut, FreedPageList, FreedTableKey, InternalTableDefinition, PageHint,
-    PageNumber, SerializedSavepoint, TableTree, TableTreeMut, TableType, TransactionalMemory,
-    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
+    Btree, BtreeHeader, BtreeMut, CachePriority, FreedPageList, FreedTableKey,
+    InternalTableDefinition, Page, PageHint, PageNumber, SerializedSavepoint, TableTree,
+    TableTreeMut, TableType, TransactionalMemory, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
 use log::{debug, warn};
 use std::borrow::Borrow;
 use std::cmp::min;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{panic, thread};
 
+const MAX_PAGES_PER_COMPACTION: usize = 1_000_000;
 const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), SavepointId> =
     SystemTableDefinition::new("next_savepoint_id");
 pub(crate) const SAVEPOINT_TABLE: SystemTableDefinition<SavepointId, SerializedSavepoint> =
@@ -1160,17 +1161,62 @@ impl WriteTransaction {
             progress = true;
         }
 
-        // Relocate the btree pages
+        // Find the 1M highest pages
+        let mut highest_pages = BTreeMap::new();
         let mut tables = self.tables.lock().unwrap();
         let table_tree = &mut tables.table_tree;
-        if table_tree.compact_tables()? {
-            progress = true;
-        }
+        table_tree.highest_index_pages(MAX_PAGES_PER_COMPACTION, &mut highest_pages)?;
         let mut system_tables = self.system_tables.lock().unwrap();
         let system_table_tree = &mut system_tables.table_tree;
-        if system_table_tree.compact_tables()? {
+        system_table_tree.highest_index_pages(MAX_PAGES_PER_COMPACTION, &mut highest_pages)?;
+
+        // Calculate how many of them can be relocated to lower pages, starting from the last page
+        let mut relocation_map = HashMap::new();
+        for path in highest_pages.into_values().rev() {
+            if relocation_map.contains_key(&path.page_number()) {
+                continue;
+            }
+            let old_page = self.mem.get_page(path.page_number())?;
+            let mut new_page = self.mem.allocate_lowest(
+                old_page.memory().len(),
+                CachePriority::default_btree(old_page.memory()),
+            )?;
+            let new_page_number = new_page.get_page_number();
+            // We have to copy at least the page type into the new page.
+            // Otherwise its cache priority will be calculated incorrectly
+            new_page.memory_mut()[0] = old_page.memory()[0];
+            drop(new_page);
+            // We're able to move this to a lower page, so insert it and rewrite all its parents
+            if new_page_number < path.page_number() {
+                relocation_map.insert(path.page_number(), new_page_number);
+                for parent in path.parents() {
+                    if relocation_map.contains_key(parent) {
+                        continue;
+                    }
+                    let old_parent = self.mem.get_page(*parent)?;
+                    let mut new_page = self.mem.allocate_lowest(
+                        old_parent.memory().len(),
+                        CachePriority::default_btree(old_parent.memory()),
+                    )?;
+                    let new_page_number = new_page.get_page_number();
+                    // We have to copy at least the page type into the new page.
+                    // Otherwise its cache priority will be calculated incorrectly
+                    new_page.memory_mut()[0] = old_parent.memory()[0];
+                    drop(new_page);
+                    relocation_map.insert(*parent, new_page_number);
+                }
+            } else {
+                self.mem.free(new_page_number);
+                break;
+            }
+        }
+
+        if !relocation_map.is_empty() {
             progress = true;
         }
+
+        table_tree.relocate_tables(&relocation_map)?;
+        system_table_tree.relocate_tables(&relocation_map)?;
 
         Ok(progress)
     }
