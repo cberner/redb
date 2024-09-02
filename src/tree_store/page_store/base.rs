@@ -1,5 +1,6 @@
 use crate::tree_store::page_store::cached_file::WritablePage;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
+use std::cmp::Ordering;
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
 #[cfg(debug_assertions)]
@@ -21,11 +22,36 @@ pub(crate) const MAX_PAGE_INDEX: u32 = 0x000F_FFFF;
 // highest 5bits: page order exponent
 //
 // Assuming a reasonable page size, like 4kiB, this allows for 4kiB * 2^20 * 2^20 = 4PiB of usable space
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub(crate) struct PageNumber {
     pub(crate) region: u32,
     pub(crate) page_index: u32,
     pub(crate) page_order: u8,
+}
+
+// PageNumbers are ordered as determined by their starting address in the database file
+impl Ord for PageNumber {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.region.cmp(&other.region) {
+            Ordering::Less => Ordering::Less,
+            Ordering::Equal => {
+                let self_order0 = self.page_index * 2u32.pow(self.page_order as u32);
+                let other_order0 = other.page_index * 2u32.pow(other.page_order as u32);
+                assert!(
+                    self_order0 != other_order0 || self.page_order == other.page_order,
+                    "{self:?} overlaps {other:?}, but is not equal"
+                );
+                self_order0.cmp(&other_order0)
+            }
+            Ordering::Greater => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for PageNumber {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl PageNumber {
