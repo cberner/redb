@@ -13,7 +13,7 @@ use crate::tree_store::{
 use crate::types::{Key, MutInPlaceValue, TypeName, Value};
 use crate::{DatabaseStats, Result};
 use std::cmp::max;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::mem;
 use std::mem::size_of;
 use std::ops::RangeFull;
@@ -553,8 +553,13 @@ impl<'txn> TableTreeMut<'txn> {
         }
     }
 
-    pub(crate) fn compact_tables(&mut self) -> Result<bool> {
-        let mut progress = false;
+    // Returns the paths to the n pages that are closest to the end of the database
+    // The return value is sorted, according to path.page_number()'s Ord
+    pub(crate) fn highest_index_pages(
+        &self,
+        n: usize,
+        output: &mut BTreeMap<PageNumber, PagePath>,
+    ) -> Result {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let mut definition = entry.value();
@@ -564,20 +569,52 @@ impl<'txn> TableTreeMut<'txn> {
                 definition.set_header(*updated_root, *updated_length);
             }
 
-            if let Some(new_root) =
-                definition.relocate_tree(self.mem.clone(), self.freed_pages.clone())?
+            definition.visit_all_pages(self.mem.clone(), |path| {
+                output.insert(path.page_number(), path.clone());
+                while output.len() > n {
+                    output.pop_first();
+                }
+                Ok(())
+            })?;
+        }
+
+        self.tree.visit_all_pages(|path| {
+            output.insert(path.page_number(), path.clone());
+            while output.len() > n {
+                output.pop_first();
+            }
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    pub(crate) fn relocate_tables(
+        &mut self,
+        relocation_map: &HashMap<PageNumber, PageNumber>,
+    ) -> Result {
+        for entry in self.tree.range::<RangeFull, &str>(&(..))? {
+            let entry = entry?;
+            let mut definition = entry.value();
+            if let Some((updated_root, updated_length)) =
+                self.pending_table_updates.get(entry.key())
             {
-                progress = true;
+                definition.set_header(*updated_root, *updated_length);
+            }
+
+            if let Some(new_root) = definition.relocate_tree(
+                self.mem.clone(),
+                self.freed_pages.clone(),
+                relocation_map,
+            )? {
                 self.pending_table_updates
                     .insert(entry.key().to_string(), (new_root, definition.get_length()));
             }
         }
 
-        if self.tree.relocate()? {
-            progress = true;
-        }
+        self.tree.relocate(relocation_map)?;
 
-        Ok(progress)
+        Ok(())
     }
 
     pub fn stats(&self) -> Result<DatabaseStats> {
