@@ -323,6 +323,10 @@ impl PagedCachedFile {
         })
     }
 
+    pub(crate) fn check_io_errors(&self) -> Result {
+        self.file.check_failure()
+    }
+
     pub(crate) fn raw_file_len(&self) -> Result<u64> {
         self.file.len()
     }
