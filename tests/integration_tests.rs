@@ -1,17 +1,19 @@
+use rand::prelude::SliceRandom;
+use rand::Rng;
+use redb::backends::FileBackend;
+use redb::{
+    AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
+    MultimapTableDefinition, MultimapValue, Range, ReadableTable, ReadableTableMetadata,
+    StorageBackend, TableDefinition, TableStats, TransactionError, Value,
+};
+use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 use std::borrow::Borrow;
 use std::fs;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
-
-use rand::prelude::SliceRandom;
-use rand::Rng;
-use redb::{
-    AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
-    MultimapTableDefinition, MultimapValue, Range, ReadableTable, ReadableTableMetadata,
-    TableDefinition, TableStats, TransactionError, Value,
-};
-use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 const ELEMENTS: usize = 100;
 
@@ -39,6 +41,71 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
     }
 
     pairs
+}
+
+#[test]
+fn previous_io_error() {
+    #[derive(Debug)]
+    struct FailingBackend {
+        inner: FileBackend,
+        fail_flag: Arc<AtomicBool>,
+    }
+
+    impl FailingBackend {
+        fn new(backend: FileBackend, fail_flag: Arc<AtomicBool>) -> Self {
+            Self {
+                inner: backend,
+                fail_flag,
+            }
+        }
+    }
+
+    impl StorageBackend for FailingBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
+            self.inner.read(offset, len)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self, eventual: bool) -> Result<(), std::io::Error> {
+            if self.fail_flag.load(Ordering::SeqCst) {
+                Err(std::io::Error::from(ErrorKind::Other))
+            } else {
+                self.inner.sync_data(eventual)
+            }
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            self.inner.write(offset, data)
+        }
+    }
+
+    let tmpfile = create_tempfile();
+
+    let fail_flag = Arc::new(AtomicBool::new(false));
+    let backend = FailingBackend::new(
+        FileBackend::new(tmpfile.into_file()).unwrap(),
+        fail_flag.clone(),
+    );
+    let db = Database::builder().create_with_backend(backend).unwrap();
+    fail_flag.store(true, Ordering::SeqCst);
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0, &0).unwrap();
+    }
+    assert!(txn.commit().is_err());
+
+    assert!(matches!(
+        db.begin_write().err().unwrap(),
+        TransactionError::Storage(StorageError::PreviousIo)
+    ));
 }
 
 #[test]

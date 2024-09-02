@@ -82,6 +82,7 @@ pub(crate) struct TransactionalMemory {
     // TODO: maybe this should be moved to WriteTransaction?
     allocated_since_commit: Mutex<HashSet<PageNumber>>,
     // True if the allocator state was corrupted when the file was opened
+    // TODO: maybe we can remove this flag now that CheckedBackend exists?
     needs_recovery: AtomicBool,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
@@ -259,6 +260,10 @@ impl TransactionalMemory {
             region_size,
             region_header_with_padding_size: region_header_size,
         })
+    }
+
+    pub(crate) fn check_io_errors(&self) -> Result {
+        self.storage.check_io_errors()
     }
 
     #[cfg(any(test, fuzzing))]

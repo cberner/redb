@@ -777,6 +777,8 @@ impl Database {
     /// write may be in progress at a time. If a write is in progress, this function will block
     /// until it completes.
     pub fn begin_write(&self) -> Result<WriteTransaction, TransactionError> {
+        // Fail early if there has been an I/O error -- nothing can be committed in that case
+        self.mem.check_io_errors()?;
         let guard = TransactionGuard::new_write(
             self.transaction_tracker.start_write_transaction(),
             self.transaction_tracker.clone(),
@@ -987,7 +989,7 @@ mod test {
     use crate::backends::FileBackend;
     use crate::{
         CommitError, Database, DatabaseError, Durability, ReadableTable, StorageBackend,
-        StorageError, TableDefinition,
+        StorageError, TableDefinition, TransactionError,
     };
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1132,10 +1134,10 @@ mod test {
         countdown.store(0, Ordering::SeqCst);
         let result = tx.commit().err().unwrap();
         assert!(matches!(result, CommitError::Storage(StorageError::Io(_))));
-        let result = db.begin_write().unwrap().commit().err().unwrap();
+        let result = db.begin_write().err().unwrap();
         assert!(matches!(
             result,
-            CommitError::Storage(StorageError::PreviousIo)
+            TransactionError::Storage(StorageError::PreviousIo)
         ));
         // Simulate a transient error
         countdown.store(u64::MAX, Ordering::SeqCst);
