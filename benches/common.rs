@@ -340,7 +340,7 @@ impl<'a> BenchDatabase for HeedBenchDatabase<'a> {
     type R<'db> = HeedBenchReadTransaction<'db> where Self: 'db;
 
     fn db_type_name() -> &'static str {
-        "heed"
+        "lmdb"
     }
 
     fn write_transaction(&self) -> Self::W<'_> {
