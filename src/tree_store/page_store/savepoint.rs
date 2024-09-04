@@ -78,10 +78,6 @@ impl Savepoint {
         self.user_root
     }
 
-    pub(crate) fn get_freed_root(&self) -> Option<BtreeHeader> {
-        self.freed_root
-    }
-
     pub(crate) fn db_address(&self) -> *const TransactionTracker {
         self.transaction_tracker.as_ref() as *const _
     }

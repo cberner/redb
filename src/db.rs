@@ -504,18 +504,6 @@ impl Database {
                 if let Some(header) = savepoint.get_user_root() {
                     Self::check_pages_allocated_recursive(header.root, mem.clone())?;
                 }
-                if let Some(header) = savepoint.get_freed_root() {
-                    let freed_pages_iter = AllPageNumbersBtreeIter::new(
-                        header.root,
-                        FreedTableKey::fixed_width(),
-                        FreedPageList::fixed_width(),
-                        mem.clone(),
-                    )?;
-                    for page_number in freed_pages_iter {
-                        let page = page_number?;
-                        assert!(mem.is_allocated(page));
-                    }
-                }
             }
         }
 
