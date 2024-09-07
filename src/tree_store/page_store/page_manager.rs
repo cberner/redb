@@ -356,26 +356,11 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn mark_pages_allocated(
-        &self,
-        allocated_pages: impl Iterator<Item = Result<PageNumber>>,
-        allow_duplicates: bool,
-    ) -> Result<()> {
+    pub(crate) fn mark_page_allocated(&self, page_number: PageNumber) {
         let mut state = self.state.lock().unwrap();
-
-        for page_number in allocated_pages {
-            let page_number = page_number?;
-            let region_index = page_number.region;
-            let allocator = state.get_region_mut(region_index);
-            if allow_duplicates
-                && allocator.is_allocated(page_number.page_index, page_number.page_order)
-            {
-                continue;
-            }
-            allocator.record_alloc(page_number.page_index, page_number.page_order);
-        }
-
-        Ok(())
+        let region_index = page_number.region;
+        let allocator = state.get_region_mut(region_index);
+        allocator.record_alloc(page_number.page_index, page_number.page_order);
     }
 
     fn write_header(&self, header: &DatabaseHeader, swap_primary: bool) -> Result {
