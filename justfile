@@ -27,8 +27,8 @@ install_py: pre
 test: pre
     RUST_BACKTRACE=1 cargo test
 
-test_wasi: pre
-    CARGO_TARGET_WASM32_WASI_RUNNER="wasmtime --mapdir=/::$TMPDIR" cargo +nightly wasi test -- --nocapture
+test_wasi:
+    cargo +nightly test --target=wasm32-wasip1 -- --nocapture
 
 bench bench='lmdb_benchmark': pre
     cargo bench --bench {{bench}}

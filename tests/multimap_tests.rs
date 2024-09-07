@@ -9,7 +9,7 @@ const U64_TABLE: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::ne
 
 fn create_tempfile() -> tempfile::NamedTempFile {
     if cfg!(target_os = "wasi") {
-        tempfile::NamedTempFile::new_in("/").unwrap()
+        tempfile::NamedTempFile::new_in("/tmp").unwrap()
     } else {
         tempfile::NamedTempFile::new().unwrap()
     }

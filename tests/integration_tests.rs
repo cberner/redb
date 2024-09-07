@@ -24,7 +24,7 @@ const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
 
 fn create_tempfile() -> tempfile::NamedTempFile {
     if cfg!(target_os = "wasi") {
-        tempfile::NamedTempFile::new_in("/").unwrap()
+        tempfile::NamedTempFile::new_in("/tmp").unwrap()
     } else {
         tempfile::NamedTempFile::new().unwrap()
     }
@@ -299,6 +299,7 @@ fn large_values() {
 
 // Note: this test requires > 3GiB of memory
 #[test]
+#[cfg(target_pointer_width = "64")]
 fn value_too_large() {
     let tmpfile = create_tempfile();
 
