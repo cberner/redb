@@ -518,7 +518,7 @@ impl Database {
                 FreedPageList::fixed_width(),
                 mem.clone(),
             )?;
-            mem.mark_pages_allocated(freed_pages_iter, true)?;
+            mem.mark_pages_allocated(freed_pages_iter, false)?;
         }
 
         let freed_table: ReadOnlyTable<FreedTableKey, FreedPageList<'static>> = ReadOnlyTable::new(
@@ -534,7 +534,7 @@ impl Database {
             for i in 0..freed_page_list.value().len() {
                 freed_page_list_as_vec.push(Ok(freed_page_list.value().get(i)));
             }
-            mem.mark_pages_allocated(freed_page_list_as_vec.into_iter(), true)?;
+            mem.mark_pages_allocated(freed_page_list_as_vec.into_iter(), false)?;
         }
 
         Ok(())
