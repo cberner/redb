@@ -976,6 +976,7 @@ mod test {
         CommitError, Database, DatabaseError, Durability, ReadableTable, StorageBackend,
         StorageError, TableDefinition, TransactionError,
     };
+    use std::fs::File;
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -1049,11 +1050,9 @@ mod test {
     #[test]
     fn crash_regression4() {
         let tmpfile = crate::create_tempfile();
+        let (file, path) = tmpfile.into_parts();
 
-        let backend = FailingBackend::new(
-            FileBackend::new(tmpfile.as_file().try_clone().unwrap()).unwrap(),
-            23,
-        );
+        let backend = FailingBackend::new(FileBackend::new(file).unwrap(), 23);
         let db = Database::builder()
             .set_cache_size(12686)
             .set_page_size(8 * 1024)
@@ -1080,18 +1079,16 @@ mod test {
             .set_cache_size(1024 * 1024)
             .set_page_size(8 * 1024)
             .set_region_size(32 * 4096)
-            .create(tmpfile.path())
+            .create(&path)
             .unwrap();
     }
 
     #[test]
     fn transient_io_error() {
         let tmpfile = crate::create_tempfile();
+        let (file, path) = tmpfile.into_parts();
 
-        let backend = FailingBackend::new(
-            FileBackend::new(tmpfile.as_file().try_clone().unwrap()).unwrap(),
-            u64::MAX,
-        );
+        let backend = FailingBackend::new(FileBackend::new(file).unwrap(), u64::MAX);
         let countdown = backend.countdown.clone();
         let db = Database::builder()
             .set_cache_size(0)
@@ -1129,9 +1126,10 @@ mod test {
         drop(db);
 
         // Check that recovery flag is set, even though the error has "cleared"
-        tmpfile.as_file().seek(SeekFrom::Start(9)).unwrap();
+        let mut file = File::open(&path).unwrap();
+        file.seek(SeekFrom::Start(9)).unwrap();
         let mut god_byte = vec![0u8];
-        assert_eq!(tmpfile.as_file().read(&mut god_byte).unwrap(), 1);
+        assert_eq!(file.read(&mut god_byte).unwrap(), 1);
         assert_ne!(god_byte[0] & 2, 0);
     }
 

@@ -6,7 +6,7 @@ mod multithreading_test {
 
     fn create_tempfile() -> tempfile::NamedTempFile {
         if cfg!(target_os = "wasi") {
-            tempfile::NamedTempFile::new_in("/").unwrap()
+            tempfile::NamedTempFile::new_in("/tmp").unwrap()
         } else {
             tempfile::NamedTempFile::new().unwrap()
         }

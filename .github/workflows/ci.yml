@@ -52,6 +52,11 @@ jobs:
           # For some reason this is required to run the fuzzer on OSX
           rustup target add x86_64-apple-darwin
 
+      - name: Setup wasmtime
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+            version: "24.0.0"
+
       - name: Install cargo-deny
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: rustup run --install 1.74 cargo install --force --version 0.14.17 cargo-deny --locked
@@ -98,12 +103,9 @@ jobs:
           pip3 install maturin
           just test_py
 
-# Re-enable when this works on stable
-#      - name: Run WASI tests
-#        if: startsWith(matrix.os, 'macos')
-#        run: |
-#          rustup toolchain install nightly
-#          rustup target add wasm32-wasi
-#          brew install wasmtime
-#          cargo install --force --version 0.1.27 cargo-wasi --locked
-#          just test_wasi
+      - name: Run WASI tests
+        if: runner.os != 'Windows'
+        run: |
+          rustup toolchain install nightly
+          rustup target add wasm32-wasip1 --toolchain=nightly
+          RUSTFLAGS="" just test_wasi
