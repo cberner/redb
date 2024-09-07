@@ -565,15 +565,11 @@ impl Database {
         Ok(())
     }
 
-    fn mark_tables_recursive(
-        root: PageNumber,
-        mem: Arc<TransactionalMemory>,
-        allow_duplicates: bool,
-    ) -> Result {
+    fn mark_tables_recursive(root: PageNumber, mem: Arc<TransactionalMemory>) -> Result {
         // Repair the allocator state
         // All pages in the master table
         let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, mem.clone())?;
-        mem.mark_pages_allocated(master_pages_iter, allow_duplicates)?;
+        mem.mark_pages_allocated(master_pages_iter, false)?;
 
         // Iterate over all other tables
         let iter: BtreeRangeIter<&str, InternalTableDefinition> =
@@ -584,7 +580,7 @@ impl Database {
             let definition = entry?.value();
             definition.visit_all_pages(mem.clone(), |path| {
                 // TODO: simplify mark_pages_allocated()
-                mem.mark_pages_allocated([Ok(path.page_number())].into_iter(), allow_duplicates)?;
+                mem.mark_pages_allocated([Ok(path.page_number())].into_iter(), false)?;
                 Ok(())
             })?;
         }
@@ -626,7 +622,7 @@ impl Database {
 
         let data_root = mem.get_data_root();
         if let Some(header) = data_root {
-            Self::mark_tables_recursive(header.root, mem.clone(), false)?;
+            Self::mark_tables_recursive(header.root, mem.clone())?;
         }
 
         let freed_root = mem.get_freed_root();
@@ -650,7 +646,7 @@ impl Database {
 
         let system_root = mem.get_system_root();
         if let Some(header) = system_root {
-            Self::mark_tables_recursive(header.root, mem.clone(), false)?;
+            Self::mark_tables_recursive(header.root, mem.clone())?;
         }
         #[cfg(debug_assertions)]
         {
