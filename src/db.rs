@@ -518,7 +518,9 @@ impl Database {
                 FreedPageList::fixed_width(),
                 mem.clone(),
             )?;
-            mem.mark_pages_allocated(freed_pages_iter, false)?;
+            for page in freed_pages_iter {
+                mem.mark_page_allocated(page?);
+            }
         }
 
         let freed_table: ReadOnlyTable<FreedTableKey, FreedPageList<'static>> = ReadOnlyTable::new(
@@ -530,11 +532,9 @@ impl Database {
         )?;
         for result in freed_table.range::<FreedTableKey>(..)? {
             let (_, freed_page_list) = result?;
-            let mut freed_page_list_as_vec = vec![];
             for i in 0..freed_page_list.value().len() {
-                freed_page_list_as_vec.push(Ok(freed_page_list.value().get(i)));
+                mem.mark_page_allocated(freed_page_list.value().get(i));
             }
-            mem.mark_pages_allocated(freed_page_list_as_vec.into_iter(), false)?;
         }
 
         Ok(())
@@ -569,7 +569,9 @@ impl Database {
         // Repair the allocator state
         // All pages in the master table
         let master_pages_iter = AllPageNumbersBtreeIter::new(root, None, None, mem.clone())?;
-        mem.mark_pages_allocated(master_pages_iter, false)?;
+        for page in master_pages_iter {
+            mem.mark_page_allocated(page?);
+        }
 
         // Iterate over all other tables
         let iter: BtreeRangeIter<&str, InternalTableDefinition> =
@@ -579,8 +581,7 @@ impl Database {
         for entry in iter {
             let definition = entry?.value();
             definition.visit_all_pages(mem.clone(), |path| {
-                // TODO: simplify mark_pages_allocated()
-                mem.mark_pages_allocated([Ok(path.page_number())].into_iter(), false)?;
+                mem.mark_page_allocated(path.page_number());
                 Ok(())
             })?;
         }
