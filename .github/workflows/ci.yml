@@ -40,11 +40,12 @@ jobs:
         with:
           python-version: "3.10"
 
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: 1.66
-          components: rustfmt, clippy
-          default: true
+      - name: Install Rust
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: |
+            rustup default 1.66
+            rustup component add rustfmt
+            rustup component add clippy
 
       - name: OSX x86 rust
         if: startsWith(matrix.os, 'macos')
