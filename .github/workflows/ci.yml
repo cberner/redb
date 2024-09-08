@@ -18,10 +18,10 @@ jobs:
       RUSTFLAGS: --deny warnings
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - name: Cache
         id: rust-cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
             path: |
                 ~/.cargo/bin/
@@ -32,13 +32,13 @@ jobs:
             key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', '.github/workflows/*.yml') }}
 
       - name: Check for forbidden words
-        run: "! grep --include='*.rs' -RE 'to_be_bytes|from_be_bytes|dbg!' ."
         if: runner.os != 'Windows'
+        run: "! grep --include='*.rs' -RE 'to_be_bytes|from_be_bytes|dbg!' ."
 
       - name: Install Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
 
       - uses: actions-rs/toolchain@v1
         with:
@@ -73,8 +73,8 @@ jobs:
         run: cargo build --all-targets --all-features
 
       - name: Fuzzer
-        run: just fuzz_ci
         if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
+        run: just fuzz_ci
 
       - name: Run tests
         run: just build test
