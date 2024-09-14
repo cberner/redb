@@ -1,5 +1,11 @@
 # redb - Changelog
 
+## 2.1.3 - 2024-09-14
+* Significant performance optimizations to `compact()`
+* Fix some additional cases where `compact()` did not fully compact the database
+* Fix a panic that could occur in `commit()` or `abort()` after an IO error. `StorageError::PreviousIo` is now returned
+* Fix a potential panic that could occur when repairing the database after a crash
+
 ## 2.1.2 - 2024-08-25
 ### Major fixes:
 * Fix leak of database space that could occur when calling `restore_savepoint()`
