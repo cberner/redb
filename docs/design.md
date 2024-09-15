@@ -477,9 +477,8 @@ redb is designed to be safe even in the event of power failure or on poorly beha
 Therefore, we make only a few assumptions about the guarantees provided by the underlying filesystem:
 1. single byte writes are atomic: i.e., each byte will be written completely or not at all,
    even in the event of a power failure
-2. following a `fsync` or `msync` operation writes are durable
+2. following an `fsync` operation writes are durable
 3. ["powersafe overwrite"](https://www.sqlite.org/psow.html): When an application writes
    a range of bytes in a file, no bytes outside of that range will change,
    even if the write occurs just before a crash or power failure. sqlite makes this same
    assumption, by default, in all modern versions.
-
