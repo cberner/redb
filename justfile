@@ -40,10 +40,10 @@ test_all: build_all
     RUST_BACKTRACE=1 cargo test --all --all-features
 
 test_wasi:
-    rustup install nightly-2025-05-04 --target wasm32-wasip1-threads
+    rustup install nightly-2025-06-17 --target wasm32-wasip1-threads
     # Uses cargo pkgid because "redb" is ambiguous with the test dependency on an old version of redb
-    cargo +nightly-2025-05-04 test -p $(cargo pkgid) --target=wasm32-wasip1-threads -- --nocapture
-    cargo +nightly-2025-05-04 test -p redb-derive --target=wasm32-wasip1-threads -- --nocapture
+    cargo +nightly-2025-06-17 test -p $(cargo pkgid) --target=wasm32-wasip1-threads -- --nocapture
+    cargo +nightly-2025-06-17 test -p redb-derive --target=wasm32-wasip1-threads -- --nocapture
 
 bench bench='redb_benchmark': pre
     cargo bench -p redb-bench --bench {{bench}}
