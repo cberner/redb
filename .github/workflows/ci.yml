@@ -42,6 +42,7 @@ jobs:
 
       - name: Install Rust
         run: |
+            rustup default nightly-2025-05-04
             rustup component add rustfmt
             rustup component add clippy
 
