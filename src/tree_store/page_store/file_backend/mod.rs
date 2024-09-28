@@ -1,12 +1,7 @@
-#[cfg(any(unix, target_os = "wasi"))]
-mod unix;
-#[cfg(any(unix, target_os = "wasi"))]
-pub use unix::FileBackend;
-
-#[cfg(windows)]
-mod windows;
-#[cfg(windows)]
-pub use windows::FileBackend;
+#[cfg(any(windows, unix, target_os = "wasi"))]
+mod optimized;
+#[cfg(any(windows, unix, target_os = "wasi"))]
+pub use optimized::FileBackend;
 
 #[cfg(not(any(windows, unix, target_os = "wasi")))]
 mod fallback;
