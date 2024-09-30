@@ -275,6 +275,14 @@ impl<'txn, K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'
             .range(&range)
             .map(|x| Range::new(x, self.transaction.transaction_guard()))
     }
+
+    fn first(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+        self.tree.first()
+    }
+
+    fn last(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+        self.tree.last()
+    }
 }
 
 impl<K: Key, V: Value> Sealed for Table<'_, K, V> {}
@@ -392,14 +400,10 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
         KR: Borrow<K::SelfType<'a>> + 'a;
 
     /// Returns the first key-value pair in the table, if it exists
-    fn first(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
-        self.iter()?.next().transpose()
-    }
+    fn first(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>>;
 
     /// Returns the last key-value pair in the table, if it exists
-    fn last(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
-        self.iter()?.next_back().transpose()
-    }
+    fn last(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>>;
 
     /// Returns a double-ended iterator over all elements in the table
     fn iter(&self) -> Result<Range<K, V>> {
@@ -519,6 +523,14 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
         self.tree
             .range(&range)
             .map(|x| Range::new(x, self.transaction_guard.clone()))
+    }
+
+    fn first(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+        self.tree.first()
+    }
+
+    fn last(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+        self.tree.last()
     }
 }
 

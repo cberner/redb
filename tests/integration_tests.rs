@@ -1797,6 +1797,14 @@ impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTable
     {
         self.inner.range(range)
     }
+
+    fn first(&self) -> redb::Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+        self.inner.first()
+    }
+
+    fn last(&self) -> redb::Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+        self.inner.last()
+    }
 }
 
 impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTableMetadata
