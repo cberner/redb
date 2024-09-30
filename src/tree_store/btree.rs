@@ -474,6 +474,18 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         self.read_tree()?.get(key)
     }
 
+    pub(crate) fn first(
+        &self,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        self.read_tree()?.first()
+    }
+
+    pub(crate) fn last(
+        &self,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        self.read_tree()?.last()
+    }
+
     pub(crate) fn range<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
         &self,
         range: &'_ T,
@@ -721,6 +733,71 @@ impl<K: Key, V: Value> Btree<K, V> {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let (_, child_page) = accessor.child_for_key::<K>(query);
                 self.get_helper(self.mem.get_page_extended(child_page, self.hint)?, query)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn first(
+        &self,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        if let Some(ref root) = self.cached_root {
+            self.first_helper(root.clone())
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn first_helper(
+        &self,
+        page: PageImpl,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                let (key_range, value_range) = accessor.entry_ranges(0).unwrap();
+                let key_guard = AccessGuard::with_page(page.clone(), key_range);
+                let value_guard = AccessGuard::with_page(page, value_range);
+                Ok(Some((key_guard, value_guard)))
+            }
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let child_page = accessor.child_page(0).unwrap();
+                self.first_helper(self.mem.get_page_extended(child_page, self.hint)?)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn last(
+        &self,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        if let Some(ref root) = self.cached_root {
+            self.last_helper(root.clone())
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn last_helper(
+        &self,
+        page: PageImpl,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                let (key_range, value_range) =
+                    accessor.entry_ranges(accessor.num_pairs() - 1).unwrap();
+                let key_guard = AccessGuard::with_page(page.clone(), key_range);
+                let value_guard = AccessGuard::with_page(page, value_range);
+                Ok(Some((key_guard, value_guard)))
+            }
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let child_page = accessor.child_page(accessor.count_children() - 1).unwrap();
+                self.last_helper(self.mem.get_page_extended(child_page, self.hint)?)
             }
             _ => unreachable!(),
         }
