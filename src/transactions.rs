@@ -5,9 +5,9 @@ use crate::sealed::Sealed;
 use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
-    Btree, BtreeHeader, BtreeMut, CachePriority, FreedPageList, FreedTableKey,
-    InternalTableDefinition, Page, PageHint, PageNumber, SerializedSavepoint, TableTree,
-    TableTreeMut, TableType, TransactionalMemory, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
+    Btree, BtreeHeader, BtreeMut, FreedPageList, FreedTableKey, InternalTableDefinition, Page,
+    PageHint, PageNumber, SerializedSavepoint, TableTree, TableTreeMut, TableType,
+    TransactionalMemory, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -1177,10 +1177,7 @@ impl WriteTransaction {
                 continue;
             }
             let old_page = self.mem.get_page(path.page_number())?;
-            let mut new_page = self.mem.allocate_lowest(
-                old_page.memory().len(),
-                CachePriority::default_btree(old_page.memory()),
-            )?;
+            let mut new_page = self.mem.allocate_lowest(old_page.memory().len())?;
             let new_page_number = new_page.get_page_number();
             // We have to copy at least the page type into the new page.
             // Otherwise its cache priority will be calculated incorrectly
@@ -1194,10 +1191,7 @@ impl WriteTransaction {
                         continue;
                     }
                     let old_parent = self.mem.get_page(*parent)?;
-                    let mut new_page = self.mem.allocate_lowest(
-                        old_parent.memory().len(),
-                        CachePriority::default_btree(old_parent.memory()),
-                    )?;
+                    let mut new_page = self.mem.allocate_lowest(old_parent.memory().len())?;
                     let new_page_number = new_page.get_page_number();
                     // We have to copy at least the page type into the new page.
                     // Otherwise its cache priority will be calculated incorrectly

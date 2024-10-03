@@ -1,7 +1,6 @@
 use crate::tree_store::page_store::base::PageHint;
-use crate::tree_store::LEAF;
+use crate::tree_store::page_store::lru_cache::LRUCache;
 use crate::{DatabaseError, Result, StorageBackend, StorageError};
-use std::collections::BTreeMap;
 use std::ops::{Index, IndexMut};
 use std::slice::SliceIndex;
 #[cfg(feature = "cache_metrics")]
@@ -9,28 +8,10 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-// Leaf pages are cached with low priority. Everything is cached with high priority
-#[derive(Clone, Copy)]
-pub(crate) enum CachePriority {
-    High,
-    Low,
-}
-
-impl CachePriority {
-    pub(crate) fn default_btree(data: &[u8]) -> CachePriority {
-        if data[0] == LEAF {
-            CachePriority::Low
-        } else {
-            CachePriority::High
-        }
-    }
-}
-
 pub(super) struct WritablePage {
-    buffer: Arc<Mutex<PrioritizedWriteCache>>,
+    buffer: Arc<Mutex<LRUWriteCache>>,
     offset: u64,
     data: Arc<[u8]>,
-    priority: CachePriority,
 }
 
 impl WritablePage {
@@ -48,7 +29,7 @@ impl Drop for WritablePage {
         self.buffer
             .lock()
             .unwrap()
-            .return_value(&self.offset, self.data.clone(), self.priority);
+            .return_value(&self.offset, self.data.clone());
     }
 }
 
@@ -67,84 +48,23 @@ impl<I: SliceIndex<[u8]>> IndexMut<I> for WritablePage {
 }
 
 #[derive(Default)]
-struct PrioritizedCache {
-    cache: BTreeMap<u64, Arc<[u8]>>,
-    low_pri_cache: BTreeMap<u64, Arc<[u8]>>,
+struct LRUWriteCache {
+    cache: LRUCache<Option<Arc<[u8]>>>,
 }
 
-impl PrioritizedCache {
+impl LRUWriteCache {
     fn new() -> Self {
         Self {
             cache: Default::default(),
-            low_pri_cache: Default::default(),
         }
     }
 
-    fn insert(&mut self, key: u64, value: Arc<[u8]>, priority: CachePriority) -> Option<Arc<[u8]>> {
-        if matches!(priority, CachePriority::Low) {
-            debug_assert!(!self.cache.contains_key(&key));
-            self.low_pri_cache.insert(key, value)
-        } else {
-            debug_assert!(!self.low_pri_cache.contains_key(&key));
-            self.cache.insert(key, value)
-        }
-    }
-
-    fn remove(&mut self, key: &u64) -> Option<Arc<[u8]>> {
-        let result = self.cache.remove(key);
-        if result.is_some() {
-            return result;
-        }
-        self.low_pri_cache.remove(key)
+    fn insert(&mut self, key: u64, value: Arc<[u8]>) {
+        assert!(self.cache.insert(key, Some(value)).is_none());
     }
 
     fn get(&self, key: &u64) -> Option<&Arc<[u8]>> {
-        let result = self.cache.get(key);
-        if result.is_some() {
-            return result;
-        }
-        self.low_pri_cache.get(key)
-    }
-
-    fn pop_lowest_priority(&mut self) -> Option<(u64, Arc<[u8]>)> {
-        let result = self.low_pri_cache.pop_first();
-        if result.is_some() {
-            return result;
-        }
-        self.cache.pop_first()
-    }
-}
-
-#[derive(Default)]
-struct PrioritizedWriteCache {
-    cache: BTreeMap<u64, Option<Arc<[u8]>>>,
-    low_pri_cache: BTreeMap<u64, Option<Arc<[u8]>>>,
-}
-
-impl PrioritizedWriteCache {
-    fn new() -> Self {
-        Self {
-            cache: Default::default(),
-            low_pri_cache: Default::default(),
-        }
-    }
-
-    fn insert(&mut self, key: u64, value: Arc<[u8]>, priority: CachePriority) {
-        if matches!(priority, CachePriority::Low) {
-            assert!(self.low_pri_cache.insert(key, Some(value)).is_none());
-            debug_assert!(!self.cache.contains_key(&key));
-        } else {
-            assert!(self.cache.insert(key, Some(value)).is_none());
-            debug_assert!(!self.low_pri_cache.contains_key(&key));
-        }
-    }
-
-    fn get(&self, key: &u64) -> Option<&Arc<[u8]>> {
-        let result = self.cache.get(key);
-        if result.is_some() {
-            return result.map(|x| x.as_ref().unwrap());
-        }
-        self.low_pri_cache.get(key).map(|x| x.as_ref().unwrap())
+        self.cache.get(key).map(|x| x.as_ref().unwrap())
     }
 
     fn remove(&mut self, key: &u64) -> Option<Arc<[u8]>> {
@@ -152,24 +72,11 @@ impl PrioritizedWriteCache {
             assert!(value.is_some());
             return value;
         }
-        if let Some(value) = self.low_pri_cache.remove(key) {
-            assert!(value.is_some());
-            return value;
-        }
         None
     }
 
-    fn return_value(&mut self, key: &u64, value: Arc<[u8]>, priority: CachePriority) {
-        if matches!(priority, CachePriority::Low) {
-            assert!(self
-                .low_pri_cache
-                .get_mut(key)
-                .unwrap()
-                .replace(value)
-                .is_none());
-        } else {
-            assert!(self.cache.get_mut(key).unwrap().replace(value).is_none());
-        }
+    fn return_value(&mut self, key: &u64, value: Arc<[u8]>) {
+        assert!(self.cache.get_mut(key).unwrap().replace(value).is_none());
     }
 
     fn take_value(&mut self, key: &u64) -> Option<Arc<[u8]>> {
@@ -177,38 +84,25 @@ impl PrioritizedWriteCache {
             let result = value.take().unwrap();
             return Some(result);
         }
-        if let Some(value) = self.low_pri_cache.get_mut(key) {
-            let result = value.take().unwrap();
-            return Some(result);
-        }
         None
     }
 
-    fn pop_lowest_priority(&mut self) -> Option<(u64, Arc<[u8]>, CachePriority)> {
-        for (k, v) in self.low_pri_cache.range(..) {
+    fn pop_lowest_priority(&mut self) -> Option<(u64, Arc<[u8]>)> {
+        let mut selected = None;
+        for (k, v) in self.cache.iter() {
             if v.is_some() {
-                let key = *k;
-                return self
-                    .low_pri_cache
-                    .remove(&key)
-                    .map(|x| (key, x.unwrap(), CachePriority::Low));
+                selected = Some(*k);
             }
         }
-        for (k, v) in self.cache.range(..) {
-            if v.is_some() {
-                let key = *k;
-                return self
-                    .cache
-                    .remove(&key)
-                    .map(|x| (key, x.unwrap(), CachePriority::High));
-            }
+        if let Some(key) = selected {
+            self.cache.remove(&key).map(|x| (key, x.unwrap()))
+        } else {
+            None
         }
-        None
     }
 
     fn clear(&mut self) {
         self.cache.clear();
-        self.low_pri_cache.clear();
     }
 }
 
@@ -291,9 +185,9 @@ pub(super) struct PagedCachedFile {
     reads_total: AtomicU64,
     #[cfg(feature = "cache_metrics")]
     reads_hits: AtomicU64,
-    read_cache: Box<[RwLock<PrioritizedCache>]>,
+    read_cache: Vec<RwLock<LRUCache<Arc<[u8]>>>>,
     // TODO: maybe move this cache to WriteTransaction?
-    write_buffer: Arc<Mutex<PrioritizedWriteCache>>,
+    write_buffer: Arc<Mutex<LRUWriteCache>>,
 }
 
 impl PagedCachedFile {
@@ -304,7 +198,7 @@ impl PagedCachedFile {
         max_write_buffer_bytes: usize,
     ) -> Result<Self, DatabaseError> {
         let read_cache = (0..Self::lock_stripes())
-            .map(|_| RwLock::new(PrioritizedCache::new()))
+            .map(|_| RwLock::new(LRUCache::new()))
             .collect();
 
         Ok(Self {
@@ -319,7 +213,7 @@ impl PagedCachedFile {
             #[cfg(feature = "cache_metrics")]
             reads_hits: Default::default(),
             read_cache,
-            write_buffer: Arc::new(Mutex::new(PrioritizedWriteCache::new())),
+            write_buffer: Arc::new(Mutex::new(LRUWriteCache::new())),
         })
     }
 
@@ -341,9 +235,6 @@ impl PagedCachedFile {
         for (offset, buffer) in write_buffer.cache.iter() {
             self.file.write(*offset, buffer.as_ref().unwrap())?;
         }
-        for (offset, buffer) in write_buffer.low_pri_cache.iter() {
-            self.file.write(*offset, buffer.as_ref().unwrap())?;
-        }
         for (offset, buffer) in write_buffer.cache.iter_mut() {
             let buffer = buffer.take().unwrap();
             let cache_size = self
@@ -353,27 +244,7 @@ impl PagedCachedFile {
             if cache_size + buffer.len() <= self.max_read_cache_bytes {
                 let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
                 let mut lock = self.read_cache[cache_slot].write().unwrap();
-                if let Some(replaced) = lock.insert(*offset, buffer, CachePriority::High) {
-                    // A race could cause us to replace an existing buffer
-                    self.read_cache_bytes
-                        .fetch_sub(replaced.len(), Ordering::AcqRel);
-                }
-            } else {
-                self.read_cache_bytes
-                    .fetch_sub(buffer.len(), Ordering::AcqRel);
-                break;
-            }
-        }
-        for (offset, buffer) in write_buffer.low_pri_cache.iter_mut() {
-            let buffer = buffer.take().unwrap();
-            let cache_size = self
-                .read_cache_bytes
-                .fetch_add(buffer.len(), Ordering::AcqRel);
-
-            if cache_size + buffer.len() <= self.max_read_cache_bytes {
-                let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
-                let mut lock = self.read_cache[cache_slot].write().unwrap();
-                if let Some(replaced) = lock.insert(*offset, buffer, CachePriority::Low) {
+                if let Some(replaced) = lock.insert(*offset, buffer) {
                     // A race could cause us to replace an existing buffer
                     self.read_cache_bytes
                         .fetch_sub(replaced.len(), Ordering::AcqRel);
@@ -416,13 +287,7 @@ impl PagedCachedFile {
 
     // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
     // Doing so will not cause UB, but is a logic error.
-    pub(super) fn read(
-        &self,
-        offset: u64,
-        len: usize,
-        hint: PageHint,
-        cache_policy: impl Fn(&[u8]) -> CachePriority,
-    ) -> Result<Arc<[u8]>> {
+    pub(super) fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<Arc<[u8]>> {
         debug_assert_eq!(0, offset % self.page_size);
         #[cfg(feature = "cache_metrics")]
         self.reads_total.fetch_add(1, Ordering::AcqRel);
@@ -451,9 +316,7 @@ impl PagedCachedFile {
         let buffer: Arc<[u8]> = self.read_direct(offset, len)?.into();
         let cache_size = self.read_cache_bytes.fetch_add(len, Ordering::AcqRel);
         let mut write_lock = self.read_cache[cache_slot].write().unwrap();
-        let cache_size = if let Some(replaced) =
-            write_lock.insert(offset, buffer.clone(), cache_policy(&buffer))
-        {
+        let cache_size = if let Some(replaced) = write_lock.insert(offset, buffer.clone()) {
             // A race could cause us to replace an existing buffer
             self.read_cache_bytes
                 .fetch_sub(replaced.len(), Ordering::AcqRel)
@@ -511,13 +374,7 @@ impl PagedCachedFile {
 
     // If overwrite is true, the page is initialized to zero
     // cache_policy takes the existing data as an argument and returns the priority. The priority should be stable and not change after WritablePage is dropped
-    pub(super) fn write(
-        &self,
-        offset: u64,
-        len: usize,
-        overwrite: bool,
-        cache_policy: impl Fn(&[u8]) -> CachePriority,
-    ) -> Result<WritablePage> {
+    pub(super) fn write(&self, offset: u64, len: usize, overwrite: bool) -> Result<WritablePage> {
         assert_eq!(0, offset % self.page_size);
         let mut lock = self.write_buffer.lock().unwrap();
 
@@ -547,11 +404,11 @@ impl PagedCachedFile {
             if previous + len > self.max_write_buffer_bytes {
                 let mut removed_bytes = 0;
                 while removed_bytes < len {
-                    if let Some((offset, buffer, removed_priority)) = lock.pop_lowest_priority() {
+                    if let Some((offset, buffer)) = lock.pop_lowest_priority() {
                         let removed_len = buffer.len();
                         let result = self.file.write(offset, &buffer);
                         if result.is_err() {
-                            lock.insert(offset, buffer, removed_priority);
+                            lock.insert(offset, buffer);
                         }
                         result?;
                         self.write_buffer_bytes
@@ -569,16 +426,13 @@ impl PagedCachedFile {
             } else {
                 self.read_direct(offset, len)?.into()
             };
-            let priority = cache_policy(&result);
-            lock.insert(offset, result, priority);
+            lock.insert(offset, result);
             lock.take_value(&offset).unwrap()
         };
-        let priority = cache_policy(&data);
         Ok(WritablePage {
             buffer: self.write_buffer.clone(),
             offset,
             data,
-            priority,
         })
     }
 }
@@ -587,7 +441,7 @@ impl PagedCachedFile {
 mod test {
     use crate::backends::InMemoryBackend;
     use crate::tree_store::page_store::cached_file::PagedCachedFile;
-    use crate::tree_store::{CachePriority, PageHint};
+    use crate::tree_store::PageHint;
     use crate::StorageBackend;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
@@ -605,9 +459,7 @@ mod test {
             let cached_file = cached_file.clone();
             std::thread::spawn(move || {
                 for _ in 0..1000 {
-                    cached_file
-                        .read(0, 128, PageHint::None, CachePriority::default_btree)
-                        .unwrap();
+                    cached_file.read(0, 128, PageHint::None).unwrap();
                     cached_file.invalidate_cache(0, 128);
                 }
             })
@@ -616,9 +468,7 @@ mod test {
             let cached_file = cached_file.clone();
             std::thread::spawn(move || {
                 for _ in 0..1000 {
-                    cached_file
-                        .read(0, 128, PageHint::None, CachePriority::default_btree)
-                        .unwrap();
+                    cached_file.read(0, 128, PageHint::None).unwrap();
                     cached_file.invalidate_cache(0, 128);
                 }
             })

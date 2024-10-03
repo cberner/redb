@@ -6,6 +6,7 @@ pub mod file_backend;
 mod header;
 mod in_memory_backend;
 mod layout;
+mod lru_cache;
 mod page_manager;
 mod region;
 mod savepoint;
@@ -21,6 +22,5 @@ pub(crate) use savepoint::SerializedSavepoint;
 
 pub(super) use base::{PageImpl, PageMut};
 pub(super) use buddy_allocator::BuddyAllocator;
-pub(crate) use cached_file::CachePriority;
 pub(super) use region::new_allocators;
 pub(super) use xxh3::hash128_with_seed;
