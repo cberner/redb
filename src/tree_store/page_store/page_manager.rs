@@ -2,7 +2,7 @@ use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
 use crate::tree_store::page_store::base::{PageHint, MAX_PAGE_INDEX};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
-use crate::tree_store::page_store::cached_file::{CachePriority, PagedCachedFile};
+use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::header::{DatabaseHeader, DB_HEADER_SIZE, MAGICNUMBER};
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
@@ -186,7 +186,7 @@ impl TransactionalMemory {
 
             header.recovery_required = false;
             storage
-                .write(0, DB_HEADER_SIZE, true, |_| CachePriority::High)?
+                .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(false, false));
             allocators.flush_to(tracker_page, layout, &storage)?;
@@ -195,7 +195,7 @@ impl TransactionalMemory {
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
             storage
-                .write(0, DB_HEADER_SIZE, true, |_| CachePriority::High)?
+                .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true, false));
             storage.flush(false)?;
@@ -231,7 +231,7 @@ impl TransactionalMemory {
             }
             assert!(!repair_info.invalid_magic_number);
             storage
-                .write(0, DB_HEADER_SIZE, true, |_| CachePriority::High)?
+                .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true, false));
             storage.flush(false)?;
@@ -310,7 +310,7 @@ impl TransactionalMemory {
                 return Err(StorageError::Corrupted("Invalid magic number".to_string()).into());
             }
             self.storage
-                .write(0, DB_HEADER_SIZE, true, |_| CachePriority::High)?
+                .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true, false));
             self.storage.flush(false)?;
@@ -365,7 +365,7 @@ impl TransactionalMemory {
 
     fn write_header(&self, header: &DatabaseHeader, swap_primary: bool) -> Result {
         self.storage
-            .write(0, DB_HEADER_SIZE, true, |_| CachePriority::High)?
+            .write(0, DB_HEADER_SIZE, true)?
             .mem_mut()
             .copy_from_slice(&header.to_bytes(true, swap_primary));
 
@@ -383,9 +383,7 @@ impl TransactionalMemory {
             || tracker_page.page_size_bytes(self.page_size) < tracker_len as u64
         {
             drop(state);
-            let new_tracker_page = self
-                .allocate(tracker_len, CachePriority::High)?
-                .get_page_number();
+            let new_tracker_page = self.allocate(tracker_len)?.get_page_number();
 
             let mut state = self.state.lock().unwrap();
             state.header.set_region_tracker(new_tracker_page);
@@ -428,8 +426,7 @@ impl TransactionalMemory {
         let old_tracker_page = state.header.region_tracker();
         // allocate acquires this lock, so we need to drop it
         drop(state);
-        let new_page =
-            self.allocate_lowest(region_tracker_size.try_into().unwrap(), CachePriority::High)?;
+        let new_page = self.allocate_lowest(region_tracker_size.try_into().unwrap())?;
         if new_page.get_page_number().is_before(old_tracker_page) {
             let mut state = self.state.lock().unwrap();
             state.header.set_region_tracker(new_page.get_page_number());
@@ -648,9 +645,7 @@ impl TransactionalMemory {
             self.page_size,
         );
         let len: usize = (range.end - range.start).try_into().unwrap();
-        let mem = self
-            .storage
-            .read(range.start, len, hint, CachePriority::default_btree)?;
+        let mem = self.storage.read(range.start, len, hint)?;
 
         // We must not retrieve an immutable reference to a page which already has a mutable ref to it
         #[cfg(debug_assertions)]
@@ -695,12 +690,7 @@ impl TransactionalMemory {
         let len: usize = (address_range.end - address_range.start)
             .try_into()
             .unwrap();
-        let mem = self.storage.write(
-            address_range.start,
-            len,
-            false,
-            CachePriority::default_btree,
-        )?;
+        let mem = self.storage.write(address_range.start, len, false)?;
 
         #[cfg(debug_assertions)]
         {
@@ -809,12 +799,7 @@ impl TransactionalMemory {
         self.allocated_since_commit.lock().unwrap().contains(&page)
     }
 
-    pub(crate) fn allocate_helper(
-        &self,
-        allocation_size: usize,
-        lowest: bool,
-        priority: CachePriority,
-    ) -> Result<PageMut> {
+    pub(crate) fn allocate_helper(&self, allocation_size: usize, lowest: bool) -> Result<PageMut> {
         let required_pages = (allocation_size + self.get_page_size() - 1) / self.get_page_size();
         let required_order = ceil_log2(required_pages);
 
@@ -859,9 +844,7 @@ impl TransactionalMemory {
             .unwrap();
 
         #[allow(unused_mut)]
-        let mut mem = self
-            .storage
-            .write(address_range.start, len, true, |_| priority)?;
+        let mut mem = self.storage.write(address_range.start, len, true)?;
         debug_assert!(mem.mem().len() >= allocation_size);
 
         #[cfg(debug_assertions)]
@@ -983,20 +966,12 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn allocate(
-        &self,
-        allocation_size: usize,
-        cache_priority: CachePriority,
-    ) -> Result<PageMut> {
-        self.allocate_helper(allocation_size, false, cache_priority)
+    pub(crate) fn allocate(&self, allocation_size: usize) -> Result<PageMut> {
+        self.allocate_helper(allocation_size, false)
     }
 
-    pub(crate) fn allocate_lowest(
-        &self,
-        allocation_size: usize,
-        cache_priority: CachePriority,
-    ) -> Result<PageMut> {
-        self.allocate_helper(allocation_size, true, cache_priority)
+    pub(crate) fn allocate_lowest(&self, allocation_size: usize) -> Result<PageMut> {
+        self.allocate_helper(allocation_size, true)
     }
 
     pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
@@ -1055,7 +1030,7 @@ impl Drop for TransactionalMemory {
         if tracker_page_size < (tracker_len as u64) {
             drop(state);
             // Allocate a larger tracker page
-            if let Ok(tracker_page) = self.allocate(tracker_len, CachePriority::High) {
+            if let Ok(tracker_page) = self.allocate(tracker_len) {
                 state = self.state.lock().unwrap();
                 state
                     .header

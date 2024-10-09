@@ -4,8 +4,8 @@ use crate::sealed::Sealed;
 use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
     btree_stats, AllPageNumbersBtreeIter, BranchAccessor, BranchMutator, Btree, BtreeHeader,
-    BtreeMut, BtreeRangeIter, BtreeStats, CachePriority, Checksum, LeafAccessor, LeafMutator, Page,
-    PageHint, PageNumber, PagePath, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtree,
+    BtreeMut, BtreeRangeIter, BtreeStats, Checksum, LeafAccessor, LeafMutator, Page, PageHint,
+    PageNumber, PagePath, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtree,
     UntypedBtreeMut, BRANCH, DEFERRED, LEAF, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, TypeName, Value};
@@ -1057,7 +1057,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                             .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                     } else {
                         // convert into a subtree
-                        let mut page = self.mem.allocate(leaf_data.len(), CachePriority::Low)?;
+                        let mut page = self.mem.allocate(leaf_data.len())?;
                         page.memory_mut()[..leaf_data.len()].copy_from_slice(leaf_data);
                         let page_number = page.get_page_number();
                         drop(page);
