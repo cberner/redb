@@ -1,5 +1,13 @@
 # redb - Changelog
 
+## 2.1.4 - 2024-10-10
+* Optimize `first()` and `last()` to be almost 2x faster
+* Improve in-memory cache algorithm to resolve edge cases where certain pages could become
+  uncacheable under cache pressure
+* Fix bug in read cache where the read cache could become disabled. This was likely to occur in
+  multithreaded workloads when the read cache was smaller than the database file. This bug lead to
+  5-10x performance degradations for some workloads
+
 ## 2.1.3 - 2024-09-14
 * Significant performance optimizations to `compact()`
 * Fix some additional cases where `compact()` did not fully compact the database
