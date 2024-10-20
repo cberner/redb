@@ -1083,3 +1083,127 @@ impl BenchInserter for FjallBenchInserter<'_, '_> {
         Ok(())
     }
 }
+
+pub struct CanopydbBenchDatabase<'a> {
+    db: &'a canopydb::Database,
+}
+
+impl<'a> CanopydbBenchDatabase<'a> {
+    #[allow(dead_code)]
+    pub fn new(db: &'a canopydb::Database) -> Self {
+        Self { db }
+    }
+}
+
+impl<'a> BenchDatabase for CanopydbBenchDatabase<'a> {
+    type W<'db>= CanopydbBenchWriteTransaction<'a> where Self: 'db;
+    type R<'db> = CanopydbBenchReadTransaction where Self: 'db;
+
+    fn db_type_name() -> &'static str {
+        "canopydb"
+    }
+
+    fn write_transaction(&self) -> Self::W<'_> {
+        CanopydbBenchWriteTransaction {
+            db: self.db,
+            txn: self.db.begin_write().unwrap(),
+        }
+    }
+
+    fn read_transaction(&self) -> Self::R<'_> {
+        CanopydbBenchReadTransaction {
+            txn: self.db.begin_read().unwrap(),
+        }
+    }
+
+    fn compact(&mut self) -> bool {
+        self.db.compact().unwrap();
+        true
+    }
+}
+
+pub struct CanopydbBenchWriteTransaction<'db> {
+    db: &'db canopydb::Database,
+    txn: canopydb::WriteTransaction,
+}
+
+impl BenchWriteTransaction for CanopydbBenchWriteTransaction<'_> {
+    type W<'txn> = CanopydbBenchInserter<'txn> where Self: 'txn;
+
+    fn get_inserter(&mut self) -> Self::W<'_> {
+        CanopydbBenchInserter {
+            tree: self.txn.get_or_create_tree(b"default").unwrap(),
+        }
+    }
+
+    fn commit(self) -> Result<(), ()> {
+        self.txn.commit().map_err(|_| ())?;
+        self.db.sync().map_err(|_| ())
+    }
+}
+
+pub struct CanopydbBenchInserter<'txn> {
+    tree: canopydb::Tree<'txn>,
+}
+
+impl BenchInserter for CanopydbBenchInserter<'_> {
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
+        self.tree.insert(key, value).map(|_| ()).map_err(|_| ())
+    }
+
+    fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
+        self.tree.delete(key).map(|_| ()).map_err(|_| ())
+    }
+}
+
+pub struct CanopydbBenchReadTransaction {
+    txn: canopydb::ReadTransaction,
+}
+
+impl BenchReadTransaction for CanopydbBenchReadTransaction {
+    type T<'txn> = CanopydbBenchReader<'txn> where Self: 'txn;
+
+    fn get_reader(&self) -> Self::T<'_> {
+        CanopydbBenchReader {
+            tree: self.txn.get_tree(b"default").unwrap().unwrap(),
+        }
+    }
+}
+
+pub struct CanopydbBenchReader<'txn> {
+    tree: canopydb::Tree<'txn>,
+}
+
+impl BenchReader for CanopydbBenchReader<'_> {
+    type Output<'out> = canopydb::Bytes where Self: 'out;
+    type Iterator<'out> = CanopydbBenchIterator<'out> where Self: 'out;
+
+    fn get(&self, key: &[u8]) -> Option<Self::Output<'_>> {
+        self.tree.get(key).unwrap()
+    }
+
+    fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
+        CanopydbBenchIterator {
+            iter: self.tree.range(key..).unwrap(),
+        }
+    }
+
+    fn len(&self) -> u64 {
+        self.tree.len()
+    }
+}
+
+pub struct CanopydbBenchIterator<'tree> {
+    iter: canopydb::RangeIter<'tree>,
+}
+
+impl BenchIterator for CanopydbBenchIterator<'_> {
+    type Output<'out> = canopydb::Bytes where Self: 'out;
+
+    fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
+        self.iter.next().map(|x| {
+            let x = x.unwrap();
+            (x.0, x.1)
+        })
+    }
+}

@@ -6,7 +6,7 @@ use tempfile::{NamedTempFile, TempDir};
 mod common;
 use common::*;
 
-use rand::Rng;
+use rand::RngCore;
 use std::time::{Duration, Instant};
 
 const ELEMENTS: usize = 1_000_000;
@@ -16,8 +16,10 @@ fn random_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>
     let mut pairs = vec![];
 
     for _ in 0..count {
-        let key: Vec<u8> = (0..key_size).map(|_| rand::rng().random()).collect();
-        let value: Vec<u8> = (0..value_size).map(|_| rand::rng().random()).collect();
+        let mut key = vec![0; key_size];
+        rand::rng().fill_bytes(&mut key);
+        let mut value = vec![0; value_size];
+        rand::rng().fill_bytes(&mut value);
         pairs.push((key, value));
     }
 
@@ -69,6 +71,8 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
 }
 
 fn main() {
+    let _ = env_logger::try_init();
+
     let redb_latency_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
         let mut db = redb::Database::builder().create(tmpfile.path()).unwrap();
@@ -90,7 +94,19 @@ fn main() {
 
     let rocksdb_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
-        let db = rocksdb::OptimisticTransactionDB::open_default(tmpfile.path()).unwrap();
+
+        let mut bb = rocksdb::BlockBasedOptions::default();
+        bb.set_block_cache(&rocksdb::Cache::new_lru_cache(4 * 1_024 * 1_024 * 1_024));
+        bb.set_bloom_filter(10.0, false);
+
+        let mut opts = rocksdb::Options::default();
+        opts.set_block_based_table_factory(&bb);
+        opts.create_if_missing(true);
+        opts.increase_parallelism(
+            std::thread::available_parallelism().map_or(1, |n| n.get()) as i32
+        );
+
+        let db = rocksdb::OptimisticTransactionDB::open(&opts, tmpfile.path()).unwrap();
         let table = RocksdbBenchDatabase::new(&db);
         benchmark(table)
     };
@@ -100,6 +116,15 @@ fn main() {
         let db = sled::Config::new().path(tmpfile.path()).open().unwrap();
         let table = SledBenchDatabase::new(&db, tmpfile.path());
         benchmark(table)
+    };
+
+    let canopydb_results = {
+        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
+        let mut env_opts = canopydb::EnvOptions::new(tmpfile.path());
+        env_opts.page_cache_size = 4 * 1024 * 1024 * 1024;
+        let db = canopydb::Database::with_options(env_opts, Default::default()).unwrap();
+        let db_bench = CanopydbBenchDatabase::new(&db);
+        benchmark(db_bench)
     };
 
     let mut rows = Vec::new();
@@ -113,6 +138,7 @@ fn main() {
         lmdb_results,
         rocksdb_results,
         sled_results,
+        canopydb_results,
     ] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
@@ -121,7 +147,7 @@ fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_width(100);
-    table.set_header(["", "redb", "lmdb", "rocksdb", "sled"]);
+    table.set_header(["", "redb", "lmdb", "rocksdb", "sled", "canopydb"]);
     for row in rows {
         table.add_row(row);
     }
