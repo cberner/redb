@@ -1095,14 +1095,16 @@ impl WriteTransaction {
             .lock()
             .unwrap()
             .table_tree
-            .flush_table_root_updates()?;
+            .flush_table_root_updates()?
+            .finalize_dirty_checksums()?;
 
         let system_root = self
             .system_tables
             .lock()
             .unwrap()
             .table_tree
-            .flush_table_root_updates()?;
+            .flush_table_root_updates()?
+            .finalize_dirty_checksums()?;
 
         self.process_freed_pages(free_until_transaction)?;
         // If a savepoint exists it might reference the freed-tree, since it holds a reference to the
@@ -1113,10 +1115,7 @@ impl WriteTransaction {
         self.store_freed_pages(savepoint_exists)?;
 
         // Finalize freed table checksums, before doing the final commit
-        // user & system table trees were already finalized when we flushed the pending roots above
-        self.freed_tree.lock().unwrap().finalize_dirty_checksums()?;
-
-        let freed_root = self.freed_tree.lock().unwrap().get_root();
+        let freed_root = self.freed_tree.lock().unwrap().finalize_dirty_checksums()?;
 
         self.mem.commit(
             user_root,
@@ -1146,23 +1145,23 @@ impl WriteTransaction {
             .lock()
             .unwrap()
             .table_tree
-            .flush_table_root_updates()?;
+            .flush_table_root_updates()?
+            .finalize_dirty_checksums()?;
 
         let system_root = self
             .system_tables
             .lock()
             .unwrap()
             .table_tree
-            .flush_table_root_updates()?;
+            .flush_table_root_updates()?
+            .finalize_dirty_checksums()?;
 
         // Store all freed pages for a future commit(), since we can't free pages during a
         // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
         self.store_freed_pages(true)?;
 
         // Finalize all checksums, before doing the final commit
-        self.freed_tree.lock().unwrap().finalize_dirty_checksums()?;
-
-        let freed_root = self.freed_tree.lock().unwrap().get_root();
+        let freed_root = self.freed_tree.lock().unwrap().finalize_dirty_checksums()?;
 
         self.mem
             .non_durable_commit(user_root, system_root, freed_root, self.transaction_id)?;
@@ -1350,7 +1349,13 @@ impl WriteTransaction {
     pub(crate) fn print_debug(&self) -> Result {
         // Flush any pending updates to make sure we get the latest root
         let mut tables = self.tables.lock().unwrap();
-        if let Some(page) = tables.table_tree.flush_table_root_updates().unwrap() {
+        if let Some(page) = tables
+            .table_tree
+            .flush_table_root_updates()
+            .unwrap()
+            .finalize_dirty_checksums()
+            .unwrap()
+        {
             eprintln!("Master tree:");
             let master_tree: Btree<&str, InternalTableDefinition> = Btree::new(
                 Some(page),

@@ -389,7 +389,7 @@ impl<'txn> TableTreeMut<'txn> {
         Ok(true)
     }
 
-    pub(crate) fn flush_table_root_updates(&mut self) -> Result<Option<BtreeHeader>> {
+    pub(crate) fn flush_table_root_updates(&mut self) -> Result<&mut Self> {
         for (name, (new_root, new_length)) in self.pending_table_updates.drain() {
             // Bypass .get_table() since the table types are dynamic
             let mut definition = self.tree.get(&name.as_str())?.unwrap().value();
@@ -418,8 +418,7 @@ impl<'txn> TableTreeMut<'txn> {
                         fixed_key_size,
                         fixed_value_size,
                     );
-                    tree.finalize_dirty_checksums()?;
-                    *table_root = tree.get_root();
+                    *table_root = tree.finalize_dirty_checksums()?;
                     *table_length = new_length;
                 }
                 InternalTableDefinition::Multimap {
@@ -440,8 +439,11 @@ impl<'txn> TableTreeMut<'txn> {
             }
             self.tree.insert(&name.as_str(), &definition)?;
         }
-        self.tree.finalize_dirty_checksums()?;
-        Ok(self.tree.get_root())
+        Ok(self)
+    }
+
+    pub(crate) fn finalize_dirty_checksums(&mut self) -> Result<Option<BtreeHeader>> {
+        self.tree.finalize_dirty_checksums()
     }
 
     // root_page: the root of the master table

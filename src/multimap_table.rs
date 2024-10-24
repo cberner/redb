@@ -308,8 +308,8 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
                         value_size,
                         <()>::fixed_width(),
                     );
-                    subtree.finalize_dirty_checksums()?;
-                    sub_root_updates.push((i, entry.key().to_vec(), subtree.get_root().unwrap()));
+                    let subtree_root = subtree.finalize_dirty_checksums()?.unwrap();
+                    sub_root_updates.push((i, entry.key().to_vec(), subtree_root));
                 }
             }
         }
@@ -327,10 +327,10 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
         Ok(())
     })?;
 
-    tree.finalize_dirty_checksums()?;
+    let root = tree.finalize_dirty_checksums()?;
     // No pages should have been freed by this operation
     assert!(freed_pages.lock().unwrap().is_empty());
-    Ok(tree.get_root())
+    Ok(root)
 }
 
 fn parse_subtree_roots<T: Page>(

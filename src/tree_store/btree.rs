@@ -152,7 +152,7 @@ impl UntypedBtreeMut {
     }
 
     // Recomputes the checksum for all pages that are uncommitted
-    pub(crate) fn finalize_dirty_checksums(&mut self) -> Result {
+    pub(crate) fn finalize_dirty_checksums(&mut self) -> Result<Option<BtreeHeader>> {
         let mut root = self.root;
         if let Some(BtreeHeader {
             root: ref p,
@@ -162,14 +162,14 @@ impl UntypedBtreeMut {
         {
             if !self.mem.uncommitted(*p) {
                 // root page is clean
-                return Ok(());
+                return Ok(root);
             }
 
             *checksum = self.finalize_dirty_checksums_helper(*p)?;
             self.root = root;
         }
 
-        Ok(())
+        Ok(root)
     }
 
     fn finalize_dirty_checksums_helper(&mut self, page_number: PageNumber) -> Result<Checksum> {
@@ -353,7 +353,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         .verify_checksum()
     }
 
-    pub(crate) fn finalize_dirty_checksums(&mut self) -> Result {
+    pub(crate) fn finalize_dirty_checksums(&mut self) -> Result<Option<BtreeHeader>> {
         let mut tree = UntypedBtreeMut::new(
             self.get_root(),
             self.mem.clone(),
@@ -361,9 +361,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             K::fixed_width(),
             V::fixed_width(),
         );
-        tree.finalize_dirty_checksums()?;
-        self.root = tree.get_root();
-        Ok(())
+        self.root = tree.finalize_dirty_checksums()?;
+        Ok(self.root)
     }
 
     #[allow(dead_code)]
