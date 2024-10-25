@@ -31,8 +31,8 @@ database file.
 | magic number                                                                                   |
 | magic con.| god byte  | padding               | page size                                      |
 | region header pages                           | region max data pages                          |
-| region tracker page number                                                                     |
 | number of full regions                        | data pages in trailing region                  |
+| region tracker page number                                                                     |
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |

@@ -167,9 +167,9 @@ pub enum Durability {
     /// the ability to cause the database process to crash, can cause invalid data to be written
     /// with a valid checksum, leaving the database in an invalid, attacker-controlled state.
     Immediate,
-    /// Commits with this durability level have the same gaurantees as [`Durability::Immediate`]
+    /// Commits with this durability level have the same guarantees as [`Durability::Immediate`]
     ///
-    /// Additionally, aata is written with the following 2-phase commit algorithm:
+    /// Additionally, data is written with the following 2-phase commit algorithm:
     ///
     /// 1. Update the inactive commit slot with the new database state
     /// 2. Call `fsync` to ensure the database slate and commit slot update have been persisted
