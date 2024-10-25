@@ -458,6 +458,12 @@ pub struct ReadOnlyTable<K: Key + 'static, V: Value + 'static> {
     transaction_guard: Arc<TransactionGuard>,
 }
 
+impl<K: Key + 'static, V: Value + 'static> TableHandle for ReadOnlyTable<K, V> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
     pub(crate) fn new(
         name: String,
