@@ -242,19 +242,12 @@ impl DatabaseHeader {
         Ok((result, repair))
     }
 
-    pub(super) fn to_bytes(
-        &self,
-        include_magic_number: bool,
-        swap_primary: bool,
-    ) -> [u8; DB_HEADER_SIZE] {
+    pub(super) fn to_bytes(&self, include_magic_number: bool) -> [u8; DB_HEADER_SIZE] {
         let mut result = [0; DB_HEADER_SIZE];
         if include_magic_number {
             result[..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
         }
         result[GOD_BYTE_OFFSET] = self.primary_slot.try_into().unwrap();
-        if swap_primary {
-            result[GOD_BYTE_OFFSET] ^= PRIMARY_BIT;
-        }
         if self.recovery_required {
             result[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
         }

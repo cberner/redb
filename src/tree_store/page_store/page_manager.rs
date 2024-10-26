@@ -192,7 +192,7 @@ impl TransactionalMemory {
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
-                .copy_from_slice(&header.to_bytes(false, false));
+                .copy_from_slice(&header.to_bytes(false));
             allocators.flush_to(tracker_page, layout, &storage)?;
 
             storage.flush(false)?;
@@ -201,7 +201,7 @@ impl TransactionalMemory {
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
-                .copy_from_slice(&header.to_bytes(true, false));
+                .copy_from_slice(&header.to_bytes(true));
             storage.flush(false)?;
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
@@ -237,7 +237,7 @@ impl TransactionalMemory {
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
-                .copy_from_slice(&header.to_bytes(true, false));
+                .copy_from_slice(&header.to_bytes(true));
             storage.flush(false)?;
         }
 
@@ -316,7 +316,7 @@ impl TransactionalMemory {
             self.storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
-                .copy_from_slice(&header.to_bytes(true, false));
+                .copy_from_slice(&header.to_bytes(true));
             self.storage.flush(false)?;
         }
 
@@ -331,7 +331,7 @@ impl TransactionalMemory {
         let mut state = self.state.lock().unwrap();
         assert!(!state.header.recovery_required);
         state.header.recovery_required = true;
-        self.write_header(&state.header, false)?;
+        self.write_header(&state.header)?;
         self.storage.flush(false)
     }
 
@@ -367,11 +367,11 @@ impl TransactionalMemory {
         allocator.record_alloc(page_number.page_index, page_number.page_order);
     }
 
-    fn write_header(&self, header: &DatabaseHeader, swap_primary: bool) -> Result {
+    fn write_header(&self, header: &DatabaseHeader) -> Result {
         self.storage
             .write(0, DB_HEADER_SIZE, true)?
             .mem_mut()
-            .copy_from_slice(&header.to_bytes(true, swap_primary));
+            .copy_from_slice(&header.to_bytes(true));
 
         Ok(())
     }
@@ -391,7 +391,7 @@ impl TransactionalMemory {
 
             let mut state = self.state.lock().unwrap();
             state.header.set_region_tracker(new_tracker_page);
-            self.write_header(&state.header, false)?;
+            self.write_header(&state.header)?;
             self.storage.flush(false)?;
         } else {
             allocator.record_alloc(tracker_page.page_index, tracker_page.page_order);
@@ -405,7 +405,7 @@ impl TransactionalMemory {
             .flush_to(tracker_page, state.header.layout(), &self.storage)?;
 
         state.header.recovery_required = false;
-        self.write_header(&state.header, false)?;
+        self.write_header(&state.header)?;
         let result = self.storage.flush(false);
         self.needs_recovery.store(false, Ordering::Release);
 
@@ -519,18 +519,19 @@ impl TransactionalMemory {
         secondary.system_root = system_root;
         secondary.freed_root = freed_root;
 
-        self.write_header(&header, false)?;
+        self.write_header(&header)?;
 
         // Use 2-phase commit, if checksums are disabled
         if two_phase {
             self.storage.flush(eventual)?;
         }
 
-        // Swap the primary bit on-disk
-        self.write_header(&header, true)?;
-        self.storage.flush(eventual)?;
-        // Only swap the in-memory primary bit after the fsync is successful
+        // Make our new commit the primary
         header.swap_primary_slot();
+
+        // Write the new header to disk
+        self.write_header(&header)?;
+        self.storage.flush(eventual)?;
 
         if shrunk {
             let result = self.storage.resize(header.layout().len());
@@ -1058,7 +1059,7 @@ impl Drop for TransactionalMemory {
 
         if self.storage.flush(false).is_ok() && !self.needs_recovery.load(Ordering::Acquire) {
             state.header.recovery_required = false;
-            let _ = self.write_header(&state.header, false);
+            let _ = self.write_header(&state.header);
             let _ = self.storage.flush(false);
         }
     }
