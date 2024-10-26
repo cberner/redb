@@ -74,11 +74,14 @@ impl<T> LRUCache<T> {
 
     pub(crate) fn pop_lowest_priority(&mut self) -> Option<(u64, T)> {
         while let Some(key) = self.lru_queue.pop_front() {
-            if let Some((value, second_chance)) = self.cache.remove(&key) {
-                if second_chance.load(Ordering::Acquire) {
-                    self.cache.insert(key, (value, AtomicBool::new(false)));
+            if let Some((_, second_chance)) = self.cache.get(&key) {
+                if second_chance
+                    .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
                     self.lru_queue.push_back(key);
                 } else {
+                    let (value, _) = self.cache.remove(&key).unwrap();
                     return Some((key, value));
                 }
             }
