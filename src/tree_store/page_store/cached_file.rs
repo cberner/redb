@@ -88,17 +88,19 @@ impl LRUWriteCache {
     }
 
     fn pop_lowest_priority(&mut self) -> Option<(u64, Arc<[u8]>)> {
-        let mut selected = None;
-        for (k, v) in self.cache.iter() {
-            if v.is_some() {
-                selected = Some(*k);
+        for _ in 0..self.cache.len() {
+            if let Some((k, v)) = self.cache.pop_lowest_priority() {
+                if let Some(v_inner) = v {
+                    return Some((k, v_inner));
+                } else {
+                    // Value is borrowed by take_value(). We can't evict it, so put it back.
+                    self.cache.insert(k, v);
+                }
+            } else {
+                break;
             }
         }
-        if let Some(key) = selected {
-            self.cache.remove(&key).map(|x| (key, x.unwrap()))
-        } else {
-            None
-        }
+        None
     }
 
     fn clear(&mut self) {
