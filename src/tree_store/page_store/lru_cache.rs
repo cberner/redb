@@ -16,6 +16,10 @@ impl<T> LRUCache<T> {
         }
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.cache.len()
+    }
+
     pub(crate) fn insert(&mut self, key: u64, value: T) -> Option<T> {
         let result = self
             .cache
