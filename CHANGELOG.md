@@ -1,5 +1,10 @@
 # redb - Changelog
 
+## 2.2.0 - 2024-10-27
+* Implement `TableHandle` for `ReadOnlyTable`
+* Fix bug in write cache, which caused pages to be evicted randomly. Pages are now evicted based on
+  how recently they have been accessed
+
 ## 2.1.4 - 2024-10-10
 * Optimize `first()` and `last()` to be almost 2x faster
 * Improve in-memory cache algorithm to resolve edge cases where certain pages could become
