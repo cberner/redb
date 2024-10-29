@@ -7,7 +7,7 @@ use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, MAX_MAX_PAGE_
 use crate::tree_store::page_store::xxh3_checksum;
 use crate::tree_store::PageNumber;
 use crate::Result;
-use std::cmp;
+use std::cmp::{self, max};
 use std::mem::size_of;
 
 const REGION_FORMAT_VERSION: u8 = 1;
@@ -133,7 +133,8 @@ pub(super) struct Allocators {
 impl Allocators {
     pub(super) fn new(layout: DatabaseLayout) -> Self {
         let mut region_allocators = vec![];
-        let mut region_tracker = RegionTracker::new(INITIAL_REGIONS, MAX_MAX_PAGE_ORDER + 1);
+        let initial_regions = max(INITIAL_REGIONS, layout.num_regions());
+        let mut region_tracker = RegionTracker::new(initial_regions, MAX_MAX_PAGE_ORDER + 1);
         for i in 0..layout.num_regions() {
             let region_layout = layout.region_layout(i);
             let allocator = BuddyAllocator::new(

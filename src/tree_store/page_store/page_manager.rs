@@ -1023,13 +1023,11 @@ impl Drop for TransactionalMemory {
         }
         let mut state = self.state.lock().unwrap();
         let tracker_len = state.allocators.region_tracker.to_vec().len();
-        let tracker_page_size = state
-            .header
-            .region_tracker()
-            .page_size_bytes(self.page_size);
-        if tracker_page_size < (tracker_len as u64) {
+        let tracker_page = state.header.region_tracker();
+        if tracker_page.page_size_bytes(self.page_size) < (tracker_len as u64) {
             drop(state);
             // Allocate a larger tracker page
+            self.free(tracker_page);
             if let Ok(tracker_page) = self.allocate(tracker_len) {
                 state = self.state.lock().unwrap();
                 state
@@ -1090,5 +1088,13 @@ mod test {
             }
         }
         txn.commit().unwrap();
+        drop(db);
+
+        let mut db = Database::builder()
+            .set_region_size((8 * page_size).try_into().unwrap())
+            .set_page_size(page_size)
+            .open(tmpfile.path())
+            .unwrap();
+        assert!(db.check_integrity().unwrap());
     }
 }
