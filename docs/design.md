@@ -88,12 +88,16 @@ controls which transaction pointer is the primary.
 `magic number` must be set to the ASCII letters 'redb' followed by 0x1A, 0x0A, 0xA9, 0x0D, 0x0A. This sequence is
 inspired by the PNG magic number.
 
-`god byte`, so named because this byte controls the state of the entire database, is a bitfield containing two flags:
+`god byte`, so named because this byte controls the state of the entire database, is a bitfield containing three flags:
 * first bit: `primary_bit` flag which indicates whether transaction slot 0 or transaction slot 1 contains the latest commit.
-  redb relies on the fact that this is a single bit to perform atomic commits.
-* second bit: `recovery_required` flag, if set then the recovery process must be run when opening the database.
-  During the recovery process, the region tracker and regional allocator states -- described below -- are reconstructed
-  by walking the btree from all active roots.
+* second bit: `recovery_required` flag, if set then the recovery process must be run when opening the database. This can be
+  a full repair, in which the region tracker and regional allocator states -- described below -- are reconstructed by walking
+  the btree from all active roots, or a quick-repair, in which the state is simply loaded from the allocator state table.
+* third bit: `two_phase_commit` flag, which indicates whether the transaction in the primary slot was written using 2-phase
+  commit. If so, the primary slot is guaranteed to be valid, and repair won't look at the secondary slot. This flag is always
+  updated atomically along with the primary bit.
+
+redb relies on the fact that this is a single byte to perform atomic commits.
 
 `page size` is the size of a redb page in bytes
 
@@ -155,7 +159,9 @@ changed during an upgrade.
 
 ### Region tracker
 The region tracker is an array of `BtreeBitmap`s that tracks the page orders which are free in each region.
-It is stored in a page in the data section of a region:
+There are two different places it can be stored: on shutdown, it's written to a page in the data section of
+a region, and when making a commit with quick-repair enabled, it's written to an entry in the allocator state
+table. The former is valid only after a clean shutdown; the latter is usable even after a crash.
 ```
 <-------------------------------------------- 8 bytes ------------------------------------------->
 ==================================================================================================
@@ -215,6 +221,11 @@ range has been allocated
 * 4 byte (repeating): end offset of order allocator allocated page state
 * n bytes: free index data
 * n bytes: allocated data
+
+Like the region tracker, there are two different places where the regional allocator state can be
+stored. On shutdown, it's written to the region header as described above, and when making a commit
+with quick-repair enabled, it's written to an entry in the allocator state table. The former is valid
+only after a clean shutdown; the latter is usable even after a crash.
 
 ```
 <-------------------------------------------- 8 bytes ------------------------------------------->
@@ -460,6 +471,12 @@ To repair the database after an unclean shutdown we must:
 1) Update the super header to reference the last fully committed transaction
 2) Update the allocator state, so that it is consistent with all the database roots in the above
    transaction
+
+If the last commit before the crash had quick-repair enabled, then these are both trivial. The
+primary commit slot is guaranteed to be valid, because it was written using 2-phase commit, and
+the corresponding allocator state is stored in the allocator state table.
+
+Otherwise, we need to perform a full repair:
 
 For (1), if the primary commit slot is invalid we switch to the secondary slot.
 

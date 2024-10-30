@@ -5,7 +5,7 @@ use crate::tree_store::btree_base::{
 use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,
 };
-use crate::tree_store::page_store::{Page, PageImpl};
+use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
     AccessGuardMut, BtreeHeader, PageNumber, RawLeafBuilder, TransactionalMemory,
 };
@@ -494,6 +494,49 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             }
             _ => unreachable!(),
         })
+    }
+
+    pub(crate) fn insert_inplace(
+        &mut self,
+        key: &K::SelfType<'_>,
+        value: &V::SelfType<'_>,
+    ) -> Result<()> {
+        assert!(self.modify_uncommitted);
+        let header = self.root.expect("Key not found (tree is empty)");
+        self.insert_inplace_helper(
+            self.mem.get_page_mut(header.root)?,
+            K::as_bytes(key).as_ref(),
+            V::as_bytes(value).as_ref(),
+        )?;
+        *self.root = Some(BtreeHeader::new(header.root, DEFERRED, header.length));
+        Ok(())
+    }
+
+    fn insert_inplace_helper(&mut self, mut page: PageMut, key: &[u8], value: &[u8]) -> Result<()> {
+        assert!(self.mem.uncommitted(page.get_page_number()));
+
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                let (position, found) = accessor.position::<K>(key);
+                assert!(found);
+                let old_len = accessor.entry(position).unwrap().value().len();
+                assert!(value.len() <= old_len);
+                let mut mutator = LeafMutator::new(&mut page, K::fixed_width(), V::fixed_width());
+                mutator.insert(position, true, key, value);
+            }
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let (child_index, child_page) = accessor.child_for_key::<K>(key);
+                self.insert_inplace_helper(self.mem.get_page_mut(child_page)?, key, value)?;
+                let mut mutator = BranchMutator::new(&mut page);
+                mutator.write_child_page(child_index, child_page, DEFERRED);
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
     }
 
     fn delete_leaf_helper(

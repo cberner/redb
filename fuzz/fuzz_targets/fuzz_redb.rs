@@ -583,6 +583,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
         if !transaction.durable {
             txn.set_durability(Durability::None);
         }
+        txn.set_quick_repair(transaction.quick_repair);
         let mut counter_table = txn.open_table(COUNTER_TABLE).unwrap();
         let uncommitted_id = txn_id as u64 + 1;
         counter_table.insert((), uncommitted_id)?;

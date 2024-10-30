@@ -441,6 +441,10 @@ impl Value for InternalTableDefinition {
         }
     }
 
+    // Be careful if you change this serialization format! The InternalTableDefinition for
+    // a given table needs to have a consistent serialized length, regardless of the table
+    // contents, so that create_table_and_flush_table_root() can update the allocator state
+    // table without causing more allocations
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
     where
         Self: 'b,

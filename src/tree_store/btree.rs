@@ -434,6 +434,23 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         Ok(old_value)
     }
 
+    // Insert without allocating or freeing any pages. This requires that you've previously
+    // inserted the same key, with a value of at least the same serialized length, earlier
+    // in the same transaction. If those preconditions aren't satisfied, insert_inplace()
+    // will panic; it won't allocate under any circumstances
+    pub(crate) fn insert_inplace(
+        &mut self,
+        key: &K::SelfType<'_>,
+        value: &V::SelfType<'_>,
+    ) -> Result<()> {
+        let mut fake_freed_pages = vec![];
+        let mut operation =
+            MutateHelper::<K, V>::new(&mut self.root, self.mem.clone(), fake_freed_pages.as_mut());
+        operation.insert_inplace(key, value)?;
+        assert!(fake_freed_pages.is_empty());
+        Ok(())
+    }
+
     pub(crate) fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<V>>> {
         #[cfg(feature = "logging")]
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);

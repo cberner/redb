@@ -442,6 +442,45 @@ impl<'txn> TableTreeMut<'txn> {
         Ok(self)
     }
 
+    // Creates a new table, calls the provided closure to insert entries into it, and then
+    // flushes the table root. The flush is done using insert_inplace(), so it's guaranteed
+    // that no pages will be allocated or freed after the closure returns
+    pub(crate) fn create_table_and_flush_table_root<K: Key + 'static, V: Value + 'static>(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&mut BtreeMut<K, V>) -> Result,
+    ) -> Result {
+        assert!(self.pending_table_updates.is_empty());
+        assert!(self.tree.get(&name)?.is_none());
+
+        // Reserve space in the table tree
+        self.tree.insert(
+            &name,
+            &InternalTableDefinition::new::<K, V>(TableType::Normal, None, 0),
+        )?;
+
+        // Create an empty table and call the provided closure on it
+        let mut tree: BtreeMut<K, V> = BtreeMut::new(
+            None,
+            self.guard.clone(),
+            self.mem.clone(),
+            self.freed_pages.clone(),
+        );
+        f(&mut tree)?;
+
+        // Finalize the table's checksums
+        let table_root = tree.finalize_dirty_checksums()?;
+        let table_length = tree.get_root().map(|x| x.length).unwrap_or_default();
+
+        // Flush the root to the table tree, without allocating
+        self.tree.insert_inplace(
+            &name,
+            &InternalTableDefinition::new::<K, V>(TableType::Normal, table_root, table_length),
+        )?;
+
+        Ok(())
+    }
+
     pub(crate) fn finalize_dirty_checksums(&mut self) -> Result<Option<BtreeHeader>> {
         self.tree.finalize_dirty_checksums()
     }
