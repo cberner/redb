@@ -5,7 +5,7 @@ use crate::tree_store::page_store::page_manager::{
     xxh3_checksum, FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2,
 };
 use crate::tree_store::{Checksum, PageNumber};
-use crate::{DatabaseError, StorageError};
+use crate::{DatabaseError, Result, StorageError};
 use std::mem::size_of;
 
 // Database layout:
@@ -58,6 +58,7 @@ pub(super) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE
 // God byte flags
 const PRIMARY_BIT: u8 = 1;
 const RECOVERY_REQUIRED: u8 = 2;
+const TWO_PHASE_COMMIT: u8 = 4;
 
 // Structure of each commit slot
 const VERSION_OFFSET: usize = 0;
@@ -95,6 +96,7 @@ pub(super) struct HeaderRepairInfo {
 pub(super) struct DatabaseHeader {
     primary_slot: usize,
     pub(super) recovery_required: bool,
+    pub(super) two_phase_commit: bool,
     page_size: u32,
     region_header_pages: u32,
     region_max_data_pages: u32,
@@ -120,6 +122,7 @@ impl DatabaseHeader {
         Self {
             primary_slot: 0,
             recovery_required: true,
+            two_phase_commit: false,
             page_size: layout.full_region_layout().page_size(),
             region_header_pages: layout.full_region_layout().get_header_pages(),
             region_max_data_pages: layout.full_region_layout().num_pages(),
@@ -194,12 +197,57 @@ impl DatabaseHeader {
         self.primary_slot ^= 1;
     }
 
+    // Figure out which slot to use as the primary when starting a repair. The repair process might
+    // still switch to the other slot later, if the tree checksums turn out to be invalid.
+    //
+    // Returns true if we picked the original primary, or false if we swapped
+    pub(super) fn pick_primary_for_repair(
+        &mut self,
+        repair_info: HeaderRepairInfo,
+    ) -> Result<bool> {
+        // If the primary was written using 2-phase commit, it's guaranteed to be valid. Don't look
+        // at the secondary; even if it happens to have a valid checksum, Durability::Paranoid means
+        // we can't trust it
+        if self.two_phase_commit {
+            if repair_info.primary_corrupted {
+                return Err(StorageError::Corrupted(
+                    "Primary is corrupted despite 2-phase commit".to_string(),
+                ));
+            }
+            return Ok(true);
+        }
+
+        // Pick whichever slot is newer, assuming it has a valid checksum. This handles an edge case
+        // where we crash during fsync(), and the only data that got written to disk was the god byte
+        // update swapping the primary -- in that case, the primary contains a valid but out-of-date
+        // transaction, so we need to load from the secondary instead
+        if repair_info.primary_corrupted {
+            if repair_info.secondary_corrupted {
+                return Err(StorageError::Corrupted(
+                    "Both commit slots are corrupted".to_string(),
+                ));
+            }
+            self.swap_primary_slot();
+            return Ok(false);
+        }
+
+        let secondary_newer =
+            self.secondary_slot().transaction_id > self.primary_slot().transaction_id;
+        if secondary_newer && !repair_info.secondary_corrupted {
+            self.swap_primary_slot();
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
     // TODO: consider returning an Err with the repair info
     pub(super) fn from_bytes(data: &[u8]) -> Result<(Self, HeaderRepairInfo), DatabaseError> {
         let invalid_magic_number = data[..MAGICNUMBER.len()] != MAGICNUMBER;
 
         let primary_slot = usize::from(data[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
         let recovery_required = (data[GOD_BYTE_OFFSET] & RECOVERY_REQUIRED) != 0;
+        let two_phase_commit = (data[GOD_BYTE_OFFSET] & TWO_PHASE_COMMIT) != 0;
         let page_size = get_u32(&data[PAGE_SIZE_OFFSET..]);
         let region_header_pages = get_u32(&data[REGION_HEADER_PAGES_OFFSET..]);
         let region_max_data_pages = get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..]);
@@ -226,6 +274,7 @@ impl DatabaseHeader {
         let result = Self {
             primary_slot,
             recovery_required,
+            two_phase_commit,
             page_size,
             region_header_pages,
             region_max_data_pages,
@@ -250,6 +299,9 @@ impl DatabaseHeader {
         result[GOD_BYTE_OFFSET] = self.primary_slot.try_into().unwrap();
         if self.recovery_required {
             result[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+        }
+        if self.two_phase_commit {
+            result[GOD_BYTE_OFFSET] |= TWO_PHASE_COMMIT;
         }
         result[PAGE_SIZE_OFFSET..(PAGE_SIZE_OFFSET + size_of::<u32>())]
             .copy_from_slice(&self.page_size.to_le_bytes());

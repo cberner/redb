@@ -19,7 +19,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::TransactionError;
 use crate::sealed::Sealed;
-use crate::transactions::SAVEPOINT_TABLE;
+use crate::transactions::{
+    AllocatorStateKey, AllocatorStateTree, ALLOCATOR_STATE_TABLE_NAME, SAVEPOINT_TABLE,
+};
 use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
 use log::{debug, info, warn};
@@ -429,7 +431,9 @@ impl Database {
             return Err(CompactionError::TransactionInProgress);
         }
         // Commit to free up any pending free pages
-        // Use 2-phase commit to avoid any possible security issues. Plus this compaction is going to be so slow that it doesn't matter
+        // Use 2-phase commit to avoid any possible security issues. Plus this compaction is going to be so slow that it doesn't matter.
+        // Once https://github.com/cberner/redb/issues/829 is fixed, we should upgrade this to use quick-repair -- that way the user
+        // can cancel the compaction without requiring a full repair afterwards
         let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
         if txn.list_persistent_savepoints()?.next().is_some() {
             return Err(CompactionError::PersistentSavepointExists);
@@ -609,6 +613,12 @@ impl Database {
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
     ) -> Result<[Option<BtreeHeader>; 3], DatabaseError> {
         if !Self::verify_primary_checksums(mem.clone())? {
+            if mem.used_two_phase_commit() {
+                return Err(DatabaseError::Storage(StorageError::Corrupted(
+                    "Primary is corrupted despite 2-phase commit".to_string(),
+                )));
+            }
+
             // 0.3 because the repair takes 3 full scans and the first is done now
             let mut handle = RepairSession::new(0.3);
             repair_callback(&mut handle);
@@ -701,23 +711,31 @@ impl Database {
         )?;
         let mut mem = Arc::new(mem);
         if mem.needs_repair()? {
-            #[cfg(feature = "logging")]
-            warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
-            let mut handle = RepairSession::new(0.0);
-            repair_callback(&mut handle);
-            if handle.aborted() {
-                return Err(DatabaseError::RepairAborted);
+            // If the last transaction used 2-phase commit and updated the allocator state table, then
+            // we can just load the allocator state from there. Otherwise, we need a full repair
+            if Self::try_quick_repair(mem.clone())? {
+                #[cfg(feature = "logging")]
+                info!("Quick-repair successful, full repair not needed");
+            } else {
+                #[cfg(feature = "logging")]
+                warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
+                let mut handle = RepairSession::new(0.0);
+                repair_callback(&mut handle);
+                if handle.aborted() {
+                    return Err(DatabaseError::RepairAborted);
+                }
+                let [data_root, system_root, freed_root] =
+                    Self::do_repair(&mut mem, repair_callback)?;
+                let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
+                mem.commit(
+                    data_root,
+                    system_root,
+                    freed_root,
+                    next_transaction_id,
+                    false,
+                    true,
+                )?;
             }
-            let [data_root, system_root, freed_root] = Self::do_repair(&mut mem, repair_callback)?;
-            let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
-            mem.commit(
-                data_root,
-                system_root,
-                freed_root,
-                next_transaction_id,
-                false,
-                true,
-            )?;
         }
 
         mem.begin_writable()?;
@@ -750,6 +768,42 @@ impl Database {
         txn.abort()?;
 
         Ok(db)
+    }
+
+    // Returns true if quick-repair was successful, or false if a full repair is needed
+    fn try_quick_repair(mem: Arc<TransactionalMemory>) -> Result<bool> {
+        // Quick-repair is only possible if the primary was written using 2-phase commit
+        if !mem.used_two_phase_commit() {
+            return Ok(false);
+        }
+
+        // See if the allocator state table is present in the system table tree
+        let fake_freed_pages = Arc::new(Mutex::new(vec![]));
+        let system_table_tree = TableTreeMut::new(
+            mem.get_system_root(),
+            Arc::new(TransactionGuard::fake()),
+            mem.clone(),
+            fake_freed_pages.clone(),
+        );
+        let Some(allocator_state_table) = system_table_tree
+            .get_table::<AllocatorStateKey, &[u8]>(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
+            .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?
+        else {
+            return Ok(false);
+        };
+
+        // Load the allocator state from the table
+        let InternalTableDefinition::Normal { table_root, .. } = allocator_state_table else {
+            unreachable!();
+        };
+        let tree = AllocatorStateTree::new(
+            table_root,
+            Arc::new(TransactionGuard::fake()),
+            mem.clone(),
+            fake_freed_pages,
+        );
+
+        mem.try_load_allocator_state(&tree)
     }
 
     fn allocate_read_transaction(&self) -> Result<TransactionGuard> {

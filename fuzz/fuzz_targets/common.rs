@@ -164,6 +164,7 @@ pub(crate) enum FuzzOperation {
 pub(crate) struct FuzzTransaction {
     pub ops: Vec<FuzzOperation>,
     pub durable: bool,
+    pub quick_repair: bool,
     pub commit: bool,
     pub create_ephemeral_savepoint: bool,
     pub create_persistent_savepoint: bool,

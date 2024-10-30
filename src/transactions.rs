@@ -13,8 +13,8 @@ use crate::types::{Key, Value};
 use crate::{
     AccessGuard, MultimapTable, MultimapTableDefinition, MultimapTableHandle, Range,
     ReadOnlyMultimapTable, ReadOnlyTable, Result, Savepoint, SavepointError, StorageError, Table,
-    TableDefinition, TableError, TableHandle, TransactionError, UntypedMultimapTableHandle,
-    UntypedTableHandle,
+    TableDefinition, TableError, TableHandle, TransactionError, TypeName,
+    UntypedMultimapTableHandle, UntypedTableHandle,
 };
 #[cfg(feature = "logging")]
 use log::{debug, warn};
@@ -23,6 +23,7 @@ use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
+use std::mem::size_of;
 use std::ops::RangeBounds;
 #[cfg(any(test, fuzzing))]
 use std::ops::RangeFull;
@@ -35,6 +36,70 @@ const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), SavepointId> =
     SystemTableDefinition::new("next_savepoint_id");
 pub(crate) const SAVEPOINT_TABLE: SystemTableDefinition<SavepointId, SerializedSavepoint> =
     SystemTableDefinition::new("persistent_savepoints");
+// The allocator state table is stored in the system table tree, but it's accessed using
+// raw btree operations rather than open_system_table(), so there's no SystemTableDefinition
+pub(crate) const ALLOCATOR_STATE_TABLE_NAME: &str = "allocator_state";
+pub(crate) type AllocatorStateTree<'a> = BtreeMut<'a, AllocatorStateKey, &'static [u8]>;
+
+#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Debug)]
+pub(crate) enum AllocatorStateKey {
+    Region(u32),
+    RegionTracker,
+    TransactionId,
+}
+
+impl Value for AllocatorStateKey {
+    type SelfType<'a> = Self;
+    type AsBytes<'a> = [u8; 1 + size_of::<u32>()];
+
+    fn fixed_width() -> Option<usize> {
+        Some(1 + size_of::<u32>())
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        match data[0] {
+            0 => Self::Region(u32::from_le_bytes(data[1..].try_into().unwrap())),
+            1 => Self::RegionTracker,
+            2 => Self::TransactionId,
+            _ => unreachable!(),
+        }
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        let mut result = Self::AsBytes::default();
+        match value {
+            Self::Region(region) => {
+                result[0] = 0;
+                result[1..].copy_from_slice(&u32::to_le_bytes(*region));
+            }
+            Self::RegionTracker => {
+                result[0] = 1;
+            }
+            Self::TransactionId => {
+                result[0] = 2;
+            }
+        }
+
+        result
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("redb::AllocatorStateKey")
+    }
+}
+
+impl Key for AllocatorStateKey {
+    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+        Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
+    }
+}
 
 pub struct SystemTableDefinition<'a, K: Key + 'static, V: Value + 'static> {
     name: &'a str,
@@ -423,6 +488,7 @@ pub struct WriteTransaction {
     dirty: AtomicBool,
     durability: InternalDurability,
     two_phase_commit: bool,
+    quick_repair: bool,
     // Persistent savepoints created during this transaction
     created_persistent_savepoints: Mutex<HashSet<SavepointId>>,
     deleted_persistent_savepoints: Mutex<Vec<(SavepointId, TransactionId)>>,
@@ -481,6 +547,7 @@ impl WriteTransaction {
             dirty: AtomicBool::new(false),
             durability: InternalDurability::Immediate,
             two_phase_commit: false,
+            quick_repair: false,
             created_persistent_savepoints: Mutex::new(Default::default()),
             deleted_persistent_savepoints: Mutex::new(vec![]),
         })
@@ -930,6 +997,20 @@ impl WriteTransaction {
         self.two_phase_commit = enabled;
     }
 
+    /// Enable or disable quick-repair (defaults to disabled)
+    ///
+    /// By default, when reopening the database after a crash, redb needs to do a full repair.
+    /// This involves walking the entire database to verify the checksums and reconstruct the
+    /// allocator state, so it can be very slow if the database is large.
+    ///
+    /// Alternatively, you can enable quick-repair. In this mode, redb saves the allocator state
+    /// as part of each commit (so it doesn't need to be reconstructed), and enables 2-phase commit
+    /// (which guarantees that the primary commit slot is valid without needing to look at the
+    /// checksums). This means commits are slower, but recovery after a crash is almost instant.
+    pub fn set_quick_repair(&mut self, enabled: bool) {
+        self.quick_repair = enabled;
+    }
+
     /// Open the given table
     ///
     /// The table will be created if it does not exist
@@ -1023,10 +1104,15 @@ impl WriteTransaction {
     }
 
     fn commit_inner(&mut self) -> Result<(), CommitError> {
+        // Quick-repair requires 2-phase commit
+        if self.quick_repair {
+            self.two_phase_commit = true;
+        }
+
         #[cfg(feature = "logging")]
         debug!(
-            "Committing transaction id={:?} with durability={:?} two_phase={}",
-            self.transaction_id, self.durability, self.two_phase_commit
+            "Committing transaction id={:?} with durability={:?} two_phase={} quick_repair={}",
+            self.transaction_id, self.durability, self.two_phase_commit, self.quick_repair
         );
         match self.durability {
             InternalDurability::None => self.non_durable_commit()?,
@@ -1089,6 +1175,7 @@ impl WriteTransaction {
             .transaction_tracker
             .oldest_live_read_transaction()
             .map_or(self.transaction_id, |x| x.next());
+        self.process_freed_pages(free_until_transaction)?;
 
         let user_root = self
             .tables
@@ -1098,21 +1185,54 @@ impl WriteTransaction {
             .flush_table_root_updates()?
             .finalize_dirty_checksums()?;
 
-        let system_root = self
-            .system_tables
-            .lock()
-            .unwrap()
-            .table_tree
-            .flush_table_root_updates()?
-            .finalize_dirty_checksums()?;
+        let mut system_tables = self.system_tables.lock().unwrap();
+        let system_tree = system_tables.table_tree.flush_table_root_updates()?;
+        system_tree
+            .delete_table(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
+            .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?;
 
-        self.process_freed_pages(free_until_transaction)?;
-        // If a savepoint exists it might reference the freed-tree, since it holds a reference to the
-        // root of the freed-tree. Therefore, we must use the transactional free mechanism to free
-        // those pages. If there are no save points then these can be immediately freed, which is
-        // done at the end of this function.
-        let savepoint_exists = self.transaction_tracker.any_savepoint_exists();
-        self.store_freed_pages(savepoint_exists)?;
+        if self.quick_repair {
+            system_tree.create_table_and_flush_table_root(
+                ALLOCATOR_STATE_TABLE_NAME,
+                |tree: &mut AllocatorStateTree| {
+                    let mut pagination_counter = 0;
+
+                    loop {
+                        let num_regions = self
+                            .mem
+                            .reserve_allocator_state(tree, self.transaction_id)?;
+
+                        // We can't free pages after the commit, because that would invalidate our
+                        // saved allocator state. Everything needs to go through the transactional
+                        // free mechanism
+                        self.store_freed_pages(&mut pagination_counter, true)?;
+
+                        if self.mem.try_save_allocator_state(tree, num_regions)? {
+                            return Ok(());
+                        }
+
+                        // Clear out the table before retrying, just in case the number of regions
+                        // has somehow shrunk. Don't use retain_in() for this, since it doesn't
+                        // free the pages immediately -- we need to reuse those pages to guarantee
+                        // that our retry loop will eventually terminate
+                        while let Some(guards) = tree.last()? {
+                            let key = guards.0.value();
+                            drop(guards);
+                            tree.remove(&key)?;
+                        }
+                    }
+                },
+            )?;
+        } else {
+            // If a savepoint exists it might reference the freed-tree, since it holds a reference to the
+            // root of the freed-tree. Therefore, we must use the transactional free mechanism to free
+            // those pages. If there are no save points then these can be immediately freed, which is
+            // done at the end of this function.
+            let savepoint_exists = self.transaction_tracker.any_savepoint_exists();
+            self.store_freed_pages(&mut 0, savepoint_exists)?;
+        }
+
+        let system_root = system_tree.finalize_dirty_checksums()?;
 
         // Finalize freed table checksums, before doing the final commit
         let freed_root = self.freed_tree.lock().unwrap().finalize_dirty_checksums()?;
@@ -1158,7 +1278,7 @@ impl WriteTransaction {
 
         // Store all freed pages for a future commit(), since we can't free pages during a
         // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
-        self.store_freed_pages(true)?;
+        self.store_freed_pages(&mut 0, true)?;
 
         // Finalize all checksums, before doing the final commit
         let freed_root = self.freed_tree.lock().unwrap().finalize_dirty_checksums()?;
@@ -1264,10 +1384,13 @@ impl WriteTransaction {
         Ok(())
     }
 
-    fn store_freed_pages(&mut self, include_post_commit_free: bool) -> Result {
+    fn store_freed_pages(
+        &self,
+        pagination_counter: &mut u64,
+        include_post_commit_free: bool,
+    ) -> Result {
         assert_eq!(PageNumber::serialized_size(), 8); // We assume below that PageNumber is length 8
 
-        let mut pagination_counter = 0u64;
         let mut freed_tree = self.freed_tree.lock().unwrap();
         if include_post_commit_free {
             // Move all the post-commit pages that came from the freed-tree. These need to be stored
@@ -1282,7 +1405,7 @@ impl WriteTransaction {
             let buffer_size = FreedPageList::required_bytes(chunk_size);
             let key = FreedTableKey {
                 transaction_id: self.transaction_id.raw_id(),
-                pagination_id: pagination_counter,
+                pagination_id: *pagination_counter,
             };
             let mut access_guard =
                 freed_tree.insert_reserve(&key, buffer_size.try_into().unwrap())?;
@@ -1295,7 +1418,7 @@ impl WriteTransaction {
             }
             drop(access_guard);
 
-            pagination_counter += 1;
+            *pagination_counter += 1;
 
             if include_post_commit_free {
                 // Move all the post-commit pages that came from the freed-tree. These need to be stored
