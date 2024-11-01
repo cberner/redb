@@ -65,7 +65,6 @@ impl Value for SavepointId {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
-        Self: 'a,
         Self: 'b,
     {
         value.0.to_le_bytes()

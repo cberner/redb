@@ -446,7 +446,6 @@ impl Value for InternalTableDefinition {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
     where
-        Self: 'a,
         Self: 'b,
     {
         let mut result = vec![value.get_type().into()];

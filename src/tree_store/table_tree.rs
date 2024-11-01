@@ -51,7 +51,6 @@ impl Value for FreedTableKey {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> [u8; 2 * size_of::<u64>()]
     where
-        Self: 'a,
         Self: 'b,
     {
         let mut result = [0u8; 2 * size_of::<u64>()];
@@ -147,7 +146,6 @@ impl Value for FreedPageList<'_> {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'b [u8]
     where
-        Self: 'a,
         Self: 'b,
     {
         value.data

@@ -66,7 +66,6 @@ impl<T: Value> Value for Vec<T> {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Vec<T::SelfType<'b>>) -> Vec<u8>
     where
-        Self: 'a,
         Self: 'b,
     {
         let mut result = if let Some(width) = T::fixed_width() {

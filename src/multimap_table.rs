@@ -562,7 +562,6 @@ impl<V: Key> Value for &DynamicCollection<V> {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
     where
-        Self: 'a,
         Self: 'b,
     {
         &value.data

@@ -93,7 +93,6 @@ pub trait Value: Debug {
     /// Serialize the value to a slice
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
-        Self: 'a,
         Self: 'b;
 
     /// Globally unique identifier for this type
@@ -152,7 +151,6 @@ impl Value for () {
 
     fn as_bytes<'a, 'b: 'a>(_: &'a Self::SelfType<'b>) -> &'a [u8]
     where
-        Self: 'a,
         Self: 'b,
     {
         &[]
@@ -194,7 +192,6 @@ impl Value for bool {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
     where
-        Self: 'a,
         Self: 'b,
     {
         match value {
@@ -241,7 +238,6 @@ impl<T: Value> Value for Option<T> {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
     where
-        Self: 'a,
         Self: 'b,
     {
         let mut result = vec![0];
@@ -299,7 +295,6 @@ impl Value for &[u8] {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
     where
-        Self: 'a,
         Self: 'b,
     {
         value
@@ -337,7 +332,6 @@ impl<const N: usize> Value for &[u8; N] {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8; N]
     where
-        Self: 'a,
         Self: 'b,
     {
         value
@@ -390,7 +384,6 @@ impl<const N: usize, T: Value> Value for [T; N] {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
     where
-        Self: 'a,
         Self: 'b,
     {
         if let Some(fixed) = T::fixed_width() {
@@ -470,7 +463,6 @@ impl Value for &str {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a str
     where
-        Self: 'a,
         Self: 'b,
     {
         value
@@ -510,7 +502,6 @@ impl Value for String {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a str
     where
-        Self: 'a,
         Self: 'b,
     {
         value.as_str()
@@ -546,7 +537,6 @@ impl Value for char {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> [u8; 3]
     where
-        Self: 'a,
         Self: 'b,
     {
         let bytes = u32::from(*value).to_le_bytes();

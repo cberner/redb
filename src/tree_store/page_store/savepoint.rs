@@ -276,7 +276,6 @@ impl<'data> Value for SerializedSavepoint<'data> {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
-        Self: 'a,
         Self: 'b,
     {
         value.data()
