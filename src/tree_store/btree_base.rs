@@ -510,7 +510,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
     pub(super) fn push(&mut self, key: &'a [u8], value: &'a [u8]) {
         self.total_key_bytes += key.len();
         self.total_value_bytes += value.len();
-        self.pairs.push((key, value))
+        self.pairs.push((key, value));
     }
 
     pub(super) fn push_all_except(

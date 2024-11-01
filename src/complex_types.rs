@@ -7,11 +7,11 @@ fn encode_varint_len(len: usize, output: &mut Vec<u8>) {
     } else if len <= u16::MAX.into() {
         let u16_len: u16 = len.try_into().unwrap();
         output.push(254);
-        output.extend_from_slice(&u16_len.to_le_bytes())
+        output.extend_from_slice(&u16_len.to_le_bytes());
     } else {
         let u32_len: u32 = len.try_into().unwrap();
         output.push(255);
-        output.extend_from_slice(&u32_len.to_le_bytes())
+        output.extend_from_slice(&u32_len.to_le_bytes());
     }
 }
 

@@ -281,7 +281,7 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn clear_read_cache(&self) {
-        self.storage.invalidate_cache_all()
+        self.storage.invalidate_cache_all();
     }
 
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool, DatabaseError> {

@@ -462,14 +462,14 @@ impl Value for InternalTableDefinition {
             result.extend_from_slice(&u32::try_from(fixed).unwrap().to_le_bytes());
         } else {
             result.push(0);
-            result.extend_from_slice(&[0; size_of::<u32>()])
+            result.extend_from_slice(&[0; size_of::<u32>()]);
         }
         if let Some(fixed) = value.private_get_fixed_value_size() {
             result.push(1);
             result.extend_from_slice(&u32::try_from(fixed).unwrap().to_le_bytes());
         } else {
             result.push(0);
-            result.extend_from_slice(&[0; size_of::<u32>()])
+            result.extend_from_slice(&[0; size_of::<u32>()]);
         }
         result.extend_from_slice(
             &u32::try_from(value.private_get_key_alignment())

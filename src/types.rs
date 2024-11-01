@@ -141,7 +141,7 @@ impl Value for () {
         Some(0)
     }
 
-    #[allow(clippy::unused_unit)]
+    #[allow(clippy::unused_unit, clippy::semicolon_if_nothing_returned)]
     fn from_bytes<'a>(_data: &'a [u8]) -> ()
     where
         Self: 'a,
