@@ -1,5 +1,5 @@
+#![deny(clippy::all, clippy::pedantic, clippy::disallowed_methods)]
 #![allow(
-    clippy::drop_non_drop,
     clippy::default_trait_access,
     clippy::if_not_else,
     clippy::inline_always,
@@ -8,39 +8,15 @@
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::module_name_repetitions,
+    clippy::must_use_candidate,
     clippy::needless_pass_by_value,
     clippy::option_option,
-    clippy::unnecessary_wraps,
-    clippy::too_many_lines,
+    clippy::redundant_closure_for_method_calls,
     clippy::similar_names,
-    clippy::wildcard_imports,
+    clippy::too_many_lines,
+    clippy::unnecessary_wraps,
     clippy::unreadable_literal,
-    clippy::must_use_candidate,
-    clippy::redundant_closure_for_method_calls
-)]
-#![deny(
-    clippy::all,
-    clippy::doc_markdown,
-    clippy::explicit_iter_loop,
-    clippy::cast_lossless,
-    clippy::checked_conversions,
-    clippy::cloned_instead_of_copied,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::disallowed_methods,
-    clippy::map_unwrap_or,
-    clippy::match_wildcard_for_single_variants,
-    clippy::range_plus_one,
-    clippy::type_repetition_in_bounds,
-    clippy::uninlined_format_args,
-    clippy::semicolon_if_nothing_returned,
-    clippy::redundant_else,
-    clippy::unused_self,
-    clippy::match_same_arms,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::transmute_ptr_to_ptr
+    clippy::wildcard_imports
 )]
 // TODO remove this once wasi no longer requires nightly
 #![cfg_attr(target_os = "wasi", feature(wasi_ext))]
