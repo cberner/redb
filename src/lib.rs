@@ -3,7 +3,8 @@
     clippy::default_trait_access,
     clippy::if_not_else,
     clippy::inline_always,
-    clippy::iter_not_returning_iterator
+    clippy::iter_not_returning_iterator,
+    clippy::let_underscore_drop
 )]
 #![deny(
     clippy::all,
