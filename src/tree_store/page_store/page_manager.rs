@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(debug_assertions)]
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::thread;
 
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
 // because the leaf node format uses 32bit offsets
@@ -991,6 +992,10 @@ impl TransactionalMemory {
 
 impl Drop for TransactionalMemory {
     fn drop(&mut self) {
+        if thread::panicking() {
+            return;
+        }
+
         // Commit any non-durable transactions that are outstanding
         if self.read_from_secondary.load(Ordering::Acquire)
             && !self.needs_recovery.load(Ordering::Acquire)
@@ -1095,6 +1100,24 @@ mod test {
             .set_page_size(page_size)
             .open(tmpfile.path())
             .unwrap();
+        assert!(db.check_integrity().unwrap());
+    }
+
+    // Make sure the database remains consistent after a panic
+    #[test]
+    #[cfg(panic = "unwind")]
+    fn panic() {
+        let tmpfile = crate::create_tempfile();
+        let table_definition: TableDefinition<u32, &[u8]> = TableDefinition::new("x");
+
+        let _ = std::panic::catch_unwind(|| {
+            let db = Database::create(&tmpfile).unwrap();
+            let txn = db.begin_write().unwrap();
+            txn.open_table(table_definition).unwrap();
+            panic!();
+        });
+
+        let mut db = Database::open(tmpfile).unwrap();
         assert!(db.check_integrity().unwrap());
     }
 }
