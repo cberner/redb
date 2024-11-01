@@ -3,6 +3,7 @@
     clippy::all,
     clippy::cast_lossless,
     clippy::checked_conversions,
+    clippy::cloned_instead_of_copied,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_precision_loss,

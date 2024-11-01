@@ -533,7 +533,7 @@ mod test {
                 } else {
                     assert_eq!(allocated.len(), num_pages as usize);
                 }
-            } else if let Some(to_free) = allocated.iter().choose(&mut rng).cloned() {
+            } else if let Some(to_free) = allocated.iter().choose(&mut rng).copied() {
                 allocator.clear(to_free);
                 allocated.remove(&to_free);
             }

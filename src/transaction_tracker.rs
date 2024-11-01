@@ -243,6 +243,6 @@ impl TransactionTracker {
             .live_read_transactions
             .keys()
             .next()
-            .cloned()
+            .copied()
     }
 }
