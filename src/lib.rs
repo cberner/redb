@@ -6,7 +6,8 @@
     clippy::iter_not_returning_iterator,
     clippy::let_underscore_drop,
     clippy::missing_errors_doc,
-    clippy::missing_panics_doc
+    clippy::missing_panics_doc,
+    clippy::module_name_repetitions
 )]
 #![deny(
     clippy::all,
