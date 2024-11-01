@@ -8,7 +8,8 @@
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::module_name_repetitions,
-    clippy::needless_pass_by_value
+    clippy::needless_pass_by_value,
+    clippy::option_option
 )]
 #![deny(
     clippy::all,
