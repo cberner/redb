@@ -20,7 +20,8 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     clippy::disallowed_methods,
-    clippy::map_unwrap_or
+    clippy::map_unwrap_or,
+    clippy::match_wildcard_for_single_variants
 )]
 // TODO remove this once wasi no longer requires nightly
 #![cfg_attr(target_os = "wasi", feature(wasi_ext))]

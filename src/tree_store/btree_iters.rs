@@ -138,7 +138,7 @@ impl RangeIterState {
                         .entry_ranges(*entry)?;
                 Some(EntryGuard::new(page.clone(), key, value))
             }
-            _ => None,
+            Internal { .. } => None,
         }
     }
 }
