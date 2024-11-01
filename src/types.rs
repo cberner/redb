@@ -72,7 +72,7 @@ impl TypeName {
 }
 
 pub trait Value: Debug {
-    /// SelfType<'a> must be the same type as Self with all lifetimes replaced with 'a
+    /// `SelfType<'a>` must be the same type as Self with all lifetimes replaced with 'a
     type SelfType<'a>: Debug + 'a
     where
         Self: 'a;
@@ -101,9 +101,9 @@ pub trait Value: Debug {
 }
 
 /// Implementing this trait indicates that the type can be mutated in-place as a &mut [u8].
-/// This enables the .insert_reserve() method on Table
+/// This enables the `.insert_reserve()` method on Table
 pub trait MutInPlaceValue: Value {
-    /// The base type such that &mut [u8] can be safely transmuted to &mut BaseRefType
+    /// The base type such that &mut [u8] can be safely transmuted to `&mut BaseRefType`
     type BaseRefType: Debug + ?Sized;
 
     // Initialize `data` to a valid value. This method will be called (at some point, not necessarily immediately)

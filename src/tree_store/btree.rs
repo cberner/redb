@@ -551,7 +551,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
 
 impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
     /// Reserve space to insert a key-value pair
-    /// The returned reference will have length equal to value_length
+    /// The returned reference will have length equal to `value_length`
     // Return type has the same lifetime as &self, because the tree must not be modified until the mutable guard is dropped
     pub(crate) fn insert_reserve(
         &mut self,

@@ -804,7 +804,7 @@ impl RepairSession {
         self.aborted
     }
 
-    /// Abort the repair process. The coorresponding call to [Builder::open] or [Builder::create] will return an error
+    /// Abort the repair process. The coorresponding call to [`Builder::open`] or [`Builder::create`] will return an error
     pub fn abort(&mut self) {
         self.aborted = true;
     }
@@ -852,7 +852,7 @@ impl Builder {
     /// Set a callback which will be invoked periodically in the event that the database file needs
     /// to be repaired.
     ///
-    /// The [RepairSession] argument can be used to control the repair process.
+    /// The [`RepairSession`] argument can be used to control the repair process.
     ///
     /// If the database file needs repair, the callback will be invoked at least once.
     /// There is no upper limit on the number of times it may be called.

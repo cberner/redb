@@ -463,7 +463,7 @@ impl BuddyAllocator {
         }
     }
 
-    /// data must have been initialized by Self::init_new(), and page_number must be free
+    /// data must have been initialized by `Self::init_new()`, and `page_number` must be free
     pub(crate) fn record_alloc(&mut self, page_number: u32, order: u8) {
         assert!(order <= self.max_order);
         // Only record the allocation for the actual page
@@ -492,7 +492,7 @@ impl BuddyAllocator {
         }
     }
 
-    /// data must have been initialized by Self::init_new()
+    /// data must have been initialized by `Self::init_new()`
     pub(crate) fn free(&mut self, page_number: u32, order: u8) {
         debug_assert!(self.get_order_free_mut(order).get(page_number));
         debug_assert!(

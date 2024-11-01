@@ -524,7 +524,7 @@ impl Into<u8> for DynamicCollectionType {
 /// (when type = 2) root (8 bytes): sub tree root page number
 /// (when type = 2) checksum (16 bytes): sub tree checksum
 ///
-/// NOTE: Even though the [PhantomData] is zero-sized, the inner data DST must be placed last.
+/// NOTE: Even though the [`PhantomData`] is zero-sized, the inner data DST must be placed last.
 /// See [Exotically Sized Types](https://doc.rust-lang.org/nomicon/exotic-sizes.html#dynamically-sized-types-dsts)
 /// section of the Rustonomicon for more details.
 #[repr(transparent)]

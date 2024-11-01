@@ -223,7 +223,7 @@ impl<'txn, K: Key + 'static, V: MutInPlaceValue + 'static> Table<'txn, K, V> {
     ///
     /// If key is already present it is replaced
     ///
-    /// The returned reference will have length equal to value_length
+    /// The returned reference will have length equal to `value_length`
     pub fn insert_reserve<'a>(
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
