@@ -12,7 +12,8 @@
     clippy::option_option,
     clippy::unnecessary_wraps,
     clippy::too_many_lines,
-    clippy::similar_names
+    clippy::similar_names,
+    clippy::wildcard_imports
 )]
 #![deny(
     clippy::all,
