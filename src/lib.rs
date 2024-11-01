@@ -14,7 +14,8 @@
     clippy::too_many_lines,
     clippy::similar_names,
     clippy::wildcard_imports,
-    clippy::unreadable_literal
+    clippy::unreadable_literal,
+    clippy::must_use_candidate
 )]
 #![deny(
     clippy::all,
