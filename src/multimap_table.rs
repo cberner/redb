@@ -590,7 +590,7 @@ impl<V: Key> DynamicCollection<V> {
     fn as_subtree(&self) -> BtreeHeader {
         assert!(matches!(self.collection_type(), SubtreeV2));
         BtreeHeader::from_le_bytes(
-            self.data[1..(1 + BtreeHeader::serialized_size())]
+            self.data[1..=BtreeHeader::serialized_size()]
                 .try_into()
                 .unwrap(),
         )
@@ -726,7 +726,7 @@ impl UntypedDynamicCollection {
     fn as_subtree(&self) -> BtreeHeader {
         assert!(matches!(self.collection_type(), SubtreeV2));
         BtreeHeader::from_le_bytes(
-            self.data[1..(1 + BtreeHeader::serialized_size())]
+            self.data[1..=BtreeHeader::serialized_size()]
                 .try_into()
                 .unwrap(),
         )
