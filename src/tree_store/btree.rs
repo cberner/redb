@@ -192,13 +192,11 @@ impl UntypedBtreeMut {
                     }
                 }
 
-                drop(accessor);
                 let mut mutator = BranchMutator::new(&mut page);
                 for (child_index, child_page, child_checksum) in new_children.into_iter().flatten()
                 {
                     mutator.write_child_page(child_index, child_page, child_checksum);
                 }
-                drop(mutator);
 
                 branch_checksum(&page, self.key_width)
             }

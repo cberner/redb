@@ -313,7 +313,6 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
                 }
             }
         }
-        drop(accessor);
         // TODO: maybe there's a better abstraction, so that we don't need to call into this low-level method?
         let mut mutator = LeafMutator::new(
             &mut leaf_page,

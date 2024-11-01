@@ -226,7 +226,6 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let new_page_accessor =
                         LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
                     let offset = new_page_accessor.offset_of_first_value();
-                    drop(new_page_accessor);
                     let guard = AccessGuardMut::new(new_page, offset, value.len());
                     return if position == 0 {
                         Ok(InsertionResult {
@@ -280,7 +279,6 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let new_page_accessor =
                         LeafAccessor::new(page_mut.memory(), K::fixed_width(), V::fixed_width());
                     let offset = new_page_accessor.offset_of_value(position).unwrap();
-                    drop(new_page_accessor);
                     let guard = AccessGuardMut::new(page_mut, offset, value.len());
                     return Ok(InsertionResult {
                         new_root: page_number,
@@ -567,7 +565,6 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             Subtree(new_page.get_page_number(), DEFERRED)
         };
         let (start, end) = accessor.value_range(position).unwrap();
-        drop(accessor);
         let guard = if uncommitted && self.modify_uncommitted {
             let page_number = page.get_page_number();
             let arc = page.to_arc();
