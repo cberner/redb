@@ -2,6 +2,7 @@
 #![deny(
     clippy::all,
     clippy::doc_markdown,
+    clippy::explicit_iter_loop,
     clippy::cast_lossless,
     clippy::checked_conversions,
     clippy::cloned_instead_of_copied,

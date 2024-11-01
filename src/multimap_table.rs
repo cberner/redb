@@ -850,7 +850,7 @@ impl<'a, V: Key + 'static> Drop for MultimapValue<'a, V> {
         drop(mem::take(&mut self.inner));
         if !self.free_on_drop.is_empty() {
             let mut freed_pages = self.freed_pages.as_ref().unwrap().lock().unwrap();
-            for page in self.free_on_drop.iter() {
+            for page in &self.free_on_drop {
                 if !self.mem.as_ref().unwrap().free_if_uncommitted(*page) {
                     freed_pages.push(*page);
                 }

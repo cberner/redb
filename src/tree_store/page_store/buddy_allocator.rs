@@ -87,21 +87,21 @@ impl BuddyAllocator {
 
         let mut data_offset = result.len() + (self.max_order as usize + 1) * 2 * size_of::<u32>();
         let end_metadata = data_offset;
-        for order in self.free.iter() {
+        for order in &self.free {
             data_offset += order.to_vec().len();
             let offset_u32: u32 = data_offset.try_into().unwrap();
             result.extend(offset_u32.to_le_bytes());
         }
-        for order in self.allocated.iter() {
+        for order in &self.allocated {
             data_offset += order.to_vec().len();
             let offset_u32: u32 = data_offset.try_into().unwrap();
             result.extend(offset_u32.to_le_bytes());
         }
         assert_eq!(end_metadata, result.len());
-        for order in self.free.iter() {
+        for order in &self.free {
             result.extend(&order.to_vec());
         }
-        for order in self.allocated.iter() {
+        for order in &self.allocated {
             result.extend(&order.to_vec());
         }
 
@@ -280,7 +280,7 @@ impl BuddyAllocator {
             }
 
             let mut check_result = HashSet::new();
-            for page in allocated_check.iter() {
+            for page in &allocated_check {
                 check_result.extend(page.to_order0());
             }
             assert_eq!(free_check, check_result);

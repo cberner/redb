@@ -41,7 +41,7 @@ impl RegionTracker {
         let allocator_len: u32 = self.order_trackers[0].to_vec().len().try_into().unwrap();
         result.extend(orders.to_le_bytes());
         result.extend(allocator_len.to_le_bytes());
-        for order in self.order_trackers.iter() {
+        for order in &self.order_trackers {
             result.extend(&order.to_vec());
         }
         result
@@ -165,7 +165,7 @@ impl Allocators {
         // Ignore the region tracker because it is an optimistic cache, and so may not match
         // between repairs of the allocators
         let mut result = 0;
-        for allocator in self.region_allocators.iter() {
+        for allocator in &self.region_allocators {
             result ^= xxh3_checksum(&allocator.to_vec());
         }
         result
