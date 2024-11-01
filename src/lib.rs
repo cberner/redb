@@ -9,7 +9,8 @@
     clippy::missing_panics_doc,
     clippy::module_name_repetitions,
     clippy::needless_pass_by_value,
-    clippy::option_option
+    clippy::option_option,
+    clippy::unnecessary_wraps
 )]
 #![deny(
     clippy::all,
