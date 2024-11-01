@@ -300,9 +300,9 @@ impl<'a> LeafAccessor<'a> {
     pub(super) fn print_node<K: Key, V: Value>(&self, include_value: bool) {
         let mut i = 0;
         while let Some(entry) = self.entry(i) {
-            eprint!(" key_{}={:?}", i, K::from_bytes(entry.key()));
+            eprint!(" key_{i}={:?}", K::from_bytes(entry.key()));
             if include_value {
-                eprint!(" value_{}={:?}", i, V::from_bytes(entry.value()));
+                eprint!(" value_{i}={:?}", V::from_bytes(entry.value()));
             }
             i += 1;
         }
@@ -1129,8 +1129,8 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         for i in 0..(self.count_children() - 1) {
             if let Some(child) = self.child_page(i + 1) {
                 let key = self.key(i).unwrap();
-                eprint!(" key_{}={:?}", i, K::from_bytes(key));
-                eprint!(" child_{}={:?}", i + 1, child);
+                eprint!(" key_{i}={:?}", K::from_bytes(key));
+                eprint!(" child_{}={child:?}", i + 1);
             }
         }
         eprint!("]");

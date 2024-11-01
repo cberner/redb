@@ -304,7 +304,7 @@ fn debug_helper<K: Key + 'static, V: Value + 'static>(
     first: Result<Option<(AccessGuard<K>, AccessGuard<V>)>>,
     last: Result<Option<(AccessGuard<K>, AccessGuard<V>)>>,
 ) -> std::fmt::Result {
-    write!(f, "Table [ name: \"{}\", ", name)?;
+    write!(f, "Table [ name: \"{name}\", ")?;
     if let Ok(len) = len {
         if len == 0 {
             write!(f, "No entries")?;

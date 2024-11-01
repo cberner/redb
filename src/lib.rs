@@ -26,7 +26,8 @@
     clippy::map_unwrap_or,
     clippy::match_wildcard_for_single_variants,
     clippy::range_plus_one,
-    clippy::type_repetition_in_bounds
+    clippy::type_repetition_in_bounds,
+    clippy::uninlined_format_args
 )]
 // TODO remove this once wasi no longer requires nightly
 #![cfg_attr(target_os = "wasi", feature(wasi_ext))]

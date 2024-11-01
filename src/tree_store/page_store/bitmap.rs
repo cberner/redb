@@ -403,7 +403,7 @@ impl U64GroupedBitmap {
     }
 
     pub fn clear(&mut self, bit: u32) {
-        assert!(bit < self.len, "{} must be less than {}", bit, self.len);
+        assert!(bit < self.len, "{bit} must be less than {}", self.len);
         let (index, bit_index) = self.data_index_of(bit);
         self.data[index] &= !Self::select_mask(bit_index);
     }
