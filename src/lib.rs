@@ -1,5 +1,6 @@
 #![allow(clippy::drop_non_drop)]
 #![deny(
+    clippy::all,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_precision_loss,
