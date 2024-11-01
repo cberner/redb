@@ -138,7 +138,7 @@ impl<'a> SerializedSavepoint<'a> {
                 .unwrap()
                 .to_le_bytes(),
         );
-        for region in savepoint.regional_allocators.iter() {
+        for region in &savepoint.regional_allocators {
             assert_eq!(savepoint.regional_allocators[0].len(), region.len());
         }
         result.extend(
@@ -147,7 +147,7 @@ impl<'a> SerializedSavepoint<'a> {
                 .to_le_bytes(),
         );
 
-        for region in savepoint.regional_allocators.iter() {
+        for region in &savepoint.regional_allocators {
             result.extend(region);
         }
         Self::Owned(result)
@@ -276,7 +276,6 @@ impl<'data> Value for SerializedSavepoint<'data> {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
-        Self: 'a,
         Self: 'b,
     {
         value.data()

@@ -313,7 +313,6 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
                 }
             }
         }
-        drop(accessor);
         // TODO: maybe there's a better abstraction, so that we don't need to call into this low-level method?
         let mut mutator = LeafMutator::new(
             &mut leaf_page,
@@ -525,7 +524,7 @@ impl Into<u8> for DynamicCollectionType {
 /// (when type = 2) root (8 bytes): sub tree root page number
 /// (when type = 2) checksum (16 bytes): sub tree checksum
 ///
-/// NOTE: Even though the [PhantomData] is zero-sized, the inner data DST must be placed last.
+/// NOTE: Even though the [`PhantomData`] is zero-sized, the inner data DST must be placed last.
 /// See [Exotically Sized Types](https://doc.rust-lang.org/nomicon/exotic-sizes.html#dynamically-sized-types-dsts)
 /// section of the Rustonomicon for more details.
 #[repr(transparent)]
@@ -563,7 +562,6 @@ impl<V: Key> Value for &DynamicCollection<V> {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
     where
-        Self: 'a,
         Self: 'b,
     {
         &value.data
@@ -576,7 +574,7 @@ impl<V: Key> Value for &DynamicCollection<V> {
 
 impl<V: Key> DynamicCollection<V> {
     fn new(data: &[u8]) -> &Self {
-        unsafe { mem::transmute(data) }
+        unsafe { &*(data as *const [u8] as *const DynamicCollection<V>) }
     }
 
     fn collection_type(&self) -> DynamicCollectionType {
@@ -591,7 +589,7 @@ impl<V: Key> DynamicCollection<V> {
     fn as_subtree(&self) -> BtreeHeader {
         assert!(matches!(self.collection_type(), SubtreeV2));
         BtreeHeader::from_le_bytes(
-            self.data[1..(1 + BtreeHeader::serialized_size())]
+            self.data[1..=BtreeHeader::serialized_size()]
                 .try_into()
                 .unwrap(),
         )
@@ -702,7 +700,7 @@ impl UntypedDynamicCollection {
     }
 
     fn new(data: &[u8]) -> &Self {
-        unsafe { mem::transmute(data) }
+        unsafe { &*(data as *const [u8] as *const UntypedDynamicCollection) }
     }
 
     fn make_subtree_data(header: BtreeHeader) -> Vec<u8> {
@@ -727,7 +725,7 @@ impl UntypedDynamicCollection {
     fn as_subtree(&self) -> BtreeHeader {
         assert!(matches!(self.collection_type(), SubtreeV2));
         BtreeHeader::from_le_bytes(
-            self.data[1..(1 + BtreeHeader::serialized_size())]
+            self.data[1..=BtreeHeader::serialized_size()]
                 .try_into()
                 .unwrap(),
         )
@@ -851,7 +849,7 @@ impl<'a, V: Key + 'static> Drop for MultimapValue<'a, V> {
         drop(mem::take(&mut self.inner));
         if !self.free_on_drop.is_empty() {
             let mut freed_pages = self.freed_pages.as_ref().unwrap().lock().unwrap();
-            for page in self.free_on_drop.iter() {
+            for page in &self.free_on_drop {
                 if !self.mem.as_ref().unwrap().free_if_uncommitted(*page) {
                     freed_pages.push(*page);
                 }

@@ -109,7 +109,7 @@ impl TableError {
             | TableError::TypeDefinitionChanged { .. }
             | TableError::TableDoesNotExist(_)
             | TableError::TableAlreadyOpen(_, _) => {
-                StorageError::Corrupted(format!("{}: {}", msg, &self))
+                StorageError::Corrupted(format!("{msg}: {self}"))
             }
             TableError::Storage(storage) => storage,
         }

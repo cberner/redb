@@ -34,10 +34,10 @@ impl RegionLayout {
         page_capacity: u32,
         page_size: u32,
     ) -> RegionLayout {
-        assert!(desired_usable_bytes <= page_capacity as u64 * page_size as u64);
+        assert!(desired_usable_bytes <= u64::from(page_capacity) * u64::from(page_size));
         let header_pages = RegionHeader::header_pages_expensive(page_size, page_capacity);
         let num_pages =
-            round_up_to_multiple_of(desired_usable_bytes, page_size.into()) / page_size as u64;
+            round_up_to_multiple_of(desired_usable_bytes, page_size.into()) / u64::from(page_size);
 
         Self {
             num_pages: num_pages.try_into().unwrap(),
@@ -57,7 +57,7 @@ impl RegionLayout {
     }
 
     pub(super) fn data_section(&self) -> Range<u64> {
-        let header_bytes = self.header_pages as u64 * self.page_size as u64;
+        let header_bytes = u64::from(self.header_pages) * u64::from(self.page_size);
         header_bytes..(header_bytes + self.usable_bytes())
     }
 
@@ -74,11 +74,11 @@ impl RegionLayout {
     }
 
     pub(super) fn len(&self) -> u64 {
-        (self.header_pages as u64) * (self.page_size as u64) + self.usable_bytes()
+        u64::from(self.header_pages) * u64::from(self.page_size) + self.usable_bytes()
     }
 
     pub(super) fn usable_bytes(&self) -> u64 {
-        self.page_size as u64 * self.num_pages as u64
+        u64::from(self.page_size) * u64::from(self.num_pages)
     }
 }
 
@@ -128,9 +128,9 @@ impl DatabaseLayout {
         region_max_data_pages_u32: u32,
         page_size_u32: u32,
     ) -> Self {
-        let page_size = page_size_u32 as u64;
-        let region_header_pages = region_header_pages_u32 as u64;
-        let region_max_data_pages = region_max_data_pages_u32 as u64;
+        let page_size = u64::from(page_size_u32);
+        let region_header_pages = u64::from(region_header_pages_u32);
+        let region_max_data_pages = u64::from(region_max_data_pages_u32);
         // Super-header
         let mut remaining = file_len - page_size;
         let full_region_size = (region_header_pages + region_max_data_pages) * page_size;
@@ -231,13 +231,13 @@ impl DatabaseLayout {
             .as_ref()
             .map(RegionLayout::usable_bytes)
             .unwrap_or_default();
-        (self.num_full_regions as u64) * self.full_region_layout.usable_bytes() + trailing
+        u64::from(self.num_full_regions) * self.full_region_layout.usable_bytes() + trailing
     }
 
     pub(super) fn region_base_address(&self, region: u32) -> u64 {
         assert!(region < self.num_regions());
-        (self.full_region_layout.page_size() as u64)
-            + (region as u64) * self.full_region_layout.len()
+        u64::from(self.full_region_layout.page_size())
+            + u64::from(region) * self.full_region_layout.len()
     }
 
     pub(super) fn region_layout(&self, region: u32) -> RegionLayout {

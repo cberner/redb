@@ -31,8 +31,8 @@ impl<T> LRUCache<T> {
         result
     }
 
-    pub(crate) fn remove(&mut self, key: &u64) -> Option<T> {
-        if let Some((value, _)) = self.cache.remove(key) {
+    pub(crate) fn remove(&mut self, key: u64) -> Option<T> {
+        if let Some((value, _)) = self.cache.remove(&key) {
             if self.lru_queue.len() > 2 * self.cache.len() {
                 // Cycle two elements of the LRU queue to ensure it doesn't grow without bound
                 for _ in 0..2 {
@@ -50,8 +50,8 @@ impl<T> LRUCache<T> {
         }
     }
 
-    pub(crate) fn get(&self, key: &u64) -> Option<&T> {
-        if let Some((value, second_chance)) = self.cache.get(key) {
+    pub(crate) fn get(&self, key: u64) -> Option<&T> {
+        if let Some((value, second_chance)) = self.cache.get(&key) {
             second_chance.store(true, Ordering::Release);
             Some(value)
         } else {
@@ -59,8 +59,8 @@ impl<T> LRUCache<T> {
         }
     }
 
-    pub(crate) fn get_mut(&mut self, key: &u64) -> Option<&mut T> {
-        if let Some((value, second_chance)) = self.cache.get_mut(key) {
+    pub(crate) fn get_mut(&mut self, key: u64) -> Option<&mut T> {
+        if let Some((value, second_chance)) = self.cache.get_mut(&key) {
             second_chance.store(true, Ordering::Release);
             Some(value)
         } else {

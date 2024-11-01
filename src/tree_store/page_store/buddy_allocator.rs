@@ -87,21 +87,21 @@ impl BuddyAllocator {
 
         let mut data_offset = result.len() + (self.max_order as usize + 1) * 2 * size_of::<u32>();
         let end_metadata = data_offset;
-        for order in self.free.iter() {
+        for order in &self.free {
             data_offset += order.to_vec().len();
             let offset_u32: u32 = data_offset.try_into().unwrap();
             result.extend(offset_u32.to_le_bytes());
         }
-        for order in self.allocated.iter() {
+        for order in &self.allocated {
             data_offset += order.to_vec().len();
             let offset_u32: u32 = data_offset.try_into().unwrap();
             result.extend(offset_u32.to_le_bytes());
         }
         assert_eq!(end_metadata, result.len());
-        for order in self.free.iter() {
+        for order in &self.free {
             result.extend(&order.to_vec());
         }
-        for order in self.allocated.iter() {
+        for order in &self.allocated {
             result.extend(&order.to_vec());
         }
 
@@ -280,7 +280,7 @@ impl BuddyAllocator {
             }
 
             let mut check_result = HashSet::new();
-            for page in allocated_check.iter() {
+            for page in &allocated_check {
                 check_result.extend(page.to_order0());
             }
             assert_eq!(free_check, check_result);
@@ -463,7 +463,7 @@ impl BuddyAllocator {
         }
     }
 
-    /// data must have been initialized by Self::init_new(), and page_number must be free
+    /// data must have been initialized by `Self::init_new()`, and `page_number` must be free
     pub(crate) fn record_alloc(&mut self, page_number: u32, order: u8) {
         assert!(order <= self.max_order);
         // Only record the allocation for the actual page
@@ -492,7 +492,7 @@ impl BuddyAllocator {
         }
     }
 
-    /// data must have been initialized by Self::init_new()
+    /// data must have been initialized by `Self::init_new()`
     pub(crate) fn free(&mut self, page_number: u32, order: u8) {
         debug_assert!(self.get_order_free_mut(order).get(page_number));
         debug_assert!(
@@ -618,7 +618,7 @@ mod test {
         // Check that serialized size is as expected for a full region
         let max_region_pages = 1024 * 1024;
         let allocator = BuddyAllocator::new(max_region_pages, max_region_pages);
-        let max_region_pages = max_region_pages as u64;
+        let max_region_pages = u64::from(max_region_pages);
         // 2x because that's the integral of 1/2^x to account for all the 21 orders
         let allocated_state_bits = 2 * max_region_pages;
         // + u32 * 21 because of the length field

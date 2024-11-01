@@ -223,7 +223,7 @@ impl<'txn, K: Key + 'static, V: MutInPlaceValue + 'static> Table<'txn, K, V> {
     ///
     /// If key is already present it is replaced
     ///
-    /// The returned reference will have length equal to value_length
+    /// The returned reference will have length equal to `value_length`
     pub fn insert_reserve<'a>(
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
@@ -304,7 +304,7 @@ fn debug_helper<K: Key + 'static, V: Value + 'static>(
     first: Result<Option<(AccessGuard<K>, AccessGuard<V>)>>,
     last: Result<Option<(AccessGuard<K>, AccessGuard<V>)>>,
 ) -> std::fmt::Result {
-    write!(f, "Table [ name: \"{}\", ", name)?;
+    write!(f, "Table [ name: \"{name}\", ")?;
     if let Ok(len) = len {
         if len == 0 {
             write!(f, "No entries")?;

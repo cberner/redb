@@ -71,14 +71,14 @@ impl BtreeBitmap {
         let vecs: Vec<Vec<u8>> = self.heights.iter().map(|x| x.to_vec()).collect();
         let mut data_offset = END_OFFSETS + self.heights.len() * size_of::<u32>();
         let end_metadata = data_offset;
-        for serialized in vecs.iter() {
+        for serialized in &vecs {
             data_offset += serialized.len();
             let offset_u32: u32 = data_offset.try_into().unwrap();
             result.extend(offset_u32.to_le_bytes());
         }
 
         assert_eq!(end_metadata, result.len());
-        for serialized in vecs.iter() {
+        for serialized in &vecs {
             result.extend(serialized);
         }
 
@@ -303,7 +303,7 @@ impl U64GroupedBitmap {
     pub fn to_vec(&self) -> Vec<u8> {
         let mut result = vec![];
         result.extend(self.len.to_le_bytes());
-        for x in self.data.iter() {
+        for x in &self.data {
             result.extend(x.to_le_bytes());
         }
         result
@@ -327,7 +327,7 @@ impl U64GroupedBitmap {
         Self { len, data }
     }
 
-    fn data_index_of(&self, bit: u32) -> (usize, usize) {
+    fn data_index_of(bit: u32) -> (usize, usize) {
         ((bit as usize) / 64, (bit as usize) % 64)
     }
 
@@ -363,7 +363,7 @@ impl U64GroupedBitmap {
     fn first_unset(&self, start_bit: u32, end_bit: u32) -> Option<u32> {
         assert_eq!(end_bit, (start_bit - start_bit % 64) + 64);
 
-        let (index, bit) = self.data_index_of(start_bit);
+        let (index, bit) = Self::data_index_of(start_bit);
         let mask = (1 << bit) - 1;
         let group = self.data[index];
         let group = group | mask;
@@ -386,7 +386,7 @@ impl U64GroupedBitmap {
 
     pub fn get(&self, bit: u32) -> bool {
         assert!(bit < self.len);
-        let (index, bit_index) = self.data_index_of(bit);
+        let (index, bit_index) = Self::data_index_of(bit);
         let group = self.data[index];
         group & U64GroupedBitmap::select_mask(bit_index) != 0
     }
@@ -394,7 +394,7 @@ impl U64GroupedBitmap {
     // Returns true iff the bit's group is all set
     pub fn set(&mut self, bit: u32) -> bool {
         assert!(bit < self.len);
-        let (index, bit_index) = self.data_index_of(bit);
+        let (index, bit_index) = Self::data_index_of(bit);
         let mut group = self.data[index];
         group |= Self::select_mask(bit_index);
         self.data[index] = group;
@@ -403,8 +403,8 @@ impl U64GroupedBitmap {
     }
 
     pub fn clear(&mut self, bit: u32) {
-        assert!(bit < self.len, "{} must be less than {}", bit, self.len);
-        let (index, bit_index) = self.data_index_of(bit);
+        assert!(bit < self.len, "{bit} must be less than {}", self.len);
+        let (index, bit_index) = Self::data_index_of(bit);
         self.data[index] &= !Self::select_mask(bit_index);
     }
 }
@@ -533,7 +533,7 @@ mod test {
                 } else {
                     assert_eq!(allocated.len(), num_pages as usize);
                 }
-            } else if let Some(to_free) = allocated.iter().choose(&mut rng).cloned() {
+            } else if let Some(to_free) = allocated.iter().choose(&mut rng).copied() {
                 allocator.clear(to_free);
                 allocated.remove(&to_free);
             }
