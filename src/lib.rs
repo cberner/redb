@@ -4,7 +4,9 @@
     clippy::if_not_else,
     clippy::inline_always,
     clippy::iter_not_returning_iterator,
-    clippy::let_underscore_drop
+    clippy::let_underscore_drop,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc
 )]
 #![deny(
     clippy::all,
