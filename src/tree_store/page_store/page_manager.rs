@@ -892,12 +892,11 @@ impl TransactionalMemory {
                     page,
                     required_order,
                 )));
-            } else {
-                // Mark the region, if it's full
-                state
-                    .get_region_tracker_mut()
-                    .mark_full(required_order, candidate_region);
             }
+            // Mark the region, if it's full
+            state
+                .get_region_tracker_mut()
+                .mark_full(required_order, candidate_region);
         }
     }
 

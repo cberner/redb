@@ -92,10 +92,10 @@ impl LRUWriteCache {
             if let Some((k, v)) = self.cache.pop_lowest_priority() {
                 if let Some(v_inner) = v {
                     return Some((k, v_inner));
-                } else {
-                    // Value is borrowed by take_value(). We can't evict it, so put it back.
-                    self.cache.insert(k, v);
                 }
+
+                // Value is borrowed by take_value(). We can't evict it, so put it back.
+                self.cache.insert(k, v);
             } else {
                 break;
             }

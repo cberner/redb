@@ -453,9 +453,9 @@ impl Database {
 
             if !progress {
                 break;
-            } else {
-                compacted = true;
             }
+
+            compacted = true;
         }
 
         Ok(compacted)
