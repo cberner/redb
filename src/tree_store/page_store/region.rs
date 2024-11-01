@@ -175,13 +175,13 @@ impl Allocators {
         let page_size = header.page_size();
         let region_header_size =
             header.layout().full_region_layout().get_header_pages() * page_size;
-        let region_size = header.layout().full_region_layout().num_pages() as u64
-            * page_size as u64
-            + region_header_size as u64;
+        let region_size = u64::from(header.layout().full_region_layout().num_pages())
+            * u64::from(page_size)
+            + u64::from(region_header_size);
         let range = header.region_tracker().address_range(
-            page_size as u64,
+            page_size.into(),
             region_size,
-            region_header_size as u64,
+            region_header_size.into(),
             page_size,
         );
         let len: usize = (range.end - range.start).try_into().unwrap();
@@ -215,12 +215,12 @@ impl Allocators {
     ) -> Result {
         let page_size = layout.full_region_layout().page_size();
         let region_header_size =
-            (layout.full_region_layout().get_header_pages() * page_size) as u64;
-        let region_size =
-            layout.full_region_layout().num_pages() as u64 * page_size as u64 + region_header_size;
+            u64::from(layout.full_region_layout().get_header_pages() * page_size);
+        let region_size = u64::from(layout.full_region_layout().num_pages()) * u64::from(page_size)
+            + region_header_size;
         let mut region_tracker_mem = {
             let range = region_tracker_page.address_range(
-                page_size as u64,
+                page_size.into(),
                 region_size,
                 region_header_size,
                 page_size,
@@ -325,7 +325,7 @@ pub(crate) struct RegionHeader {}
 
 impl RegionHeader {
     pub(crate) fn header_pages_expensive(page_size: u32, pages_per_region: u32) -> u32 {
-        let page_size = page_size as u64;
+        let page_size = u64::from(page_size);
         // TODO: this is kind of expensive. Maybe it should be cached
         let allocator = BuddyAllocator::new(pages_per_region, pages_per_region);
         let result = 8u64 + allocator.to_vec().len() as u64;

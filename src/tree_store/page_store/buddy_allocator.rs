@@ -618,7 +618,7 @@ mod test {
         // Check that serialized size is as expected for a full region
         let max_region_pages = 1024 * 1024;
         let allocator = BuddyAllocator::new(max_region_pages, max_region_pages);
-        let max_region_pages = max_region_pages as u64;
+        let max_region_pages = u64::from(max_region_pages);
         // 2x because that's the integral of 1/2^x to account for all the 21 orders
         let allocated_state_bits = 2 * max_region_pages;
         // + u32 * 21 because of the length field

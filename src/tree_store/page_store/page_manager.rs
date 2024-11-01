@@ -114,7 +114,10 @@ impl TransactionalMemory {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
         let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
-        let region_size = min(region_size, (MAX_PAGE_INDEX as u64 + 1) * page_size as u64);
+        let region_size = min(
+            region_size,
+            (u64::from(MAX_PAGE_INDEX) + 1) * page_size as u64,
+        );
         assert!(region_size.is_power_of_two());
 
         let storage = PagedCachedFile::new(
@@ -143,7 +146,7 @@ impl TransactionalMemory {
             // Make sure that there is enough room to allocate the region tracker into a page
             let size: u64 = max(
                 MIN_DESIRED_USABLE_BYTES,
-                page_size as u64 * MIN_USABLE_PAGES as u64,
+                page_size as u64 * u64::from(MIN_USABLE_PAGES),
             );
             let tracker_space =
                 (page_size * ((region_tracker_required_bytes + page_size - 1) / page_size)) as u64;
@@ -615,7 +618,7 @@ impl TransactionalMemory {
                 .free(page_number.page_index, page_number.page_order);
 
             let address = page_number.address_range(
-                self.page_size as u64,
+                self.page_size.into(),
                 self.region_size,
                 self.region_header_with_padding_size,
                 self.page_size,
@@ -640,7 +643,7 @@ impl TransactionalMemory {
         hint: PageHint,
     ) -> Result<PageImpl> {
         let range = page_number.address_range(
-            self.page_size as u64,
+            self.page_size.into(),
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
@@ -683,7 +686,7 @@ impl TransactionalMemory {
         }
 
         let address_range = page_number.address_range(
-            self.page_size as u64,
+            self.page_size.into(),
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
@@ -773,7 +776,7 @@ impl TransactionalMemory {
             .mark_free(page.page_order, region_index);
 
         let address_range = page.address_range(
-            self.page_size as u64,
+            self.page_size.into(),
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
@@ -835,7 +838,7 @@ impl TransactionalMemory {
             .insert(page_number);
 
         let address_range = page_number.address_range(
-            self.page_size as u64,
+            self.page_size.into(),
             self.region_size,
             self.region_header_with_padding_size,
             self.page_size,
@@ -925,9 +928,9 @@ impl TransactionalMemory {
     fn grow(&self, state: &mut InMemoryState, required_order_allocation: u8) -> Result<()> {
         let layout = state.header.layout();
         let required_growth =
-            2u64.pow(required_order_allocation.into()) * state.header.page_size() as u64;
-        let max_region_size = (state.header.layout().full_region_layout().num_pages() as u64)
-            * (state.header.page_size() as u64);
+            2u64.pow(required_order_allocation.into()) * u64::from(state.header.page_size());
+        let max_region_size = u64::from(state.header.layout().full_region_layout().num_pages())
+            * u64::from(state.header.page_size());
         let next_desired_size = if layout.num_full_regions() > 0 {
             if let Some(trailing) = layout.trailing_region_layout() {
                 if 2 * required_growth < max_region_size - trailing.usable_bytes() {
@@ -979,7 +982,7 @@ impl TransactionalMemory {
         let state = self.state.lock().unwrap();
         let mut count = 0u64;
         for i in 0..state.header.layout().num_regions() {
-            count += state.get_region(i).count_allocated_pages() as u64;
+            count += u64::from(state.get_region(i).count_allocated_pages());
         }
 
         Ok(count)

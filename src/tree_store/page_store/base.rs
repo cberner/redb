@@ -35,8 +35,8 @@ impl Ord for PageNumber {
         match self.region.cmp(&other.region) {
             Ordering::Less => Ordering::Less,
             Ordering::Equal => {
-                let self_order0 = self.page_index * 2u32.pow(self.page_order as u32);
-                let other_order0 = other.page_index * 2u32.pow(other.page_order as u32);
+                let self_order0 = self.page_index * 2u32.pow(self.page_order.into());
+                let other_order0 = other.page_index * 2u32.pow(other.page_order.into());
                 assert!(
                     self_order0 != other_order0 || self.page_order == other.page_order,
                     "{self:?} overlaps {other:?}, but is not equal"
@@ -72,9 +72,9 @@ impl PageNumber {
     }
 
     pub(crate) fn to_le_bytes(self) -> [u8; 8] {
-        let mut temp = (0x000F_FFFF & self.page_index) as u64;
-        temp |= (0x000F_FFFF & self.region as u64) << 20;
-        temp |= (0b0001_1111 & self.page_order as u64) << 59;
+        let mut temp = 0x000F_FFFF & u64::from(self.page_index);
+        temp |= (0x000F_FFFF & u64::from(self.region)) << 20;
+        temp |= (0b0001_1111 & u64::from(self.page_order)) << 59;
         temp.to_le_bytes()
     }
 
@@ -99,8 +99,8 @@ impl PageNumber {
         if self.region > other.region {
             return false;
         }
-        let self_order0 = self.page_index * 2u32.pow(self.page_order as u32);
-        let other_order0 = other.page_index * 2u32.pow(other.page_order as u32);
+        let self_order0 = self.page_index * 2u32.pow(self.page_order.into());
+        let other_order0 = other.page_index * 2u32.pow(other.page_order.into());
         assert_ne!(self_order0, other_order0, "{self:?} overlaps {other:?}");
         self_order0 < other_order0
     }
@@ -145,9 +145,9 @@ impl PageNumber {
         page_size: u32,
     ) -> Range<u64> {
         let regional_start =
-            region_pages_start + (self.page_index as u64) * self.page_size_bytes(page_size);
+            region_pages_start + u64::from(self.page_index) * self.page_size_bytes(page_size);
         debug_assert!(regional_start < region_size);
-        let region_base = (self.region as u64) * region_size;
+        let region_base = u64::from(self.region) * region_size;
         let start = data_section_offset + region_base + regional_start;
         let end = start + self.page_size_bytes(page_size);
         start..end
@@ -155,7 +155,7 @@ impl PageNumber {
 
     pub(crate) fn page_size_bytes(&self, page_size: u32) -> u64 {
         let pages = 1u64 << self.page_order;
-        pages * (page_size as u64)
+        pages * u64::from(page_size)
     }
 }
 
