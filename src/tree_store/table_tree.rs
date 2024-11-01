@@ -14,7 +14,6 @@ use crate::types::{Key, MutInPlaceValue, TypeName, Value};
 use crate::{DatabaseStats, Result};
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap};
-use std::mem;
 use std::mem::size_of;
 use std::ops::RangeFull;
 use std::sync::{Arc, Mutex};
@@ -166,7 +165,7 @@ impl MutInPlaceValue for FreedPageList<'_> {
     }
 
     fn from_bytes_mut(data: &mut [u8]) -> &mut Self::BaseRefType {
-        unsafe { mem::transmute(data) }
+        unsafe { &mut *(data as *mut [u8] as *mut FreedPageListMut) }
     }
 }
 

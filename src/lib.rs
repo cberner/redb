@@ -39,7 +39,8 @@
     clippy::redundant_else,
     clippy::unused_self,
     clippy::match_same_arms,
-    clippy::trivially_copy_pass_by_ref
+    clippy::trivially_copy_pass_by_ref,
+    clippy::transmute_ptr_to_ptr
 )]
 // TODO remove this once wasi no longer requires nightly
 #![cfg_attr(target_os = "wasi", feature(wasi_ext))]
