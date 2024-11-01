@@ -10,7 +10,8 @@
     clippy::module_name_repetitions,
     clippy::needless_pass_by_value,
     clippy::option_option,
-    clippy::unnecessary_wraps
+    clippy::unnecessary_wraps,
+    clippy::too_many_lines
 )]
 #![deny(
     clippy::all,
