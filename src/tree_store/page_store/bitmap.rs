@@ -327,7 +327,7 @@ impl U64GroupedBitmap {
         Self { len, data }
     }
 
-    fn data_index_of(&self, bit: u32) -> (usize, usize) {
+    fn data_index_of(bit: u32) -> (usize, usize) {
         ((bit as usize) / 64, (bit as usize) % 64)
     }
 
@@ -363,7 +363,7 @@ impl U64GroupedBitmap {
     fn first_unset(&self, start_bit: u32, end_bit: u32) -> Option<u32> {
         assert_eq!(end_bit, (start_bit - start_bit % 64) + 64);
 
-        let (index, bit) = self.data_index_of(start_bit);
+        let (index, bit) = Self::data_index_of(start_bit);
         let mask = (1 << bit) - 1;
         let group = self.data[index];
         let group = group | mask;
@@ -386,7 +386,7 @@ impl U64GroupedBitmap {
 
     pub fn get(&self, bit: u32) -> bool {
         assert!(bit < self.len);
-        let (index, bit_index) = self.data_index_of(bit);
+        let (index, bit_index) = Self::data_index_of(bit);
         let group = self.data[index];
         group & U64GroupedBitmap::select_mask(bit_index) != 0
     }
@@ -394,7 +394,7 @@ impl U64GroupedBitmap {
     // Returns true iff the bit's group is all set
     pub fn set(&mut self, bit: u32) -> bool {
         assert!(bit < self.len);
-        let (index, bit_index) = self.data_index_of(bit);
+        let (index, bit_index) = Self::data_index_of(bit);
         let mut group = self.data[index];
         group |= Self::select_mask(bit_index);
         self.data[index] = group;
@@ -404,7 +404,7 @@ impl U64GroupedBitmap {
 
     pub fn clear(&mut self, bit: u32) {
         assert!(bit < self.len, "{bit} must be less than {}", self.len);
-        let (index, bit_index) = self.data_index_of(bit);
+        let (index, bit_index) = Self::data_index_of(bit);
         self.data[index] &= !Self::select_mask(bit_index);
     }
 }

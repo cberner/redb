@@ -34,7 +34,8 @@
     clippy::type_repetition_in_bounds,
     clippy::uninlined_format_args,
     clippy::semicolon_if_nothing_returned,
-    clippy::redundant_else
+    clippy::redundant_else,
+    clippy::unused_self
 )]
 // TODO remove this once wasi no longer requires nightly
 #![cfg_attr(target_os = "wasi", feature(wasi_ext))]

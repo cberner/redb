@@ -504,7 +504,7 @@ impl TransactionalMemory {
         let mut state = self.state.lock().unwrap();
         // Trim surplus file space, before finalizing the commit
         let shrunk = if allow_trim {
-            self.try_shrink(&mut state)?
+            Self::try_shrink(&mut state)?
         } else {
             false
         };
@@ -810,13 +810,12 @@ impl TransactionalMemory {
         let mut state = self.state.lock().unwrap();
 
         let page_number = if let Some(page_number) =
-            self.allocate_helper_retry(&mut state, required_order, lowest)?
+            Self::allocate_helper_retry(&mut state, required_order, lowest)?
         {
             page_number
         } else {
             self.grow(&mut state, required_order)?;
-            self.allocate_helper_retry(&mut state, required_order, lowest)?
-                .unwrap()
+            Self::allocate_helper_retry(&mut state, required_order, lowest)?.unwrap()
         };
 
         #[cfg(debug_assertions)]
@@ -868,7 +867,6 @@ impl TransactionalMemory {
     }
 
     fn allocate_helper_retry(
-        &self,
         state: &mut InMemoryState,
         required_order: u8,
         lowest: bool,
@@ -900,7 +898,7 @@ impl TransactionalMemory {
         }
     }
 
-    fn try_shrink(&self, state: &mut InMemoryState) -> Result<bool> {
+    fn try_shrink(state: &mut InMemoryState) -> Result<bool> {
         let layout = state.header.layout();
         let last_region_index = layout.num_regions() - 1;
         let last_allocator = state.get_region(last_region_index);
