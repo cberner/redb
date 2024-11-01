@@ -1,4 +1,8 @@
-#![allow(clippy::drop_non_drop, clippy::default_trait_access)]
+#![allow(
+    clippy::drop_non_drop,
+    clippy::default_trait_access,
+    clippy::if_not_else
+)]
 #![deny(
     clippy::all,
     clippy::doc_markdown,
