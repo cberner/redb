@@ -33,8 +33,7 @@ pub enum RangeIterState {
 impl RangeIterState {
     fn page_number(&self) -> PageNumber {
         match self {
-            Leaf { page, .. } => page.get_page_number(),
-            Internal { page, .. } => page.get_page_number(),
+            Leaf { page, .. } | Internal { page, .. } => page.get_page_number(),
         }
     }
 

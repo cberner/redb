@@ -106,11 +106,8 @@ impl InternalTableDefinition {
                 table_root,
                 table_length,
                 ..
-            } => {
-                *table_root = root;
-                *table_length = length;
             }
-            InternalTableDefinition::Multimap {
+            | InternalTableDefinition::Multimap {
                 table_root,
                 table_length,
                 ..
@@ -261,22 +258,22 @@ impl InternalTableDefinition {
 
     fn private_get_root(&self) -> Option<BtreeHeader> {
         match self {
-            InternalTableDefinition::Normal { table_root, .. } => *table_root,
-            InternalTableDefinition::Multimap { table_root, .. } => *table_root,
+            InternalTableDefinition::Normal { table_root, .. }
+            | InternalTableDefinition::Multimap { table_root, .. } => *table_root,
         }
     }
 
     pub(crate) fn get_length(&self) -> u64 {
         match self {
-            InternalTableDefinition::Normal { table_length, .. } => *table_length,
-            InternalTableDefinition::Multimap { table_length, .. } => *table_length,
+            InternalTableDefinition::Normal { table_length, .. }
+            | InternalTableDefinition::Multimap { table_length, .. } => *table_length,
         }
     }
 
     fn private_get_fixed_key_size(&self) -> Option<usize> {
         match self {
-            InternalTableDefinition::Normal { fixed_key_size, .. } => *fixed_key_size,
-            InternalTableDefinition::Multimap { fixed_key_size, .. } => *fixed_key_size,
+            InternalTableDefinition::Normal { fixed_key_size, .. }
+            | InternalTableDefinition::Multimap { fixed_key_size, .. } => *fixed_key_size,
         }
     }
 
@@ -284,8 +281,8 @@ impl InternalTableDefinition {
         match self {
             InternalTableDefinition::Normal {
                 fixed_value_size, ..
-            } => *fixed_value_size,
-            InternalTableDefinition::Multimap {
+            }
+            | InternalTableDefinition::Multimap {
                 fixed_value_size, ..
             } => *fixed_value_size,
         }
@@ -293,8 +290,8 @@ impl InternalTableDefinition {
 
     fn private_get_key_alignment(&self) -> usize {
         match self {
-            InternalTableDefinition::Normal { key_alignment, .. } => *key_alignment,
-            InternalTableDefinition::Multimap { key_alignment, .. } => *key_alignment,
+            InternalTableDefinition::Normal { key_alignment, .. }
+            | InternalTableDefinition::Multimap { key_alignment, .. } => *key_alignment,
         }
     }
 
@@ -302,8 +299,8 @@ impl InternalTableDefinition {
         match self {
             InternalTableDefinition::Normal {
                 value_alignment, ..
-            } => *value_alignment,
-            InternalTableDefinition::Multimap {
+            }
+            | InternalTableDefinition::Multimap {
                 value_alignment, ..
             } => *value_alignment,
         }
@@ -318,15 +315,15 @@ impl InternalTableDefinition {
 
     fn private_key_type(&self) -> TypeName {
         match self {
-            InternalTableDefinition::Normal { key_type, .. } => key_type.clone(),
-            InternalTableDefinition::Multimap { key_type, .. } => key_type.clone(),
+            InternalTableDefinition::Normal { key_type, .. }
+            | InternalTableDefinition::Multimap { key_type, .. } => key_type.clone(),
         }
     }
 
     fn private_value_type(&self) -> TypeName {
         match self {
-            InternalTableDefinition::Normal { value_type, .. } => value_type.clone(),
-            InternalTableDefinition::Multimap { value_type, .. } => value_type.clone(),
+            InternalTableDefinition::Normal { value_type, .. }
+            | InternalTableDefinition::Multimap { value_type, .. } => value_type.clone(),
         }
     }
 }
