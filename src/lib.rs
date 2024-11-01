@@ -1,4 +1,4 @@
-#![allow(clippy::drop_non_drop)]
+#![allow(clippy::drop_non_drop, clippy::default_trait_access)]
 #![deny(
     clippy::all,
     clippy::cast_lossless,
