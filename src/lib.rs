@@ -15,7 +15,8 @@
     clippy::similar_names,
     clippy::wildcard_imports,
     clippy::unreadable_literal,
-    clippy::must_use_candidate
+    clippy::must_use_candidate,
+    clippy::redundant_closure_for_method_calls
 )]
 #![deny(
     clippy::all,
