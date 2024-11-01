@@ -11,7 +11,8 @@
     clippy::needless_pass_by_value,
     clippy::option_option,
     clippy::unnecessary_wraps,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::similar_names
 )]
 #![deny(
     clippy::all,
