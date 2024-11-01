@@ -13,7 +13,8 @@
     clippy::unnecessary_wraps,
     clippy::too_many_lines,
     clippy::similar_names,
-    clippy::wildcard_imports
+    clippy::wildcard_imports,
+    clippy::unreadable_literal
 )]
 #![deny(
     clippy::all,
