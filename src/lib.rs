@@ -37,7 +37,8 @@
     clippy::semicolon_if_nothing_returned,
     clippy::redundant_else,
     clippy::unused_self,
-    clippy::match_same_arms
+    clippy::match_same_arms,
+    clippy::trivially_copy_pass_by_ref
 )]
 // TODO remove this once wasi no longer requires nightly
 #![cfg_attr(target_os = "wasi", feature(wasi_ext))]

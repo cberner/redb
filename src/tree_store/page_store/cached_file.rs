@@ -29,7 +29,7 @@ impl Drop for WritablePage {
         self.buffer
             .lock()
             .unwrap()
-            .return_value(&self.offset, self.data.clone());
+            .return_value(self.offset, self.data.clone());
     }
 }
 
@@ -63,11 +63,11 @@ impl LRUWriteCache {
         assert!(self.cache.insert(key, Some(value)).is_none());
     }
 
-    fn get(&self, key: &u64) -> Option<&Arc<[u8]>> {
+    fn get(&self, key: u64) -> Option<&Arc<[u8]>> {
         self.cache.get(key).map(|x| x.as_ref().unwrap())
     }
 
-    fn remove(&mut self, key: &u64) -> Option<Arc<[u8]>> {
+    fn remove(&mut self, key: u64) -> Option<Arc<[u8]>> {
         if let Some(value) = self.cache.remove(key) {
             assert!(value.is_some());
             return value;
@@ -75,11 +75,11 @@ impl LRUWriteCache {
         None
     }
 
-    fn return_value(&mut self, key: &u64, value: Arc<[u8]>) {
+    fn return_value(&mut self, key: u64, value: Arc<[u8]>) {
         assert!(self.cache.get_mut(key).unwrap().replace(value).is_none());
     }
 
-    fn take_value(&mut self, key: &u64) -> Option<Arc<[u8]>> {
+    fn take_value(&mut self, key: u64) -> Option<Arc<[u8]>> {
         if let Some(value) = self.cache.get_mut(key) {
             let result = value.take().unwrap();
             return Some(result);
@@ -296,7 +296,7 @@ impl PagedCachedFile {
 
         if !matches!(hint, PageHint::Clean) {
             let lock = self.write_buffer.lock().unwrap();
-            if let Some(cached) = lock.get(&offset) {
+            if let Some(cached) = lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
                 debug_assert_eq!(cached.len(), len);
@@ -307,7 +307,7 @@ impl PagedCachedFile {
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         {
             let read_lock = self.read_cache[cache_slot].read().unwrap();
-            if let Some(cached) = read_lock.get(&offset) {
+            if let Some(cached) = read_lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
                 debug_assert_eq!(cached.len(), len);
@@ -345,7 +345,7 @@ impl PagedCachedFile {
     // Discard pending writes to the given range
     pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
         assert_eq!(0, offset % self.page_size);
-        if let Some(removed) = self.write_buffer.lock().unwrap().remove(&offset) {
+        if let Some(removed) = self.write_buffer.lock().unwrap().remove(offset) {
             self.write_buffer_bytes
                 .fetch_sub(removed.len(), Ordering::Release);
         }
@@ -357,7 +357,7 @@ impl PagedCachedFile {
     pub(super) fn invalidate_cache(&self, offset: u64, len: usize) {
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         let mut lock = self.read_cache[cache_slot].write().unwrap();
-        if let Some(removed) = lock.remove(&offset) {
+        if let Some(removed) = lock.remove(offset) {
             assert_eq!(len, removed.len());
             self.read_cache_bytes
                 .fetch_sub(removed.len(), Ordering::AcqRel);
@@ -384,7 +384,7 @@ impl PagedCachedFile {
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         let existing = {
             let mut lock = self.read_cache[cache_slot].write().unwrap();
-            if let Some(removed) = lock.remove(&offset) {
+            if let Some(removed) = lock.remove(offset) {
                 assert_eq!(
                     len,
                     removed.len(),
@@ -399,7 +399,7 @@ impl PagedCachedFile {
             }
         };
 
-        let data = if let Some(removed) = lock.take_value(&offset) {
+        let data = if let Some(removed) = lock.take_value(offset) {
             removed
         } else {
             let previous = self.write_buffer_bytes.fetch_add(len, Ordering::AcqRel);
@@ -429,7 +429,7 @@ impl PagedCachedFile {
                 self.read_direct(offset, len)?.into()
             };
             lock.insert(offset, result);
-            lock.take_value(&offset).unwrap()
+            lock.take_value(offset).unwrap()
         };
         Ok(WritablePage {
             buffer: self.write_buffer.clone(),
