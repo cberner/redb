@@ -7,7 +7,8 @@
     clippy::let_underscore_drop,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
-    clippy::module_name_repetitions
+    clippy::module_name_repetitions,
+    clippy::needless_pass_by_value
 )]
 #![deny(
     clippy::all,
