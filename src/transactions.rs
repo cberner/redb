@@ -1065,8 +1065,7 @@ impl WriteTransaction {
         let free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_transaction()
-            .map(|x| x.next())
-            .unwrap_or(self.transaction_id);
+            .map_or(self.transaction_id, |x| x.next());
 
         let user_root = self
             .tables

@@ -611,7 +611,7 @@ impl RawBtree {
     }
 
     pub(crate) fn len(&self) -> Result<u64> {
-        Ok(self.root.map(|x| x.length).unwrap_or(0))
+        Ok(self.root.map_or(0, |x| x.length))
     }
 
     pub(crate) fn verify_checksum(&self) -> Result<bool> {
@@ -809,7 +809,7 @@ impl<K: Key, V: Value> Btree<K, V> {
     }
 
     pub(crate) fn len(&self) -> Result<u64> {
-        Ok(self.root.map(|x| x.length).unwrap_or(0))
+        Ok(self.root.map_or(0, |x| x.length))
     }
 
     pub(crate) fn stats(&self) -> Result<BtreeStats> {
