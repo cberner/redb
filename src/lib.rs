@@ -2,7 +2,8 @@
     clippy::drop_non_drop,
     clippy::default_trait_access,
     clippy::if_not_else,
-    clippy::inline_always
+    clippy::inline_always,
+    clippy::iter_not_returning_iterator
 )]
 #![deny(
     clippy::all,
