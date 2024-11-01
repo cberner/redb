@@ -1,7 +1,8 @@
 #![allow(
     clippy::drop_non_drop,
     clippy::default_trait_access,
-    clippy::if_not_else
+    clippy::if_not_else,
+    clippy::inline_always
 )]
 #![deny(
     clippy::all,
