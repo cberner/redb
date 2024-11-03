@@ -10,7 +10,7 @@ mod lru_cache;
 mod page_manager;
 mod region;
 mod savepoint;
-#[allow(dead_code)]
+#[allow(clippy::pedantic, dead_code)]
 mod xxh3;
 
 pub(crate) use base::{Page, PageHint, PageNumber, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH};
