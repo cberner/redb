@@ -190,7 +190,7 @@ fn extract_if() {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
         assert_eq!(table.len().unwrap(), 10);
         for _ in table.extract_if(|x, _| x % 2 != 0).unwrap() {}
-        table.extract_if(|_, _| true).unwrap().rev().next();
+        table.extract_if(|_, _| true).unwrap().next_back();
     }
     write_txn.commit().unwrap();
 

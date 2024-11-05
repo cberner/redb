@@ -181,6 +181,7 @@ pub enum Durability {
     /// 2. can introduce crashes during fsync(),
     /// 3. has knowledge of the database file contents, and
     /// 4. can include arbitrary data in a write transaction
+    ///
     /// could cause a transaction to partially commit (some but not all of the data is written).
     /// This is described in the design doc in futher detail.
     ///

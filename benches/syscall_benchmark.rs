@@ -119,6 +119,7 @@ fn uring_bench(path: &Path) {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
+        .truncate(true)
         .create(true)
         .open(path)
         .unwrap();
@@ -206,6 +207,7 @@ fn readwrite_bench(path: &Path) {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
+        .truncate(true)
         .create(true)
         .open(path)
         .unwrap();
@@ -268,6 +270,7 @@ fn mmap_bench(path: &Path) {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
+        .truncate(true)
         .create(true)
         .open(path)
         .unwrap();

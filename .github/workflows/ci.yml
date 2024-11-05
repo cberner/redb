@@ -43,7 +43,7 @@ jobs:
       - name: Install Rust
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: |
-            rustup default 1.66
+            rustup default 1.81
             rustup component add rustfmt
             rustup component add clippy
 

@@ -654,7 +654,10 @@ mod test {
         // IETF Memo "Care and Feeding of Magic Numbers"
 
         // Test that magic number is not valid utf-8
-        assert!(std::str::from_utf8(&MAGICNUMBER).is_err());
+        #[allow(invalid_from_utf8)]
+        {
+            assert!(std::str::from_utf8(&MAGICNUMBER).is_err());
+        }
         // Test there is a octet with high-bit set
         assert!(MAGICNUMBER.iter().any(|x| *x & 0x80 != 0));
         // Test there is a non-printable ASCII character

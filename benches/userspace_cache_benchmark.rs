@@ -111,6 +111,7 @@ mod unix {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
+                .truncate(true)
                 .create(true)
                 .open(path)
                 .unwrap();
@@ -350,6 +351,7 @@ mod unix {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
+            .truncate(true)
             .create(true)
             .open(path)
             .unwrap();
