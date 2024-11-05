@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::env::current_dir;
 use std::fs;
 use tempfile::{NamedTempFile, TempDir};

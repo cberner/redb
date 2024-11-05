@@ -19,6 +19,7 @@ impl SpecialValuesDb {
             database: Database::create("index.redb").unwrap(),
             file: OpenOptions::new()
                 .write(true)
+                .truncate(true)
                 .create(true)
                 .read(true)
                 .open("values.dat")
