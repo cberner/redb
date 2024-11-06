@@ -574,7 +574,7 @@ impl<V: Key> Value for &DynamicCollection<V> {
 
 impl<V: Key> DynamicCollection<V> {
     fn new(data: &[u8]) -> &Self {
-        unsafe { &*(data as *const [u8] as *const DynamicCollection<V>) }
+        unsafe { &*(std::ptr::from_ref::<[u8]>(data) as *const DynamicCollection<V>) }
     }
 
     fn collection_type(&self) -> DynamicCollectionType {
@@ -700,7 +700,7 @@ impl UntypedDynamicCollection {
     }
 
     fn new(data: &[u8]) -> &Self {
-        unsafe { &*(data as *const [u8] as *const UntypedDynamicCollection) }
+        unsafe { &*(std::ptr::from_ref::<[u8]>(data) as *const UntypedDynamicCollection) }
     }
 
     fn make_subtree_data(header: BtreeHeader) -> Vec<u8> {

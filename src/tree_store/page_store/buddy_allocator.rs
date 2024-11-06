@@ -497,9 +497,7 @@ impl BuddyAllocator {
         debug_assert!(self.get_order_free_mut(order).get(page_number));
         debug_assert!(
             self.get_order_allocated(order).get(page_number),
-            "Attempted to free page {}, order {}, which is not allocated",
-            page_number,
-            order
+            "Attempted to free page {page_number}, order {order}, which is not allocated",
         );
 
         self.get_order_allocated_mut(order).clear(page_number);

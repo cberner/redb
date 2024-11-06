@@ -872,12 +872,10 @@ impl TransactionalMemory {
         lowest: bool,
     ) -> Result<Option<PageNumber>> {
         loop {
-            let candidate_region =
-                if let Some(candidate) = state.get_region_tracker_mut().find_free(required_order) {
-                    candidate
-                } else {
-                    return Ok(None);
-                };
+            let Some(candidate_region) = state.get_region_tracker_mut().find_free(required_order)
+            else {
+                return Ok(None);
+            };
             let region = state.get_region_mut(candidate_region);
             let r = if lowest {
                 region.alloc_lowest(required_order)

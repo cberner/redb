@@ -149,6 +149,7 @@ impl Value for () {
         ()
     }
 
+    #[allow(clippy::ignored_unit_patterns)]
     fn as_bytes<'a, 'b: 'a>(_: &'a Self::SelfType<'b>) -> &'a [u8]
     where
         Self: 'b,
@@ -388,7 +389,7 @@ impl<const N: usize, T: Value> Value for [T; N] {
     {
         if let Some(fixed) = T::fixed_width() {
             let mut result = Vec::with_capacity(fixed * N);
-            for item in value.iter() {
+            for item in value {
                 result.extend_from_slice(T::as_bytes(item).as_ref());
             }
             result

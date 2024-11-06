@@ -79,7 +79,7 @@ impl Savepoint {
     }
 
     pub(crate) fn db_address(&self) -> *const TransactionTracker {
-        self.transaction_tracker.as_ref() as *const _
+        std::ptr::from_ref(self.transaction_tracker.as_ref())
     }
 
     pub(crate) fn set_persistent(&mut self) {

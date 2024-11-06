@@ -147,10 +147,10 @@ pub enum Durability {
     /// this durability level will result in rapid growth of the database file.
     None,
     /// Commits with this durability level have been queued for persitance to disk, and should be
-    /// persistent some time after [WriteTransaction::commit] returns.
+    /// persistent some time after [`WriteTransaction::commit`] returns.
     Eventual,
     /// Commits with this durability level are guaranteed to be persistent as soon as
-    /// [WriteTransaction::commit] returns.
+    /// [`WriteTransaction::commit`] returns.
     ///
     /// Data is written with checksums, with the following commit algorithm:
     ///
@@ -167,7 +167,7 @@ pub enum Durability {
     /// the ability to cause the database process to crash, can cause invalid data to be written
     /// with a valid checksum, leaving the database in an invalid, attacker-controlled state.
     Immediate,
-    /// Commits with this durability level have the same gaurantees as [Durability::Immediate]
+    /// Commits with this durability level have the same gaurantees as [`Durability::Immediate`]
     ///
     /// Additionally, aata is written with the following 2-phase commit algorithm:
     ///
@@ -178,7 +178,7 @@ pub enum Durability {
     ///
     /// This mitigates a theoretical attack where an attacker who
     /// 1. can control the order in which pages are flushed to disk
-    /// 2. can introduce crashes during fsync(),
+    /// 2. can introduce crashes during `fsync`,
     /// 3. has knowledge of the database file contents, and
     /// 4. can include arbitrary data in a write transaction
     ///
@@ -654,7 +654,7 @@ impl WriteTransaction {
 
     /// Delete the given persistent savepoint.
     ///
-    /// Note that if the transaction is abort()'ed this deletion will be rolled back.
+    /// Note that if the transaction is `abort()`'ed this deletion will be rolled back.
     ///
     /// Returns `true` if the savepoint existed
     /// Returns `[SavepointError::InvalidSavepoint`] if the transaction's durability is less than `[Durability::Immediate]`
@@ -751,7 +751,7 @@ impl WriteTransaction {
     pub fn restore_savepoint(&mut self, savepoint: &Savepoint) -> Result<(), SavepointError> {
         // Ensure that user does not try to restore a Savepoint that is from a different Database
         assert_eq!(
-            self.transaction_tracker.as_ref() as *const _,
+            std::ptr::from_ref(self.transaction_tracker.as_ref()),
             savepoint.db_address()
         );
 
