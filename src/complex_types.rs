@@ -7,12 +7,11 @@ fn encode_varint_len(len: usize, output: &mut Vec<u8>) {
     } else if len <= u16::MAX.into() {
         let u16_len: u16 = len.try_into().unwrap();
         output.push(254);
-        output.extend_from_slice(&u16_len.to_le_bytes())
+        output.extend_from_slice(&u16_len.to_le_bytes());
     } else {
-        assert!(len <= u32::MAX as usize);
         let u32_len: u32 = len.try_into().unwrap();
         output.push(255);
-        output.extend_from_slice(&u32_len.to_le_bytes())
+        output.extend_from_slice(&u32_len.to_le_bytes());
     }
 }
 
@@ -67,7 +66,6 @@ impl<T: Value> Value for Vec<T> {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Vec<T::SelfType<'b>>) -> Vec<u8>
     where
-        Self: 'a,
         Self: 'b,
     {
         let mut result = if let Some(width) = T::fixed_width() {

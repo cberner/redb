@@ -1,10 +1,22 @@
-#![allow(clippy::drop_non_drop)]
-#![deny(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::disallowed_methods
+#![deny(clippy::all, clippy::pedantic, clippy::disallowed_methods)]
+#![allow(
+    clippy::default_trait_access,
+    clippy::if_not_else,
+    clippy::inline_always,
+    clippy::iter_not_returning_iterator,
+    clippy::let_underscore_drop,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::module_name_repetitions,
+    clippy::must_use_candidate,
+    clippy::needless_pass_by_value,
+    clippy::option_option,
+    clippy::redundant_closure_for_method_calls,
+    clippy::similar_names,
+    clippy::too_many_lines,
+    clippy::unnecessary_wraps,
+    clippy::unreadable_literal,
+    clippy::wildcard_imports
 )]
 // TODO remove this once wasi no longer requires nightly
 #![cfg_attr(target_os = "wasi", feature(wasi_ext))]

@@ -534,7 +534,7 @@ impl WriteTransaction {
         println!("Tables");
         for p in table_pages {
             all_allocated.remove(&p);
-            println!("{p:?}")
+            println!("{p:?}");
         }
 
         let system_table_allocators = self
@@ -551,7 +551,7 @@ impl WriteTransaction {
         println!("System tables");
         for p in system_table_pages {
             all_allocated.remove(&p);
-            println!("{p:?}")
+            println!("{p:?}");
         }
 
         println!("Free table");
@@ -559,7 +559,7 @@ impl WriteTransaction {
             for p in freed_iter {
                 let p = p.unwrap();
                 all_allocated.remove(&p);
-                println!("{p:?}")
+                println!("{p:?}");
             }
         }
         println!("Pending free (i.e. in freed table)");
@@ -575,7 +575,7 @@ impl WriteTransaction {
             for i in 0..value.len() {
                 let p = value.get(i);
                 all_allocated.remove(&p);
-                println!("{p:?}")
+                println!("{p:?}");
             }
         }
         if !all_allocated.is_empty() {
@@ -1066,8 +1066,7 @@ impl WriteTransaction {
         let free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_transaction()
-            .map(|x| x.next())
-            .unwrap_or(self.transaction_id);
+            .map_or(self.transaction_id, |x| x.next());
 
         let user_root = self
             .tables

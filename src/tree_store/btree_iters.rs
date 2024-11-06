@@ -33,8 +33,7 @@ pub enum RangeIterState {
 impl RangeIterState {
     fn page_number(&self) -> PageNumber {
         match self {
-            Leaf { page, .. } => page.get_page_number(),
-            Internal { page, .. } => page.get_page_number(),
+            Leaf { page, .. } | Internal { page, .. } => page.get_page_number(),
         }
     }
 
@@ -138,7 +137,7 @@ impl RangeIterState {
                         .entry_ranges(*entry)?;
                 Some(EntryGuard::new(page.clone(), key, value))
             }
-            _ => None,
+            Internal { .. } => None,
         }
     }
 }

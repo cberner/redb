@@ -324,9 +324,9 @@ impl<'a> LeafAccessor<'a> {
     pub(super) fn print_node<K: Key, V: Value>(&self, include_value: bool) {
         let mut i = 0;
         while let Some(entry) = self.entry(i) {
-            eprint!(" key_{}={:?}", i, K::from_bytes(entry.key()));
+            eprint!(" key_{i}={:?}", K::from_bytes(entry.key()));
             if include_value {
-                eprint!(" value_{}={:?}", i, V::from_bytes(entry.value()));
+                eprint!(" value_{i}={:?}", V::from_bytes(entry.value()));
             }
             i += 1;
         }
@@ -536,7 +536,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
     pub(super) fn push(&mut self, key: &'a [u8], value: &'a [u8]) {
         self.total_key_bytes += key.len();
         self.total_value_bytes += value.len();
-        self.pairs.push((key, value))
+        self.pairs.push((key, value));
     }
 
     pub(super) fn push_all_except(
@@ -897,7 +897,6 @@ impl<'b> LeafMutator<'b> {
             .value_range(i)
             .map(|(start, end)| end - start)
             .unwrap_or_default();
-        drop(accessor);
 
         let value_delta = if overwrite {
             isize::try_from(value.len()).unwrap() - isize::try_from(existing_value_len).unwrap()
@@ -1015,7 +1014,6 @@ impl<'b> LeafMutator<'b> {
         let value_start = accessor.value_start(i).unwrap();
         let value_end = accessor.value_end(i).unwrap();
         let last_value_end = accessor.value_end(accessor.num_pairs() - 1).unwrap();
-        drop(accessor);
 
         // Update all the pointers
         let key_ptr_size = if self.fixed_key_size.is_none() {
@@ -1112,7 +1110,6 @@ impl<'b> LeafMutator<'b> {
             self.fixed_value_size,
         );
         let num_pairs = accessor.num_pairs();
-        drop(accessor);
         let mut offset = 4 + size_of::<u32>() * i;
         if self.fixed_key_size.is_none() {
             offset += size_of::<u32>() * num_pairs;
@@ -1158,8 +1155,8 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         for i in 0..(self.count_children() - 1) {
             if let Some(child) = self.child_page(i + 1) {
                 let key = self.key(i).unwrap();
-                eprint!(" key_{}={:?}", i, K::from_bytes(key));
-                eprint!(" child_{}={:?}", i + 1, child);
+                eprint!(" key_{i}={:?}", K::from_bytes(key));
+                eprint!(" child_{}={child:?}", i + 1);
             }
         }
         eprint!("]");

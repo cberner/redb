@@ -192,13 +192,11 @@ impl UntypedBtreeMut {
                     }
                 }
 
-                drop(accessor);
                 let mut mutator = BranchMutator::new(&mut page);
                 for (child_index, child_page, child_checksum) in new_children.into_iter().flatten()
                 {
                     mutator.write_child_page(child_index, child_page, child_checksum);
                 }
-                drop(mutator);
 
                 branch_checksum(&page, self.key_width)
             }
@@ -553,7 +551,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
 
 impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
     /// Reserve space to insert a key-value pair
-    /// The returned reference will have length equal to value_length
+    /// The returned reference will have length equal to `value_length`
     // Return type has the same lifetime as &self, because the tree must not be modified until the mutable guard is dropped
     pub(crate) fn insert_reserve(
         &mut self,
@@ -613,7 +611,7 @@ impl RawBtree {
     }
 
     pub(crate) fn len(&self) -> Result<u64> {
-        Ok(self.root.map(|x| x.length).unwrap_or(0))
+        Ok(self.root.map_or(0, |x| x.length))
     }
 
     pub(crate) fn verify_checksum(&self) -> Result<bool> {
@@ -811,7 +809,7 @@ impl<K: Key, V: Value> Btree<K, V> {
     }
 
     pub(crate) fn len(&self) -> Result<u64> {
-        Ok(self.root.map(|x| x.length).unwrap_or(0))
+        Ok(self.root.map_or(0, |x| x.length))
     }
 
     pub(crate) fn stats(&self) -> Result<BtreeStats> {

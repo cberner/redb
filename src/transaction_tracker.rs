@@ -16,11 +16,11 @@ impl TransactionId {
         Self(value)
     }
 
-    pub(crate) fn raw_id(&self) -> u64 {
+    pub(crate) fn raw_id(self) -> u64 {
         self.0
     }
 
-    pub(crate) fn next(&self) -> TransactionId {
+    pub(crate) fn next(self) -> TransactionId {
         TransactionId(self.0 + 1)
     }
 
@@ -30,7 +30,7 @@ impl TransactionId {
         next
     }
 
-    pub(crate) fn parent(&self) -> Option<TransactionId> {
+    pub(crate) fn parent(self) -> Option<TransactionId> {
         if self.0 == 0 {
             None
         } else {
@@ -43,7 +43,7 @@ impl TransactionId {
 pub(crate) struct SavepointId(pub u64);
 
 impl SavepointId {
-    pub(crate) fn next(&self) -> SavepointId {
+    pub(crate) fn next(self) -> SavepointId {
         SavepointId(self.0 + 1)
     }
 }
@@ -65,7 +65,6 @@ impl Value for SavepointId {
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
-        Self: 'a,
         Self: 'b,
     {
         value.0.to_le_bytes()
@@ -243,6 +242,6 @@ impl TransactionTracker {
             .live_read_transactions
             .keys()
             .next()
-            .cloned()
+            .copied()
     }
 }
