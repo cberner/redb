@@ -606,7 +606,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
             self.fixed_value_size,
             self.total_key_bytes - first_split_key_bytes,
         );
-        for (key, value) in self.pairs[division..].iter() {
+        for (key, value) in &self.pairs[division..] {
             builder.append(key, value);
         }
         drop(builder);

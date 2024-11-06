@@ -165,7 +165,7 @@ impl MutInPlaceValue for FreedPageList<'_> {
     }
 
     fn from_bytes_mut(data: &mut [u8]) -> &mut Self::BaseRefType {
-        unsafe { &mut *(data as *mut [u8] as *mut FreedPageListMut) }
+        unsafe { &mut *(std::ptr::from_mut::<[u8]>(data) as *mut FreedPageListMut) }
     }
 }
 

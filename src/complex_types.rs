@@ -75,7 +75,7 @@ impl<T: Value> Value for Vec<T> {
         };
         encode_varint_len(value.len(), &mut result);
 
-        for element in value.iter() {
+        for element in value {
             let serialized = T::as_bytes(element);
             if T::fixed_width().is_none() {
                 encode_varint_len(serialized.as_ref().len(), &mut result);

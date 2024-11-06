@@ -195,7 +195,7 @@ impl std::error::Error for TableError {}
 pub enum DatabaseError {
     /// The Database is already open. Cannot acquire lock.
     DatabaseAlreadyOpen,
-    /// [crate::RepairSession::abort] was called.
+    /// [`crate::RepairSession::abort`] was called.
     RepairAborted,
     /// The database file is in an old file format and must be manually upgraded
     UpgradeRequired(u8),
@@ -445,7 +445,7 @@ pub enum Error {
     /// Savepoints become invalid when an older savepoint is restored after it was created,
     /// and savepoints cannot be created if the transaction is "dirty" (any tables have been opened)
     InvalidSavepoint,
-    /// [crate::RepairSession::abort] was called.
+    /// [`crate::RepairSession::abort`] was called.
     RepairAborted,
     /// A persistent savepoint exists
     PersistentSavepointExists,
