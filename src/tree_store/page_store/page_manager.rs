@@ -466,7 +466,6 @@ impl TransactionalMemory {
         transaction_id: TransactionId,
         eventual: bool,
         two_phase: bool,
-        allow_trim: bool,
     ) -> Result {
         let result = self.commit_inner(
             data_root,
@@ -475,7 +474,6 @@ impl TransactionalMemory {
             transaction_id,
             eventual,
             two_phase,
-            allow_trim,
         );
         if result.is_err() {
             self.needs_recovery.store(true, Ordering::Release);
@@ -492,7 +490,6 @@ impl TransactionalMemory {
         transaction_id: TransactionId,
         eventual: bool,
         two_phase: bool,
-        allow_trim: bool,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
@@ -503,11 +500,7 @@ impl TransactionalMemory {
 
         let mut state = self.state.lock().unwrap();
         // Trim surplus file space, before finalizing the commit
-        let shrunk = if allow_trim {
-            Self::try_shrink(&mut state)?
-        } else {
-            false
-        };
+        let shrunk = Self::try_shrink(&mut state)?;
         // Copy the header so that we can release the state lock, while we flush the file
         let mut header = state.header.clone();
         drop(state);
@@ -1010,7 +1003,6 @@ impl Drop for TransactionalMemory {
                         freed_root,
                         non_durable_transaction_id,
                         false,
-                        true,
                         true,
                     )
                     .is_err()
