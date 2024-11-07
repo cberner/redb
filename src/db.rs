@@ -386,17 +386,34 @@ impl Database {
             .unwrap()
             .clear_cache_and_reload()?;
 
-        if !Self::verify_primary_checksums(self.mem.clone())? {
-            was_clean = false;
-        }
+        let old_roots = [
+            self.mem.get_data_root(),
+            self.mem.get_system_root(),
+            self.mem.get_freed_root(),
+        ];
 
-        Self::do_repair(&mut self.mem, &|_| {}).map_err(|err| match err {
+        let new_roots = Self::do_repair(&mut self.mem, &|_| {}).map_err(|err| match err {
             DatabaseError::Storage(storage_err) => storage_err,
             _ => unreachable!(),
         })?;
-        if allocator_hash != self.mem.allocator_hash() {
+
+        if old_roots != new_roots || allocator_hash != self.mem.allocator_hash() {
             was_clean = false;
         }
+
+        if !was_clean {
+            let next_transaction_id = self.mem.get_last_committed_transaction_id()?.next();
+            let [data_root, system_root, freed_root] = new_roots;
+            self.mem.commit(
+                data_root,
+                system_root,
+                freed_root,
+                next_transaction_id,
+                false,
+                true,
+            )?;
+        }
+
         self.mem.begin_writable()?;
 
         Ok(was_clean)
@@ -592,7 +609,7 @@ impl Database {
     fn do_repair(
         mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<[Option<BtreeHeader>; 3], DatabaseError> {
         if !Self::verify_primary_checksums(mem.clone())? {
             // 0.3 because the repair takes 3 full scans and the first is done now
             let mut handle = RepairSession::new(0.3);
@@ -662,19 +679,7 @@ impl Database {
         // by storing an empty root during the below commit()
         mem.clear_read_cache();
 
-        let transaction_id = mem.get_last_committed_transaction_id()?.next();
-        mem.commit(
-            data_root,
-            system_root,
-            freed_root,
-            transaction_id,
-            false,
-            true,
-            // don't trim the database file, because we want the allocator hash to match exactly
-            false,
-        )?;
-
-        Ok(())
+        Ok([data_root, system_root, freed_root])
     }
 
     fn new(
@@ -705,7 +710,16 @@ impl Database {
             if handle.aborted() {
                 return Err(DatabaseError::RepairAborted);
             }
-            Self::do_repair(&mut mem, repair_callback)?;
+            let [data_root, system_root, freed_root] = Self::do_repair(&mut mem, repair_callback)?;
+            let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
+            mem.commit(
+                data_root,
+                system_root,
+                freed_root,
+                next_transaction_id,
+                false,
+                true,
+            )?;
         }
 
         mem.begin_writable()?;
