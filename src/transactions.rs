@@ -1320,6 +1320,11 @@ impl WriteTransaction {
         })
     }
 
+    #[cfg(any(test, fuzzing))]
+    pub fn num_region_tracker_pages(&self) -> u64 {
+        1 << self.mem.tracker_page().page_order
+    }
+
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self) -> Result {
         // Flush any pending updates to make sure we get the latest root
