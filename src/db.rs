@@ -5,9 +5,7 @@ use crate::tree_store::{
     TableType, TransactionalMemory, PAGE_SIZE,
 };
 use crate::types::{Key, Value};
-use crate::{
-    CompactionError, DatabaseError, Durability, ReadOnlyTable, SavepointError, StorageError,
-};
+use crate::{CompactionError, DatabaseError, ReadOnlyTable, SavepointError, StorageError};
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Debug, Display, Formatter};
 
@@ -439,11 +437,11 @@ impl Database {
         if self.transaction_tracker.any_savepoint_exists() {
             return Err(CompactionError::EphemeralSavepointExists);
         }
-        txn.set_durability(Durability::Paranoid);
+        txn.set_two_phase_commit(true);
         txn.commit().map_err(|e| e.into_storage_error())?;
         // Repeat, just in case executing list_persistent_savepoints() created a new table
         let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-        txn.set_durability(Durability::Paranoid);
+        txn.set_two_phase_commit(true);
         txn.commit().map_err(|e| e.into_storage_error())?;
         // There can't be any outstanding transactions because we have a `&mut self`, so all pending free pages
         // should have been cleared out by the above commit()
@@ -464,7 +462,7 @@ impl Database {
 
             // Double commit to free up the relocated pages for reuse
             let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-            txn.set_durability(Durability::Paranoid);
+            txn.set_two_phase_commit(true);
             txn.commit().map_err(|e| e.into_storage_error())?;
             assert!(self.mem.get_freed_root().is_none());
 
@@ -1176,7 +1174,7 @@ mod test {
         let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
         let mut tx = db.begin_write().unwrap();
-        tx.set_durability(Durability::Paranoid);
+        tx.set_two_phase_commit(true);
         let savepoint0 = tx.ephemeral_savepoint().unwrap();
         {
             tx.open_table(table_def).unwrap();
@@ -1184,7 +1182,7 @@ mod test {
         tx.commit().unwrap();
 
         let mut tx = db.begin_write().unwrap();
-        tx.set_durability(Durability::Paranoid);
+        tx.set_two_phase_commit(true);
         let savepoint1 = tx.ephemeral_savepoint().unwrap();
         tx.restore_savepoint(&savepoint0).unwrap();
         tx.set_durability(Durability::None);
@@ -1196,7 +1194,7 @@ mod test {
         tx.commit().unwrap();
 
         let mut tx = db.begin_write().unwrap();
-        tx.set_durability(Durability::Paranoid);
+        tx.set_two_phase_commit(true);
         tx.restore_savepoint(&savepoint0).unwrap();
         {
             tx.open_table(table_def).unwrap();
@@ -1204,7 +1202,7 @@ mod test {
         tx.commit().unwrap();
 
         let mut tx = db.begin_write().unwrap();
-        tx.set_durability(Durability::Paranoid);
+        tx.set_two_phase_commit(true);
         let savepoint2 = tx.ephemeral_savepoint().unwrap();
         drop(savepoint0);
         tx.restore_savepoint(&savepoint2).unwrap();
@@ -1217,7 +1215,7 @@ mod test {
         tx.commit().unwrap();
 
         let mut tx = db.begin_write().unwrap();
-        tx.set_durability(Durability::Paranoid);
+        tx.set_two_phase_commit(true);
         let savepoint3 = tx.ephemeral_savepoint().unwrap();
         drop(savepoint1);
         tx.restore_savepoint(&savepoint3).unwrap();
@@ -1227,7 +1225,7 @@ mod test {
         tx.commit().unwrap();
 
         let mut tx = db.begin_write().unwrap();
-        tx.set_durability(Durability::Paranoid);
+        tx.set_two_phase_commit(true);
         let savepoint4 = tx.ephemeral_savepoint().unwrap();
         drop(savepoint2);
         tx.restore_savepoint(&savepoint3).unwrap();
@@ -1239,7 +1237,7 @@ mod test {
         tx.abort().unwrap();
 
         let mut tx = db.begin_write().unwrap();
-        tx.set_durability(Durability::Paranoid);
+        tx.set_two_phase_commit(true);
         let savepoint5 = tx.ephemeral_savepoint().unwrap();
         drop(savepoint3);
         assert!(tx.restore_savepoint(&savepoint4).is_err());
@@ -1249,7 +1247,7 @@ mod test {
         tx.commit().unwrap();
 
         let mut tx = db.begin_write().unwrap();
-        tx.set_durability(Durability::Paranoid);
+        tx.set_two_phase_commit(true);
         tx.restore_savepoint(&savepoint5).unwrap();
         tx.set_durability(Durability::None);
         {

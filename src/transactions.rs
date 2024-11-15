@@ -151,46 +151,20 @@ pub enum Durability {
     Eventual,
     /// Commits with this durability level are guaranteed to be persistent as soon as
     /// [`WriteTransaction::commit`] returns.
-    ///
-    /// Data is written with checksums, with the following commit algorithm:
-    ///
-    /// 1. Update the inactive commit slot with the new database state
-    /// 2. Flip the god byte primary bit to activate the newly updated commit slot
-    /// 3. Call `fsync` to ensure all writes have been persisted to disk
-    ///
-    /// When opening the database after a crash, the most recent of the two commit slots with a
-    /// valid checksum is used.
-    ///
-    /// Security considerations: The checksum used is xxhash, a fast, non-cryptographic hash
-    /// function with close to perfect collision resistance when used with non-malicious input. An
-    /// attacker with an extremely high degree of control over the database's workload, including
-    /// the ability to cause the database process to crash, can cause invalid data to be written
-    /// with a valid checksum, leaving the database in an invalid, attacker-controlled state.
     Immediate,
-    /// Commits with this durability level have the same guarantees as [`Durability::Immediate`]
-    ///
-    /// Additionally, data is written with the following 2-phase commit algorithm:
-    ///
-    /// 1. Update the inactive commit slot with the new database state
-    /// 2. Call `fsync` to ensure the database slate and commit slot update have been persisted
-    /// 3. Flip the god byte primary bit to activate the newly updated commit slot
-    /// 4. Call `fsync` to ensure the write to the god byte has been persisted
-    ///
-    /// This mitigates a theoretical attack where an attacker who
-    /// 1. can control the order in which pages are flushed to disk
-    /// 2. can introduce crashes during `fsync`,
-    /// 3. has knowledge of the database file contents, and
-    /// 4. can include arbitrary data in a write transaction
-    ///
-    /// could cause a transaction to partially commit (some but not all of the data is written).
-    /// This is described in the design doc in futher detail.
-    ///
-    /// Security considerations: Many hard disk drives and SSDs do not actually guarantee that data
-    /// has been persisted to disk after calling `fsync`. Even with this commit level, an attacker
-    /// with a high degree of control over the database's workload, including the ability to cause
-    /// the database process to crash, can cause the database to crash with the god byte primary bit
-    /// pointing to an invalid commit slot, leaving the database in an invalid, potentially attacker-controlled state.
+    /// This is identical to `Durability::Immediate`, but also enables 2-phase commit. New code
+    /// should call `set_two_phase_commit(true)` directly instead.
+    #[deprecated(since = "2.3.0", note = "use set_two_phase_commit(true) instead")]
     Paranoid,
+}
+
+// These are the actual durability levels used internally. `Durability::Paranoid` is translated
+// to `InternalDurability::Immediate`, and also enables 2-phase commit
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum InternalDurability {
+    None,
+    Eventual,
+    Immediate,
 }
 
 // Like a Table but only one may be open at a time to avoid possible races
@@ -447,7 +421,8 @@ pub struct WriteTransaction {
     system_tables: Mutex<SystemNamespace<'static>>,
     completed: bool,
     dirty: AtomicBool,
-    durability: Durability,
+    durability: InternalDurability,
+    two_phase_commit: bool,
     // Persistent savepoints created during this transaction
     created_persistent_savepoints: Mutex<HashSet<SavepointId>>,
     deleted_persistent_savepoints: Mutex<Vec<(SavepointId, TransactionId)>>,
@@ -504,7 +479,8 @@ impl WriteTransaction {
             post_commit_frees,
             completed: false,
             dirty: AtomicBool::new(false),
-            durability: Durability::Immediate,
+            durability: InternalDurability::Immediate,
+            two_phase_commit: false,
             created_persistent_savepoints: Mutex::new(Default::default()),
             deleted_persistent_savepoints: Mutex::new(vec![]),
         })
@@ -595,10 +571,7 @@ impl WriteTransaction {
     /// Returns `[SavepointError::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened)
     /// or if the transaction's durability is less than `[Durability::Immediate]`
     pub fn persistent_savepoint(&self) -> Result<u64, SavepointError> {
-        if !matches!(
-            self.durability,
-            Durability::Immediate | Durability::Paranoid
-        ) {
+        if self.durability != InternalDurability::Immediate {
             return Err(SavepointError::InvalidSavepoint);
         }
 
@@ -659,10 +632,7 @@ impl WriteTransaction {
     /// Returns `true` if the savepoint existed
     /// Returns `[SavepointError::InvalidSavepoint`] if the transaction's durability is less than `[Durability::Immediate]`
     pub fn delete_persistent_savepoint(&self, id: u64) -> Result<bool, SavepointError> {
-        if !matches!(
-            self.durability,
-            Durability::Immediate | Durability::Paranoid
-        ) {
+        if self.durability != InternalDurability::Immediate {
             return Err(SavepointError::InvalidSavepoint);
         }
         let mut system_tables = self.system_tables.lock().unwrap();
@@ -904,7 +874,60 @@ impl WriteTransaction {
             .unwrap()
             .is_empty();
         assert!(no_created && no_deleted);
-        self.durability = durability;
+
+        self.durability = match durability {
+            Durability::None => InternalDurability::None,
+            Durability::Eventual => InternalDurability::Eventual,
+            Durability::Immediate => InternalDurability::Immediate,
+            #[allow(deprecated)]
+            Durability::Paranoid => {
+                self.set_two_phase_commit(true);
+                InternalDurability::Immediate
+            }
+        };
+    }
+
+    /// Enable or disable 2-phase commit (defaults to disabled)
+    ///
+    /// By default, data is written using the following 1-phase commit algorithm:
+    ///
+    /// 1. Update the inactive commit slot with the new database state
+    /// 2. Flip the god byte primary bit to activate the newly updated commit slot
+    /// 3. Call `fsync` to ensure all writes have been persisted to disk
+    ///
+    /// All data is written with checksums. When opening the database after a crash, the most
+    /// recent of the two commit slots with a valid checksum is used.
+    ///
+    /// Security considerations: The checksum used is xxhash, a fast, non-cryptographic hash
+    /// function with close to perfect collision resistance when used with non-malicious input. An
+    /// attacker with an extremely high degree of control over the database's workload, including
+    /// the ability to cause the database process to crash, can cause invalid data to be written
+    /// with a valid checksum, leaving the database in an invalid, attacker-controlled state.
+    ///
+    /// Alternatively, you can enable 2-phase commit, which writes data like this:
+    ///
+    /// 1. Update the inactive commit slot with the new database state
+    /// 2. Call `fsync` to ensure the database slate and commit slot update have been persisted
+    /// 3. Flip the god byte primary bit to activate the newly updated commit slot
+    /// 4. Call `fsync` to ensure the write to the god byte has been persisted
+    ///
+    /// This mitigates a theoretical attack where an attacker who
+    /// 1. can control the order in which pages are flushed to disk
+    /// 2. can introduce crashes during `fsync`,
+    /// 3. has knowledge of the database file contents, and
+    /// 4. can include arbitrary data in a write transaction
+    ///
+    /// could cause a transaction to partially commit (some but not all of the data is written).
+    /// This is described in the design doc in futher detail.
+    ///
+    /// Security considerations: Many hard disk drives and SSDs do not actually guarantee that data
+    /// has been persisted to disk after calling `fsync`. Even with 2-phase commit, an attacker with
+    /// a high degree of control over the database's workload, including the ability to cause the
+    /// database process to crash, can cause the database to crash with the god byte primary bit
+    /// pointing to an invalid commit slot, leaving the database in an invalid, potentially attacker-
+    /// controlled state.
+    pub fn set_two_phase_commit(&mut self, enabled: bool) {
+        self.two_phase_commit = enabled;
     }
 
     /// Open the given table
@@ -1002,14 +1025,13 @@ impl WriteTransaction {
     fn commit_inner(&mut self) -> Result<(), CommitError> {
         #[cfg(feature = "logging")]
         debug!(
-            "Committing transaction id={:?} with durability={:?}",
-            self.transaction_id, self.durability
+            "Committing transaction id={:?} with durability={:?} two_phase={}",
+            self.transaction_id, self.durability, self.two_phase_commit
         );
         match self.durability {
-            Durability::None => self.non_durable_commit()?,
-            Durability::Eventual => self.durable_commit(true, false)?,
-            Durability::Immediate => self.durable_commit(false, false)?,
-            Durability::Paranoid => self.durable_commit(false, true)?,
+            InternalDurability::None => self.non_durable_commit()?,
+            InternalDurability::Eventual => self.durable_commit(true)?,
+            InternalDurability::Immediate => self.durable_commit(false)?,
         }
 
         for (savepoint, transaction) in self.deleted_persistent_savepoints.lock().unwrap().iter() {
@@ -1062,7 +1084,7 @@ impl WriteTransaction {
         Ok(())
     }
 
-    pub(crate) fn durable_commit(&mut self, eventual: bool, two_phase: bool) -> Result {
+    pub(crate) fn durable_commit(&mut self, eventual: bool) -> Result {
         let free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_transaction()
@@ -1102,7 +1124,7 @@ impl WriteTransaction {
             freed_root,
             self.transaction_id,
             eventual,
-            two_phase,
+            self.two_phase_commit,
         )?;
 
         // Mark any pending non-durable commits as fully committed.
