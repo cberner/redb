@@ -12,7 +12,7 @@ use crate::tree_store::{Page, PageNumber};
 use crate::StorageBackend;
 use crate::{DatabaseError, Result, StorageError};
 #[cfg(feature = "logging")]
-use log::{debug, warn};
+use log::warn;
 use std::cmp::{max, min};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
@@ -461,9 +461,8 @@ impl TransactionalMemory {
         Ok(true)
     }
 
-    // Returns true on success, or false if the allocator state was stale (in which case we need
-    // to fall back to a full repair)
-    pub(crate) fn try_load_allocator_state(&self, tree: &AllocatorStateTree) -> Result<bool> {
+    // Returns true if the allocator state table is up to date, or false if it's stale
+    pub(crate) fn is_valid_allocator_state(&self, tree: &AllocatorStateTree) -> Result<bool> {
         // See if this is stale allocator state left over from a previous transaction. That won't
         // happen during normal operation, since WriteTransaction::commit() always updates the
         // allocator state table before calling TransactionalMemory::commit(), but there are also
@@ -478,11 +477,12 @@ impl TransactionalMemory {
                 .try_into()
                 .unwrap(),
         ));
-        if transaction_id != self.get_last_committed_transaction_id()? {
-            #[cfg(feature = "logging")]
-            debug!("Ignoring stale allocator state from {:?}", transaction_id);
-            return Ok(false);
-        }
+
+        Ok(transaction_id == self.get_last_committed_transaction_id()?)
+    }
+
+    pub(crate) fn load_allocator_state(&self, tree: &AllocatorStateTree) -> Result {
+        assert!(self.is_valid_allocator_state(tree)?);
 
         // Load the allocator state
         let mut region_allocators = vec![];
@@ -517,7 +517,7 @@ impl TransactionalMemory {
         self.state.lock().unwrap().header.recovery_required = false;
         self.needs_recovery.store(false, Ordering::Release);
 
-        Ok(true)
+        Ok(())
     }
 
     pub(crate) fn is_allocated(&self, page: PageNumber) -> bool {

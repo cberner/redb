@@ -441,7 +441,7 @@ mod test {
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::header::{
         GOD_BYTE_OFFSET, MAGICNUMBER, PAGE_SIZE, PRIMARY_BIT, RECOVERY_REQUIRED,
-        TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET, USER_ROOT_OFFSET,
+        TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT, USER_ROOT_OFFSET,
     };
     use crate::tree_store::page_store::TransactionalMemory;
     #[cfg(not(target_os = "windows"))]
@@ -467,8 +467,12 @@ mod test {
         // Start a read to be sure the previous write isn't garbage collected
         let read_txn = db.begin_read().unwrap();
 
-        let write_txn = db.begin_write().unwrap();
+        let mut write_txn = db.begin_write().unwrap();
         {
+            // We want this to be the last commit before the database is closed, so it needs to
+            // use quick-repair -- otherwise, Database::drop() will generate its own quick-repair
+            // commit on shutdown
+            write_txn.set_quick_repair(true);
             let mut table = write_txn.open_table(X).unwrap();
             table.insert("hello", "world2").unwrap();
         }
@@ -487,6 +491,7 @@ mod test {
         file.read_exact(&mut buffer).unwrap();
         file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
         buffer[0] |= RECOVERY_REQUIRED;
+        buffer[0] &= !TWO_PHASE_COMMIT;
         file.write_all(&buffer).unwrap();
 
         // Overwrite the primary checksum to simulate a failure during commit
@@ -621,6 +626,7 @@ mod test {
         file.read_exact(&mut buffer).unwrap();
         file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
         buffer[0] |= RECOVERY_REQUIRED;
+        buffer[0] &= !TWO_PHASE_COMMIT;
         file.write_all(&buffer).unwrap();
 
         assert!(TransactionalMemory::new(
