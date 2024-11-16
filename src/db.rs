@@ -5,17 +5,17 @@ use crate::tree_store::{
     TableType, TransactionalMemory, PAGE_SIZE,
 };
 use crate::types::{Key, Value};
-use crate::{CompactionError, DatabaseError, ReadOnlyTable, SavepointError, StorageError};
+use crate::{CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError};
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Debug, Display, Formatter};
 
 use std::fs::{File, OpenOptions};
-use std::io;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::ops::RangeFull;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::{io, thread};
 
 use crate::error::TransactionError;
 use crate::sealed::Sealed;
@@ -713,9 +713,10 @@ impl Database {
         if mem.needs_repair()? {
             // If the last transaction used 2-phase commit and updated the allocator state table, then
             // we can just load the allocator state from there. Otherwise, we need a full repair
-            if Self::try_quick_repair(mem.clone())? {
+            if let Some(tree) = Self::get_allocator_state_table(&mem)? {
                 #[cfg(feature = "logging")]
-                info!("Quick-repair successful, full repair not needed");
+                info!("Found valid allocator state, full repair not needed");
+                mem.load_allocator_state(&tree)?;
             } else {
                 #[cfg(feature = "logging")]
                 warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
@@ -770,14 +771,15 @@ impl Database {
         Ok(db)
     }
 
-    // Returns true if quick-repair was successful, or false if a full repair is needed
-    fn try_quick_repair(mem: Arc<TransactionalMemory>) -> Result<bool> {
-        // Quick-repair is only possible if the primary was written using 2-phase commit
+    fn get_allocator_state_table(
+        mem: &Arc<TransactionalMemory>,
+    ) -> Result<Option<AllocatorStateTree>> {
+        // The allocator state table is only valid if the primary was written using 2-phase commit
         if !mem.used_two_phase_commit() {
-            return Ok(false);
+            return Ok(None);
         }
 
-        // See if the allocator state table is present in the system table tree
+        // See if it's present in the system table tree
         let fake_freed_pages = Arc::new(Mutex::new(vec![]));
         let system_table_tree = TableTreeMut::new(
             mem.get_system_root(),
@@ -789,10 +791,10 @@ impl Database {
             .get_table::<AllocatorStateKey, &[u8]>(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
             .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?
         else {
-            return Ok(false);
+            return Ok(None);
         };
 
-        // Load the allocator state from the table
+        // Load the allocator state table
         let InternalTableDefinition::Normal { table_root, .. } = allocator_state_table else {
             unreachable!();
         };
@@ -803,7 +805,12 @@ impl Database {
             fake_freed_pages,
         );
 
-        mem.try_load_allocator_state(&tree)
+        // Make sure this isn't stale allocator state left over from a previous transaction
+        if !mem.is_valid_allocator_state(&tree)? {
+            return Ok(None);
+        }
+
+        Ok(Some(tree))
     }
 
     fn allocate_read_transaction(&self) -> Result<TransactionGuard> {
@@ -850,6 +857,35 @@ impl Database {
         #[cfg(feature = "logging")]
         debug!("Beginning read transaction id={:?}", guard.id());
         ReadTransaction::new(self.get_memory(), guard)
+    }
+
+    fn ensure_allocator_state_table(&self) -> Result<(), Error> {
+        // If the allocator state table is already up to date, we're done
+        if Self::get_allocator_state_table(&self.mem)?.is_some() {
+            return Ok(());
+        }
+
+        // Make a new quick-repair commit to update the allocator state table
+        #[cfg(feature = "logging")]
+        debug!("Writing allocator state table");
+        let mut tx = self.begin_write()?;
+        tx.set_quick_repair(true);
+        tx.commit()?;
+
+        Ok(())
+    }
+}
+
+impl Drop for Database {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            return;
+        }
+
+        if self.ensure_allocator_state_table().is_err() {
+            #[cfg(feature = "logging")]
+            warn!("Failed to write allocator state table. Repair may be required at restart.")
+        }
     }
 }
 
