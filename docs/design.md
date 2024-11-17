@@ -386,8 +386,8 @@ many other values (all the other keys in the b-tree root, along with their child
 
 # MVCC (multi-version concurrency control)
 
-redb uses MVCC to isolation transactions from one another. This is implemented on top of the copy-on-write
-b-tree datastructure which underlies most of redb. Read transactions make a private copy of the root
+redb uses MVCC to isolate transactions from one another. This is implemented on top of the copy-on-write
+b-tree data structure which underlies most of redb. Read transactions make a private copy of the root
 of the b-tree, and are registered in the database so that no pages that root references are freed.
 When a write transaction frees a page it is pushed into a queue, and only reused after all read transactions
 that could reference it have completed.
