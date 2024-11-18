@@ -539,7 +539,7 @@ impl TransactionalMemory {
             // Allocate a larger tracker page
             self.free(tracker_page);
             tracker_page = self
-                .allocate_non_transactional(tracker_len)?
+                .allocate_non_transactional(tracker_len, false)?
                 .get_page_number();
             let mut state = self.state.lock().unwrap();
             state.header.set_region_tracker(tracker_page);
@@ -559,10 +559,8 @@ impl TransactionalMemory {
         let old_tracker_page = state.header.region_tracker();
         // allocate acquires this lock, so we need to drop it
         drop(state);
-        // Allocate the new page. Unlike other region-tracker allocations, this happens inside
-        // a transaction, so we use an ordinary allocation (which gets committed or rolled back
-        // along with the rest of the transaction) rather than allocate_non_transactional()
-        let new_page = self.allocate_lowest(region_tracker_size.try_into().unwrap())?;
+        let new_page =
+            self.allocate_non_transactional(region_tracker_size.try_into().unwrap(), true)?;
         if new_page.get_page_number().is_before(old_tracker_page) {
             let mut state = self.state.lock().unwrap();
             state.header.set_region_tracker(new_page.get_page_number());
@@ -1110,8 +1108,8 @@ impl TransactionalMemory {
 
     // Allocate a page not associated with any transaction. The page is immediately considered committed,
     // and won't be rolled back if an abort happens. This is only used for the region tracker
-    fn allocate_non_transactional(&self, allocation_size: usize) -> Result<PageMut> {
-        self.allocate_helper(allocation_size, false, false)
+    fn allocate_non_transactional(&self, allocation_size: usize, lowest: bool) -> Result<PageMut> {
+        self.allocate_helper(allocation_size, lowest, false)
     }
 
     pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
