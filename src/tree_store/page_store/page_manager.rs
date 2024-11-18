@@ -361,26 +361,7 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn end_repair(&self) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        let tracker_len = state.allocators.region_tracker.to_vec().len();
-        let tracker_page = state.header.region_tracker();
-
-        let allocator = state.get_region_mut(tracker_page.region);
-        // Allocate a new tracker page, if the old one was overwritten or is too small
-        if allocator.is_allocated(tracker_page.page_index, tracker_page.page_order)
-            || tracker_page.page_size_bytes(self.page_size) < tracker_len as u64
-        {
-            drop(state);
-            let new_tracker_page = self.allocate(tracker_len)?.get_page_number();
-
-            let mut state = self.state.lock().unwrap();
-            state.header.set_region_tracker(new_tracker_page);
-            self.write_header(&state.header)?;
-            self.storage.flush(false)?;
-        } else {
-            allocator.record_alloc(tracker_page.page_index, tracker_page.page_order);
-            drop(state);
-        }
+        self.allocate_region_tracker_page()?;
 
         let mut state = self.state.lock().unwrap();
         let tracker_page = state.header.region_tracker();
@@ -436,10 +417,30 @@ impl TransactionalMemory {
         num_regions: u32,
     ) -> Result<bool> {
         // Has the number of regions changed since reserve_allocator_state() was called?
-        if num_regions != self.state.lock().unwrap().header.layout().num_regions() {
+        let state = self.state.lock().unwrap();
+        if num_regions != state.header.layout().num_regions() {
             return Ok(false);
         }
 
+        // Temporarily free the region tracker page, because we don't want to include it in our
+        // recorded allocations
+        let tracker_page = state.header.region_tracker();
+        drop(state);
+        self.free(tracker_page);
+
+        let result = self.try_save_allocator_state_inner(tree, num_regions);
+
+        // Restore the region tracker page
+        self.mark_page_allocated(tracker_page);
+
+        result
+    }
+
+    fn try_save_allocator_state_inner(
+        &self,
+        tree: &mut AllocatorStateTree,
+        num_regions: u32,
+    ) -> Result<bool> {
         for i in 0..num_regions {
             let region_bytes =
                 &self.state.lock().unwrap().allocators.region_allocators[i as usize].to_vec();
@@ -509,10 +510,8 @@ impl TransactionalMemory {
         state.allocators.resize_to(layout);
         drop(state);
 
-        // Allocate a larger region tracker page if necessary. This also happens automatically on
-        // shutdown, but we do it here because we want our allocator state to exactly match the
-        // result of running a full repair
-        self.ensure_region_tracker_page()?;
+        // Allocate a page for the region tracker
+        self.allocate_region_tracker_page()?;
 
         self.state.lock().unwrap().header.recovery_required = false;
         self.needs_recovery.store(false, Ordering::Release);
@@ -527,22 +526,33 @@ impl TransactionalMemory {
         allocator.is_allocated(page.page_index, page.page_order)
     }
 
-    // Make sure we have a large enough region-tracker page. This uses allocate_non_transactional(),
-    // so it should only be called from outside a transaction
-    fn ensure_region_tracker_page(&self) -> Result {
-        let state = self.state.lock().unwrap();
+    // Allocate a page for the region tracker. If possible, this will pick the same page that
+    // was used last time; otherwise it'll pick a new page and update the database header to
+    // match
+    fn allocate_region_tracker_page(&self) -> Result {
+        let mut state = self.state.lock().unwrap();
         let tracker_len = state.allocators.region_tracker.to_vec().len();
-        let mut tracker_page = state.header.region_tracker();
-        drop(state);
+        let tracker_page = state.header.region_tracker();
 
-        if tracker_page.page_size_bytes(self.page_size) < (tracker_len as u64) {
-            // Allocate a larger tracker page
-            self.free(tracker_page);
-            tracker_page = self
+        let allocator = state.get_region_mut(tracker_page.region);
+        // Pick a new tracker page, if the old one was overwritten or is too small
+        if allocator.is_allocated(tracker_page.page_index, tracker_page.page_order)
+            || tracker_page.page_size_bytes(self.page_size) < tracker_len as u64
+        {
+            drop(state);
+
+            let new_tracker_page = self
                 .allocate_non_transactional(tracker_len, false)?
                 .get_page_number();
+
             let mut state = self.state.lock().unwrap();
-            state.header.set_region_tracker(tracker_page);
+            state.header.set_region_tracker(new_tracker_page);
+            self.write_header(&state.header)?;
+            self.storage.flush(false)?;
+        } else {
+            // The old page is available, so just mark it as allocated
+            allocator.record_alloc(tracker_page.page_index, tracker_page.page_order);
+            drop(state);
         }
 
         Ok(())
@@ -1133,8 +1143,10 @@ impl Drop for TransactionalMemory {
             return;
         }
 
-        // Allocate a larger region-tracker page if necessary
-        if self.ensure_region_tracker_page().is_err() {
+        // Reallocate the region tracker page, which will grow it if necessary
+        let tracker_page = self.state.lock().unwrap().header.region_tracker();
+        self.free(tracker_page);
+        if self.allocate_region_tracker_page().is_err() {
             #[cfg(feature = "logging")]
             warn!("Failure while flushing allocator state. Repair required at restart.");
             return;
