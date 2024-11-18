@@ -1135,36 +1135,6 @@ impl Drop for TransactionalMemory {
             return;
         }
 
-        // Commit any non-durable transactions that are outstanding
-        if self.read_from_secondary.load(Ordering::Acquire)
-            && !self.needs_recovery.load(Ordering::Acquire)
-        {
-            if let Ok(non_durable_transaction_id) = self.get_last_committed_transaction_id() {
-                let root = self.get_data_root();
-                let system_root = self.get_system_root();
-                let freed_root = self.get_freed_root();
-                if self
-                    .commit(
-                        root,
-                        system_root,
-                        freed_root,
-                        non_durable_transaction_id,
-                        false,
-                        true,
-                    )
-                    .is_err()
-                {
-                    #[cfg(feature = "logging")]
-                    warn!(
-                        "Failure while finalizing non-durable commit. Database may have rolled back"
-                    );
-                }
-            } else {
-                #[cfg(feature = "logging")]
-                warn!("Failure while finalizing non-durable commit. Database may have rolled back");
-            }
-        }
-
         // Allocate a larger region-tracker page if necessary
         if self.ensure_region_tracker_page().is_err() {
             #[cfg(feature = "logging")]
