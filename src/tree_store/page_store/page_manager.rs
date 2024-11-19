@@ -1129,7 +1129,7 @@ impl TransactionalMemory {
 
 impl Drop for TransactionalMemory {
     fn drop(&mut self) {
-        if thread::panicking() {
+        if thread::panicking() || self.needs_recovery.load(Ordering::Acquire) {
             return;
         }
 
