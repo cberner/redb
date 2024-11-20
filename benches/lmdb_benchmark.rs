@@ -16,6 +16,8 @@ const KEY_SIZE: usize = 24;
 const VALUE_SIZE: usize = 150;
 const RNG_SEED: u64 = 3;
 
+const CACHE_SIZE: usize = 4 * 1_024 * 1_024 * 1_024;
+
 fn fill_slice(slice: &mut [u8], rng: &mut fastrand::Rng) {
     let mut i = 0;
     while i + size_of::<u128>() < slice.len() {
@@ -331,7 +333,7 @@ fn main() {
     let redb_latency_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
         let mut db = redb::Database::builder()
-            .set_cache_size(4 * 1024 * 1024 * 1024)
+            .set_cache_size(CACHE_SIZE)
             .create(tmpfile.path())
             .unwrap();
         let table = RedbBenchDatabase::new(&db);
@@ -375,7 +377,7 @@ fn main() {
         let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
 
         let mut bb = rocksdb::BlockBasedOptions::default();
-        bb.set_block_cache(&rocksdb::Cache::new_lru_cache(4 * 1_024 * 1_024 * 1_024));
+        bb.set_block_cache(&rocksdb::Cache::new_lru_cache(CACHE_SIZE));
 
         let mut opts = rocksdb::Options::default();
         opts.set_block_based_table_factory(&bb);
@@ -395,7 +397,13 @@ fn main() {
 
     let sled_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
-        let db = sled::Config::new().path(tmpfile.path()).open().unwrap();
+
+        let db = sled::Config::new()
+            .path(tmpfile.path())
+            .cache_capacity(CACHE_SIZE as u64)
+            .open()
+            .unwrap();
+
         let table = SledBenchDatabase::new(&db, tmpfile.path());
         let mut results = benchmark(table);
         results.push(("compaction".to_string(), ResultType::NA));
