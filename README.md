@@ -72,7 +72,7 @@ redb has similar performance to other top embedded key-value stores such as lmdb
 | compaction                | 857.02ms     | N/A          | N/A            | N/A        | N/A       |
 | size after bench          | 311.23 MiB   | 582.22 MiB   | **206.39 MiB** | 458.51 MiB | 4.00 GiB  |
 
-Source code for benchmark [here](./benches/lmdb_benchmark.rs). Results collected on a Intel i9 11900k with Samsung 990 EVO NVMe.
+Source code for benchmark [here](./benches/lmdb_benchmark.rs). Results collected on an Intel i9 11900k with Samsung 990 EVO NVMe.
 
 Benchmarked with the following configuration:
 
