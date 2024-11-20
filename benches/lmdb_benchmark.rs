@@ -377,7 +377,7 @@ fn main() {
         let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
 
         let mut bb = rocksdb::BlockBasedOptions::default();
-        bb.set_block_cache(&rocksdb::Cache::new_lru_cache(CACHE_SIZE as u64));
+        bb.set_block_cache(&rocksdb::Cache::new_lru_cache(CACHE_SIZE));
 
         let mut opts = rocksdb::Options::default();
         opts.set_block_based_table_factory(&bb);

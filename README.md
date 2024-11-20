@@ -51,24 +51,37 @@ To run all the tests and benchmarks a few extra dependencies are required:
 * `apt install libclang-dev`
 
 ## Benchmarks
-redb has similar performance to other top embedded key-value stores such as lmdb and rocksdb
 
-|                           |    redb    |    lmdb    |    rocksdb  |  sled  | sanakirja |
-|---------------------------|------------|------------|-------------|--------|-----------|
-| bulk load                 |   2792ms   | **1115ms** |   5610ms    | 5005ms | 1161ms |
-| individual writes         | **462ms**  |   1119ms   |   1097ms    | 957ms  | 662ms  |
-| batch writes              |   2568ms   |   2247ms   | **1344ms**  | 1622ms | 2713ms |
-| random reads              |   988ms    | **558ms**  |   3469ms    | 1509ms | 678ms  |
-| random reads              |   962ms    | **556ms**  |   3377ms    | 1425ms | 671ms  |
-| random range reads        |   2534ms   | **985ms**  |   6058ms    | 4670ms | 1089ms |
-| random range reads        |   2493ms   | **998ms**  |   5801ms    | 4665ms | 1119ms |
-| random reads (4 threads)  |   344ms    | **141ms**  |   1247ms    | 424ms  | 266ms  |
-| random reads (8 threads)  |   192ms    | **72ms**   |   673ms     | 230ms  | 620ms  |
-| random reads (16 threads) |   131ms    | **47ms**   |   476ms     | 148ms  | 3500ms |
-| random reads (32 threads) |   118ms    | **44ms**   |   412ms     | 129ms  | 4313ms |
-| removals                  |   2184ms   | **784ms**  |   2451ms    | 2047ms | 1344ms |
+redb has similar performance to other top embedded key-value stores such as lmdb and rocksdb.
 
-Source code for benchmark [here](./benches/lmdb_benchmark.rs). Results collected on a Ryzen 5900X with Samsung 980 PRO NVMe.
+|                           | redb         | lmdb         | rocksdb        | sled       | sanakirja |
+|---------------------------|--------------|--------------|----------------|------------|-----------|
+| bulk load                 | 2.44s        | 1.05s        | 6.37s          | 5.80s      | **1.01s** |
+| individual writes         | **104.61ms** | 177.21ms     | 638.13ms       | 462.88ms   | 160.41ms  |
+| batch writes              | 1.94s        | 1.20s        | **765.37ms**   | 1.18s      | 1.58s     |
+| len()                     | 3.93µs       | **352.00ns** | 203.00ms       | 415.50ms   | 31.14ms   |
+| random reads              | 933.80ms     | **577.05ms** | 2.68s          | 1.63s      | 978.73ms  |
+| random reads              | 912.94ms     | **579.27ms** | 2.74s          | 1.64s      | 1.03s     |
+| random range reads        | 2.37s        | **930.70ms** | 4.67s          | 4.81s      | 1.33s     |
+| random range reads        | 2.41s        | **925.27ms** | 4.71s          | 4.89s      | 1.35s     |
+| random reads (4 threads)  | 251.39ms     | **151.90ms** | 691.21ms       | 431.72ms   | 374.82ms  |
+| random reads (8 threads)  | 139.29ms     | **93.60ms**  | 396.04ms       | 239.21ms   | 745.92ms  |
+| random reads (16 threads) | 108.88ms     | **79.04ms**  | 276.27ms       | 149.45ms   | 1.75s     |
+| random reads (32 threads) | 98.35ms      | **70.71ms**  | 259.77ms       | 162.62ms   | 1.76s     |
+| removals                  | 1.63s        | **756.30ms** | 3.22s          | 2.46s      | 1.14s     |
+| compaction                | 857.02ms     | N/A          | N/A            | N/A        | N/A       |
+| size after bench          | 311.23 MiB   | 582.22 MiB   | **206.39 MiB** | 458.51 MiB | 4.00 GiB  |
+
+Source code for benchmark [here](./benches/lmdb_benchmark.rs). Results collected on a Intel i9 11900k with Samsung 990 EVO NVMe.
+
+Benchmarked with the following configuration:
+
+```rs
+const ELEMENTS: usize = 1_000_000;
+const KEY_SIZE: usize = 24;
+const VALUE_SIZE: usize = 150;
+const CACHE_SIZE: usize = 4 * 1_024 * 1_024 * 1_024;
+```
 
 ## License
 
