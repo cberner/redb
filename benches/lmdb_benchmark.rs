@@ -310,7 +310,7 @@ impl std::fmt::Display for ResultType {
 
         match self {
             ResultType::NA => write!(f, "N/A"),
-            ResultType::Duration(d) => write!(f, "{d:.2?}"),
+            ResultType::Duration(d) => write!(f, "{:?}ms", d.as_millis()),
             ResultType::SizeInBytes(s) => {
                 let b = Byte::from_u64(*s).get_appropriate_unit(UnitType::Binary);
                 write!(f, "{b:.2}")
