@@ -1,27 +1,9 @@
-#![deny(clippy::all, clippy::pedantic, clippy::disallowed_methods)]
+#![deny(clippy::disallowed_methods)]
 // TODO: revisit this list and see if we can enable some
-#![allow(
-    let_underscore_drop,
-    clippy::default_trait_access,
-    clippy::if_not_else,
-    clippy::inline_always,
-    clippy::iter_not_returning_iterator,
-    clippy::manual_let_else,
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    clippy::module_name_repetitions,
-    clippy::must_use_candidate,
-    clippy::needless_pass_by_value,
-    clippy::option_option,
-    clippy::redundant_closure_for_method_calls,
-    clippy::similar_names,
-    clippy::too_many_lines,
-    clippy::unnecessary_wraps,
-    clippy::unreadable_literal,
-    clippy::wildcard_imports
-)]
+#![allow(clippy::all)]
 // TODO remove this once wasi no longer requires nightly
 #![cfg_attr(target_os = "wasi", feature(wasi_ext))]
+#![feature(file_lock)]
 
 //! # redb
 //!

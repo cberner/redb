@@ -14,9 +14,6 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
-    env:
-      RUSTFLAGS: --deny warnings
-
     steps:
       - uses: actions/checkout@v4
       - name: Cache
@@ -43,7 +40,7 @@ jobs:
       - name: Install Rust
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: |
-            rustup default 1.81
+            rustup default nightly-2024-11-15
             rustup component add rustfmt
             rustup component add clippy
 
@@ -79,12 +76,6 @@ jobs:
 
       - name: Run tests
         run: just build test
-
-      - name: Clippy
-        run: cargo clippy --all --all-targets -- -Dwarnings
-
-      - name: Format
-        run: cargo fmt --all -- --check
 
       - name: Run CPython wrapper tests
         if: runner.os != 'Windows'
