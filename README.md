@@ -53,20 +53,23 @@ To run all the tests and benchmarks a few extra dependencies are required:
 ## Benchmarks
 redb has similar performance to other top embedded key-value stores such as lmdb and rocksdb
 
-|                           |    redb    |    lmdb    |    rocksdb  |  sled  | sanakirja |
-|---------------------------|------------|------------|-------------|--------|-----------|
-| bulk load                 |   2792ms   | **1115ms** |   5610ms    | 5005ms | 1161ms |
-| individual writes         | **462ms**  |   1119ms   |   1097ms    | 957ms  | 662ms  |
-| batch writes              |   2568ms   |   2247ms   | **1344ms**  | 1622ms | 2713ms |
-| random reads              |   988ms    | **558ms**  |   3469ms    | 1509ms | 678ms  |
-| random reads              |   962ms    | **556ms**  |   3377ms    | 1425ms | 671ms  |
-| random range reads        |   2534ms   | **985ms**  |   6058ms    | 4670ms | 1089ms |
-| random range reads        |   2493ms   | **998ms**  |   5801ms    | 4665ms | 1119ms |
-| random reads (4 threads)  |   344ms    | **141ms**  |   1247ms    | 424ms  | 266ms  |
-| random reads (8 threads)  |   192ms    | **72ms**   |   673ms     | 230ms  | 620ms  |
-| random reads (16 threads) |   131ms    | **47ms**   |   476ms     | 148ms  | 3500ms |
-| random reads (32 threads) |   118ms    | **44ms**   |   412ms     | 129ms  | 4313ms |
-| removals                  |   2184ms   | **784ms**  |   2451ms    | 2047ms | 1344ms |
+|                           | redb       | lmdb       | rocksdb        | sled       | sanakirja |
+|---------------------------|------------|------------|----------------|------------|-----------|
+| bulk load                 | 2330ms     | **1122ms** | 6343ms         | 5557ms     | 1145ms    |
+| individual writes         | **226ms**  | 413ms      | 714ms          | 828ms      | 393ms     |
+| batch writes              | 2973ms     | 1924ms     | **1131ms**     | 1839ms     | 2882ms    |
+| len()                     | **0ms**    | **0ms**    | 257ms          | 401ms      | 64ms      |
+| random reads              | 811ms      | **580ms**  | 2325ms         | 1567ms     | 837ms     |
+| random reads              | 780ms      | **578ms**  | 2329ms         | 1550ms     | 820ms     |
+| random range reads        | 2376ms     | **1186ms** | 4512ms         | 4534ms     | 1372ms    |
+| random range reads        | 2359ms     | **1197ms** | 4448ms         | 4488ms     | 1366ms    |
+| random reads (4 threads)  | 329ms      | **154ms**  | 644ms          | 479ms      | 342ms     |
+| random reads (8 threads)  | 173ms      | **77ms**   | 326ms          | 255ms      | 440ms     |
+| random reads (16 threads) | 109ms      | **46ms**   | 237ms          | 165ms      | 1584ms    |
+| random reads (32 threads) | 90ms       | **41ms**   | 180ms          | 136ms      | 4686ms    |
+| removals                  | 1737ms     | **795ms**  | 2660ms         | 2341ms     | 1138ms    |
+| compaction                | 963ms      | N/A        | N/A            | N/A        | N/A       |
+| size after bench          | 311.23 MiB | 582.22 MiB | **206.39 MiB** | 454.01 MiB | 4.00 GiB  |
 
 Source code for benchmark [here](./benches/lmdb_benchmark.rs). Results collected on a Ryzen 5900X with Samsung 980 PRO NVMe.
 
