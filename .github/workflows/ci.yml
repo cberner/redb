@@ -29,7 +29,7 @@ jobs:
                 ~/.cargo/registry/cache/
                 ~/.cargo/git/db/
                 target/
-            key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', '.github/workflows/*.yml') }}
+            key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', '.github/workflows/*.yml', 'rust-toolchain') }}
 
       - name: Check for forbidden words
         if: runner.os != 'Windows'
@@ -43,7 +43,6 @@ jobs:
       - name: Install Rust
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: |
-            rustup default 1.81
             rustup component add rustfmt
             rustup component add clippy
 
