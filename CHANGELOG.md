@@ -1,5 +1,13 @@
 # redb - Changelog
 
+## 2.3.0 - 2024-12-10
+* Add `WriteTransaction::set_two_phase_commit()`
+* Add `WriteTransaction::set_quick_repair()` which enables a faster repair mechanism at the cost of
+  slower transaction commits
+* `Durability::Paranoid` is now deprecated. Use `set_two_phase_commit(true)` instead
+* Fix various bugs when repairing the database after an unclean shutdown. These could result in
+  panics, leaked space in the database file, or database corruption
+
 ## 2.2.0 - 2024-10-27
 * Implement `TableHandle` for `ReadOnlyTable`
 * Fix bug in write cache, which caused pages to be evicted randomly. Pages are now evicted based on
