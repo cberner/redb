@@ -1449,7 +1449,8 @@ impl WriteTransaction {
             + freed_tree_stats.stored_leaf_bytes;
         let total_fragmented = data_tree_stats.fragmented_bytes()
             + system_tree_stats.fragmented_bytes
-            + freed_tree_stats.fragmented_bytes;
+            + freed_tree_stats.fragmented_bytes
+            + self.mem.count_free_pages()? * (self.mem.get_page_size() as u64);
 
         Ok(DatabaseStats {
             tree_height: data_tree_stats.tree_height(),
