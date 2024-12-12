@@ -423,7 +423,7 @@ impl Database {
     /// Compacts the database file
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
-    pub fn compact(&mut self) -> Result<bool, CompactionError> {
+    pub fn compact(&self) -> Result<bool, CompactionError> {
         if self
             .transaction_tracker
             .oldest_live_read_transaction()
