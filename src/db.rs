@@ -310,6 +310,7 @@ impl Drop for TransactionGuard {
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct Database {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
