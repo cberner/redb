@@ -508,6 +508,7 @@ mod test {
 
         assert!(TransactionalMemory::new(
             Box::new(FileBackend::new(file).unwrap()),
+            false,
             PAGE_SIZE,
             None,
             0,
@@ -597,6 +598,7 @@ mod test {
 
         assert!(TransactionalMemory::new(
             Box::new(FileBackend::new(file).unwrap()),
+            false,
             PAGE_SIZE,
             None,
             0,
@@ -631,6 +633,7 @@ mod test {
 
         assert!(TransactionalMemory::new(
             Box::new(FileBackend::new(file).unwrap()),
+            false,
             PAGE_SIZE,
             None,
             0,
@@ -687,6 +690,7 @@ mod test {
 
         assert!(TransactionalMemory::new(
             Box::new(FileBackend::new(file).unwrap()),
+            false,
             PAGE_SIZE,
             None,
             0,

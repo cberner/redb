@@ -10,7 +10,6 @@ use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Debug, Display, Formatter};
 
 use std::fs::{File, OpenOptions};
-use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::ops::RangeFull;
 use std::path::Path;
@@ -692,6 +691,7 @@ impl Database {
 
     fn new(
         file: Box<dyn StorageBackend>,
+        allow_initialize: bool,
         page_size: usize,
         region_size: Option<u64>,
         read_cache_size_bytes: usize,
@@ -704,6 +704,7 @@ impl Database {
         info!("Opening database {:?}", &file_path);
         let mem = TransactionalMemory::new(
             file,
+            allow_initialize,
             page_size,
             region_size,
             read_cache_size_bytes,
@@ -1009,6 +1010,7 @@ impl Builder {
 
         Database::new(
             Box::new(FileBackend::new(file)?),
+            true,
             self.page_size,
             self.region_size,
             self.read_cache_size_bytes,
@@ -1021,12 +1023,9 @@ impl Builder {
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
-        if file.metadata()?.len() == 0 {
-            return Err(StorageError::Io(ErrorKind::InvalidData.into()).into());
-        }
-
         Database::new(
             Box::new(FileBackend::new(file)?),
+            false,
             self.page_size,
             None,
             self.read_cache_size_bytes,
@@ -1041,6 +1040,7 @@ impl Builder {
     pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
         Database::new(
             Box::new(FileBackend::new(file)?),
+            true,
             self.page_size,
             self.region_size,
             self.read_cache_size_bytes,
@@ -1056,6 +1056,7 @@ impl Builder {
     ) -> Result<Database, DatabaseError> {
         Database::new(
             Box::new(backend),
+            true,
             self.page_size,
             self.region_size,
             self.read_cache_size_bytes,

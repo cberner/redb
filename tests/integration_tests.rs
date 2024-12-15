@@ -9,7 +9,7 @@ use redb::{
 use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 use std::borrow::Borrow;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1518,6 +1518,25 @@ fn does_not_exist() {
     let tmpfile = create_tempfile();
 
     let result = Database::open(tmpfile.path());
+    if let Err(DatabaseError::Storage(StorageError::Io(e))) = result {
+        assert!(matches!(e.kind(), ErrorKind::InvalidData));
+    } else {
+        panic!();
+    }
+}
+
+#[test]
+fn invalid_database_file() {
+    let mut tmpfile = create_tempfile();
+    tmpfile.write_all(b"hi").unwrap();
+    let result = Database::open(tmpfile.path());
+    if let Err(DatabaseError::Storage(StorageError::Io(e))) = result {
+        assert!(matches!(e.kind(), ErrorKind::InvalidData));
+    } else {
+        panic!();
+    }
+
+    let result = Database::create(tmpfile.path());
     if let Err(DatabaseError::Storage(StorageError::Io(e))) = result {
         assert!(matches!(e.kind(), ErrorKind::InvalidData));
     } else {

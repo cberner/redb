@@ -18,6 +18,7 @@ use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryInto;
+use std::io::ErrorKind;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(debug_assertions)]
 use std::sync::Arc;
@@ -107,6 +108,8 @@ impl TransactionalMemory {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         file: Box<dyn StorageBackend>,
+        // Allow initializing a new database in an empty file
+        allow_initialize: bool,
         page_size: usize,
         requested_region_size: Option<u64>,
         read_cache_size_bytes: usize,
@@ -128,8 +131,10 @@ impl TransactionalMemory {
             write_cache_size_bytes,
         )?;
 
+        let initial_storage_len = storage.raw_file_len()?;
+
         let magic_number: [u8; MAGICNUMBER.len()] =
-            if storage.raw_file_len()? >= MAGICNUMBER.len() as u64 {
+            if initial_storage_len >= MAGICNUMBER.len() as u64 {
                 storage
                     .read_direct(0, MAGICNUMBER.len())?
                     .try_into()
@@ -137,6 +142,18 @@ impl TransactionalMemory {
             } else {
                 [0; MAGICNUMBER.len()]
             };
+
+        if initial_storage_len > 0 {
+            // File already exists check that the magic number matches
+            if magic_number != MAGICNUMBER {
+                return Err(StorageError::Io(ErrorKind::InvalidData.into()).into());
+            }
+        } else {
+            // File is empty, check that we're allowed to initialize a new database (i.e. the caller is Database::create() and not open())
+            if !allow_initialize {
+                return Err(StorageError::Io(ErrorKind::InvalidData.into()).into());
+            }
+        }
 
         if magic_number != MAGICNUMBER {
             let region_tracker_required_bytes =
