@@ -211,6 +211,23 @@ impl<'a, K: Key + 'static, V: Key + 'static> Display for MultimapTableDefinition
     }
 }
 
+/// Information regarding the usage of the in-memory cache
+///
+/// Note: these metrics are only collected when the "`cache_metrics`" feature is enabled
+#[derive(Debug)]
+pub struct CacheStats {
+    pub(crate) evictions: u64,
+}
+
+impl CacheStats {
+    /// Number of times that data has been evicted, due to the cache being full
+    ///
+    /// To increase the cache size use [`Builder::set_cache_size`]
+    pub fn evictions(&self) -> u64 {
+        self.evictions
+    }
+}
+
 pub(crate) struct TransactionGuard {
     transaction_tracker: Option<Arc<TransactionTracker>>,
     transaction_id: Option<TransactionId>,
@@ -326,6 +343,13 @@ impl Database {
     /// Opens an existing redb database.
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
+    }
+
+    /// Information regarding the usage of the in-memory cache
+    ///
+    /// Note: these metrics are only collected when the "`cache_metrics`" feature is enabled
+    pub fn cache_stats(&self) -> CacheStats {
+        self.mem.cache_stats()
     }
 
     pub(crate) fn get_memory(&self) -> Arc<TransactionalMemory> {

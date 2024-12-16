@@ -1,6 +1,6 @@
 use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::lru_cache::LRUCache;
-use crate::{DatabaseError, Result, StorageBackend, StorageError};
+use crate::{CacheStats, DatabaseError, Result, StorageBackend, StorageError};
 use std::ops::{Index, IndexMut};
 use std::slice::SliceIndex;
 #[cfg(feature = "cache_metrics")]
@@ -187,6 +187,8 @@ pub(super) struct PagedCachedFile {
     reads_total: AtomicU64,
     #[cfg(feature = "cache_metrics")]
     reads_hits: AtomicU64,
+    #[cfg(feature = "cache_metrics")]
+    evictions: AtomicU64,
     read_cache: Vec<RwLock<LRUCache<Arc<[u8]>>>>,
     // TODO: maybe move this cache to WriteTransaction?
     write_buffer: Arc<Mutex<LRUWriteCache>>,
@@ -214,9 +216,21 @@ impl PagedCachedFile {
             reads_total: Default::default(),
             #[cfg(feature = "cache_metrics")]
             reads_hits: Default::default(),
+            #[cfg(feature = "cache_metrics")]
+            evictions: Default::default(),
             read_cache,
             write_buffer: Arc::new(Mutex::new(LRUWriteCache::new())),
         })
+    }
+
+    #[allow(clippy::unused_self)]
+    pub(crate) fn cache_stats(&self) -> CacheStats {
+        CacheStats {
+            #[cfg(not(feature = "cache_metrics"))]
+            evictions: 0,
+            #[cfg(feature = "cache_metrics")]
+            evictions: self.evictions.load(Ordering::Acquire),
+        }
     }
 
     pub(crate) fn check_io_errors(&self) -> Result {
@@ -329,6 +343,10 @@ impl PagedCachedFile {
         if cache_size + len > self.max_read_cache_bytes {
             while removed < len {
                 if let Some((_, v)) = write_lock.pop_lowest_priority() {
+                    #[cfg(feature = "cache_metrics")]
+                    {
+                        self.evictions.fetch_add(1, Ordering::Relaxed);
+                    }
                     removed += v.len();
                 } else {
                     break;
@@ -415,6 +433,10 @@ impl PagedCachedFile {
                         result?;
                         self.write_buffer_bytes
                             .fetch_sub(removed_len, Ordering::Release);
+                        #[cfg(feature = "cache_metrics")]
+                        {
+                            self.evictions.fetch_add(1, Ordering::Relaxed);
+                        }
                         removed_bytes += removed_len;
                     } else {
                         break;

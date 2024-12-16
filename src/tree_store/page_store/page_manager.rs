@@ -9,7 +9,7 @@ use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
 use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
 use crate::tree_store::{Page, PageNumber};
-use crate::StorageBackend;
+use crate::{CacheStats, StorageBackend};
 use crate::{DatabaseError, Result, StorageError};
 #[cfg(feature = "logging")]
 use log::warn;
@@ -272,6 +272,10 @@ impl TransactionalMemory {
             region_size,
             region_header_with_padding_size: region_header_size,
         })
+    }
+
+    pub(crate) fn cache_stats(&self) -> CacheStats {
+        self.storage.cache_stats()
     }
 
     pub(crate) fn check_io_errors(&self) -> Result {
