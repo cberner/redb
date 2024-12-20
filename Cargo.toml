@@ -77,6 +77,10 @@ name = "userspace_cache_benchmark"
 harness = false
 
 [[bench]]
+name = "savepoint_benchmark"
+harness = false
+
+[[bench]]
 name = "lmdb_benchmark"
 harness = false
 
