@@ -383,13 +383,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     where
         F: FnMut(&PagePath) -> Result,
     {
-        let tree = UntypedBtree::new(
-            self.root,
-            self.mem.clone(),
-            K::fixed_width(),
-            V::fixed_width(),
-        );
-        tree.visit_all_pages(visitor)
+        self.read_tree()?.visit_all_pages(visitor)
     }
 
     pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
@@ -719,6 +713,19 @@ impl<K: Key, V: Value> Btree<K, V> {
 
     pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
         self.root
+    }
+
+    pub(crate) fn visit_all_pages<F>(&self, visitor: F) -> Result
+    where
+        F: FnMut(&PagePath) -> Result,
+    {
+        let tree = UntypedBtree::new(
+            self.root,
+            self.mem.clone(),
+            K::fixed_width(),
+            V::fixed_width(),
+        );
+        tree.visit_all_pages(visitor)
     }
 
     pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'static, V>>> {

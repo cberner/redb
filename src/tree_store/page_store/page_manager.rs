@@ -606,6 +606,32 @@ impl TransactionalMemory {
         }
     }
 
+    // Diffs region_states, which must be derived from get_raw_allocator_states(), against
+    // the currently allocated set of pages
+    pub(crate) fn pages_allocated_since_raw_state(
+        &self,
+        old_states: &[BuddyAllocator],
+    ) -> Vec<PageNumber> {
+        let mut result = vec![];
+        let state = self.state.lock().unwrap();
+
+        for i in 0..state.header.layout().num_regions() {
+            let current_state = state.get_region(i);
+            if let Some(old_state) = old_states.get(i as usize) {
+                current_state.difference(i, old_state, &mut result);
+            } else {
+                // This region didn't exist, so everything is newly allocated
+                current_state.get_allocated_pages(i, &mut result);
+            }
+        }
+
+        // Don't include the region tracker, since we manage that internally to the TranscationalMemory
+        // Otherwise restoring a savepoint would free it.
+        result.retain(|x| *x != state.header.region_tracker());
+
+        result
+    }
+
     pub(crate) fn get_raw_allocator_states(&self) -> Vec<Vec<u8>> {
         let state = self.state.lock().unwrap();
 
@@ -900,10 +926,6 @@ impl TransactionalMemory {
         } else {
             state.header.primary_slot().freed_root
         }
-    }
-
-    pub(crate) fn get_layout(&self) -> DatabaseLayout {
-        self.state.lock().unwrap().header.layout()
     }
 
     pub(crate) fn get_last_committed_transaction_id(&self) -> Result<TransactionId> {

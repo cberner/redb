@@ -5,9 +5,9 @@ use crate::sealed::Sealed;
 use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
-    Btree, BtreeHeader, BtreeMut, FreedPageList, FreedTableKey, InternalTableDefinition, Page,
-    PageHint, PageNumber, SerializedSavepoint, TableTree, TableTreeMut, TableType,
-    TransactionalMemory, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
+    Btree, BtreeHeader, BtreeMut, BuddyAllocator, FreedPageList, FreedTableKey,
+    InternalTableDefinition, Page, PageHint, PageNumber, SerializedSavepoint, TableTree,
+    TableTreeMut, TableType, TransactionalMemory, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -25,7 +25,6 @@ use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::RangeBounds;
-#[cfg(any(test, fuzzing))]
 use std::ops::RangeFull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -563,34 +562,32 @@ impl WriteTransaction {
         println!("Tracker page");
         println!("{tracker:?}");
 
-        let table_allocators = self
-            .tables
+        let mut table_pages = vec![];
+        self.tables
             .lock()
             .unwrap()
             .table_tree
-            .all_referenced_pages()
+            .visit_all_pages(|path| {
+                table_pages.push(path.page_number());
+                Ok(())
+            })
             .unwrap();
-        let mut table_pages = vec![];
-        for (i, allocator) in table_allocators.iter().enumerate() {
-            allocator.get_allocated_pages(i.try_into().unwrap(), &mut table_pages);
-        }
         println!("Tables");
         for p in table_pages {
             all_allocated.remove(&p);
             println!("{p:?}");
         }
 
-        let system_table_allocators = self
-            .system_tables
+        let mut system_table_pages = vec![];
+        self.system_tables
             .lock()
             .unwrap()
             .table_tree
-            .all_referenced_pages()
+            .visit_all_pages(|path| {
+                system_table_pages.push(path.page_number());
+                Ok(())
+            })
             .unwrap();
-        let mut system_table_pages = vec![];
-        for (i, allocator) in system_table_allocators.iter().enumerate() {
-            allocator.get_allocated_pages(i.try_into().unwrap(), &mut system_table_pages);
-        }
         println!("System tables");
         for p in system_table_pages {
             all_allocated.remove(&p);
@@ -837,31 +834,51 @@ impl WriteTransaction {
         //    and new roots
         // 3) update the system tree to remove invalid persistent savepoints.
 
-        let old_table_tree = TableTreeMut::new(
-            savepoint.get_user_root(),
+        let old_system_tree = TableTree::new(
+            savepoint.get_system_root(),
+            PageHint::None,
             self.transaction_guard.clone(),
             self.mem.clone(),
-            self.freed_pages.clone(),
-        );
-        // TODO: traversing these can be very slow in a large database. Speed this up.
-        let current_root_pages = self
-            .tables
-            .lock()
-            .unwrap()
-            .table_tree
-            .all_referenced_pages()?;
-        let old_root_pages = old_table_tree.all_referenced_pages()?;
+        )?;
+        let old_freed_tree: Btree<FreedTableKey, FreedPageList<'static>> = Btree::new(
+            savepoint.get_freed_root(),
+            PageHint::None,
+            self.transaction_guard.clone(),
+            self.mem.clone(),
+        )?;
+
+        // Pages which are part of the system and freed trees in the savepoint, should be freed
+        // even after the savepoint is restored, because the system and freed trees only roll
+        // forward
+        let mut old_system_and_freed_pages = HashSet::new();
+        old_system_tree.visit_all_pages(|path| {
+            old_system_and_freed_pages.insert(path.page_number());
+            Ok(())
+        })?;
+        old_freed_tree.visit_all_pages(|path| {
+            old_system_and_freed_pages.insert(path.page_number());
+            Ok(())
+        })?;
 
         // 1) restore the table tree
-        self.tables.lock().unwrap().table_tree = TableTreeMut::new(
-            savepoint.get_user_root(),
-            self.transaction_guard.clone(),
-            self.mem.clone(),
-            self.freed_pages.clone(),
-        );
+        {
+            self.tables.lock().unwrap().table_tree = TableTreeMut::new(
+                savepoint.get_user_root(),
+                self.transaction_guard.clone(),
+                self.mem.clone(),
+                self.freed_pages.clone(),
+            );
+        }
 
-        // 1a) filter any pages referenced by the old data root to bring them back to the committed state
-        let mut txn_id = savepoint.get_transaction_id().raw_id();
+        // 1a) purge all transactions that happened after the savepoint from freed tree,
+        // except pages from the old system or freed tree in the savepoint. Those still need to be
+        // freed, since the system tree only rolls forward, never back. This brings all pages in the
+        // old data root back to the committed state
+        // This operation will also leak everything else that was allocated since the savepoint,
+        // but we fix that below -- noting that all the system trees that existed between the savepoint
+        // and now which might be referenced by other savepoints will become unreachable, since those
+        // savepoints are invalidated by this restoration
+        let mut txn_id = savepoint.get_transaction_id().next().raw_id();
         let mut freed_tree = self.freed_tree.lock().unwrap();
         loop {
             let lower = FreedTableKey {
@@ -887,7 +904,8 @@ impl WriteTransaction {
                 let item = entry?;
                 for i in 0..item.value().len() {
                     let p = item.value().get(i);
-                    if !old_root_pages[p.region as usize].is_allocated(p.page_index, p.page_order) {
+                    // Keep the old system and freed tree pages, but purge anything else
+                    if old_system_and_freed_pages.contains(&p) {
                         pending_pages.push(p);
                     }
                 }
@@ -917,17 +935,74 @@ impl WriteTransaction {
             txn_id += 1;
         }
 
+        let mut current_system_and_freed_pages = HashSet::new();
+        self.system_tables
+            .lock()
+            .unwrap()
+            .table_tree
+            .visit_all_pages(|path| {
+                current_system_and_freed_pages.insert(path.page_number());
+                Ok(())
+            })?;
+        freed_tree.visit_all_pages(|path| {
+            current_system_and_freed_pages.insert(path.page_number());
+            Ok(())
+        })?;
+
+        let mut old_allocators: Vec<BuddyAllocator> = savepoint
+            .get_regional_allocators()
+            .iter()
+            .map(|data| BuddyAllocator::from_savepoint_state(data))
+            .collect();
+
+        // Find the oldest transaction in the current freed tree, for use below
+        {
+            let oldest_unprocessed_transaction =
+                if let Some(entry) = freed_tree.range::<RangeFull, FreedTableKey>(&(..))?.next() {
+                    entry?.key().transaction_id
+                } else {
+                    self.transaction_id.raw_id()
+                };
+
+            let lookup_key = FreedTableKey {
+                transaction_id: oldest_unprocessed_transaction,
+                pagination_id: 0,
+            };
+
+            // Replay all finalized frees into the old allocator state to ensure that a page which
+            // was pending free, freed, and then reallocated does not leak
+            for entry in old_freed_tree.range(&(..lookup_key))? {
+                let item = entry?;
+                let pages: FreedPageList = item.value();
+                for i in 0..pages.len() {
+                    let page = pages.get(i);
+                    assert!(old_allocators[page.region as usize]
+                        .is_allocated(page.page_index, page.page_order));
+                    old_allocators[page.region as usize].free(page.page_index, page.page_order);
+                }
+            }
+        }
+
         // 2) free all pages that became unreachable
         let mut freed_pages = self.freed_pages.lock().unwrap();
-        for i in 0..current_root_pages.len() {
-            let mut pages = vec![];
-            current_root_pages[i].difference(i.try_into().unwrap(), &old_root_pages[i], &mut pages);
-            for page in pages {
-                if self.mem.uncommitted(page) {
-                    self.mem.free(page);
-                } else {
-                    freed_pages.push(page);
-                }
+        let mut already_awaiting_free: HashSet<PageNumber> = freed_pages.iter().copied().collect();
+        already_awaiting_free.extend(self.post_commit_frees.lock().unwrap().iter().copied());
+        let to_free = self.mem.pages_allocated_since_raw_state(&old_allocators);
+        for page in to_free {
+            if already_awaiting_free.contains(&page) {
+                // Make sure that we don't double free something that is already going to be freed
+                continue;
+            }
+            if current_system_and_freed_pages.contains(&page) {
+                // Don't free pages which are part of the current system or freed tree, even though
+                // these pages are new. Again this is because these trees only move forward;
+                // never backwards as part of a savepoint restore
+                continue;
+            }
+            if self.mem.uncommitted(page) {
+                self.mem.free(page);
+            } else {
+                freed_pages.push(page);
             }
         }
         drop(freed_pages);

@@ -21,6 +21,5 @@ pub use savepoint::Savepoint;
 pub(crate) use savepoint::SerializedSavepoint;
 
 pub(super) use base::{PageImpl, PageMut};
-pub(super) use buddy_allocator::BuddyAllocator;
-pub(super) use region::new_allocators;
+pub(crate) use buddy_allocator::BuddyAllocator;
 pub(super) use xxh3::hash128_with_seed;
