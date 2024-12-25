@@ -202,6 +202,43 @@ impl BuddyAllocator {
         free_pages
     }
 
+    // Inverse of make_state_for_savepoint()
+    pub(crate) fn from_savepoint_state(data: &[u8]) -> Self {
+        let mut offset = 0;
+        let max_order = data[offset];
+        offset += 1;
+        let len = u32::from_le_bytes(
+            data[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        );
+        offset += size_of::<u32>();
+
+        let mut data_start = offset + size_of::<u32>() * (max_order as usize + 1);
+        let mut allocated_sets = vec![];
+        for _ in 0..=max_order {
+            let data_end = u32::from_le_bytes(
+                data[offset..(offset + size_of::<u32>())]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            offset += size_of::<u32>();
+            allocated_sets.push(U64GroupedBitmap::from_bytes(&data[data_start..data_end]));
+            data_start = data_end;
+        }
+        assert_eq!(data_start, data.len());
+
+        let mut result = Self::new(len, allocated_sets[0].capacity());
+
+        for (order, allocated) in allocated_sets.iter().enumerate() {
+            for page_number in allocated.iter() {
+                result.record_alloc(page_number, order.try_into().unwrap());
+            }
+        }
+
+        result
+    }
+
     // Reduced state for savepoint, which includes only the list of allocated pages
     // Format:
     // 1 byte: max order
@@ -246,7 +283,6 @@ impl BuddyAllocator {
         }
     }
 
-    #[cfg(any(test, fuzzing))]
     pub(crate) fn get_allocated_pages(&self, region: u32, output: &mut Vec<PageNumber>) {
         for order in 0..=self.max_order {
             let allocated = self.get_order_allocated(order);
@@ -610,6 +646,24 @@ mod test {
             allocator.free(page, order);
         }
         assert_eq!(allocator.count_allocated_pages(), 0);
+    }
+
+    #[test]
+    fn make_savepoint_state() {
+        let num_pages = 256;
+        let mut allocator = BuddyAllocator::new(num_pages, num_pages);
+
+        // Allocate some arbitrary stuff
+        allocator.record_alloc(7, 0);
+        allocator.alloc(0);
+        allocator.alloc(1);
+        allocator.alloc(3);
+        allocator.alloc(0);
+        allocator.alloc(0);
+
+        let allocator2 =
+            BuddyAllocator::from_savepoint_state(&allocator.make_state_for_savepoint());
+        assert_eq!(allocator.to_vec(), allocator2.to_vec());
     }
 
     #[test]

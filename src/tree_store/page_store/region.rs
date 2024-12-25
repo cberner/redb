@@ -112,19 +112,6 @@ impl RegionTracker {
     }
 }
 
-pub(crate) fn new_allocators(layout: DatabaseLayout) -> Vec<BuddyAllocator> {
-    let mut result = vec![];
-    for i in 0..layout.num_regions() {
-        let region_layout = layout.region_layout(i);
-        let allocator = BuddyAllocator::new(
-            region_layout.num_pages(),
-            layout.full_region_layout().num_pages(),
-        );
-        result.push(allocator);
-    }
-    result
-}
-
 pub(super) struct Allocators {
     pub(super) region_tracker: RegionTracker,
     pub(super) region_allocators: Vec<BuddyAllocator>,

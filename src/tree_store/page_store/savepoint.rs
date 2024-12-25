@@ -29,7 +29,6 @@ pub struct Savepoint {
     // are not freed
     transaction_id: TransactionId,
     user_root: Option<BtreeHeader>,
-    // For future use. This is not used in the restoration protocol.
     system_root: Option<BtreeHeader>,
     freed_root: Option<BtreeHeader>,
     regional_allocators: Vec<Vec<u8>>,
@@ -76,6 +75,18 @@ impl Savepoint {
 
     pub(crate) fn get_user_root(&self) -> Option<BtreeHeader> {
         self.user_root
+    }
+
+    pub(crate) fn get_system_root(&self) -> Option<BtreeHeader> {
+        self.system_root
+    }
+
+    pub(crate) fn get_freed_root(&self) -> Option<BtreeHeader> {
+        self.freed_root
+    }
+
+    pub(crate) fn get_regional_allocators(&self) -> &Vec<Vec<u8>> {
+        &self.regional_allocators
     }
 
     pub(crate) fn db_address(&self) -> *const TransactionTracker {
@@ -147,6 +158,8 @@ impl<'a> SerializedSavepoint<'a> {
                 .to_le_bytes(),
         );
 
+        // TODO: this seems like it is going to fail on databases with > 3GiB of regional allocators
+        // since that is the max size of a single stored value
         for region in &savepoint.regional_allocators {
             result.extend(region);
         }

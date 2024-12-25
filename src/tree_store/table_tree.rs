@@ -5,7 +5,6 @@ use crate::multimap_table::{
 };
 use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
 use crate::tree_store::btree_base::BtreeHeader;
-use crate::tree_store::page_store::{new_allocators, BuddyAllocator};
 use crate::tree_store::{
     Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageHint, PageNumber, PagePath,
     RawBtree, TableType, TransactionalMemory,
@@ -196,6 +195,7 @@ impl Iterator for TableNameIter {
 
 pub(crate) struct TableTree {
     tree: Btree<&'static str, InternalTableDefinition>,
+    mem: Arc<TransactionalMemory>,
 }
 
 impl TableTree {
@@ -206,7 +206,8 @@ impl TableTree {
         mem: Arc<TransactionalMemory>,
     ) -> Result<Self> {
         Ok(Self {
-            tree: Btree::new(master_root, page_hint, guard, mem)?,
+            tree: Btree::new(master_root, page_hint, guard, mem.clone())?,
+            mem,
         })
     }
 
@@ -258,6 +259,33 @@ impl TableTree {
             },
         )
     }
+
+    pub(crate) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
+    where
+        F: FnMut(&PagePath) -> Result,
+    {
+        // All the pages in the table tree itself
+        self.tree.visit_all_pages(&mut visitor)?;
+
+        // All the normal tables
+        for entry in self.list_tables(TableType::Normal)? {
+            let definition = self
+                .get_table_untyped(&entry, TableType::Normal)
+                .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
+                .unwrap();
+            definition.visit_all_pages(self.mem.clone(), |path| visitor(path))?;
+        }
+
+        for entry in self.list_tables(TableType::Multimap)? {
+            let definition = self
+                .get_table_untyped(&entry, TableType::Multimap)
+                .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
+                .unwrap();
+            definition.visit_all_pages(self.mem.clone(), |path| visitor(path))?;
+        }
+
+        Ok(())
+    }
 }
 
 pub(crate) struct TableTreeMut<'txn> {
@@ -283,18 +311,6 @@ impl<'txn> TableTreeMut<'txn> {
             pending_table_updates: Default::default(),
             freed_pages,
         }
-    }
-
-    pub(crate) fn all_referenced_pages(&self) -> Result<Vec<BuddyAllocator>> {
-        let mut result = new_allocators(self.mem.get_layout());
-
-        self.visit_all_pages(|path| {
-            let page = path.page_number();
-            result[page.region as usize].record_alloc(page.page_index, page.page_order);
-            Ok(())
-        })?;
-
-        Ok(result)
     }
 
     pub(crate) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
