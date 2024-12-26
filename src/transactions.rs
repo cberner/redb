@@ -621,6 +621,26 @@ impl WriteTransaction {
                 println!("{p:?}");
             }
         }
+        {
+            let pages = self.freed_pages.lock().unwrap();
+            if !pages.is_empty() {
+                println!("Pages in in-memory freed_pages");
+                for p in pages.iter() {
+                    println!("{p:?}");
+                    all_allocated.remove(p);
+                }
+            }
+        }
+        {
+            let pages = self.post_commit_frees.lock().unwrap();
+            if !pages.is_empty() {
+                println!("Pages in in-memory post_commit_frees");
+                for p in pages.iter() {
+                    println!("{p:?}");
+                    all_allocated.remove(p);
+                }
+            }
+        }
         if !all_allocated.is_empty() {
             println!("Leaked pages");
             for p in all_allocated {
