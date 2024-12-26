@@ -225,13 +225,14 @@ impl BuddyAllocator {
         result
     }
 
+    // Returns all allocated pages in self, for the given region, that are not allocated in `other`
     pub(crate) fn difference(
         &self,
         region: u32,
         other: &BuddyAllocator,
         output: &mut Vec<PageNumber>,
     ) {
-        let num_pages = other.len();
+        let num_pages = self.len();
 
         for order in 0..=self.max_order {
             let other_allocated = other.get_order_allocated(order);

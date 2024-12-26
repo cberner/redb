@@ -263,7 +263,7 @@ impl<'a, 'b> Iterator for U64GroupedBitmapDifference<'a, 'b> {
         self.data_index += 1;
         while self.data_index < self.data.len() {
             let next = self.data[self.data_index];
-            let exclusion = self.exclusion_data[self.data_index];
+            let exclusion = *self.exclusion_data.get(self.data_index).unwrap_or(&0);
             let next = next & (!exclusion);
             if next != 0 {
                 self.current = next;
