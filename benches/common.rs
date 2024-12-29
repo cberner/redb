@@ -1,5 +1,7 @@
 use redb::{AccessGuard, ReadableTableMetadata, TableDefinition};
-use rocksdb::{Direction, IteratorMode, TransactionDB, TransactionOptions, WriteOptions};
+use rocksdb::{
+    Direction, IteratorMode, OptimisticTransactionDB, OptimisticTransactionOptions, WriteOptions,
+};
 use sanakirja::btree::page_unsized;
 use sanakirja::{Commit, RootDb};
 use std::fs;
@@ -453,11 +455,11 @@ impl BenchIterator for HeedBenchIterator<'_> {
 }
 
 pub struct RocksdbBenchDatabase<'a> {
-    db: &'a TransactionDB,
+    db: &'a OptimisticTransactionDB,
 }
 
 impl<'a> RocksdbBenchDatabase<'a> {
-    pub fn new(db: &'a TransactionDB) -> Self {
+    pub fn new(db: &'a OptimisticTransactionDB) -> Self {
         Self { db }
     }
 }
@@ -473,7 +475,7 @@ impl<'a> BenchDatabase for RocksdbBenchDatabase<'a> {
     fn write_transaction(&self) -> Self::W<'_> {
         let mut write_opt = WriteOptions::new();
         write_opt.set_sync(true);
-        let mut txn_opt = TransactionOptions::new();
+        let mut txn_opt = OptimisticTransactionOptions::new();
         txn_opt.set_snapshot(true);
         let txn = self.db.transaction_opt(&write_opt, &txn_opt);
         RocksdbBenchWriteTransaction { txn }
@@ -486,7 +488,7 @@ impl<'a> BenchDatabase for RocksdbBenchDatabase<'a> {
 }
 
 pub struct RocksdbBenchWriteTransaction<'a> {
-    txn: rocksdb::Transaction<'a, TransactionDB>,
+    txn: rocksdb::Transaction<'a, OptimisticTransactionDB>,
 }
 
 impl<'a> BenchWriteTransaction for RocksdbBenchWriteTransaction<'a> {
@@ -502,7 +504,7 @@ impl<'a> BenchWriteTransaction for RocksdbBenchWriteTransaction<'a> {
 }
 
 pub struct RocksdbBenchInserter<'a> {
-    txn: &'a rocksdb::Transaction<'a, TransactionDB>,
+    txn: &'a rocksdb::Transaction<'a, OptimisticTransactionDB>,
 }
 
 impl BenchInserter for RocksdbBenchInserter<'_> {
@@ -516,7 +518,7 @@ impl BenchInserter for RocksdbBenchInserter<'_> {
 }
 
 pub struct RocksdbBenchReadTransaction<'db> {
-    snapshot: rocksdb::SnapshotWithThreadMode<'db, TransactionDB>,
+    snapshot: rocksdb::SnapshotWithThreadMode<'db, OptimisticTransactionDB>,
 }
 
 impl<'db> BenchReadTransaction for RocksdbBenchReadTransaction<'db> {
@@ -530,7 +532,7 @@ impl<'db> BenchReadTransaction for RocksdbBenchReadTransaction<'db> {
 }
 
 pub struct RocksdbBenchReader<'db, 'txn> {
-    snapshot: &'txn rocksdb::SnapshotWithThreadMode<'db, TransactionDB>,
+    snapshot: &'txn rocksdb::SnapshotWithThreadMode<'db, OptimisticTransactionDB>,
 }
 
 impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
@@ -555,7 +557,7 @@ impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
 }
 
 pub struct RocksdbBenchIterator<'a> {
-    iter: rocksdb::DBIteratorWithThreadMode<'a, TransactionDB>,
+    iter: rocksdb::DBIteratorWithThreadMode<'a, OptimisticTransactionDB>,
 }
 
 impl BenchIterator for RocksdbBenchIterator<'_> {
