@@ -308,7 +308,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
     }
     let size = database_size(path);
     println!(
-        "{}: Final file size {}ms",
+        "{}: Final file size {}",
         T::db_type_name(),
         ResultType::SizeInBytes(size)
     );
