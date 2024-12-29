@@ -23,6 +23,11 @@ pub trait BenchDatabase {
     fn write_transaction(&self) -> Self::W<'_>;
 
     fn read_transaction(&self) -> Self::R<'_>;
+
+    // Returns a boolean indicating whether compaction is supported
+    fn compact(&mut self) -> bool {
+        false
+    }
 }
 
 pub trait BenchWriteTransaction {
@@ -77,12 +82,12 @@ pub trait BenchIterator {
 }
 
 pub struct RedbBenchDatabase<'a> {
-    db: &'a redb::Database,
+    db: &'a mut redb::Database,
 }
 
 impl<'a> RedbBenchDatabase<'a> {
     #[allow(dead_code)]
-    pub fn new(db: &'a redb::Database) -> Self {
+    pub fn new(db: &'a mut redb::Database) -> Self {
         RedbBenchDatabase { db }
     }
 }
@@ -103,6 +108,11 @@ impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
     fn read_transaction(&self) -> Self::R<'_> {
         let txn = self.db.begin_read().unwrap();
         RedbBenchReadTransaction { txn }
+    }
+
+    fn compact(&mut self) -> bool {
+        self.db.compact().unwrap();
+        true
     }
 }
 
