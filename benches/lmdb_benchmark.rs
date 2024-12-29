@@ -394,7 +394,7 @@ fn main() {
         opts.set_block_based_table_factory(&bb);
         opts.create_if_missing(true);
 
-        let db = rocksdb::TransactionDB::open(&opts, &Default::default(), tmpfile.path()).unwrap();
+        let db = rocksdb::OptimisticTransactionDB::open(&opts, tmpfile.path()).unwrap();
         let table = RocksdbBenchDatabase::new(&db);
         benchmark(table, tmpfile.path())
     };

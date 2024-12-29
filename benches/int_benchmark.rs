@@ -79,7 +79,7 @@ fn main() {
 
     let rocksdb_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
-        let db = rocksdb::TransactionDB::open_default(tmpfile.path()).unwrap();
+        let db = rocksdb::OptimisticTransactionDB::open_default(tmpfile.path()).unwrap();
         let table = RocksdbBenchDatabase::new(&db);
         benchmark(table)
     };
