@@ -73,10 +73,10 @@ fn make_rng_shards(shards: usize, elements: usize) -> Vec<fastrand::Rng> {
     rngs
 }
 
-fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, ResultType)> {
+fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String, ResultType)> {
     let mut rng = make_rng();
     let mut results = Vec::new();
-    let db = Arc::new(db);
+    let mut db = Arc::new(db);
 
     let start = Instant::now();
     let mut txn = db.write_transaction();
@@ -285,6 +285,38 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T) -> Vec<(String, ResultType)>
     );
     results.push(("removals".to_string(), ResultType::Duration(duration)));
 
+    let start = Instant::now();
+    if Arc::get_mut(&mut db).unwrap().compact() {
+        let end = Instant::now();
+        let duration = end - start;
+        println!(
+            "{}: Compacted in {}ms",
+            T::db_type_name(),
+            duration.as_millis()
+        );
+        results.push(("compaction".to_string(), ResultType::Duration(duration)));
+    } else {
+        results.push(("compaction".to_string(), ResultType::NA));
+    }
+    {
+        let mut txn = db.write_transaction();
+        let mut inserter = txn.get_inserter();
+        let (key, value) = gen_pair(&mut rng);
+        inserter.insert(&key, &value).unwrap();
+        drop(inserter);
+        txn.commit().unwrap();
+    }
+    let size = database_size(path);
+    println!(
+        "{}: Final file size {}ms",
+        T::db_type_name(),
+        ResultType::SizeInBytes(size)
+    );
+    results.push((
+        "size after bench".to_string(),
+        ResultType::SizeInBytes(size),
+    ));
+
     results
 }
 
@@ -336,22 +368,8 @@ fn main() {
             .set_cache_size(CACHE_SIZE)
             .create(tmpfile.path())
             .unwrap();
-        let table = RedbBenchDatabase::new(&db);
-        let mut results = benchmark(table);
-
-        let start = Instant::now();
-        db.compact().unwrap();
-        let end = Instant::now();
-        let duration = end - start;
-        println!("redb: Compacted in {}ms", duration.as_millis());
-        results.push(("compaction".to_string(), ResultType::Duration(duration)));
-
-        let size = database_size(tmpfile.path());
-        results.push((
-            "size after bench".to_string(),
-            ResultType::SizeInBytes(size),
-        ));
-        results
+        let table = RedbBenchDatabase::new(&mut db);
+        benchmark(table, tmpfile.path())
     };
 
     let lmdb_results = {
@@ -363,14 +381,7 @@ fn main() {
                 .unwrap()
         };
         let table = HeedBenchDatabase::new(&env);
-        let mut results = benchmark(table);
-        results.push(("compaction".to_string(), ResultType::NA));
-        let size = database_size(tmpfile.path());
-        results.push((
-            "size after bench".to_string(),
-            ResultType::SizeInBytes(size),
-        ));
-        results
+        benchmark(table, tmpfile.path())
     };
 
     let rocksdb_results = {
@@ -385,14 +396,7 @@ fn main() {
 
         let db = rocksdb::TransactionDB::open(&opts, &Default::default(), tmpfile.path()).unwrap();
         let table = RocksdbBenchDatabase::new(&db);
-        let mut results = benchmark(table);
-        results.push(("compaction".to_string(), ResultType::NA));
-        let size = database_size(tmpfile.path());
-        results.push((
-            "size after bench".to_string(),
-            ResultType::SizeInBytes(size),
-        ));
-        results
+        benchmark(table, tmpfile.path())
     };
 
     let sled_results = {
@@ -405,14 +409,7 @@ fn main() {
             .unwrap();
 
         let table = SledBenchDatabase::new(&db, tmpfile.path());
-        let mut results = benchmark(table);
-        results.push(("compaction".to_string(), ResultType::NA));
-        let size = database_size(tmpfile.path());
-        results.push((
-            "size after bench".to_string(),
-            ResultType::SizeInBytes(size),
-        ));
-        results
+        benchmark(table, tmpfile.path())
     };
 
     let sanakirja_results = {
@@ -420,14 +417,7 @@ fn main() {
         fs::remove_file(tmpfile.path()).unwrap();
         let db = sanakirja::Env::new(tmpfile.path(), 4096 * 1024 * 1024, 2).unwrap();
         let table = SanakirjaBenchDatabase::new(&db);
-        let mut results = benchmark(table);
-        results.push(("compaction".to_string(), ResultType::NA));
-        let size = database_size(tmpfile.path());
-        results.push((
-            "size after bench".to_string(),
-            ResultType::SizeInBytes(size),
-        ));
-        results
+        benchmark(table, tmpfile.path())
     };
 
     fs::remove_dir_all(&tmpdir).unwrap();
