@@ -485,6 +485,11 @@ impl<'a> BenchDatabase for RocksdbBenchDatabase<'a> {
         let snapshot = self.db.snapshot();
         RocksdbBenchReadTransaction { snapshot }
     }
+
+    fn compact(&mut self) -> bool {
+        self.db.compact_range::<&[u8], &[u8]>(None, None);
+        true
+    }
 }
 
 pub struct RocksdbBenchWriteTransaction<'a> {
