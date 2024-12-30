@@ -1,5 +1,13 @@
 # redb - Changelog
 
+## 2.4.0 - 2024-12-30
+* Add `Database::cache_stats()`
+* Fix `open()` and `create()` to return `InvalidData` when they are called on a database file
+  that is not a valid redb database
+* Significantly speed up `restore_savepoint()`. The time is takes now scales with the change delta
+  since the savepoint was captured, rather than the size of the database file
+* `DatabaseStats::fragmented_bytes()` is now more accurate
+
 ## 2.3.0 - 2024-12-10
 * Add `WriteTransaction::set_two_phase_commit()`
 * Add `WriteTransaction::set_quick_repair()` which enables a faster repair mechanism at the cost of
