@@ -1,3 +1,4 @@
+use heed::{CompactionOption, EnvInfo};
 use redb::{AccessGuard, ReadableTableMetadata, TableDefinition};
 use rocksdb::{
     Direction, IteratorMode, OptimisticTransactionDB, OptimisticTransactionOptions, WriteOptions,
@@ -334,20 +335,21 @@ impl<'a> BenchInserter for SledBenchInserter<'a> {
     }
 }
 
-pub struct HeedBenchDatabase<'a> {
-    env: &'a heed::Env,
+pub struct HeedBenchDatabase {
+    env: Option<heed::Env>,
     db: heed::Database<heed::types::Bytes, heed::types::Bytes>,
 }
 
-impl<'a> HeedBenchDatabase<'a> {
-    pub fn new(env: &'a heed::Env) -> Self {
+impl HeedBenchDatabase {
+    pub fn new(env: heed::Env) -> Self {
         let mut tx = env.write_txn().unwrap();
         let db = env.create_database(&mut tx, None).unwrap();
-        Self { env, db }
+        tx.commit().unwrap();
+        Self { env: Some(env), db }
     }
 }
 
-impl<'a> BenchDatabase for HeedBenchDatabase<'a> {
+impl BenchDatabase for HeedBenchDatabase {
     type W<'db> = HeedBenchWriteTransaction<'db> where Self: 'db;
     type R<'db> = HeedBenchReadTransaction<'db> where Self: 'db;
 
@@ -356,13 +358,47 @@ impl<'a> BenchDatabase for HeedBenchDatabase<'a> {
     }
 
     fn write_transaction(&self) -> Self::W<'_> {
-        let txn = self.env.write_txn().unwrap();
+        let env = self.env.as_ref().unwrap();
+        let txn = env.write_txn().unwrap();
         Self::W { db: self.db, txn }
     }
 
     fn read_transaction(&self) -> Self::R<'_> {
-        let txn = self.env.read_txn().unwrap();
+        let env = self.env.as_ref().unwrap();
+        let txn = env.read_txn().unwrap();
         Self::R { db: self.db, txn }
+    }
+
+    fn compact(&mut self) -> bool {
+        // We take the env to be able to compact and reopen it after compaction.
+        let env = self.env.take().unwrap();
+        let EnvInfo { map_size, .. } = env.info();
+        let path = env.path().to_owned();
+        let file = env
+            .copy_to_file(path.join("data2.mdb"), CompactionOption::Enabled)
+            .unwrap();
+        drop(file);
+
+        // We close the env
+        env.prepare_for_closing().wait();
+
+        // We replace the previous data file with the new, compacted, one.
+        fs::rename(path.join("data2.mdb"), path.join("data.mdb")).unwrap();
+
+        // We reopen the env and the associated database
+        let env = unsafe {
+            heed::EnvOpenOptions::new()
+                .map_size(map_size)
+                .open(path)
+                .unwrap()
+        };
+
+        let tx = env.read_txn().unwrap();
+        self.db = env.open_database(&tx, None).unwrap().unwrap();
+        drop(tx);
+        self.env = Some(env);
+
+        true
     }
 }
 
