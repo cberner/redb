@@ -331,9 +331,9 @@ fn database_size(path: &Path) -> u64 {
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ResultType {
-    NA,
     Duration(Duration),
     SizeInBytes(u64),
+    NA,
 }
 
 impl std::fmt::Display for ResultType {
