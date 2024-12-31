@@ -373,15 +373,15 @@ fn main() {
     };
 
     let lmdb_results = {
-        let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
+        let tempdir: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
         let env = unsafe {
             heed::EnvOpenOptions::new()
                 .map_size(4096 * 1024 * 1024)
-                .open(tmpfile.path())
+                .open(tempdir.path())
                 .unwrap()
         };
-        let table = HeedBenchDatabase::new(&env);
-        benchmark(table, tmpfile.path())
+        let table = HeedBenchDatabase::new(env);
+        benchmark(table, tempdir.path())
     };
 
     let rocksdb_results = {

@@ -73,7 +73,7 @@ fn main() {
                 .open(tmpfile.path())
                 .unwrap()
         };
-        let table = HeedBenchDatabase::new(&env);
+        let table = HeedBenchDatabase::new(env);
         benchmark(table)
     };
 
