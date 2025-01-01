@@ -416,7 +416,7 @@ fn main() {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
         fs::remove_file(tmpfile.path()).unwrap();
         let db = sanakirja::Env::new(tmpfile.path(), 4096 * 1024 * 1024, 2).unwrap();
-        let table = SanakirjaBenchDatabase::new(&db);
+        let table = SanakirjaBenchDatabase::new(&db, &tmpdir);
         benchmark(table, tmpfile.path())
     };
 
