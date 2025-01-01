@@ -381,6 +381,7 @@ impl BenchDatabase for HeedBenchDatabase {
         let file = env
             .copy_to_file(path.join("data2.mdb"), CompactionOption::Enabled)
             .unwrap();
+        file.sync_all().unwrap();
         drop(file);
 
         // We close the env
