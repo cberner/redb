@@ -8,7 +8,7 @@ use sanakirja::{Commit, RootDb};
 use std::fs;
 use std::fs::File;
 use std::ops::Bound;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[allow(dead_code)]
 const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
@@ -360,7 +360,11 @@ impl BenchDatabase for HeedBenchDatabase {
     fn write_transaction(&self) -> Self::W<'_> {
         let env = self.env.as_ref().unwrap();
         let txn = env.write_txn().unwrap();
-        Self::W { db: self.db, txn }
+        Self::W {
+            db: self.db,
+            db_dir: self.env.as_ref().unwrap().path().to_path_buf(),
+            txn,
+        }
     }
 
     fn read_transaction(&self) -> Self::R<'_> {
@@ -404,6 +408,8 @@ impl BenchDatabase for HeedBenchDatabase {
 
 pub struct HeedBenchWriteTransaction<'db> {
     db: heed::Database<heed::types::Bytes, heed::types::Bytes>,
+    #[allow(dead_code)]
+    db_dir: PathBuf,
     txn: heed::RwTxn<'db>,
 }
 
@@ -418,7 +424,21 @@ impl<'db> BenchWriteTransaction for HeedBenchWriteTransaction<'db> {
     }
 
     fn commit(self) -> Result<(), ()> {
-        self.txn.commit().map_err(|_| ())
+        let result = self.txn.commit().map_err(|_| ());
+        #[cfg(target_os = "macos")]
+        {
+            // Workaround for broken durability on MacOS in lmdb
+            // See: https://github.com/cberner/redb/pull/928#issuecomment-2567032808
+            for entry in fs::read_dir(self.db_dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.path().is_file() {
+                    let file = File::open(entry.path()).unwrap();
+                    file.sync_all().unwrap();
+                }
+            }
+        }
+
+        result
     }
 }
 
@@ -514,7 +534,10 @@ impl<'a> BenchDatabase for RocksdbBenchDatabase<'a> {
         let mut txn_opt = OptimisticTransactionOptions::new();
         txn_opt.set_snapshot(true);
         let txn = self.db.transaction_opt(&write_opt, &txn_opt);
-        RocksdbBenchWriteTransaction { txn }
+        RocksdbBenchWriteTransaction {
+            txn,
+            db_dir: self.db.path().to_path_buf(),
+        }
     }
 
     fn read_transaction(&self) -> Self::R<'_> {
@@ -530,6 +553,8 @@ impl<'a> BenchDatabase for RocksdbBenchDatabase<'a> {
 
 pub struct RocksdbBenchWriteTransaction<'a> {
     txn: rocksdb::Transaction<'a, OptimisticTransactionDB>,
+    #[allow(dead_code)]
+    db_dir: PathBuf,
 }
 
 impl<'a> BenchWriteTransaction for RocksdbBenchWriteTransaction<'a> {
@@ -540,7 +565,21 @@ impl<'a> BenchWriteTransaction for RocksdbBenchWriteTransaction<'a> {
     }
 
     fn commit(self) -> Result<(), ()> {
-        self.txn.commit().map_err(|_| ())
+        let result = self.txn.commit().map_err(|_| ());
+        #[cfg(target_os = "macos")]
+        {
+            // Workaround for broken durability on MacOS in rocksdb
+            // See: https://github.com/cberner/redb/pull/928#issuecomment-2567032808
+            for entry in fs::read_dir(self.db_dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.path().is_file() {
+                    let file = File::open(entry.path()).unwrap();
+                    file.sync_all().unwrap();
+                }
+            }
+        }
+
+        result
     }
 }
 
@@ -614,11 +653,12 @@ impl BenchIterator for RocksdbBenchIterator<'_> {
 
 pub struct SanakirjaBenchDatabase<'a> {
     db: &'a sanakirja::Env,
+    db_dir: PathBuf,
 }
 
 impl<'a> SanakirjaBenchDatabase<'a> {
     #[allow(dead_code)]
-    pub fn new(db: &'a sanakirja::Env) -> Self {
+    pub fn new(db: &'a sanakirja::Env, path: &'_ Path) -> Self {
         let mut txn = sanakirja::Env::mut_txn_begin(db).unwrap();
         // XXX: There's no documentation on why this method is unsafe, so let's just hope we upheld the requirements for it to be safe!
         let table = unsafe {
@@ -627,7 +667,10 @@ impl<'a> SanakirjaBenchDatabase<'a> {
         };
         txn.set_root(0, table.db.into());
         txn.commit().unwrap();
-        Self { db }
+        Self {
+            db,
+            db_dir: path.to_path_buf(),
+        }
     }
 }
 
@@ -641,7 +684,10 @@ impl<'a> BenchDatabase for SanakirjaBenchDatabase<'a> {
 
     fn write_transaction(&self) -> Self::W<'_> {
         let txn = sanakirja::Env::mut_txn_begin(self.db).unwrap();
-        SanakirjaBenchWriteTransaction { txn }
+        SanakirjaBenchWriteTransaction {
+            txn,
+            db_dir: self.db_dir.clone(),
+        }
     }
 
     fn read_transaction(&self) -> Self::R<'_> {
@@ -652,6 +698,8 @@ impl<'a> BenchDatabase for SanakirjaBenchDatabase<'a> {
 
 pub struct SanakirjaBenchWriteTransaction<'db> {
     txn: sanakirja::MutTxn<&'db sanakirja::Env, ()>,
+    #[allow(dead_code)]
+    db_dir: PathBuf,
 }
 
 impl<'db> BenchWriteTransaction for SanakirjaBenchWriteTransaction<'db> {
@@ -666,7 +714,21 @@ impl<'db> BenchWriteTransaction for SanakirjaBenchWriteTransaction<'db> {
     }
 
     fn commit(self) -> Result<(), ()> {
-        self.txn.commit().map_err(|_| ())
+        let result = self.txn.commit().map_err(|_| ());
+        #[cfg(target_os = "macos")]
+        {
+            // Workaround for presumably broken durability on MacOS
+            // See: https://github.com/cberner/redb/pull/928#issuecomment-2567032808
+            for entry in fs::read_dir(self.db_dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.path().is_file() {
+                    let file = File::open(entry.path()).unwrap();
+                    file.sync_all().unwrap();
+                }
+            }
+        }
+
+        result
     }
 }
 
