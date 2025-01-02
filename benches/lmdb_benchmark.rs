@@ -285,6 +285,11 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
     );
     results.push(("removals".to_string(), ResultType::Duration(duration)));
 
+    let uncompacted_size = database_size(path);
+    results.push((
+        "uncompacted size".to_string(),
+        ResultType::SizeInBytes(uncompacted_size),
+    ));
     let start = Instant::now();
     if Arc::get_mut(&mut db).unwrap().compact() {
         let end = Instant::now();
@@ -294,28 +299,22 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
             T::db_type_name(),
             duration.as_millis()
         );
-        results.push(("compaction".to_string(), ResultType::Duration(duration)));
+        {
+            let mut txn = db.write_transaction();
+            let mut inserter = txn.get_inserter();
+            let (key, value) = gen_pair(&mut rng);
+            inserter.insert(&key, &value).unwrap();
+            drop(inserter);
+            txn.commit().unwrap();
+        }
+        let compacted_size = database_size(path);
+        results.push((
+            "compacted size".to_string(),
+            ResultType::SizeInBytes(compacted_size),
+        ));
     } else {
-        results.push(("compaction".to_string(), ResultType::NA));
+        results.push(("compacted size".to_string(), ResultType::NA));
     }
-    {
-        let mut txn = db.write_transaction();
-        let mut inserter = txn.get_inserter();
-        let (key, value) = gen_pair(&mut rng);
-        inserter.insert(&key, &value).unwrap();
-        drop(inserter);
-        txn.commit().unwrap();
-    }
-    let size = database_size(path);
-    println!(
-        "{}: Final file size {}",
-        T::db_type_name(),
-        ResultType::SizeInBytes(size)
-    );
-    results.push((
-        "size after bench".to_string(),
-        ResultType::SizeInBytes(size),
-    ));
 
     results
 }
