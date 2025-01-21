@@ -541,6 +541,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     {
         let iter = self.range(&range)?;
         let mut freed = vec![];
+        // Do not modify the existing tree, because we're iterating over it concurrently with the removals
+        // TODO: optimize this to iterate and remove at the same time
         let mut operation: MutateHelper<'_, '_, K, V> =
             MutateHelper::new_do_not_modify(&mut self.root, self.mem.clone(), &mut freed);
         for entry in iter {
@@ -549,7 +551,12 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                 assert!(operation.delete(&entry.key())?.is_some());
             }
         }
-        self.freed_pages.lock().unwrap().extend_from_slice(&freed);
+        let mut freed_pages = self.freed_pages.lock().unwrap();
+        for page in freed {
+            if !self.mem.free_if_uncommitted(page) {
+                freed_pages.push(page);
+            }
+        }
 
         Ok(())
     }
