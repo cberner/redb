@@ -12,9 +12,9 @@ fn main() -> Result<(), Error> {
     let write_txn = db.begin_write()?;
     {
         let mut table = write_txn.open_table(definition)?;
-        table.insert(&0.to_string().as_str(), 0 as u32)?;
+        table.insert(&0.to_string().as_str(), 0_u32)?;
         // The resulting table should have a different "a" value each time this example is run
-        table.insert("a".to_string().as_str(), 0 as u32)?;
+        table.insert("a".to_string().as_str(), 0_u32)?;
     }
     write_txn.commit()?;
 
