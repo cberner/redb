@@ -1,7 +1,7 @@
 use redb::TableHandle;
 use redb::{Database, Error, TableDefinition};
 use std::time::Instant;
-use std::{sync::Arc, thread, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 fn main() -> Result<(), Error> {
     let db = Database::create("my_db.redb")?;
