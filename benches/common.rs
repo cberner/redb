@@ -866,7 +866,7 @@ impl<'a> BenchDatabase for FjallBenchDatabase<'a> {
     }
 
     fn compact(&mut self) -> bool {
-        false
+        true
     }
 }
 
