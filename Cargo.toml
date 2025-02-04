@@ -39,7 +39,7 @@ byte-unit = "=5.0.4"
 fastrand = "2.0.0"
 sled = "0.34.7"
 libc = "0.2.99"
-fjall = "2.5"
+fjall = { version = "2.5", default-features = false, features = ["single_writer_tx", "bloom"] }
 
 # Just benchmarking dependencies, which don't build on wasi
 [target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
