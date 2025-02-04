@@ -852,7 +852,11 @@ impl<'a> BenchDatabase for FjallBenchDatabase<'a> {
     fn write_transaction(&self) -> Self::W<'_> {
         let part = self.db.open_partition("test", Default::default()).unwrap();
         let txn = self.db.write_tx();
-        FjallBenchWriteTransaction { txn, part }
+        FjallBenchWriteTransaction {
+            txn,
+            part,
+            keyspace: self.db,
+        }
     }
 
     fn read_transaction(&self) -> Self::R<'_> {
@@ -903,8 +907,6 @@ impl<'db> BenchReader for FjallBenchReader<'db> {
     }
 
     fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
-        // let iter = self.table.range(key..).unwrap();
-        // FjallBenchIterator { iter }
         let iter = self.txn.range(self.part, key..);
         FjallBenchIterator {
             iter: Box::new(iter),
@@ -932,6 +934,7 @@ impl BenchIterator for FjallBenchIterator {
 }
 
 pub struct FjallBenchWriteTransaction<'db> {
+    keyspace: &'db fjall::TxKeyspace,
     part: fjall::TxPartitionHandle,
     txn: fjall::WriteTransaction<'db>,
 }
@@ -943,12 +946,19 @@ impl<'db> BenchWriteTransaction for FjallBenchWriteTransaction<'db> {
         Self: 'txn;
 
     fn get_inserter(&mut self) -> Self::W<'_> {
-        let FjallBenchWriteTransaction { part, txn } = self;
+        let FjallBenchWriteTransaction {
+            part,
+            txn,
+            keyspace: _,
+        } = self;
         FjallBenchInserter { part, txn }
     }
 
     fn commit(self) -> Result<(), ()> {
-        self.txn.commit().map_err(|_| ())
+        self.txn.commit().map_err(|_| ())?;
+        self.keyspace
+            .persist(fjall::PersistMode::SyncAll)
+            .map_err(|_| ())
     }
 }
 
