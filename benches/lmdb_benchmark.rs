@@ -419,6 +419,20 @@ fn main() {
         benchmark(table, tmpfile.path())
     };
 
+    let fjall_results = {
+        let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
+
+        let mut db = fjall::Config::new(tmpfile.path())
+            .block_cache(Arc::new(fjall::BlockCache::with_capacity_bytes(
+                CACHE_SIZE.try_into().unwrap(),
+            )))
+            .open_transactional()
+            .unwrap();
+
+        let table = FjallBenchDatabase::new(&mut db);
+        benchmark(table, tmpfile.path())
+    };
+
     fs::remove_dir_all(&tmpdir).unwrap();
 
     let mut rows = Vec::new();
@@ -433,6 +447,7 @@ fn main() {
         rocksdb_results,
         sled_results,
         sanakirja_results,
+        fjall_results,
     ];
 
     let mut identified_smallests = vec![vec![false; results.len()]; rows.len()];
@@ -463,7 +478,7 @@ fn main() {
     let mut table = comfy_table::Table::new();
     table.load_preset(comfy_table::presets::ASCII_MARKDOWN);
     table.set_width(100);
-    table.set_header(["", "redb", "lmdb", "rocksdb", "sled", "sanakirja"]);
+    table.set_header(["", "redb", "lmdb", "rocksdb", "sled", "sanakirja", "fjall"]);
     for row in rows {
         table.add_row(row);
     }
