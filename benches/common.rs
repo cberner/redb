@@ -903,7 +903,7 @@ impl<'db> BenchReader for FjallBenchReader<'db> {
         Self: 'out;
 
     fn get<'a>(&'a self, key: &[u8]) -> Option<Self::Output<'a>> {
-        self.txn.get(&self.part, key).unwrap()
+        self.txn.get(self.part, key).unwrap()
     }
 
     fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
@@ -914,7 +914,7 @@ impl<'db> BenchReader for FjallBenchReader<'db> {
     }
 
     fn len(&self) -> u64 {
-        self.txn.len(&self.part).unwrap().try_into().unwrap()
+        self.txn.len(self.part).unwrap().try_into().unwrap()
     }
 }
 
@@ -969,12 +969,12 @@ pub struct FjallBenchInserter<'txn, 'db> {
 
 impl BenchInserter for FjallBenchInserter<'_, '_> {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
-        self.txn.insert(&self.part, key, value);
+        self.txn.insert(self.part, key, value);
         Ok(())
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
-        self.txn.remove(&self.part, key);
+        self.txn.remove(self.part, key);
         Ok(())
     }
 }
