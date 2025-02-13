@@ -1188,6 +1188,15 @@ impl TransactionalMemory {
     pub(crate) fn get_page_size(&self) -> usize {
         self.page_size.try_into().unwrap()
     }
+
+    pub(crate) fn get_allocated_since_commit_bytes(&self) -> u64 {
+        let uncommited_pages = self.allocated_since_commit.lock().unwrap();
+        let mut bytes = 0;
+        for uncommited_page in uncommited_pages.iter() {
+            bytes += uncommited_page.page_size_bytes(self.page_size)
+        }
+        bytes
+    }
 }
 
 impl Drop for TransactionalMemory {

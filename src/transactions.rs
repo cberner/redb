@@ -156,6 +156,7 @@ pub struct DatabaseStats {
     pub(crate) metadata_bytes: u64,
     pub(crate) fragmented_bytes: u64,
     pub(crate) page_size: usize,
+    pub(crate) uncommitted_bytes: u64,
 }
 
 impl DatabaseStats {
@@ -198,6 +199,10 @@ impl DatabaseStats {
     /// Number of bytes per page
     pub fn page_size(&self) -> usize {
         self.page_size
+    }
+
+    pub fn uncommitted_bytes(&self) -> u64 {
+        self.uncommitted_bytes
     }
 }
 
@@ -1556,6 +1561,7 @@ impl WriteTransaction {
             metadata_bytes: total_metadata_bytes,
             fragmented_bytes: total_fragmented,
             page_size: self.mem.get_page_size(),
+            uncommitted_bytes: data_tree_stats.uncommitted_bytes(),
         })
     }
 
@@ -1783,5 +1789,33 @@ mod test {
         let db2 = Database::create(tmpfile.path()).unwrap();
         let write_txn = db2.begin_write().unwrap();
         assert!(write_txn.transaction_id > first_txn_id);
+    }
+
+    #[test]
+    fn test_uncommitted_bytes() {
+        let tmp_file = crate::create_tempfile();
+        let db = Database::create(tmp_file.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let written_bytes = write_txn.stats().unwrap();
+            assert_eq!(0, written_bytes.uncommitted_bytes());
+
+            let mut table = write_txn.open_table(X).unwrap();
+            for i in 0..100 {
+                table.insert(&*format!("key-{}", i), &*format!("value-{}", i)).unwrap();
+            }
+
+            let written_bytes = write_txn.stats().unwrap();
+            assert!(written_bytes.uncommitted_bytes() > 0);
+        }
+        write_txn.commit().unwrap();
+
+        let write_txn = db.begin_write().unwrap();
+        {
+            let written_bytes = write_txn.stats().unwrap();
+            assert_eq!(0, written_bytes.uncommitted_bytes());
+        }
+        write_txn.commit().unwrap();
+        drop(db);
     }
 }
