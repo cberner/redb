@@ -557,7 +557,6 @@ impl<'txn> TableTreeMut<'txn> {
         result
     }
 
-    // root_page: the root of the master table
     pub(crate) fn delete_table(
         &mut self,
         name: &str,
