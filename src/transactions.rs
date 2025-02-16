@@ -422,6 +422,46 @@ impl<'db> TableNamespace<'db> {
     }
 
     #[track_caller]
+    fn inner_rename(
+        &mut self,
+        name: &str,
+        new_name: &str,
+        table_type: TableType,
+    ) -> Result<(), TableError> {
+        if let Some(location) = self.open_tables.get(name) {
+            return Err(TableError::TableAlreadyOpen(name.to_string(), location));
+        }
+
+        self.table_tree.rename_table(name, new_name, table_type)
+    }
+
+    #[track_caller]
+    fn rename_table(
+        &mut self,
+        transaction: &WriteTransaction,
+        name: &str,
+        new_name: &str,
+    ) -> Result<(), TableError> {
+        #[cfg(feature = "logging")]
+        debug!("Renaming table: {} to {}", name, new_name);
+        transaction.dirty.store(true, Ordering::Release);
+        self.inner_rename(name, new_name, TableType::Normal)
+    }
+
+    #[track_caller]
+    fn rename_multimap_table(
+        &mut self,
+        transaction: &WriteTransaction,
+        name: &str,
+        new_name: &str,
+    ) -> Result<(), TableError> {
+        #[cfg(feature = "logging")]
+        debug!("Renaming multimap table: {} to {}", name, new_name);
+        transaction.dirty.store(true, Ordering::Release);
+        self.inner_rename(name, new_name, TableType::Multimap)
+    }
+
+    #[track_caller]
     fn inner_delete(&mut self, name: &str, table_type: TableType) -> Result<bool, TableError> {
         if let Some(location) = self.open_tables.get(name) {
             return Err(TableError::TableAlreadyOpen(name.to_string(), location));
@@ -1138,6 +1178,36 @@ impl WriteTransaction {
         length: u64,
     ) {
         self.tables.lock().unwrap().close_table(name, table, length);
+    }
+
+    /// Rename the given table
+    pub fn rename_table(
+        &self,
+        definition: impl TableHandle,
+        new_name: impl TableHandle,
+    ) -> Result<(), TableError> {
+        let name = definition.name().to_string();
+        // Drop the definition so that callers can pass in a `Table` to rename, without getting a TableAlreadyOpen error
+        drop(definition);
+        self.tables
+            .lock()
+            .unwrap()
+            .rename_table(self, &name, new_name.name())
+    }
+
+    /// Rename the given multimap table
+    pub fn rename_multimap_table(
+        &self,
+        definition: impl MultimapTableHandle,
+        new_name: impl MultimapTableHandle,
+    ) -> Result<(), TableError> {
+        let name = definition.name().to_string();
+        // Drop the definition so that callers can pass in a `MultimapTable` to rename, without getting a TableAlreadyOpen error
+        drop(definition);
+        self.tables
+            .lock()
+            .unwrap()
+            .rename_multimap_table(self, &name, new_name.name())
     }
 
     /// Delete the given table
