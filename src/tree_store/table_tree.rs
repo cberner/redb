@@ -557,6 +557,29 @@ impl<'txn> TableTreeMut<'txn> {
         result
     }
 
+    pub(crate) fn rename_table(
+        &mut self,
+        name: &str,
+        new_name: &str,
+        table_type: TableType,
+    ) -> Result<(), TableError> {
+        if let Some(definition) = self.get_table_untyped(name, table_type)? {
+            if self.get_table_untyped(new_name, table_type)?.is_some() {
+                return Err(TableError::TableExists(new_name.to_string()));
+            }
+            if let Some(update) = self.pending_table_updates.remove(name) {
+                self.pending_table_updates
+                    .insert(new_name.to_string(), update);
+            }
+            assert!(self.tree.remove(&name)?.is_some());
+            assert!(self.tree.insert(&new_name, &definition)?.is_none());
+        } else {
+            return Err(TableError::TableDoesNotExist(name.to_string()));
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn delete_table(
         &mut self,
         name: &str,
