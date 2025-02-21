@@ -195,7 +195,7 @@ impl<'a> U64GroupedBitmapIter<'a> {
     }
 }
 
-impl<'a> Iterator for U64GroupedBitmapIter<'a> {
+impl Iterator for U64GroupedBitmapIter<'_> {
     type Item = u32;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -248,7 +248,7 @@ impl<'a, 'b> U64GroupedBitmapDifference<'a, 'b> {
     }
 }
 
-impl<'a, 'b> Iterator for U64GroupedBitmapDifference<'a, 'b> {
+impl Iterator for U64GroupedBitmapDifference<'_, '_> {
     type Item = u32;
 
     fn next(&mut self) -> Option<Self::Item> {

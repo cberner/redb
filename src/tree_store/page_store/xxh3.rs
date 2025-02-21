@@ -638,7 +638,7 @@ fn hash128_4to8(data: &[u8], secret: &[u8], mut seed: u64) -> u128 {
     r_low = xorshift(r_low, 28);
     r_high = xxh3_avalanche(r_high);
 
-    (r_high as u128) << 64 | r_low as u128
+    ((r_high as u128) << 64) | r_low as u128
 }
 
 fn hash128_9to16(data: &[u8], secret: &[u8], seed: u64) -> u128 {
@@ -666,7 +666,7 @@ fn hash128_9to16(data: &[u8], secret: &[u8], seed: u64) -> u128 {
     r2_low = xxh3_avalanche(r2_low);
     r2_high = xxh3_avalanche(r2_high);
 
-    (r2_high as u128) << 64 | r2_low as u128
+    ((r2_high as u128) << 64) | r2_low as u128
 }
 
 fn hash128_0to16(data: &[u8], secret: &[u8], seed: u64) -> u128 {
@@ -702,7 +702,7 @@ fn hash128_17to128(data: &[u8], secret: &[u8], seed: u64) -> u128 {
     r_low = xxh3_avalanche(r_low);
     r_high = 0u64.wrapping_sub(xxh3_avalanche(r_high));
 
-    (r_high as u128) << 64 | r_low as u128
+    ((r_high as u128) << 64) | r_low as u128
 }
 
 fn hash128_129to240(data: &[u8], secret: &[u8], seed: u64) -> u128 {
@@ -746,7 +746,7 @@ fn hash128_129to240(data: &[u8], secret: &[u8], seed: u64) -> u128 {
     r_low = xxh3_avalanche(r_low);
     r_high = 0u64.wrapping_sub(xxh3_avalanche(r_high));
 
-    (r_high as u128) << 64 | r_low as u128
+    ((r_high as u128) << 64) | r_low as u128
 }
 
 fn hash128_0to240(data: &[u8], secret: &[u8], seed: u64) -> u128 {
@@ -804,7 +804,7 @@ fn hash128_large_generic(
         !(PRIME64[1].wrapping_mul(data.len() as u64)),
     );
 
-    (high as u128) << 64 | low as u128
+    ((high as u128) << 64) | low as u128
 }
 
 #[cfg(test)]

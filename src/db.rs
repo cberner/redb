@@ -128,7 +128,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> TableDefinition<'a, K, V> {
     }
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> TableHandle for TableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> TableHandle for TableDefinition<'_, K, V> {
     fn name(&self) -> &str {
         self.name
     }
@@ -136,15 +136,15 @@ impl<'a, K: Key + 'static, V: Value + 'static> TableHandle for TableDefinition<'
 
 impl<K: Key, V: Value> Sealed for TableDefinition<'_, K, V> {}
 
-impl<'a, K: Key + 'static, V: Value + 'static> Clone for TableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Clone for TableDefinition<'_, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> Copy for TableDefinition<'a, K, V> {}
+impl<K: Key + 'static, V: Value + 'static> Copy for TableDefinition<'_, K, V> {}
 
-impl<'a, K: Key + 'static, V: Value + 'static> Display for TableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Display for TableDefinition<'_, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -181,9 +181,7 @@ impl<'a, K: Key + 'static, V: Key + 'static> MultimapTableDefinition<'a, K, V> {
     }
 }
 
-impl<'a, K: Key + 'static, V: Key + 'static> MultimapTableHandle
-    for MultimapTableDefinition<'a, K, V>
-{
+impl<K: Key + 'static, V: Key + 'static> MultimapTableHandle for MultimapTableDefinition<'_, K, V> {
     fn name(&self) -> &str {
         self.name
     }
@@ -191,15 +189,15 @@ impl<'a, K: Key + 'static, V: Key + 'static> MultimapTableHandle
 
 impl<K: Key, V: Key> Sealed for MultimapTableDefinition<'_, K, V> {}
 
-impl<'a, K: Key + 'static, V: Key + 'static> Clone for MultimapTableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Key + 'static> Clone for MultimapTableDefinition<'_, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: Key + 'static, V: Key + 'static> Copy for MultimapTableDefinition<'a, K, V> {}
+impl<K: Key + 'static, V: Key + 'static> Copy for MultimapTableDefinition<'_, K, V> {}
 
-impl<'a, K: Key + 'static, V: Key + 'static> Display for MultimapTableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Key + 'static> Display for MultimapTableDefinition<'_, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,

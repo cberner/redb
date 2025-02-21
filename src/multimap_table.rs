@@ -542,10 +542,12 @@ impl<V: Key> std::fmt::Debug for DynamicCollection<V> {
 }
 
 impl<V: Key> Value for &DynamicCollection<V> {
-    type SelfType<'a> = &'a DynamicCollection<V>
+    type SelfType<'a>
+        = &'a DynamicCollection<V>
     where
         Self: 'a;
-    type AsBytes<'a> = &'a [u8]
+    type AsBytes<'a>
+        = &'a [u8]
     where
         Self: 'a;
 
@@ -827,7 +829,7 @@ impl<'a, V: Key + 'static> Iterator for MultimapValue<'a, V> {
     }
 }
 
-impl<'a, V: Key + 'static> DoubleEndedIterator for MultimapValue<'a, V> {
+impl<V: Key + 'static> DoubleEndedIterator for MultimapValue<'_, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         // TODO: optimize out this copy
         let bytes = match self.inner.as_mut().unwrap() {
@@ -843,7 +845,7 @@ impl<'a, V: Key + 'static> DoubleEndedIterator for MultimapValue<'a, V> {
     }
 }
 
-impl<'a, V: Key + 'static> Drop for MultimapValue<'a, V> {
+impl<V: Key + 'static> Drop for MultimapValue<'_, V> {
     fn drop(&mut self) {
         // Drop our references to the pages that are about to be freed
         drop(mem::take(&mut self.inner));
@@ -867,7 +869,7 @@ pub struct MultimapRange<'a, K: Key + 'static, V: Key + 'static> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, K: Key + 'static, V: Key + 'static> MultimapRange<'a, K, V> {
+impl<K: Key + 'static, V: Key + 'static> MultimapRange<'_, K, V> {
     fn new(
         inner: BtreeRangeIter<K, &'static DynamicCollection<V>>,
         guard: Arc<TransactionGuard>,
@@ -907,7 +909,7 @@ impl<'a, K: Key + 'static, V: Key + 'static> Iterator for MultimapRange<'a, K, V
     }
 }
 
-impl<'a, K: Key + 'static, V: Key + 'static> DoubleEndedIterator for MultimapRange<'a, K, V> {
+impl<K: Key + 'static, V: Key + 'static> DoubleEndedIterator for MultimapRange<'_, K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self.inner.next_back()? {
             Ok(entry) => {
@@ -1318,7 +1320,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
     }
 }
 
-impl<'txn, K: Key + 'static, V: Key + 'static> ReadableTableMetadata for MultimapTable<'txn, K, V> {
+impl<K: Key + 'static, V: Key + 'static> ReadableTableMetadata for MultimapTable<'_, K, V> {
     fn stats(&self) -> Result<TableStats> {
         let tree_stats = multimap_btree_stats(
             self.tree.get_root().map(|x| x.root),
@@ -1343,9 +1345,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> ReadableTableMetadata for Multima
     }
 }
 
-impl<'txn, K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
-    for MultimapTable<'txn, K, V>
-{
+impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for MultimapTable<'_, K, V> {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<V>> {
         let guard = self.transaction.transaction_guard();
@@ -1378,7 +1378,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
 
 impl<K: Key + 'static, V: Key + 'static> Sealed for MultimapTable<'_, K, V> {}
 
-impl<'txn, K: Key + 'static, V: Key + 'static> Drop for MultimapTable<'txn, K, V> {
+impl<K: Key + 'static, V: Key + 'static> Drop for MultimapTable<'_, K, V> {
     fn drop(&mut self) {
         self.transaction
             .close_table(&self.name, &self.tree, self.num_values);

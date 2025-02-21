@@ -316,7 +316,7 @@ impl RegionHeader {
         // TODO: this is kind of expensive. Maybe it should be cached
         let allocator = BuddyAllocator::new(pages_per_region, pages_per_region);
         let result = 8u64 + allocator.to_vec().len() as u64;
-        ((result + page_size - 1) / page_size).try_into().unwrap()
+        result.div_ceil(page_size).try_into().unwrap()
     }
 
     fn serialize(allocator: &BuddyAllocator, output: &mut [u8]) {

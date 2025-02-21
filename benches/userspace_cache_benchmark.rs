@@ -74,13 +74,13 @@ mod unix {
         data: Vec<u8>,
     }
 
-    impl<'a> WritablePage<'a> {
+    impl WritablePage<'_> {
         fn mut_data(&mut self) -> &mut [u8] {
             &mut self.data
         }
     }
 
-    impl<'a> Drop for WritablePage<'a> {
+    impl Drop for WritablePage<'_> {
         fn drop(&mut self) {
             let data = mem::take(&mut self.data);
             assert!(self

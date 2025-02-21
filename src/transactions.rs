@@ -117,7 +117,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> SystemTableDefinition<'a, K, V> {
     }
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> TableHandle for SystemTableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> TableHandle for SystemTableDefinition<'_, K, V> {
     fn name(&self) -> &str {
         self.name
     }
@@ -125,15 +125,15 @@ impl<'a, K: Key + 'static, V: Value + 'static> TableHandle for SystemTableDefini
 
 impl<K: Key, V: Value> Sealed for SystemTableDefinition<'_, K, V> {}
 
-impl<'a, K: Key + 'static, V: Value + 'static> Clone for SystemTableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Clone for SystemTableDefinition<'_, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> Copy for SystemTableDefinition<'a, K, V> {}
+impl<K: Key + 'static, V: Value + 'static> Copy for SystemTableDefinition<'_, K, V> {}
 
-impl<'a, K: Key + 'static, V: Value + 'static> Display for SystemTableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Display for SystemTableDefinition<'_, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -303,7 +303,7 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
     }
 }
 
-impl<'db, 's, K: Key + 'static, V: Value + 'static> Drop for SystemTable<'db, 's, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Drop for SystemTable<'_, '_, K, V> {
     fn drop(&mut self) {
         self.namespace.close_table(
             &self.name,
@@ -360,7 +360,7 @@ struct TableNamespace<'db> {
     table_tree: TableTreeMut<'db>,
 }
 
-impl<'db> TableNamespace<'db> {
+impl TableNamespace<'_> {
     #[track_caller]
     fn inner_open<K: Key + 'static, V: Value + 'static>(
         &mut self,

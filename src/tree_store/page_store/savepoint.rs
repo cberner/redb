@@ -113,7 +113,7 @@ pub(crate) enum SerializedSavepoint<'a> {
     Owned(Vec<u8>),
 }
 
-impl<'a> SerializedSavepoint<'a> {
+impl SerializedSavepoint<'_> {
     pub(crate) fn from_savepoint(savepoint: &Savepoint) -> Self {
         assert_eq!(savepoint.version, FILE_FORMAT_VERSION2);
         let mut result = vec![savepoint.version];
@@ -272,9 +272,15 @@ impl<'a> SerializedSavepoint<'a> {
     }
 }
 
-impl<'data> Value for SerializedSavepoint<'data> {
-    type SelfType<'a> = SerializedSavepoint<'a> where Self: 'a;
-    type AsBytes<'a> = &'a [u8] where Self: 'a;
+impl Value for SerializedSavepoint<'_> {
+    type SelfType<'a>
+        = SerializedSavepoint<'a>
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = &'a [u8]
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         None
