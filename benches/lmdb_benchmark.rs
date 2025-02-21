@@ -46,7 +46,7 @@ fn fill_slice(slice: &mut [u8], rng: &mut fastrand::Rng) {
 }
 
 /// Returns pairs of key, value
-fn gen_pair(rng: &mut fastrand::Rng) -> ([u8; KEY_SIZE], Vec<u8>) {
+fn random_pair(rng: &mut fastrand::Rng) -> ([u8; KEY_SIZE], Vec<u8>) {
     let mut key = [0u8; KEY_SIZE];
     fill_slice(&mut key, rng);
     let mut value = vec![0u8; VALUE_SIZE];
@@ -65,7 +65,7 @@ fn make_rng_shards(shards: usize, elements: usize) -> Vec<fastrand::Rng> {
     for i in 0..shards {
         let mut rng = make_rng();
         for _ in 0..(i * elements_per_shard) {
-            gen_pair(&mut rng);
+            random_pair(&mut rng);
         }
         rngs.push(rng);
     }
@@ -83,7 +83,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
     let mut inserter = txn.get_inserter();
     {
         for _ in 0..ELEMENTS {
-            let (key, value) = gen_pair(&mut rng);
+            let (key, value) = random_pair(&mut rng);
             inserter.insert(&key, &value).unwrap();
         }
     }
@@ -106,7 +106,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
         for _ in 0..writes {
             let mut txn = db.write_transaction();
             let mut inserter = txn.get_inserter();
-            let (key, value) = gen_pair(&mut rng);
+            let (key, value) = random_pair(&mut rng);
             inserter.insert(&key, &value).unwrap();
             drop(inserter);
             txn.commit().unwrap();
@@ -133,7 +133,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
             let mut txn = db.write_transaction();
             let mut inserter = txn.get_inserter();
             for _ in 0..batch_size {
-                let (key, value) = gen_pair(&mut rng);
+                let (key, value) = random_pair(&mut rng);
                 inserter.insert(&key, &value).unwrap();
             }
             drop(inserter);
@@ -171,7 +171,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
             let mut expected_checksum = 0u64;
             let reader = txn.get_reader();
             for _ in 0..ELEMENTS {
-                let (key, value) = gen_pair(&mut rng);
+                let (key, value) = random_pair(&mut rng);
                 let result = reader.get(&key).unwrap();
                 checksum += result.as_ref()[0] as u64;
                 expected_checksum += value[0] as u64;
@@ -195,7 +195,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
             let mut value_sum = 0;
             let num_scan = 10;
             for _ in 0..ELEMENTS {
-                let (key, _value) = gen_pair(&mut rng);
+                let (key, _value) = random_pair(&mut rng);
                 let mut iter = reader.range_from(&key);
                 for _ in 0..num_scan {
                     if let Some((_, value)) = iter.next() {
@@ -236,7 +236,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
                     let mut expected_checksum = 0u64;
                     let reader = txn.get_reader();
                     for _ in 0..(ELEMENTS / num_threads) {
-                        let (key, value) = gen_pair(&mut rng);
+                        let (key, value) = random_pair(&mut rng);
                         let result = reader.get(&key).unwrap();
                         checksum += result.as_ref()[0] as u64;
                         expected_checksum += value[0] as u64;
@@ -268,7 +268,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
         let mut txn = db.write_transaction();
         let mut inserter = txn.get_inserter();
         for _ in 0..deletes {
-            let (key, _value) = gen_pair(&mut rng);
+            let (key, _value) = random_pair(&mut rng);
             inserter.remove(&key).unwrap();
         }
         drop(inserter);
@@ -302,7 +302,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
         {
             let mut txn = db.write_transaction();
             let mut inserter = txn.get_inserter();
-            let (key, value) = gen_pair(&mut rng);
+            let (key, value) = random_pair(&mut rng);
             inserter.insert(&key, &value).unwrap();
             drop(inserter);
             txn.commit().unwrap();
