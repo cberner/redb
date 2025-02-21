@@ -19,12 +19,12 @@ struct Timing {
 }
 
 /// Returns pairs of key, value
-fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+fn random_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut pairs = vec![];
 
     for _ in 0..count {
-        let key: Vec<u8> = (0..key_size).map(|_| rand::thread_rng().gen()).collect();
-        let value: Vec<u8> = (0..value_size).map(|_| rand::thread_rng().gen()).collect();
+        let key: Vec<u8> = (0..key_size).map(|_| rand::rng().random()).collect();
+        let value: Vec<u8> = (0..value_size).map(|_| rand::rng().random()).collect();
         pairs.push((key, value));
     }
 
@@ -32,7 +32,7 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
 }
 
 fn benchmark(db: &Database, insertions: usize) -> Timing {
-    let mut pairs = gen_data(insertions, 24, VALUE_SIZE);
+    let mut pairs = random_data(insertions, 24, VALUE_SIZE);
     let mut written = 0;
 
     let mut total_savepoint_creation = Duration::from_micros(0);

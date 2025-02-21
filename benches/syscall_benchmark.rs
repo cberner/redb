@@ -42,12 +42,12 @@ fn print_load_time(name: &'static str, duration: Duration) {
 }
 
 /// Returns pairs of key, value
-fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+fn random_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut pairs = vec![];
 
     for _ in 0..count {
-        let key: Vec<u8> = (0..key_size).map(|_| rand::thread_rng().gen()).collect();
-        let value: Vec<u8> = (0..value_size).map(|_| rand::thread_rng().gen()).collect();
+        let key: Vec<u8> = (0..key_size).map(|_| rand::rng().random()).collect();
+        let value: Vec<u8> = (0..value_size).map(|_| rand::rng().random()).collect();
         pairs.push((key, value));
     }
 
@@ -62,7 +62,7 @@ fn lmdb_bench(path: &Path) {
             .unwrap()
     };
 
-    let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let mut pairs = random_data(1000, KEY_SIZE, VALUE_SIZE);
     let pairs_len = pairs.len();
 
     let db: heed::Database<heed::types::Bytes, heed::types::Bytes> = env
@@ -86,7 +86,7 @@ fn lmdb_bench(path: &Path) {
         print_load_time("lmdb-zero", duration);
 
         let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-        key_order.shuffle(&mut rand::thread_rng());
+        key_order.shuffle(&mut rand::rng());
 
         let txn = env.read_txn().unwrap();
         {
@@ -124,7 +124,7 @@ fn uring_bench(path: &Path) {
         .open(path)
         .unwrap();
 
-    let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let mut pairs = random_data(1000, KEY_SIZE, VALUE_SIZE);
     let pairs_len = pairs.len();
 
     let start = SystemTime::now();
@@ -147,7 +147,7 @@ fn uring_bench(path: &Path) {
     print_load_time("uring_read()/write()", duration);
 
     let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-    key_order.shuffle(&mut rand::thread_rng());
+    key_order.shuffle(&mut rand::rng());
 
     {
         for _ in 0..ITERATIONS {
@@ -212,7 +212,7 @@ fn readwrite_bench(path: &Path) {
         .open(path)
         .unwrap();
 
-    let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let mut pairs = random_data(1000, KEY_SIZE, VALUE_SIZE);
     let pairs_len = pairs.len();
 
     let start = SystemTime::now();
@@ -235,7 +235,7 @@ fn readwrite_bench(path: &Path) {
     print_load_time("read()/write()", duration);
 
     let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-    key_order.shuffle(&mut rand::thread_rng());
+    key_order.shuffle(&mut rand::rng());
 
     {
         for _ in 0..ITERATIONS {
@@ -291,7 +291,7 @@ fn mmap_bench(path: &Path) {
     assert_ne!(mmap_raw, libc::MAP_FAILED);
     let mmap = unsafe { slice::from_raw_parts_mut(mmap_raw as *mut u8, len as usize) };
 
-    let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let mut pairs = random_data(1000, KEY_SIZE, VALUE_SIZE);
     let pairs_len = pairs.len();
 
     let mut write_index = 0;
@@ -314,7 +314,7 @@ fn mmap_bench(path: &Path) {
     print_load_time("mmap()", duration);
 
     let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-    key_order.shuffle(&mut rand::thread_rng());
+    key_order.shuffle(&mut rand::rng());
 
     {
         for _ in 0..ITERATIONS {
@@ -358,7 +358,7 @@ fn mmap_anon_bench() {
     assert_ne!(mmap_raw, libc::MAP_FAILED);
     let mmap = unsafe { slice::from_raw_parts_mut(mmap_raw as *mut u8, len) };
 
-    let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let mut pairs = random_data(1000, KEY_SIZE, VALUE_SIZE);
     let pairs_len = pairs.len();
 
     let mut write_index = 0;
@@ -379,7 +379,7 @@ fn mmap_anon_bench() {
     print_load_time("mmap(ANON)", duration);
 
     let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-    key_order.shuffle(&mut rand::thread_rng());
+    key_order.shuffle(&mut rand::rng());
 
     {
         for _ in 0..ITERATIONS {
@@ -411,7 +411,7 @@ fn vec_bench() {
 
     let mut mmap = vec![0; len];
 
-    let mut pairs = gen_data(1000, KEY_SIZE, VALUE_SIZE);
+    let mut pairs = random_data(1000, KEY_SIZE, VALUE_SIZE);
     let pairs_len = pairs.len();
 
     let mut write_index = 0;
@@ -432,7 +432,7 @@ fn vec_bench() {
     print_load_time("vec[]", duration);
 
     let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-    key_order.shuffle(&mut rand::thread_rng());
+    key_order.shuffle(&mut rand::rng());
 
     {
         for _ in 0..ITERATIONS {

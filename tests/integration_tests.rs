@@ -31,12 +31,12 @@ fn create_tempfile() -> tempfile::NamedTempFile {
 }
 
 /// Returns pairs of key, value
-fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+fn random_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut pairs = vec![];
 
     for _ in 0..count {
-        let key: Vec<u8> = (0..key_size).map(|_| rand::thread_rng().gen()).collect();
-        let value: Vec<u8> = (0..value_size).map(|_| rand::thread_rng().gen()).collect();
+        let key: Vec<u8> = (0..key_size).map(|_| rand::rng().random()).collect();
+        let value: Vec<u8> = (0..value_size).map(|_| rand::rng().random()).collect();
         pairs.push((key, value));
     }
 
@@ -132,7 +132,7 @@ fn non_durable_commit_persistence() {
     let db = Database::create(tmpfile.path()).unwrap();
     let mut txn = db.begin_write().unwrap();
     txn.set_durability(Durability::None);
-    let pairs = gen_data(100, 16, 20);
+    let pairs = random_data(100, 16, 20);
     {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..ELEMENTS {
@@ -149,7 +149,7 @@ fn non_durable_commit_persistence() {
     let table = txn.open_table(SLICE_TABLE).unwrap();
 
     let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-    key_order.shuffle(&mut rand::thread_rng());
+    key_order.shuffle(&mut rand::rng());
 
     {
         for i in &key_order {
@@ -165,7 +165,7 @@ fn test_persistence(durability: Durability) {
     let db = Database::create(tmpfile.path()).unwrap();
     let mut txn = db.begin_write().unwrap();
     txn.set_durability(durability);
-    let pairs = gen_data(100, 16, 20);
+    let pairs = random_data(100, 16, 20);
     {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
         for i in 0..ELEMENTS {
@@ -181,7 +181,7 @@ fn test_persistence(durability: Durability) {
     let table = txn.open_table(SLICE_TABLE).unwrap();
 
     let mut key_order: Vec<usize> = (0..ELEMENTS).collect();
-    key_order.shuffle(&mut rand::thread_rng());
+    key_order.shuffle(&mut rand::rng());
 
     {
         for i in &key_order {

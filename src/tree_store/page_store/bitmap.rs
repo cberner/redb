@@ -513,12 +513,12 @@ mod test {
 
     #[test]
     fn random_pattern() {
-        let seed = rand::thread_rng().gen();
+        let seed = rand::rng().random();
         // Print the seed to debug for reproducibility, in case this test fails
         println!("seed={seed}");
         let mut rng = StdRng::seed_from_u64(seed);
 
-        let num_pages = rng.gen_range(2..10000);
+        let num_pages = rng.random_range(2..10000);
         let mut allocator = BtreeBitmap::new(num_pages);
         for i in 0..num_pages {
             allocator.clear(i);
@@ -526,7 +526,7 @@ mod test {
         let mut allocated = HashSet::new();
 
         for _ in 0..(num_pages * 2) {
-            if rng.gen_bool(0.75) {
+            if rng.random_bool(0.75) {
                 if let Some(page) = allocator.alloc() {
                     allocated.insert(page);
                 } else {

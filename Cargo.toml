@@ -26,7 +26,7 @@ libc = "0.2.104"
 
 # Common test/bench dependencies
 [dev-dependencies]
-rand = "0.8"
+rand = "0.9"
 tempfile = "3.5.0"
 # for backwards compatibility testing - pin at 1.0.0
 redb1 = { version = "=1.0.0", package = "redb" }
