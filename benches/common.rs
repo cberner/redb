@@ -95,9 +95,15 @@ impl<'a> RedbBenchDatabase<'a> {
     }
 }
 
-impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
-    type W<'db> = RedbBenchWriteTransaction where Self: 'db;
-    type R<'db> = RedbBenchReadTransaction where Self: 'db;
+impl BenchDatabase for RedbBenchDatabase<'_> {
+    type W<'db>
+        = RedbBenchWriteTransaction
+    where
+        Self: 'db;
+    type R<'db>
+        = RedbBenchReadTransaction
+    where
+        Self: 'db;
 
     fn db_type_name() -> &'static str {
         "redb"
@@ -124,7 +130,10 @@ pub struct RedbBenchReadTransaction {
 }
 
 impl BenchReadTransaction for RedbBenchReadTransaction {
-    type T<'txn> = RedbBenchReader where Self: 'txn;
+    type T<'txn>
+        = RedbBenchReader
+    where
+        Self: 'txn;
 
     fn get_reader(&self) -> Self::T<'_> {
         let table = self.txn.open_table(X).unwrap();
@@ -137,8 +146,14 @@ pub struct RedbBenchReader {
 }
 
 impl BenchReader for RedbBenchReader {
-    type Output<'out> = RedbAccessGuard<'out> where Self: 'out;
-    type Iterator<'out> = RedbBenchIterator<'out> where Self: 'out;
+    type Output<'out>
+        = RedbAccessGuard<'out>
+    where
+        Self: 'out;
+    type Iterator<'out>
+        = RedbBenchIterator<'out>
+    where
+        Self: 'out;
 
     fn get<'a>(&'a self, key: &[u8]) -> Option<Self::Output<'a>> {
         self.table.get(key).unwrap().map(RedbAccessGuard::new)
@@ -159,7 +174,10 @@ pub struct RedbBenchIterator<'a> {
 }
 
 impl BenchIterator for RedbBenchIterator<'_> {
-    type Output<'a> = RedbAccessGuard<'a> where Self: 'a;
+    type Output<'a>
+        = RedbAccessGuard<'a>
+    where
+        Self: 'a;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
         self.iter.next().map(|item| {
@@ -179,7 +197,7 @@ impl<'a> RedbAccessGuard<'a> {
     }
 }
 
-impl<'a> AsRef<[u8]> for RedbAccessGuard<'a> {
+impl AsRef<[u8]> for RedbAccessGuard<'_> {
     fn as_ref(&self) -> &[u8] {
         self.inner.value()
     }
@@ -190,7 +208,10 @@ pub struct RedbBenchWriteTransaction {
 }
 
 impl BenchWriteTransaction for RedbBenchWriteTransaction {
-    type W<'txn> = RedbBenchInserter<'txn> where Self: 'txn;
+    type W<'txn>
+        = RedbBenchInserter<'txn>
+    where
+        Self: 'txn;
 
     fn get_inserter(&mut self) -> Self::W<'_> {
         let table = self.txn.open_table(X).unwrap();
@@ -227,9 +248,15 @@ impl<'a> SledBenchDatabase<'a> {
     }
 }
 
-impl<'a> BenchDatabase for SledBenchDatabase<'a> {
-    type W<'db> = SledBenchWriteTransaction<'db> where Self: 'db;
-    type R<'db> = SledBenchReadTransaction<'db> where Self: 'db;
+impl BenchDatabase for SledBenchDatabase<'_> {
+    type W<'db>
+        = SledBenchWriteTransaction<'db>
+    where
+        Self: 'db;
+    type R<'db>
+        = SledBenchReadTransaction<'db>
+    where
+        Self: 'db;
 
     fn db_type_name() -> &'static str {
         "sled"
@@ -252,7 +279,10 @@ pub struct SledBenchReadTransaction<'db> {
 }
 
 impl<'db> BenchReadTransaction for SledBenchReadTransaction<'db> {
-    type T<'txn> = SledBenchReader<'db> where Self: 'txn;
+    type T<'txn>
+        = SledBenchReader<'db>
+    where
+        Self: 'txn;
 
     fn get_reader(&self) -> Self::T<'_> {
         SledBenchReader { db: self.db }
@@ -263,9 +293,15 @@ pub struct SledBenchReader<'db> {
     db: &'db sled::Db,
 }
 
-impl<'db> BenchReader for SledBenchReader<'db> {
-    type Output<'out> = sled::IVec where Self: 'out;
-    type Iterator<'out> = SledBenchIterator where Self: 'out;
+impl BenchReader for SledBenchReader<'_> {
+    type Output<'out>
+        = sled::IVec
+    where
+        Self: 'out;
+    type Iterator<'out>
+        = SledBenchIterator
+    where
+        Self: 'out;
 
     fn get(&self, key: &[u8]) -> Option<sled::IVec> {
         self.db.get(key).unwrap()
@@ -286,7 +322,10 @@ pub struct SledBenchIterator {
 }
 
 impl BenchIterator for SledBenchIterator {
-    type Output<'out> = sled::IVec where Self: 'out;
+    type Output<'out>
+        = sled::IVec
+    where
+        Self: 'out;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
         self.iter.next().map(|x| x.unwrap())
@@ -298,8 +337,11 @@ pub struct SledBenchWriteTransaction<'a> {
     db_dir: &'a Path,
 }
 
-impl<'a> BenchWriteTransaction for SledBenchWriteTransaction<'a> {
-    type W<'txn> = SledBenchInserter<'txn> where Self: 'txn;
+impl BenchWriteTransaction for SledBenchWriteTransaction<'_> {
+    type W<'txn>
+        = SledBenchInserter<'txn>
+    where
+        Self: 'txn;
 
     fn get_inserter(&mut self) -> Self::W<'_> {
         SledBenchInserter { db: self.db }
@@ -325,7 +367,7 @@ pub struct SledBenchInserter<'a> {
     db: &'a sled::Db,
 }
 
-impl<'a> BenchInserter for SledBenchInserter<'a> {
+impl BenchInserter for SledBenchInserter<'_> {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.db.insert(key, value).map(|_| ()).map_err(|_| ())
     }
@@ -350,8 +392,14 @@ impl HeedBenchDatabase {
 }
 
 impl BenchDatabase for HeedBenchDatabase {
-    type W<'db> = HeedBenchWriteTransaction<'db> where Self: 'db;
-    type R<'db> = HeedBenchReadTransaction<'db> where Self: 'db;
+    type W<'db>
+        = HeedBenchWriteTransaction<'db>
+    where
+        Self: 'db;
+    type R<'db>
+        = HeedBenchReadTransaction<'db>
+    where
+        Self: 'db;
 
     fn db_type_name() -> &'static str {
         "lmdb"
@@ -415,7 +463,10 @@ pub struct HeedBenchWriteTransaction<'db> {
 }
 
 impl<'db> BenchWriteTransaction for HeedBenchWriteTransaction<'db> {
-    type W<'txn> = HeedBenchInserter<'txn, 'db> where Self: 'txn;
+    type W<'txn>
+        = HeedBenchInserter<'txn, 'db>
+    where
+        Self: 'txn;
 
     fn get_inserter(&mut self) -> Self::W<'_> {
         Self::W {
@@ -464,7 +515,10 @@ pub struct HeedBenchReadTransaction<'db> {
 }
 
 impl<'db> BenchReadTransaction for HeedBenchReadTransaction<'db> {
-    type T<'txn> = HeedBenchReader<'txn, 'db> where Self: 'txn;
+    type T<'txn>
+        = HeedBenchReader<'txn, 'db>
+    where
+        Self: 'txn;
 
     fn get_reader(&self) -> Self::T<'_> {
         Self::T {
@@ -479,9 +533,15 @@ pub struct HeedBenchReader<'txn, 'db> {
     txn: &'txn heed::RoTxn<'db>,
 }
 
-impl<'txn, 'db> BenchReader for HeedBenchReader<'txn, 'db> {
-    type Output<'out> = &'out [u8] where Self: 'out;
-    type Iterator<'out> = HeedBenchIterator<'out> where Self: 'out;
+impl BenchReader for HeedBenchReader<'_, '_> {
+    type Output<'out>
+        = &'out [u8]
+    where
+        Self: 'out;
+    type Iterator<'out>
+        = HeedBenchIterator<'out>
+    where
+        Self: 'out;
 
     fn get(&self, key: &[u8]) -> Option<&[u8]> {
         self.db.get(self.txn, key).unwrap()
@@ -504,7 +564,10 @@ pub struct HeedBenchIterator<'a> {
 }
 
 impl BenchIterator for HeedBenchIterator<'_> {
-    type Output<'out> = &'out [u8] where Self: 'out;
+    type Output<'out>
+        = &'out [u8]
+    where
+        Self: 'out;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
         self.iter.next().map(|x| x.unwrap())
@@ -521,9 +584,15 @@ impl<'a> RocksdbBenchDatabase<'a> {
     }
 }
 
-impl<'a> BenchDatabase for RocksdbBenchDatabase<'a> {
-    type W<'db> = RocksdbBenchWriteTransaction<'db> where Self: 'db;
-    type R<'db> = RocksdbBenchReadTransaction<'db> where Self: 'db;
+impl BenchDatabase for RocksdbBenchDatabase<'_> {
+    type W<'db>
+        = RocksdbBenchWriteTransaction<'db>
+    where
+        Self: 'db;
+    type R<'db>
+        = RocksdbBenchReadTransaction<'db>
+    where
+        Self: 'db;
 
     fn db_type_name() -> &'static str {
         "rocksdb"
@@ -558,8 +627,11 @@ pub struct RocksdbBenchWriteTransaction<'a> {
     db_dir: PathBuf,
 }
 
-impl<'a> BenchWriteTransaction for RocksdbBenchWriteTransaction<'a> {
-    type W<'txn> = RocksdbBenchInserter<'txn> where Self: 'txn;
+impl BenchWriteTransaction for RocksdbBenchWriteTransaction<'_> {
+    type W<'txn>
+        = RocksdbBenchInserter<'txn>
+    where
+        Self: 'txn;
 
     fn get_inserter(&mut self) -> Self::W<'_> {
         RocksdbBenchInserter { txn: &self.txn }
@@ -603,7 +675,10 @@ pub struct RocksdbBenchReadTransaction<'db> {
 }
 
 impl<'db> BenchReadTransaction for RocksdbBenchReadTransaction<'db> {
-    type T<'txn> = RocksdbBenchReader<'db, 'txn> where Self: 'txn;
+    type T<'txn>
+        = RocksdbBenchReader<'db, 'txn>
+    where
+        Self: 'txn;
 
     fn get_reader(&self) -> Self::T<'_> {
         RocksdbBenchReader {
@@ -616,9 +691,15 @@ pub struct RocksdbBenchReader<'db, 'txn> {
     snapshot: &'txn rocksdb::SnapshotWithThreadMode<'db, OptimisticTransactionDB>,
 }
 
-impl<'db, 'txn> BenchReader for RocksdbBenchReader<'db, 'txn> {
-    type Output<'out> = Vec<u8> where Self: 'out;
-    type Iterator<'out> = RocksdbBenchIterator<'out> where Self: 'out;
+impl BenchReader for RocksdbBenchReader<'_, '_> {
+    type Output<'out>
+        = Vec<u8>
+    where
+        Self: 'out;
+    type Iterator<'out>
+        = RocksdbBenchIterator<'out>
+    where
+        Self: 'out;
 
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.snapshot.get(key).unwrap()
@@ -642,7 +723,10 @@ pub struct RocksdbBenchIterator<'a> {
 }
 
 impl BenchIterator for RocksdbBenchIterator<'_> {
-    type Output<'out> = Box<[u8]> where Self: 'out;
+    type Output<'out>
+        = Box<[u8]>
+    where
+        Self: 'out;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
         self.iter.next().map(|x| {
@@ -675,9 +759,15 @@ impl<'a> SanakirjaBenchDatabase<'a> {
     }
 }
 
-impl<'a> BenchDatabase for SanakirjaBenchDatabase<'a> {
-    type W<'db> = SanakirjaBenchWriteTransaction<'db> where Self: 'db;
-    type R<'db> = SanakirjaBenchReadTransaction<'db> where Self: 'db;
+impl BenchDatabase for SanakirjaBenchDatabase<'_> {
+    type W<'db>
+        = SanakirjaBenchWriteTransaction<'db>
+    where
+        Self: 'db;
+    type R<'db>
+        = SanakirjaBenchReadTransaction<'db>
+    where
+        Self: 'db;
 
     fn db_type_name() -> &'static str {
         "sanakirja"
@@ -704,7 +794,10 @@ pub struct SanakirjaBenchWriteTransaction<'db> {
 }
 
 impl<'db> BenchWriteTransaction for SanakirjaBenchWriteTransaction<'db> {
-    type W<'txn> = SanakirjaBenchInserter<'db, 'txn> where Self: 'txn;
+    type W<'txn>
+        = SanakirjaBenchInserter<'db, 'txn>
+    where
+        Self: 'txn;
 
     fn get_inserter(&mut self) -> Self::W<'_> {
         let table = self.txn.root_db(0).unwrap();
@@ -762,7 +855,10 @@ pub struct SanakirjaBenchReadTransaction<'db> {
 }
 
 impl<'db> BenchReadTransaction for SanakirjaBenchReadTransaction<'db> {
-    type T<'txn> = SanakirjaBenchReader<'db, 'txn> where Self: 'txn;
+    type T<'txn>
+        = SanakirjaBenchReader<'db, 'txn>
+    where
+        Self: 'txn;
 
     fn get_reader(&self) -> Self::T<'_> {
         let table = self.txn.root_db(0).unwrap();
@@ -780,8 +876,14 @@ pub struct SanakirjaBenchReader<'db, 'txn> {
 }
 
 impl<'db, 'txn> BenchReader for SanakirjaBenchReader<'db, 'txn> {
-    type Output<'out> = &'out [u8] where Self: 'out;
-    type Iterator<'out> = SanakirjaBenchIterator<'db, 'txn> where Self: 'out;
+    type Output<'out>
+        = &'out [u8]
+    where
+        Self: 'out;
+    type Iterator<'out>
+        = SanakirjaBenchIterator<'db, 'txn>
+    where
+        Self: 'out;
 
     fn get(&self, key: &[u8]) -> Option<&[u8]> {
         sanakirja::btree::get(self.txn, &self.table, key, None)
@@ -813,8 +915,11 @@ pub struct SanakirjaBenchIterator<'db, 'txn> {
     >,
 }
 
-impl<'db, 'txn> BenchIterator for SanakirjaBenchIterator<'db, 'txn> {
-    type Output<'out> = &'txn [u8] where Self: 'out;
+impl<'txn> BenchIterator for SanakirjaBenchIterator<'_, 'txn> {
+    type Output<'out>
+        = &'txn [u8]
+    where
+        Self: 'out;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
         self.iter.next().map(|x| {
@@ -835,7 +940,7 @@ impl<'a> FjallBenchDatabase<'a> {
     }
 }
 
-impl<'a> BenchDatabase for FjallBenchDatabase<'a> {
+impl BenchDatabase for FjallBenchDatabase<'_> {
     type W<'db>
         = FjallBenchWriteTransaction<'db>
     where
@@ -892,7 +997,7 @@ pub struct FjallBenchReader<'a> {
     txn: &'a fjall::ReadTransaction,
 }
 
-impl<'db> BenchReader for FjallBenchReader<'db> {
+impl BenchReader for FjallBenchReader<'_> {
     type Output<'out>
         = fjall::Slice
     where

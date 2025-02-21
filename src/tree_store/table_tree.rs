@@ -24,10 +24,12 @@ pub(crate) struct FreedTableKey {
 }
 
 impl Value for FreedTableKey {
-    type SelfType<'a> = FreedTableKey
+    type SelfType<'a>
+        = FreedTableKey
     where
         Self: 'a;
-    type AsBytes<'a> = [u8; 2 * size_of::<u64>()]
+    type AsBytes<'a>
+        = [u8; 2 * size_of::<u64>()]
     where
         Self: 'a;
 
@@ -83,7 +85,7 @@ pub(crate) struct FreedPageList<'a> {
     data: &'a [u8],
 }
 
-impl<'a> FreedPageList<'a> {
+impl FreedPageList<'_> {
     pub(crate) fn required_bytes(len: usize) -> usize {
         2 + PageNumber::serialized_size() * len
     }
@@ -124,12 +126,14 @@ impl FreedPageListMut {
 }
 
 impl Value for FreedPageList<'_> {
-    type SelfType<'a> = FreedPageList<'a>
-        where
-            Self: 'a;
-    type AsBytes<'a> = &'a [u8]
-        where
-            Self: 'a;
+    type SelfType<'a>
+        = FreedPageList<'a>
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = &'a [u8]
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         None
@@ -297,7 +301,7 @@ pub(crate) struct TableTreeMut<'txn> {
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
 }
 
-impl<'txn> TableTreeMut<'txn> {
+impl TableTreeMut<'_> {
     pub(crate) fn new(
         master_root: Option<BtreeHeader>,
         guard: Arc<TransactionGuard>,

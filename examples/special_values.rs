@@ -40,7 +40,7 @@ struct SpecialValuesTransaction<'db> {
     file: &'db mut File,
 }
 
-impl<'db> SpecialValuesTransaction<'db> {
+impl SpecialValuesTransaction<'_> {
     fn open_table<K: Key + 'static, V: Value + 'static>(
         &mut self,
         table: TableDefinition<K, V>,
@@ -65,7 +65,7 @@ struct SpecialValuesTable<'txn, K: Key + 'static, V: Value + 'static> {
     _value_type: PhantomData<V>,
 }
 
-impl<'txn, K: Key + 'static, V: Value + 'static> SpecialValuesTable<'txn, K, V> {
+impl<K: Key + 'static, V: Value + 'static> SpecialValuesTable<'_, K, V> {
     fn insert(&mut self, key: K::SelfType<'_>, value: V::SelfType<'_>) {
         // Append to end of file
         let offset = self.file.seek(SeekFrom::End(0)).unwrap();

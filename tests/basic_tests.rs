@@ -1472,12 +1472,14 @@ fn custom_ordering() {
     struct ReverseKey(Vec<u8>);
 
     impl Value for ReverseKey {
-        type SelfType<'a> = ReverseKey
+        type SelfType<'a>
+            = ReverseKey
         where
-        Self: 'a;
-        type AsBytes<'a> = &'a [u8]
+            Self: 'a;
+        type AsBytes<'a>
+            = &'a [u8]
         where
-        Self: 'a;
+            Self: 'a;
 
         fn fixed_width() -> Option<usize> {
             None

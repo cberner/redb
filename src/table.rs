@@ -218,7 +218,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     }
 }
 
-impl<'txn, K: Key + 'static, V: MutInPlaceValue + 'static> Table<'txn, K, V> {
+impl<K: Key + 'static, V: MutInPlaceValue + 'static> Table<'_, K, V> {
     /// Reserve space to insert a key-value pair
     ///
     /// If key is already present it is replaced
@@ -243,7 +243,7 @@ impl<'txn, K: Key + 'static, V: MutInPlaceValue + 'static> Table<'txn, K, V> {
     }
 }
 
-impl<'txn, K: Key + 'static, V: Value + 'static> ReadableTableMetadata for Table<'txn, K, V> {
+impl<K: Key + 'static, V: Value + 'static> ReadableTableMetadata for Table<'_, K, V> {
     fn stats(&self) -> Result<TableStats> {
         let tree_stats = self.tree.stats()?;
 
@@ -262,7 +262,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> ReadableTableMetadata for Table
     }
 }
 
-impl<'txn, K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'txn, K, V> {
+impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'_, K, V> {
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>> {
         self.tree.get(key.borrow())
     }
@@ -287,7 +287,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'
 
 impl<K: Key, V: Value> Sealed for Table<'_, K, V> {}
 
-impl<'txn, K: Key + 'static, V: Value + 'static> Drop for Table<'txn, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Drop for Table<'_, K, V> {
     fn drop(&mut self) {
         self.transaction.close_table(
             &self.name,
@@ -590,11 +590,10 @@ impl<
 }
 
 impl<
-        'a,
         K: Key + 'static,
         V: Value + 'static,
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    > DoubleEndedIterator for ExtractIf<'a, K, V, F>
+    > DoubleEndedIterator for ExtractIf<'_, K, V, F>
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;
@@ -615,7 +614,7 @@ pub struct Range<'a, K: Key + 'static, V: Value + 'static> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> Range<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Range<'_, K, V> {
     pub(super) fn new(inner: BtreeRangeIter<K, V>, guard: Arc<TransactionGuard>) -> Self {
         Self {
             inner,
@@ -640,7 +639,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> Iterator for Range<'a, K, V> {
     }
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> DoubleEndedIterator for Range<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> DoubleEndedIterator for Range<'_, K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.inner.next_back().map(|x| {
             x.map(|entry| {

@@ -167,7 +167,7 @@ impl TransactionalMemory {
                 page_size as u64 * u64::from(MIN_USABLE_PAGES),
             );
             let tracker_space =
-                (page_size * ((region_tracker_required_bytes + page_size - 1) / page_size)) as u64;
+                (page_size * region_tracker_required_bytes.div_ceil(page_size)) as u64;
             let starting_size = size + tracker_space;
 
             let layout = DatabaseLayout::calculate(
@@ -191,7 +191,7 @@ impl TransactionalMemory {
             // Allocate the region tracker in the zeroth region
             let tracker_page = {
                 let tracker_required_pages =
-                    (allocators.region_tracker.to_vec().len() + page_size - 1) / page_size;
+                    allocators.region_tracker.to_vec().len().div_ceil(page_size);
                 let required_order = ceil_log2(tracker_required_pages);
                 let page_number = allocators.region_allocators[0]
                     .alloc(required_order)
@@ -988,7 +988,7 @@ impl TransactionalMemory {
         lowest: bool,
         transactional: bool,
     ) -> Result<PageMut> {
-        let required_pages = (allocation_size + self.get_page_size() - 1) / self.get_page_size();
+        let required_pages = allocation_size.div_ceil(self.get_page_size());
         let required_order = ceil_log2(required_pages);
 
         let mut state = self.state.lock().unwrap();
