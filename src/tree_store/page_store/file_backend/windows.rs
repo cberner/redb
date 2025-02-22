@@ -10,7 +10,7 @@ use std::os::windows::io::RawHandle;
 const ERROR_LOCK_VIOLATION: i32 = 0x21;
 const ERROR_IO_PENDING: i32 = 997;
 
-extern "system" {
+unsafe extern "system" {
     /// <https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfile>
     fn LockFile(
         file: RawHandle,

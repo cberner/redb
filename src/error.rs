@@ -237,7 +237,10 @@ impl Display for DatabaseError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             DatabaseError::UpgradeRequired(actual) => {
-                write!(f, "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION2}, but file is version {actual}")
+                write!(
+                    f,
+                    "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION2}, but file is version {actual}"
+                )
             }
             DatabaseError::RepairAborted => {
                 write!(f, "Database repair aborted.")
@@ -515,7 +518,10 @@ impl Display for Error {
                 write!(f, "DB corrupted: {msg}")
             }
             Error::UpgradeRequired(actual) => {
-                write!(f, "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION2}, but file is version {actual}")
+                write!(
+                    f,
+                    "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION2}, but file is version {actual}"
+                )
             }
             Error::ValueTooLarge(len) => {
                 write!(

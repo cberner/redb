@@ -1,7 +1,7 @@
 use tempfile::{NamedTempFile, TempDir};
 
-use rand::prelude::SliceRandom;
 use rand::Rng;
+use rand::prelude::SliceRandom;
 use std::env::current_dir;
 use std::fs::OpenOptions;
 use std::io::{IoSlice, Read, Seek, SeekFrom, Write};

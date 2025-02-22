@@ -1,5 +1,5 @@
-use crate::tree_store::page_store::{xxh3_checksum, Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::PageNumber;
+use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory, xxh3_checksum};
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
 use std::cmp::Ordering;
@@ -358,11 +358,7 @@ impl<'a> LeafAccessor<'a> {
 
     pub(crate) fn find_key<K: Key>(&self, query: &[u8]) -> Option<usize> {
         let (entry, found) = self.position::<K>(query);
-        if found {
-            Some(entry)
-        } else {
-            None
-        }
+        if found { Some(entry) } else { None }
     }
 
     fn key_section_start(&self) -> usize {

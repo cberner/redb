@@ -5,8 +5,8 @@ use tempfile::NamedTempFile;
 
 #[cfg(target_os = "linux")]
 mod unix {
-    use rand::prelude::SliceRandom;
     use rand::Rng;
+    use rand::prelude::SliceRandom;
     use std::collections::BTreeMap;
     use std::fs::{File, OpenOptions};
     use std::io::{IoSlice, Seek, SeekFrom, Write};
@@ -83,12 +83,13 @@ mod unix {
     impl Drop for WritablePage<'_> {
         fn drop(&mut self) {
             let data = mem::take(&mut self.data);
-            assert!(self
-                .buffer
-                .lock()
-                .unwrap()
-                .insert(self.page, Arc::new(data))
-                .is_none());
+            assert!(
+                self.buffer
+                    .lock()
+                    .unwrap()
+                    .insert(self.page, Arc::new(data))
+                    .is_none()
+            );
         }
     }
 

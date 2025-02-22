@@ -1,7 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::tree_store::btree_base::{
-    branch_checksum, leaf_checksum, BranchAccessor, BranchMutator, BtreeHeader, Checksum,
-    LeafAccessor, BRANCH, DEFERRED, LEAF,
+    BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF, LeafAccessor,
+    branch_checksum, leaf_checksum,
 };
 use crate::tree_store::btree_iters::BtreeExtractIf;
 use crate::tree_store::btree_mutator::MutateHelper;
@@ -578,9 +578,7 @@ impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
         #[cfg(feature = "logging")]
         trace!(
             "Btree(root={:?}): Inserting {:?} with {} reserved bytes for the value",
-            &self.root,
-            key,
-            value_length
+            &self.root, key, value_length
         );
         let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut value = vec![0u8; value_length as usize];

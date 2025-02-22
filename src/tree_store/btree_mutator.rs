@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
-    BranchAccessor, BranchBuilder, BranchMutator, Checksum, LeafAccessor, LeafBuilder, LeafMutator,
-    BRANCH, DEFERRED, LEAF,
+    BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
+    LeafBuilder, LeafMutator,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,

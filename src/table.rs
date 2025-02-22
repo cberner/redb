@@ -1,8 +1,8 @@
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
 use crate::tree_store::{
-    AccessGuardMut, Btree, BtreeExtractIf, BtreeHeader, BtreeMut, BtreeRangeIter, PageHint,
-    PageNumber, RawBtree, TransactionalMemory, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
+    AccessGuardMut, Btree, BtreeExtractIf, BtreeHeader, BtreeMut, BtreeRangeIter, MAX_PAIR_LENGTH,
+    MAX_VALUE_LENGTH, PageHint, PageNumber, RawBtree, TransactionalMemory,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, StorageError, WriteTransaction};
@@ -558,11 +558,11 @@ pub struct ExtractIf<
 }
 
 impl<
-        'a,
-        K: Key + 'static,
-        V: Value + 'static,
-        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    > ExtractIf<'a, K, V, F>
+    'a,
+    K: Key + 'static,
+    V: Value + 'static,
+    F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+> ExtractIf<'a, K, V, F>
 {
     fn new(inner: BtreeExtractIf<'a, K, V, F>) -> Self {
         Self { inner }
@@ -570,11 +570,11 @@ impl<
 }
 
 impl<
-        'a,
-        K: Key + 'static,
-        V: Value + 'static,
-        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    > Iterator for ExtractIf<'a, K, V, F>
+    'a,
+    K: Key + 'static,
+    V: Value + 'static,
+    F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+> Iterator for ExtractIf<'a, K, V, F>
 {
     type Item = Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)>;
 
@@ -590,10 +590,10 @@ impl<
 }
 
 impl<
-        K: Key + 'static,
-        V: Value + 'static,
-        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    > DoubleEndedIterator for ExtractIf<'_, K, V, F>
+    K: Key + 'static,
+    V: Value + 'static,
+    F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+> DoubleEndedIterator for ExtractIf<'_, K, V, F>
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;

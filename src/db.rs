@@ -1,8 +1,8 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeHeader, BtreeRangeIter, FreedPageList, FreedTableKey,
-    InternalTableDefinition, PageHint, PageNumber, RawBtree, SerializedSavepoint, TableTreeMut,
-    TableType, TransactionalMemory, PAGE_SIZE,
+    InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, RawBtree, SerializedSavepoint,
+    TableTreeMut, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError};
@@ -19,7 +19,7 @@ use std::{io, thread};
 use crate::error::TransactionError;
 use crate::sealed::Sealed;
 use crate::transactions::{
-    AllocatorStateKey, AllocatorStateTree, ALLOCATOR_STATE_TABLE_NAME, SAVEPOINT_TABLE,
+    ALLOCATOR_STATE_TABLE_NAME, AllocatorStateKey, AllocatorStateTree, SAVEPOINT_TABLE,
 };
 use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
@@ -1103,8 +1103,8 @@ mod test {
     };
     use std::fs::File;
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Debug)]
     struct FailingBackend {
@@ -1132,11 +1132,7 @@ mod test {
             if self
                 .countdown
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
-                    if x > 0 {
-                        Some(x - 1)
-                    } else {
-                        None
-                    }
+                    if x > 0 { Some(x - 1) } else { None }
                 })
                 .is_err()
             {

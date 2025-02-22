@@ -3,10 +3,10 @@ use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
 use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
-    btree_stats, AllPageNumbersBtreeIter, BranchAccessor, BranchMutator, Btree, BtreeHeader,
-    BtreeMut, BtreeRangeIter, BtreeStats, Checksum, LeafAccessor, LeafMutator, Page, PageHint,
-    PageNumber, PagePath, RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtree,
-    UntypedBtreeMut, BRANCH, DEFERRED, LEAF, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
+    AllPageNumbersBtreeIter, BRANCH, BranchAccessor, BranchMutator, Btree, BtreeHeader, BtreeMut,
+    BtreeRangeIter, BtreeStats, Checksum, DEFERRED, LEAF, LeafAccessor, LeafMutator,
+    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PagePath, RawBtree,
+    RawLeafBuilder, TransactionalMemory, UntypedBtree, UntypedBtreeMut, btree_stats,
 };
 use crate::types::{Key, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};

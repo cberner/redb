@@ -6,8 +6,8 @@ use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeHeader, BtreeMut, BuddyAllocator, FreedPageList, FreedTableKey,
-    InternalTableDefinition, Page, PageHint, PageNumber, SerializedSavepoint, TableTree,
-    TableTreeMut, TableType, TransactionalMemory, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
+    InternalTableDefinition, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber,
+    SerializedSavepoint, TableTree, TableTreeMut, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -1016,8 +1016,10 @@ impl WriteTransaction {
                 let pages: FreedPageList = item.value();
                 for i in 0..pages.len() {
                     let page = pages.get(i);
-                    assert!(old_allocators[page.region as usize]
-                        .is_allocated(page.page_index, page.page_order));
+                    assert!(
+                        old_allocators[page.region as usize]
+                            .is_allocated(page.page_index, page.page_order)
+                    );
                     old_allocators[page.region as usize].free(page.page_index, page.page_order);
                 }
             }
