@@ -4,7 +4,7 @@ use std::fmt::Debug;
 
 use bincode::{deserialize, serialize};
 use redb::{Database, Error, Key, Range, TableDefinition, TypeName, Value};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 struct SomeKey {

@@ -1,6 +1,6 @@
+use crate::tree_store::PageNumber;
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, U64GroupedBitmap};
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
-use crate::tree_store::PageNumber;
 use std::cmp::min;
 #[cfg(test)]
 use std::collections::HashSet;

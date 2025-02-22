@@ -3,7 +3,7 @@ use crate::error::TableError;
 use crate::multimap_table::{
     finalize_tree_and_subtree_checksums, multimap_btree_stats, verify_tree_and_subtree_checksums,
 };
-use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
+use crate::tree_store::btree::{UntypedBtreeMut, btree_stats};
 use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::{
     Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageHint, PageNumber, PagePath,
@@ -771,9 +771,9 @@ impl TableTreeMut<'_> {
 
 #[cfg(test)]
 mod test {
+    use crate::Value;
     use crate::tree_store::table_tree_base::InternalTableDefinition;
     use crate::types::TypeName;
-    use crate::Value;
 
     #[test]
     fn round_trip() {

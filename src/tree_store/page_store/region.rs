@@ -1,3 +1,5 @@
+use crate::Result;
+use crate::tree_store::PageNumber;
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
@@ -5,8 +7,6 @@ use crate::tree_store::page_store::header::DatabaseHeader;
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, MAX_MAX_PAGE_ORDER};
 use crate::tree_store::page_store::xxh3_checksum;
-use crate::tree_store::PageNumber;
-use crate::Result;
 use std::cmp::{self, max};
 use std::mem::size_of;
 

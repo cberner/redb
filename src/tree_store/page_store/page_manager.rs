@@ -1,13 +1,13 @@
 use crate::transaction_tracker::TransactionId;
 use crate::transactions::{AllocatorStateKey, AllocatorStateTree};
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
-use crate::tree_store::page_store::base::{PageHint, MAX_PAGE_INDEX};
+use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, PageHint};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
-use crate::tree_store::page_store::header::{DatabaseHeader, DB_HEADER_SIZE, MAGICNUMBER};
+use crate::tree_store::page_store::header::{DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER};
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
-use crate::tree_store::page_store::{hash128_with_seed, PageImpl, PageMut};
+use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
 use crate::tree_store::{Page, PageNumber};
 use crate::{CacheStats, StorageBackend};
 use crate::{DatabaseError, Result, StorageError};
@@ -19,10 +19,10 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::io::ErrorKind;
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(debug_assertions)]
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
@@ -860,11 +860,13 @@ impl TransactionalMemory {
     pub(crate) fn get_page_mut(&self, page_number: PageNumber) -> Result<PageMut> {
         #[cfg(debug_assertions)]
         {
-            assert!(!self
-                .read_page_ref_counts
-                .lock()
-                .unwrap()
-                .contains_key(&page_number));
+            assert!(
+                !self
+                    .read_page_ref_counts
+                    .lock()
+                    .unwrap()
+                    .contains_key(&page_number)
+            );
             assert!(!self.open_dirty_pages.lock().unwrap().contains(&page_number));
         }
 

@@ -1,4 +1,4 @@
-use crate::multimap_table::{relocate_subtrees, UntypedMultiBtree};
+use crate::multimap_table::{UntypedMultiBtree, relocate_subtrees};
 use crate::tree_store::{
     BtreeHeader, PageNumber, PagePath, TransactionalMemory, UntypedBtree, UntypedBtreeMut,
 };

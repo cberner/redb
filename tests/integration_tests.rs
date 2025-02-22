@@ -1,5 +1,5 @@
-use rand::prelude::SliceRandom;
 use rand::Rng;
+use rand::prelude::SliceRandom;
 use redb::backends::FileBackend;
 use redb::{
     AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
@@ -12,8 +12,8 @@ use std::fs;
 use std::io::{ErrorKind, Write};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const ELEMENTS: usize = 100;
 

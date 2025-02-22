@@ -2,7 +2,7 @@ use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::page_manager::{
-    xxh3_checksum, FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2,
+    FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, xxh3_checksum,
 };
 use crate::tree_store::{Checksum, PageNumber};
 use crate::{DatabaseError, Result, StorageError};
@@ -356,7 +356,7 @@ impl TransactionHeader {
                 return Err(StorageError::Corrupted(format!(
                     "Expected file format version <= {FILE_FORMAT_VERSION2}, found {version}",
                 ))
-                .into())
+                .into());
             }
         }
         let checksum = Checksum::from_le_bytes(
@@ -437,15 +437,15 @@ impl TransactionHeader {
 
 #[cfg(test)]
 mod test {
+    #[cfg(not(target_os = "windows"))]
+    use crate::StorageError;
     use crate::backends::FileBackend;
     use crate::db::TableDefinition;
+    use crate::tree_store::page_store::TransactionalMemory;
     use crate::tree_store::page_store::header::{
         GOD_BYTE_OFFSET, MAGICNUMBER, PAGE_SIZE, PRIMARY_BIT, RECOVERY_REQUIRED,
         TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT, USER_ROOT_OFFSET,
     };
-    use crate::tree_store::page_store::TransactionalMemory;
-    #[cfg(not(target_os = "windows"))]
-    use crate::StorageError;
     use crate::{Database, DatabaseError, ReadableTable};
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -506,17 +506,19 @@ mod test {
         .unwrap();
         file.write_all(&[0; size_of::<u128>()]).unwrap();
 
-        assert!(TransactionalMemory::new(
-            Box::new(FileBackend::new(file).unwrap()),
-            false,
-            PAGE_SIZE,
-            None,
-            0,
-            0
-        )
-        .unwrap()
-        .needs_repair()
-        .unwrap());
+        assert!(
+            TransactionalMemory::new(
+                Box::new(FileBackend::new(file).unwrap()),
+                false,
+                PAGE_SIZE,
+                None,
+                0,
+                0
+            )
+            .unwrap()
+            .needs_repair()
+            .unwrap()
+        );
 
         #[allow(unused_mut)]
         let mut db2 = Database::create(tmpfile.path()).unwrap();
@@ -596,17 +598,19 @@ mod test {
         buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
 
-        assert!(TransactionalMemory::new(
-            Box::new(FileBackend::new(file).unwrap()),
-            false,
-            PAGE_SIZE,
-            None,
-            0,
-            0
-        )
-        .unwrap()
-        .needs_repair()
-        .unwrap());
+        assert!(
+            TransactionalMemory::new(
+                Box::new(FileBackend::new(file).unwrap()),
+                false,
+                PAGE_SIZE,
+                None,
+                0,
+                0
+            )
+            .unwrap()
+            .needs_repair()
+            .unwrap()
+        );
 
         Database::open(tmpfile.path()).unwrap();
     }
@@ -631,17 +635,19 @@ mod test {
         buffer[0] &= !TWO_PHASE_COMMIT;
         file.write_all(&buffer).unwrap();
 
-        assert!(TransactionalMemory::new(
-            Box::new(FileBackend::new(file).unwrap()),
-            false,
-            PAGE_SIZE,
-            None,
-            0,
-            0
-        )
-        .unwrap()
-        .needs_repair()
-        .unwrap());
+        assert!(
+            TransactionalMemory::new(
+                Box::new(FileBackend::new(file).unwrap()),
+                false,
+                PAGE_SIZE,
+                None,
+                0,
+                0
+            )
+            .unwrap()
+            .needs_repair()
+            .unwrap()
+        );
 
         let err = Database::builder()
             .set_repair_callback(|handle| handle.abort())
@@ -688,17 +694,19 @@ mod test {
         buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
 
-        assert!(TransactionalMemory::new(
-            Box::new(FileBackend::new(file).unwrap()),
-            false,
-            PAGE_SIZE,
-            None,
-            0,
-            0
-        )
-        .unwrap()
-        .needs_repair()
-        .unwrap());
+        assert!(
+            TransactionalMemory::new(
+                Box::new(FileBackend::new(file).unwrap()),
+                false,
+                PAGE_SIZE,
+                None,
+                0,
+                0
+            )
+            .unwrap()
+            .needs_repair()
+            .unwrap()
+        );
 
         Database::open(tmpfile.path()).unwrap();
     }
