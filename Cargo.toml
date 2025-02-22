@@ -42,8 +42,7 @@ libc = "0.2.99"
 
 # Just benchmarking dependencies, which don't build on wasi
 [target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
-# Pinned to compatibility with MSRV
-ctrlc = "=3.2.3"
+ctrlc = "3.2.3"
 heed = "0.20"
 sanakirja = "=1.4.1"
 sanakirja-core = "=1.4.1"
