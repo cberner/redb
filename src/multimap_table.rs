@@ -816,13 +816,13 @@ impl<'a, V: Key + 'static> Iterator for MultimapValue<'a, V> {
     fn next(&mut self) -> Option<Self::Item> {
         // TODO: optimize out this copy
         let bytes = match self.inner.as_mut().unwrap() {
-            ValueIterState::Subtree(ref mut iter) => match iter.next()? {
+            ValueIterState::Subtree(iter) => match iter.next()? {
                 Ok(e) => e.key_data(),
                 Err(err) => {
                     return Some(Err(err));
                 }
             },
-            ValueIterState::InlineLeaf(ref mut iter) => iter.next_key()?.to_vec(),
+            ValueIterState::InlineLeaf(iter) => iter.next_key()?.to_vec(),
         };
         self.remaining -= 1;
         Some(Ok(AccessGuard::with_owned_value(bytes)))
@@ -833,13 +833,13 @@ impl<V: Key + 'static> DoubleEndedIterator for MultimapValue<'_, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         // TODO: optimize out this copy
         let bytes = match self.inner.as_mut().unwrap() {
-            ValueIterState::Subtree(ref mut iter) => match iter.next_back()? {
+            ValueIterState::Subtree(iter) => match iter.next_back()? {
                 Ok(e) => e.key_data(),
                 Err(err) => {
                     return Some(Err(err));
                 }
             },
-            ValueIterState::InlineLeaf(ref mut iter) => iter.next_key_back()?.to_vec(),
+            ValueIterState::InlineLeaf(iter) => iter.next_key_back()?.to_vec(),
         };
         Some(Ok(AccessGuard::with_owned_value(bytes)))
     }
