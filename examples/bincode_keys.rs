@@ -4,7 +4,7 @@ use std::fmt::Debug;
 
 use bincode::{deserialize, serialize};
 use redb::{Database, Error, Key, Range, TableDefinition, TypeName, Value};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 struct SomeKey {
@@ -66,11 +66,13 @@ impl<T> Value for Bincode<T>
 where
     T: Debug + Serialize + for<'a> Deserialize<'a>,
 {
-    type SelfType<'a> = T
+    type SelfType<'a>
+        = T
     where
         Self: 'a;
 
-    type AsBytes<'a> = Vec<u8>
+    type AsBytes<'a>
+        = Vec<u8>
     where
         Self: 'a;
 

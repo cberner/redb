@@ -32,10 +32,12 @@ fn decode_varint_len(data: &[u8]) -> (usize, usize) {
 }
 
 impl<T: Value> Value for Vec<T> {
-    type SelfType<'a> = Vec<T::SelfType<'a>>
+    type SelfType<'a>
+        = Vec<T::SelfType<'a>>
     where
         Self: 'a;
-    type AsBytes<'a> = Vec<u8>
+    type AsBytes<'a>
+        = Vec<u8>
     where
         Self: 'a;
 

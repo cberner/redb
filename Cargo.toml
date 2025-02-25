@@ -6,8 +6,8 @@ repository = "https://github.com/cberner/redb"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 version = "2.4.0"
-edition = "2021"
-rust-version = "1.81"
+edition = "2024"
+rust-version = "1.85"
 authors = ["Christopher Berner <me@cberner.com>"]
 exclude = ["fuzz/"]
 
@@ -26,7 +26,7 @@ libc = "0.2.104"
 
 # Common test/bench dependencies
 [dev-dependencies]
-rand = "0.8"
+rand = "0.9"
 tempfile = "3.5.0"
 # for backwards compatibility testing - pin at 1.0.0
 redb1 = { version = "=1.0.0", package = "redb" }
@@ -42,8 +42,7 @@ libc = "0.2.99"
 
 # Just benchmarking dependencies, which don't build on wasi
 [target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
-# Pinned to compatibility with MSRV
-ctrlc = "=3.2.3"
+ctrlc = "3.2.3"
 heed = "0.20"
 sanakirja = "=1.4.1"
 sanakirja-core = "=1.4.1"

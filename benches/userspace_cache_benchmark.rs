@@ -5,8 +5,8 @@ use tempfile::NamedTempFile;
 
 #[cfg(target_os = "linux")]
 mod unix {
-    use rand::prelude::SliceRandom;
     use rand::Rng;
+    use rand::prelude::SliceRandom;
     use std::collections::BTreeMap;
     use std::fs::{File, OpenOptions};
     use std::io::{IoSlice, Seek, SeekFrom, Write};
@@ -52,18 +52,18 @@ mod unix {
         );
     }
 
-    fn gen_data(count: usize, value_size: usize) -> Vec<Vec<u8>> {
+    fn random_data(count: usize, value_size: usize) -> Vec<Vec<u8>> {
         let mut values = vec![];
         for _ in 0..count {
-            let value: Vec<u8> = (0..value_size).map(|_| rand::thread_rng().gen()).collect();
+            let value: Vec<u8> = (0..value_size).map(|_| rand::rng().random()).collect();
             values.push(value);
         }
         values
     }
 
-    fn gen_entry_indices() -> Vec<usize> {
+    fn random_entry_indices() -> Vec<usize> {
         let mut page_numbers: Vec<usize> = (0..ELEMENTS_SPACE).collect();
-        page_numbers.shuffle(&mut rand::thread_rng());
+        page_numbers.shuffle(&mut rand::rng());
         page_numbers.drain(ELEMENTS..);
         page_numbers
     }
@@ -74,21 +74,22 @@ mod unix {
         data: Vec<u8>,
     }
 
-    impl<'a> WritablePage<'a> {
+    impl WritablePage<'_> {
         fn mut_data(&mut self) -> &mut [u8] {
             &mut self.data
         }
     }
 
-    impl<'a> Drop for WritablePage<'a> {
+    impl Drop for WritablePage<'_> {
         fn drop(&mut self) {
             let data = mem::take(&mut self.data);
-            assert!(self
-                .buffer
-                .lock()
-                .unwrap()
-                .insert(self.page, Arc::new(data))
-                .is_none());
+            assert!(
+                self.buffer
+                    .lock()
+                    .unwrap()
+                    .insert(self.page, Arc::new(data))
+                    .is_none()
+            );
         }
     }
 
@@ -374,10 +375,10 @@ mod unix {
         let result = unsafe { libc::madvise(mmap_raw, len as libc::size_t, libc::MADV_RANDOM) };
         assert_eq!(result, 0);
 
-        let pairs = Arc::new(gen_data(1000, VALUE_SIZE));
+        let pairs = Arc::new(random_data(1000, VALUE_SIZE));
         let pairs_len = pairs.len();
 
-        let entry_indices = gen_entry_indices();
+        let entry_indices = random_entry_indices();
         let mut chunks: Vec<Vec<usize>> = vec![];
         for chunk in entry_indices.chunks_exact(ELEMENTS / threads) {
             chunks.push(chunk.to_vec());
@@ -549,10 +550,10 @@ mod unix {
         // We assume two values fit into a single page
         assert_eq!(VALUE_SIZE, PagedCachedFile::page_size());
 
-        let pairs = Arc::new(gen_data(1000, VALUE_SIZE));
+        let pairs = Arc::new(random_data(1000, VALUE_SIZE));
         let pairs_len = pairs.len();
 
-        let entry_indices = gen_entry_indices();
+        let entry_indices = random_entry_indices();
         let mut chunks: Vec<Vec<usize>> = vec![];
         for chunk in entry_indices.chunks_exact(ELEMENTS / threads) {
             chunks.push(chunk.to_vec());

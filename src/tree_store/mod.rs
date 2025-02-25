@@ -7,18 +7,18 @@ mod table_tree;
 mod table_tree_base;
 
 pub(crate) use btree::{
-    btree_stats, Btree, BtreeMut, BtreeStats, PagePath, RawBtree, UntypedBtree, UntypedBtreeMut,
+    Btree, BtreeMut, BtreeStats, PagePath, RawBtree, UntypedBtree, UntypedBtreeMut, btree_stats,
 };
 pub use btree_base::{AccessGuard, AccessGuardMut};
 pub(crate) use btree_base::{
-    BranchAccessor, BranchMutator, BtreeHeader, Checksum, LeafAccessor, LeafMutator,
-    RawLeafBuilder, BRANCH, DEFERRED, LEAF,
+    BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF, LeafAccessor,
+    LeafMutator, RawLeafBuilder,
 };
 pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeExtractIf, BtreeRangeIter};
-pub use page_store::{file_backend, InMemoryBackend, Savepoint};
 pub(crate) use page_store::{
-    BuddyAllocator, Page, PageHint, PageNumber, SerializedSavepoint, TransactionalMemory,
-    FILE_FORMAT_VERSION2, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE,
+    BuddyAllocator, FILE_FORMAT_VERSION2, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE, Page,
+    PageHint, PageNumber, SerializedSavepoint, TransactionalMemory,
 };
+pub use page_store::{InMemoryBackend, Savepoint, file_backend};
 pub(crate) use table_tree::{FreedPageList, FreedTableKey, TableTree, TableTreeMut};
 pub(crate) use table_tree_base::{InternalTableDefinition, TableType};

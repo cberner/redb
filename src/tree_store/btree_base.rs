@@ -1,5 +1,5 @@
-use crate::tree_store::page_store::{xxh3_checksum, Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::PageNumber;
+use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory, xxh3_checksum};
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
 use std::cmp::Ordering;
@@ -169,7 +169,7 @@ pub struct AccessGuard<'a, V: Value + 'static> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, V: Value + 'static> AccessGuard<'a, V> {
+impl<V: Value + 'static> AccessGuard<'_, V> {
     pub(crate) fn with_page(page: PageImpl, range: Range<usize>) -> Self {
         Self {
             page: EitherPage::Immutable(page),
@@ -229,7 +229,7 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
     }
 }
 
-impl<'a, V: Value + 'static> Drop for AccessGuard<'a, V> {
+impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
     fn drop(&mut self) {
         match self.on_drop {
             OnDrop::None => {}
@@ -257,7 +257,7 @@ pub struct AccessGuardMut<'a, V: Value + 'static> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
+impl<V: Value + 'static> AccessGuardMut<'_, V> {
     pub(crate) fn new(page: PageMut, offset: usize, len: usize) -> Self {
         AccessGuardMut {
             page,
@@ -269,7 +269,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
     }
 }
 
-impl<'a, V: MutInPlaceValue + 'static> AsMut<V::BaseRefType> for AccessGuardMut<'a, V> {
+impl<V: MutInPlaceValue + 'static> AsMut<V::BaseRefType> for AccessGuardMut<'_, V> {
     fn as_mut(&mut self) -> &mut V::BaseRefType {
         V::from_bytes_mut(&mut self.page.memory_mut()[self.offset..(self.offset + self.len)])
     }
@@ -358,11 +358,7 @@ impl<'a> LeafAccessor<'a> {
 
     pub(crate) fn find_key<K: Key>(&self, query: &[u8]) -> Option<usize> {
         let (entry, found) = self.position::<K>(query);
-        if found {
-            Some(entry)
-        } else {
-            None
-        }
+        if found { Some(entry) } else { None }
     }
 
     fn key_section_start(&self) -> usize {
@@ -795,7 +791,7 @@ impl<'a> RawLeafBuilder<'a> {
     }
 }
 
-impl<'a> Drop for RawLeafBuilder<'a> {
+impl Drop for RawLeafBuilder<'_> {
     fn drop(&mut self) {
         if !thread::panicking() {
             assert_eq!(self.pairs_written, self.num_pairs);
@@ -1544,7 +1540,7 @@ impl<'b> RawBranchBuilder<'b> {
     }
 }
 
-impl<'b> Drop for RawBranchBuilder<'b> {
+impl Drop for RawBranchBuilder<'_> {
     fn drop(&mut self) {
         if !thread::panicking() {
             assert_eq!(self.keys_written, self.num_keys);

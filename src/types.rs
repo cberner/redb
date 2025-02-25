@@ -50,7 +50,7 @@ impl TypeName {
     }
 
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        let mut result = Vec::with_capacity(self.name.as_bytes().len() + 1);
+        let mut result = Vec::with_capacity(self.name.len() + 1);
         result.push(self.classification.to_byte());
         result.extend_from_slice(self.name.as_bytes());
         result
@@ -130,10 +130,12 @@ pub trait Key: Value {
 }
 
 impl Value for () {
-    type SelfType<'a> = ()
+    type SelfType<'a>
+        = ()
     where
         Self: 'a;
-    type AsBytes<'a> = &'a [u8]
+    type AsBytes<'a>
+        = &'a [u8]
     where
         Self: 'a;
 
@@ -169,12 +171,14 @@ impl Key for () {
 }
 
 impl Value for bool {
-    type SelfType<'a> = bool
-        where
-            Self: 'a;
-    type AsBytes<'a> = &'a [u8]
-        where
-            Self: 'a;
+    type SelfType<'a>
+        = bool
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = &'a [u8]
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         Some(1)
@@ -215,10 +219,12 @@ impl Key for bool {
 }
 
 impl<T: Value> Value for Option<T> {
-    type SelfType<'a> = Option<T::SelfType<'a>>
+    type SelfType<'a>
+        = Option<T::SelfType<'a>>
     where
         Self: 'a;
-    type AsBytes<'a> = Vec<u8>
+    type AsBytes<'a>
+        = Vec<u8>
     where
         Self: 'a;
 
@@ -276,10 +282,12 @@ impl<T: Key> Key for Option<T> {
 }
 
 impl Value for &[u8] {
-    type SelfType<'a> = &'a [u8]
+    type SelfType<'a>
+        = &'a [u8]
     where
         Self: 'a;
-    type AsBytes<'a> = &'a [u8]
+    type AsBytes<'a>
+        = &'a [u8]
     where
         Self: 'a;
 
@@ -313,10 +321,12 @@ impl Key for &[u8] {
 }
 
 impl<const N: usize> Value for &[u8; N] {
-    type SelfType<'a> = &'a [u8; N]
+    type SelfType<'a>
+        = &'a [u8; N]
     where
         Self: 'a;
-    type AsBytes<'a> = &'a [u8; N]
+    type AsBytes<'a>
+        = &'a [u8; N]
     where
         Self: 'a;
 
@@ -350,12 +360,14 @@ impl<const N: usize> Key for &[u8; N] {
 }
 
 impl<const N: usize, T: Value> Value for [T; N] {
-    type SelfType<'a> = [T::SelfType<'a>; N]
-        where
-            Self: 'a;
-    type AsBytes<'a> = Vec<u8>
-        where
-            Self: 'a;
+    type SelfType<'a>
+        = [T::SelfType<'a>; N]
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         T::fixed_width().map(|x| x * N)
@@ -444,10 +456,12 @@ impl<const N: usize, T: Key> Key for [T; N] {
 }
 
 impl Value for &str {
-    type SelfType<'a> = &'a str
+    type SelfType<'a>
+        = &'a str
     where
         Self: 'a;
-    type AsBytes<'a> = &'a str
+    type AsBytes<'a>
+        = &'a str
     where
         Self: 'a;
 
@@ -483,10 +497,12 @@ impl Key for &str {
 }
 
 impl Value for String {
-    type SelfType<'a> = String
+    type SelfType<'a>
+        = String
     where
         Self: 'a;
-    type AsBytes<'a> = &'a str
+    type AsBytes<'a>
+        = &'a str
     where
         Self: 'a;
 
@@ -523,7 +539,10 @@ impl Key for String {
 
 impl Value for char {
     type SelfType<'a> = char;
-    type AsBytes<'a> = [u8; 3] where Self: 'a;
+    type AsBytes<'a>
+        = [u8; 3]
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         Some(3)
@@ -559,7 +578,10 @@ macro_rules! le_value {
     ($t:ty) => {
         impl Value for $t {
             type SelfType<'a> = $t;
-            type AsBytes<'a> = [u8; std::mem::size_of::<$t>()] where Self: 'a;
+            type AsBytes<'a>
+                = [u8; std::mem::size_of::<$t>()]
+            where
+                Self: 'a;
 
             fn fixed_width() -> Option<usize> {
                 Some(std::mem::size_of::<$t>())

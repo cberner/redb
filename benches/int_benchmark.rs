@@ -14,18 +14,18 @@ use std::time::{Duration, Instant};
 const ELEMENTS: usize = 1_000_000;
 
 /// Returns pairs of key, value
-fn gen_data(count: usize) -> Vec<(u32, u64)> {
+fn random_data(count: usize) -> Vec<(u32, u64)> {
     let mut rng = StdRng::seed_from_u64(0);
     let mut pairs = vec![];
     for _ in 0..count {
-        pairs.push(rng.gen());
+        pairs.push(rng.random());
     }
     pairs
 }
 
 fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
     let mut results = Vec::new();
-    let pairs = gen_data(1_000_000);
+    let pairs = random_data(1_000_000);
     let mut written = 0;
 
     let start = Instant::now();

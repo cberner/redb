@@ -463,12 +463,12 @@ impl PagedCachedFile {
 
 #[cfg(test)]
 mod test {
-    use crate::backends::InMemoryBackend;
-    use crate::tree_store::page_store::cached_file::PagedCachedFile;
-    use crate::tree_store::PageHint;
     use crate::StorageBackend;
-    use std::sync::atomic::Ordering;
+    use crate::backends::InMemoryBackend;
+    use crate::tree_store::PageHint;
+    use crate::tree_store::page_store::cached_file::PagedCachedFile;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
     // TODO: Switch to threaded wasi build for the tests
     #[cfg(not(target_os = "wasi"))]

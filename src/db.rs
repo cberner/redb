@@ -1,8 +1,8 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeHeader, BtreeRangeIter, FreedPageList, FreedTableKey,
-    InternalTableDefinition, PageHint, PageNumber, RawBtree, SerializedSavepoint, TableTreeMut,
-    TableType, TransactionalMemory, PAGE_SIZE,
+    InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, RawBtree, SerializedSavepoint,
+    TableTreeMut, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError};
@@ -19,7 +19,7 @@ use std::{io, thread};
 use crate::error::TransactionError;
 use crate::sealed::Sealed;
 use crate::transactions::{
-    AllocatorStateKey, AllocatorStateTree, ALLOCATOR_STATE_TABLE_NAME, SAVEPOINT_TABLE,
+    ALLOCATOR_STATE_TABLE_NAME, AllocatorStateKey, AllocatorStateTree, SAVEPOINT_TABLE,
 };
 use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
@@ -128,7 +128,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> TableDefinition<'a, K, V> {
     }
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> TableHandle for TableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> TableHandle for TableDefinition<'_, K, V> {
     fn name(&self) -> &str {
         self.name
     }
@@ -136,15 +136,15 @@ impl<'a, K: Key + 'static, V: Value + 'static> TableHandle for TableDefinition<'
 
 impl<K: Key, V: Value> Sealed for TableDefinition<'_, K, V> {}
 
-impl<'a, K: Key + 'static, V: Value + 'static> Clone for TableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Clone for TableDefinition<'_, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> Copy for TableDefinition<'a, K, V> {}
+impl<K: Key + 'static, V: Value + 'static> Copy for TableDefinition<'_, K, V> {}
 
-impl<'a, K: Key + 'static, V: Value + 'static> Display for TableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Display for TableDefinition<'_, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -181,9 +181,7 @@ impl<'a, K: Key + 'static, V: Key + 'static> MultimapTableDefinition<'a, K, V> {
     }
 }
 
-impl<'a, K: Key + 'static, V: Key + 'static> MultimapTableHandle
-    for MultimapTableDefinition<'a, K, V>
-{
+impl<K: Key + 'static, V: Key + 'static> MultimapTableHandle for MultimapTableDefinition<'_, K, V> {
     fn name(&self) -> &str {
         self.name
     }
@@ -191,15 +189,15 @@ impl<'a, K: Key + 'static, V: Key + 'static> MultimapTableHandle
 
 impl<K: Key, V: Key> Sealed for MultimapTableDefinition<'_, K, V> {}
 
-impl<'a, K: Key + 'static, V: Key + 'static> Clone for MultimapTableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Key + 'static> Clone for MultimapTableDefinition<'_, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: Key + 'static, V: Key + 'static> Copy for MultimapTableDefinition<'a, K, V> {}
+impl<K: Key + 'static, V: Key + 'static> Copy for MultimapTableDefinition<'_, K, V> {}
 
-impl<'a, K: Key + 'static, V: Key + 'static> Display for MultimapTableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Key + 'static> Display for MultimapTableDefinition<'_, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -1105,8 +1103,8 @@ mod test {
     };
     use std::fs::File;
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Debug)]
     struct FailingBackend {
@@ -1134,11 +1132,7 @@ mod test {
             if self
                 .countdown
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
-                    if x > 0 {
-                        Some(x - 1)
-                    } else {
-                        None
-                    }
+                    if x > 0 { Some(x - 1) } else { None }
                 })
                 .is_err()
             {

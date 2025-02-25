@@ -88,7 +88,7 @@ fn main() {
     let mut rng = StdRng::seed_from_u64(RNG_SEED);
     let mut values = vec![];
     for _ in 0..ELEMENTS {
-        values.push(rng.gen());
+        values.push(rng.random());
     }
 
     let tmpdir = current_dir().unwrap().join(".benchmark");

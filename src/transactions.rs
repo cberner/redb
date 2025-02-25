@@ -6,8 +6,8 @@ use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeHeader, BtreeMut, BuddyAllocator, FreedPageList, FreedTableKey,
-    InternalTableDefinition, Page, PageHint, PageNumber, SerializedSavepoint, TableTree,
-    TableTreeMut, TableType, TransactionalMemory, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
+    InternalTableDefinition, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber,
+    SerializedSavepoint, TableTree, TableTreeMut, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -117,7 +117,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> SystemTableDefinition<'a, K, V> {
     }
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> TableHandle for SystemTableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> TableHandle for SystemTableDefinition<'_, K, V> {
     fn name(&self) -> &str {
         self.name
     }
@@ -125,15 +125,15 @@ impl<'a, K: Key + 'static, V: Value + 'static> TableHandle for SystemTableDefini
 
 impl<K: Key, V: Value> Sealed for SystemTableDefinition<'_, K, V> {}
 
-impl<'a, K: Key + 'static, V: Value + 'static> Clone for SystemTableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Clone for SystemTableDefinition<'_, K, V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> Copy for SystemTableDefinition<'a, K, V> {}
+impl<K: Key + 'static, V: Value + 'static> Copy for SystemTableDefinition<'_, K, V> {}
 
-impl<'a, K: Key + 'static, V: Value + 'static> Display for SystemTableDefinition<'a, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Display for SystemTableDefinition<'_, K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -308,7 +308,7 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
     }
 }
 
-impl<'db, 's, K: Key + 'static, V: Value + 'static> Drop for SystemTable<'db, 's, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Drop for SystemTable<'_, '_, K, V> {
     fn drop(&mut self) {
         self.namespace.close_table(
             &self.name,
@@ -365,7 +365,7 @@ struct TableNamespace<'db> {
     table_tree: TableTreeMut<'db>,
 }
 
-impl<'db> TableNamespace<'db> {
+impl TableNamespace<'_> {
     #[track_caller]
     fn inner_open<K: Key + 'static, V: Value + 'static>(
         &mut self,
@@ -424,6 +424,46 @@ impl<'db> TableNamespace<'db> {
             transaction.mem.clone(),
             transaction,
         ))
+    }
+
+    #[track_caller]
+    fn inner_rename(
+        &mut self,
+        name: &str,
+        new_name: &str,
+        table_type: TableType,
+    ) -> Result<(), TableError> {
+        if let Some(location) = self.open_tables.get(name) {
+            return Err(TableError::TableAlreadyOpen(name.to_string(), location));
+        }
+
+        self.table_tree.rename_table(name, new_name, table_type)
+    }
+
+    #[track_caller]
+    fn rename_table(
+        &mut self,
+        transaction: &WriteTransaction,
+        name: &str,
+        new_name: &str,
+    ) -> Result<(), TableError> {
+        #[cfg(feature = "logging")]
+        debug!("Renaming table: {} to {}", name, new_name);
+        transaction.dirty.store(true, Ordering::Release);
+        self.inner_rename(name, new_name, TableType::Normal)
+    }
+
+    #[track_caller]
+    fn rename_multimap_table(
+        &mut self,
+        transaction: &WriteTransaction,
+        name: &str,
+        new_name: &str,
+    ) -> Result<(), TableError> {
+        #[cfg(feature = "logging")]
+        debug!("Renaming multimap table: {} to {}", name, new_name);
+        transaction.dirty.store(true, Ordering::Release);
+        self.inner_rename(name, new_name, TableType::Multimap)
     }
 
     #[track_caller]
@@ -981,8 +1021,10 @@ impl WriteTransaction {
                 let pages: FreedPageList = item.value();
                 for i in 0..pages.len() {
                     let page = pages.get(i);
-                    assert!(old_allocators[page.region as usize]
-                        .is_allocated(page.page_index, page.page_order));
+                    assert!(
+                        old_allocators[page.region as usize]
+                            .is_allocated(page.page_index, page.page_order)
+                    );
                     old_allocators[page.region as usize].free(page.page_index, page.page_order);
                 }
             }
@@ -1143,6 +1185,36 @@ impl WriteTransaction {
         length: u64,
     ) {
         self.tables.lock().unwrap().close_table(name, table, length);
+    }
+
+    /// Rename the given table
+    pub fn rename_table(
+        &self,
+        definition: impl TableHandle,
+        new_name: impl TableHandle,
+    ) -> Result<(), TableError> {
+        let name = definition.name().to_string();
+        // Drop the definition so that callers can pass in a `Table` to rename, without getting a TableAlreadyOpen error
+        drop(definition);
+        self.tables
+            .lock()
+            .unwrap()
+            .rename_table(self, &name, new_name.name())
+    }
+
+    /// Rename the given multimap table
+    pub fn rename_multimap_table(
+        &self,
+        definition: impl MultimapTableHandle,
+        new_name: impl MultimapTableHandle,
+    ) -> Result<(), TableError> {
+        let name = definition.name().to_string();
+        // Drop the definition so that callers can pass in a `MultimapTable` to rename, without getting a TableAlreadyOpen error
+        drop(definition);
+        self.tables
+            .lock()
+            .unwrap()
+            .rename_multimap_table(self, &name, new_name.name())
     }
 
     /// Delete the given table

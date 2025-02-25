@@ -93,6 +93,8 @@ pub enum TableError {
     },
     /// Table name does not match any table in database
     TableDoesNotExist(String),
+    /// Table name already exists in the database
+    TableExists(String),
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
     TableAlreadyOpen(String, &'static panic::Location<'static>),
@@ -108,6 +110,7 @@ impl TableError {
             | TableError::TableIsNotMultimap(_)
             | TableError::TypeDefinitionChanged { .. }
             | TableError::TableDoesNotExist(_)
+            | TableError::TableExists(_)
             | TableError::TableAlreadyOpen(_, _) => {
                 StorageError::Corrupted(format!("{msg}: {self}"))
             }
@@ -134,6 +137,7 @@ impl From<TableError> for Error {
             TableError::TableIsMultimap(table) => Error::TableIsMultimap(table),
             TableError::TableIsNotMultimap(table) => Error::TableIsNotMultimap(table),
             TableError::TableDoesNotExist(table) => Error::TableDoesNotExist(table),
+            TableError::TableExists(table) => Error::TableExists(table),
             TableError::TableAlreadyOpen(name, location) => Error::TableAlreadyOpen(name, location),
             TableError::Storage(storage) => storage.into(),
         }
@@ -178,6 +182,9 @@ impl Display for TableError {
             }
             TableError::TableDoesNotExist(table) => {
                 write!(f, "Table '{table}' does not exist")
+            }
+            TableError::TableExists(table) => {
+                write!(f, "Table '{table}' already exists")
             }
             TableError::TableAlreadyOpen(name, location) => {
                 write!(f, "Table '{name}' already opened at: {location}")
@@ -230,7 +237,10 @@ impl Display for DatabaseError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             DatabaseError::UpgradeRequired(actual) => {
-                write!(f, "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION2}, but file is version {actual}")
+                write!(
+                    f,
+                    "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION2}, but file is version {actual}"
+                )
             }
             DatabaseError::RepairAborted => {
                 write!(f, "Database repair aborted.")
@@ -476,6 +486,8 @@ pub enum Error {
     },
     /// Table name does not match any table in database
     TableDoesNotExist(String),
+    /// Table name already exists in the database
+    TableExists(String),
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
     TableAlreadyOpen(String, &'static panic::Location<'static>),
@@ -506,7 +518,10 @@ impl Display for Error {
                 write!(f, "DB corrupted: {msg}")
             }
             Error::UpgradeRequired(actual) => {
-                write!(f, "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION2}, but file is version {actual}")
+                write!(
+                    f,
+                    "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION2}, but file is version {actual}"
+                )
             }
             Error::ValueTooLarge(len) => {
                 write!(
@@ -544,6 +559,9 @@ impl Display for Error {
             }
             Error::TableDoesNotExist(table) => {
                 write!(f, "Table '{table}' does not exist")
+            }
+            Error::TableExists(table) => {
+                write!(f, "Table '{table}' already exists")
             }
             Error::TableAlreadyOpen(name, location) => {
                 write!(f, "Table '{name}' already opened at: {location}")

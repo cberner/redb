@@ -945,6 +945,65 @@ fn delete_table() {
 }
 
 #[test]
+fn rename_table() {
+    let table_def: TableDefinition<&str, &str> = TableDefinition::new("x");
+    let table_def2: TableDefinition<&str, &str> = TableDefinition::new("x2");
+    let multitable_def: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("x");
+    let multitable_def2: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("x2");
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert("hi", "hi").unwrap();
+        write_txn.rename_table(table, table_def2).unwrap();
+        assert!(matches!(
+            write_txn.rename_table(table_def, table_def2).unwrap_err(),
+            TableError::TableDoesNotExist(_)
+        ));
+
+        let table = write_txn.open_table(table_def).unwrap();
+        assert!(matches!(
+            write_txn.rename_table(table, table_def2).unwrap_err(),
+            TableError::TableExists(_)
+        ));
+
+        assert!(matches!(
+            write_txn
+                .rename_multimap_table(multitable_def, multitable_def2)
+                .unwrap_err(),
+            TableError::TableIsNotMultimap(_)
+        ));
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(table_def).unwrap();
+        assert!(table.is_empty().unwrap());
+        let table2 = write_txn.open_table(table_def2).unwrap();
+        assert_eq!(table2.get("hi").unwrap().unwrap().value(), "hi");
+    }
+}
+
+#[test]
+fn rename_open_table() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(matches!(
+            write_txn.rename_table(STR_TABLE, STR_TABLE).unwrap_err(),
+            TableError::TableAlreadyOpen(_, _)
+        ));
+        drop(table);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
 fn no_dirty_reads() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
@@ -1413,12 +1472,14 @@ fn custom_ordering() {
     struct ReverseKey(Vec<u8>);
 
     impl Value for ReverseKey {
-        type SelfType<'a> = ReverseKey
+        type SelfType<'a>
+            = ReverseKey
         where
-        Self: 'a;
-        type AsBytes<'a> = &'a [u8]
+            Self: 'a;
+        type AsBytes<'a>
+            = &'a [u8]
         where
-        Self: 'a;
+            Self: 'a;
 
         fn fixed_width() -> Option<usize> {
             None

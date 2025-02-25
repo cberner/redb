@@ -3,7 +3,7 @@ use crate::error::TableError;
 use crate::multimap_table::{
     finalize_tree_and_subtree_checksums, multimap_btree_stats, verify_tree_and_subtree_checksums,
 };
-use crate::tree_store::btree::{btree_stats, UntypedBtreeMut};
+use crate::tree_store::btree::{UntypedBtreeMut, btree_stats};
 use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::{
     Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageHint, PageNumber, PagePath,
@@ -24,10 +24,12 @@ pub(crate) struct FreedTableKey {
 }
 
 impl Value for FreedTableKey {
-    type SelfType<'a> = FreedTableKey
+    type SelfType<'a>
+        = FreedTableKey
     where
         Self: 'a;
-    type AsBytes<'a> = [u8; 2 * size_of::<u64>()]
+    type AsBytes<'a>
+        = [u8; 2 * size_of::<u64>()]
     where
         Self: 'a;
 
@@ -83,7 +85,7 @@ pub(crate) struct FreedPageList<'a> {
     data: &'a [u8],
 }
 
-impl<'a> FreedPageList<'a> {
+impl FreedPageList<'_> {
     pub(crate) fn required_bytes(len: usize) -> usize {
         2 + PageNumber::serialized_size() * len
     }
@@ -124,12 +126,14 @@ impl FreedPageListMut {
 }
 
 impl Value for FreedPageList<'_> {
-    type SelfType<'a> = FreedPageList<'a>
-        where
-            Self: 'a;
-    type AsBytes<'a> = &'a [u8]
-        where
-            Self: 'a;
+    type SelfType<'a>
+        = FreedPageList<'a>
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = &'a [u8]
+    where
+        Self: 'a;
 
     fn fixed_width() -> Option<usize> {
         None
@@ -297,7 +301,7 @@ pub(crate) struct TableTreeMut<'txn> {
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
 }
 
-impl<'txn> TableTreeMut<'txn> {
+impl TableTreeMut<'_> {
     pub(crate) fn new(
         master_root: Option<BtreeHeader>,
         guard: Arc<TransactionGuard>,
@@ -557,7 +561,29 @@ impl<'txn> TableTreeMut<'txn> {
         result
     }
 
-    // root_page: the root of the master table
+    pub(crate) fn rename_table(
+        &mut self,
+        name: &str,
+        new_name: &str,
+        table_type: TableType,
+    ) -> Result<(), TableError> {
+        if let Some(definition) = self.get_table_untyped(name, table_type)? {
+            if self.get_table_untyped(new_name, table_type)?.is_some() {
+                return Err(TableError::TableExists(new_name.to_string()));
+            }
+            if let Some(update) = self.pending_table_updates.remove(name) {
+                self.pending_table_updates
+                    .insert(new_name.to_string(), update);
+            }
+            assert!(self.tree.remove(&name)?.is_some());
+            assert!(self.tree.insert(&new_name, &definition)?.is_none());
+        } else {
+            return Err(TableError::TableDoesNotExist(name.to_string()));
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn delete_table(
         &mut self,
         name: &str,
@@ -749,9 +775,9 @@ impl<'txn> TableTreeMut<'txn> {
 
 #[cfg(test)]
 mod test {
+    use crate::Value;
     use crate::tree_store::table_tree_base::InternalTableDefinition;
     use crate::types::TypeName;
-    use crate::Value;
 
     #[test]
     fn round_trip() {

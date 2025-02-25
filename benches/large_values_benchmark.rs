@@ -12,12 +12,12 @@ use std::time::{Duration, Instant};
 const ELEMENTS: usize = 1_000_000;
 
 /// Returns pairs of key, value
-fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+fn random_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut pairs = vec![];
 
     for _ in 0..count {
-        let key: Vec<u8> = (0..key_size).map(|_| rand::thread_rng().gen()).collect();
-        let value: Vec<u8> = (0..value_size).map(|_| rand::thread_rng().gen()).collect();
+        let key: Vec<u8> = (0..key_size).map(|_| rand::rng().random()).collect();
+        let value: Vec<u8> = (0..value_size).map(|_| rand::rng().random()).collect();
         pairs.push((key, value));
     }
 
@@ -26,10 +26,10 @@ fn gen_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, V
 
 fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
     let mut results = Vec::new();
-    let mut pairs = gen_data(1_000_000, 24, 150);
+    let mut pairs = random_data(1_000_000, 24, 150);
     let mut written = 0;
 
-    let mut bigpairs = gen_data(100, 24, 2_000_000);
+    let mut bigpairs = random_data(100, 24, 2_000_000);
     let bigelements = 4000;
 
     let start = Instant::now();
