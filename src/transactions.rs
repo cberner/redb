@@ -1602,6 +1602,10 @@ impl WriteTransaction {
         Ok(())
     }
 
+    pub fn uncommitted_bytes(&self) -> u64 {
+        self.mem.get_allocated_since_commit_bytes()
+    }
+
     /// Retrieves information about storage usage in the database
     pub fn stats(&self) -> Result<DatabaseStats> {
         let tables = self.tables.lock().unwrap();
@@ -1870,7 +1874,7 @@ mod test {
         let write_txn = db.begin_write().unwrap();
         {
             let written_bytes = write_txn.stats().unwrap();
-            assert_eq!(0, written_bytes.uncommitted_bytes());
+            assert_eq!(0, write_txn.uncommitted_bytes());
 
             let mut table = write_txn.open_table(X).unwrap();
             for i in 0..100 {
@@ -1878,14 +1882,14 @@ mod test {
             }
 
             let written_bytes = write_txn.stats().unwrap();
-            assert!(written_bytes.uncommitted_bytes() > 0);
+            assert!(write_txn.uncommitted_bytes() > 0);
         }
         write_txn.commit().unwrap();
 
         let write_txn = db.begin_write().unwrap();
         {
             let written_bytes = write_txn.stats().unwrap();
-            assert_eq!(0, written_bytes.uncommitted_bytes());
+            assert_eq!(0, write_txn.uncommitted_bytes());
         }
         write_txn.commit().unwrap();
         drop(db);
