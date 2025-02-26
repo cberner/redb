@@ -235,6 +235,46 @@ macro_rules! tuple_impl {
     };
 }
 
+impl<T: Value> Value for (T,) {
+    type SelfType<'a>
+        = (T::SelfType<'a>,)
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = T::AsBytes<'a>
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        T::fixed_width()
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        (T::from_bytes(data),)
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'a,
+        Self: 'b,
+    {
+        T::as_bytes(&value.0)
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal(&format!("({},)", T::type_name().name()))
+    }
+}
+
+impl<T: Key> Key for (T,) {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        T::compare(data1, data2)
+    }
+}
+
 tuple_impl! {
     T0, t0, 0
     | T1, t1, 1
@@ -353,6 +393,7 @@ mod test {
     fn width() {
         assert!(<(&str, u8)>::fixed_width().is_none());
         assert!(<(u16, u8, &str, u128)>::fixed_width().is_none());
+        assert_eq!(<(u16,)>::fixed_width().unwrap(), 2);
         assert_eq!(<(u16, u8)>::fixed_width().unwrap(), 3);
         assert_eq!(<(u16, u8, u128)>::fixed_width().unwrap(), 19);
         assert_eq!(<(u16, u8, i8, u128)>::fixed_width().unwrap(), 20);
