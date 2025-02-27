@@ -756,6 +756,9 @@ impl TableTreeMut<'_> {
                 }
             }
         }
+
+        let uncommitted_bytes = self.mem.get_allocated_since_commit_bytes();
+
         Ok(DatabaseStats {
             tree_height: master_tree_stats.tree_height + max_subtree_height,
             allocated_pages: self.mem.count_allocated_pages()?,
@@ -765,6 +768,7 @@ impl TableTreeMut<'_> {
             metadata_bytes: total_metadata_bytes,
             fragmented_bytes: total_fragmented,
             page_size: self.mem.get_page_size(),
+            uncommitted_bytes,
         })
     }
 }
