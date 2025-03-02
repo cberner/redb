@@ -120,7 +120,7 @@ impl BtreeBitmap {
             if capacity <= 64 {
                 break;
             }
-            capacity = (capacity + 63) / 64;
+            capacity = capacity.div_ceil(64);
         }
 
         // Reverse so that the root as index 0
@@ -283,7 +283,7 @@ pub(crate) struct U64GroupedBitmap {
 
 impl U64GroupedBitmap {
     fn required_words(elements: u32) -> usize {
-        let words = (elements + 63) / 64;
+        let words = elements.div_ceil(64);
         words as usize
     }
 
