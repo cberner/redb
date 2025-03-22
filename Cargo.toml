@@ -51,7 +51,7 @@ fjall = "2.6"
 comfy-table = "7.0.1"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-io-uring = "0.6.2"
+io-uring = "0.7.4"
 
 [features]
 # This feature is still experimental, and is not considered stable
