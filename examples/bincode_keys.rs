@@ -2,17 +2,16 @@ use std::any::type_name;
 use std::cmp::Ordering;
 use std::fmt::Debug;
 
-use bincode::{deserialize, serialize};
+use bincode::{Decode, Encode, decode_from_slice, encode_to_vec};
 use redb::{Database, Error, Key, Range, TableDefinition, TypeName, Value};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Decode, Encode, PartialEq, Eq, PartialOrd, Ord)]
 struct SomeKey {
     foo: String,
     bar: i32,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Decode, Encode, PartialEq)]
 struct SomeValue {
     foo: [f64; 3],
     bar: bool,
@@ -64,7 +63,7 @@ pub struct Bincode<T>(pub T);
 
 impl<T> Value for Bincode<T>
 where
-    T: Debug + Serialize + for<'a> Deserialize<'a>,
+    T: Debug + Encode + Decode<()>,
 {
     type SelfType<'a>
         = T
@@ -84,7 +83,9 @@ where
     where
         Self: 'a,
     {
-        deserialize(data).unwrap()
+        decode_from_slice(data, bincode::config::standard())
+            .unwrap()
+            .0
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -92,7 +93,7 @@ where
         Self: 'a,
         Self: 'b,
     {
-        serialize(value).unwrap()
+        encode_to_vec(value, bincode::config::standard()).unwrap()
     }
 
     fn type_name() -> TypeName {
@@ -102,7 +103,7 @@ where
 
 impl<T> Key for Bincode<T>
 where
-    T: Debug + Serialize + DeserializeOwned + Ord,
+    T: Debug + Decode<()> + Encode + Ord,
 {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
