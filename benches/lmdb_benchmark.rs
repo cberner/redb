@@ -1,5 +1,4 @@
 use std::env::current_dir;
-use std::mem::size_of;
 use std::path::Path;
 use std::sync::Arc;
 use std::{fs, process, thread};
@@ -10,47 +9,27 @@ use common::*;
 
 use std::time::{Duration, Instant};
 
-const ITERATIONS: usize = 2;
-const ELEMENTS: usize = 1_000_000;
+const READ_ITERATIONS: usize = 2;
+const BULK_ELEMENTS: usize = 1_000_000;
+const INDIVIDUAL_WRITES: usize = 1_000;
+const BATCH_WRITES: usize = 100;
+const BATCH_SIZE: usize = 1000;
+const SCAN_ITERATIONS: usize = 2;
+const NUM_READS: usize = 1_000_000;
+const NUM_SCANS: usize = 500_000;
+const SCAN_LEN: usize = 10;
 const KEY_SIZE: usize = 24;
 const VALUE_SIZE: usize = 150;
 const RNG_SEED: u64 = 3;
 
-const CACHE_SIZE: usize = 4 * 1_024 * 1_024 * 1_024;
-
-fn fill_slice(slice: &mut [u8], rng: &mut fastrand::Rng) {
-    let mut i = 0;
-    while i + size_of::<u128>() < slice.len() {
-        let tmp = rng.u128(..);
-        slice[i..(i + size_of::<u128>())].copy_from_slice(&tmp.to_le_bytes());
-        i += size_of::<u128>()
-    }
-    if i + size_of::<u64>() < slice.len() {
-        let tmp = rng.u64(..);
-        slice[i..(i + size_of::<u64>())].copy_from_slice(&tmp.to_le_bytes());
-        i += size_of::<u64>()
-    }
-    if i + size_of::<u32>() < slice.len() {
-        let tmp = rng.u32(..);
-        slice[i..(i + size_of::<u32>())].copy_from_slice(&tmp.to_le_bytes());
-        i += size_of::<u32>()
-    }
-    if i + size_of::<u16>() < slice.len() {
-        let tmp = rng.u16(..);
-        slice[i..(i + size_of::<u16>())].copy_from_slice(&tmp.to_le_bytes());
-        i += size_of::<u16>()
-    }
-    if i + size_of::<u8>() < slice.len() {
-        slice[i] = rng.u8(..);
-    }
-}
+const CACHE_SIZE: usize = 4 * 1_024 * 1_024 * 1_024; // 4GB
 
 /// Returns pairs of key, value
 fn random_pair(rng: &mut fastrand::Rng) -> ([u8; KEY_SIZE], Vec<u8>) {
     let mut key = [0u8; KEY_SIZE];
-    fill_slice(&mut key, rng);
+    rng.fill(&mut key);
     let mut value = vec![0u8; VALUE_SIZE];
-    fill_slice(&mut value, rng);
+    rng.fill(&mut value);
 
     (key, value)
 }
@@ -82,7 +61,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
     let mut txn = db.write_transaction();
     let mut inserter = txn.get_inserter();
     {
-        for _ in 0..ELEMENTS {
+        for _ in 0..BULK_ELEMENTS {
             let (key, value) = random_pair(&mut rng);
             inserter.insert(&key, &value).unwrap();
         }
@@ -95,15 +74,14 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
     println!(
         "{}: Bulk loaded {} items in {}ms",
         T::db_type_name(),
-        ELEMENTS,
+        BULK_ELEMENTS,
         duration.as_millis()
     );
     results.push(("bulk load".to_string(), ResultType::Duration(duration)));
 
     let start = Instant::now();
-    let writes = 100;
     {
-        for _ in 0..writes {
+        for _ in 0..INDIVIDUAL_WRITES {
             let mut txn = db.write_transaction();
             let mut inserter = txn.get_inserter();
             let (key, value) = random_pair(&mut rng);
@@ -118,7 +96,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
     println!(
         "{}: Wrote {} individual items in {}ms",
         T::db_type_name(),
-        writes,
+        INDIVIDUAL_WRITES,
         duration.as_millis()
     );
     results.push((
@@ -127,12 +105,11 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
     ));
 
     let start = Instant::now();
-    let batch_size = 1000;
     {
-        for _ in 0..writes {
+        for _ in 0..BATCH_WRITES {
             let mut txn = db.write_transaction();
             let mut inserter = txn.get_inserter();
-            for _ in 0..batch_size {
+            for _ in 0..BATCH_SIZE {
                 let (key, value) = random_pair(&mut rng);
                 inserter.insert(&key, &value).unwrap();
             }
@@ -144,33 +121,34 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
     let end = Instant::now();
     let duration = end - start;
     println!(
-        "{}: Wrote {} x {} items in {}ms",
+        "{}: Wrote {} batches of {} items in {}ms",
         T::db_type_name(),
-        writes,
-        batch_size,
+        BATCH_WRITES,
+        BATCH_SIZE,
         duration.as_millis()
     );
     results.push(("batch writes".to_string(), ResultType::Duration(duration)));
 
+    let elements = BULK_ELEMENTS + INDIVIDUAL_WRITES + BATCH_SIZE * BATCH_WRITES;
     let txn = db.read_transaction();
     {
         {
             let start = Instant::now();
             let len = txn.get_reader().len();
-            assert_eq!(len, ELEMENTS as u64 + 100_000 + 100);
+            assert_eq!(len, elements as u64);
             let end = Instant::now();
             let duration = end - start;
             println!("{}: len() in {}ms", T::db_type_name(), duration.as_millis());
             results.push(("len()".to_string(), ResultType::Duration(duration)));
         }
 
-        for _ in 0..ITERATIONS {
+        for _ in 0..READ_ITERATIONS {
             let mut rng = make_rng();
             let start = Instant::now();
             let mut checksum = 0u64;
             let mut expected_checksum = 0u64;
             let reader = txn.get_reader();
-            for _ in 0..ELEMENTS {
+            for _ in 0..NUM_READS {
                 let (key, value) = random_pair(&mut rng);
                 let result = reader.get(&key).unwrap();
                 checksum += result.as_ref()[0] as u64;
@@ -182,22 +160,21 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
             println!(
                 "{}: Random read {} items in {}ms",
                 T::db_type_name(),
-                ELEMENTS,
+                NUM_READS,
                 duration.as_millis()
             );
             results.push(("random reads".to_string(), ResultType::Duration(duration)));
         }
 
-        for _ in 0..ITERATIONS {
+        for _ in 0..SCAN_ITERATIONS {
             let mut rng = make_rng();
             let start = Instant::now();
             let reader = txn.get_reader();
             let mut value_sum = 0;
-            let num_scan = 10;
-            for _ in 0..ELEMENTS {
+            for _ in 0..NUM_SCANS {
                 let (key, _value) = random_pair(&mut rng);
                 let mut iter = reader.range_from(&key);
-                for _ in 0..num_scan {
+                for _ in 0..SCAN_LEN {
                     if let Some((_, value)) = iter.next() {
                         value_sum += value.as_ref()[0];
                     } else {
@@ -209,9 +186,10 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
             let end = Instant::now();
             let duration = end - start;
             println!(
-                "{}: Random range read {} elements in {}ms",
+                "{}: Random range read {} x {} elements in {}ms",
                 T::db_type_name(),
-                ELEMENTS * num_scan,
+                NUM_SCANS,
+                SCAN_LEN,
                 duration.as_millis()
             );
             results.push((
@@ -223,19 +201,23 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
     drop(txn);
 
     for num_threads in [4, 8, 16, 32] {
-        let mut rngs = make_rng_shards(num_threads, ELEMENTS);
+        let barrier = Arc::new(std::sync::Barrier::new(num_threads));
+        let mut rngs = make_rng_shards(num_threads, elements);
         let start = Instant::now();
 
         thread::scope(|s| {
             for _ in 0..num_threads {
+                let barrier = barrier.clone();
                 let db2 = db.clone();
-                let mut rng = rngs.pop().unwrap();
+                let rng = rngs.pop().unwrap();
                 s.spawn(move || {
+                    barrier.wait();
                     let txn = db2.read_transaction();
                     let mut checksum = 0u64;
                     let mut expected_checksum = 0u64;
                     let reader = txn.get_reader();
-                    for _ in 0..(ELEMENTS / num_threads) {
+                    let mut rng = rng.clone();
+                    for _ in 0..(elements / num_threads) {
                         let (key, value) = random_pair(&mut rng);
                         let result = reader.get(&key).unwrap();
                         checksum += result.as_ref()[0] as u64;
@@ -252,7 +234,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
             "{}: Random read ({} threads) {} items in {}ms",
             T::db_type_name(),
             num_threads,
-            ELEMENTS,
+            elements,
             duration.as_millis()
         );
         results.push((
@@ -262,7 +244,7 @@ fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String,
     }
 
     let start = Instant::now();
-    let deletes = ELEMENTS / 2;
+    let deletes = elements / 2;
     {
         let mut rng = make_rng();
         let mut txn = db.write_transaction();
@@ -351,6 +333,7 @@ impl std::fmt::Display for ResultType {
 }
 
 fn main() {
+    let _ = env_logger::try_init();
     let tmpdir = current_dir().unwrap().join(".benchmark");
     fs::create_dir(&tmpdir).unwrap();
 
@@ -388,10 +371,14 @@ fn main() {
 
         let mut bb = rocksdb::BlockBasedOptions::default();
         bb.set_block_cache(&rocksdb::Cache::new_lru_cache(CACHE_SIZE));
+        bb.set_bloom_filter(10.0, false);
 
         let mut opts = rocksdb::Options::default();
         opts.set_block_based_table_factory(&bb);
         opts.create_if_missing(true);
+        opts.increase_parallelism(
+            std::thread::available_parallelism().map_or(1, |n| n.get()) as i32
+        );
 
         let db = rocksdb::OptimisticTransactionDB::open(&opts, tmpfile.path()).unwrap();
         let table = RocksdbBenchDatabase::new(&db);

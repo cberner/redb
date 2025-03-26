@@ -6,7 +6,7 @@ use tempfile::{NamedTempFile, TempDir};
 mod common;
 use common::*;
 
-use rand::Rng;
+use rand::RngCore;
 use std::time::{Duration, Instant};
 
 const ELEMENTS: usize = 1_000_000;
@@ -16,8 +16,10 @@ fn random_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>
     let mut pairs = vec![];
 
     for _ in 0..count {
-        let key: Vec<u8> = (0..key_size).map(|_| rand::rng().random()).collect();
-        let value: Vec<u8> = (0..value_size).map(|_| rand::rng().random()).collect();
+        let mut key = vec![0; key_size];
+        rand::rng().fill_bytes(&mut key);
+        let mut value = vec![0; value_size];
+        rand::rng().fill_bytes(&mut value);
         pairs.push((key, value));
     }
 
@@ -69,6 +71,8 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
 }
 
 fn main() {
+    let _ = env_logger::try_init();
+
     let redb_latency_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
         let mut db = redb::Database::builder().create(tmpfile.path()).unwrap();
@@ -90,7 +94,19 @@ fn main() {
 
     let rocksdb_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
-        let db = rocksdb::OptimisticTransactionDB::open_default(tmpfile.path()).unwrap();
+
+        let mut bb = rocksdb::BlockBasedOptions::default();
+        bb.set_block_cache(&rocksdb::Cache::new_lru_cache(4 * 1_024 * 1_024 * 1_024));
+        bb.set_bloom_filter(10.0, false);
+
+        let mut opts = rocksdb::Options::default();
+        opts.set_block_based_table_factory(&bb);
+        opts.create_if_missing(true);
+        opts.increase_parallelism(
+            std::thread::available_parallelism().map_or(1, |n| n.get()) as i32
+        );
+
+        let db = rocksdb::OptimisticTransactionDB::open(&opts, tmpfile.path()).unwrap();
         let table = RocksdbBenchDatabase::new(&db);
         benchmark(table)
     };
