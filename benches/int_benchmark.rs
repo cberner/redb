@@ -58,6 +58,8 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
 }
 
 fn main() {
+    let _ = env_logger::try_init();
+
     let redb_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
         let mut db = redb::Database::create(tmpfile.path()).unwrap();
@@ -79,7 +81,19 @@ fn main() {
 
     let rocksdb_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
-        let db = rocksdb::OptimisticTransactionDB::open_default(tmpfile.path()).unwrap();
+
+        let mut bb = rocksdb::BlockBasedOptions::default();
+        bb.set_block_cache(&rocksdb::Cache::new_lru_cache(4 * 1_024 * 1_024 * 1_024));
+        bb.set_bloom_filter(10.0, false);
+
+        let mut opts = rocksdb::Options::default();
+        opts.set_block_based_table_factory(&bb);
+        opts.create_if_missing(true);
+        opts.increase_parallelism(
+            std::thread::available_parallelism().map_or(1, |n| n.get()) as i32
+        );
+
+        let db = rocksdb::OptimisticTransactionDB::open(&opts, tmpfile.path()).unwrap();
         let table = RocksdbBenchDatabase::new(&db);
         benchmark(table)
     };
