@@ -470,8 +470,6 @@ mod test {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
-    // TODO: Switch to threaded wasi build for the tests
-    #[cfg(not(target_os = "wasi"))]
     #[test]
     fn cache_leak() {
         let backend = InMemoryBackend::new();

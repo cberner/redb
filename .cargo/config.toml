@@ -1,5 +1,8 @@
 [target.wasm32-wasip1]
 runner = "wasmtime --dir=/tmp"
 
+[target.wasm32-wasip1-threads]
+runner = "wasmtime --dir=/tmp -W threads=y -S threads=y"
+
 [target.wasm32-wasip2]
 runner = "wasmtime --dir=/tmp"
