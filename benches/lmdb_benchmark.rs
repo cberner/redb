@@ -410,9 +410,7 @@ fn main() {
         let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
 
         let mut db = fjall::Config::new(tmpfile.path())
-            .block_cache(Arc::new(fjall::BlockCache::with_capacity_bytes(
-                CACHE_SIZE.try_into().unwrap(),
-            )))
+            .cache_size(CACHE_SIZE.try_into().unwrap())
             .open_transactional()
             .unwrap();
 
