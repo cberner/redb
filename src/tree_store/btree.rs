@@ -556,7 +556,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                 let entry = accessor.entry(position).unwrap();
                 let key_data = entry.key().to_vec();
                 let value_data = entry.value().to_vec();
-                
                 let result = if accessor.num_pairs() == 1 {
                     DeletionResult::DeletedLeaf
                 } else if new_required_bytes < self.mem.get_page_size() / 3 {
@@ -588,7 +587,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                     freed_pages.push(page_number);
                     drop(page);
                 }
-                
                 let key_guard = AccessGuard::with_owned_value(key_data);
                 let value_guard = AccessGuard::with_owned_value(value_data);
 
@@ -796,7 +794,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                 let entry = accessor.entry(position).unwrap();
                 let key_data = entry.key().to_vec();
                 let value_data = entry.value().to_vec();
-                
                 let result = if accessor.num_pairs() == 1 {
                     DeletionResult::DeletedLeaf
                 } else if new_required_bytes < self.mem.get_page_size() / 3 {
@@ -828,7 +825,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                     freed_pages.push(page_number);
                     drop(page);
                 }
-                
                 let key_guard = AccessGuard::with_owned_value(key_data);
                 let value_guard = AccessGuard::with_owned_value(value_data);
 
