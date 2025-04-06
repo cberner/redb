@@ -1132,7 +1132,7 @@ fn u64_type() {
             .range(0..2)
             .unwrap()
             .map(|item| item.unwrap().1.value())
-            .sum()
+            .sum::<u64>()
     );
     assert_eq!(1, table.get(&0).unwrap().unwrap().value());
 }
