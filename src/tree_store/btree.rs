@@ -522,13 +522,15 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         }
     }
 
-    type PopResult<K, V> = Result<Option<(DeletionResult, AccessGuard<'static, K>, AccessGuard<'static, V>)>>;
+    type PopResult<K, V> = Result<
+        Option<(
+            DeletionResult,
+            AccessGuard<'static, K>,
+            AccessGuard<'static, V>,
+        )>,
+    >;
 
-    fn pop_last_from_node(
-        &mut self,
-        page: PageImpl,
-        checksum: Checksum,
-    ) -> PopResult<K, V> {
+    fn pop_last_from_node(&mut self, page: PageImpl, checksum: Checksum) -> PopResult<K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
@@ -753,11 +755,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         }
     }
 
-    fn pop_first_from_node(
-        &mut self,
-        page: PageImpl,
-        checksum: Checksum,
-    ) -> PopResult<K, V> {
+    fn pop_first_from_node(&mut self, page: PageImpl, checksum: Checksum) -> PopResult<K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
