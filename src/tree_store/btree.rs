@@ -522,17 +522,13 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         }
     }
 
+    type PopResult<K, V> = Result<Option<(DeletionResult, AccessGuard<'static, K>, AccessGuard<'static, V>)>>;
+
     fn pop_last_from_node(
         &mut self,
         page: PageImpl,
         checksum: Checksum,
-    ) -> Result<
-        Option<(
-            DeletionResult,
-            AccessGuard<'static, K>,
-            AccessGuard<'static, V>,
-        )>,
-    > {
+    ) -> PopResult<K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
@@ -647,54 +643,51 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                             K::fixed_width(),
                         );
 
-                        let final_result = match deletion_result {
-                            DeletionResult::DeletedLeaf => {
-                                for i in 0..accessor.count_children() - 1 {
-                                    builder.push_child(
-                                        accessor.child_page(i).unwrap(),
-                                        accessor.child_checksum(i).unwrap(),
-                                    );
-                                    if i < accessor.count_children() - 2 {
-                                        builder.push_key(accessor.key(i).unwrap());
-                                    }
+                        let final_result = if let DeletionResult::DeletedLeaf = deletion_result {
+                            for i in 0..accessor.count_children() - 1 {
+                                builder.push_child(
+                                    accessor.child_page(i).unwrap(),
+                                    accessor.child_checksum(i).unwrap(),
+                                );
+                                if i < accessor.count_children() - 2 {
+                                    builder.push_key(accessor.key(i).unwrap());
                                 }
+                            }
 
-                                if accessor.count_children() == 2 {
-                                    let child_page = accessor.child_page(0).unwrap();
-                                    let child_checksum = accessor.child_checksum(0).unwrap();
-                                    let page_number = page.get_page_number();
-                                    if self.modify_uncommitted {
-                                        if !self.mem.free_if_uncommitted(page_number) {
-                                            let mut freed_pages = self.freed_pages.lock().unwrap();
-                                            freed_pages.push(page_number);
-                                        }
-                                    } else {
-                                        let mut freed_pages = self.freed_pages.lock().unwrap();
-                                        freed_pages.push(page_number);
-                                    }
-                                    drop(page);
-                                    DeletionResult::DeletedBranch(child_page, child_checksum)
-                                } else {
-                                    let new_page = builder.build()?;
-                                    let page_number = page.get_page_number();
-                                    if self.modify_uncommitted {
-                                        if !self.mem.free_if_uncommitted(page_number) {
-                                            let mut freed_pages = self.freed_pages.lock().unwrap();
-                                            freed_pages.push(page_number);
-                                        }
-                                    } else {
-                                        let mut freed_pages = self.freed_pages.lock().unwrap();
-                                        freed_pages.push(page_number);
-                                    }
-                                    drop(page);
-                                    DeletionResult::Subtree(new_page.get_page_number(), DEFERRED)
-                                }
-                            }
-                            _ => {
+                            if accessor.count_children() == 2 {
+                                let child_page = accessor.child_page(0).unwrap();
+                                let child_checksum = accessor.child_checksum(0).unwrap();
                                 let page_number = page.get_page_number();
+                                if self.modify_uncommitted {
+                                    if !self.mem.free_if_uncommitted(page_number) {
+                                        let mut freed_pages = self.freed_pages.lock().unwrap();
+                                        freed_pages.push(page_number);
+                                    }
+                                } else {
+                                    let mut freed_pages = self.freed_pages.lock().unwrap();
+                                    freed_pages.push(page_number);
+                                }
                                 drop(page);
-                                DeletionResult::PartialBranch(page_number, checksum)
+                                DeletionResult::DeletedBranch(child_page, child_checksum)
+                            } else {
+                                let new_page = builder.build()?;
+                                let page_number = page.get_page_number();
+                                if self.modify_uncommitted {
+                                    if !self.mem.free_if_uncommitted(page_number) {
+                                        let mut freed_pages = self.freed_pages.lock().unwrap();
+                                        freed_pages.push(page_number);
+                                    }
+                                } else {
+                                    let mut freed_pages = self.freed_pages.lock().unwrap();
+                                    freed_pages.push(page_number);
+                                }
+                                drop(page);
+                                DeletionResult::Subtree(new_page.get_page_number(), DEFERRED)
                             }
+                        } else {
+                            let page_number = page.get_page_number();
+                            drop(page);
+                            DeletionResult::PartialBranch(page_number, checksum)
                         };
 
                         Ok(Some((final_result, key_guard, value_guard)))
@@ -764,13 +757,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         &mut self,
         page: PageImpl,
         checksum: Checksum,
-    ) -> Result<
-        Option<(
-            DeletionResult,
-            AccessGuard<'static, K>,
-            AccessGuard<'static, V>,
-        )>,
-    > {
+    ) -> PopResult<K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
@@ -885,54 +872,51 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                             K::fixed_width(),
                         );
 
-                        let final_result = match deletion_result {
-                            DeletionResult::DeletedLeaf => {
-                                for i in 1..accessor.count_children() {
-                                    if i > 1 {
-                                        builder.push_key(accessor.key(i - 2).unwrap());
-                                    }
-                                    builder.push_child(
-                                        accessor.child_page(i).unwrap(),
-                                        accessor.child_checksum(i).unwrap(),
-                                    );
+                        let final_result = if let DeletionResult::DeletedLeaf = deletion_result {
+                            for i in 1..accessor.count_children() {
+                                if i > 1 {
+                                    builder.push_key(accessor.key(i - 2).unwrap());
                                 }
+                                builder.push_child(
+                                    accessor.child_page(i).unwrap(),
+                                    accessor.child_checksum(i).unwrap(),
+                                );
+                            }
 
-                                if accessor.count_children() == 2 {
-                                    let child_page = accessor.child_page(1).unwrap();
-                                    let child_checksum = accessor.child_checksum(1).unwrap();
-                                    let page_number = page.get_page_number();
-                                    if self.modify_uncommitted {
-                                        if !self.mem.free_if_uncommitted(page_number) {
-                                            let mut freed_pages = self.freed_pages.lock().unwrap();
-                                            freed_pages.push(page_number);
-                                        }
-                                    } else {
-                                        let mut freed_pages = self.freed_pages.lock().unwrap();
-                                        freed_pages.push(page_number);
-                                    }
-                                    drop(page);
-                                    DeletionResult::DeletedBranch(child_page, child_checksum)
-                                } else {
-                                    let new_page = builder.build()?;
-                                    let page_number = page.get_page_number();
-                                    if self.modify_uncommitted {
-                                        if !self.mem.free_if_uncommitted(page_number) {
-                                            let mut freed_pages = self.freed_pages.lock().unwrap();
-                                            freed_pages.push(page_number);
-                                        }
-                                    } else {
-                                        let mut freed_pages = self.freed_pages.lock().unwrap();
-                                        freed_pages.push(page_number);
-                                    }
-                                    drop(page);
-                                    DeletionResult::Subtree(new_page.get_page_number(), DEFERRED)
-                                }
-                            }
-                            _ => {
+                            if accessor.count_children() == 2 {
+                                let child_page = accessor.child_page(1).unwrap();
+                                let child_checksum = accessor.child_checksum(1).unwrap();
                                 let page_number = page.get_page_number();
+                                if self.modify_uncommitted {
+                                    if !self.mem.free_if_uncommitted(page_number) {
+                                        let mut freed_pages = self.freed_pages.lock().unwrap();
+                                        freed_pages.push(page_number);
+                                    }
+                                } else {
+                                    let mut freed_pages = self.freed_pages.lock().unwrap();
+                                    freed_pages.push(page_number);
+                                }
                                 drop(page);
-                                DeletionResult::PartialBranch(page_number, checksum)
+                                DeletionResult::DeletedBranch(child_page, child_checksum)
+                            } else {
+                                let new_page = builder.build()?;
+                                let page_number = page.get_page_number();
+                                if self.modify_uncommitted {
+                                    if !self.mem.free_if_uncommitted(page_number) {
+                                        let mut freed_pages = self.freed_pages.lock().unwrap();
+                                        freed_pages.push(page_number);
+                                    }
+                                } else {
+                                    let mut freed_pages = self.freed_pages.lock().unwrap();
+                                    freed_pages.push(page_number);
+                                }
+                                drop(page);
+                                DeletionResult::Subtree(new_page.get_page_number(), DEFERRED)
                             }
+                        } else {
+                            let page_number = page.get_page_number();
+                            drop(page);
+                            DeletionResult::PartialBranch(page_number, checksum)
                         };
 
                         Ok(Some((final_result, key_guard, value_guard)))
