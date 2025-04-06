@@ -28,7 +28,7 @@ test: pre
     RUST_BACKTRACE=1 cargo test
 
 test_wasi:
-    cargo +nightly test --target=wasm32-wasip1 -- --nocapture
+    cargo +nightly-2025-04-06 test --target=wasm32-wasip1-threads -- --nocapture
 
 bench bench='lmdb_benchmark': pre
     cargo bench --bench {{bench}}
