@@ -526,7 +526,13 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         &mut self,
         page: PageImpl,
         checksum: Checksum,
-    ) -> Result<Option<(DeletionResult, AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+    ) -> Result<
+        Option<(
+            DeletionResult,
+            AccessGuard<'static, K>,
+            AccessGuard<'static, V>,
+        )>,
+    > {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
@@ -755,7 +761,13 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         &mut self,
         page: PageImpl,
         checksum: Checksum,
-    ) -> Result<Option<(DeletionResult, AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+    ) -> Result<
+        Option<(
+            DeletionResult,
+            AccessGuard<'static, K>,
+            AccessGuard<'static, V>,
+        )>,
+    > {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
