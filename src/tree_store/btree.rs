@@ -1,7 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::tree_store::btree_base::{
-    BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF, LeafAccessor,
-    branch_checksum, leaf_checksum,
+    BRANCH, BranchAccessor, BranchBuilder, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
+    LeafAccessor, LeafBuilder, RawLeafBuilder, branch_checksum, leaf_checksum,
 };
 use crate::tree_store::btree_iters::BtreeExtractIf;
 use crate::tree_store::btree_mutator::MutateHelper;
@@ -19,6 +19,18 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
+
+#[derive(Debug)]
+pub(crate) enum DeletionResult {
+    Subtree(PageNumber, Checksum),
+    DeletedLeaf,
+    PartialLeaf {
+        page: Arc<[u8]>,
+        deleted_pair: usize,
+    },
+    PartialBranch(PageNumber, Checksum),
+    DeletedBranch(PageNumber, Checksum),
+}
 
 pub(crate) struct BtreeStats {
     pub(crate) tree_height: u32,
@@ -320,6 +332,7 @@ pub(crate) struct BtreeMut<'a, K: Key + 'static, V: Value + 'static> {
     transaction_guard: Arc<TransactionGuard>,
     root: Option<BtreeHeader>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+    modify_uncommitted: bool,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
     _lifetime: PhantomData<&'a ()>,
@@ -337,6 +350,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             transaction_guard: guard,
             root,
             freed_pages,
+            modify_uncommitted: true,
             _key_type: Default::default(),
             _value_type: Default::default(),
             _lifetime: Default::default(),
@@ -453,6 +467,486 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             MutateHelper::new(&mut self.root, self.mem.clone(), freed_pages.as_mut());
         let result = operation.delete(key)?;
         Ok(result)
+    }
+
+    pub(crate) fn pop_last_helper(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        if let Some(header) = self.root {
+            let BtreeHeader {
+                root: p,
+                checksum,
+                length,
+            } = header;
+            let result = self.pop_last_from_node(self.mem.get_page(p)?, checksum)?;
+            match result {
+                Some((deletion_result, key_guard, value_guard)) => {
+                    let new_length = length - 1;
+                    let new_root = match deletion_result {
+                        DeletionResult::Subtree(page, checksum) => {
+                            Some(BtreeHeader::new(page, checksum, new_length))
+                        }
+                        DeletionResult::DeletedLeaf => None,
+                        DeletionResult::PartialLeaf { page, deleted_pair } => {
+                            let accessor =
+                                LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+                            let mut builder = LeafBuilder::new(
+                                &self.mem,
+                                accessor.num_pairs() - 1,
+                                K::fixed_width(),
+                                V::fixed_width(),
+                            );
+                            builder.push_all_except(&accessor, Some(deleted_pair));
+                            let page = builder.build()?;
+                            assert_eq!(new_length, accessor.num_pairs() as u64 - 1);
+                            Some(BtreeHeader::new(
+                                page.get_page_number(),
+                                DEFERRED,
+                                new_length,
+                            ))
+                        }
+                        DeletionResult::PartialBranch(page_number, checksum) => {
+                            Some(BtreeHeader::new(page_number, checksum, new_length))
+                        }
+                        DeletionResult::DeletedBranch(remaining_child, checksum) => {
+                            Some(BtreeHeader::new(remaining_child, checksum, new_length))
+                        }
+                    };
+                    self.root = new_root;
+                    Ok(Some((key_guard, value_guard)))
+                }
+                None => Ok(None),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn pop_last_from_node(
+        &mut self,
+        page: PageImpl,
+        checksum: Checksum,
+    ) -> Result<
+        Option<(
+            DeletionResult,
+            AccessGuard<'static, K>,
+            AccessGuard<'static, V>,
+        )>,
+    > {
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                if accessor.num_pairs() == 0 {
+                    return Ok(None);
+                }
+
+                let position = accessor.num_pairs() - 1;
+
+                let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
+                    - accessor.length_of_pairs(position, position + 1);
+                let new_required_bytes = RawLeafBuilder::required_bytes(
+                    accessor.num_pairs() - 1,
+                    new_kv_bytes,
+                    K::fixed_width(),
+                    V::fixed_width(),
+                );
+                let uncommitted = self.mem.uncommitted(page.get_page_number());
+
+                let entry = accessor.entry(position).unwrap();
+                let key_data = entry.key().to_vec();
+                let value_data = entry.value().to_vec();
+                
+                let result = if accessor.num_pairs() == 1 {
+                    DeletionResult::DeletedLeaf
+                } else if new_required_bytes < self.mem.get_page_size() / 3 {
+                    DeletionResult::PartialLeaf {
+                        page: page.to_arc(),
+                        deleted_pair: position,
+                    }
+                } else {
+                    let mut builder = LeafBuilder::new(
+                        &self.mem,
+                        accessor.num_pairs() - 1,
+                        K::fixed_width(),
+                        V::fixed_width(),
+                    );
+                    for i in 0..accessor.num_pairs() - 1 {
+                        let entry = accessor.entry(i).unwrap();
+                        builder.push(entry.key(), entry.value());
+                    }
+                    let new_page = builder.build()?;
+                    DeletionResult::Subtree(new_page.get_page_number(), DEFERRED)
+                };
+
+                let page_number = page.get_page_number();
+                if uncommitted && self.modify_uncommitted {
+                    drop(page);
+                    self.mem.free(page_number);
+                } else {
+                    let mut freed_pages = self.freed_pages.lock().unwrap();
+                    freed_pages.push(page_number);
+                    drop(page);
+                }
+                
+                let key_guard = AccessGuard::with_owned_value(key_data);
+                let value_guard = AccessGuard::with_owned_value(value_data);
+
+                Ok(Some((result, key_guard, value_guard)))
+            }
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let child_index = accessor.count_children() - 1;
+                let child_page = accessor.child_page(child_index).unwrap();
+                let child_checksum = accessor.child_checksum(child_index).unwrap();
+
+                let result =
+                    self.pop_last_from_node(self.mem.get_page(child_page)?, child_checksum)?;
+
+                if let Some((deletion_result, key_guard, value_guard)) = result {
+                    if let DeletionResult::Subtree(new_child, new_child_checksum) = deletion_result
+                    {
+                        let result_page = if self.mem.uncommitted(page.get_page_number())
+                            && self.modify_uncommitted
+                        {
+                            let page_number = page.get_page_number();
+                            drop(page);
+                            let mut mutpage = self.mem.get_page_mut(page_number)?;
+                            let mut mutator = BranchMutator::new(&mut mutpage);
+                            mutator.write_child_page(child_index, new_child, new_child_checksum);
+                            page_number
+                        } else {
+                            let mut builder = BranchBuilder::new(
+                                &self.mem,
+                                accessor.count_children(),
+                                K::fixed_width(),
+                            );
+                            builder.push_all(&accessor);
+                            builder.replace_child(child_index, new_child, new_child_checksum);
+                            let new_page = builder.build()?;
+                            let page_number = page.get_page_number();
+                            if self.modify_uncommitted {
+                                if !self.mem.free_if_uncommitted(page_number) {
+                                    let mut freed_pages = self.freed_pages.lock().unwrap();
+                                    freed_pages.push(page_number);
+                                }
+                            } else {
+                                let mut freed_pages = self.freed_pages.lock().unwrap();
+                                freed_pages.push(page_number);
+                            }
+                            drop(page);
+                            new_page.get_page_number()
+                        };
+                        Ok(Some((
+                            DeletionResult::Subtree(result_page, DEFERRED),
+                            key_guard,
+                            value_guard,
+                        )))
+                    } else {
+                        let mut builder = BranchBuilder::new(
+                            &self.mem,
+                            accessor.count_children(),
+                            K::fixed_width(),
+                        );
+
+                        let final_result = match deletion_result {
+                            DeletionResult::DeletedLeaf => {
+                                for i in 0..accessor.count_children() - 1 {
+                                    builder.push_child(
+                                        accessor.child_page(i).unwrap(),
+                                        accessor.child_checksum(i).unwrap(),
+                                    );
+                                    if i < accessor.count_children() - 2 {
+                                        builder.push_key(accessor.key(i).unwrap());
+                                    }
+                                }
+
+                                if accessor.count_children() == 2 {
+                                    let child_page = accessor.child_page(0).unwrap();
+                                    let child_checksum = accessor.child_checksum(0).unwrap();
+                                    let page_number = page.get_page_number();
+                                    if self.modify_uncommitted {
+                                        if !self.mem.free_if_uncommitted(page_number) {
+                                            let mut freed_pages = self.freed_pages.lock().unwrap();
+                                            freed_pages.push(page_number);
+                                        }
+                                    } else {
+                                        let mut freed_pages = self.freed_pages.lock().unwrap();
+                                        freed_pages.push(page_number);
+                                    }
+                                    drop(page);
+                                    DeletionResult::DeletedBranch(child_page, child_checksum)
+                                } else {
+                                    let new_page = builder.build()?;
+                                    let page_number = page.get_page_number();
+                                    if self.modify_uncommitted {
+                                        if !self.mem.free_if_uncommitted(page_number) {
+                                            let mut freed_pages = self.freed_pages.lock().unwrap();
+                                            freed_pages.push(page_number);
+                                        }
+                                    } else {
+                                        let mut freed_pages = self.freed_pages.lock().unwrap();
+                                        freed_pages.push(page_number);
+                                    }
+                                    drop(page);
+                                    DeletionResult::Subtree(new_page.get_page_number(), DEFERRED)
+                                }
+                            }
+                            _ => {
+                                let page_number = page.get_page_number();
+                                drop(page);
+                                DeletionResult::PartialBranch(page_number, checksum)
+                            }
+                        };
+
+                        Ok(Some((final_result, key_guard, value_guard)))
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn pop_first_helper(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        if let Some(header) = self.root {
+            let BtreeHeader {
+                root: p,
+                checksum,
+                length,
+            } = header;
+            let result = self.pop_first_from_node(self.mem.get_page(p)?, checksum)?;
+            match result {
+                Some((deletion_result, key_guard, value_guard)) => {
+                    let new_length = length - 1;
+                    let new_root = match deletion_result {
+                        DeletionResult::Subtree(page, checksum) => {
+                            Some(BtreeHeader::new(page, checksum, new_length))
+                        }
+                        DeletionResult::DeletedLeaf => None,
+                        DeletionResult::PartialLeaf { page, deleted_pair } => {
+                            let accessor =
+                                LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+                            let mut builder = LeafBuilder::new(
+                                &self.mem,
+                                accessor.num_pairs() - 1,
+                                K::fixed_width(),
+                                V::fixed_width(),
+                            );
+                            builder.push_all_except(&accessor, Some(deleted_pair));
+                            let page = builder.build()?;
+                            assert_eq!(new_length, accessor.num_pairs() as u64 - 1);
+                            Some(BtreeHeader::new(
+                                page.get_page_number(),
+                                DEFERRED,
+                                new_length,
+                            ))
+                        }
+                        DeletionResult::PartialBranch(page_number, checksum) => {
+                            Some(BtreeHeader::new(page_number, checksum, new_length))
+                        }
+                        DeletionResult::DeletedBranch(remaining_child, checksum) => {
+                            Some(BtreeHeader::new(remaining_child, checksum, new_length))
+                        }
+                    };
+                    self.root = new_root;
+                    Ok(Some((key_guard, value_guard)))
+                }
+                None => Ok(None),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn pop_first_from_node(
+        &mut self,
+        page: PageImpl,
+        checksum: Checksum,
+    ) -> Result<
+        Option<(
+            DeletionResult,
+            AccessGuard<'static, K>,
+            AccessGuard<'static, V>,
+        )>,
+    > {
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                if accessor.num_pairs() == 0 {
+                    return Ok(None);
+                }
+
+                let position = 0;
+
+                let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
+                    - accessor.length_of_pairs(position, position + 1);
+                let new_required_bytes = RawLeafBuilder::required_bytes(
+                    accessor.num_pairs() - 1,
+                    new_kv_bytes,
+                    K::fixed_width(),
+                    V::fixed_width(),
+                );
+                let uncommitted = self.mem.uncommitted(page.get_page_number());
+
+                let entry = accessor.entry(position).unwrap();
+                let key_data = entry.key().to_vec();
+                let value_data = entry.value().to_vec();
+                
+                let result = if accessor.num_pairs() == 1 {
+                    DeletionResult::DeletedLeaf
+                } else if new_required_bytes < self.mem.get_page_size() / 3 {
+                    DeletionResult::PartialLeaf {
+                        page: page.to_arc(),
+                        deleted_pair: position,
+                    }
+                } else {
+                    let mut builder = LeafBuilder::new(
+                        &self.mem,
+                        accessor.num_pairs() - 1,
+                        K::fixed_width(),
+                        V::fixed_width(),
+                    );
+                    for i in 1..accessor.num_pairs() {
+                        let entry = accessor.entry(i).unwrap();
+                        builder.push(entry.key(), entry.value());
+                    }
+                    let new_page = builder.build()?;
+                    DeletionResult::Subtree(new_page.get_page_number(), DEFERRED)
+                };
+
+                let page_number = page.get_page_number();
+                if uncommitted && self.modify_uncommitted {
+                    drop(page);
+                    self.mem.free(page_number);
+                } else {
+                    let mut freed_pages = self.freed_pages.lock().unwrap();
+                    freed_pages.push(page_number);
+                    drop(page);
+                }
+                
+                let key_guard = AccessGuard::with_owned_value(key_data);
+                let value_guard = AccessGuard::with_owned_value(value_data);
+
+                Ok(Some((result, key_guard, value_guard)))
+            }
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let child_index = 0;
+                let child_page = accessor.child_page(child_index).unwrap();
+                let child_checksum = accessor.child_checksum(child_index).unwrap();
+
+                let result =
+                    self.pop_first_from_node(self.mem.get_page(child_page)?, child_checksum)?;
+
+                if let Some((deletion_result, key_guard, value_guard)) = result {
+                    if let DeletionResult::Subtree(new_child, new_child_checksum) = deletion_result
+                    {
+                        let result_page = if self.mem.uncommitted(page.get_page_number())
+                            && self.modify_uncommitted
+                        {
+                            let page_number = page.get_page_number();
+                            drop(page);
+                            let mut mutpage = self.mem.get_page_mut(page_number)?;
+                            let mut mutator = BranchMutator::new(&mut mutpage);
+                            mutator.write_child_page(child_index, new_child, new_child_checksum);
+                            page_number
+                        } else {
+                            let mut builder = BranchBuilder::new(
+                                &self.mem,
+                                accessor.count_children(),
+                                K::fixed_width(),
+                            );
+                            builder.push_all(&accessor);
+                            builder.replace_child(child_index, new_child, new_child_checksum);
+                            let new_page = builder.build()?;
+                            let page_number = page.get_page_number();
+                            if self.modify_uncommitted {
+                                if !self.mem.free_if_uncommitted(page_number) {
+                                    let mut freed_pages = self.freed_pages.lock().unwrap();
+                                    freed_pages.push(page_number);
+                                }
+                            } else {
+                                let mut freed_pages = self.freed_pages.lock().unwrap();
+                                freed_pages.push(page_number);
+                            }
+                            drop(page);
+                            new_page.get_page_number()
+                        };
+                        Ok(Some((
+                            DeletionResult::Subtree(result_page, DEFERRED),
+                            key_guard,
+                            value_guard,
+                        )))
+                    } else {
+                        let mut builder = BranchBuilder::new(
+                            &self.mem,
+                            accessor.count_children(),
+                            K::fixed_width(),
+                        );
+
+                        let final_result = match deletion_result {
+                            DeletionResult::DeletedLeaf => {
+                                for i in 1..accessor.count_children() {
+                                    if i > 1 {
+                                        builder.push_key(accessor.key(i - 2).unwrap());
+                                    }
+                                    builder.push_child(
+                                        accessor.child_page(i).unwrap(),
+                                        accessor.child_checksum(i).unwrap(),
+                                    );
+                                }
+
+                                if accessor.count_children() == 2 {
+                                    let child_page = accessor.child_page(1).unwrap();
+                                    let child_checksum = accessor.child_checksum(1).unwrap();
+                                    let page_number = page.get_page_number();
+                                    if self.modify_uncommitted {
+                                        if !self.mem.free_if_uncommitted(page_number) {
+                                            let mut freed_pages = self.freed_pages.lock().unwrap();
+                                            freed_pages.push(page_number);
+                                        }
+                                    } else {
+                                        let mut freed_pages = self.freed_pages.lock().unwrap();
+                                        freed_pages.push(page_number);
+                                    }
+                                    drop(page);
+                                    DeletionResult::DeletedBranch(child_page, child_checksum)
+                                } else {
+                                    let new_page = builder.build()?;
+                                    let page_number = page.get_page_number();
+                                    if self.modify_uncommitted {
+                                        if !self.mem.free_if_uncommitted(page_number) {
+                                            let mut freed_pages = self.freed_pages.lock().unwrap();
+                                            freed_pages.push(page_number);
+                                        }
+                                    } else {
+                                        let mut freed_pages = self.freed_pages.lock().unwrap();
+                                        freed_pages.push(page_number);
+                                    }
+                                    drop(page);
+                                    DeletionResult::Subtree(new_page.get_page_number(), DEFERRED)
+                                }
+                            }
+                            _ => {
+                                let page_number = page.get_page_number();
+                                drop(page);
+                                DeletionResult::PartialBranch(page_number, checksum)
+                            }
+                        };
+
+                        Ok(Some((final_result, key_guard, value_guard)))
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[allow(dead_code)]
