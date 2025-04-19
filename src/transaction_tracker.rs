@@ -181,7 +181,7 @@ impl TransactionTracker {
         &self,
         mem: &TransactionalMemory,
     ) -> Result<TransactionId> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()?;
         let id = mem.get_last_committed_transaction_id()?;
         state
             .live_read_transactions

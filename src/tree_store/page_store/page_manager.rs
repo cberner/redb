@@ -931,7 +931,7 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn get_last_committed_transaction_id(&self) -> Result<TransactionId> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()?;
         if self.read_from_secondary.load(Ordering::Acquire) {
             Ok(state.header.secondary_slot().transaction_id)
         } else {
