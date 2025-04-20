@@ -886,6 +886,13 @@ impl<K: Key, V: Value> Btree<K, V> {
     }
 }
 
+impl<K: Key, V: Value> Drop for Btree<K, V> {
+    fn drop(&mut self) {
+        // Make sure that we clear our reference to the root page, before the transaction guard goes out of scope
+        self.cached_root = None;
+    }
+}
+
 pub(crate) fn btree_stats(
     root: Option<PageNumber>,
     mem: &TransactionalMemory,
