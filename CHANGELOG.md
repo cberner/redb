@@ -1,5 +1,13 @@
 # redb - Changelog
 
+## 2.5.0 - 2025-04-21
+* Add `rename_table()` and `rename_multimap_table()`
+* Add `Key` and `Value` implementations for the unary tuple type (i.e. `(T,)`)
+* Fix an issue which could cause a panic when concurrently performing read and write transactions,
+  when `debug_assertions` were enabled
+* Optimize `retain()` and `retain_in()` to use less space in the database file
+* Improve handling of some internal errors to return `LockPoisoned` instead of panicking
+
 ## 2.4.0 - 2024-12-30
 * Add `Database::cache_stats()`
 * Fix `open()` and `create()` to return `InvalidData` when they are called on a database file
