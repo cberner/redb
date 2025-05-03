@@ -338,7 +338,7 @@ impl<'a> LeafAccessor<'a> {
         // inclusive. Start past end, since it might be positioned beyond the end of the leaf
         let mut max_entry = self.num_pairs();
         while min_entry < max_entry {
-            let mid = (min_entry + max_entry) / 2;
+            let mid = min_entry.midpoint(max_entry);
             let key = self.key_unchecked(mid);
             match K::compare(query, key) {
                 Ordering::Less => {
@@ -1167,7 +1167,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         let mut min_child = 0; // inclusive
         let mut max_child = self.num_keys(); // inclusive
         while min_child < max_child {
-            let mid = (min_child + max_child) / 2;
+            let mid = min_child.midpoint(max_child);
             match K::compare(query, self.key(mid).unwrap()) {
                 Ordering::Less => {
                     max_child = mid;
