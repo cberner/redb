@@ -1,5 +1,6 @@
 #![deny(clippy::all, clippy::pedantic, clippy::disallowed_methods)]
 // TODO: revisit this list and see if we can enable some
+// TODO: we should enable result_large_err for perf reasons
 #![allow(
     let_underscore_drop,
     clippy::default_trait_access,
@@ -14,6 +15,7 @@
     clippy::needless_pass_by_value,
     clippy::option_option,
     clippy::redundant_closure_for_method_calls,
+    clippy::result_large_err,
     clippy::similar_names,
     clippy::too_many_lines,
     clippy::unnecessary_wraps,
