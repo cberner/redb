@@ -539,7 +539,7 @@ impl Database {
                 let (_, savepoint_data) = result?;
                 let savepoint = savepoint_data
                     .value()
-                    .to_savepoint(fake_transaction_tracker.clone());
+                    .to_savepoint(fake_transaction_tracker.clone(), mem.file_format_v3());
                 if let Some(header) = savepoint.get_user_root() {
                     Self::check_pages_allocated_recursive(header.root, mem.clone())?;
                 }
@@ -710,6 +710,7 @@ impl Database {
         Ok([data_root, system_root, freed_root])
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new(
         file: Box<dyn StorageBackend>,
         allow_initialize: bool,
@@ -718,6 +719,7 @@ impl Database {
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
+        enable_file_format_v3: bool,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -730,6 +732,7 @@ impl Database {
             region_size,
             read_cache_size_bytes,
             write_cache_size_bytes,
+            enable_file_format_v3,
         )?;
         let mut mem = Arc::new(mem);
         if mem.needs_repair()? {
@@ -946,6 +949,7 @@ pub struct Builder {
     read_cache_size_bytes: usize,
     write_cache_size_bytes: usize,
     repair_callback: Box<dyn Fn(&mut RepairSession)>,
+    enable_file_format_v3: bool,
 }
 
 impl Builder {
@@ -967,10 +971,17 @@ impl Builder {
             // TODO: Default should probably take into account the total system memory
             write_cache_size_bytes: 0,
             repair_callback: Box::new(|_| {}),
+            enable_file_format_v3: false,
         };
 
         result.set_cache_size(1024 * 1024 * 1024);
         result
+    }
+
+    #[cfg(any(test, fuzzing))]
+    pub fn set_file_format_v3(&mut self, value: bool) -> &mut Self {
+        self.enable_file_format_v3 = value;
+        self
     }
 
     /// Set a callback which will be invoked periodically in the event that the database file needs
@@ -1037,6 +1048,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+            self.enable_file_format_v3,
         )
     }
 
@@ -1052,6 +1064,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+            self.enable_file_format_v3,
         )
     }
 
@@ -1067,6 +1080,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+            self.enable_file_format_v3,
         )
     }
 
@@ -1083,6 +1097,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+            self.enable_file_format_v3,
         )
     }
 }
