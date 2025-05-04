@@ -28,7 +28,8 @@ test: pre
     RUST_BACKTRACE=1 cargo test
 
 test_wasi:
-    cargo +nightly-2025-04-06 test --target=wasm32-wasip1-threads -- --nocapture
+    rustup install nightly-2025-05-04 --target wasm32-wasip1-threads
+    cargo +nightly-2025-05-04 test --target=wasm32-wasip1-threads -- --nocapture
 
 bench bench='lmdb_benchmark': pre
     cargo bench --bench {{bench}}
