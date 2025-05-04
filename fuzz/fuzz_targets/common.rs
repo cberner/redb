@@ -175,6 +175,7 @@ pub(crate) struct FuzzTransaction {
 #[derive(Arbitrary, Debug, Clone)]
 pub(crate) struct FuzzConfig {
     pub multimap_table: bool,
+    pub file_format_v3: bool,
     pub cache_size: BoundedUSize<MAX_CACHE_SIZE>,
     pub crash_after_ops: BoundedU64<MAX_CRASH_OPS>,
     pub transactions: Vec<FuzzTransaction>,

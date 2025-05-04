@@ -39,6 +39,14 @@ pub(super) const INITIAL_REGIONS: u32 = 1000; // Enough for a 4TiB database
 pub(crate) const FILE_FORMAT_VERSION1: u8 = 1;
 // New file format. All btrees have a separate length stored in their header for constant time access
 pub(crate) const FILE_FORMAT_VERSION2: u8 = 2;
+// New file format:
+// * Allocator state is stored in a system table, instead of in the region headers
+// * Freed tree split into two system tables: one for the data tables, and one for the system tables
+//   It is no longer stored in a separate tree
+// * New "allocated pages table" which tracks the pages allocated, in the data tree, by a transaction.
+//   This is a system table. It is only written when a savepoint exists
+// * New persistent savepoint format
+pub(crate) const FILE_FORMAT_VERSION3: u8 = 3;
 
 fn ceil_log2(x: usize) -> u8 {
     if x.is_power_of_two() {
@@ -102,6 +110,7 @@ pub(crate) struct TransactionalMemory {
     // code path where there is no locking
     region_size: u64,
     region_header_with_padding_size: u64,
+    enable_file_format_v3: bool,
 }
 
 impl TransactionalMemory {
@@ -114,6 +123,7 @@ impl TransactionalMemory {
         requested_region_size: Option<u64>,
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
+        enable_file_format_v3: bool,
     ) -> Result<Self, DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
@@ -199,19 +209,20 @@ impl TransactionalMemory {
                 PageNumber::new(0, page_number, required_order)
             };
 
-            let mut header = DatabaseHeader::new(
-                layout,
-                TransactionId::new(0),
-                FILE_FORMAT_VERSION2,
-                tracker_page,
-            );
+            let file_format = if enable_file_format_v3 {
+                FILE_FORMAT_VERSION3
+            } else {
+                FILE_FORMAT_VERSION2
+            };
+            let mut header =
+                DatabaseHeader::new(layout, TransactionId::new(0), file_format, tracker_page);
 
             header.recovery_required = false;
             header.two_phase_commit = true;
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
-                .copy_from_slice(&header.to_bytes(false));
+                .copy_from_slice(&header.to_bytes(false, enable_file_format_v3));
             allocators.flush_to(tracker_page, layout, &storage)?;
 
             storage.flush(false)?;
@@ -220,11 +231,12 @@ impl TransactionalMemory {
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
-                .copy_from_slice(&header.to_bytes(true));
+                .copy_from_slice(&header.to_bytes(true, enable_file_format_v3));
             storage.flush(false)?;
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
-        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
+        let (mut header, repair_info) =
+            DatabaseHeader::from_bytes(&header_bytes, enable_file_format_v3)?;
 
         assert_eq!(header.page_size() as usize, page_size);
         assert!(storage.raw_file_len()? >= header.layout().len());
@@ -245,7 +257,7 @@ impl TransactionalMemory {
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
-                .copy_from_slice(&header.to_bytes(true));
+                .copy_from_slice(&header.to_bytes(true, enable_file_format_v3));
             storage.flush(false)?;
         }
 
@@ -271,7 +283,12 @@ impl TransactionalMemory {
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,
+            enable_file_format_v3,
         })
+    }
+
+    pub(crate) fn file_format_v3(&self) -> bool {
+        self.enable_file_format_v3
     }
 
     pub(crate) fn cache_stats(&self) -> CacheStats {
@@ -303,7 +320,8 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
-        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
+        let (mut header, repair_info) =
+            DatabaseHeader::from_bytes(&header_bytes, self.enable_file_format_v3)?;
         // TODO: This ends up always being true because this is called from check_integrity() once the db is already open
         // TODO: Also we should recheck the layout
         let mut was_clean = true;
@@ -317,7 +335,7 @@ impl TransactionalMemory {
             self.storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
-                .copy_from_slice(&header.to_bytes(true));
+                .copy_from_slice(&header.to_bytes(true, self.enable_file_format_v3));
             self.storage.flush(false)?;
         }
 
@@ -376,7 +394,7 @@ impl TransactionalMemory {
         self.storage
             .write(0, DB_HEADER_SIZE, true)?
             .mem_mut()
-            .copy_from_slice(&header.to_bytes(true));
+            .copy_from_slice(&header.to_bytes(true, self.enable_file_format_v3));
 
         Ok(())
     }
