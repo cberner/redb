@@ -20,6 +20,7 @@ struct SomeValue {
 const TABLE: TableDefinition<Bincode<SomeKey>, Bincode<SomeValue>> =
     TableDefinition::new("my_data");
 
+#[allow(clippy::result_large_err)]
 fn main() -> Result<(), Error> {
     let some_key = SomeKey {
         foo: "hello world".to_string(),
