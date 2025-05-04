@@ -3,6 +3,7 @@ use redb::{Database, Error, TableDefinition};
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
 
+#[allow(clippy::result_large_err)]
 fn main() -> Result<(), Error> {
     let db = Database::create("my_db.redb")?;
     let definition: TableDefinition<&str, u32> = TableDefinition::new("my_data");
@@ -49,7 +50,7 @@ fn main() -> Result<(), Error> {
                     table.insert(&i.to_string().as_str(), i as u32)?;
                     // The resulting table should have a different "a" value each time this example is run
                     table.insert("a".to_string().as_str(), i as u32)?;
-                    println!("Inserted data from write_thread #{}", i);
+                    println!("Inserted data from write_thread #{i}");
                 }
                 write_txn.commit()?;
             }
@@ -61,7 +62,7 @@ fn main() -> Result<(), Error> {
     // See if there any errors were returned from the threads
     for handle in handles {
         if let Err(e) = handle.join() {
-            println!("{:?}", e)
+            println!("{e:?}");
         }
     }
 

@@ -2,6 +2,7 @@ use redb::{Database, Error, TableDefinition};
 
 const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
 
+#[allow(clippy::result_large_err)]
 fn main() -> Result<(), Error> {
     let db = Database::create("int_keys.redb")?;
     let write_txn = db.begin_write()?;
