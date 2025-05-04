@@ -106,6 +106,4 @@ jobs:
       - name: Run WASI tests
         if: runner.os != 'Windows'
         run: |
-          rustup toolchain install nightly-2025-04-06
-          rustup target add wasm32-wasip1-threads --toolchain=nightly-2025-04-06
           RUSTFLAGS="" just test_wasi
