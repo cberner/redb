@@ -4,6 +4,7 @@ use libfuzzer_sys::fuzz_target;
 use redb::{AccessGuard, Database, Durability, Error, MultimapTable, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, ReadableTableMetadata, Savepoint, StorageBackend, Table, TableDefinition, WriteTransaction};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Debug;
+use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -503,9 +504,15 @@ fn is_simulated_io_error(err: &redb::Error) -> bool {
     }
 }
 
+// Open a separate file descriptor to the same file
+// We need a separate file descriptor to make sure it has its own locks
+fn open_dup(file: &NamedTempFile) -> File {
+    OpenOptions::new().read(true).write(true).open(file.path()).unwrap()
+}
+
 fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransaction, &mut BTreeMap<u64, T>, &FuzzTransaction, &mut SavepointManager<T>) -> Result<(), redb::Error>) -> Result<(), redb::Error> {
     let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
-    let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap())?);
+    let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file))?);
     let countdown = backend.countdown.clone();
 
     let mut db = Database::builder()
@@ -564,7 +571,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
                     assert_ne!(god_byte[0] & 2, 0);
 
                     // Repair the database
-                    let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap()).unwrap());
+                    let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)).unwrap());
                     db = Database::builder()
                         .set_page_size(config.page_size.value)
                         .set_cache_size(config.cache_size.value)
@@ -606,7 +613,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
                 assert_ne!(god_byte[0] & 2, 0);
 
                 // Repair the database
-                let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap()).unwrap());
+                let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)).unwrap());
                 db = Database::builder()
                     .set_page_size(config.page_size.value)
                     .set_cache_size(config.cache_size.value)
@@ -650,7 +657,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
     // Repair the database, if needed, and disable IO error simulation
     countdown.swap(u64::MAX, Ordering::SeqCst);
     drop(db);
-    let backend = FuzzerBackend::new(FileBackend::new(redb_file.as_file().try_clone().unwrap()).unwrap());
+    let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)).unwrap());
     db = Database::builder()
         .set_page_size(config.page_size.value)
         .set_cache_size(config.cache_size.value)
