@@ -103,6 +103,11 @@ impl<T: Clone> SavepointManager<T> {
         }
     }
 
+    fn clean_shutdown(&mut self) {
+        let persistent: Vec<FuzzerSavepoint<T>> = self.savepoints.drain(..).filter(|x| matches!(x, FuzzerSavepoint::Persistent(_, _))).collect();
+        self.savepoints = persistent;
+    }
+
     fn crash(&mut self) {
         let persistent: Vec<FuzzerSavepoint<T>> = self.savepoints.drain(..).filter(|x| matches!(x, FuzzerSavepoint::Persistent(_, _))).collect();
         self.savepoints = persistent;
@@ -513,7 +518,7 @@ fn open_dup(file: &NamedTempFile) -> File {
 fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransaction, &mut BTreeMap<u64, T>, &FuzzTransaction, &mut SavepointManager<T>) -> Result<(), redb::Error>) -> Result<(), redb::Error> {
     let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
     let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file))?);
-    let countdown = backend.countdown.clone();
+    let mut countdown = backend.countdown.clone();
 
     let mut db = Database::builder()
         .set_page_size(config.page_size.value)
@@ -549,6 +554,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
     let mut savepoint_manager = SavepointManager::new();
     let mut reference = BTreeMap::new();
     let mut non_durable_reference = reference.clone();
+    let mut has_done_close_db = false;
 
     for (txn_id, transaction) in config.transactions.iter().enumerate() {
         let result = handle_savepoints(db.begin_write().unwrap(), &mut non_durable_reference, transaction, &mut savepoint_manager, countdown.clone());
@@ -630,6 +636,10 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
         let txn = db.begin_read().unwrap();
         let counter_table = txn.open_table(COUNTER_TABLE).unwrap();
         let last_committed = counter_table.get(()).unwrap().unwrap().value();
+        // Need to make sure this transaction is completed. Otherwise, it could conflict with closing
+        // and re-opening the database below
+        drop(counter_table);
+        txn.close().unwrap();
         countdown.store(old_countdown, Ordering::SeqCst);
 
         let commit_succeeded = last_committed == uncommitted_id;
@@ -642,6 +652,25 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
             }
         } else {
             savepoint_manager.abort();
+        }
+
+        if transaction.close_db && !has_done_close_db {
+            has_done_close_db = true;
+            let old_countdown = countdown.swap(u64::MAX, Ordering::SeqCst);
+            drop(db);
+            savepoint_manager.commit(true);
+            reference = non_durable_reference.clone();
+            savepoint_manager.clean_shutdown();
+
+            let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file))?);
+            countdown = backend.countdown.clone();
+            db = Database::builder()
+                .set_page_size(config.page_size.value)
+                .set_cache_size(config.cache_size.value)
+                .set_region_size(config.region_size.value as u64)
+                .create_with_backend(backend).unwrap();
+
+            countdown.store(old_countdown, Ordering::SeqCst);
         }
     }
 
