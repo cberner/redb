@@ -106,11 +106,11 @@ impl FreedPageList<'_> {
 
 #[derive(Debug)]
 #[repr(transparent)]
-pub(crate) struct FreedPageListMut {
+pub(crate) struct PageListMut {
     data: [u8],
 }
 
-impl FreedPageListMut {
+impl PageListMut {
     pub(crate) fn push_back(&mut self, value: PageNumber) {
         let len = u16::from_le_bytes(self.data[..size_of::<u16>()].try_into().unwrap());
         self.data[..size_of::<u16>()].copy_from_slice(&(len + 1).to_le_bytes());
@@ -159,7 +159,7 @@ impl Value for FreedPageList<'_> {
 }
 
 impl MutInPlaceValue for FreedPageList<'_> {
-    type BaseRefType = FreedPageListMut;
+    type BaseRefType = PageListMut;
 
     fn initialize(data: &mut [u8]) {
         assert!(data.len() >= 8);
@@ -168,7 +168,7 @@ impl MutInPlaceValue for FreedPageList<'_> {
     }
 
     fn from_bytes_mut(data: &mut [u8]) -> &mut Self::BaseRefType {
-        unsafe { &mut *(std::ptr::from_mut::<[u8]>(data) as *mut FreedPageListMut) }
+        unsafe { &mut *(std::ptr::from_mut::<[u8]>(data) as *mut PageListMut) }
     }
 }
 
