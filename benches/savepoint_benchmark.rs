@@ -102,7 +102,9 @@ fn main() {
         "persistent_savepoint()",
         "restore_savepoint()",
     ]);
-    for inserts in [10_000, 20_000, 40_000, 80_000, 160_000, 320_000, 640_000] {
+    for inserts in [
+        10_000, 20_000, 40_000, 80_000, 160_000, 320_000, 640_000, 1_280_000, 2_560_000, 5_120_000,
+    ] {
         let timing = benchmark(&db, inserts);
         let len = tmpfile.as_file().metadata().unwrap().len();
         let row = vec![
