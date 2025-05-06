@@ -1276,15 +1276,23 @@ impl WriteTransaction {
             self.two_phase_commit = true;
         }
 
+        let user_root = self
+            .tables
+            .lock()
+            .unwrap()
+            .table_tree
+            .flush_table_root_updates()?
+            .finalize_dirty_checksums()?;
+
         #[cfg(feature = "logging")]
         debug!(
             "Committing transaction id={:?} with durability={:?} two_phase={} quick_repair={}",
             self.transaction_id, self.durability, self.two_phase_commit, self.quick_repair
         );
         match self.durability {
-            InternalDurability::None => self.non_durable_commit()?,
-            InternalDurability::Eventual => self.durable_commit(true)?,
-            InternalDurability::Immediate => self.durable_commit(false)?,
+            InternalDurability::None => self.non_durable_commit(user_root)?,
+            InternalDurability::Eventual => self.durable_commit(user_root, true)?,
+            InternalDurability::Immediate => self.durable_commit(user_root, false)?,
         }
 
         for (savepoint, transaction) in self.deleted_persistent_savepoints.lock().unwrap().iter() {
@@ -1337,20 +1345,16 @@ impl WriteTransaction {
         Ok(())
     }
 
-    pub(crate) fn durable_commit(&mut self, eventual: bool) -> Result {
+    pub(crate) fn durable_commit(
+        &mut self,
+        user_root: Option<BtreeHeader>,
+        eventual: bool,
+    ) -> Result {
         let free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_transaction()
             .map_or(self.transaction_id, |x| x.next());
         self.process_freed_pages(free_until_transaction)?;
-
-        let user_root = self
-            .tables
-            .lock()
-            .unwrap()
-            .table_tree
-            .flush_table_root_updates()?
-            .finalize_dirty_checksums()?;
 
         let mut system_tables = self.system_tables.lock().unwrap();
         let system_tree = system_tables.table_tree.flush_table_root_updates()?;
@@ -1426,15 +1430,7 @@ impl WriteTransaction {
     }
 
     // Commit without a durability guarantee
-    pub(crate) fn non_durable_commit(&mut self) -> Result {
-        let user_root = self
-            .tables
-            .lock()
-            .unwrap()
-            .table_tree
-            .flush_table_root_updates()?
-            .finalize_dirty_checksums()?;
-
+    pub(crate) fn non_durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
         let system_root = self
             .system_tables
             .lock()
