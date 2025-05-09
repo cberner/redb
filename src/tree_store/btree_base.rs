@@ -1,12 +1,12 @@
-use crate::tree_store::PageNumber;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory, xxh3_checksum};
+use crate::tree_store::{PageNumber, PageTrackerPolicy};
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 pub(crate) const LEAF: u8 = 1;
@@ -501,6 +501,7 @@ pub(super) struct LeafBuilder<'a, 'b> {
     total_key_bytes: usize,
     total_value_bytes: usize,
     mem: &'b TransactionalMemory,
+    allocated_pages: &'b Mutex<PageTrackerPolicy>,
 }
 
 impl<'a, 'b> LeafBuilder<'a, 'b> {
@@ -515,6 +516,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
 
     pub(super) fn new(
         mem: &'b TransactionalMemory,
+        allocated_pages: &'b Mutex<PageTrackerPolicy>,
         capacity: usize,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
@@ -526,6 +528,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
             total_key_bytes: 0,
             total_value_bytes: 0,
             mem,
+            allocated_pages,
         }
     }
 
@@ -575,7 +578,8 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
 
         let required_size =
             self.required_bytes(division, first_split_key_bytes + first_split_value_bytes);
-        let mut page1 = self.mem.allocate(required_size)?;
+        let mut allocated_pages = self.allocated_pages.lock().unwrap();
+        let mut page1 = self.mem.allocate(required_size, &mut allocated_pages)?;
         let mut builder = RawLeafBuilder::new(
             page1.memory_mut(),
             division,
@@ -594,7 +598,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
                 - first_split_key_bytes
                 - first_split_value_bytes,
         );
-        let mut page2 = self.mem.allocate(required_size)?;
+        let mut page2 = self.mem.allocate(required_size, &mut allocated_pages)?;
         let mut builder = RawLeafBuilder::new(
             page2.memory_mut(),
             self.pairs.len() - division,
@@ -615,7 +619,8 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
         );
-        let mut page = self.mem.allocate(required_size)?;
+        let mut allocated_pages = self.allocated_pages.lock().unwrap();
+        let mut page = self.mem.allocate(required_size, &mut allocated_pages)?;
         let mut builder = RawLeafBuilder::new(
             page.memory_mut(),
             self.pairs.len(),
@@ -1269,11 +1274,13 @@ pub(super) struct BranchBuilder<'a, 'b> {
     total_key_bytes: usize,
     fixed_key_size: Option<usize>,
     mem: &'b TransactionalMemory,
+    allocated_pages: &'b Mutex<PageTrackerPolicy>,
 }
 
 impl<'a, 'b> BranchBuilder<'a, 'b> {
     pub(super) fn new(
         mem: &'b TransactionalMemory,
+        allocated_pages: &'b Mutex<PageTrackerPolicy>,
         child_capacity: usize,
         fixed_key_size: Option<usize>,
     ) -> Self {
@@ -1283,6 +1290,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
             total_key_bytes: 0,
             fixed_key_size,
             mem,
+            allocated_pages,
         }
     }
 
@@ -1325,7 +1333,8 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
             self.total_key_bytes,
             self.fixed_key_size,
         );
-        let mut page = self.mem.allocate(size)?;
+        let mut allocated_pages = self.allocated_pages.lock().unwrap();
+        let mut page = self.mem.allocate(size, &mut allocated_pages)?;
         let mut builder = RawBranchBuilder::new(&mut page, self.keys.len(), self.fixed_key_size);
         builder.write_first_page(self.children[0].0, self.children[0].1);
         for i in 1..self.children.len() {
@@ -1347,6 +1356,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
     }
 
     pub(super) fn build_split(self) -> Result<(PageMut, &'a [u8], PageMut)> {
+        let mut allocated_pages = self.allocated_pages.lock().unwrap();
         assert_eq!(self.children.len(), self.keys.len() + 1);
         assert!(self.keys.len() >= 3);
         let division = self.keys.len() / 2;
@@ -1356,7 +1366,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
 
         let size =
             RawBranchBuilder::required_bytes(division, first_split_key_len, self.fixed_key_size);
-        let mut page1 = self.mem.allocate(size)?;
+        let mut page1 = self.mem.allocate(size, &mut allocated_pages)?;
         let mut builder = RawBranchBuilder::new(&mut page1, division, self.fixed_key_size);
         builder.write_first_page(self.children[0].0, self.children[0].1);
         for i in 0..division {
@@ -1375,7 +1385,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
             second_split_key_len,
             self.fixed_key_size,
         );
-        let mut page2 = self.mem.allocate(size)?;
+        let mut page2 = self.mem.allocate(size, &mut allocated_pages)?;
         let mut builder = RawBranchBuilder::new(
             &mut page2,
             self.keys.len() - division - 1,

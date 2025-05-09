@@ -7,16 +7,18 @@ use crate::tree_store::btree::{UntypedBtreeMut, btree_stats};
 use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::{
     Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageHint, PageNumber, PagePath,
-    RawBtree, TableType, TransactionalMemory,
+    PageTrackerPolicy, RawBtree, TableType, TransactionalMemory,
 };
 use crate::types::{Key, MutInPlaceValue, TypeName, Value};
 use crate::{DatabaseStats, Result};
 use std::cmp::max;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
 use std::ops::RangeFull;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
+// TODO: remove this struct in 3.0 release
 #[derive(Debug)]
 pub(crate) struct FreedTableKey {
     pub(crate) transaction_id: u64,
@@ -80,6 +82,7 @@ impl Key for FreedTableKey {
 // Format:
 // 2 bytes: length
 // length * size_of(PageNumber): array of page numbers
+// TODO: remove this struct in 3.0 release
 #[derive(Debug)]
 pub(crate) struct FreedPageList<'a> {
     data: &'a [u8],
@@ -299,6 +302,7 @@ pub(crate) struct TableTreeMut<'txn> {
     // Cached updates from tables that have been closed. These must be flushed to the btree
     pending_table_updates: HashMap<String, (Option<BtreeHeader>, u64)>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+    allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
 }
 
 impl TableTreeMut<'_> {
@@ -307,14 +311,26 @@ impl TableTreeMut<'_> {
         guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+        allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
     ) -> Self {
         Self {
-            tree: BtreeMut::new(master_root, guard.clone(), mem.clone(), freed_pages.clone()),
+            tree: BtreeMut::new(
+                master_root,
+                guard.clone(),
+                mem.clone(),
+                freed_pages.clone(),
+                allocated_pages.clone(),
+            ),
             guard,
             mem,
             pending_table_updates: Default::default(),
             freed_pages,
+            allocated_pages,
         }
+    }
+
+    pub(crate) fn set_root(&mut self, root: Option<BtreeHeader>) {
+        self.tree.set_root(root);
     }
 
     pub(crate) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
@@ -353,10 +369,6 @@ impl TableTreeMut<'_> {
     ) {
         self.pending_table_updates
             .insert(name.to_string(), (table_root, length));
-    }
-
-    pub(crate) fn clear_table_root_updates(&mut self) {
-        self.pending_table_updates.clear();
     }
 
     pub(crate) fn verify_checksums(&self) -> Result<bool> {
@@ -407,6 +419,30 @@ impl TableTreeMut<'_> {
         }
 
         Ok(true)
+    }
+
+    pub(crate) fn clear_root_updates_and_close(&mut self) {
+        self.pending_table_updates.clear();
+        self.allocated_pages.lock().unwrap().close();
+    }
+
+    pub(crate) fn flush_and_close(&mut self) -> Result<(Option<BtreeHeader>, HashSet<PageNumber>)> {
+        match self.flush_inner() {
+            Ok(header) => {
+                let allocated = self.allocated_pages.lock()?.close();
+                Ok((header, allocated))
+            }
+            Err(err) => {
+                // Ensure that the allocated pages get clear. Otherwise it will cause a panic
+                // when they are dropped
+                self.allocated_pages.lock()?.close();
+                Err(err)
+            }
+        }
+    }
+
+    fn flush_inner(&mut self) -> Result<Option<BtreeHeader>> {
+        self.flush_table_root_updates()?.finalize_dirty_checksums()
     }
 
     pub(crate) fn flush_table_root_updates(&mut self) -> Result<&mut Self> {
@@ -485,6 +521,7 @@ impl TableTreeMut<'_> {
             self.guard.clone(),
             self.mem.clone(),
             self.freed_pages.clone(),
+            self.allocated_pages.clone(),
         );
         f(&mut tree)?;
 
@@ -766,6 +803,15 @@ impl TableTreeMut<'_> {
             fragmented_bytes: total_fragmented,
             page_size: self.mem.get_page_size(),
         })
+    }
+}
+
+impl Drop for TableTreeMut<'_> {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            return;
+        }
+        assert!(self.allocated_pages.lock().unwrap().is_empty());
     }
 }
 
