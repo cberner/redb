@@ -1,8 +1,8 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeHeader, BtreeRangeIter, FreedPageList, FreedTableKey,
-    InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, RawBtree, SerializedSavepoint,
-    TableTree, TableTreeMut, TableType, TransactionalMemory,
+    InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, PageTrackerPolicy, RawBtree,
+    SerializedSavepoint, TableTree, TableTreeMut, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError};
@@ -19,7 +19,8 @@ use std::{io, thread};
 use crate::error::TransactionError;
 use crate::sealed::Sealed;
 use crate::transactions::{
-    ALLOCATOR_STATE_TABLE_NAME, AllocatorStateKey, AllocatorStateTree, SAVEPOINT_TABLE,
+    ALLOCATOR_STATE_TABLE_NAME, AllocatorStateKey, AllocatorStateTree, DATA_ALLOCATED_TABLE,
+    PageList, SAVEPOINT_TABLE, TransactionIdWithPagination,
 };
 use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
@@ -356,20 +357,25 @@ impl Database {
 
     pub(crate) fn verify_primary_checksums(mem: Arc<TransactionalMemory>) -> Result<bool> {
         let fake_freed_pages = Arc::new(Mutex::new(vec![]));
+        let fake_allocated = Arc::new(Mutex::new(PageTrackerPolicy::Closed));
+        // TODO: seems like we should be able to use TableTree here, instead of TableTreeMut
         let table_tree = TableTreeMut::new(
             mem.get_data_root(),
             Arc::new(TransactionGuard::fake()),
             mem.clone(),
             fake_freed_pages.clone(),
+            fake_allocated.clone(),
         );
         if !table_tree.verify_checksums()? {
             return Ok(false);
         }
+        // TODO: seems like we should be able to use TableTree here, instead of TableTreeMut
         let system_table_tree = TableTreeMut::new(
             mem.get_system_root(),
             Arc::new(TransactionGuard::fake()),
             mem.clone(),
             fake_freed_pages.clone(),
+            fake_allocated.clone(),
         );
         if !system_table_tree.verify_checksums()? {
             return Ok(false);
@@ -499,6 +505,46 @@ impl Database {
         }
 
         Ok(compacted)
+    }
+
+    fn check_repaired_allocated_pages_table(
+        system_root: Option<BtreeHeader>,
+        mem: Arc<TransactionalMemory>,
+    ) -> Result {
+        let table_tree = TableTree::new(
+            system_root,
+            PageHint::None,
+            Arc::new(TransactionGuard::fake()),
+            mem.clone(),
+        )?;
+        if let Some(table_def) = table_tree
+            .get_table::<TransactionIdWithPagination, PageList>(
+                DATA_ALLOCATED_TABLE.name(),
+                TableType::Normal,
+            )
+            .map_err(|e| e.into_storage_error_or_corrupted("Allocated pages table corrupted"))?
+        {
+            let table_root = if let InternalTableDefinition::Normal { table_root, .. } = table_def {
+                table_root
+            } else {
+                unreachable!()
+            };
+            let table: ReadOnlyTable<TransactionIdWithPagination, PageList> = ReadOnlyTable::new(
+                DATA_ALLOCATED_TABLE.name().to_string(),
+                table_root,
+                PageHint::None,
+                Arc::new(TransactionGuard::fake()),
+                mem.clone(),
+            )?;
+            for result in table.range::<TransactionIdWithPagination>(..)? {
+                let (_, pages) = result?;
+                for i in 0..pages.value().len() {
+                    assert!(mem.is_allocated(pages.value().get(i)));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn check_repaired_persistent_savepoints(
@@ -699,6 +745,8 @@ impl Database {
             // Savepoints only reference pages from a previous commit, so those are either referenced
             // in the current root, or are in the freed tree
             Self::check_repaired_persistent_savepoints(system_root, mem.clone())?;
+
+            Self::check_repaired_allocated_pages_table(system_root, mem.clone())?;
         }
 
         mem.end_repair()?;
@@ -806,11 +854,13 @@ impl Database {
 
         // See if it's present in the system table tree
         let fake_freed_pages = Arc::new(Mutex::new(vec![]));
+        let fake_allocated = Arc::new(Mutex::new(PageTrackerPolicy::Closed));
         let system_table_tree = TableTreeMut::new(
             mem.get_system_root(),
             Arc::new(TransactionGuard::fake()),
             mem.clone(),
             fake_freed_pages.clone(),
+            fake_allocated.clone(),
         );
         let Some(allocator_state_table) = system_table_tree
             .get_table::<AllocatorStateKey, &[u8]>(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
@@ -828,6 +878,7 @@ impl Database {
             Arc::new(TransactionGuard::fake()),
             mem.clone(),
             fake_freed_pages,
+            fake_allocated,
         );
 
         // Make sure this isn't stale allocator state left over from a previous transaction
@@ -1187,7 +1238,7 @@ mod test {
         let tmpfile = crate::create_tempfile();
         let (file, path) = tmpfile.into_parts();
 
-        let backend = FailingBackend::new(FileBackend::new(file).unwrap(), 23);
+        let backend = FailingBackend::new(FileBackend::new(file).unwrap(), 24);
         let db = Database::builder()
             .set_cache_size(12686)
             .set_page_size(8 * 1024)

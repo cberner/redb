@@ -4,7 +4,6 @@ use crate::{Key, Result, Savepoint, TypeName, Value};
 use log::debug;
 use std::cmp::Ordering;
 use std::collections::btree_map::BTreeMap;
-use std::collections::btree_set::BTreeSet;
 use std::mem::size_of;
 use std::sync::{Condvar, Mutex};
 
@@ -87,7 +86,7 @@ struct State {
     live_read_transactions: BTreeMap<TransactionId, u64>,
     next_transaction_id: TransactionId,
     live_write_transaction: Option<TransactionId>,
-    valid_savepoints: BTreeSet<SavepointId>,
+    valid_savepoints: BTreeMap<SavepointId, TransactionId>,
     // Non-durable commits that are still in-memory, and waiting for a durable commit to get flushed
     // We need to make sure that the freed-table does not get processed for these, since they are not durable yet
     // Therefore, we hold a read transaction on their parent
@@ -174,7 +173,9 @@ impl TransactionTracker {
             .entry(savepoint.get_transaction_id())
             .and_modify(|x| *x += 1)
             .or_insert(1);
-        state.valid_savepoints.insert(savepoint.get_id());
+        state
+            .valid_savepoints
+            .insert(savepoint.get_id(), savepoint.get_transaction_id());
     }
 
     pub(crate) fn register_read_transaction(
@@ -205,11 +206,11 @@ impl TransactionTracker {
         !self.state.lock().unwrap().valid_savepoints.is_empty()
     }
 
-    pub(crate) fn allocate_savepoint(&self) -> SavepointId {
+    pub(crate) fn allocate_savepoint(&self, transaction_id: TransactionId) -> SavepointId {
         let mut state = self.state.lock().unwrap();
         let id = state.next_savepoint_id.next();
         state.next_savepoint_id = id;
-        state.valid_savepoints.insert(id);
+        state.valid_savepoints.insert(id, transaction_id);
         id
     }
 
@@ -224,7 +225,11 @@ impl TransactionTracker {
     }
 
     pub(crate) fn is_valid_savepoint(&self, id: SavepointId) -> bool {
-        self.state.lock().unwrap().valid_savepoints.contains(&id)
+        self.state
+            .lock()
+            .unwrap()
+            .valid_savepoints
+            .contains_key(&id)
     }
 
     pub(crate) fn invalidate_savepoints_after(&self, id: SavepointId) {
@@ -232,7 +237,16 @@ impl TransactionTracker {
             .lock()
             .unwrap()
             .valid_savepoints
-            .retain(|x| *x <= id);
+            .retain(|x, _| *x <= id);
+    }
+
+    pub(crate) fn oldest_savepoint(&self) -> Option<(SavepointId, TransactionId)> {
+        self.state
+            .lock()
+            .unwrap()
+            .valid_savepoints
+            .first_key_value()
+            .map(|x| (*x.0, *x.1))
     }
 
     pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
