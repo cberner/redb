@@ -2,7 +2,7 @@ use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker}
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeHeader, BtreeRangeIter, FreedPageList, FreedTableKey,
     InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, RawBtree, SerializedSavepoint,
-    TableTreeMut, TableType, TransactionalMemory,
+    TableTree, TableTreeMut, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError};
@@ -505,13 +505,12 @@ impl Database {
         system_root: Option<BtreeHeader>,
         mem: Arc<TransactionalMemory>,
     ) -> Result {
-        let freed_list = Arc::new(Mutex::new(vec![]));
-        let table_tree = TableTreeMut::new(
+        let table_tree = TableTree::new(
             system_root,
+            PageHint::None,
             Arc::new(TransactionGuard::fake()),
             mem.clone(),
-            freed_list,
-        );
+        )?;
         let fake_transaction_tracker = Arc::new(TransactionTracker::new(TransactionId::new(0)));
         if let Some(savepoint_table_def) = table_tree
             .get_table::<SavepointId, SerializedSavepoint>(
