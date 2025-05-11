@@ -5,7 +5,9 @@ use crate::tree_store::{
     SerializedSavepoint, TableTree, TableTreeMut, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
-use crate::{CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError};
+use crate::{
+    CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError, TableError,
+};
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Debug, Display, Formatter};
 
@@ -20,7 +22,8 @@ use crate::error::TransactionError;
 use crate::sealed::Sealed;
 use crate::transactions::{
     ALLOCATOR_STATE_TABLE_NAME, AllocatorStateKey, AllocatorStateTree, DATA_ALLOCATED_TABLE,
-    PageList, SAVEPOINT_TABLE, TransactionIdWithPagination,
+    DATA_FREED_TABLE, PageList, SAVEPOINT_TABLE, SYSTEM_FREED_TABLE, SystemTableDefinition,
+    TransactionIdWithPagination,
 };
 use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
@@ -476,7 +479,9 @@ impl Database {
         txn.commit().map_err(|e| e.into_storage_error())?;
         // There can't be any outstanding transactions because we have a `&mut self`, so all pending free pages
         // should have been cleared out by the above commit()
-        assert!(self.mem.get_freed_root().is_none());
+        let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+        assert!(!txn.pending_free_pages()?);
+        txn.abort()?;
 
         let mut compacted = false;
         // Iteratively compact until no progress is made
@@ -495,7 +500,15 @@ impl Database {
             let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
             txn.set_two_phase_commit(true);
             txn.commit().map_err(|e| e.into_storage_error())?;
-            assert!(self.mem.get_freed_root().is_none());
+            // Triple commit to free up the relocated pages for reuse
+            // TODO: this really shouldn't be necessary, but the data freed tree is a system table
+            // and so free'ing up its pages causes more deletes from the system tree
+            let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            txn.set_two_phase_commit(true);
+            txn.commit().map_err(|e| e.into_storage_error())?;
+            let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            assert!(!txn.pending_free_pages()?);
+            txn.abort()?;
 
             if !progress {
                 break;
@@ -625,6 +638,53 @@ impl Database {
         Ok(())
     }
 
+    fn mark_freed_tree_v2<K: Key, V: Value>(
+        system_root: Option<BtreeHeader>,
+        table_def: SystemTableDefinition<K, V>,
+        mem: Arc<TransactionalMemory>,
+    ) -> Result {
+        let fake_guard = Arc::new(TransactionGuard::fake());
+        let system_tree = TableTree::new(system_root, PageHint::None, fake_guard, mem.clone())?;
+        let table_name = table_def.name();
+        let result = match system_tree.get_table::<K, V>(table_name, TableType::Normal) {
+            Ok(result) => result,
+            Err(TableError::Storage(err)) => {
+                return Err(err);
+            }
+            Err(TableError::TableDoesNotExist(_)) => {
+                return Ok(());
+            }
+            Err(_) => {
+                return Err(StorageError::Corrupted(format!(
+                    "Unable to open {table_name}"
+                )));
+            }
+        };
+
+        if let Some(definition) = result {
+            let table_root = match definition {
+                InternalTableDefinition::Normal { table_root, .. } => table_root,
+                InternalTableDefinition::Multimap { .. } => unreachable!(),
+            };
+            let table: ReadOnlyTable<TransactionIdWithPagination, PageList<'static>> =
+                ReadOnlyTable::new(
+                    table_name.to_string(),
+                    table_root,
+                    PageHint::None,
+                    Arc::new(TransactionGuard::fake()),
+                    mem.clone(),
+                )?;
+            for result in table.range::<TransactionIdWithPagination>(..)? {
+                let (_, page_list) = result?;
+                for i in 0..page_list.value().len() {
+                    mem.mark_page_allocated(page_list.value().get(i));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn check_pages_allocated_recursive(root: PageNumber, mem: Arc<TransactionalMemory>) -> Result {
         // Repair the allocator state
         // All pages in the master table
@@ -740,6 +800,9 @@ impl Database {
         if let Some(header) = system_root {
             Self::mark_tables_recursive(header.root, mem.clone())?;
         }
+
+        Self::mark_freed_tree_v2(system_root, DATA_FREED_TABLE, mem.clone())?;
+        Self::mark_freed_tree_v2(system_root, SYSTEM_FREED_TABLE, mem.clone())?;
         #[cfg(debug_assertions)]
         {
             // Savepoints only reference pages from a previous commit, so those are either referenced

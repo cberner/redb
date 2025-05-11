@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
 use std::ops::RangeFull;
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::{mem, thread};
 
 // TODO: remove this struct in 3.0 release
 #[derive(Debug)]
@@ -426,11 +426,16 @@ impl TableTreeMut<'_> {
         self.allocated_pages.lock().unwrap().close();
     }
 
-    pub(crate) fn flush_and_close(&mut self) -> Result<(Option<BtreeHeader>, HashSet<PageNumber>)> {
+    pub(crate) fn flush_and_close(
+        &mut self,
+    ) -> Result<(Option<BtreeHeader>, HashSet<PageNumber>, Vec<PageNumber>)> {
         match self.flush_inner() {
             Ok(header) => {
                 let allocated = self.allocated_pages.lock()?.close();
-                Ok((header, allocated))
+                let mut old = vec![];
+                let mut freed_pages = self.freed_pages.lock()?;
+                mem::swap(freed_pages.as_mut(), &mut old);
+                Ok((header, allocated, old))
             }
             Err(err) => {
                 // Ensure that the allocated pages get clear. Otherwise it will cause a panic
@@ -498,13 +503,66 @@ impl TableTreeMut<'_> {
         Ok(self)
     }
 
+    // Opens a table, calls the provided closure to insert entries into it, and then
+    // flushes the table root. The flush is done using insert_inplace(), so it's guaranteed
+    // that no pages will be allocated or freed after the closure returns
+    pub(crate) fn open_table_and_flush_table_root<K: Key + 'static, V: Value + 'static>(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&mut BtreeMut<K, V>) -> Result,
+    ) -> Result {
+        assert!(self.pending_table_updates.is_empty());
+
+        // Reserve space in the table tree
+        // TODO: maybe we should have a more explicit method, like "force_uncommitted()"
+        let existing = self
+            .tree
+            .insert(
+                &name,
+                &InternalTableDefinition::new::<K, V>(TableType::Normal, None, 0),
+            )?
+            .map(|x| x.value());
+        if let Some(existing) = existing {
+            self.tree.insert(&name, &existing)?;
+        }
+
+        let table_root = match self.tree.get(&name)?.unwrap().value() {
+            InternalTableDefinition::Normal { table_root, .. } => table_root,
+            InternalTableDefinition::Multimap { .. } => {
+                unreachable!()
+            }
+        };
+
+        // Open the table and call the provided closure on it
+        let mut tree: BtreeMut<K, V> = BtreeMut::new(
+            table_root,
+            self.guard.clone(),
+            self.mem.clone(),
+            self.freed_pages.clone(),
+            self.allocated_pages.clone(),
+        );
+        f(&mut tree)?;
+
+        // Finalize the table's checksums
+        let table_root = tree.finalize_dirty_checksums()?;
+        let table_length = tree.get_root().map(|x| x.length).unwrap_or_default();
+
+        // Flush the root to the table tree, without allocating
+        self.tree.insert_inplace(
+            &name,
+            &InternalTableDefinition::new::<K, V>(TableType::Normal, table_root, table_length),
+        )?;
+
+        Ok(())
+    }
+
     // Creates a new table, calls the provided closure to insert entries into it, and then
     // flushes the table root. The flush is done using insert_inplace(), so it's guaranteed
     // that no pages will be allocated or freed after the closure returns
     pub(crate) fn create_table_and_flush_table_root<K: Key + 'static, V: Value + 'static>(
         &mut self,
         name: &str,
-        f: impl FnOnce(&mut BtreeMut<K, V>) -> Result,
+        f: impl FnOnce(&mut Self, &mut BtreeMut<K, V>) -> Result,
     ) -> Result {
         assert!(self.pending_table_updates.is_empty());
         assert!(self.tree.get(&name)?.is_none());
@@ -523,7 +581,7 @@ impl TableTreeMut<'_> {
             self.freed_pages.clone(),
             self.allocated_pages.clone(),
         );
-        f(&mut tree)?;
+        f(self, &mut tree)?;
 
         // Finalize the table's checksums
         let table_root = tree.finalize_dirty_checksums()?;
