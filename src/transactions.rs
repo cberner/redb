@@ -42,10 +42,19 @@ pub(crate) const DATA_ALLOCATED_TABLE: SystemTableDefinition<
     TransactionIdWithPagination,
     PageList,
 > = SystemTableDefinition::new("data_pages_allocated");
+// Pages in the data tree that are in the pending free state: i.e., they are unreachable from the
+// root as of the given transaction.
+pub(crate) const DATA_FREED_TABLE: SystemTableDefinition<TransactionIdWithPagination, PageList> =
+    SystemTableDefinition::new("data_pages_unreachable");
+// Pages in the system tree that are in the pending free state: i.e., they are unreachable from the
+// root as of the given transaction.
+pub(crate) const SYSTEM_FREED_TABLE: SystemTableDefinition<TransactionIdWithPagination, PageList> =
+    SystemTableDefinition::new("system_pages_unreachable");
 // The allocator state table is stored in the system table tree, but it's accessed using
 // raw btree operations rather than open_system_table(), so there's no SystemTableDefinition
 pub(crate) const ALLOCATOR_STATE_TABLE_NAME: &str = "allocator_state";
 pub(crate) type AllocatorStateTree<'a> = BtreeMut<'a, AllocatorStateKey, &'static [u8]>;
+pub(crate) type SystemFreedTree<'a> = BtreeMut<'a, TransactionIdWithPagination, PageList<'static>>;
 
 // Format:
 // 2 bytes: length
@@ -56,7 +65,7 @@ pub(crate) struct PageList<'a> {
 }
 
 impl PageList<'_> {
-    pub(crate) fn required_bytes(len: usize) -> usize {
+    fn required_bytes(len: usize) -> usize {
         2 + PageNumber::serialized_size() * len
     }
 
@@ -492,10 +501,37 @@ impl<K: Key + 'static, V: Value + 'static> Drop for SystemTable<'_, '_, K, V> {
 
 struct SystemNamespace<'db> {
     table_tree: TableTreeMut<'db>,
+    freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     transaction_guard: Arc<TransactionGuard>,
 }
 
 impl<'db> SystemNamespace<'db> {
+    fn new(
+        root_page: Option<BtreeHeader>,
+        guard: Arc<TransactionGuard>,
+        mem: Arc<TransactionalMemory>,
+    ) -> Self {
+        // No need to track allocations in the system tree. Savepoint restoration only relies on
+        // freeing in the data tree
+        let ignore = Arc::new(Mutex::new(PageTrackerPolicy::Ignore));
+        let freed_pages = Arc::new(Mutex::new(vec![]));
+        Self {
+            table_tree: TableTreeMut::new(
+                root_page,
+                guard.clone(),
+                mem,
+                freed_pages.clone(),
+                ignore,
+            ),
+            freed_pages,
+            transaction_guard: guard.clone(),
+        }
+    }
+
+    fn system_freed_pages(&self) -> Arc<Mutex<Vec<PageNumber>>> {
+        self.freed_pages.clone()
+    }
+
     fn open_system_table<'txn, 's, K: Key + 'static, V: Value + 'static>(
         &'s mut self,
         transaction: &'txn WriteTransaction,
@@ -514,7 +550,7 @@ impl<'db> SystemNamespace<'db> {
         Ok(SystemTable::new(
             definition.name(),
             root,
-            transaction.freed_pages.clone(),
+            self.freed_pages.clone(),
             self.transaction_guard.clone(),
             transaction.mem.clone(),
             self,
@@ -535,10 +571,39 @@ impl<'db> SystemNamespace<'db> {
 struct TableNamespace<'db> {
     open_tables: HashMap<String, &'static panic::Location<'static>>,
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+    freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     table_tree: TableTreeMut<'db>,
 }
 
 impl TableNamespace<'_> {
+    fn new(
+        root_page: Option<BtreeHeader>,
+        guard: Arc<TransactionGuard>,
+        mem: Arc<TransactionalMemory>,
+    ) -> Self {
+        let allocated = if mem.file_format_v3() {
+            Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()))
+        } else {
+            Arc::new(Mutex::new(PageTrackerPolicy::Ignore))
+        };
+        let freed_pages = Arc::new(Mutex::new(vec![]));
+        let table_tree = TableTreeMut::new(
+            root_page,
+            guard,
+            mem,
+            // Committed pages which are no longer reachable and will be queued for free'ing
+            // These are separated from the system freed pages
+            freed_pages.clone(),
+            allocated.clone(),
+        );
+        Self {
+            open_tables: Default::default(),
+            table_tree,
+            freed_pages,
+            allocated_pages: allocated,
+        }
+    }
+
     fn set_dirty(&mut self, transaction: &WriteTransaction) {
         transaction.dirty.store(true, Ordering::Release);
         if !transaction.transaction_tracker.any_savepoint_exists() {
@@ -587,7 +652,7 @@ impl TableNamespace<'_> {
             definition.name(),
             root,
             length,
-            transaction.freed_pages.clone(),
+            self.freed_pages.clone(),
             self.allocated_pages.clone(),
             transaction.mem.clone(),
             transaction,
@@ -608,7 +673,7 @@ impl TableNamespace<'_> {
         Ok(Table::new(
             definition.name(),
             root,
-            transaction.freed_pages.clone(),
+            self.freed_pages.clone(),
             self.allocated_pages.clone(),
             transaction.mem.clone(),
             transaction,
@@ -711,7 +776,9 @@ pub struct WriteTransaction {
     // The table of freed pages by transaction. FreedTableKey -> binary.
     // The binary blob is a length-prefixed array of PageNumber
     freed_tree: Mutex<BtreeMut<'static, FreedTableKey, FreedPageList<'static>>>,
-    freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+    // Legacy freed pages list. This is only for pages where we don't know whether they originated
+    // in the data or the system tree
+    legacy_freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     // Pages that were freed from the freed-tree. These can be freed immediately after commit(),
     // since read transactions do not access the freed-tree
     post_commit_frees: Arc<Mutex<Vec<PageNumber>>>,
@@ -739,39 +806,13 @@ impl WriteTransaction {
         let root_page = mem.get_data_root();
         let system_page = mem.get_system_root();
         let freed_root = mem.get_freed_root();
-        let freed_pages = Arc::new(Mutex::new(vec![]));
         let post_commit_frees = Arc::new(Mutex::new(vec![]));
 
-        let allocated = if mem.file_format_v3() {
-            Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()))
-        } else {
-            Arc::new(Mutex::new(PageTrackerPolicy::Ignore))
-        };
-        let tables = TableNamespace {
-            open_tables: Default::default(),
-            table_tree: TableTreeMut::new(
-                root_page,
-                guard.clone(),
-                mem.clone(),
-                freed_pages.clone(),
-                allocated.clone(),
-            ),
-            allocated_pages: allocated,
-        };
-
+        let tables = TableNamespace::new(root_page, guard.clone(), mem.clone());
+        let system_tables = SystemNamespace::new(system_page, guard.clone(), mem.clone());
         // No need to track allocations in the system tree. Savepoint restoration only relies on
         // freeing in the data tree
         let ignore = Arc::new(Mutex::new(PageTrackerPolicy::Ignore));
-        let system_tables = SystemNamespace {
-            table_tree: TableTreeMut::new(
-                system_page,
-                guard.clone(),
-                mem.clone(),
-                freed_pages.clone(),
-                ignore.clone(),
-            ),
-            transaction_guard: guard.clone(),
-        };
 
         Ok(Self {
             transaction_tracker,
@@ -787,7 +828,7 @@ impl WriteTransaction {
                 post_commit_frees.clone(),
                 ignore,
             )),
-            freed_pages,
+            legacy_freed_pages: Arc::new(Mutex::new(vec![])),
             post_commit_frees,
             completed: false,
             dirty: AtomicBool::new(false),
@@ -797,6 +838,31 @@ impl WriteTransaction {
             created_persistent_savepoints: Mutex::new(Default::default()),
             deleted_persistent_savepoints: Mutex::new(vec![]),
         })
+    }
+
+    pub(crate) fn pending_free_pages(&self) -> Result<bool> {
+        if self.mem.get_freed_root().is_some() {
+            return Ok(true);
+        }
+        let mut system_tables = self.system_tables.lock().unwrap();
+        if system_tables
+            .open_system_table(self, DATA_FREED_TABLE)?
+            .tree
+            .get_root()
+            .is_some()
+        {
+            return Ok(true);
+        }
+        if system_tables
+            .open_system_table(self, SYSTEM_FREED_TABLE)?
+            .tree
+            .get_root()
+            .is_some()
+        {
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     #[cfg(any(test, fuzzing))]
@@ -849,7 +915,7 @@ impl WriteTransaction {
                 println!("{p:?}");
             }
         }
-        println!("Pending free (i.e. in freed table)");
+        println!("Pending free (in legacy freed tree)");
         for entry in self
             .freed_tree
             .lock()
@@ -866,9 +932,66 @@ impl WriteTransaction {
             }
         }
         {
-            let pages = self.freed_pages.lock().unwrap();
+            println!("Pending free (in data freed table)");
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let data_freed = system_tables
+                .open_system_table(self, DATA_FREED_TABLE)
+                .unwrap();
+            for entry in data_freed.range::<TransactionIdWithPagination>(..).unwrap() {
+                let (_, entry) = entry.unwrap();
+                let value = entry.value();
+                for i in 0..value.len() {
+                    let p = value.get(i);
+                    all_allocated.remove(&p);
+                    println!("{p:?}");
+                }
+            }
+        }
+        {
+            println!("Pending free (in system freed table)");
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let system_freed = system_tables
+                .open_system_table(self, SYSTEM_FREED_TABLE)
+                .unwrap();
+            for entry in system_freed
+                .range::<TransactionIdWithPagination>(..)
+                .unwrap()
+            {
+                let (_, entry) = entry.unwrap();
+                let value = entry.value();
+                for i in 0..value.len() {
+                    let p = value.get(i);
+                    all_allocated.remove(&p);
+                    println!("{p:?}");
+                }
+            }
+        }
+        {
+            let pages = self.legacy_freed_pages.lock().unwrap();
             if !pages.is_empty() {
-                println!("Pages in in-memory freed_pages");
+                println!("Pages in in-memory legacy freed_pages");
+                for p in pages.iter() {
+                    println!("{p:?}");
+                    all_allocated.remove(p);
+                }
+            }
+        }
+        {
+            let tables = self.tables.lock().unwrap();
+            let pages = tables.freed_pages.lock().unwrap();
+            if !pages.is_empty() {
+                println!("Pages in in-memory data freed_pages");
+                for p in pages.iter() {
+                    println!("{p:?}");
+                    all_allocated.remove(p);
+                }
+            }
+        }
+        {
+            let system_tables = self.system_tables.lock().unwrap();
+            let pages = system_tables.freed_pages.lock().unwrap();
+            if !pages.is_empty() {
+                println!("Pages in in-memory system freed_pages");
                 for p in pages.iter() {
                     println!("{p:?}");
                     all_allocated.remove(p);
@@ -1085,6 +1208,14 @@ impl WriteTransaction {
         //    and new roots
         // 3) update the system tree to remove invalid persistent savepoints.
 
+        if self.mem.file_format_v3() {
+            self.restore_savepoint_v2(savepoint)
+        } else {
+            self.restore_savepoint_v1(savepoint)
+        }
+    }
+
+    fn restore_savepoint_v1(&mut self, savepoint: &Savepoint) -> Result<(), SavepointError> {
         let old_system_tree = TableTree::new(
             savepoint.get_system_root(),
             PageHint::None,
@@ -1232,14 +1363,56 @@ impl WriteTransaction {
                     old_allocators[page.region as usize].free(page.page_index, page.page_order);
                 }
             }
+
+            if let Some(header) = old_system_tree
+                .get_table::<TransactionIdWithPagination, PageList>(
+                    DATA_FREED_TABLE.name(),
+                    TableType::Normal,
+                )
+                .map_err(|e| e.into_storage_error_or_corrupted("Data freed table is corrupted"))?
+            {
+                match header {
+                    InternalTableDefinition::Normal { table_root, .. } => {
+                        assert!(table_root.is_none());
+                    }
+                    InternalTableDefinition::Multimap { .. } => unreachable!(),
+                };
+            }
+
+            if let Some(header) = old_system_tree
+                .get_table::<TransactionIdWithPagination, PageList>(
+                    SYSTEM_FREED_TABLE.name(),
+                    TableType::Normal,
+                )
+                .map_err(|e| e.into_storage_error_or_corrupted("System freed table is corrupted"))?
+            {
+                match header {
+                    InternalTableDefinition::Normal { table_root, .. } => {
+                        assert!(table_root.is_none());
+                    }
+                    InternalTableDefinition::Multimap { .. } => unreachable!(),
+                };
+            }
         }
 
         // 2) free all pages that became unreachable
-        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut legacy_freed_pages = self.legacy_freed_pages.lock().unwrap();
         let tables = self.tables.lock().unwrap();
         let mut allocated = tables.allocated_pages.lock().unwrap();
-        let mut already_awaiting_free: HashSet<PageNumber> = freed_pages.iter().copied().collect();
+        let mut already_awaiting_free: HashSet<PageNumber> =
+            legacy_freed_pages.iter().copied().collect();
         already_awaiting_free.extend(self.post_commit_frees.lock().unwrap().iter().copied());
+        already_awaiting_free.extend(tables.freed_pages.lock().unwrap().iter().copied());
+        already_awaiting_free.extend(
+            self.system_tables
+                .lock()
+                .unwrap()
+                .system_freed_pages()
+                .lock()
+                .unwrap()
+                .iter()
+                .copied(),
+        );
         let to_free = self.mem.pages_allocated_since_raw_state(&old_allocators);
         for page in to_free {
             if already_awaiting_free.contains(&page) {
@@ -1255,12 +1428,70 @@ impl WriteTransaction {
             if self.mem.uncommitted(page) {
                 self.mem.free(page, &mut allocated);
             } else {
-                freed_pages.push(page);
+                legacy_freed_pages.push(page);
             }
         }
-        drop(freed_pages);
+        drop(legacy_freed_pages);
+        drop(freed_tree);
         drop(allocated);
         drop(tables);
+
+        // 3) Invalidate all savepoints that are newer than the one being applied to prevent the user
+        // from later trying to restore a savepoint "on another timeline"
+        self.transaction_tracker
+            .invalidate_savepoints_after(savepoint.get_id());
+        for persistent_savepoint in self.list_persistent_savepoints()? {
+            if persistent_savepoint > savepoint.get_id().0 {
+                self.delete_persistent_savepoint(persistent_savepoint)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn restore_savepoint_v2(&mut self, savepoint: &Savepoint) -> Result<(), SavepointError> {
+        // 1) restore the table tree
+        {
+            self.tables
+                .lock()
+                .unwrap()
+                .set_root(savepoint.get_user_root());
+        }
+
+        // 1a) purge all transactions that happened after the savepoint from the data freed tree
+        let txn_id = savepoint.get_transaction_id().next().raw_id();
+        {
+            let lower = TransactionIdWithPagination {
+                transaction_id: txn_id,
+                pagination_id: 0,
+            };
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let mut data_freed = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
+            for entry in data_freed.extract_from_if(lower.., |_, _| true)? {
+                entry?;
+            }
+            // No need to process the system freed table, because it only rolls forward
+        }
+        let freed_tree = self.freed_tree.lock().unwrap();
+        assert!(freed_tree.get_root().is_none());
+
+        // 2) queue all pages that became unreachable
+        {
+            let tables = self.tables.lock().unwrap();
+            let mut data_freed_pages = tables.freed_pages.lock().unwrap();
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let data_allocated = system_tables.open_system_table(self, DATA_ALLOCATED_TABLE)?;
+            let lower = TransactionIdWithPagination {
+                transaction_id: txn_id,
+                pagination_id: 0,
+            };
+            for entry in data_allocated.range(lower..)? {
+                let (_, value) = entry?;
+                for i in 0..value.value().len() {
+                    data_freed_pages.push(value.value().get(i));
+                }
+            }
+        }
 
         // 3) Invalidate all savepoints that are newer than the one being applied to prevent the user
         // from later trying to restore a savepoint "on another timeline"
@@ -1489,9 +1720,14 @@ impl WriteTransaction {
             self.two_phase_commit = true;
         }
 
-        let (user_root, allocated_pages) =
+        let (user_root, allocated_pages, data_freed) =
             self.tables.lock().unwrap().table_tree.flush_and_close()?;
 
+        if self.mem.file_format_v3() {
+            self.store_data_freed_pages(data_freed)?;
+        } else {
+            self.legacy_freed_pages.lock().unwrap().extend(data_freed);
+        }
         self.store_allocated_pages(allocated_pages.into_iter().collect())?;
 
         #[cfg(feature = "logging")]
@@ -1510,11 +1746,64 @@ impl WriteTransaction {
                 .deallocate_savepoint(*savepoint, *transaction);
         }
 
+        assert!(self.legacy_freed_pages.lock().unwrap().is_empty());
+        assert!(
+            self.system_tables
+                .lock()
+                .unwrap()
+                .system_freed_pages()
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            self.tables
+                .lock()
+                .unwrap()
+                .freed_pages
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(self.post_commit_frees.lock().unwrap().is_empty());
+
         #[cfg(feature = "logging")]
         debug!(
             "Finished commit of transaction id={:?}",
             self.transaction_id
         );
+
+        Ok(())
+    }
+
+    fn store_data_freed_pages(&self, mut freed_pages: Vec<PageNumber>) -> Result {
+        let mut system_tables = self.system_tables.lock().unwrap();
+        let mut freed_table = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
+        let mut pagination_counter = 0;
+        while !freed_pages.is_empty() {
+            let chunk_size = 400;
+            let buffer_size = PageList::required_bytes(chunk_size);
+            let key = TransactionIdWithPagination {
+                transaction_id: self.transaction_id.raw_id(),
+                pagination_id: pagination_counter,
+            };
+            let mut access_guard =
+                freed_table.insert_reserve(&key, buffer_size.try_into().unwrap())?;
+
+            let len = freed_pages.len();
+            access_guard.as_mut().clear();
+            for page in freed_pages.drain(len - min(len, chunk_size)..) {
+                // Make sure that the page is currently allocated
+                debug_assert!(
+                    self.mem.is_allocated(page),
+                    "Page is not allocated: {page:?}"
+                );
+                debug_assert!(!self.mem.uncommitted(page), "Page is uncommitted: {page:?}");
+                access_guard.as_mut().push_back(page);
+            }
+
+            pagination_counter += 1;
+        }
 
         Ok(())
     }
@@ -1614,6 +1903,7 @@ impl WriteTransaction {
         self.process_freed_pages(free_until_transaction)?;
 
         let mut system_tables = self.system_tables.lock().unwrap();
+        let system_freed_pages = system_tables.system_freed_pages();
         let system_tree = system_tables.table_tree.flush_table_root_updates()?;
         system_tree
             .delete_table(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
@@ -1622,8 +1912,9 @@ impl WriteTransaction {
         if self.quick_repair {
             system_tree.create_table_and_flush_table_root(
                 ALLOCATOR_STATE_TABLE_NAME,
-                |tree: &mut AllocatorStateTree| {
-                    let mut pagination_counter = 0;
+                |system_tree_ref, tree: &mut AllocatorStateTree| {
+                    let mut legacy_pagination_counter = 0;
+                    let mut v2_pagination_counter = 0;
 
                     loop {
                         let num_regions = self
@@ -1633,7 +1924,13 @@ impl WriteTransaction {
                         // We can't free pages after the commit, because that would invalidate our
                         // saved allocator state. Everything needs to go through the transactional
                         // free mechanism
-                        self.store_freed_pages(&mut pagination_counter, true)?;
+                        self.store_freed_pages(
+                            system_tree_ref,
+                            system_freed_pages.clone(),
+                            &mut legacy_pagination_counter,
+                            &mut v2_pagination_counter,
+                            true,
+                        )?;
 
                         if self.mem.try_save_allocator_state(tree, num_regions)? {
                             return Ok(());
@@ -1657,7 +1954,13 @@ impl WriteTransaction {
             // those pages. If there are no save points then these can be immediately freed, which is
             // done at the end of this function.
             let savepoint_exists = self.transaction_tracker.any_savepoint_exists();
-            self.store_freed_pages(&mut 0, savepoint_exists)?;
+            self.store_freed_pages(
+                system_tree,
+                system_freed_pages,
+                &mut 0,
+                &mut 0,
+                savepoint_exists,
+            )?;
         }
 
         let system_root = system_tree.finalize_dirty_checksums()?;
@@ -1688,17 +1991,25 @@ impl WriteTransaction {
 
     // Commit without a durability guarantee
     pub(crate) fn non_durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
-        let system_root = self
-            .system_tables
-            .lock()
-            .unwrap()
-            .table_tree
-            .flush_table_root_updates()?
-            .finalize_dirty_checksums()?;
+        let system_root = {
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let system_freed_pages = system_tables.system_freed_pages();
+            system_tables.table_tree.flush_table_root_updates()?;
+            // Store all freed pages for a future commit(), since we can't free pages during a
+            // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
+            self.store_freed_pages(
+                &mut system_tables.table_tree,
+                system_freed_pages,
+                &mut 0,
+                &mut 0,
+                true,
+            )?;
 
-        // Store all freed pages for a future commit(), since we can't free pages during a
-        // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
-        self.store_freed_pages(&mut 0, true)?;
+            system_tables
+                .table_tree
+                .flush_table_root_updates()?
+                .finalize_dirty_checksums()?
+        };
 
         // Finalize all checksums, before doing the final commit
         let freed_root = self.freed_tree.lock().unwrap().finalize_dirty_checksums()?;
@@ -1781,6 +2092,7 @@ impl WriteTransaction {
     fn process_freed_pages(&mut self, free_until: TransactionId) -> Result {
         // We assume below that PageNumber is length 8
         assert_eq!(PageNumber::serialized_size(), 8);
+        // TODO: remove all this old code for the original freed tree
         let lookup_key = FreedTableKey {
             transaction_id: free_until.raw_id(),
             pagination_id: 0,
@@ -1802,36 +2114,114 @@ impl WriteTransaction {
             freed_tree.remove(&key)?;
         }
 
+        // Handle the data freed tree
+        let mut system_tables = self.system_tables.lock().unwrap();
+        {
+            let mut data_freed = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
+            let key = TransactionIdWithPagination {
+                transaction_id: free_until.raw_id(),
+                pagination_id: 0,
+            };
+            for entry in data_freed.extract_from_if(..key, |_, _| true)? {
+                let (_, page_list) = entry?;
+                for i in 0..page_list.value().len() {
+                    self.mem
+                        .free(page_list.value().get(i), &mut PageTrackerPolicy::Ignore);
+                }
+            }
+        }
+
+        // Handle the system freed tree
+        {
+            let mut system_freed = system_tables.open_system_table(self, SYSTEM_FREED_TABLE)?;
+            let key = TransactionIdWithPagination {
+                transaction_id: free_until.raw_id(),
+                pagination_id: 0,
+            };
+            for entry in system_freed.extract_from_if(..key, |_, _| true)? {
+                let (_, page_list) = entry?;
+                for i in 0..page_list.value().len() {
+                    self.mem
+                        .free(page_list.value().get(i), &mut PageTrackerPolicy::Ignore);
+                }
+            }
+        }
+
         Ok(())
     }
 
     fn store_freed_pages(
         &self,
-        pagination_counter: &mut u64,
+        system_tree: &mut TableTreeMut,
+        system_freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+        legacy_pagination_counter: &mut u64,
+        v2_pagination_counter: &mut u64,
         include_post_commit_free: bool,
     ) -> Result {
         assert_eq!(PageNumber::serialized_size(), 8); // We assume below that PageNumber is length 8
 
+        if self.mem.file_format_v3() {
+            if include_post_commit_free {
+                system_tree.open_table_and_flush_table_root(
+                    SYSTEM_FREED_TABLE.name(),
+                    |system_freed_tree: &mut SystemFreedTree| {
+                        while !system_freed_pages.lock().unwrap().is_empty() {
+                            let chunk_size = 200;
+                            let buffer_size = PageList::required_bytes(chunk_size);
+                            let key = TransactionIdWithPagination {
+                                transaction_id: self.transaction_id.raw_id(),
+                                pagination_id: *v2_pagination_counter,
+                            };
+                            let mut access_guard = system_freed_tree
+                                .insert_reserve(&key, buffer_size.try_into().unwrap())?;
+
+                            let mut freed_pages = system_freed_pages.lock().unwrap();
+                            let len = freed_pages.len();
+                            access_guard.as_mut().clear();
+                            for page in freed_pages.drain(len - min(len, chunk_size)..) {
+                                access_guard.as_mut().push_back(page);
+                            }
+                            drop(access_guard);
+
+                            *v2_pagination_counter += 1;
+                        }
+                        Ok(())
+                    },
+                )?;
+            } else {
+                self.post_commit_frees
+                    .lock()
+                    .unwrap()
+                    .extend(system_freed_pages.lock().unwrap().drain(..));
+            }
+        } else {
+            self.legacy_freed_pages
+                .lock()
+                .unwrap()
+                .extend(system_freed_pages.lock().unwrap().drain(..));
+        }
+
+        // TODO: remove all this code for the old free tree
         let mut freed_tree = self.freed_tree.lock().unwrap();
         if include_post_commit_free {
             // Move all the post-commit pages that came from the freed-tree. These need to be stored
             // since we can't free pages until a durable commit
-            self.freed_pages
+            self.legacy_freed_pages
                 .lock()
                 .unwrap()
                 .extend(self.post_commit_frees.lock().unwrap().drain(..));
         }
-        while !self.freed_pages.lock().unwrap().is_empty() {
+        while !self.legacy_freed_pages.lock().unwrap().is_empty() {
             let chunk_size = 100;
             let buffer_size = FreedPageList::required_bytes(chunk_size);
             let key = FreedTableKey {
                 transaction_id: self.transaction_id.raw_id(),
-                pagination_id: *pagination_counter,
+                pagination_id: *legacy_pagination_counter,
             };
             let mut access_guard =
                 freed_tree.insert_reserve(&key, buffer_size.try_into().unwrap())?;
 
-            let mut freed_pages = self.freed_pages.lock().unwrap();
+            let mut freed_pages = self.legacy_freed_pages.lock().unwrap();
             let len = freed_pages.len();
             access_guard.as_mut().clear();
             for page in freed_pages.drain(len - min(len, chunk_size)..) {
@@ -1839,7 +2229,7 @@ impl WriteTransaction {
             }
             drop(access_guard);
 
-            *pagination_counter += 1;
+            *legacy_pagination_counter += 1;
 
             if include_post_commit_free {
                 // Move all the post-commit pages that came from the freed-tree. These need to be stored
