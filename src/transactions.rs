@@ -1155,10 +1155,17 @@ impl WriteTransaction {
             id, transaction_id
         );
 
-        let regional_allocators = self.mem.get_raw_allocator_states();
+        let (system_root, freed_root, regional_allocators) = if self.mem.file_format_v3() {
+            (None, None, vec![])
+        } else {
+            let system_root = self.mem.get_system_root();
+            let freed_root = self.mem.get_freed_root();
+            let regional_allocators = self.mem.get_raw_allocator_states();
+
+            (system_root, freed_root, regional_allocators)
+        };
+
         let root = self.mem.get_data_root();
-        let system_root = self.mem.get_system_root();
-        let freed_root = self.mem.get_freed_root();
         let savepoint = Savepoint::new_ephemeral(
             &self.mem,
             self.transaction_tracker.clone(),
