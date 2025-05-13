@@ -132,41 +132,44 @@ impl SerializedSavepoint<'_> {
             result.extend([0; BtreeHeader::serialized_size()]);
         }
 
-        if let Some(header) = savepoint.system_root {
-            result.push(1);
-            result.extend(header.to_le_bytes());
-        } else {
-            result.push(0);
-            result.extend([0; BtreeHeader::serialized_size()]);
+        if !enable_file_format_v3 {
+            if let Some(header) = savepoint.system_root {
+                result.push(1);
+                result.extend(header.to_le_bytes());
+            } else {
+                result.push(0);
+                result.extend([0; BtreeHeader::serialized_size()]);
+            }
+
+            if let Some(header) = savepoint.freed_root {
+                result.push(1);
+                result.extend(header.to_le_bytes());
+            } else {
+                result.push(0);
+                result.extend([0; BtreeHeader::serialized_size()]);
+            }
+
+            result.extend(
+                u32::try_from(savepoint.regional_allocators.len())
+                    .unwrap()
+                    .to_le_bytes(),
+            );
+            for region in &savepoint.regional_allocators {
+                assert_eq!(savepoint.regional_allocators[0].len(), region.len());
+            }
+            result.extend(
+                u32::try_from(savepoint.regional_allocators[0].len())
+                    .unwrap()
+                    .to_le_bytes(),
+            );
+
+            // TODO: this seems like it is going to fail on databases with > 3GiB of regional allocators
+            // since that is the max size of a single stored value
+            for region in &savepoint.regional_allocators {
+                result.extend(region);
+            }
         }
 
-        if let Some(header) = savepoint.freed_root {
-            result.push(1);
-            result.extend(header.to_le_bytes());
-        } else {
-            result.push(0);
-            result.extend([0; BtreeHeader::serialized_size()]);
-        }
-
-        result.extend(
-            u32::try_from(savepoint.regional_allocators.len())
-                .unwrap()
-                .to_le_bytes(),
-        );
-        for region in &savepoint.regional_allocators {
-            assert_eq!(savepoint.regional_allocators[0].len(), region.len());
-        }
-        result.extend(
-            u32::try_from(savepoint.regional_allocators[0].len())
-                .unwrap()
-                .to_le_bytes(),
-        );
-
-        // TODO: this seems like it is going to fail on databases with > 3GiB of regional allocators
-        // since that is the max size of a single stored value
-        for region in &savepoint.regional_allocators {
-            result.extend(region);
-        }
         Self::Owned(result)
     }
 
@@ -220,53 +223,59 @@ impl SerializedSavepoint<'_> {
         };
         offset += BtreeHeader::serialized_size();
 
-        let not_null = data[offset];
-        assert!(not_null == 0 || not_null == 1);
-        offset += 1;
-        let system_root = if not_null == 1 {
-            Some(BtreeHeader::from_le_bytes(
-                data[offset..(offset + BtreeHeader::serialized_size())]
+        let (system_root, freed_root, regional_allocators) = if enable_file_format_v3 {
+            (None, None, vec![])
+        } else {
+            let not_null = data[offset];
+            assert!(not_null == 0 || not_null == 1);
+            offset += 1;
+            let system_root = if not_null == 1 {
+                Some(BtreeHeader::from_le_bytes(
+                    data[offset..(offset + BtreeHeader::serialized_size())]
+                        .try_into()
+                        .unwrap(),
+                ))
+            } else {
+                None
+            };
+            offset += BtreeHeader::serialized_size();
+
+            let not_null = data[offset];
+            assert!(not_null == 0 || not_null == 1);
+            offset += 1;
+            let freed_root = if not_null == 1 {
+                Some(BtreeHeader::from_le_bytes(
+                    data[offset..(offset + BtreeHeader::serialized_size())]
+                        .try_into()
+                        .unwrap(),
+                ))
+            } else {
+                None
+            };
+            offset += BtreeHeader::serialized_size();
+
+            let regions = u32::from_le_bytes(
+                data[offset..(offset + size_of::<u32>())]
                     .try_into()
                     .unwrap(),
-            ))
-        } else {
-            None
-        };
-        offset += BtreeHeader::serialized_size();
-
-        let not_null = data[offset];
-        assert!(not_null == 0 || not_null == 1);
-        offset += 1;
-        let freed_root = if not_null == 1 {
-            Some(BtreeHeader::from_le_bytes(
-                data[offset..(offset + BtreeHeader::serialized_size())]
+            ) as usize;
+            offset += size_of::<u32>();
+            let allocator_len = u32::from_le_bytes(
+                data[offset..(offset + size_of::<u32>())]
                     .try_into()
                     .unwrap(),
-            ))
-        } else {
-            None
+            ) as usize;
+            offset += size_of::<u32>();
+
+            let mut regional_allocators = vec![];
+
+            for _ in 0..regions {
+                regional_allocators.push(data[offset..(offset + allocator_len)].to_vec());
+                offset += allocator_len;
+            }
+
+            (system_root, freed_root, regional_allocators)
         };
-        offset += BtreeHeader::serialized_size();
-
-        let regions = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-        let allocator_len = u32::from_le_bytes(
-            data[offset..(offset + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += size_of::<u32>();
-
-        let mut regional_allocators = vec![];
-
-        for _ in 0..regions {
-            regional_allocators.push(data[offset..(offset + allocator_len)].to_vec());
-            offset += allocator_len;
-        }
 
         assert_eq!(offset, data.len());
 
