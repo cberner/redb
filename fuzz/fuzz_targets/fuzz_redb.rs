@@ -762,6 +762,7 @@ fn handle_savepoints<T: Clone>(mut txn: WriteTransaction, reference: &mut BTreeM
         // and it doesn't add value since we already fuzz failures on the main transaction path
         let old_countdown = countdown.swap(u64::MAX, Ordering::SeqCst);
         txn.commit()?;
+        savepoints.commit(true);
         countdown.store(old_countdown, Ordering::SeqCst);
         Ok(true)
     } else {
@@ -769,6 +770,7 @@ fn handle_savepoints<T: Clone>(mut txn: WriteTransaction, reference: &mut BTreeM
         // and it doesn't add value since we already fuzz failures on the main transaction path
         let old_countdown = countdown.swap(u64::MAX, Ordering::SeqCst);
         txn.abort()?;
+        savepoints.abort();
         countdown.store(old_countdown, Ordering::SeqCst);
         Ok(false)
     }
