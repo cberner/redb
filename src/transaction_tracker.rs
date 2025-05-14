@@ -4,6 +4,7 @@ use crate::{Key, Result, Savepoint, TypeName, Value};
 use log::debug;
 use std::cmp::Ordering;
 use std::collections::btree_map::BTreeMap;
+use std::collections::btree_set::BTreeSet;
 use std::mem::size_of;
 use std::sync::{Condvar, Mutex};
 
@@ -257,5 +258,16 @@ impl TransactionTracker {
             .keys()
             .next()
             .copied()
+    }
+
+    // Excludes non-durable commit read transactions
+    pub(crate) fn any_user_read_transaction(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        let mut all: BTreeSet<TransactionId> =
+            state.live_read_transactions.keys().copied().collect();
+        for id in &state.pending_non_durable_commits {
+            assert!(all.remove(&id.parent().unwrap()));
+        }
+        !all.is_empty()
     }
 }

@@ -1,9 +1,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use redb::{AccessGuard, Database, Durability, Error, MultimapTable, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, ReadableTableMetadata, Savepoint, StorageBackend, Table, TableDefinition, WriteTransaction};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fmt::Debug;
+use redb::{AccessGuard, Database, Durability, Error, MultimapTable, MultimapTableDefinition, MultimapValue, ReadableMultimapTable, ReadableTable, ReadableTableMetadata, Savepoint, StorageBackend, Table, TableDefinition, UpgradeError, WriteTransaction};
+use std::collections::{BTreeMap, BTreeSet, HashSet, HashMap};
+use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -88,9 +88,27 @@ enum FuzzerSavepoint<T: Clone> {
     NotYetDurablePersistent(u64, BTreeMap<u64, T>)
 }
 
+impl<T: Clone> Debug for FuzzerSavepoint<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FuzzerSavepoint::Ephemeral(_, _) => {
+                write!(f, "Ephemeral")
+            }
+            FuzzerSavepoint::Persistent(x, _) => {
+                write!(f, "Persistent({:?})", x)
+            }
+            FuzzerSavepoint::NotYetDurablePersistent(x, _) => {
+                write!(f, "NotYetDurablePersistent({:?})", x)
+            }
+        }
+    }
+}
+
 struct SavepointManager<T: Clone> {
     savepoints: Vec<FuzzerSavepoint<T>>,
     uncommitted_persistent: HashSet<u64>,
+    // Boolean indicates whether it is durable
+    persistent_awaiting_deletion: HashMap<u64, bool>,
     persistent_countdown: usize,
 }
 
@@ -99,11 +117,24 @@ impl<T: Clone> SavepointManager<T> {
         Self {
             savepoints: vec![],
             uncommitted_persistent: Default::default(),
+            persistent_awaiting_deletion: Default::default(),
             persistent_countdown: MAX_PERSISTENT_SAVEPOINTS,
         }
     }
 
+    fn ephemeral_savepoint_exists(&self) -> bool {
+        self.savepoints.iter().any(|x| matches!(x, FuzzerSavepoint::Ephemeral(_, _)))
+    }
+
+    fn persistent_savepoint_exists(&self) -> bool {
+        if !self.persistent_awaiting_deletion.is_empty() {
+            return true;
+        }
+        self.savepoints.iter().any(|x| matches!(x, FuzzerSavepoint::Persistent(_, _) | FuzzerSavepoint::NotYetDurablePersistent(_, _)))
+    }
+
     fn clean_shutdown(&mut self) {
+        self.commit(true);
         let persistent: Vec<FuzzerSavepoint<T>> = self.savepoints.drain(..).filter(|x| matches!(x, FuzzerSavepoint::Persistent(_, _))).collect();
         self.savepoints = persistent;
     }
@@ -111,6 +142,12 @@ impl<T: Clone> SavepointManager<T> {
     fn crash(&mut self) {
         let persistent: Vec<FuzzerSavepoint<T>> = self.savepoints.drain(..).filter(|x| matches!(x, FuzzerSavepoint::Persistent(_, _))).collect();
         self.savepoints = persistent;
+        let keys: Vec<u64> = self.persistent_awaiting_deletion.keys().cloned().collect();
+        for i in keys {
+            if !self.persistent_awaiting_deletion[&i] {
+                self.persistent_awaiting_deletion.remove(&i);
+            }
+        }
         self.uncommitted_persistent.clear();
         self.persistent_countdown = MAX_PERSISTENT_SAVEPOINTS;
     }
@@ -157,6 +194,10 @@ impl<T: Clone> SavepointManager<T> {
         assert!(txn.list_persistent_savepoints()?.count() <= MAX_SAVEPOINTS);
 
         Ok(())
+    }
+
+    fn finalize_gc_persistent_savepoints(&mut self) {
+        self.persistent_awaiting_deletion.clear();
     }
 
     fn commit(&mut self, durable: bool) {
@@ -208,7 +249,16 @@ impl<T: Clone> SavepointManager<T> {
     fn ephemeral_savepoint(&mut self, txn: &WriteTransaction, reference: &BTreeMap<u64, T>) -> Result<(), Error> {
         self.savepoints.push(Ephemeral(txn.ephemeral_savepoint()?, reference.clone()));
         if self.savepoints.len() > MAX_SAVEPOINTS {
-            self.savepoints.remove(0);
+            let removed = self.savepoints.remove(0);
+            match removed {
+                Ephemeral(_, _) => {},
+                Persistent(id, _) => {
+                    self.persistent_awaiting_deletion.insert(id, true);
+                }
+                NotYetDurablePersistent(id, _) => {
+                    self.persistent_awaiting_deletion.insert(id, false);
+                }
+            }
         }
         Ok(())
     }
@@ -223,7 +273,16 @@ impl<T: Clone> SavepointManager<T> {
         self.savepoints.push(NotYetDurablePersistent(id, reference.clone()));
         self.uncommitted_persistent.insert(id);
         if self.savepoints.len() > MAX_SAVEPOINTS {
-            self.savepoints.remove(0);
+            let removed = self.savepoints.remove(0);
+            match removed {
+                Ephemeral(_, _) => {},
+                Persistent(id, _) => {
+                    self.persistent_awaiting_deletion.insert(id, true);
+                }
+                NotYetDurablePersistent(id, _) => {
+                    self.persistent_awaiting_deletion.insert(id, false);
+                }
+            }
         }
         Ok(())
     }
@@ -515,7 +574,7 @@ fn open_dup(file: &NamedTempFile) -> File {
     OpenOptions::new().read(true).write(true).open(file.path()).unwrap()
 }
 
-fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransaction, &mut BTreeMap<u64, T>, &FuzzTransaction, &mut SavepointManager<T>) -> Result<(), redb::Error>) -> Result<(), redb::Error> {
+fn exec_table_crash_support<T: Clone + Debug>(config: &FuzzConfig, apply: fn(WriteTransaction, &mut BTreeMap<u64, T>, &FuzzTransaction, &mut SavepointManager<T>) -> Result<(), redb::Error>) -> Result<(), redb::Error> {
     let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
     let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file))?);
     let mut countdown = backend.countdown.clone();
@@ -556,6 +615,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
     let mut reference = BTreeMap::new();
     let mut non_durable_reference = reference.clone();
     let mut has_done_close_db = false;
+    let mut upgrade_counter = 0;
 
     for (txn_id, transaction) in config.transactions.iter().enumerate() {
         let result = handle_savepoints(db.begin_write().unwrap(), &mut non_durable_reference, transaction, &mut savepoint_manager, countdown.clone());
@@ -652,6 +712,7 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
             non_durable_reference = uncommitted_reference;
             if transaction.durable {
                 reference = non_durable_reference.clone();
+                savepoint_manager.finalize_gc_persistent_savepoints();
             }
         } else {
             savepoint_manager.abort();
@@ -675,6 +736,68 @@ fn exec_table_crash_support<T: Clone>(config: &FuzzConfig, apply: fn(WriteTransa
                 .create_with_backend(backend).unwrap();
 
             countdown.store(old_countdown, Ordering::SeqCst);
+        }
+
+        if transaction.upgrade && upgrade_counter < 2 {
+            upgrade_counter += 1;
+            match db.upgrade() {
+                Err(UpgradeError::TransactionInProgress) => {
+                    panic!();
+                },
+                Err(UpgradeError::PersistentSavepointExists) => {
+                    assert!(savepoint_manager.persistent_savepoint_exists());
+                },
+                Err(UpgradeError::EphemeralSavepointExists) => {
+                    assert!(savepoint_manager.ephemeral_savepoint_exists());
+                },
+                Err(UpgradeError::Storage(err)) => {
+                    let err = err.into();
+                    if is_simulated_io_error(&err) {
+                        drop(db);
+
+                        // Check that recovery flag is set
+                        redb_file.seek(SeekFrom::Start(9)).unwrap();
+                        let mut god_byte = vec![0u8];
+                        assert_eq!(redb_file.read(&mut god_byte).unwrap(), 1);
+                        assert_ne!(god_byte[0] & 2, 0);
+
+                        // Repair the database
+                        let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)).unwrap());
+                        db = Database::builder()
+                            .set_page_size(config.page_size.value)
+                            .set_cache_size(config.cache_size.value)
+                            .set_region_size(config.region_size.value as u64)
+                            .set_file_format_v3(config.file_format_v3)
+                            .create_with_backend(backend)
+                            .unwrap();
+
+                        let txn = db.begin_read().unwrap();
+                        let counter_table = txn.open_table(COUNTER_TABLE).unwrap();
+                        let after_upgrade = counter_table.get(()).unwrap().unwrap().value();
+                        let commit_succeeded = last_committed == after_upgrade;
+                        // The last commit succeeded, possibly as the first part of this upgrade,
+                        // make sure the reference state is consistent
+                        if commit_succeeded {
+                            savepoint_manager.clean_shutdown();
+                            reference = non_durable_reference.clone();
+                        } else {
+                            savepoint_manager.crash();
+                            non_durable_reference = reference.clone();
+                        }
+                    } else {
+                        return Err(err);
+                    }
+                },
+                Err(_) => {
+                    panic!()
+                }
+                Ok(upgraded) => {
+                    if upgraded {
+                        savepoint_manager.commit(true);
+                        reference = non_durable_reference.clone();
+                    }
+                }
+            }
         }
     }
 
