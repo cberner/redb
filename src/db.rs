@@ -846,7 +846,9 @@ impl Database {
             enable_file_format_v3,
         )?;
         let mut mem = Arc::new(mem);
-        if mem.needs_repair()? {
+        // TODO: Seems like there should be a better way to structure this. We have a file format
+        // check here, which matches the InMemoryState::from_bytes behavior
+        if mem.needs_repair()? || mem.file_format_v3() {
             // If the last transaction used 2-phase commit and updated the allocator state table, then
             // we can just load the allocator state from there. Otherwise, we need a full repair
             if let Some(tree) = Self::get_allocator_state_table(&mem)? {

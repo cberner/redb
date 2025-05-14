@@ -66,8 +66,10 @@ struct InMemoryState {
 }
 
 impl InMemoryState {
-    fn from_bytes(header: DatabaseHeader, file: &PagedCachedFile) -> Result<Self> {
-        let allocators = if header.recovery_required {
+    fn from_bytes(header: DatabaseHeader, file: &PagedCachedFile, version: u8) -> Result<Self> {
+        // TODO: seems like there should be a nicer way to structure this, rather than having
+        // a format version check here
+        let allocators = if header.recovery_required || version >= FILE_FORMAT_VERSION3 {
             Allocators::new(header.layout())
         } else {
             Allocators::from_bytes(&header, file)?
@@ -265,8 +267,8 @@ impl TransactionalMemory {
         assert_eq!(layout.len(), storage.raw_file_len()?);
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
-
-        let state = InMemoryState::from_bytes(header, &storage)?;
+        let version = header.primary_slot().version;
+        let state = InMemoryState::from_bytes(header, &storage, version)?;
 
         assert!(page_size >= DB_HEADER_SIZE);
 
@@ -1239,14 +1241,16 @@ impl Drop for TransactionalMemory {
         }
 
         let mut state = self.state.lock().unwrap();
-        if state
-            .allocators
-            .flush_to(
-                state.header.region_tracker(),
-                state.header.layout(),
-                &self.storage,
-            )
-            .is_err()
+        // File format v3 now relies on the quick repair code path
+        if !self.file_format_v3()
+            && state
+                .allocators
+                .flush_to(
+                    state.header.region_tracker(),
+                    state.header.layout(),
+                    &self.storage,
+                )
+                .is_err()
         {
             #[cfg(feature = "logging")]
             warn!("Failure while flushing allocator state. Repair required at restart.");
