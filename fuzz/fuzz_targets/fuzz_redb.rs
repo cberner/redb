@@ -583,7 +583,7 @@ fn exec_table_crash_support<T: Clone + Debug>(config: &FuzzConfig, apply: fn(Wri
         .set_page_size(config.page_size.value)
         .set_cache_size(config.cache_size.value)
         .set_region_size(config.region_size.value as u64)
-        .set_file_format_v3(config.file_format_v3)
+        .create_with_file_format_v3(config.file_format_v3)
         .create_with_backend(backend).unwrap();
 
     // Disable IO error simulation while we get a baseline number of allocated pages
@@ -643,7 +643,6 @@ fn exec_table_crash_support<T: Clone + Debug>(config: &FuzzConfig, apply: fn(Wri
                         .set_page_size(config.page_size.value)
                         .set_cache_size(config.cache_size.value)
                         .set_region_size(config.region_size.value as u64)
-                        .set_file_format_v3(config.file_format_v3)
                         .create_with_backend(backend)
                         .unwrap();
                 } else {
@@ -686,7 +685,6 @@ fn exec_table_crash_support<T: Clone + Debug>(config: &FuzzConfig, apply: fn(Wri
                     .set_page_size(config.page_size.value)
                     .set_cache_size(config.cache_size.value)
                     .set_region_size(config.region_size.value as u64)
-                    .set_file_format_v3(config.file_format_v3)
                     .create_with_backend(backend)
                     .unwrap();
             } else {
@@ -732,7 +730,6 @@ fn exec_table_crash_support<T: Clone + Debug>(config: &FuzzConfig, apply: fn(Wri
                 .set_page_size(config.page_size.value)
                 .set_cache_size(config.cache_size.value)
                 .set_region_size(config.region_size.value as u64)
-                .set_file_format_v3(config.file_format_v3)
                 .create_with_backend(backend).unwrap();
 
             countdown.store(old_countdown, Ordering::SeqCst);
@@ -767,7 +764,6 @@ fn exec_table_crash_support<T: Clone + Debug>(config: &FuzzConfig, apply: fn(Wri
                             .set_page_size(config.page_size.value)
                             .set_cache_size(config.cache_size.value)
                             .set_region_size(config.region_size.value as u64)
-                            .set_file_format_v3(config.file_format_v3)
                             .create_with_backend(backend)
                             .unwrap();
 
@@ -818,7 +814,6 @@ fn exec_table_crash_support<T: Clone + Debug>(config: &FuzzConfig, apply: fn(Wri
         .set_page_size(config.page_size.value)
         .set_cache_size(config.cache_size.value)
         .set_region_size(config.region_size.value as u64)
-        .set_file_format_v3(config.file_format_v3)
         .create_with_backend(backend)
         .unwrap();
 

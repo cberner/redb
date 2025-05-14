@@ -1134,15 +1134,19 @@ impl Builder {
             // TODO: Default should probably take into account the total system memory
             write_cache_size_bytes: 0,
             repair_callback: Box::new(|_| {}),
-            default_to_file_format_v3: false,
+            default_to_file_format_v3: true,
         };
 
         result.set_cache_size(1024 * 1024 * 1024);
         result
     }
 
-    #[cfg(any(test, fuzzing))]
-    pub fn set_file_format_v3(&mut self, value: bool) -> &mut Self {
+    /// Create new databases in the v3 file format
+    ///
+    /// The v3 format is only supported in redb 2.6 and newer.
+    ///
+    /// Defaults to `true`
+    pub fn create_with_file_format_v3(&mut self, value: bool) -> &mut Self {
         self.default_to_file_format_v3 = value;
         self
     }
@@ -1350,7 +1354,7 @@ mod test {
         let tmpfile = crate::create_tempfile();
         let (file, path) = tmpfile.into_parts();
 
-        let backend = FailingBackend::new(FileBackend::new(file).unwrap(), 24);
+        let backend = FailingBackend::new(FileBackend::new(file).unwrap(), 37);
         let db = Database::builder()
             .set_cache_size(12686)
             .set_page_size(8 * 1024)
