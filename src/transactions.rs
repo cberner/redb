@@ -840,6 +840,39 @@ impl WriteTransaction {
         })
     }
 
+    pub(crate) fn version_asserts(&self) -> Result {
+        if self.mem.file_format_v3() {
+            assert_eq!(self.freed_tree.lock().unwrap().len()?, 0);
+        } else {
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let data_allocated = system_tables.open_system_table(self, DATA_ALLOCATED_TABLE)?;
+            assert!(
+                data_allocated
+                    .range::<TransactionIdWithPagination>(..)?
+                    .next()
+                    .is_none()
+            );
+            drop(data_allocated);
+            let data_freed = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
+            assert!(
+                data_freed
+                    .range::<TransactionIdWithPagination>(..)?
+                    .next()
+                    .is_none()
+            );
+            drop(data_freed);
+            let system_freed = system_tables.open_system_table(self, SYSTEM_FREED_TABLE)?;
+            assert!(
+                system_freed
+                    .range::<TransactionIdWithPagination>(..)?
+                    .next()
+                    .is_none()
+            );
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn pending_free_pages(&self) -> Result<bool> {
         if self.mem.get_freed_root().is_some() {
             return Ok(true);
