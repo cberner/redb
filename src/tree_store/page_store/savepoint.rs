@@ -114,12 +114,10 @@ pub(crate) enum SerializedSavepoint<'a> {
 }
 
 impl SerializedSavepoint<'_> {
-    pub(crate) fn from_savepoint(savepoint: &Savepoint, enable_file_format_v3: bool) -> Self {
-        if enable_file_format_v3 {
-            assert_eq!(savepoint.version, FILE_FORMAT_VERSION3);
-        } else {
-            assert_eq!(savepoint.version, FILE_FORMAT_VERSION2);
-        }
+    pub(crate) fn from_savepoint(savepoint: &Savepoint) -> Self {
+        assert!(
+            savepoint.version == FILE_FORMAT_VERSION2 || savepoint.version == FILE_FORMAT_VERSION3
+        );
         let mut result = vec![savepoint.version];
         result.extend(savepoint.id.0.to_le_bytes());
         result.extend(savepoint.transaction_id.raw_id().to_le_bytes());
@@ -132,7 +130,7 @@ impl SerializedSavepoint<'_> {
             result.extend([0; BtreeHeader::serialized_size()]);
         }
 
-        if !enable_file_format_v3 {
+        if savepoint.version <= FILE_FORMAT_VERSION2 {
             if let Some(header) = savepoint.system_root {
                 result.push(1);
                 result.extend(header.to_le_bytes());
@@ -180,19 +178,11 @@ impl SerializedSavepoint<'_> {
         }
     }
 
-    pub(crate) fn to_savepoint(
-        &self,
-        transaction_tracker: Arc<TransactionTracker>,
-        enable_file_format_v3: bool,
-    ) -> Savepoint {
+    pub(crate) fn to_savepoint(&self, transaction_tracker: Arc<TransactionTracker>) -> Savepoint {
         let data = self.data();
         let mut offset = 0;
         let version = data[offset];
-        if enable_file_format_v3 {
-            assert_eq!(version, FILE_FORMAT_VERSION3);
-        } else {
-            assert_eq!(version, FILE_FORMAT_VERSION2);
-        }
+        assert!(version == FILE_FORMAT_VERSION2 || version == FILE_FORMAT_VERSION3);
         offset += size_of::<u8>();
 
         let id = u64::from_le_bytes(
@@ -223,7 +213,7 @@ impl SerializedSavepoint<'_> {
         };
         offset += BtreeHeader::serialized_size();
 
-        let (system_root, freed_root, regional_allocators) = if enable_file_format_v3 {
+        let (system_root, freed_root, regional_allocators) = if version >= FILE_FORMAT_VERSION3 {
             (None, None, vec![])
         } else {
             let not_null = data[offset];

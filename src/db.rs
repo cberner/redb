@@ -598,7 +598,7 @@ impl Database {
                 let (_, savepoint_data) = result?;
                 let savepoint = savepoint_data
                     .value()
-                    .to_savepoint(fake_transaction_tracker.clone(), mem.file_format_v3());
+                    .to_savepoint(fake_transaction_tracker.clone());
                 if let Some(header) = savepoint.get_user_root() {
                     Self::check_pages_allocated_recursive(header.root, mem.clone())?;
                 }
@@ -830,7 +830,7 @@ impl Database {
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
-        enable_file_format_v3: bool,
+        default_to_file_format_v3: bool,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -843,7 +843,7 @@ impl Database {
             region_size,
             read_cache_size_bytes,
             write_cache_size_bytes,
-            enable_file_format_v3,
+            default_to_file_format_v3,
         )?;
         let mut mem = Arc::new(mem);
         // TODO: Seems like there should be a better way to structure this. We have a file format
@@ -1066,7 +1066,7 @@ pub struct Builder {
     read_cache_size_bytes: usize,
     write_cache_size_bytes: usize,
     repair_callback: Box<dyn Fn(&mut RepairSession)>,
-    enable_file_format_v3: bool,
+    default_to_file_format_v3: bool,
 }
 
 impl Builder {
@@ -1088,7 +1088,7 @@ impl Builder {
             // TODO: Default should probably take into account the total system memory
             write_cache_size_bytes: 0,
             repair_callback: Box::new(|_| {}),
-            enable_file_format_v3: false,
+            default_to_file_format_v3: false,
         };
 
         result.set_cache_size(1024 * 1024 * 1024);
@@ -1097,7 +1097,7 @@ impl Builder {
 
     #[cfg(any(test, fuzzing))]
     pub fn set_file_format_v3(&mut self, value: bool) -> &mut Self {
-        self.enable_file_format_v3 = value;
+        self.default_to_file_format_v3 = value;
         self
     }
 
@@ -1165,7 +1165,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
-            self.enable_file_format_v3,
+            self.default_to_file_format_v3,
         )
     }
 
@@ -1181,7 +1181,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
-            self.enable_file_format_v3,
+            self.default_to_file_format_v3,
         )
     }
 
@@ -1197,7 +1197,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
-            self.enable_file_format_v3,
+            self.default_to_file_format_v3,
         )
     }
 
@@ -1214,7 +1214,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
-            self.enable_file_format_v3,
+            self.default_to_file_format_v3,
         )
     }
 }

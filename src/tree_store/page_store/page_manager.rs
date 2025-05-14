@@ -112,7 +112,7 @@ pub(crate) struct TransactionalMemory {
     // code path where there is no locking
     region_size: u64,
     region_header_with_padding_size: u64,
-    enable_file_format_v3: bool,
+    file_format: u8,
 }
 
 impl TransactionalMemory {
@@ -125,7 +125,7 @@ impl TransactionalMemory {
         requested_region_size: Option<u64>,
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
-        enable_file_format_v3: bool,
+        default_to_file_format_v3: bool,
     ) -> Result<Self, DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
@@ -211,7 +211,7 @@ impl TransactionalMemory {
                 PageNumber::new(0, page_number, required_order)
             };
 
-            let file_format = if enable_file_format_v3 {
+            let file_format = if default_to_file_format_v3 {
                 FILE_FORMAT_VERSION3
             } else {
                 FILE_FORMAT_VERSION2
@@ -224,7 +224,7 @@ impl TransactionalMemory {
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
-                .copy_from_slice(&header.to_bytes(false, enable_file_format_v3));
+                .copy_from_slice(&header.to_bytes(false));
             allocators.flush_to(tracker_page, layout, &storage)?;
 
             storage.flush(false)?;
@@ -233,12 +233,11 @@ impl TransactionalMemory {
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
-                .copy_from_slice(&header.to_bytes(true, enable_file_format_v3));
+                .copy_from_slice(&header.to_bytes(true));
             storage.flush(false)?;
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
-        let (mut header, repair_info) =
-            DatabaseHeader::from_bytes(&header_bytes, enable_file_format_v3)?;
+        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
 
         assert_eq!(header.page_size() as usize, page_size);
         assert!(storage.raw_file_len()? >= header.layout().len());
@@ -259,7 +258,7 @@ impl TransactionalMemory {
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
-                .copy_from_slice(&header.to_bytes(true, enable_file_format_v3));
+                .copy_from_slice(&header.to_bytes(true));
             storage.flush(false)?;
         }
 
@@ -285,12 +284,12 @@ impl TransactionalMemory {
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,
-            enable_file_format_v3,
+            file_format: version,
         })
     }
 
     pub(crate) fn file_format_v3(&self) -> bool {
-        self.enable_file_format_v3
+        self.file_format == FILE_FORMAT_VERSION3
     }
 
     pub(crate) fn cache_stats(&self) -> CacheStats {
@@ -322,8 +321,7 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
-        let (mut header, repair_info) =
-            DatabaseHeader::from_bytes(&header_bytes, self.enable_file_format_v3)?;
+        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
         // TODO: This ends up always being true because this is called from check_integrity() once the db is already open
         // TODO: Also we should recheck the layout
         let mut was_clean = true;
@@ -337,7 +335,7 @@ impl TransactionalMemory {
             self.storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
-                .copy_from_slice(&header.to_bytes(true, self.enable_file_format_v3));
+                .copy_from_slice(&header.to_bytes(true));
             self.storage.flush(false)?;
         }
 
@@ -396,7 +394,7 @@ impl TransactionalMemory {
         self.storage
             .write(0, DB_HEADER_SIZE, true)?
             .mem_mut()
-            .copy_from_slice(&header.to_bytes(true, self.enable_file_format_v3));
+            .copy_from_slice(&header.to_bytes(true));
 
         Ok(())
     }
