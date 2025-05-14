@@ -296,6 +296,73 @@ impl Display for SavepointError {
 
 impl std::error::Error for SavepointError {}
 
+/// Errors related to database upgrades
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum UpgradeError {
+    /// A persistent savepoint exists
+    PersistentSavepointExists,
+    /// A ephemeral savepoint exists
+    EphemeralSavepointExists,
+    /// A transaction is still in-progress
+    TransactionInProgress,
+    /// Error from underlying storage
+    Storage(StorageError),
+}
+
+impl From<UpgradeError> for Error {
+    fn from(err: UpgradeError) -> Error {
+        match err {
+            UpgradeError::PersistentSavepointExists => Error::PersistentSavepointExists,
+            UpgradeError::EphemeralSavepointExists => Error::EphemeralSavepointExists,
+            UpgradeError::TransactionInProgress => Error::TransactionInProgress,
+            UpgradeError::Storage(storage) => storage.into(),
+        }
+    }
+}
+
+impl From<StorageError> for UpgradeError {
+    fn from(err: StorageError) -> UpgradeError {
+        UpgradeError::Storage(err)
+    }
+}
+
+impl From<CommitError> for UpgradeError {
+    fn from(err: CommitError) -> UpgradeError {
+        match err {
+            CommitError::Storage(err) => UpgradeError::Storage(err),
+        }
+    }
+}
+
+impl Display for UpgradeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpgradeError::PersistentSavepointExists => {
+                write!(
+                    f,
+                    "Persistent savepoint exists. Operation cannot be performed."
+                )
+            }
+            UpgradeError::EphemeralSavepointExists => {
+                write!(
+                    f,
+                    "Ephemeral savepoint exists. Operation cannot be performed."
+                )
+            }
+            UpgradeError::TransactionInProgress => {
+                write!(
+                    f,
+                    "A transaction is still in progress. Operation cannot be performed."
+                )
+            }
+            UpgradeError::Storage(storage) => storage.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for UpgradeError {}
+
 /// Errors related to compaction
 #[derive(Debug)]
 #[non_exhaustive]

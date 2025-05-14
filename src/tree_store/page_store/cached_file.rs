@@ -122,6 +122,10 @@ impl CheckedBackend {
         }
     }
 
+    fn set_failure(&self) {
+        self.io_failed.store(true, Ordering::Release);
+    }
+
     fn check_failure(&self) -> Result<()> {
         if self.io_failed.load(Ordering::Acquire) {
             Err(StorageError::PreviousIo)
@@ -235,6 +239,10 @@ impl PagedCachedFile {
 
     pub(crate) fn check_io_errors(&self) -> Result {
         self.file.check_failure()
+    }
+
+    pub(crate) fn set_irrecoverable_io_error(&self) {
+        self.file.set_failure();
     }
 
     pub(crate) fn raw_file_len(&self) -> Result<u64> {

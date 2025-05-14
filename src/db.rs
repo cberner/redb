@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::{io, thread};
 
-use crate::error::TransactionError;
+use crate::error::{TransactionError, UpgradeError};
 use crate::sealed::Sealed;
 use crate::transactions::{
     ALLOCATOR_STATE_TABLE_NAME, AllocatorStateKey, AllocatorStateTree, DATA_ALLOCATED_TABLE,
@@ -447,6 +447,52 @@ impl Database {
         self.mem.begin_writable()?;
 
         Ok(was_clean)
+    }
+
+    /// Upgrade the database file format
+    ///
+    /// Returns [`UpgradeError::PersistentSavepointExists`] or [`UpgradeError::EphemeralSavepointExists`]
+    /// if there are any persistent or ephemeral savepoints. Delete them and then try again.
+    ///
+    /// Returns `true` if an upgrade was performed, and `false` if the database is already using the
+    /// latest file format
+    pub fn upgrade(&mut self) -> Result<bool, UpgradeError> {
+        if self.mem.file_format_v3() {
+            return Ok(false);
+        }
+
+        let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+        if txn.list_persistent_savepoints()?.next().is_some() {
+            return Err(UpgradeError::PersistentSavepointExists);
+        }
+        txn.abort()?;
+
+        if self.transaction_tracker.any_savepoint_exists() {
+            return Err(UpgradeError::EphemeralSavepointExists);
+        }
+
+        if self.transaction_tracker.any_user_read_transaction() {
+            return Err(UpgradeError::TransactionInProgress);
+        }
+
+        // Commit to free up any pending free pages
+        // Use 2-phase commit to avoid any possible security issues.
+        let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+        txn.set_two_phase_commit(true);
+        txn.commit()?;
+        // Repeat, just in case executing list_persistent_savepoints() created a new table
+        let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+        txn.set_two_phase_commit(true);
+        txn.commit()?;
+        // There can't be any outstanding transactions because we have a `&mut self`, so all pending free pages
+        // should have been cleared out by the above commit()
+        let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+        assert!(!txn.pending_free_pages()?);
+        txn.abort()?;
+
+        Arc::get_mut(&mut self.mem).unwrap().upgrade_to_v3()?;
+
+        Ok(true)
     }
 
     /// Compacts the database file

@@ -167,6 +167,7 @@ pub(crate) struct FuzzTransaction {
     pub quick_repair: bool,
     pub commit: bool,
     pub close_db: bool,
+    pub upgrade: bool,
     pub create_ephemeral_savepoint: bool,
     pub create_persistent_savepoint: bool,
     pub restore_savepoint: Option<BoundedUSize<MAX_SAVEPOINTS>>,
