@@ -1073,7 +1073,7 @@ impl WriteTransaction {
         let mut savepoint_table = system_tables.open_system_table(self, SAVEPOINT_TABLE)?;
         savepoint_table.insert(
             savepoint.get_id(),
-            SerializedSavepoint::from_savepoint(&savepoint, self.mem.file_format_v3()),
+            SerializedSavepoint::from_savepoint(&savepoint),
         )?;
 
         savepoint.set_persistent();
@@ -1108,10 +1108,7 @@ impl WriteTransaction {
         let value = table.get(SavepointId(id))?;
 
         value
-            .map(|x| {
-                x.value()
-                    .to_savepoint(self.transaction_tracker.clone(), self.mem.file_format_v3())
-            })
+            .map(|x| x.value().to_savepoint(self.transaction_tracker.clone()))
             .ok_or(SavepointError::InvalidSavepoint)
     }
 
@@ -1131,7 +1128,7 @@ impl WriteTransaction {
         if let Some(serialized) = savepoint {
             let savepoint = serialized
                 .value()
-                .to_savepoint(self.transaction_tracker.clone(), self.mem.file_format_v3());
+                .to_savepoint(self.transaction_tracker.clone());
             self.deleted_persistent_savepoints
                 .lock()
                 .unwrap()

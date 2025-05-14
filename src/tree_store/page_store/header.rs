@@ -244,10 +244,7 @@ impl DatabaseHeader {
     }
 
     // TODO: consider returning an Err with the repair info
-    pub(super) fn from_bytes(
-        data: &[u8],
-        enable_file_format_v3: bool,
-    ) -> Result<(Self, HeaderRepairInfo), DatabaseError> {
+    pub(super) fn from_bytes(data: &[u8]) -> Result<(Self, HeaderRepairInfo), DatabaseError> {
         let invalid_magic_number = data[..MAGICNUMBER.len()] != MAGICNUMBER;
 
         let primary_slot = usize::from(data[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
@@ -266,11 +263,9 @@ impl DatabaseHeader {
         );
         let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(
             &data[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + TRANSACTION_SIZE)],
-            enable_file_format_v3,
         )?;
         let (slot1, slot1_corrupted) = TransactionHeader::from_bytes(
             &data[TRANSACTION_1_OFFSET..(TRANSACTION_1_OFFSET + TRANSACTION_SIZE)],
-            enable_file_format_v3,
         )?;
         let (primary_corrupted, secondary_corrupted) = if primary_slot == 0 {
             (slot0_corrupted, slot1_corrupted)
@@ -298,11 +293,7 @@ impl DatabaseHeader {
         Ok((result, repair))
     }
 
-    pub(super) fn to_bytes(
-        &self,
-        include_magic_number: bool,
-        enable_file_format_v3: bool,
-    ) -> [u8; DB_HEADER_SIZE] {
+    pub(super) fn to_bytes(&self, include_magic_number: bool) -> [u8; DB_HEADER_SIZE] {
         let mut result = [0; DB_HEADER_SIZE];
         if include_magic_number {
             result[..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
@@ -328,9 +319,9 @@ impl DatabaseHeader {
         result[REGION_TRACKER_PAGE_NUMBER_OFFSET
             ..(REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size())]
             .copy_from_slice(&self.region_tracker.to_le_bytes());
-        let slot0 = self.transaction_slots[0].to_bytes(enable_file_format_v3);
+        let slot0 = self.transaction_slots[0].to_bytes();
         result[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + slot0.len())].copy_from_slice(&slot0);
-        let slot1 = self.transaction_slots[1].to_bytes(enable_file_format_v3);
+        let slot1 = self.transaction_slots[1].to_bytes();
         result[TRANSACTION_1_OFFSET..(TRANSACTION_1_OFFSET + slot1.len())].copy_from_slice(&slot1);
 
         result
@@ -358,36 +349,20 @@ impl TransactionHeader {
     }
 
     // Returned bool indicates whether the checksum was corrupted
-    pub(super) fn from_bytes(
-        data: &[u8],
-        enable_file_format_v3: bool,
-    ) -> Result<(Self, bool), DatabaseError> {
+    pub(super) fn from_bytes(data: &[u8]) -> Result<(Self, bool), DatabaseError> {
         let version = data[VERSION_OFFSET];
-        if enable_file_format_v3 {
-            match version {
-                FILE_FORMAT_VERSION1 | FILE_FORMAT_VERSION2 => {
-                    return Err(DatabaseError::UpgradeRequired(version));
-                }
-                FILE_FORMAT_VERSION3 => {}
-                _ => {
-                    return Err(StorageError::Corrupted(format!(
-                        "Expected file format version <= {FILE_FORMAT_VERSION3}, found {version}",
-                    ))
-                    .into());
-                }
+        match version {
+            FILE_FORMAT_VERSION1 => {
+                return Err(DatabaseError::UpgradeRequired(version));
             }
-        } else {
-            match version {
-                FILE_FORMAT_VERSION1 => return Err(DatabaseError::UpgradeRequired(version)),
-                FILE_FORMAT_VERSION2 => {}
-                _ => {
-                    return Err(StorageError::Corrupted(format!(
-                        "Expected file format version <= {FILE_FORMAT_VERSION2}, found {version}",
-                    ))
-                    .into());
-                }
+            FILE_FORMAT_VERSION2 | FILE_FORMAT_VERSION3 => {}
+            _ => {
+                return Err(StorageError::Corrupted(format!(
+                    "Expected file format version <= {FILE_FORMAT_VERSION3}, found {version}",
+                ))
+                .into());
             }
-        };
+        }
         let checksum = Checksum::from_le_bytes(
             data[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
                 .try_into()
@@ -435,12 +410,8 @@ impl TransactionHeader {
         Ok((result, corrupted))
     }
 
-    pub(super) fn to_bytes(&self, enable_file_format_v3: bool) -> [u8; TRANSACTION_SIZE] {
-        if enable_file_format_v3 {
-            assert_eq!(self.version, FILE_FORMAT_VERSION3);
-        } else {
-            assert_eq!(self.version, FILE_FORMAT_VERSION2);
-        }
+    pub(super) fn to_bytes(&self) -> [u8; TRANSACTION_SIZE] {
+        assert!(self.version == FILE_FORMAT_VERSION2 || self.version == FILE_FORMAT_VERSION3);
         let mut result = [0; TRANSACTION_SIZE];
         result[VERSION_OFFSET] = self.version;
         if let Some(header) = self.user_root {
