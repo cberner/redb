@@ -174,10 +174,12 @@ impl DatabaseHeader {
     }
 
     pub(super) fn region_tracker(&self) -> PageNumber {
+        assert_ne!(self.primary_slot().version, FILE_FORMAT_VERSION3);
         self.region_tracker
     }
 
     pub(super) fn set_region_tracker(&mut self, page: PageNumber) {
+        assert_ne!(self.primary_slot().version, FILE_FORMAT_VERSION3);
         self.region_tracker = page;
     }
 
