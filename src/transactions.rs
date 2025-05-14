@@ -2068,7 +2068,7 @@ impl WriteTransaction {
     pub(crate) fn compact_pages(&mut self) -> Result<bool> {
         let mut progress = false;
         // Relocate the region tracker page
-        if self.mem.relocate_region_tracker()? {
+        if !self.mem.file_format_v3() && self.mem.relocate_region_tracker()? {
             progress = true;
         }
 
@@ -2317,7 +2317,11 @@ impl WriteTransaction {
 
     #[cfg(any(test, fuzzing))]
     pub fn num_region_tracker_pages(&self) -> u64 {
-        1 << self.mem.tracker_page().page_order
+        if self.mem.file_format_v3() {
+            0
+        } else {
+            1 << self.mem.tracker_page().page_order
+        }
     }
 
     #[allow(dead_code)]

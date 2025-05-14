@@ -66,8 +66,10 @@ struct InMemoryState {
 }
 
 impl InMemoryState {
-    fn from_bytes(header: DatabaseHeader, file: &PagedCachedFile) -> Result<Self> {
-        let allocators = if header.recovery_required {
+    fn from_bytes(header: DatabaseHeader, file: &PagedCachedFile, version: u8) -> Result<Self> {
+        // TODO: seems like there should be a nicer way to structure this, rather than having
+        // a format version check here
+        let allocators = if header.recovery_required || version >= FILE_FORMAT_VERSION3 {
             Allocators::new(header.layout())
         } else {
             Allocators::from_bytes(&header, file)?
@@ -265,8 +267,8 @@ impl TransactionalMemory {
         assert_eq!(layout.len(), storage.raw_file_len()?);
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
-
-        let state = InMemoryState::from_bytes(header, &storage)?;
+        let version = header.primary_slot().version;
+        let state = InMemoryState::from_bytes(header, &storage, version)?;
 
         assert!(page_size >= DB_HEADER_SIZE);
 
@@ -400,13 +402,17 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn end_repair(&self) -> Result<()> {
-        self.allocate_region_tracker_page()?;
+        if !self.file_format_v3() {
+            self.allocate_region_tracker_page()?;
+        }
 
         let mut state = self.state.lock().unwrap();
-        let tracker_page = state.header.region_tracker();
-        state
-            .allocators
-            .flush_to(tracker_page, state.header.layout(), &self.storage)?;
+        if !self.file_format_v3() {
+            let tracker_page = state.header.region_tracker();
+            state
+                .allocators
+                .flush_to(tracker_page, state.header.layout(), &self.storage)?;
+        }
 
         state.header.recovery_required = false;
         self.write_header(&state.header)?;
@@ -463,14 +469,22 @@ impl TransactionalMemory {
 
         // Temporarily free the region tracker page, because we don't want to include it in our
         // recorded allocations
-        let tracker_page = state.header.region_tracker();
-        drop(state);
-        self.free(tracker_page, &mut PageTrackerPolicy::Ignore);
+        let tracker_page = if !self.file_format_v3() {
+            let tracker_page = state.header.region_tracker();
+            drop(state);
+            self.free(tracker_page, &mut PageTrackerPolicy::Ignore);
+            Some(tracker_page)
+        } else {
+            drop(state);
+            None
+        };
 
         let result = self.try_save_allocator_state_inner(tree, num_regions);
 
         // Restore the region tracker page
-        self.mark_page_allocated(tracker_page);
+        if let Some(tracker_page) = tracker_page {
+            self.mark_page_allocated(tracker_page);
+        }
 
         result
     }
@@ -550,7 +564,9 @@ impl TransactionalMemory {
         drop(state);
 
         // Allocate a page for the region tracker
-        self.allocate_region_tracker_page()?;
+        if !self.file_format_v3() {
+            self.allocate_region_tracker_page()?;
+        }
 
         self.state.lock().unwrap().header.recovery_required = false;
         self.needs_recovery.store(false, Ordering::Release);
@@ -1230,23 +1246,27 @@ impl Drop for TransactionalMemory {
         }
 
         // Reallocate the region tracker page, which will grow it if necessary
-        let tracker_page = self.state.lock().unwrap().header.region_tracker();
-        self.free(tracker_page, &mut PageTrackerPolicy::Ignore);
-        if self.allocate_region_tracker_page().is_err() {
-            #[cfg(feature = "logging")]
-            warn!("Failure while flushing allocator state. Repair required at restart.");
-            return;
+        if !self.file_format_v3() {
+            let tracker_page = self.state.lock().unwrap().header.region_tracker();
+            self.free(tracker_page, &mut PageTrackerPolicy::Ignore);
+            if self.allocate_region_tracker_page().is_err() {
+                #[cfg(feature = "logging")]
+                warn!("Failure while flushing allocator state. Repair required at restart.");
+                return;
+            }
         }
 
         let mut state = self.state.lock().unwrap();
-        if state
-            .allocators
-            .flush_to(
-                state.header.region_tracker(),
-                state.header.layout(),
-                &self.storage,
-            )
-            .is_err()
+        // File format v3 now relies on the quick repair code path
+        if !self.file_format_v3()
+            && state
+                .allocators
+                .flush_to(
+                    state.header.region_tracker(),
+                    state.header.layout(),
+                    &self.storage,
+                )
+                .is_err()
         {
             #[cfg(feature = "logging")]
             warn!("Failure while flushing allocator state. Repair required at restart.");
