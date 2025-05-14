@@ -1141,8 +1141,12 @@ impl Builder {
         result
     }
 
-    #[cfg(any(test, fuzzing))]
-    pub fn set_file_format_v3(&mut self, value: bool) -> &mut Self {
+    /// Create new databases in the v3 file format
+    ///
+    /// The v3 format is only supported in redb 2.6 and newer.
+    ///
+    /// Defaults to `false`
+    pub fn create_with_file_format_v3(&mut self, value: bool) -> &mut Self {
         self.default_to_file_format_v3 = value;
         self
     }
