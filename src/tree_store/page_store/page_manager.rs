@@ -288,6 +288,29 @@ impl TransactionalMemory {
         })
     }
 
+    pub(crate) fn upgrade_to_v3(&mut self) -> Result {
+        let data_root = self.get_data_root();
+        let system_root = self.get_system_root();
+        let transaction_id = self.get_last_committed_transaction_id()?;
+        assert!(self.get_freed_root().is_none());
+
+        let tracker_page = self.tracker_page();
+        self.file_format = FILE_FORMAT_VERSION3;
+        // Repeat twice just to be sure both slots have the new version number
+        for _ in 0..2 {
+            match self.commit(data_root, system_root, None, transaction_id, false, true) {
+                Ok(()) => {}
+                Err(err) => {
+                    self.storage.set_irrecoverable_io_error();
+                    return Err(err);
+                }
+            }
+        }
+        self.free(tracker_page, &mut PageTrackerPolicy::Ignore);
+
+        Ok(())
+    }
+
     pub(crate) fn file_format_v3(&self) -> bool {
         self.file_format == FILE_FORMAT_VERSION3
     }
@@ -305,7 +328,6 @@ impl TransactionalMemory {
         self.state.lock().unwrap().allocators.all_allocated()
     }
 
-    #[cfg(any(test, fuzzing))]
     pub(crate) fn tracker_page(&self) -> PageNumber {
         self.state.lock().unwrap().header.region_tracker()
     }
@@ -730,6 +752,7 @@ impl TransactionalMemory {
         secondary.user_root = data_root;
         secondary.system_root = system_root;
         secondary.freed_root = freed_root;
+        secondary.version = self.file_format;
 
         self.write_header(&header)?;
 

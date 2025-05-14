@@ -32,6 +32,8 @@ tempfile = "3.5.0"
 redb1 = { version = "=1.0.0", package = "redb" }
 # for backwards compatibility testing - pin at 2.0.0
 redb2 = { version = "=2.0.0", package = "redb" }
+# for backwards compatibility testing - pin at 2.5.0
+redb2_5 = { git = "https://github.com/cberner/redb", tag="v2.5.0", package = "redb" }
 bincode = "2.0.1"
 walkdir = "2.5.0"
 byte-unit = "5.1.6"
