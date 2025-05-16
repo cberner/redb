@@ -13,7 +13,9 @@ mod savepoint;
 #[allow(clippy::pedantic, dead_code)]
 mod xxh3;
 
-pub(crate) use base::{MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber};
+pub(crate) use base::{
+    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PageTrackerPolicy,
+};
 pub(crate) use header::PAGE_SIZE;
 pub use in_memory_backend::InMemoryBackend;
 pub(crate) use page_manager::{FILE_FORMAT_VERSION2, TransactionalMemory, xxh3_checksum};

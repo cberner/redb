@@ -2,7 +2,7 @@ use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
 use crate::tree_store::{
     AccessGuardMut, Btree, BtreeExtractIf, BtreeHeader, BtreeMut, BtreeRangeIter, MAX_PAIR_LENGTH,
-    MAX_VALUE_LENGTH, PageHint, PageNumber, RawBtree, TransactionalMemory,
+    MAX_VALUE_LENGTH, PageHint, PageNumber, PageTrackerPolicy, RawBtree, TransactionalMemory,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, StorageError, WriteTransaction};
@@ -75,6 +75,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         name: &str,
         table_root: Option<BtreeHeader>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+        allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
         mem: Arc<TransactionalMemory>,
         transaction: &'txn WriteTransaction,
     ) -> Table<'txn, K, V> {
@@ -86,6 +87,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
                 transaction.transaction_guard(),
                 mem,
                 freed_pages,
+                allocated_pages,
             ),
         }
     }
@@ -564,7 +566,7 @@ impl<
     F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
 > ExtractIf<'a, K, V, F>
 {
-    fn new(inner: BtreeExtractIf<'a, K, V, F>) -> Self {
+    pub(crate) fn new(inner: BtreeExtractIf<'a, K, V, F>) -> Self {
         Self { inner }
     }
 }

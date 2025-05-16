@@ -2,7 +2,7 @@ use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::page_manager::{
-    FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, xxh3_checksum,
+    FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, xxh3_checksum,
 };
 use crate::tree_store::{Checksum, PageNumber};
 use crate::{DatabaseError, Result, StorageError};
@@ -350,11 +350,13 @@ impl TransactionHeader {
     pub(super) fn from_bytes(data: &[u8]) -> Result<(Self, bool), DatabaseError> {
         let version = data[VERSION_OFFSET];
         match version {
-            FILE_FORMAT_VERSION1 => return Err(DatabaseError::UpgradeRequired(version)),
-            FILE_FORMAT_VERSION2 => {}
+            FILE_FORMAT_VERSION1 => {
+                return Err(DatabaseError::UpgradeRequired(version));
+            }
+            FILE_FORMAT_VERSION2 | FILE_FORMAT_VERSION3 => {}
             _ => {
                 return Err(StorageError::Corrupted(format!(
-                    "Expected file format version <= {FILE_FORMAT_VERSION2}, found {version}",
+                    "Expected file format version <= {FILE_FORMAT_VERSION3}, found {version}",
                 ))
                 .into());
             }
@@ -407,7 +409,7 @@ impl TransactionHeader {
     }
 
     pub(super) fn to_bytes(&self) -> [u8; TRANSACTION_SIZE] {
-        assert_eq!(self.version, FILE_FORMAT_VERSION2);
+        assert!(self.version == FILE_FORMAT_VERSION2 || self.version == FILE_FORMAT_VERSION3);
         let mut result = [0; TRANSACTION_SIZE];
         result[VERSION_OFFSET] = self.version;
         if let Some(header) = self.user_root {
@@ -513,7 +515,8 @@ mod test {
                 PAGE_SIZE,
                 None,
                 0,
-                0
+                0,
+                true,
             )
             .unwrap()
             .needs_repair()
@@ -605,7 +608,8 @@ mod test {
                 PAGE_SIZE,
                 None,
                 0,
-                0
+                0,
+                true,
             )
             .unwrap()
             .needs_repair()
@@ -642,7 +646,8 @@ mod test {
                 PAGE_SIZE,
                 None,
                 0,
-                0
+                0,
+                true,
             )
             .unwrap()
             .needs_repair()
@@ -701,7 +706,8 @@ mod test {
                 PAGE_SIZE,
                 None,
                 0,
-                0
+                0,
+                true,
             )
             .unwrap()
             .needs_repair()

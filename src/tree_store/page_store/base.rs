@@ -3,9 +3,9 @@ use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 use std::cmp::Ordering;
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
-#[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
+use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 #[cfg(debug_assertions)]
@@ -271,6 +271,60 @@ impl Drop for PageMut {
 pub(crate) enum PageHint {
     None,
     Clean,
+}
+
+pub(crate) enum PageTrackerPolicy {
+    Ignore,
+    Track(HashSet<PageNumber>),
+    Closed,
+}
+
+impl PageTrackerPolicy {
+    pub(crate) fn new_tracking() -> Self {
+        PageTrackerPolicy::Track(HashSet::new())
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            PageTrackerPolicy::Ignore | PageTrackerPolicy::Closed => true,
+            PageTrackerPolicy::Track(x) => x.is_empty(),
+        }
+    }
+
+    pub(super) fn remove(&mut self, page: PageNumber) {
+        match self {
+            PageTrackerPolicy::Ignore => {}
+            PageTrackerPolicy::Track(x) => {
+                assert!(x.remove(&page));
+            }
+            PageTrackerPolicy::Closed => {
+                panic!("Page tracker is closed");
+            }
+        }
+    }
+
+    pub(super) fn insert(&mut self, page: PageNumber) {
+        match self {
+            PageTrackerPolicy::Ignore => {}
+            PageTrackerPolicy::Track(x) => {
+                assert!(x.insert(page));
+            }
+            PageTrackerPolicy::Closed => {
+                panic!("Page tracker is closed");
+            }
+        }
+    }
+
+    pub(crate) fn close(&mut self) -> HashSet<PageNumber> {
+        let old = mem::replace(self, PageTrackerPolicy::Closed);
+        match old {
+            PageTrackerPolicy::Ignore => HashSet::new(),
+            PageTrackerPolicy::Track(x) => x,
+            PageTrackerPolicy::Closed => {
+                panic!("Page tracker is closed");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

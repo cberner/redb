@@ -1132,6 +1132,7 @@ fn regression23() {
     // Extra commit to finalize the cleanup of the freed pages.
     // There was a bug where the restoration of the savepoint would leak pages
     db.begin_write().unwrap().commit().unwrap();
+    db.begin_write().unwrap().commit().unwrap();
 
     let txn = db.begin_write().unwrap();
     assert_eq!(allocated_pages, txn.stats().unwrap().allocated_pages());

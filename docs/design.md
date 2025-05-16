@@ -32,7 +32,7 @@ database file.
 | magic con.| god byte  | padding               | page size                                      |
 | region header pages                           | region max data pages                          |
 | number of full regions                        | data pages in trailing region                  |
-| region tracker page number                                                                     |
+| padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
@@ -46,10 +46,10 @@ database file.
 | system root checksum                                                                           |
 | system root checksum (cont.)                                                                   |
 | system root length                                                                             |
-| freed root page number                                                                         |
-| freed checksum                                                                                 |
-| freed checksum (cont.)                                                                         |
-| freed root length                                                                              |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
+| padding                                                                                        |
 | transaction id                                                                                 |
 | slot checksum                                                                                  |
 | slot checksum (cont.)                                                                          |
@@ -57,7 +57,7 @@ database file.
 |                                 Same layout as commit slot 0                                   |
 ----------------------------------- footer padding (192+ bytes) ------------------------------------
 ==================================================================================================
-| Region header                                                                                  |
+| Region header (unused as of v3)                                                                |
 --------------------------------------------------------------------------------------------------
 | Region data                                                                                    |
 ==================================================================================================
@@ -82,8 +82,7 @@ controls which transaction pointer is the primary.
 * 4 bytes: region max data pages
 * 4 bytes: number of full regions
 * 4 bytes: data pages in partial trailing region
-* 8 bytes: region tracker page number
-* 24 bytes: padding to 64 bytes
+* 32 bytes: padding to 64 bytes
 
 `magic number` must be set to the ASCII letters 'redb' followed by 0x1A, 0x0A, 0xA9, 0x0D, 0x0A. This sequence is
 inspired by the PNG magic number.
@@ -111,8 +110,6 @@ grows or shrinks. This field is only valid when the database does not need recov
 `pages in partial trailing region` all regions except the last must be full. This stores the number of pages in the last region.
 This field is only valid when the database does not need recovery. Otherwise it must be recalculated from the file length and verified
 
-`region tracker page number` the page storing the region tracker data structure. Only valid when the database does not need recovery
-
 ### Transaction slot 0 (128 bytes):
 * 1 byte: file format version number
 * 1 byte: boolean indicating that user root page is non-null
@@ -125,9 +122,7 @@ This field is only valid when the database does not need recovery. Otherwise it 
 * 8 bytes: system root page
 * 16 bytes: system root checksum
 * 8 bytes: system root length
-* 8 bytes: freed table root page
-* 16 bytes: freed table root checksum
-* 8 bytes: freed root length
+* 40 bytes: padding
 * 8 bytes: last committed transaction id
 * 16 bytes: slot checksum
 
@@ -145,12 +140,6 @@ changed during an upgrade.
 `system root checksum` stores the XXH3_128bit checksum of the system root page, which in turn stores the checksum of its child pages.
 
 `system root length` is the number of tables in the system table tree. This field is new in file format v2.
-
-`freed table root page` is the page of the root of the pending free table.
-
-`freed table root checksum` stores the XXH3_128bit checksum of the freed table root page, which in turn stores the checksum of its child pages.
-
-`freed root length` is the length of the freed tree. This field is new in file format v2.
 
 `slot checksum` is the XXH3_128bit checksum of all the preceding fields in the transaction slot.
 
@@ -444,27 +433,16 @@ When a transaction aborts, all pages it allocated are immediately freed.
 
 #### Savepoint restore
 Restoring a savepoint brings all normal tables back to the state they were in when the savepoint was
-captured. The system tables are unaffected, and the freed tree needs to be put into a consistent
-state.
+captured. The savepoint system tables are unaffected, and the freed trees need to be put into a
+consistent state.
 Restoring the normal tables is trivial, since the savepoint captures the data root.
 
 The freed table needs to be updated in two ways:
 1) the restored data root from the savepoint must reference only committed pages, so we remove all
-   pending free pages that are referenced by the savepoint's data root
+   pending free pages from future transactions that are in the data freed tree.
 2) all pages that become unreachable by restoring the savepoint data root must be added to the freed
-   table
-
-Simple method. We rewrite the freed table to remove any pending free pages which are
-referenced by the savepoint's data root, and then add the difference of the pages referenced by the
-current data root and the savepoint's data root.
-
-Fast method. A file format change will be required, but in the future the freed tree can be split
-into one for frees from the data tree and one for frees from the system tree and freed tree itself.
-Then (1) can be accomplished by evicting all entries from the data freed tree which are associated
-with transactions after the savepoint. Then an "allocation tree" will be added to track allocations
-in the data tree for each transaction, as an optimization this will be written only when a savepoint
-exists. Then, (2) will be accomplished by moving all allocations from transactions after the
-savepoint into the pending free state.
+   table. This is done by adding all pages in the allocated pages table from the data tree to the
+   data freed tree.
 
 #### Database repair
 To repair the database after an unclean shutdown we must:
@@ -488,6 +466,20 @@ pages as allocated:
 All pages referenced by a savepoint must be contained in the above, because it is either:
 a) referenced directly by the data, system, or freed tree -- i.e. it's a committed page
 b) it is not referenced, in which case it is in the pending free state and is contained in the freed tree
+
+# Version changes
+## v1
+Initial file format
+
+## v2
+Added a length field to both btrees and tables. This allows for constant time `len()`
+
+## v3
+* Removed the freed tree. Instead, these pages are stored in two system tables, one for the data tree
+and one for the system tree.
+* Added an "allocated pages" system table which tracks the pages allocated by each transaction when
+  a savepoint exists
+* Removed the allocator state. Instead, the "quick repair" code path is used.
 
 # Assumptions about underlying media
 redb is designed to be safe even in the event of power failure or on poorly behaved media.

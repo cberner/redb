@@ -4,7 +4,7 @@ use crate::tree_store::btree_base::{BranchAccessor, LeafAccessor};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
-use crate::tree_store::{BtreeHeader, PageNumber};
+use crate::tree_store::{BtreeHeader, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, Value};
 use std::borrow::Borrow;
 use std::collections::Bound;
@@ -254,6 +254,7 @@ pub(crate) struct BtreeExtractIf<
     predicate: F,
     free_on_drop: Vec<PageNumber>,
     master_free_list: Arc<Mutex<Vec<PageNumber>>>,
+    allocated: Arc<Mutex<PageTrackerPolicy>>,
     mem: Arc<TransactionalMemory>,
 }
 
@@ -265,6 +266,7 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
         inner: BtreeRangeIter<K, V>,
         predicate: F,
         master_free_list: Arc<Mutex<Vec<PageNumber>>>,
+        allocated: Arc<Mutex<PageTrackerPolicy>>,
         mem: Arc<TransactionalMemory>,
     ) -> Self {
         Self {
@@ -273,6 +275,7 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
             predicate,
             free_on_drop: vec![],
             master_free_list,
+            allocated,
             mem,
         }
     }
@@ -291,6 +294,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
                     self.root,
                     self.mem.clone(),
                     &mut self.free_on_drop,
+                    self.allocated.clone(),
                 );
                 match operation.delete(&entry.key()) {
                     Ok(x) => {
@@ -319,6 +323,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
                     self.root,
                     self.mem.clone(),
                     &mut self.free_on_drop,
+                    self.allocated.clone(),
                 );
                 match operation.delete(&entry.key()) {
                     Ok(x) => {
@@ -341,8 +346,9 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
 {
     fn drop(&mut self) {
         let mut master_free_list = self.master_free_list.lock().unwrap();
+        let mut allocated = self.allocated.lock().unwrap();
         for page in self.free_on_drop.drain(..) {
-            if !self.mem.free_if_uncommitted(page) {
+            if !self.mem.free_if_uncommitted(page, &mut allocated) {
                 master_free_list.push(page);
             }
         }
