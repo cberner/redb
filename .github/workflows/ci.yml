@@ -41,7 +41,6 @@ jobs:
           python-version: "3.12"
 
       - name: Install Rust
-        if: steps.rust-cache.outputs.cache-hit != 'true'
         run: |
             rustup component add rustfmt
             rustup component add clippy
