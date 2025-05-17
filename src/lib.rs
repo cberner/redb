@@ -73,7 +73,7 @@ pub use db::{
 };
 pub use error::{
     CommitError, CompactionError, DatabaseError, Error, SavepointError, StorageError, TableError,
-    TransactionError, UpgradeError,
+    TransactionError,
 };
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, ReadOnlyMultimapTable,
