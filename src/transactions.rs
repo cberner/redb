@@ -2511,7 +2511,7 @@ impl ReadTransaction {
     /// Returns `ReadTransactionStillInUse` error if a table or other object retrieved from the transaction still references this transaction
     pub fn close(self) -> Result<(), TransactionError> {
         if Arc::strong_count(self.tree.transaction_guard()) > 1 {
-            return Err(TransactionError::ReadTransactionStillInUse(self));
+            return Err(TransactionError::ReadTransactionStillInUse(Box::new(self)));
         }
         // No-op, just drop ourself
         Ok(())
