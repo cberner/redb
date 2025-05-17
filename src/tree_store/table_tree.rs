@@ -9,7 +9,7 @@ use crate::tree_store::{
     Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageHint, PageNumber, PagePath,
     PageTrackerPolicy, RawBtree, TableType, TransactionalMemory,
 };
-use crate::types::{Key, MutInPlaceValue, TypeName, Value};
+use crate::types::{Key, Value};
 use crate::{DatabaseStats, Result};
 use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -17,95 +17,6 @@ use std::mem::size_of;
 use std::ops::RangeFull;
 use std::sync::{Arc, Mutex};
 use std::{mem, thread};
-
-// TODO: remove this struct in 3.0 release
-#[derive(Debug)]
-pub(crate) struct FreedTableKey {
-    pub(crate) transaction_id: u64,
-    pub(crate) pagination_id: u64,
-}
-
-impl Value for FreedTableKey {
-    type SelfType<'a>
-        = FreedTableKey
-    where
-        Self: 'a;
-    type AsBytes<'a>
-        = [u8; 2 * size_of::<u64>()]
-    where
-        Self: 'a;
-
-    fn fixed_width() -> Option<usize> {
-        Some(2 * size_of::<u64>())
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> Self
-    where
-        Self: 'a,
-    {
-        let transaction_id = u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap());
-        let pagination_id = u64::from_le_bytes(data[size_of::<u64>()..].try_into().unwrap());
-        Self {
-            transaction_id,
-            pagination_id,
-        }
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> [u8; 2 * size_of::<u64>()]
-    where
-        Self: 'b,
-    {
-        let mut result = [0u8; 2 * size_of::<u64>()];
-        result[..size_of::<u64>()].copy_from_slice(&value.transaction_id.to_le_bytes());
-        result[size_of::<u64>()..].copy_from_slice(&value.pagination_id.to_le_bytes());
-        result
-    }
-
-    fn type_name() -> TypeName {
-        TypeName::internal("redb::FreedTableKey")
-    }
-}
-
-impl Key for FreedTableKey {
-    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
-        let value1 = Self::from_bytes(data1);
-        let value2 = Self::from_bytes(data2);
-
-        match value1.transaction_id.cmp(&value2.transaction_id) {
-            std::cmp::Ordering::Greater => std::cmp::Ordering::Greater,
-            std::cmp::Ordering::Equal => value1.pagination_id.cmp(&value2.pagination_id),
-            std::cmp::Ordering::Less => std::cmp::Ordering::Less,
-        }
-    }
-}
-
-// Format:
-// 2 bytes: length
-// length * size_of(PageNumber): array of page numbers
-// TODO: remove this struct in 3.0 release
-#[derive(Debug)]
-pub(crate) struct FreedPageList<'a> {
-    data: &'a [u8],
-}
-
-impl FreedPageList<'_> {
-    pub(crate) fn required_bytes(len: usize) -> usize {
-        2 + PageNumber::serialized_size() * len
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        u16::from_le_bytes(self.data[..size_of::<u16>()].try_into().unwrap()).into()
-    }
-
-    pub(crate) fn get(&self, index: usize) -> PageNumber {
-        let start = size_of::<u16>() + PageNumber::serialized_size() * index;
-        PageNumber::from_le_bytes(
-            self.data[start..(start + PageNumber::serialized_size())]
-                .try_into()
-                .unwrap(),
-        )
-    }
-}
 
 #[derive(Debug)]
 #[repr(transparent)]
@@ -125,53 +36,6 @@ impl PageListMut {
 
     pub(crate) fn clear(&mut self) {
         self.data[..size_of::<u16>()].fill(0);
-    }
-}
-
-impl Value for FreedPageList<'_> {
-    type SelfType<'a>
-        = FreedPageList<'a>
-    where
-        Self: 'a;
-    type AsBytes<'a>
-        = &'a [u8]
-    where
-        Self: 'a;
-
-    fn fixed_width() -> Option<usize> {
-        None
-    }
-
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
-    where
-        Self: 'a,
-    {
-        FreedPageList { data }
-    }
-
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'b [u8]
-    where
-        Self: 'b,
-    {
-        value.data
-    }
-
-    fn type_name() -> TypeName {
-        TypeName::internal("redb::FreedPageList")
-    }
-}
-
-impl MutInPlaceValue for FreedPageList<'_> {
-    type BaseRefType = PageListMut;
-
-    fn initialize(data: &mut [u8]) {
-        assert!(data.len() >= 8);
-        // Set the length to zero
-        data[..8].fill(0);
-    }
-
-    fn from_bytes_mut(data: &mut [u8]) -> &mut Self::BaseRefType {
-        unsafe { &mut *(std::ptr::from_mut::<[u8]>(data) as *mut PageListMut) }
     }
 }
 
@@ -333,6 +197,7 @@ impl TableTreeMut<'_> {
         self.tree.set_root(root);
     }
 
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
     where
         F: FnMut(&PagePath) -> Result,

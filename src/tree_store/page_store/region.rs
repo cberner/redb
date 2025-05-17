@@ -1,18 +1,12 @@
-use crate::Result;
+#[cfg(any(test, fuzzing))]
 use crate::tree_store::PageNumber;
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
-use crate::tree_store::page_store::cached_file::PagedCachedFile;
-use crate::tree_store::page_store::header::DatabaseHeader;
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, MAX_MAX_PAGE_ORDER};
 use crate::tree_store::page_store::xxh3_checksum;
 use std::cmp::{self, max};
 use std::mem::size_of;
-
-const REGION_FORMAT_VERSION: u8 = 1;
-const ALLOCATOR_LENGTH_OFFSET: usize = 4;
-const ALLOCATOR_OFFSET: usize = ALLOCATOR_LENGTH_OFFSET + size_of::<u32>();
 
 // Tracks the page orders that MAY BE free in each region. This data structure is optimistic, so
 // a region may not actually have a page free for a given order
@@ -158,83 +152,6 @@ impl Allocators {
         result
     }
 
-    pub(super) fn from_bytes(header: &DatabaseHeader, storage: &PagedCachedFile) -> Result<Self> {
-        let page_size = header.page_size();
-        let region_header_size =
-            header.layout().full_region_layout().get_header_pages() * page_size;
-        let region_size = u64::from(header.layout().full_region_layout().num_pages())
-            * u64::from(page_size)
-            + u64::from(region_header_size);
-        let range = header.region_tracker().address_range(
-            page_size.into(),
-            region_size,
-            region_header_size.into(),
-            page_size,
-        );
-        let len: usize = (range.end - range.start).try_into().unwrap();
-        let region_tracker = storage.read_direct(range.start, len)?;
-        let mut region_allocators = vec![];
-        let layout = header.layout();
-        for i in 0..layout.num_regions() {
-            let base = layout.region_base_address(i);
-            let header_len: usize = layout
-                .region_layout(i)
-                .data_section()
-                .start
-                .try_into()
-                .unwrap();
-
-            let mem = storage.read_direct(base, header_len)?;
-            region_allocators.push(RegionHeader::deserialize(&mem));
-        }
-
-        Ok(Self {
-            region_tracker: RegionTracker::from_page(&region_tracker),
-            region_allocators,
-        })
-    }
-
-    pub(super) fn flush_to(
-        &self,
-        region_tracker_page: PageNumber,
-        layout: DatabaseLayout,
-        storage: &PagedCachedFile,
-    ) -> Result {
-        let page_size = layout.full_region_layout().page_size();
-        let region_header_size =
-            u64::from(layout.full_region_layout().get_header_pages() * page_size);
-        let region_size = u64::from(layout.full_region_layout().num_pages()) * u64::from(page_size)
-            + region_header_size;
-        let mut region_tracker_mem = {
-            let range = region_tracker_page.address_range(
-                page_size.into(),
-                region_size,
-                region_header_size,
-                page_size,
-            );
-            let len: usize = (range.end - range.start).try_into().unwrap();
-            storage.write(range.start, len, false)?
-        };
-        let tracker_bytes = self.region_tracker.to_vec();
-        region_tracker_mem.mem_mut()[..tracker_bytes.len()].copy_from_slice(&tracker_bytes);
-
-        assert_eq!(self.region_allocators.len(), layout.num_regions() as usize);
-        for i in 0..layout.num_regions() {
-            let base = layout.region_base_address(i);
-            let len: usize = layout
-                .region_layout(i)
-                .data_section()
-                .start
-                .try_into()
-                .unwrap();
-
-            let mut mem = storage.write(base, len, false)?;
-            RegionHeader::serialize(&self.region_allocators[i as usize], mem.mem_mut());
-        }
-
-        Ok(())
-    }
-
     pub(super) fn resize_to(&mut self, new_layout: DatabaseLayout) {
         let shrink = match (new_layout.num_regions() as usize).cmp(&self.region_allocators.len()) {
             cmp::Ordering::Less => true,
@@ -304,10 +221,7 @@ impl Allocators {
 }
 
 // Region header
-// 1 byte: region format version
-// 3 bytes: padding
-// 4 bytes: length of the allocator state in bytes
-// n bytes: the allocator state
+// Note: unused as of v3 file format
 pub(crate) struct RegionHeader {}
 
 impl RegionHeader {
@@ -317,25 +231,5 @@ impl RegionHeader {
         let allocator = BuddyAllocator::new(pages_per_region, pages_per_region);
         let result = 8u64 + allocator.to_vec().len() as u64;
         result.div_ceil(page_size).try_into().unwrap()
-    }
-
-    fn serialize(allocator: &BuddyAllocator, output: &mut [u8]) {
-        let serialized = allocator.to_vec();
-        let len: u32 = serialized.len().try_into().unwrap();
-        output[0] = REGION_FORMAT_VERSION;
-        output[ALLOCATOR_LENGTH_OFFSET..(ALLOCATOR_LENGTH_OFFSET + size_of::<u32>())]
-            .copy_from_slice(&len.to_le_bytes());
-        output[ALLOCATOR_OFFSET..(ALLOCATOR_OFFSET + serialized.len())]
-            .copy_from_slice(&serialized);
-    }
-
-    fn deserialize(data: &[u8]) -> BuddyAllocator {
-        assert_eq!(REGION_FORMAT_VERSION, data[0]);
-        let allocator_len = u32::from_le_bytes(
-            data[ALLOCATOR_LENGTH_OFFSET..(ALLOCATOR_LENGTH_OFFSET + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        BuddyAllocator::from_bytes(&data[ALLOCATOR_OFFSET..(ALLOCATOR_OFFSET + allocator_len)])
     }
 }

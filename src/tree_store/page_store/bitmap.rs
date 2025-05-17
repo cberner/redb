@@ -177,6 +177,7 @@ impl BtreeBitmap {
     }
 }
 
+#[cfg(any(test, fuzzing))]
 pub(crate) struct U64GroupedBitmapIter<'a> {
     len: u32,
     data: &'a [u64],
@@ -184,6 +185,7 @@ pub(crate) struct U64GroupedBitmapIter<'a> {
     current: u64,
 }
 
+#[cfg(any(test, fuzzing))]
 impl<'a> U64GroupedBitmapIter<'a> {
     fn new(len: u32, data: &'a [u64]) -> Self {
         Self {
@@ -195,6 +197,7 @@ impl<'a> U64GroupedBitmapIter<'a> {
     }
 }
 
+#[cfg(any(test, fuzzing))]
 impl Iterator for U64GroupedBitmapIter<'_> {
     type Item = u32;
 
@@ -217,54 +220,6 @@ impl Iterator for U64GroupedBitmapIter<'_> {
         self.data_index += 1;
         while self.data_index < self.data.len() {
             let next = self.data[self.data_index];
-            if next != 0 {
-                self.current = next;
-                return self.next();
-            }
-            self.data_index += 1;
-        }
-        None
-    }
-}
-
-pub(crate) struct U64GroupedBitmapDifference<'a, 'b> {
-    data: &'a [u64],
-    exclusion_data: &'b [u64],
-    data_index: usize,
-    current: u64,
-}
-
-impl<'a, 'b> U64GroupedBitmapDifference<'a, 'b> {
-    fn new(data: &'a [u64], exclusion_data: &'b [u64]) -> Self {
-        assert_eq!(data.len(), exclusion_data.len());
-        let base = data[0];
-        let exclusion = exclusion_data[0];
-        Self {
-            data,
-            exclusion_data,
-            data_index: 0,
-            current: base & (!exclusion),
-        }
-    }
-}
-
-impl Iterator for U64GroupedBitmapDifference<'_, '_> {
-    type Item = u32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.current != 0 {
-            let mut result: u32 = self.data_index.try_into().unwrap();
-            result *= u64::BITS;
-            let bit = self.current.trailing_zeros();
-            result += bit;
-            self.current &= !U64GroupedBitmap::select_mask(bit as usize);
-            return Some(result);
-        }
-        self.data_index += 1;
-        while self.data_index < self.data.len() {
-            let next = self.data[self.data_index];
-            let exclusion = *self.exclusion_data.get(self.data_index).unwrap_or(&0);
-            let next = next & (!exclusion);
             if next != 0 {
                 self.current = next;
                 return self.next();
@@ -339,13 +294,7 @@ impl U64GroupedBitmap {
         self.data.iter().map(|x| x.count_zeros()).sum()
     }
 
-    pub fn difference<'a0, 'b0>(
-        &'a0 self,
-        exclusion: &'b0 U64GroupedBitmap,
-    ) -> U64GroupedBitmapDifference<'a0, 'b0> {
-        U64GroupedBitmapDifference::new(&self.data, &exclusion.data)
-    }
-
+    #[cfg(any(test, fuzzing))]
     pub fn iter(&self) -> U64GroupedBitmapIter {
         U64GroupedBitmapIter::new(self.len, &self.data)
     }

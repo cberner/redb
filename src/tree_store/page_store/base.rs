@@ -91,20 +91,6 @@ impl PageNumber {
         }
     }
 
-    // Returns true if this PageNumber is before the other PageNumber in the file layout
-    pub(crate) fn is_before(&self, other: PageNumber) -> bool {
-        if self.region < other.region {
-            return true;
-        }
-        if self.region > other.region {
-            return false;
-        }
-        let self_order0 = self.page_index * 2u32.pow(self.page_order.into());
-        let other_order0 = other.page_index * 2u32.pow(other.page_order.into());
-        assert_ne!(self_order0, other_order0, "{self:?} overlaps {other:?}");
-        self_order0 < other_order0
-    }
-
     #[cfg(test)]
     pub(crate) fn to_order0(self) -> Vec<PageNumber> {
         let mut pages = vec![self];

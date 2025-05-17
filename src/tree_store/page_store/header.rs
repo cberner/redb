@@ -1,10 +1,10 @@
 use crate::transaction_tracker::TransactionId;
+use crate::tree_store::Checksum;
 use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::page_manager::{
     FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, xxh3_checksum,
 };
-use crate::tree_store::{Checksum, PageNumber};
 use crate::{DatabaseError, Result, StorageError};
 use std::mem::size_of;
 
@@ -29,12 +29,12 @@ use std::mem::size_of;
 // 5 bytes: padding
 // 8 bytes: root page
 // 16 bytes: root checksum
-// 8 bytes: freed table root page
-// 16 bytes: freed table root checksum
+// 8 bytes: unused: formerly freed table root page
+// 16 bytes: unused: formerly freed table root checksum
 // 8 bytes: last committed transaction id
 // 4 bytes: number of full regions
 // 4 bytes: data pages in partial trailing region
-// 8 bytes: region tracker page number
+// 8 bytes: unused: formerly region tracker page number
 // 16 bytes: slot checksum
 //
 // Commit slot 1 (next 128 bytes):
@@ -48,8 +48,8 @@ const REGION_HEADER_PAGES_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u32>();
 const REGION_MAX_DATA_PAGES_OFFSET: usize = REGION_HEADER_PAGES_OFFSET + size_of::<u32>();
 const NUM_FULL_REGIONS_OFFSET: usize = REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>();
 const TRAILING_REGION_DATA_PAGES_OFFSET: usize = NUM_FULL_REGIONS_OFFSET + size_of::<u32>();
-const REGION_TRACKER_PAGE_NUMBER_OFFSET: usize =
-    TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>();
+// Formerly the region tracker page
+const _UNUSED3_OFFSET: usize = TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>();
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 64;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
@@ -64,13 +64,13 @@ const TWO_PHASE_COMMIT: u8 = 4;
 const VERSION_OFFSET: usize = 0;
 const USER_ROOT_NON_NULL_OFFSET: usize = size_of::<u8>();
 const SYSTEM_ROOT_NON_NULL_OFFSET: usize = USER_ROOT_NON_NULL_OFFSET + size_of::<u8>();
-const FREED_ROOT_NON_NULL_OFFSET: usize = SYSTEM_ROOT_NON_NULL_OFFSET + size_of::<u8>();
+const _UNUSED_OFFSET: usize = SYSTEM_ROOT_NON_NULL_OFFSET + size_of::<u8>();
 const PADDING: usize = 4;
 
-const USER_ROOT_OFFSET: usize = FREED_ROOT_NON_NULL_OFFSET + size_of::<u8>() + PADDING;
+const USER_ROOT_OFFSET: usize = _UNUSED_OFFSET + size_of::<u8>() + PADDING;
 const SYSTEM_ROOT_OFFSET: usize = USER_ROOT_OFFSET + BtreeHeader::serialized_size();
-const FREED_ROOT_OFFSET: usize = SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size();
-const TRANSACTION_ID_OFFSET: usize = FREED_ROOT_OFFSET + BtreeHeader::serialized_size();
+const _UNUSED2_OFFSET: usize = SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size();
+const TRANSACTION_ID_OFFSET: usize = _UNUSED2_OFFSET + BtreeHeader::serialized_size();
 const TRANSACTION_LAST_FIELD: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
 
 const SLOT_CHECKSUM_OFFSET: usize = TRANSACTION_SIZE - size_of::<Checksum>();
@@ -102,23 +102,17 @@ pub(super) struct DatabaseHeader {
     region_max_data_pages: u32,
     full_regions: u32,
     trailing_partial_region_pages: u32,
-    region_tracker: PageNumber,
     transaction_slots: [TransactionHeader; 2],
 }
 
 impl DatabaseHeader {
-    pub(super) fn new(
-        layout: DatabaseLayout,
-        transaction_id: TransactionId,
-        version: u8,
-        region_tracker: PageNumber,
-    ) -> Self {
+    pub(super) fn new(layout: DatabaseLayout, transaction_id: TransactionId) -> Self {
         #[allow(clippy::assertions_on_constants)]
         {
             assert!(TRANSACTION_LAST_FIELD <= SLOT_CHECKSUM_OFFSET);
         }
 
-        let slot = TransactionHeader::new(transaction_id, version);
+        let slot = TransactionHeader::new(transaction_id);
         Self {
             primary_slot: 0,
             recovery_required: true,
@@ -131,7 +125,6 @@ impl DatabaseHeader {
                 .trailing_region_layout()
                 .map(|x| x.num_pages())
                 .unwrap_or_default(),
-            region_tracker,
             transaction_slots: [slot.clone(), slot],
         }
     }
@@ -171,16 +164,6 @@ impl DatabaseHeader {
             self.trailing_partial_region_pages = 0;
         }
         self.full_regions = layout.num_full_regions();
-    }
-
-    pub(super) fn region_tracker(&self) -> PageNumber {
-        assert_ne!(self.primary_slot().version, FILE_FORMAT_VERSION3);
-        self.region_tracker
-    }
-
-    pub(super) fn set_region_tracker(&mut self, page: PageNumber) {
-        assert_ne!(self.primary_slot().version, FILE_FORMAT_VERSION3);
-        self.region_tracker = page;
     }
 
     pub(super) fn primary_slot(&self) -> &TransactionHeader {
@@ -255,12 +238,6 @@ impl DatabaseHeader {
         let region_max_data_pages = get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..]);
         let full_regions = get_u32(&data[NUM_FULL_REGIONS_OFFSET..]);
         let trailing_data_pages = get_u32(&data[TRAILING_REGION_DATA_PAGES_OFFSET..]);
-        let region_tracker = PageNumber::from_le_bytes(
-            data[REGION_TRACKER_PAGE_NUMBER_OFFSET
-                ..(REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size())]
-                .try_into()
-                .unwrap(),
-        );
         let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(
             &data[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + TRANSACTION_SIZE)],
         )?;
@@ -282,7 +259,6 @@ impl DatabaseHeader {
             region_max_data_pages,
             full_regions,
             trailing_partial_region_pages: trailing_data_pages,
-            region_tracker,
             transaction_slots: [slot0, slot1],
         };
         let repair = HeaderRepairInfo {
@@ -316,9 +292,6 @@ impl DatabaseHeader {
         result[TRAILING_REGION_DATA_PAGES_OFFSET
             ..(TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>())]
             .copy_from_slice(&self.trailing_partial_region_pages.to_le_bytes());
-        result[REGION_TRACKER_PAGE_NUMBER_OFFSET
-            ..(REGION_TRACKER_PAGE_NUMBER_OFFSET + PageNumber::serialized_size())]
-            .copy_from_slice(&self.region_tracker.to_le_bytes());
         let slot0 = self.transaction_slots[0].to_bytes();
         result[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + slot0.len())].copy_from_slice(&slot0);
         let slot1 = self.transaction_slots[1].to_bytes();
@@ -333,17 +306,15 @@ pub(super) struct TransactionHeader {
     pub(super) version: u8,
     pub(super) user_root: Option<BtreeHeader>,
     pub(super) system_root: Option<BtreeHeader>,
-    pub(super) freed_root: Option<BtreeHeader>,
     pub(super) transaction_id: TransactionId,
 }
 
 impl TransactionHeader {
-    fn new(transaction_id: TransactionId, version: u8) -> Self {
+    fn new(transaction_id: TransactionId) -> Self {
         Self {
-            version,
+            version: FILE_FORMAT_VERSION3,
             user_root: None,
             system_root: None,
-            freed_root: None,
             transaction_id,
         }
     }
@@ -352,10 +323,10 @@ impl TransactionHeader {
     pub(super) fn from_bytes(data: &[u8]) -> Result<(Self, bool), DatabaseError> {
         let version = data[VERSION_OFFSET];
         match version {
-            FILE_FORMAT_VERSION1 => {
+            FILE_FORMAT_VERSION1 | FILE_FORMAT_VERSION2 => {
                 return Err(DatabaseError::UpgradeRequired(version));
             }
-            FILE_FORMAT_VERSION2 | FILE_FORMAT_VERSION3 => {}
+            FILE_FORMAT_VERSION3 => {}
             _ => {
                 return Err(StorageError::Corrupted(format!(
                     "Expected file format version <= {FILE_FORMAT_VERSION3}, found {version}",
@@ -388,22 +359,12 @@ impl TransactionHeader {
         } else {
             None
         };
-        let freed_root = if data[FREED_ROOT_NON_NULL_OFFSET] != 0 {
-            Some(BtreeHeader::from_le_bytes(
-                data[FREED_ROOT_OFFSET..(FREED_ROOT_OFFSET + BtreeHeader::serialized_size())]
-                    .try_into()
-                    .unwrap(),
-            ))
-        } else {
-            None
-        };
         let transaction_id = TransactionId::new(get_u64(&data[TRANSACTION_ID_OFFSET..]));
 
         let result = Self {
             version,
             user_root,
             system_root,
-            freed_root,
             transaction_id,
         };
 
@@ -411,7 +372,7 @@ impl TransactionHeader {
     }
 
     pub(super) fn to_bytes(&self) -> [u8; TRANSACTION_SIZE] {
-        assert!(self.version == FILE_FORMAT_VERSION2 || self.version == FILE_FORMAT_VERSION3);
+        assert_eq!(self.version, FILE_FORMAT_VERSION3);
         let mut result = [0; TRANSACTION_SIZE];
         result[VERSION_OFFSET] = self.version;
         if let Some(header) = self.user_root {
@@ -422,11 +383,6 @@ impl TransactionHeader {
         if let Some(header) = self.system_root {
             result[SYSTEM_ROOT_NON_NULL_OFFSET] = 1;
             result[SYSTEM_ROOT_OFFSET..(SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size())]
-                .copy_from_slice(&header.to_le_bytes());
-        }
-        if let Some(header) = self.freed_root {
-            result[FREED_ROOT_NON_NULL_OFFSET] = 1;
-            result[FREED_ROOT_OFFSET..(FREED_ROOT_OFFSET + BtreeHeader::serialized_size())]
                 .copy_from_slice(&header.to_le_bytes());
         }
         result[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
@@ -518,7 +474,6 @@ mod test {
                 None,
                 0,
                 0,
-                false,
             )
             .unwrap()
             .needs_repair()
@@ -611,7 +566,6 @@ mod test {
                 None,
                 0,
                 0,
-                false,
             )
             .unwrap()
             .needs_repair()
@@ -649,7 +603,6 @@ mod test {
                 None,
                 0,
                 0,
-                false,
             )
             .unwrap()
             .needs_repair()
@@ -709,7 +662,6 @@ mod test {
                 None,
                 0,
                 0,
-                false,
             )
             .unwrap()
             .needs_repair()
