@@ -18,7 +18,7 @@ pub(crate) use base::{
 };
 pub(crate) use header::PAGE_SIZE;
 pub use in_memory_backend::InMemoryBackend;
-pub(crate) use page_manager::{FILE_FORMAT_VERSION2, TransactionalMemory, xxh3_checksum};
+pub(crate) use page_manager::{FILE_FORMAT_VERSION3, TransactionalMemory, xxh3_checksum};
 pub use savepoint::Savepoint;
 pub(crate) use savepoint::SerializedSavepoint;
 
