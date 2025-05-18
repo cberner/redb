@@ -1,4 +1,4 @@
-use crate::tree_store::{FILE_FORMAT_VERSION2, MAX_VALUE_LENGTH};
+use crate::tree_store::{FILE_FORMAT_VERSION3, MAX_VALUE_LENGTH};
 use crate::{ReadTransaction, TypeName};
 use std::fmt::{Display, Formatter};
 use std::sync::PoisonError;
@@ -239,7 +239,7 @@ impl Display for DatabaseError {
             DatabaseError::UpgradeRequired(actual) => {
                 write!(
                     f,
-                    "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION2}, but file is version {actual}"
+                    "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION3}, but file is version {actual}"
                 )
             }
             DatabaseError::RepairAborted => {
@@ -520,7 +520,7 @@ impl Display for Error {
             Error::UpgradeRequired(actual) => {
                 write!(
                     f,
-                    "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION2}, but file is version {actual}"
+                    "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION3}, but file is version {actual}"
                 )
             }
             Error::ValueTooLarge(len) => {
