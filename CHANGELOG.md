@@ -1,5 +1,20 @@
 # redb - Changelog
 
+## 2.6.0 - 2025-05-22
+
+### Add support for the v3 file format.
+This file format improves savepoints.
+Savepoints in the v3 format have constant, and small, overhead. Creating
+and restoring them is also much faster. The v3 file format also supports
+savepoints on large databases (v2 has a limit around 32TB). This release
+creates v2 databases by default. Use `Builder::create_with_file_format_v3()`
+and `Database::upgrade()`, respectively, to enable and migrate to v3.
+
+**The upcoming 3.0 release will only support the v3 file format.**
+
+* Add `Builder::create_with_file_format_v3()`
+* Add `Database::upgrade()`
+
 ## 2.5.0 - 2025-04-21
 * Add `rename_table()` and `rename_multimap_table()`
 * Add `Key` and `Value` implementations for the unary tuple type (i.e. `(T,)`)
