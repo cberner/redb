@@ -642,7 +642,7 @@ fn exec_table_crash_support<T: Clone + Debug>(config: &FuzzConfig, apply: fn(Wri
         let old_countdown = countdown.swap(u64::MAX, Ordering::SeqCst);
         let mut txn = db.begin_write().unwrap();
         if !transaction.durable {
-            txn.set_durability(Durability::None);
+            txn.set_durability(Durability::None).unwrap();
         }
         txn.set_quick_repair(transaction.quick_repair);
         let mut counter_table = txn.open_table(COUNTER_TABLE).unwrap();

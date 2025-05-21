@@ -13,8 +13,9 @@ use crate::types::{Key, Value};
 use crate::{
     AccessGuard, AccessGuardMut, ExtractIf, MultimapTable, MultimapTableDefinition,
     MultimapTableHandle, MutInPlaceValue, Range, ReadOnlyMultimapTable, ReadOnlyTable, Result,
-    Savepoint, SavepointError, StorageError, Table, TableDefinition, TableError, TableHandle,
-    TransactionError, TypeName, UntypedMultimapTableHandle, UntypedTableHandle,
+    Savepoint, SavepointError, SetDurabilityError, StorageError, Table, TableDefinition,
+    TableError, TableHandle, TransactionError, TypeName, UntypedMultimapTableHandle,
+    UntypedTableHandle,
 };
 #[cfg(feature = "logging")]
 use log::{debug, warn};
@@ -1175,19 +1176,22 @@ impl WriteTransaction {
     /// Set the desired durability level for writes made in this transaction
     /// Defaults to [`Durability::Immediate`]
     ///
-    /// Will panic if the durability is reduced below `[Durability::Immediate]` after a persistent savepoint has been created or deleted.
-    pub fn set_durability(&mut self, durability: Durability) {
-        let no_created = self
+    /// If a persistent savepoint has been created or deleted, in this transaction, the durability may not
+    /// be reduced below [`Durability::Immediate`]
+    pub fn set_durability(&mut self, durability: Durability) -> Result<(), SetDurabilityError> {
+        let created = !self
             .created_persistent_savepoints
             .lock()
             .unwrap()
             .is_empty();
-        let no_deleted = self
+        let deleted = !self
             .deleted_persistent_savepoints
             .lock()
             .unwrap()
             .is_empty();
-        assert!(no_created && no_deleted);
+        if (created || deleted) && !matches!(durability, Durability::Immediate) {
+            return Err(SetDurabilityError::PersistentSavepointModified);
+        }
 
         self.durability = match durability {
             Durability::None => InternalDurability::None,
@@ -1199,6 +1203,8 @@ impl WriteTransaction {
                 InternalDurability::Immediate
             }
         };
+
+        Ok(())
     }
 
     /// Enable or disable 2-phase commit (defaults to disabled)
