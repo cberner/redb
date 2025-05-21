@@ -72,8 +72,8 @@ pub use db::{
     StorageBackend, TableDefinition, TableHandle, UntypedMultimapTableHandle, UntypedTableHandle,
 };
 pub use error::{
-    CommitError, CompactionError, DatabaseError, Error, SavepointError, StorageError, TableError,
-    TransactionError,
+    CommitError, CompactionError, DatabaseError, Error, SavepointError, SetDurabilityError,
+    StorageError, TableError, TransactionError,
 };
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, ReadOnlyMultimapTable,

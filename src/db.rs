@@ -1240,7 +1240,7 @@ mod test {
         tx.set_two_phase_commit(true);
         let savepoint1 = tx.ephemeral_savepoint().unwrap();
         tx.restore_savepoint(&savepoint0).unwrap();
-        tx.set_durability(Durability::None);
+        tx.set_durability(Durability::None).unwrap();
         {
             let mut t = tx.open_table(table_def).unwrap();
             t.insert_reserve(&660503, 489).unwrap().as_mut().fill(0xFF);
@@ -1284,7 +1284,7 @@ mod test {
         let savepoint4 = tx.ephemeral_savepoint().unwrap();
         drop(savepoint2);
         tx.restore_savepoint(&savepoint3).unwrap();
-        tx.set_durability(Durability::None);
+        tx.set_durability(Durability::None).unwrap();
         {
             let mut t = tx.open_table(table_def).unwrap();
             assert!(t.remove(&207936).unwrap().is_none());
@@ -1304,7 +1304,7 @@ mod test {
         let mut tx = db.begin_write().unwrap();
         tx.set_two_phase_commit(true);
         tx.restore_savepoint(&savepoint5).unwrap();
-        tx.set_durability(Durability::None);
+        tx.set_durability(Durability::None).unwrap();
         {
             tx.open_table(table_def).unwrap();
         }
@@ -1324,7 +1324,7 @@ mod test {
 
         let mut tx = db.begin_write().unwrap();
         let _savepoint0 = tx.ephemeral_savepoint().unwrap();
-        tx.set_durability(Durability::None);
+        tx.set_durability(Durability::None).unwrap();
         {
             let mut t = tx.open_table(table_def).unwrap();
             let value = vec![0; 306];
@@ -1335,7 +1335,7 @@ mod test {
         let mut tx = db.begin_write().unwrap();
         let savepoint1 = tx.ephemeral_savepoint().unwrap();
         tx.restore_savepoint(&savepoint1).unwrap();
-        tx.set_durability(Durability::None);
+        tx.set_durability(Durability::None).unwrap();
         {
             let mut t = tx.open_table(table_def).unwrap();
             let value = vec![0; 2008];

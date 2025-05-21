@@ -4,7 +4,7 @@ use redb::backends::FileBackend;
 use redb::{
     AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
     MultimapTableDefinition, MultimapValue, Range, ReadableTable, ReadableTableMetadata,
-    StorageBackend, TableDefinition, TableStats, TransactionError, Value,
+    SetDurabilityError, StorageBackend, TableDefinition, TableStats, TransactionError, Value,
 };
 use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 use std::borrow::Borrow;
@@ -114,7 +114,7 @@ fn mixed_durable_commit() {
 
     let db = Database::create(tmpfile.path()).unwrap();
     let mut txn = db.begin_write().unwrap();
-    txn.set_durability(Durability::None);
+    txn.set_durability(Durability::None).unwrap();
     {
         let mut table = txn.open_table(U64_TABLE).unwrap();
         table.insert(&0, &0).unwrap();
@@ -131,7 +131,7 @@ fn non_durable_commit_persistence() {
 
     let db = Database::create(tmpfile.path()).unwrap();
     let mut txn = db.begin_write().unwrap();
-    txn.set_durability(Durability::None);
+    txn.set_durability(Durability::None).unwrap();
     let pairs = random_data(100, 16, 20);
     {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
@@ -164,7 +164,7 @@ fn test_persistence(durability: Durability) {
 
     let db = Database::create(tmpfile.path()).unwrap();
     let mut txn = db.begin_write().unwrap();
-    txn.set_durability(durability);
+    txn.set_durability(durability).unwrap();
     let pairs = random_data(100, 16, 20);
     {
         let mut table = txn.open_table(SLICE_TABLE).unwrap();
@@ -604,7 +604,7 @@ fn regression7() {
     tx.commit().unwrap();
 
     let mut tx = db.begin_write().unwrap();
-    tx.set_durability(Durability::None);
+    tx.set_durability(Durability::None).unwrap();
     {
         let mut t = tx.open_table(table_def).unwrap();
         let v = vec![0u8; 47];
@@ -637,7 +637,7 @@ fn regression8() {
     let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
     let mut tx = db.begin_write().unwrap();
-    tx.set_durability(Durability::None);
+    tx.set_durability(Durability::None).unwrap();
     {
         let mut t = tx.open_table(table_def).unwrap();
         let v = vec![0u8; 1186];
@@ -794,7 +794,7 @@ fn regression13() {
     let table_def: MultimapTableDefinition<u64, &[u8]> = MultimapTableDefinition::new("x");
 
     let mut tx = db.begin_write().unwrap();
-    tx.set_durability(Durability::None);
+    tx.set_durability(Durability::None).unwrap();
     {
         let mut t = tx.open_multimap_table(table_def).unwrap();
         let value = vec![0; 1026];
@@ -814,7 +814,7 @@ fn regression14() {
     let table_def: MultimapTableDefinition<u64, &[u8]> = MultimapTableDefinition::new("x");
 
     let mut tx = db.begin_write().unwrap();
-    tx.set_durability(Durability::None);
+    tx.set_durability(Durability::None).unwrap();
     {
         let mut t = tx.open_multimap_table(table_def).unwrap();
         let value = vec![0; 1424];
@@ -823,7 +823,7 @@ fn regression14() {
     tx.commit().unwrap();
 
     let mut tx = db.begin_write().unwrap();
-    tx.set_durability(Durability::None);
+    tx.set_durability(Durability::None).unwrap();
     {
         let mut t = tx.open_multimap_table(table_def).unwrap();
         let value = vec![0; 2230];
@@ -853,7 +853,7 @@ fn regression17() {
     let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
     let mut tx = db.begin_write().unwrap();
-    tx.set_durability(Durability::None);
+    tx.set_durability(Durability::None).unwrap();
     {
         let mut t = tx.open_table(table_def).unwrap();
         let value = vec![0; 4578];
@@ -1231,7 +1231,7 @@ fn multimap_stats() {
     let mut last_size = 0;
     for i in 0..1000 {
         let mut txn = db.begin_write().unwrap();
-        txn.set_durability(Durability::None);
+        txn.set_durability(Durability::None).unwrap();
         let mut table = txn.open_multimap_table(table_def).unwrap();
         table.insert(0, i).unwrap();
         drop(table);
@@ -1242,6 +1242,25 @@ fn multimap_stats() {
         assert!(bytes > last_size, "{i}");
         last_size = bytes;
     }
+}
+
+#[test]
+fn no_downgrade_durability_with_savepoint() {
+    let tmpfile = create_tempfile();
+
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let mut tx = db.begin_write().unwrap();
+    tx.persistent_savepoint().unwrap();
+    assert!(matches!(
+        tx.set_durability(Durability::Eventual),
+        Err(SetDurabilityError::PersistentSavepointModified)
+    ));
+    assert!(matches!(
+        tx.set_durability(Durability::None),
+        Err(SetDurabilityError::PersistentSavepointModified)
+    ));
+    assert!(matches!(tx.set_durability(Durability::Immediate), Ok(())));
 }
 
 #[test]
@@ -1275,7 +1294,7 @@ fn non_durable_read_isolation() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let mut write_txn = db.begin_write().unwrap();
-    write_txn.set_durability(Durability::None);
+    write_txn.set_durability(Durability::None).unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
         table.insert("hello", "world").unwrap();
@@ -1287,7 +1306,7 @@ fn non_durable_read_isolation() {
     assert_eq!("world", read_table.get("hello").unwrap().unwrap().value());
 
     let mut write_txn = db.begin_write().unwrap();
-    write_txn.set_durability(Durability::None);
+    write_txn.set_durability(Durability::None).unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
         table.remove("hello").unwrap();

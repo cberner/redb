@@ -358,6 +358,35 @@ impl std::error::Error for CompactionError {}
 /// Errors related to transactions
 #[derive(Debug)]
 #[non_exhaustive]
+pub enum SetDurabilityError {
+    /// A persistent savepoint was modified
+    PersistentSavepointModified,
+}
+
+impl From<SetDurabilityError> for Error {
+    fn from(err: SetDurabilityError) -> Error {
+        match err {
+            SetDurabilityError::PersistentSavepointModified => Error::PersistentSavepointModified,
+        }
+    }
+}
+
+impl Display for SetDurabilityError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SetDurabilityError::PersistentSavepointModified => {
+                write!(
+                    f,
+                    "Persistent savepoint modified. Cannot reduce transaction durability"
+                )
+            }
+        }
+    }
+}
+
+/// Errors related to transactions
+#[derive(Debug)]
+#[non_exhaustive]
 pub enum TransactionError {
     /// Error from underlying storage
     Storage(StorageError),
@@ -457,6 +486,8 @@ pub enum Error {
     InvalidSavepoint,
     /// [`crate::RepairSession::abort`] was called.
     RepairAborted,
+    /// A persistent savepoint was modified
+    PersistentSavepointModified,
     /// A persistent savepoint exists
     PersistentSavepointExists,
     /// An Ephemeral savepoint exists
@@ -583,6 +614,12 @@ impl Display for Error {
             }
             Error::RepairAborted => {
                 write!(f, "Database repair aborted.")
+            }
+            Error::PersistentSavepointModified => {
+                write!(
+                    f,
+                    "Persistent savepoint modified. Cannot reduce transaction durability"
+                )
             }
             Error::PersistentSavepointExists => {
                 write!(
