@@ -365,10 +365,6 @@ pub enum Durability {
     /// Commits with this durability level are guaranteed to be persistent as soon as
     /// [`WriteTransaction::commit`] returns.
     Immediate,
-    /// This is identical to `Durability::Immediate`, but also enables 2-phase commit. New code
-    /// should call `set_two_phase_commit(true)` directly instead.
-    #[deprecated(since = "2.3.0", note = "use set_two_phase_commit(true) instead")]
-    Paranoid,
 }
 
 // These are the actual durability levels used internally. `Durability::Paranoid` is translated
@@ -1197,11 +1193,6 @@ impl WriteTransaction {
             Durability::None => InternalDurability::None,
             Durability::Eventual => InternalDurability::Eventual,
             Durability::Immediate => InternalDurability::Immediate,
-            #[allow(deprecated)]
-            Durability::Paranoid => {
-                self.set_two_phase_commit(true);
-                InternalDurability::Immediate
-            }
         };
 
         Ok(())
