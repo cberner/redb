@@ -1024,20 +1024,20 @@ impl TransactionalMemory {
     pub(crate) fn get_page_size(&self) -> usize {
         self.page_size.try_into().unwrap()
     }
-}
 
-impl Drop for TransactionalMemory {
-    fn drop(&mut self) {
-        if thread::panicking() || self.needs_recovery.load(Ordering::Acquire) {
-            return;
+    pub(crate) fn close(&self) -> Result {
+        if !self.needs_recovery.load(Ordering::Acquire) && !thread::panicking() {
+            let mut state = self.state.lock()?;
+            if self.storage.flush(false).is_ok() {
+                state.header.recovery_required = false;
+                self.write_header(&state.header)?;
+                self.storage.flush(false)?;
+            }
         }
 
-        let mut state = self.state.lock().unwrap();
-        if self.storage.flush(false).is_ok() && !self.needs_recovery.load(Ordering::Acquire) {
-            state.header.recovery_required = false;
-            let _ = self.write_header(&state.header);
-            let _ = self.storage.flush(false);
-        }
+        self.storage.close()?;
+
+        Ok(())
     }
 }
 

@@ -52,6 +52,14 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
 
     /// Writes the specified array to the storage.
     fn write(&self, offset: u64, data: &[u8]) -> std::result::Result<(), io::Error>;
+
+    /// Release any resources held by the backend
+    ///
+    /// Note: redb will not access the backend after calling this method and will call it exactly
+    /// once when the [`Database`] is dropped
+    fn close(&self) -> std::result::Result<(), io::Error> {
+        Ok(())
+    }
 }
 
 pub trait TableHandle: Sealed {
@@ -847,13 +855,14 @@ impl Database {
 
 impl Drop for Database {
     fn drop(&mut self) {
-        if thread::panicking() {
-            return;
-        }
-
-        if self.ensure_allocator_state_table().is_err() {
+        if !thread::panicking() && self.ensure_allocator_state_table().is_err() {
             #[cfg(feature = "logging")]
             warn!("Failed to write allocator state table. Repair may be required at restart.")
+        }
+
+        if self.mem.close().is_err() {
+            #[cfg(feature = "logging")]
+            warn!("Failed to flush database file. Repair may be required at restart.")
         }
     }
 }
