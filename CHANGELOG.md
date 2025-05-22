@@ -1,5 +1,17 @@
 # redb - Changelog
 
+## 3.0.0 - 2025-XX-XX
+
+### Removes support for file format v2.
+Use `Database::upgrade()` in redb 2.6 migrate to the v3 file format.
+
+* Add `StorageBackend::close()`
+* Change `ReadTransactionStillInUse` to contain a `Box`
+* Change `set_durability()` to return a `Result`
+* Remove `Durability::Paranoid`
+* Disallow access to the database from read transactions after the `Database` as been
+  dropped. Access will now return `DatabaseClosed`
+
 ## 2.6.0 - 2025-05-22
 
 ### Add support for the v3 file format.
