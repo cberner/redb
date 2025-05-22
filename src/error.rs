@@ -14,6 +14,7 @@ pub enum StorageError {
     ValueTooLarge(usize),
     Io(io::Error),
     PreviousIo,
+    DatabaseClosed,
     LockPoisoned(&'static panic::Location<'static>),
 }
 
@@ -36,6 +37,7 @@ impl From<StorageError> for Error {
             StorageError::ValueTooLarge(x) => Error::ValueTooLarge(x),
             StorageError::Io(x) => Error::Io(x),
             StorageError::PreviousIo => Error::PreviousIo,
+            StorageError::DatabaseClosed => Error::DatabaseClosed,
             StorageError::LockPoisoned(location) => Error::LockPoisoned(location),
         }
     }
@@ -56,6 +58,9 @@ impl Display for StorageError {
             }
             StorageError::Io(err) => {
                 write!(f, "I/O error: {err}")
+            }
+            StorageError::DatabaseClosed => {
+                write!(f, "Database has been closed")
             }
             StorageError::PreviousIo => {
                 write!(
@@ -523,6 +528,7 @@ pub enum Error {
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
     TableAlreadyOpen(String, &'static panic::Location<'static>),
     Io(io::Error),
+    DatabaseClosed,
     /// A previous IO error occurred. The database must be closed and re-opened
     PreviousIo,
     LockPoisoned(&'static panic::Location<'static>),
@@ -599,6 +605,9 @@ impl Display for Error {
             }
             Error::Io(err) => {
                 write!(f, "I/O error: {err}")
+            }
+            Error::DatabaseClosed => {
+                write!(f, "Database has been closed")
             }
             Error::PreviousIo => {
                 write!(

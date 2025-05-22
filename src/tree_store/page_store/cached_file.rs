@@ -112,6 +112,7 @@ impl LRUWriteCache {
 struct CheckedBackend {
     file: Box<dyn StorageBackend>,
     io_failed: AtomicBool,
+    closed: AtomicBool,
 }
 
 impl CheckedBackend {
@@ -119,15 +120,28 @@ impl CheckedBackend {
         Self {
             file,
             io_failed: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
         }
     }
 
     fn check_failure(&self) -> Result<()> {
         if self.io_failed.load(Ordering::Acquire) {
-            Err(StorageError::PreviousIo)
+            if self.closed.load(Ordering::Acquire) {
+                Err(StorageError::DatabaseClosed)
+            } else {
+                Err(StorageError::PreviousIo)
+            }
         } else {
             Ok(())
         }
+    }
+
+    fn close(&self) -> Result {
+        self.closed.store(true, Ordering::Release);
+        self.io_failed.store(true, Ordering::Release);
+        self.file.close()?;
+
+        Ok(())
     }
 
     fn len(&self) -> Result<u64> {
@@ -231,6 +245,10 @@ impl PagedCachedFile {
             #[cfg(feature = "cache_metrics")]
             evictions: self.evictions.load(Ordering::Acquire),
         }
+    }
+
+    pub(crate) fn close(&self) -> Result {
+        self.file.close()
     }
 
     pub(crate) fn check_io_errors(&self) -> Result {

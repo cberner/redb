@@ -85,11 +85,11 @@ impl StorageBackend for FileBackend {
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
         self.file.write_all_at(data, offset)
     }
-}
 
-#[cfg(unix)] // remove this line when wasi-libc gets flock
-impl Drop for FileBackend {
-    fn drop(&mut self) {
+    #[cfg(unix)] // remove this line when wasi-libc gets flock
+    fn close(&self) -> Result<(), io::Error> {
         unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+
+        Ok(())
     }
 }

@@ -3,6 +3,7 @@
 use crate::{DatabaseError, Result, StorageBackend};
 use std::fs::File;
 use std::io;
+use std::io::Error;
 use std::os::windows::fs::FileExt;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::io::RawHandle;
@@ -92,10 +93,10 @@ impl StorageBackend for FileBackend {
         }
         Ok(())
     }
-}
 
-impl Drop for FileBackend {
-    fn drop(&mut self) {
+    fn close(&self) -> Result<(), Error> {
         unsafe { UnlockFile(self.file.as_raw_handle(), 0, 0, u32::MAX, u32::MAX) };
+
+        Ok(())
     }
 }

@@ -397,7 +397,6 @@ impl TransactionHeader {
 
 #[cfg(test)]
 mod test {
-    #[cfg(not(target_os = "windows"))]
     use crate::StorageError;
     use crate::backends::FileBackend;
     use crate::db::TableDefinition;
@@ -573,6 +572,36 @@ mod test {
         );
 
         Database::open(tmpfile.path()).unwrap();
+    }
+
+    #[test]
+    fn close_on_drop() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder()
+            .set_cache_size(0)
+            .create(tmpfile.path())
+            .unwrap();
+        let table_def: TableDefinition<u64, u64> = TableDefinition::new("x");
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_def).unwrap();
+            table.insert(0, 0).unwrap();
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_read().unwrap();
+        drop(db);
+        assert!(matches!(
+            txn.list_tables().err().unwrap(),
+            StorageError::DatabaseClosed
+        ));
+
+        let mut file = OpenOptions::new().read(true).open(tmpfile.path()).unwrap();
+
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        let mut buffer = [0u8; 1];
+        file.read_exact(&mut buffer).unwrap();
+        assert_eq!(buffer[0] & RECOVERY_REQUIRED, 0);
+        drop(txn);
     }
 
     #[test]
