@@ -7,7 +7,8 @@ use crate::tree_store::btree_mutator::DeletionResult::{
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
-    AccessGuardMut, BtreeHeader, PageNumber, PageTrackerPolicy, RawLeafBuilder, TransactionalMemory,
+    AccessGuardMutInPlace, BtreeHeader, PageNumber, PageTrackerPolicy, RawLeafBuilder,
+    TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
@@ -41,7 +42,7 @@ struct InsertionResult<'a, V: Value + 'static> {
     // Following sibling, if the root had to be split
     additional_sibling: Option<(Vec<u8>, PageNumber, Checksum)>,
     // The inserted value for .insert_reserve() to use
-    inserted_value: AccessGuardMut<'a, V>,
+    inserted_value: AccessGuardMutInPlace<'a, V>,
     // The previous value, if any
     old_value: Option<AccessGuard<'a, V>>,
 }
@@ -157,7 +158,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         &mut self,
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
-    ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMut<'a, V>)> {
+    ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMutInPlace<'a, V>)> {
         let (new_root, old_value, guard) = if let Some(BtreeHeader {
             root: p,
             checksum,
@@ -207,7 +208,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
             let offset = accessor.offset_of_first_value();
             let page_num = page.get_page_number();
-            let guard = AccessGuardMut::new(page, offset, value_bytes.len());
+            let guard = AccessGuardMutInPlace::new(page, offset, value_bytes.len());
 
             (BtreeHeader::new(page_num, DEFERRED, 1), None, guard)
         };
@@ -245,7 +246,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let new_page_accessor =
                         LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
                     let offset = new_page_accessor.offset_of_first_value();
-                    let guard = AccessGuardMut::new(new_page, offset, value.len());
+                    let guard = AccessGuardMutInPlace::new(new_page, offset, value.len());
                     return if position == 0 {
                         Ok(InsertionResult {
                             new_root: new_page_number,
@@ -298,7 +299,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let new_page_accessor =
                         LeafAccessor::new(page_mut.memory(), K::fixed_width(), V::fixed_width());
                     let offset = new_page_accessor.offset_of_value(position).unwrap();
-                    let guard = AccessGuardMut::new(page_mut, offset, value.len());
+                    let guard = AccessGuardMutInPlace::new(page_mut, offset, value.len());
                     return Ok(InsertionResult {
                         new_root: page_number,
                         root_checksum: DEFERRED,
@@ -353,7 +354,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let accessor =
                         LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
                     let offset = accessor.offset_of_value(position).unwrap();
-                    let guard = AccessGuardMut::new(new_page, offset, value.len());
+                    let guard = AccessGuardMutInPlace::new(new_page, offset, value.len());
 
                     InsertionResult {
                         new_root: new_page_number,
@@ -396,7 +397,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             V::fixed_width(),
                         );
                         let offset = accessor.offset_of_value(position).unwrap();
-                        AccessGuardMut::new(new_page1, offset, value.len())
+                        AccessGuardMutInPlace::new(new_page1, offset, value.len())
                     } else {
                         let accessor = LeafAccessor::new(
                             new_page2.memory(),
@@ -404,7 +405,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             V::fixed_width(),
                         );
                         let offset = accessor.offset_of_value(position - division).unwrap();
-                        AccessGuardMut::new(new_page2, offset, value.len())
+                        AccessGuardMutInPlace::new(new_page2, offset, value.len())
                     };
 
                     InsertionResult {

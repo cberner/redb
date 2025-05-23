@@ -7,7 +7,7 @@ use crate::tree_store::btree_iters::BtreeExtractIf;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::{
-    AccessGuardMut, AllPageNumbersBtreeIter, BtreeRangeIter, PageHint, PageNumber,
+    AccessGuardMutInPlace, AllPageNumbersBtreeIter, BtreeRangeIter, PageHint, PageNumber,
     PageTrackerPolicy,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
@@ -604,7 +604,7 @@ impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
         &mut self,
         key: &K::SelfType<'_>,
         value_length: u32,
-    ) -> Result<AccessGuardMut<V>> {
+    ) -> Result<AccessGuardMutInPlace<V>> {
         #[cfg(feature = "logging")]
         trace!(
             "Btree(root={:?}): Inserting {:?} with {} reserved bytes for the value",
