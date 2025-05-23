@@ -248,7 +248,7 @@ impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
     }
 }
 
-pub struct AccessGuardMut<'a, V: Value + 'static> {
+pub struct AccessGuardMutInPlace<'a, V: Value + 'static> {
     page: PageMut,
     offset: usize,
     len: usize,
@@ -257,9 +257,9 @@ pub struct AccessGuardMut<'a, V: Value + 'static> {
     _lifetime: PhantomData<&'a ()>,
 }
 
-impl<V: Value + 'static> AccessGuardMut<'_, V> {
+impl<V: Value + 'static> AccessGuardMutInPlace<'_, V> {
     pub(crate) fn new(page: PageMut, offset: usize, len: usize) -> Self {
-        AccessGuardMut {
+        AccessGuardMutInPlace {
             page,
             offset,
             len,
@@ -269,7 +269,7 @@ impl<V: Value + 'static> AccessGuardMut<'_, V> {
     }
 }
 
-impl<V: MutInPlaceValue + 'static> AsMut<V::BaseRefType> for AccessGuardMut<'_, V> {
+impl<V: MutInPlaceValue + 'static> AsMut<V::BaseRefType> for AccessGuardMutInPlace<'_, V> {
     fn as_mut(&mut self) -> &mut V::BaseRefType {
         V::from_bytes_mut(&mut self.page.memory_mut()[self.offset..(self.offset + self.len)])
     }

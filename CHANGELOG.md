@@ -8,6 +8,7 @@ Use `Database::upgrade()` in redb 2.6 migrate to the v3 file format.
 * Add `StorageBackend::close()`
 * Change `ReadTransactionStillInUse` to contain a `Box`
 * Change `set_durability()` to return a `Result`
+* Rename `AccessGuardMut` to `AccessGuardMutInPlace`
 * Remove `Durability::Paranoid`
 * Disallow access to the database from read transactions after the `Database` as been
   dropped. Access will now return `DatabaseClosed`

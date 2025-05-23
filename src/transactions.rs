@@ -11,7 +11,7 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{
-    AccessGuard, AccessGuardMut, ExtractIf, MultimapTable, MultimapTableDefinition,
+    AccessGuard, AccessGuardMutInPlace, ExtractIf, MultimapTable, MultimapTableDefinition,
     MultimapTableHandle, MutInPlaceValue, Range, ReadOnlyMultimapTable, ReadOnlyTable, Result,
     Savepoint, SavepointError, SetDurabilityError, StorageError, Table, TableDefinition,
     TableError, TableHandle, TransactionError, TypeName, UntypedMultimapTableHandle,
@@ -469,7 +469,7 @@ impl<K: Key + 'static, V: MutInPlaceValue + 'static> SystemTable<'_, '_, K, V> {
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
         value_length: u32,
-    ) -> Result<AccessGuardMut<V>> {
+    ) -> Result<AccessGuardMutInPlace<V>> {
         if value_length as usize > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(value_length as usize));
         }
