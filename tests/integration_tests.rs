@@ -1325,6 +1325,49 @@ fn check_integrity_clean() {
 }
 
 #[test]
+fn page_reuse() {
+    let tmpfile = create_tempfile();
+
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Allocates a page to store 0 -> 0
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Clear the freed tree
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    // Allocates a page to store 0 -> 1, and frees the page for 0 -> 0
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 1).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Should reuse the page for 0 -> 0
+    let txn = db.begin_write().unwrap();
+    let allocated_pages = txn.stats().unwrap().allocated_pages();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 2).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Clear the freed tree
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    assert_eq!(allocated_pages, txn.stats().unwrap().allocated_pages());
+}
+
+#[test]
 fn multimap_stats() {
     let tmpfile = create_tempfile();
     let db = Database::builder().create(tmpfile.path()).unwrap();
