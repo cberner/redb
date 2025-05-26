@@ -350,16 +350,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         }
     }
 
-    pub(crate) fn verify_checksum(&self) -> Result<bool> {
-        RawBtree::new(
-            self.get_root(),
-            K::fixed_width(),
-            V::fixed_width(),
-            self.mem.clone(),
-        )
-        .verify_checksum()
-    }
-
     pub(crate) fn finalize_dirty_checksums(&mut self) -> Result<Option<BtreeHeader>> {
         let mut tree = UntypedBtreeMut::new(
             self.get_root(),
@@ -752,6 +742,16 @@ impl<K: Key, V: Value> Btree<K, V> {
 
     pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
         self.root
+    }
+
+    pub(crate) fn verify_checksum(&self) -> Result<bool> {
+        RawBtree::new(
+            self.get_root(),
+            K::fixed_width(),
+            V::fixed_width(),
+            self.mem.clone(),
+        )
+        .verify_checksum()
     }
 
     pub(crate) fn visit_all_pages<F>(&self, visitor: F) -> Result

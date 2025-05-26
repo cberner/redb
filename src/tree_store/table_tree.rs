@@ -86,6 +86,55 @@ impl TableTree {
         self.tree.transaction_guard()
     }
 
+    pub(crate) fn verify_checksums(&self) -> Result<bool> {
+        if !self.tree.verify_checksum()? {
+            return Ok(false);
+        }
+
+        for entry in self.tree.range::<RangeFull, &str>(&(..))? {
+            let entry = entry?;
+            let definition = entry.value();
+            match definition {
+                InternalTableDefinition::Normal {
+                    table_root,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => {
+                    if let Some(header) = table_root {
+                        if !RawBtree::new(
+                            Some(header),
+                            fixed_key_size,
+                            fixed_value_size,
+                            self.mem.clone(),
+                        )
+                        .verify_checksum()?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                }
+                InternalTableDefinition::Multimap {
+                    table_root,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => {
+                    if !verify_tree_and_subtree_checksums(
+                        table_root,
+                        fixed_key_size,
+                        fixed_value_size,
+                        self.mem.clone(),
+                    )? {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
     // root_page: the root of the master table
     pub(crate) fn list_tables(&self, table_type: TableType) -> Result<Vec<String>> {
         let iter = self.tree.range::<RangeFull, &str>(&(..))?;
@@ -234,56 +283,6 @@ impl TableTreeMut<'_> {
     ) {
         self.pending_table_updates
             .insert(name.to_string(), (table_root, length));
-    }
-
-    pub(crate) fn verify_checksums(&self) -> Result<bool> {
-        assert!(self.pending_table_updates.is_empty());
-        if !self.tree.verify_checksum()? {
-            return Ok(false);
-        }
-
-        for entry in self.tree.range::<RangeFull, &str>(&(..))? {
-            let entry = entry?;
-            let definition = entry.value();
-            match definition {
-                InternalTableDefinition::Normal {
-                    table_root,
-                    fixed_key_size,
-                    fixed_value_size,
-                    ..
-                } => {
-                    if let Some(header) = table_root {
-                        if !RawBtree::new(
-                            Some(header),
-                            fixed_key_size,
-                            fixed_value_size,
-                            self.mem.clone(),
-                        )
-                        .verify_checksum()?
-                        {
-                            return Ok(false);
-                        }
-                    }
-                }
-                InternalTableDefinition::Multimap {
-                    table_root,
-                    fixed_key_size,
-                    fixed_value_size,
-                    ..
-                } => {
-                    if !verify_tree_and_subtree_checksums(
-                        table_root,
-                        fixed_key_size,
-                        fixed_value_size,
-                        self.mem.clone(),
-                    )? {
-                        return Ok(false);
-                    }
-                }
-            }
-        }
-
-        Ok(true)
     }
 
     pub(crate) fn clear_root_updates_and_close(&mut self) {
