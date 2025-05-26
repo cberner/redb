@@ -365,31 +365,24 @@ impl Database {
     }
 
     pub(crate) fn verify_primary_checksums(mem: Arc<TransactionalMemory>) -> Result<bool> {
-        let fake_freed_pages = Arc::new(Mutex::new(vec![]));
-        let fake_allocated = Arc::new(Mutex::new(PageTrackerPolicy::Closed));
-        // TODO: seems like we should be able to use TableTree here, instead of TableTreeMut
-        let table_tree = TableTreeMut::new(
+        let table_tree = TableTree::new(
             mem.get_data_root(),
+            PageHint::None,
             Arc::new(TransactionGuard::fake()),
             mem.clone(),
-            fake_freed_pages.clone(),
-            fake_allocated.clone(),
-        );
+        )?;
         if !table_tree.verify_checksums()? {
             return Ok(false);
         }
-        // TODO: seems like we should be able to use TableTree here, instead of TableTreeMut
-        let system_table_tree = TableTreeMut::new(
+        let system_table_tree = TableTree::new(
             mem.get_system_root(),
+            PageHint::None,
             Arc::new(TransactionGuard::fake()),
             mem.clone(),
-            fake_freed_pages.clone(),
-            fake_allocated.clone(),
-        );
+        )?;
         if !system_table_tree.verify_checksums()? {
             return Ok(false);
         }
-        assert!(fake_freed_pages.lock().unwrap().is_empty());
 
         Ok(true)
     }
