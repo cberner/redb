@@ -314,7 +314,6 @@ impl TransactionalMemory {
         self.storage.flush(false)
     }
 
-    // TODO: This is unused as of file format v3
     #[cfg(test)]
     pub(crate) fn needs_repair(&self) -> Result<bool> {
         Ok(self.state.lock().unwrap().header.recovery_required)
