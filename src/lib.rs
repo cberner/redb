@@ -22,6 +22,7 @@
 )]
 // TODO remove this once wasi no longer requires nightly
 #![cfg_attr(target_os = "wasi", feature(wasi_ext))]
+#![feature(file_lock)]
 
 //! # redb
 //!
