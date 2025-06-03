@@ -886,6 +886,51 @@ fn insert_reserve() {
 }
 
 #[test]
+fn get_mut() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(table.insert("hello", "world").unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+
+    {
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(STR_TABLE).unwrap();
+        assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+    }
+
+    let mut very_long_string = String::from("hello");
+    for _ in 0..10_000 {
+        very_long_string.push('x');
+    }
+
+    let mut last_value = "world";
+
+    for new_value in ["earth", "mars", very_long_string.as_str()].iter() {
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(STR_TABLE).unwrap();
+            let mut value = table.get_mut("hello").unwrap().unwrap();
+            if value.value() == last_value {
+                value.insert(new_value).unwrap();
+            } else {
+                panic!();
+            }
+            assert_eq!(value.value(), *new_value);
+            last_value = new_value;
+        }
+        write_txn.commit().unwrap();
+
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(STR_TABLE).unwrap();
+        assert_eq!(*new_value, table.get("hello").unwrap().unwrap().value());
+    }
+}
+
+#[test]
 fn delete() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();

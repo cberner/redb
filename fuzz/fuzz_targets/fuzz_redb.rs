@@ -285,6 +285,9 @@ fn handle_multimap_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, BT
             let entry = reference.get(&key);
             assert_multimap_value_eq(iter, entry)?;
         }
+        FuzzOperation::GetMut { .. } => {
+            // no-op. Multimap tables don't support get_mut
+        }
         FuzzOperation::Insert { key, value_size } => {
             let key = key.value;
             let value_size = value_size.value as usize;
@@ -383,6 +386,15 @@ fn handle_table_op(op: &FuzzOperation, reference: &mut BTreeMap<u64, usize>, tab
                     assert!(table.get(&key)?.is_none());
                 }
             }
+        }
+        FuzzOperation::GetMut { key, value_size } => {
+            let key = key.value;
+            let value_size = value_size.value as usize;
+            let value = vec![0xFF; value_size];
+            if let Some(mut v) = table.get_mut(&key)? {
+                v.insert(value.as_slice())?;
+            }
+            reference.get_mut(&key).map(|x| *x = value_size);
         }
         FuzzOperation::Insert { key, value_size } => {
             let key = key.value;

@@ -112,6 +112,10 @@ pub(crate) enum FuzzOperation {
     Get {
         key: BoundedU64<KEY_SPACE>,
     },
+    GetMut {
+        key: BoundedU64<KEY_SPACE>,
+        value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,
+    },
     Insert {
         key: BoundedU64<KEY_SPACE>,
         value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,

@@ -6,7 +6,7 @@ use crate::tree_store::{
     TransactionalMemory,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
-use crate::{AccessGuard, StorageError, WriteTransaction};
+use crate::{AccessGuard, AccessGuardMut, StorageError, WriteTransaction};
 use crate::{Result, TableHandle};
 use std::borrow::Borrow;
 use std::fmt::{Debug, Formatter};
@@ -96,6 +96,14 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.tree.print_debug(include_values)
+    }
+
+    /// Returns an accessor, which allows mutation, to the value corresponding to the given key
+    pub fn get_mut<'k>(
+        &mut self,
+        key: impl Borrow<K::SelfType<'k>>,
+    ) -> Result<Option<AccessGuardMut<V>>> {
+        self.tree.get_mut(key.borrow())
     }
 
     /// Removes and returns the first key-value pair in the table
