@@ -2,7 +2,8 @@ use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::mem::size_of;
-
+#[cfg(feature = "chrono")]
+mod chrono;
 #[derive(Eq, PartialEq, Clone, Debug)]
 enum TypeClassification {
     Internal,
