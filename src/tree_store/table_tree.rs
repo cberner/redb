@@ -646,8 +646,10 @@ impl TableTreeMut<'_> {
                 self.freed_pages.clone(),
                 relocation_map,
             )? {
-                self.pending_table_updates
-                    .insert(entry.key().to_string(), (new_root, definition.get_length()));
+                self.pending_table_updates.insert(
+                    entry.key().to_string(),
+                    (Some(new_root), definition.get_length()),
+                );
             }
         }
 
