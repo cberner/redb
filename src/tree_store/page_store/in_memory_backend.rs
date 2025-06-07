@@ -1,6 +1,6 @@
 use crate::StorageBackend;
 use std::io;
-use std::sync::*;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Acts as temporal in-memory database storage.
 #[derive(Debug, Default)]
