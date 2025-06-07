@@ -513,9 +513,7 @@ impl Database {
             )
             .map_err(|e| e.into_storage_error_or_corrupted("Allocated pages table corrupted"))?
         {
-            let table_root = if let InternalTableDefinition::Normal { table_root, .. } = table_def {
-                table_root
-            } else {
+            let InternalTableDefinition::Normal { table_root, .. } = table_def else {
                 unreachable!()
             };
             let table: ReadOnlyTable<TransactionIdWithPagination, PageList> = ReadOnlyTable::new(

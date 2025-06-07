@@ -4,7 +4,6 @@
     clippy::default_trait_access,
     clippy::if_not_else,
     clippy::iter_not_returning_iterator,
-    clippy::manual_let_else,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::module_name_repetitions,
