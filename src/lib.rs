@@ -13,8 +13,7 @@
     clippy::similar_names,
     clippy::too_many_lines,
     clippy::unnecessary_wraps,
-    clippy::unreadable_literal,
-    clippy::wildcard_imports
+    clippy::unreadable_literal
 )]
 // TODO remove this once wasi no longer requires nightly
 #![cfg_attr(target_os = "wasi", feature(wasi_ext))]
