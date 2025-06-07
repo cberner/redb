@@ -1,7 +1,6 @@
 #![deny(clippy::all, clippy::pedantic, clippy::disallowed_methods)]
 // TODO: revisit this list and see if we can enable some
 #![allow(
-    let_underscore_drop,
     clippy::default_trait_access,
     clippy::if_not_else,
     clippy::inline_always,
