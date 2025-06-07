@@ -215,7 +215,7 @@ impl InternalTableDefinition {
         mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         relocation_map: &HashMap<PageNumber, PageNumber>,
-    ) -> Result<Option<Option<BtreeHeader>>> {
+    ) -> Result<Option<BtreeHeader>> {
         let original_root = self.private_get_root();
         let relocated_root = match self {
             InternalTableDefinition::Normal { table_root, .. } => *table_root,
@@ -250,7 +250,7 @@ impl InternalTableDefinition {
         tree.relocate(relocation_map)?;
         if tree.get_root() != original_root {
             self.set_header(tree.get_root(), self.get_length());
-            Ok(Some(tree.get_root()))
+            Ok(tree.get_root())
         } else {
             Ok(None)
         }
