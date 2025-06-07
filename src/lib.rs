@@ -3,7 +3,6 @@
 #![allow(
     clippy::default_trait_access,
     clippy::if_not_else,
-    clippy::inline_always,
     clippy::iter_not_returning_iterator,
     clippy::manual_let_else,
     clippy::missing_errors_doc,

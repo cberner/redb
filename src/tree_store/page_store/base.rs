@@ -55,7 +55,6 @@ impl PartialOrd for PageNumber {
 }
 
 impl PageNumber {
-    #[inline(always)]
     pub(crate) const fn serialized_size() -> usize {
         8
     }
