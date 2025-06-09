@@ -1,9 +1,9 @@
-use std::mem::size_of;
 use arbitrary::Unstructured;
 use libfuzzer_sys::arbitrary::Arbitrary;
-use rand_distr::{Binomial, Distribution};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand_distr::{Binomial, Distribution};
+use std::mem::size_of;
 
 const MAX_CRASH_OPS: u64 = 20;
 const MAX_CACHE_SIZE: usize = 100_000_000;
@@ -14,15 +14,13 @@ pub const MAX_SAVEPOINTS: usize = 6;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundedU64<const N: u64> {
-    pub value: u64
+    pub value: u64,
 }
 
 impl<const N: u64> Arbitrary<'_> for BoundedU64<N> {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let value: u64 = u.int_in_range(0..=(N - 1))?;
-        Ok(Self {
-            value
-        })
+        Ok(Self { value })
     }
 
     fn size_hint(_depth: usize) -> (usize, Option<usize>) {
@@ -32,15 +30,13 @@ impl<const N: u64> Arbitrary<'_> for BoundedU64<N> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct U64Between<const MIN: u64, const MAX: u64> {
-    pub value: u64
+    pub value: u64,
 }
 
 impl<const MIN: u64, const MAX: u64> Arbitrary<'_> for U64Between<MIN, MAX> {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let value: u64 = u.int_in_range(MIN..=MAX)?;
-        Ok(Self {
-            value
-        })
+        Ok(Self { value })
     }
 
     fn size_hint(_depth: usize) -> (usize, Option<usize>) {
@@ -50,7 +46,7 @@ impl<const MIN: u64, const MAX: u64> Arbitrary<'_> for U64Between<MIN, MAX> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct BinomialDifferenceBoundedUSize<const N: usize> {
-    pub value: usize
+    pub value: usize,
 }
 
 impl<const N: usize> Arbitrary<'_> for BinomialDifferenceBoundedUSize<N> {
@@ -61,9 +57,7 @@ impl<const N: usize> Arbitrary<'_> for BinomialDifferenceBoundedUSize<N> {
         let distribution = Binomial::new(N as u64, 0.5).unwrap();
         let value = distribution.sample(&mut rng) as isize;
         let value = (value - N as isize / 2).abs() as usize;
-        Ok(Self {
-            value
-        })
+        Ok(Self { value })
     }
 
     fn size_hint(_depth: usize) -> (usize, Option<usize>) {
@@ -73,14 +67,14 @@ impl<const N: usize> Arbitrary<'_> for BinomialDifferenceBoundedUSize<N> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PowerOfTwoBetween<const M: u32, const N: u32> {
-    pub value: usize
+    pub value: usize,
 }
 
 impl<const M: u32, const N: u32> Arbitrary<'_> for PowerOfTwoBetween<M, N> {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let value: u32 = u.int_in_range(M..=N)?;
         Ok(Self {
-            value: 2usize.pow(value)
+            value: 2usize.pow(value),
         })
     }
 
@@ -91,15 +85,13 @@ impl<const M: u32, const N: u32> Arbitrary<'_> for PowerOfTwoBetween<M, N> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundedUSize<const N: usize> {
-    pub value: usize
+    pub value: usize,
 }
 
 impl<const N: usize> Arbitrary<'_> for BoundedUSize<N> {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let value: usize = u.int_in_range(0..=(N - 1))?;
-        Ok(Self {
-            value
-        })
+        Ok(Self { value })
     }
 
     fn size_hint(_depth: usize) -> (usize, Option<usize>) {
@@ -131,12 +123,9 @@ pub(crate) enum FuzzOperation {
         key: BoundedU64<KEY_SPACE>,
         value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,
     },
-    Len {
-    },
-    PopFirst {
-    },
-    PopLast {
-    },
+    Len {},
+    PopFirst {},
+    PopLast {},
     Retain {
         modulus: U64Between<1, 8>,
     },
