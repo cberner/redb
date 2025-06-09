@@ -15,8 +15,8 @@ authors.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [workspace]
-members = [".", "crates/redb-bench"]
-default-members = ["."]
+members = [".", "crates/redb-bench", "crates/redb-derive"]
+default-members = [".", "crates/redb-derive"]
 
 [workspace.package]
 edition = "2024"
