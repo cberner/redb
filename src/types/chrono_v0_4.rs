@@ -34,12 +34,12 @@ impl Value for NaiveDate {
     where
         Self: 'a,
     {
-        if data.len() != 6 {
-            panic!(
-                "Invalid byte length for NaiveDate, expected 6 bytes, got {}",
-                data.len()
-            );
-        }
+        assert_eq!(
+            data.len(),
+            6,
+            "NaiveDate must be 6 bytes long, got {}",
+            data.len()
+        );
         date_from_bytes(data)
     }
 
@@ -48,8 +48,8 @@ impl Value for NaiveDate {
         Self: 'b,
     {
         let year = value.year().to_le_bytes();
-        let month = value.month() as u8;
-        let day = value.day() as u8;
+        let month = u8::try_from(value.month()).unwrap();
+        let day = u8::try_from(value.day()).unwrap();
         [year[0], year[1], year[2], year[3], month, day]
     }
 
@@ -85,12 +85,11 @@ impl Value for NaiveTime {
     where
         Self: 'a,
     {
-        if data.len() != 7 {
-            panic!(
-                "Invalid byte length for NaiveTime, expected 7 bytes, got {}",
-                data.len()
-            );
-        }
+        assert!(
+            data.len() == 7,
+            "NaiveTime must be 7 bytes long, got {}",
+            data.len()
+        );
         time_from_bytes(data)
     }
 
@@ -143,12 +142,12 @@ impl Value for NaiveDateTime {
     where
         Self: 'a,
     {
-        if data.len() != 13 {
-            panic!(
-                "Invalid byte length for NaiveDateTime, expected 20 bytes, got {}",
-                data.len()
-            );
-        }
+        assert_eq!(
+            data.len(),
+            13,
+            "NaiveDateTime must be 13 bytes long, got {}",
+            data.len()
+        );
 
         let date = date_from_bytes(&data[0..6]);
         let time = time_from_bytes(&data[6..13]);
@@ -160,8 +159,8 @@ impl Value for NaiveDateTime {
         Self: 'b,
     {
         let year = value.year().to_le_bytes();
-        let month = value.month() as u8;
-        let day = value.day() as u8;
+        let month = u8::try_from(value.month()).unwrap();
+        let day = u8::try_from(value.day()).unwrap();
         let time_since_midnight = value.time().num_seconds_from_midnight().to_le_bytes();
         let nanoseconds = value.time().nanosecond().to_le_bytes();
 
@@ -213,12 +212,12 @@ impl Value for DateTime<FixedOffset> {
     where
         Self: 'a,
     {
-        if data.len() != 17 {
-            panic!(
-                "Invalid byte length for DateTime<FixedOffset>, expected 17 bytes, got {}",
-                data.len()
-            );
-        }
+        assert_eq!(
+            data.len(),
+            17,
+            "DateTime<FixedOffset> must be 17 bytes long, got {}",
+            data.len()
+        );
         let date = date_from_bytes(&data[0..6]);
         let time = time_from_bytes(&data[6..13]);
 
@@ -233,8 +232,8 @@ impl Value for DateTime<FixedOffset> {
     {
         let value_utc = value.with_timezone(&Utc);
         let year = value_utc.year().to_le_bytes();
-        let month = value_utc.month() as u8;
-        let day = value_utc.day() as u8;
+        let month = u8::try_from(value_utc.month()).unwrap();
+        let day = u8::try_from(value_utc.day()).unwrap();
         let time_since_midnight = value_utc.time().num_seconds_from_midnight().to_le_bytes();
 
         let nanoseconds = value_utc.time().nanosecond().to_le_bytes();
@@ -291,12 +290,12 @@ impl Value for FixedOffset {
     where
         Self: 'a,
     {
-        if data.len() != 4 {
-            panic!(
-                "Invalid byte length for FixedOffset, expected 4 bytes, got {}",
-                data.len()
-            );
-        }
+        assert_eq!(
+            data.len(),
+            4,
+            "FixedOffset must be 4 bytes long got {}",
+            data.len()
+        );
         offset_from_bytes(data)
     }
 
@@ -325,8 +324,8 @@ fn offset_from_bytes(data: &[u8]) -> FixedOffset {
 }
 fn date_from_bytes(data: &[u8]) -> NaiveDate {
     let year = i32::from_le_bytes(data[0..4].try_into().unwrap());
-    let month = data[4] as u32;
-    let day = data[5] as u32;
+    let month = u32::from(data[4]);
+    let day = u32::from(data[5]);
     NaiveDate::from_ymd_opt(year, month, day).expect("Invalid date")
 }
 fn time_from_bytes(data: &[u8]) -> NaiveTime {
@@ -339,7 +338,9 @@ fn time_from_bytes(data: &[u8]) -> NaiveTime {
 #[cfg(test)]
 mod tests {
     use crate::{Database, Key, TableDefinition, Value};
-    use chrono_v0_4::{DateTime, FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime};
+    use chrono_v0_4::{
+        DateTime, FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone,
+    };
     use tempfile::NamedTempFile;
     const NAIVE_DATE_TABLE: TableDefinition<NaiveDate, i32> =
         TableDefinition::new("naive_date_table");
@@ -426,21 +427,23 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2023, 10, 5).unwrap();
         let time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
         let naive_datetime = NaiveDateTime::new(date, time);
-        let offset = FixedOffset::east_opt(3600).unwrap(); // +01:00
-        let datetime = DateTime::from_naive_utc_and_offset(naive_datetime, offset);
-        let bytes = DateTime::<FixedOffset>::as_bytes(&datetime);
-        assert_eq!(
-            DateTime::<FixedOffset>::compare(&bytes, &bytes),
-            std::cmp::Ordering::Equal,
-            "Bytes should compare equal to themselves"
-        );
-        assert_eq!(
-            DateTime::<FixedOffset>::fixed_width(),
-            Some(bytes.len()),
-            "DateTime<FixedOffset> should have fixed width"
-        );
-        let datetime_from_bytes = DateTime::<FixedOffset>::from_bytes(&bytes);
-        assert_eq!(datetime, datetime_from_bytes);
+        for i in -12..=12 {
+            let offset = FixedOffset::east_opt(i * 3600).unwrap(); // i hours offset
+            let datetime = offset.from_utc_datetime(&naive_datetime);
+            let bytes = DateTime::<FixedOffset>::as_bytes(&datetime);
+            assert_eq!(
+                DateTime::<FixedOffset>::fixed_width(),
+                Some(bytes.len()),
+                "DateTime<FixedOffset> should have fixed width"
+            );
+            assert_eq!(
+                DateTime::<FixedOffset>::compare(&bytes, &bytes),
+                std::cmp::Ordering::Equal,
+                "Bytes should compare equal to themselves"
+            );
+            let datetime_from_bytes = DateTime::<FixedOffset>::from_bytes(&bytes);
+            assert_eq!(datetime, datetime_from_bytes);
+        }
     }
     #[test]
     fn test_fixed_offset_table() {
