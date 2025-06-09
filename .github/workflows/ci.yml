@@ -69,14 +69,14 @@ jobs:
         run: cargo install --force --version 1.36.0 just --locked
 
       - name: Compile
-        run: cargo build --all-targets --all-features
+        run: cargo build --all --all-targets --all-features
 
       - name: Fuzzer
         if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
         run: just fuzz_ci
 
       - name: Run tests
-        run: just build test
+        run: just test_all
 
       - name: Clippy
         run: cargo clippy --all --all-targets -- -Dwarnings

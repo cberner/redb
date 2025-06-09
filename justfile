@@ -2,7 +2,16 @@ build: pre
     cargo build --all-targets
     cargo doc
 
+build_all: pre_all
+    cargo build --all --all-targets
+    cargo doc --all
+
 pre:
+    cargo deny --all-features check licenses
+    cargo fmt --all -- --check
+    cargo clippy --all-targets
+
+pre_all:
     cargo deny --all-features check licenses
     cargo fmt --all -- --check
     cargo clippy --all --all-targets
@@ -27,12 +36,15 @@ install_py: pre
 test: pre
     RUST_BACKTRACE=1 cargo test
 
+test_all: build_all
+    RUST_BACKTRACE=1 cargo test --all
+
 test_wasi:
     rustup install nightly-2025-05-04 --target wasm32-wasip1-threads
     cargo +nightly-2025-05-04 test --target=wasm32-wasip1-threads -- --nocapture
 
 bench bench='lmdb_benchmark': pre
-    cargo bench --bench {{bench}}
+    cargo bench -p redb-bench --bench {{bench}}
 
 watch +args='test':
     cargo watch --clear --exec "{{args}}"
@@ -43,7 +55,7 @@ fuzz: pre
 fuzz_cmin:
     cargo fuzz cmin --sanitizer=none fuzz_redb -- -max_len=10000
 
-fuzz_ci: pre
+fuzz_ci: pre_all
     cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=10000 -max_total_time=60
 
 fuzz_coverage: pre
