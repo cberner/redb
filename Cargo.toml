@@ -11,9 +11,6 @@ homepage.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[lib]
-crate-type = ["cdylib", "rlib"]
-
 [workspace]
 members = [".", "crates/redb-bench", "crates/redb-derive"]
 default-members = [".", "crates/redb-derive"]
@@ -47,6 +44,7 @@ libc = "0.2.99"
 
 [features]
 # This feature is still experimental, and is not considered stable
+# TODO: move this to a subcrate. We should probably set that to crate-type "cdylib" too
 python = ["dep:pyo3", "dep:pyo3-build-config"]
 # Enables log messages
 logging = ["dep:log"]
