@@ -7,12 +7,12 @@ build_all: pre_all
     cargo doc --all
 
 pre:
-    cargo deny --all-features check licenses
+    cargo deny --workspace --all-features check licenses
     cargo fmt --all -- --check
     cargo clippy --all-targets
 
 pre_all:
-    cargo deny --all-features check licenses
+    cargo deny --workspace --all-features check licenses
     cargo fmt --all -- --check
     cargo clippy --all --all-targets
 
