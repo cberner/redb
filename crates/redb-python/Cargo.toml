@@ -1,0 +1,26 @@
+[package]
+name = "redb-python"
+description = "Python bindings for redb"
+publish = false
+version = "0.5.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "redb"
+doc = false
+crate-type = ["cdylib"]
+
+[build-dependencies]
+pyo3-build-config = "0.24.1"
+
+[dependencies]
+pyo3 = { version = "0.24.1", features=["extension-module", "abi3-py37"] }
+redb = { path = "../.." }
+
+[dev-dependencies]
+tempfile = "3.5.0"
