@@ -12,8 +12,8 @@ repository.workspace = true
 authors.workspace = true
 
 [workspace]
-members = [".", "crates/redb-bench", "crates/redb-derive"]
-default-members = [".", "crates/redb-derive"]
+members = [".", "crates/redb-bench", "crates/redb-derive", "crates/redb-python"]
+default-members = [".", "crates/redb-derive", "crates/redb-python"]
 
 [workspace.package]
 edition = "2024"
@@ -23,12 +23,8 @@ homepage = "https://www.redb.org"
 repository = "https://github.com/cberner/redb"
 authors = ["Christopher Berner <me@cberner.com>"]
 
-[build-dependencies]
-pyo3-build-config = { version = "0.24.1", optional = true }
-
 [dependencies]
 log = { version = "0.4.17", optional = true }
-pyo3 = { version = "0.24.1", features=["extension-module", "abi3-py37"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.104"
@@ -43,9 +39,6 @@ bincode = "2.0.1"
 libc = "0.2.99"
 
 [features]
-# This feature is still experimental, and is not considered stable
-# TODO: move this to a subcrate. We should probably set that to crate-type "cdylib" too
-python = ["dep:pyo3", "dep:pyo3-build-config"]
 # Enables log messages
 logging = ["dep:log"]
 # Enable cache hit metrics

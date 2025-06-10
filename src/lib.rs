@@ -84,16 +84,11 @@ pub use types::{Key, MutInPlaceValue, TypeName, Value};
 
 pub type Result<T = (), E = StorageError> = std::result::Result<T, E>;
 
-#[cfg(feature = "python")]
-pub use crate::python::redb;
-
 pub mod backends;
 mod complex_types;
 mod db;
 mod error;
 mod multimap_table;
-#[cfg(feature = "python")]
-mod python;
 mod sealed;
 mod table;
 mod transaction_tracker;

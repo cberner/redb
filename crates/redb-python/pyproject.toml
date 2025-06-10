@@ -16,4 +16,3 @@ build-backend = "maturin"
 
 [tool.maturin]
 compatibility = "manylinux2014"
-features = ["python"]
