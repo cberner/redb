@@ -25,6 +25,7 @@ authors = ["Christopher Berner <me@cberner.com>"]
 
 [dependencies]
 log = { version = "0.4.17", optional = true }
+chrono_v0_4 = { package = "chrono", version= "0.4", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.104"
