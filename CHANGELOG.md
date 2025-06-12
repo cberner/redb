@@ -5,6 +5,18 @@
 ### Removes support for file format v2.
 Use `Database::upgrade()` in redb 2.6 migrate to the v3 file format.
 
+### Optimize storage of tuple types
+Optimize storage of variable width tuple types with arity greater than 1. The new format elides the
+length of any fixed width fields and uses varint encoding for the lengths of all variable width
+fields.
+
+Note that this encoding is not compatible with the serialization of variable width tuples used in prior versions.
+To load tuple data created prior to version 3.0, wrap them in the `Legacy` type.
+For example, `TableDefinition<u64, (&str, u32)>` becomes `TableDefinition<u64, Legacy<(&str, u32)>>`.
+Fixed width tuples, such as `(u32, u64)` are backwards compatible.
+
+### Other changes
+
 * Add `StorageBackend::close()`
 * Add `Table::get_mut()`
 * Change `ReadTransactionStillInUse` to contain a `Box`
