@@ -5,10 +5,10 @@
 //!| Structure             | Layout                                                                                                                   | Size |                                                  |
 //!|-----------------------|--------------------------------------------------------------------------------------------------------------------------|------|--------------------------------------------------|
 //!| NaiveDate             | `{year:i32}\|{month:u8}\|{day:u8}`                                                                                       | 6    |                                                  |
-//!| NaiveTime             | `{seconds_from_midnight:i32:first 3 bytes}\|{nanoseconds:i32}`                                                           | 7    |                                                  |
-//!| NaiveDateTime         | `{year:i32}\|{month:u8}\|{day:u8}\|{seconds_from_midnight:i32:first 3 bytes}\|{nanoseconds:i32}`                         | 13   |                                                  |
+//!| NaiveTime             | `{seconds_from_midnight:u32:first 3 bytes}\|{nanoseconds:u32}`                                                           | 7    |                                                  |
+//!| NaiveDateTime         | `{year:i32}\|{month:u8}\|{day:u8}\|{seconds_from_midnight:u32:first 3 bytes}\|{nanoseconds:u32}`                         | 13   |                                                  |
 //!| FixedOffset           | `{seconds_from_utc:i32}`                                                                                                 | 4    |                                                  |
-//!| DateTime<FixedOffset> | `{year:i32}\|{month:u8}\|{day:u8}\|{seconds_from_midnight:i32:first 3 bytes}\|{nanoseconds:i32}\|{seconds_from_utc:i32}` | 17   | Time is stored in UTC with the offset in seconds |
+//!| DateTime<FixedOffset> | `{year:i32}\|{month:u8}\|{day:u8}\|{seconds_from_midnight:u32:first 3 bytes}\|{nanoseconds:u32}\|{seconds_from_utc:i32}` | 17   | Time is stored in UTC with the offset in seconds |
 use crate::{Key, TypeName, Value};
 
 use chrono_v0_4::{
@@ -261,7 +261,7 @@ impl Value for DateTime<FixedOffset> {
     }
 
     fn type_name() -> TypeName {
-        TypeName::new("chrono::DateTime")
+        TypeName::new("chrono::DateTime<chrono::FixedOffset>")
     }
 }
 impl Key for DateTime<FixedOffset> {
