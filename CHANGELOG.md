@@ -19,6 +19,9 @@ Fixed width tuples, such as `(u32, u64)` are backwards compatible.
 
 * Add `StorageBackend::close()`
 * Add `Table::get_mut()`
+* Add `chrono_v0_4` feature flag which enables serialization of the `NaiveDate`, `NaiveTime`,
+  `NaiveDatetime`, `DateTime<FixedOffset>`, and `FixedOffset` types in the `chrono` crate.
+* Change `TypeName::name()` to be public
 * Change `ReadTransactionStillInUse` to contain a `Box`
 * Change `set_durability()` to return a `Result`
 * Rename `AccessGuardMut` to `AccessGuardMutInPlace`. Note that a new `AccessGuardMut` struct has
