@@ -8,6 +8,9 @@ mod chrono_v0_4;
 enum TypeClassification {
     Internal,
     UserDefined,
+    // Used by variable width tuple encoding in version 3.0 and newer. This differentiates the encoding
+    // from the old encoding used previously
+    Internal2,
 }
 
 impl TypeClassification {
@@ -15,6 +18,7 @@ impl TypeClassification {
         match self {
             TypeClassification::Internal => 1,
             TypeClassification::UserDefined => 2,
+            TypeClassification::Internal2 => 3,
         }
     }
 
@@ -22,6 +26,7 @@ impl TypeClassification {
         match value {
             1 => TypeClassification::Internal,
             2 => TypeClassification::UserDefined,
+            3 => TypeClassification::Internal2,
             _ => unreachable!(),
         }
     }
@@ -46,6 +51,13 @@ impl TypeName {
     pub(crate) fn internal(name: &str) -> Self {
         Self {
             classification: TypeClassification::Internal,
+            name: name.to_string(),
+        }
+    }
+
+    pub(crate) fn internal2(name: &str) -> Self {
+        Self {
+            classification: TypeClassification::Internal2,
             name: name.to_string(),
         }
     }

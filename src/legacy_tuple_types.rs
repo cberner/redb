@@ -1,30 +1,22 @@
-use crate::complex_types::{decode_varint_len, encode_varint_len};
 use crate::types::{Key, TypeName, Value};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
+use std::mem::size_of;
 
-fn serialize_tuple_elements_variable<const N: usize>(
-    is_fixed_width: [bool; N],
-    slices: [&[u8]; N],
-) -> Vec<u8> {
+#[repr(transparent)]
+#[derive(Debug)]
+pub struct Legacy<T>(T);
+
+fn serialize_tuple_elements_variable(slices: &[&[u8]]) -> Vec<u8> {
     let total_len: usize = slices.iter().map(|x| x.len()).sum();
-    let worst_case_len_overhead: usize =
-        is_fixed_width.iter().map(|x| if *x { 0 } else { 5 }).sum();
-    let mut output = Vec::with_capacity(total_len + worst_case_len_overhead);
-    let zipped = is_fixed_width.iter().zip(slices.iter());
-    for len in zipped
-        .map(|(fixed, x)| if *fixed { None } else { Some(x.len()) })
-        .take(slices.len() - 1)
-        .flatten()
-    {
-        encode_varint_len(len, &mut output);
+    let mut output = Vec::with_capacity((slices.len() - 1) * size_of::<u32>() + total_len);
+    for len in slices.iter().map(|x| x.len()).take(slices.len() - 1) {
+        output.extend_from_slice(&(u32::try_from(len).unwrap()).to_le_bytes());
     }
 
     for slice in slices {
         output.extend_from_slice(slice);
     }
-
-    debug_assert!(output.len() <= total_len + worst_case_len_overhead);
 
     output
 }
@@ -38,19 +30,12 @@ fn serialize_tuple_elements_fixed(slices: &[&[u8]]) -> Vec<u8> {
     output
 }
 
-fn parse_lens<const N: usize>(fixed_width: [Option<usize>; N], data: &[u8]) -> (usize, [usize; N]) {
+fn parse_lens<const N: usize>(data: &[u8]) -> [usize; N] {
     let mut result = [0; N];
-    let mut offset = 0;
-    for (i, &fixed) in fixed_width.iter().enumerate() {
-        if let Some(len) = fixed {
-            result[i] = len;
-        } else {
-            let (len, bytes_read) = decode_varint_len(&data[offset..]);
-            result[i] = len;
-            offset += bytes_read;
-        }
+    for i in 0..N {
+        result[i] = u32::from_le_bytes(data[4 * i..4 * (i + 1)].try_into().unwrap()) as usize;
     }
-    (offset, result)
+    result
 }
 
 fn not_equal<T: Key>(data1: &[u8], data2: &[u8]) -> Option<Ordering> {
@@ -82,13 +67,7 @@ macro_rules! as_bytes_impl {
                 )+
             ])
         } else {
-            serialize_tuple_elements_variable(
-            [
-                $(
-                    <$t>::fixed_width().is_some(),
-                )+
-            ],
-            [
+            serialize_tuple_elements_variable(&[
                 $(
                     <$t>::as_bytes($value.$i.borrow()).as_ref(),
                 )+
@@ -109,11 +88,7 @@ macro_rules! type_name_impl {
             )+
             result.push(')');
 
-            if Self::fixed_width().is_some() {
-                TypeName::internal(&result)
-            } else {
-                TypeName::internal2(&result)
-            }
+            TypeName::internal(&result)
         }
     };
 }
@@ -122,13 +97,8 @@ macro_rules! from_bytes_variable_impl {
     ( $data:expr $(,$t:ty, $v:ident, $i:literal )+ | $t_last:ty, $v_last:ident, $i_last:literal ) => {
         #[allow(clippy::manual_bits)]
         {
-            let (mut offset, lens) = parse_lens::<$i_last>(
-                [
-                    $(
-                        <$t>::fixed_width(),
-                    )+
-                ],
-                $data);
+            let lens: [usize; $i_last] = parse_lens($data);
+            let mut offset = $i_last * size_of::<u32>();
             $(
                 let len = lens[$i];
                 let $v = <$t>::from_bytes(&$data[offset..(offset + len)]);
@@ -168,13 +138,10 @@ macro_rules! compare_variable_impl {
     ( $data0:expr, $data1:expr $(,$t:ty, $i:literal )+ | $t_last:ty, $i_last:literal ) => {
         #[allow(clippy::manual_bits)]
         {
-            let fixed_width = [
-                $(
-                    <$t>::fixed_width(),
-                )+
-            ];
-            let (mut offset0, lens0) = parse_lens::<$i_last>(fixed_width, $data0);
-            let (mut offset1, lens1) = parse_lens::<$i_last>(fixed_width, $data1);
+            let lens0: [usize; $i_last] = parse_lens($data0);
+            let lens1: [usize; $i_last] = parse_lens($data1);
+            let mut offset0 = $i_last * size_of::<u32>();
+            let mut offset1 = $i_last * size_of::<u32>();
             $(
                 let index = $i;
                 let len0 = lens0[index];
@@ -221,7 +188,7 @@ macro_rules! compare_fixed_impl {
 
 macro_rules! tuple_impl {
     ( $($t:ident, $v:ident, $i:tt ),+ | $t_last:ident, $v_last:ident, $i_last:tt ) => {
-        impl<$($t: Value,)+ $t_last: Value> Value for ($($t,)+ $t_last) {
+        impl<$($t: Value,)+ $t_last: Value> Value for Legacy<($($t,)+ $t_last)> {
             type SelfType<'a> = (
                 $(<$t>::SelfType<'a>,)+
                 <$t_last>::SelfType<'a>,
@@ -260,7 +227,7 @@ macro_rules! tuple_impl {
             }
         }
 
-        impl<$($t: Key,)+ $t_last: Key> Key for ($($t,)+ $t_last) {
+        impl<$($t: Key,)+ $t_last: Key> Key for Legacy<($($t,)+ $t_last)> {
             fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
                 if Self::fixed_width().is_some() {
                     compare_fixed_impl!(data1, data2, $($t,)+ $t_last)
@@ -272,7 +239,7 @@ macro_rules! tuple_impl {
     };
 }
 
-impl<T: Value> Value for (T,) {
+impl<T: Value> Value for Legacy<(T,)> {
     type SelfType<'a>
         = (T::SelfType<'a>,)
     where
@@ -306,7 +273,7 @@ impl<T: Value> Value for (T,) {
     }
 }
 
-impl<T: Key> Key for (T,) {
+impl<T: Key> Key for Legacy<(T,)> {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         T::compare(data1, data2)
     }
@@ -424,25 +391,16 @@ tuple_impl! {
 
 #[cfg(test)]
 mod test {
+    use crate::legacy_tuple_types::Legacy;
     use crate::types::Value;
 
     #[test]
     fn width() {
-        assert!(<(&str, u8)>::fixed_width().is_none());
-        assert!(<(u16, u8, &str, u128)>::fixed_width().is_none());
-        assert_eq!(<(u16,)>::fixed_width().unwrap(), 2);
-        assert_eq!(<(u16, u8)>::fixed_width().unwrap(), 3);
-        assert_eq!(<(u16, u8, u128)>::fixed_width().unwrap(), 19);
-        assert_eq!(<(u16, u8, i8, u128)>::fixed_width().unwrap(), 20);
-        // Check that length of final field is elided
-        assert_eq!(
-            <(u8, &str)>::as_bytes(&(1, "hello")).len(),
-            "hello".len() + size_of::<u8>()
-        );
-        // Check that varint encoding uses only 1 byte for small strings
-        assert_eq!(
-            <(&str, u8)>::as_bytes(&("hello", 1)).len(),
-            "hello".len() + size_of::<u8>() + size_of::<u8>()
-        );
+        assert!(<Legacy<(&str, u8)>>::fixed_width().is_none());
+        assert!(<Legacy<(u16, u8, &str, u128)>>::fixed_width().is_none());
+        assert_eq!(<Legacy<(u16,)>>::fixed_width().unwrap(), 2);
+        assert_eq!(<Legacy<(u16, u8)>>::fixed_width().unwrap(), 3);
+        assert_eq!(<Legacy<(u16, u8, u128)>>::fixed_width().unwrap(), 19);
+        assert_eq!(<Legacy<(u16, u8, i8, u128)>>::fixed_width().unwrap(), 20);
     }
 }

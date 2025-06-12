@@ -1,7 +1,7 @@
 use crate::types::{TypeName, Value};
 
 // Encode len as a varint and store it at the end of output
-fn encode_varint_len(len: usize, output: &mut Vec<u8>) {
+pub(super) fn encode_varint_len(len: usize, output: &mut Vec<u8>) {
     if len < 254 {
         output.push(len.try_into().unwrap());
     } else if len <= u16::MAX.into() {
@@ -17,7 +17,7 @@ fn encode_varint_len(len: usize, output: &mut Vec<u8>) {
 
 // Decode a variable length int starting at the beginning of data
 // Returns (decoded length, length consumed of `data`)
-fn decode_varint_len(data: &[u8]) -> (usize, usize) {
+pub(super) fn decode_varint_len(data: &[u8]) -> (usize, usize) {
     match data[0] {
         0..=253 => (data[0] as usize, 1),
         254 => (
