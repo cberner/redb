@@ -37,7 +37,6 @@ tempfile = "3.5.0"
 # for backwards compatibility testing - pin at 2.6.0
 redb2_6 = { version = "=2.6.0", package = "redb" }
 bincode = "2.0.1"
-libc = "0.2.99"
 
 [features]
 # Enables log messages
