@@ -27,7 +27,7 @@ authors = ["Christopher Berner <me@cberner.com>"]
 log = { version = "0.4.17", optional = true }
 chrono_v0_4 = { package = "chrono", version= "0.4.41", optional = true }
 
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2.104"
 
 # Common test/bench dependencies
