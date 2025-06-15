@@ -10,6 +10,39 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, GenericParam, Ident, parse_macro_input};
 
+#[proc_macro_derive(Key)]
+pub fn derive_key(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    match generate_key_impl(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn generate_key_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let Data::Struct(_) = &input.data else {
+        return Err(syn::Error::new_spanned(
+            input,
+            "Key can only be derived for structs",
+        ));
+    };
+
+    let name = &input.ident;
+    let generics = &input.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    Ok(quote! {
+        impl #impl_generics redb::Key for #name #ty_generics #where_clause {
+            fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+                let value1 = #name::from_bytes(data1);
+                let value2 = #name::from_bytes(data2);
+                Ord::cmp(&value1, &value2)
+            }
+        }
+    })
+}
+
 #[proc_macro_derive(Value)]
 pub fn derive_value(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
