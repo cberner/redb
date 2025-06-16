@@ -1,20 +1,20 @@
 build: pre
-    cargo build --all-targets
+    cargo build --all-targets --all-features
     cargo doc
 
 build_all: pre_all
-    cargo build --all --all-targets
+    cargo build --all --all-targets --all-features
     cargo doc --all
 
 pre:
     cargo deny --workspace --all-features check licenses
     cargo fmt --all -- --check
-    cargo clippy --all-targets
+    cargo clippy --all-targets --all-features
 
 pre_all:
     cargo deny --workspace --all-features check licenses
     cargo fmt --all -- --check
-    cargo clippy --all --all-targets
+    cargo clippy --all --all-targets --all-features
 
 release: pre
     cargo build --release
