@@ -65,9 +65,9 @@
 //! [design]: https://github.com/cberner/redb/blob/master/docs/design.md
 
 pub use db::{
-    Builder, CacheStats, Database, MultimapTableDefinition, MultimapTableHandle, ReadableDatabase,
-    RepairSession, StorageBackend, TableDefinition, TableHandle, UntypedMultimapTableHandle,
-    UntypedTableHandle,
+    Builder, CacheStats, Database, MultimapTableDefinition, MultimapTableHandle, ReadOnlyDatabase,
+    ReadableDatabase, RepairSession, StorageBackend, TableDefinition, TableHandle,
+    UntypedMultimapTableHandle, UntypedTableHandle,
 };
 pub use error::{
     CommitError, CompactionError, DatabaseError, Error, SavepointError, SetDurabilityError,

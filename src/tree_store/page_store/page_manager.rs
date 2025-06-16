@@ -137,6 +137,7 @@ impl TransactionalMemory {
         requested_region_size: Option<u64>,
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
+        read_only: bool,
     ) -> Result<Self, DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
@@ -237,6 +238,9 @@ impl TransactionalMemory {
         let needs_recovery =
             header.recovery_required || header.layout().len() != storage.raw_file_len()?;
         if needs_recovery {
+            if read_only {
+                return Err(DatabaseError::RepairAborted);
+            }
             let layout = header.layout();
             let region_max_pages = layout.full_region_layout().num_pages();
             let region_header_pages = layout.full_region_layout().get_header_pages();
