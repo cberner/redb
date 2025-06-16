@@ -1,4 +1,4 @@
-use redb::{Legacy, ReadableTableMetadata, TableError};
+use redb::{Legacy, ReadableDatabase, ReadableTableMetadata, TableError};
 
 const ELEMENTS: usize = 3;
 

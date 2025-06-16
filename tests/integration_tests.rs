@@ -3,8 +3,9 @@ use rand::prelude::SliceRandom;
 use redb::backends::FileBackend;
 use redb::{
     AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
-    MultimapTableDefinition, MultimapValue, Range, ReadableTable, ReadableTableMetadata,
-    SetDurabilityError, StorageBackend, TableDefinition, TableStats, TransactionError, Value,
+    MultimapTableDefinition, MultimapValue, Range, ReadableDatabase, ReadableTable,
+    ReadableTableMetadata, SetDurabilityError, StorageBackend, TableDefinition, TableStats,
+    TransactionError, Value,
 };
 use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 use std::borrow::Borrow;

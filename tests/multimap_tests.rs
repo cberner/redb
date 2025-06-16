@@ -1,5 +1,6 @@
 use redb::{
-    Database, MultimapTableDefinition, ReadableMultimapTable, ReadableTableMetadata, TableError,
+    Database, MultimapTableDefinition, ReadableDatabase, ReadableMultimapTable,
+    ReadableTableMetadata, TableError,
 };
 
 const STR_TABLE: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("str_to_str");

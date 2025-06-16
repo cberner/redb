@@ -304,6 +304,22 @@ impl Drop for TransactionGuard {
     }
 }
 
+pub trait ReadableDatabase {
+    /// Begins a read transaction
+    ///
+    /// Captures a snapshot of the database, so that only data committed before calling this method
+    /// is visible in the transaction
+    ///
+    /// Returns a [`ReadTransaction`] which may be used to read from the database. Read transactions
+    /// may exist concurrently with writes
+    fn begin_read(&self) -> Result<ReadTransaction, TransactionError>;
+
+    /// Information regarding the usage of the in-memory cache
+    ///
+    /// Note: these metrics are only collected when the "`cache_metrics`" feature is enabled
+    fn cache_stats(&self) -> CacheStats;
+}
+
 /// Opened redb database file
 ///
 /// Use [`Self::begin_read`] to get a [`ReadTransaction`] object that can be used to read from the database
@@ -339,6 +355,19 @@ pub struct Database {
     transaction_tracker: Arc<TransactionTracker>,
 }
 
+impl ReadableDatabase for Database {
+    fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
+        let guard = self.allocate_read_transaction()?;
+        #[cfg(feature = "logging")]
+        debug!("Beginning read transaction id={:?}", guard.id());
+        ReadTransaction::new(self.get_memory(), guard)
+    }
+
+    fn cache_stats(&self) -> CacheStats {
+        self.mem.cache_stats()
+    }
+}
+
 impl Database {
     /// Opens the specified file as a redb database.
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
@@ -351,13 +380,6 @@ impl Database {
     /// Opens an existing redb database.
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
-    }
-
-    /// Information regarding the usage of the in-memory cache
-    ///
-    /// Note: these metrics are only collected when the "`cache_metrics`" feature is enabled
-    pub fn cache_stats(&self) -> CacheStats {
-        self.mem.cache_stats()
     }
 
     pub(crate) fn get_memory(&self) -> Arc<TransactionalMemory> {
@@ -807,20 +829,6 @@ impl Database {
         );
         WriteTransaction::new(guard, self.transaction_tracker.clone(), self.mem.clone())
             .map_err(|e| e.into())
-    }
-
-    /// Begins a read transaction
-    ///
-    /// Captures a snapshot of the database, so that only data committed before calling this method
-    /// is visible in the transaction
-    ///
-    /// Returns a [`ReadTransaction`] which may be used to read from the database. Read transactions
-    /// may exist concurrently with writes
-    pub fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
-        let guard = self.allocate_read_transaction()?;
-        #[cfg(feature = "logging")]
-        debug!("Beginning read transaction id={:?}", guard.id());
-        ReadTransaction::new(self.get_memory(), guard)
     }
 
     fn ensure_allocator_state_table(&self) -> Result<(), Error> {

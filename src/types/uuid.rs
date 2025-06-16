@@ -43,7 +43,7 @@ impl Key for Uuid {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Database, Key, TableDefinition, Value};
+    use crate::{Database, Key, ReadableDatabase, TableDefinition, Value};
     use tempfile::NamedTempFile;
     use uuid::Uuid;
 

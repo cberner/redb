@@ -3,7 +3,7 @@
 use libfuzzer_sys::fuzz_target;
 use redb::{
     AccessGuard, Database, Durability, Error, MultimapTable, MultimapTableDefinition,
-    MultimapValue, ReadableMultimapTable, ReadableTable, ReadableTableMetadata, Savepoint,
+    MultimapValue, ReadableDatabase, ReadableMultimapTable, ReadableTable, ReadableTableMetadata, Savepoint,
     StorageBackend, Table, TableDefinition, WriteTransaction,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

@@ -397,7 +397,6 @@ impl TransactionHeader {
 
 #[cfg(test)]
 mod test {
-    use crate::StorageError;
     use crate::backends::FileBackend;
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::TransactionalMemory;
@@ -406,6 +405,7 @@ mod test {
         TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT, USER_ROOT_OFFSET,
     };
     use crate::{Database, DatabaseError, ReadableTable};
+    use crate::{ReadableDatabase, StorageError};
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::mem::size_of;

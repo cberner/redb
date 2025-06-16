@@ -337,7 +337,7 @@ fn time_from_bytes(data: &[u8]) -> NaiveTime {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Database, Key, TableDefinition, Value};
+    use crate::{Database, Key, ReadableDatabase, TableDefinition, Value};
     use chrono_v0_4::{
         DateTime, FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone,
     };
