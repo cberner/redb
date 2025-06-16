@@ -34,10 +34,10 @@ install_py: pre
     maturin develop --manifest-path=./crates/redb-python/Cargo.toml
 
 test: pre
-    RUST_BACKTRACE=1 cargo test
+    RUST_BACKTRACE=1 cargo test --all-features
 
 test_all: build_all
-    RUST_BACKTRACE=1 cargo test --all
+    RUST_BACKTRACE=1 cargo test --all --all-features
 
 test_wasi:
     rustup install nightly-2025-05-04 --target wasm32-wasip1-threads
