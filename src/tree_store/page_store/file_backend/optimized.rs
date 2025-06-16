@@ -55,22 +55,20 @@ impl StorageBackend for FileBackend {
     }
 
     #[cfg(any(unix, target_os = "wasi"))]
-    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
-        let mut buffer = vec![0; len];
-        self.file.read_exact_at(&mut buffer, offset)?;
-        Ok(buffer)
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+        self.file.read_exact_at(out, offset)?;
+        Ok(())
     }
 
     #[cfg(windows)]
-    fn read(&self, mut offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
-        let mut buffer = vec![0; len];
+    fn read(&self, mut offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
         let mut data_offset = 0;
-        while data_offset < buffer.len() {
-            let read = self.file.seek_read(&mut buffer[data_offset..], offset)?;
+        while data_offset < out.len() {
+            let read = self.file.seek_read(&mut out[data_offset..], offset)?;
             offset += read as u64;
             data_offset += read;
         }
-        Ok(buffer)
+        Ok(())
     }
 
     fn set_len(&self, len: u64) -> Result<(), io::Error> {
