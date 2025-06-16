@@ -533,7 +533,7 @@ impl<'db> SystemNamespace<'db> {
         definition: SystemTableDefinition<K, V>,
     ) -> Result<SystemTable<'db, 's, K, V>> {
         #[cfg(feature = "logging")]
-        debug!("Opening system table: {}", definition);
+        debug!("Opening system table: {definition}");
         let (root, _) = self
             .table_tree
             .get_or_create_table::<K, V>(definition.name(), TableType::Normal)
@@ -635,7 +635,7 @@ impl TableNamespace<'_> {
         definition: MultimapTableDefinition<K, V>,
     ) -> Result<MultimapTable<'txn, K, V>, TableError> {
         #[cfg(feature = "logging")]
-        debug!("Opening multimap table: {}", definition);
+        debug!("Opening multimap table: {definition}");
         let (root, length) = self.inner_open::<K, V>(definition.name(), TableType::Multimap)?;
         self.set_dirty(transaction);
 
@@ -657,7 +657,7 @@ impl TableNamespace<'_> {
         definition: TableDefinition<K, V>,
     ) -> Result<Table<'txn, K, V>, TableError> {
         #[cfg(feature = "logging")]
-        debug!("Opening table: {}", definition);
+        debug!("Opening table: {definition}");
         let (root, _) = self.inner_open::<K, V>(definition.name(), TableType::Normal)?;
         self.set_dirty(transaction);
 
@@ -693,7 +693,7 @@ impl TableNamespace<'_> {
         new_name: &str,
     ) -> Result<(), TableError> {
         #[cfg(feature = "logging")]
-        debug!("Renaming table: {} to {}", name, new_name);
+        debug!("Renaming table: {name} to {new_name}");
         self.set_dirty(transaction);
         self.inner_rename(name, new_name, TableType::Normal)
     }
@@ -706,7 +706,7 @@ impl TableNamespace<'_> {
         new_name: &str,
     ) -> Result<(), TableError> {
         #[cfg(feature = "logging")]
-        debug!("Renaming multimap table: {} to {}", name, new_name);
+        debug!("Renaming multimap table: {name} to {new_name}");
         self.set_dirty(transaction);
         self.inner_rename(name, new_name, TableType::Multimap)
     }
@@ -727,7 +727,7 @@ impl TableNamespace<'_> {
         name: &str,
     ) -> Result<bool, TableError> {
         #[cfg(feature = "logging")]
-        debug!("Deleting table: {}", name);
+        debug!("Deleting table: {name}");
         self.set_dirty(transaction);
         self.inner_delete(name, TableType::Normal)
     }
@@ -739,7 +739,7 @@ impl TableNamespace<'_> {
         name: &str,
     ) -> Result<bool, TableError> {
         #[cfg(feature = "logging")]
-        debug!("Deleting multimap table: {}", name);
+        debug!("Deleting multimap table: {name}");
         self.set_dirty(transaction);
         self.inner_delete(name, TableType::Multimap)
     }
@@ -1063,10 +1063,7 @@ impl WriteTransaction {
 
         let (id, transaction_id) = self.allocate_savepoint()?;
         #[cfg(feature = "logging")]
-        debug!(
-            "Creating savepoint id={:?}, txn_id={:?}",
-            id, transaction_id
-        );
+        debug!("Creating savepoint id={id:?}, txn_id={transaction_id:?}");
 
         let root = self.mem.get_data_root();
         let savepoint = Savepoint::new_ephemeral(
@@ -1855,7 +1852,7 @@ impl Drop for WriteTransaction {
             #[allow(unused_variables)]
             if let Err(error) = self.abort_inner() {
                 #[cfg(feature = "logging")]
-                warn!("Failure automatically aborting transaction: {}", error);
+                warn!("Failure automatically aborting transaction: {error}");
             }
         } else if !self.completed && self.mem.storage_failure() {
             self.tables

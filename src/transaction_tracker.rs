@@ -121,7 +121,7 @@ impl TransactionTracker {
         assert!(state.live_write_transaction.is_none());
         let transaction_id = state.next_transaction_id.increment();
         #[cfg(feature = "logging")]
-        debug!("Beginning write transaction id={:?}", transaction_id);
+        debug!("Beginning write transaction id={transaction_id:?}");
         state.live_write_transaction = Some(transaction_id);
 
         transaction_id
