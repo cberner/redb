@@ -69,8 +69,14 @@ jobs:
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: cargo install --force --version 1.36.0 just --locked
 
-      - name: Compile
-        run: cargo build --all --all-targets --all-features
+      - name: Compile (default features)
+        run: cargo check --all --all-targets
+
+      - name: Compile (all features)
+        run: cargo check --all --all-targets --all-features
+
+      - name: Compile (no features)
+        run: cargo check --all --all-targets --no-default-features
 
       - name: Fuzzer
         if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
