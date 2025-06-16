@@ -1,8 +1,9 @@
 use rand::random;
 use redb::backends::InMemoryBackend;
 use redb::{
-    Database, Key, Legacy, MultimapTableDefinition, MultimapTableHandle, Range, ReadableTable,
-    ReadableTableMetadata, TableDefinition, TableError, TableHandle, TypeName, Value,
+    Database, Key, Legacy, MultimapTableDefinition, MultimapTableHandle, Range, ReadableDatabase,
+    ReadableTable, ReadableTableMetadata, TableDefinition, TableError, TableHandle, TypeName,
+    Value,
 };
 use std::cmp::Ordering;
 #[cfg(not(target_os = "wasi"))]

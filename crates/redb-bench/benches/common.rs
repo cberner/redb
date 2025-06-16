@@ -1,5 +1,5 @@
 use heed::{CompactionOption, EnvInfo};
-use redb::{AccessGuard, ReadableTableMetadata, TableDefinition};
+use redb::{AccessGuard, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 use rocksdb::{
     Direction, IteratorMode, OptimisticTransactionDB, OptimisticTransactionOptions, WriteOptions,
 };

@@ -1,5 +1,5 @@
-use redb::TableHandle;
 use redb::{Database, Error, TableDefinition};
+use redb::{ReadableDatabase, TableHandle};
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
 
