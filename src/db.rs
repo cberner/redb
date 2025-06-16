@@ -848,12 +848,12 @@ impl Drop for Database {
     fn drop(&mut self) {
         if !thread::panicking() && self.ensure_allocator_state_table().is_err() {
             #[cfg(feature = "logging")]
-            warn!("Failed to write allocator state table. Repair may be required at restart.")
+            warn!("Failed to write allocator state table. Repair may be required at restart.");
         }
 
         if self.mem.close().is_err() {
             #[cfg(feature = "logging")]
-            warn!("Failed to flush database file. Repair may be required at restart.")
+            warn!("Failed to flush database file. Repair may be required at restart.");
         }
     }
 }
