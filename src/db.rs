@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
-    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageTrackerPolicy, TableTree,
-    TableTreeMut, TableType, TransactionalMemory,
+    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, TableTree, TableType,
+    TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -13,7 +13,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::{io, thread};
 
 use crate::error::TransactionError;
@@ -745,15 +745,12 @@ impl Database {
         }
 
         // See if it's present in the system table tree
-        let fake_freed_pages = Arc::new(Mutex::new(vec![]));
-        let fake_allocated = Arc::new(Mutex::new(PageTrackerPolicy::Closed));
-        let system_table_tree = TableTreeMut::new(
+        let system_table_tree = TableTree::new(
             mem.get_system_root(),
+            PageHint::None,
             Arc::new(TransactionGuard::fake()),
             mem.clone(),
-            fake_freed_pages.clone(),
-            fake_allocated.clone(),
-        );
+        )?;
         let Some(allocator_state_table) = system_table_tree
             .get_table::<AllocatorStateKey, &[u8]>(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
             .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?
@@ -767,11 +764,10 @@ impl Database {
         };
         let tree = AllocatorStateTree::new(
             table_root,
+            PageHint::None,
             Arc::new(TransactionGuard::fake()),
             mem.clone(),
-            fake_freed_pages,
-            fake_allocated,
-        );
+        )?;
 
         // Make sure this isn't stale allocator state left over from a previous transaction
         if !mem.is_valid_allocator_state(&tree)? {
