@@ -1,9 +1,11 @@
 use rand::random;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use redb::DatabaseError;
 use redb::backends::InMemoryBackend;
 use redb::{
-    Database, Key, Legacy, MultimapTableDefinition, MultimapTableHandle, Range, ReadableDatabase,
-    ReadableTable, ReadableTableMetadata, TableDefinition, TableError, TableHandle, TypeName,
-    Value,
+    Database, Key, Legacy, MultimapTableDefinition, MultimapTableHandle, Range, ReadOnlyDatabase,
+    ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableError,
+    TableHandle, TypeName, Value,
 };
 use std::cmp::Ordering;
 #[cfg(not(target_os = "wasi"))]
@@ -39,6 +41,47 @@ fn len() {
     assert_eq!(table.len().unwrap(), 3);
     let untyped_table = read_txn.open_untyped_table(STR_TABLE).unwrap();
     assert_eq!(untyped_table.len().unwrap(), 3);
+}
+
+#[test]
+fn read_only() {
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(STR_TABLE).unwrap();
+            table.insert("hello", "world").unwrap();
+            table.insert("hello2", "world2").unwrap();
+            table.insert("hi", "world").unwrap();
+        }
+        write_txn.commit().unwrap();
+
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        assert!(matches!(
+            ReadOnlyDatabase::open(tmpfile.path()),
+            Err(DatabaseError::DatabaseAlreadyOpen)
+        ));
+        drop(db);
+    }
+
+    let db = ReadOnlyDatabase::open(tmpfile.path()).unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 3);
+
+    let db2 = ReadOnlyDatabase::open(tmpfile.path()).unwrap();
+    let read_txn2 = db.begin_read().unwrap();
+    let table2 = read_txn2.open_table(STR_TABLE).unwrap();
+    assert_eq!(table2.len().unwrap(), 3);
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    assert!(matches!(
+        Database::open(tmpfile.path()),
+        Err(DatabaseError::DatabaseAlreadyOpen)
+    ));
+    drop(db);
+    drop(db2);
 }
 
 #[test]
