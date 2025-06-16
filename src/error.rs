@@ -207,7 +207,7 @@ impl std::error::Error for TableError {}
 pub enum DatabaseError {
     /// The Database is already open. Cannot acquire lock.
     DatabaseAlreadyOpen,
-    /// [`crate::RepairSession::abort`] was called.
+    /// [`crate::RepairSession::abort`] was called or repair was aborted for another reason (such as the database being read-only).
     RepairAborted,
     /// The database file is in an old file format and must be manually upgraded
     UpgradeRequired(u8),
