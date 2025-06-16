@@ -20,12 +20,14 @@ Fixed width tuples, such as `(u32, u64)` are backwards compatible.
 * Add `StorageBackend::close()`
 * Add `Table::get_mut()`
 * Add `chrono_v0_4` feature flag which enables serialization of the `NaiveDate`, `NaiveTime`,
-  `NaiveDatetime`, `DateTime<FixedOffset>`, and `FixedOffset` types in the `chrono` crate.
+  `NaiveDatetime`, `DateTime<FixedOffset>`, and `FixedOffset` types in the `chrono` crate
+* Add `uuid` feature flag which enables serialization of the `Uuid` type in the `uuid` crate
 * Change `TypeName::name()` to be public
 * Change `ReadTransactionStillInUse` to contain a `Box`
 * Change `set_durability()` to return a `Result`
+* Move `Database::cache_stats()` and `Database::begin_read()` to `ReadableDatabase` trait
 * Rename `AccessGuardMut` to `AccessGuardMutInPlace`. Note that a new `AccessGuardMut` struct has
-  been added; it serves a different purpose.
+  been added; it serves a different purpose
 * Remove `Durability::Paranoid`
 * Disallow access to the database from read transactions after the `Database` as been
   dropped. Access will now return `DatabaseClosed`
