@@ -1,6 +1,44 @@
 use crate::StorageBackend;
 use std::io;
+use std::io::Error;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+#[derive(Debug)]
+pub(crate) struct ReadOnlyBackend {
+    inner: Box<dyn StorageBackend>,
+}
+
+impl ReadOnlyBackend {
+    pub fn new(inner: Box<dyn StorageBackend>) -> Self {
+        Self { inner }
+    }
+}
+
+impl StorageBackend for ReadOnlyBackend {
+    fn len(&self) -> Result<u64, Error> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), Error> {
+        self.inner.read(offset, out)
+    }
+
+    fn set_len(&self, _len: u64) -> Result<(), Error> {
+        unreachable!()
+    }
+
+    fn sync_data(&self) -> Result<(), Error> {
+        unreachable!()
+    }
+
+    fn write(&self, _offset: u64, _data: &[u8]) -> Result<(), Error> {
+        unreachable!()
+    }
+
+    fn close(&self) -> Result<(), Error> {
+        self.inner.close()
+    }
+}
 
 /// Acts as temporal in-memory database storage.
 #[derive(Debug, Default)]
