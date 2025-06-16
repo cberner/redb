@@ -1,5 +1,5 @@
 use crate::transaction_tracker::TransactionId;
-use crate::transactions::{AllocatorStateKey, AllocatorStateTree};
+use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateTreeMut};
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
 use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, PageHint};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
@@ -372,7 +372,7 @@ impl TransactionalMemory {
 
     pub(crate) fn reserve_allocator_state(
         &self,
-        tree: &mut AllocatorStateTree,
+        tree: &mut AllocatorStateTreeMut,
         transaction_id: TransactionId,
     ) -> Result<u32> {
         let state = self.state.lock().unwrap();
@@ -406,7 +406,7 @@ impl TransactionalMemory {
     // Returns true on success, or false if the number of regions has changed
     pub(crate) fn try_save_allocator_state(
         &self,
-        tree: &mut AllocatorStateTree,
+        tree: &mut AllocatorStateTreeMut,
         num_regions: u32,
     ) -> Result<bool> {
         // Has the number of regions changed since reserve_allocator_state() was called?

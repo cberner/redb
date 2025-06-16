@@ -52,7 +52,8 @@ pub(crate) const SYSTEM_FREED_TABLE: SystemTableDefinition<TransactionIdWithPagi
 // The allocator state table is stored in the system table tree, but it's accessed using
 // raw btree operations rather than open_system_table(), so there's no SystemTableDefinition
 pub(crate) const ALLOCATOR_STATE_TABLE_NAME: &str = "allocator_state";
-pub(crate) type AllocatorStateTree<'a> = BtreeMut<'a, AllocatorStateKey, &'static [u8]>;
+pub(crate) type AllocatorStateTree = Btree<AllocatorStateKey, &'static [u8]>;
+pub(crate) type AllocatorStateTreeMut<'a> = BtreeMut<'a, AllocatorStateKey, &'static [u8]>;
 pub(crate) type SystemFreedTree<'a> = BtreeMut<'a, TransactionIdWithPagination, PageList<'static>>;
 
 // Format:
@@ -1564,7 +1565,7 @@ impl WriteTransaction {
         if self.quick_repair {
             system_tree.create_table_and_flush_table_root(
                 ALLOCATOR_STATE_TABLE_NAME,
-                |system_tree_ref, tree: &mut AllocatorStateTree| {
+                |system_tree_ref, tree: &mut AllocatorStateTreeMut| {
                     let mut pagination_counter = 0;
 
                     loop {
