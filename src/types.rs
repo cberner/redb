@@ -4,6 +4,9 @@ use std::fmt::Debug;
 use std::mem::size_of;
 #[cfg(feature = "chrono_v0_4")]
 mod chrono_v0_4;
+#[cfg(feature = "uuid")]
+mod uuid;
+
 #[derive(Eq, PartialEq, Clone, Debug)]
 enum TypeClassification {
     Internal,
