@@ -532,8 +532,6 @@ impl<'db> SystemNamespace<'db> {
         transaction: &'txn WriteTransaction,
         definition: SystemTableDefinition<K, V>,
     ) -> Result<SystemTable<'db, 's, K, V>> {
-        #[cfg(feature = "logging")]
-        debug!("Opening system table: {definition}");
         let (root, _) = self
             .table_tree
             .get_or_create_table::<K, V>(definition.name(), TableType::Normal)
