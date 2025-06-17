@@ -338,7 +338,10 @@ pub trait ReadableDatabase {
 /// const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
 ///
 /// # fn main() -> Result<(), Error> {
-/// # let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+/// # #[cfg(not(target_os = "wasi"))]
+/// # let tmpfile = NamedTempFile::new().unwrap();
+/// # #[cfg(target_os = "wasi")]
+/// # let tmpfile = NamedTempFile::new_in("/tmp").unwrap();
 /// # let filename = tmpfile.path();
 /// let db = Database::create(filename)?;
 /// let write_txn = db.begin_write()?;
