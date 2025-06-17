@@ -205,7 +205,7 @@ mod unix {
             Ok(buffer)
         }
 
-        fn write_page(&self, page: u64) -> WritablePage {
+        fn write_page(&self, page: u64) -> WritablePage<'_> {
             let mut lock = self.write_buffer.lock().unwrap();
 
             let existing = None;
