@@ -295,7 +295,7 @@ impl U64GroupedBitmap {
     }
 
     #[cfg(any(test, fuzzing))]
-    pub fn iter(&self) -> U64GroupedBitmapIter {
+    pub fn iter(&self) -> U64GroupedBitmapIter<'_> {
         U64GroupedBitmapIter::new(self.len, &self.data)
     }
 

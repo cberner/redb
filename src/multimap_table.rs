@@ -1307,7 +1307,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
     pub fn remove_all<'a>(
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
-    ) -> Result<MultimapValue<V>> {
+    ) -> Result<MultimapValue<'_, V>> {
         let iter = if let Some(collection) = self.tree.remove(key.borrow())? {
             let mut pages = vec![];
             if matches!(
@@ -1375,7 +1375,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableTableMetadata for MultimapTable
 
 impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for MultimapTable<'_, K, V> {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<V>> {
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'_, V>> {
         let guard = self.transaction.transaction_guard();
         let iter = if let Some(collection) = self.tree.get(key.borrow())? {
             DynamicCollection::iter(collection, guard, self.mem.clone())?
@@ -1391,7 +1391,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
     }
 
     /// Returns a double-ended iterator over a range of elements in the table
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<K, V>>
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
@@ -1415,15 +1415,15 @@ impl<K: Key + 'static, V: Key + 'static> Drop for MultimapTable<'_, K, V> {
 
 pub trait ReadableMultimapTable<K: Key + 'static, V: Key + 'static>: ReadableTableMetadata {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<V>>;
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'_, V>>;
 
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<K, V>>
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a;
 
     /// Returns an double-ended iterator over all elements in the table. Values are in ascending
     /// order.
-    fn iter(&self) -> Result<MultimapRange<K, V>> {
+    fn iter(&self) -> Result<MultimapRange<'_, K, V>> {
         self.range::<K::SelfType<'_>>(..)
     }
 }
@@ -1572,7 +1572,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
     for ReadOnlyMultimapTable<K, V>
 {
     /// Returns an iterator over all values for the given key. Values are in ascending order.
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<V>> {
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'_, V>> {
         let iter = if let Some(collection) = self.tree.get(key.borrow())? {
             DynamicCollection::iter(collection, self.transaction_guard.clone(), self.mem.clone())?
         } else {
@@ -1586,7 +1586,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
         Ok(iter)
     }
 
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<K, V>>
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {

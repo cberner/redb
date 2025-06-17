@@ -414,7 +414,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         &mut self,
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
-    ) -> Result<Option<AccessGuard<V>>> {
+    ) -> Result<Option<AccessGuard<'_, V>>> {
         #[cfg(feature = "logging")]
         trace!(
             "Btree(root={:?}): Inserting {:?} with value of length {}",
@@ -455,7 +455,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         Ok(())
     }
 
-    pub(crate) fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<V>>> {
+    pub(crate) fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'_, V>>> {
         #[cfg(feature = "logging")]
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
         let mut freed_pages = self.freed_pages.lock().unwrap();
@@ -496,7 +496,10 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         self.read_tree()?.get(key)
     }
 
-    pub(crate) fn get_mut(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuardMut<V>>> {
+    pub(crate) fn get_mut(
+        &mut self,
+        key: &K::SelfType<'_>,
+    ) -> Result<Option<AccessGuardMut<'_, V>>> {
         if let Some(ref mut root) = self.root {
             let key_bytes = K::as_bytes(key);
             let query = key_bytes.as_ref();
@@ -531,7 +534,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         parent: Option<(PageMut, usize)>,
         mut page: PageMut,
         query: &[u8],
-    ) -> Result<Option<AccessGuardMut<V>>> {
+    ) -> Result<Option<AccessGuardMut<'_, V>>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
@@ -684,7 +687,7 @@ impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
         &mut self,
         key: &K::SelfType<'_>,
         value_length: u32,
-    ) -> Result<AccessGuardMutInPlace<V>> {
+    ) -> Result<AccessGuardMutInPlace<'_, V>> {
         #[cfg(feature = "logging")]
         trace!(
             "Btree(root={:?}): Inserting {:?} with {} reserved bytes for the value",

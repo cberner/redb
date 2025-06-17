@@ -405,14 +405,14 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
         }
     }
 
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<'_, V>>>
     where
         K: 'a,
     {
         self.tree.get(key.borrow())
     }
 
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<K, V>>
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<'_, K, V>>
     where
         K: 'a,
         KR: Borrow<K::SelfType<'a>> + 'a,
@@ -426,7 +426,7 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
         &mut self,
         range: impl RangeBounds<KR> + 'a,
         predicate: F,
-    ) -> Result<ExtractIf<K, V, F>>
+    ) -> Result<ExtractIf<'_, K, V, F>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
@@ -439,7 +439,7 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
         &mut self,
         key: impl Borrow<K::SelfType<'k>>,
         value: impl Borrow<V::SelfType<'v>>,
-    ) -> Result<Option<AccessGuard<V>>> {
+    ) -> Result<Option<AccessGuard<'_, V>>> {
         let value_len = V::as_bytes(value.borrow()).as_ref().len();
         if value_len > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(value_len));
@@ -457,7 +457,7 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
     pub fn remove<'a>(
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
-    ) -> Result<Option<AccessGuard<V>>>
+    ) -> Result<Option<AccessGuard<'_, V>>>
     where
         K: 'a,
     {
@@ -470,7 +470,7 @@ impl<K: Key + 'static, V: MutInPlaceValue + 'static> SystemTable<'_, '_, K, V> {
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
         value_length: u32,
-    ) -> Result<AccessGuardMutInPlace<V>> {
+    ) -> Result<AccessGuardMutInPlace<'_, V>> {
         if value_length as usize > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(value_length as usize));
         }
