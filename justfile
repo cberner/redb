@@ -20,7 +20,7 @@ release: pre
     cargo build --release
 
 flamegraph:
-    cargo flamegraph --bench lmdb_benchmark
+    cargo flamegraph -p redb-bench --bench lmdb_benchmark
     firefox ./flamegraph.svg
 
 publish_py: test_py
