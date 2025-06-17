@@ -1827,22 +1827,25 @@ struct DelegatingTable<K: Key + 'static, V: Value + 'static, T: ReadableTable<K,
 impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTable<K, V>
     for DelegatingTable<K, V, T>
 {
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> redb::Result<Option<AccessGuard<V>>> {
+    fn get<'a>(
+        &self,
+        key: impl Borrow<K::SelfType<'a>>,
+    ) -> redb::Result<Option<AccessGuard<'_, V>>> {
         self.inner.get(key)
     }
 
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> redb::Result<Range<K, V>>
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> redb::Result<Range<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
         self.inner.range(range)
     }
 
-    fn first(&self) -> redb::Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+    fn first(&self) -> redb::Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.inner.first()
     }
 
-    fn last(&self) -> redb::Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+    fn last(&self) -> redb::Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.inner.last()
     }
 }
@@ -1868,11 +1871,14 @@ struct DelegatingMultimapTable<K: Key + 'static, V: Key + 'static, T: ReadableMu
 impl<K: Key + 'static, V: Key + 'static, T: ReadableMultimapTable<K, V>> ReadableMultimapTable<K, V>
     for DelegatingMultimapTable<K, V, T>
 {
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> redb::Result<MultimapValue<V>> {
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> redb::Result<MultimapValue<'_, V>> {
         self.inner.get(key)
     }
 
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> redb::Result<MultimapRange<K, V>>
+    fn range<'a, KR>(
+        &self,
+        range: impl RangeBounds<KR> + 'a,
+    ) -> redb::Result<MultimapRange<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {

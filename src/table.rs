@@ -102,12 +102,12 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     pub fn get_mut<'k>(
         &mut self,
         key: impl Borrow<K::SelfType<'k>>,
-    ) -> Result<Option<AccessGuardMut<V>>> {
+    ) -> Result<Option<AccessGuardMut<'_, V>>> {
         self.tree.get_mut(key.borrow())
     }
 
     /// Removes and returns the first key-value pair in the table
-    pub fn pop_first(&mut self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+    pub fn pop_first(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         // TODO: optimize this
         let first = self
             .iter()?
@@ -125,7 +125,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     }
 
     /// Removes and returns the last key-value pair in the table
-    pub fn pop_last(&mut self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+    pub fn pop_last(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         // TODO: optimize this
         let last = self
             .iter()?
@@ -149,7 +149,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     pub fn extract_if<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         predicate: F,
-    ) -> Result<ExtractIf<K, V, F>> {
+    ) -> Result<ExtractIf<'_, K, V, F>> {
         self.extract_from_if::<K::SelfType<'_>, F>(.., predicate)
     }
 
@@ -161,7 +161,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         &mut self,
         range: impl RangeBounds<KR> + 'a,
         predicate: F,
-    ) -> Result<ExtractIf<K, V, F>>
+    ) -> Result<ExtractIf<'_, K, V, F>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
@@ -203,7 +203,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         &mut self,
         key: impl Borrow<K::SelfType<'k>>,
         value: impl Borrow<V::SelfType<'v>>,
-    ) -> Result<Option<AccessGuard<V>>> {
+    ) -> Result<Option<AccessGuard<'_, V>>> {
         let value_len = V::as_bytes(value.borrow()).as_ref().len();
         if value_len > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(value_len));
@@ -224,7 +224,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     pub fn remove<'a>(
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
-    ) -> Result<Option<AccessGuard<V>>> {
+    ) -> Result<Option<AccessGuard<'_, V>>> {
         self.tree.remove(key.borrow())
     }
 }
@@ -239,7 +239,7 @@ impl<K: Key + 'static, V: MutInPlaceValue + 'static> Table<'_, K, V> {
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
         value_length: u32,
-    ) -> Result<AccessGuardMutInPlace<V>> {
+    ) -> Result<AccessGuardMutInPlace<'_, V>> {
         if value_length as usize > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(value_length as usize));
         }
@@ -274,11 +274,11 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTableMetadata for Table<'_, K
 }
 
 impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'_, K, V> {
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>> {
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<'_, V>>> {
         self.tree.get(key.borrow())
     }
 
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<K, V>>
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
@@ -287,11 +287,11 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'_, K, 
             .map(|x| Range::new(x, self.transaction.transaction_guard()))
     }
 
-    fn first(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+    fn first(&self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.tree.first()
     }
 
-    fn last(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+    fn last(&self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.tree.last()
     }
 }
@@ -372,7 +372,7 @@ pub trait ReadableTableMetadata {
 
 pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMetadata {
     /// Returns the value corresponding to the given key
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>>;
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<'_, V>>>;
 
     /// Returns a double-ended iterator over a range of elements in the table
     ///
@@ -406,18 +406,18 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     /// # Ok(())
     /// # }
     /// ```
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<K, V>>
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a;
 
     /// Returns the first key-value pair in the table, if it exists
-    fn first(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>>;
+    fn first(&self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>>;
 
     /// Returns the last key-value pair in the table, if it exists
-    fn last(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>>;
+    fn last(&self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>>;
 
     /// Returns a double-ended iterator over all elements in the table
-    fn iter(&self) -> Result<Range<K, V>> {
+    fn iter(&self) -> Result<Range<'_, K, V>> {
         self.range::<K::SelfType<'_>>(..)
     }
 }
@@ -529,11 +529,11 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTableMetadata for ReadOnlyTab
 }
 
 impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable<K, V> {
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<V>>> {
+    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<Option<AccessGuard<'_, V>>> {
         self.tree.get(key.borrow())
     }
 
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<K, V>>
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
@@ -542,11 +542,11 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
             .map(|x| Range::new(x, self.transaction_guard.clone()))
     }
 
-    fn first(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+    fn first(&self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.tree.first()
     }
 
-    fn last(&self) -> Result<Option<(AccessGuard<K>, AccessGuard<V>)>> {
+    fn last(&self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.tree.last()
     }
 }
