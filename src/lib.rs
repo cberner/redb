@@ -40,9 +40,11 @@
 //!
 //! const TABLE: TableDefinition<&str, u64> = TableDefinition::new("my_data");
 //!
-//! #[cfg(not(target_os = "wasi"))]
 //! fn main() -> Result<(), Error> {
+//!     #[cfg(not(target_os = "wasi"))]
 //!     let file = tempfile::NamedTempFile::new().unwrap();
+//!     #[cfg(target_os = "wasi")]
+//!     let file = tempfile::NamedTempFile::new_in("/tmp").unwrap();
 //!     let db = Database::create(file.path())?;
 //!     let write_txn = db.begin_write()?;
 //!     {
