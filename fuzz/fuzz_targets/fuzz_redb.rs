@@ -74,9 +74,9 @@ impl StorageBackend for FuzzerBackend {
         self.inner.len()
     }
 
-    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
         self.check_countdown()?;
-        self.inner.read(offset, len)
+        self.inner.read(offset, out)
     }
 
     fn set_len(&self, len: u64) -> Result<(), std::io::Error> {

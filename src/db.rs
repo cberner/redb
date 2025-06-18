@@ -35,8 +35,8 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
 
     /// Reads the specified array of bytes from the storage.
     ///
-    /// If `len` + `offset` exceeds the length of the storage an appropriate `Error` should be returned or a panic may occur.
-    fn read(&self, offset: u64, len: usize) -> std::result::Result<Vec<u8>, io::Error>;
+    /// If `out.len()` + `offset` exceeds the length of the storage an appropriate `Error` should be returned or a panic may occur.
+    fn read(&self, offset: u64, out: &mut [u8]) -> std::result::Result<(), io::Error>;
 
     /// Sets the length of the storage.
     ///
@@ -1101,9 +1101,9 @@ mod test {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
             self.check_countdown()?;
-            self.inner.read(offset, len)
+            self.inner.read(offset, out)
         }
 
         fn set_len(&self, len: u64) -> Result<(), std::io::Error> {

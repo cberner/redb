@@ -153,9 +153,9 @@ impl CheckedBackend {
         result.map_err(StorageError::from)
     }
 
-    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<()> {
         self.check_failure()?;
-        let result = self.file.read(offset, len);
+        let result = self.file.read(offset, out);
         if result.is_err() {
             self.io_failed.store(true, Ordering::Release);
         }
@@ -316,7 +316,9 @@ impl PagedCachedFile {
 
     // Read directly from the file, ignoring any cached data
     pub(super) fn read_direct(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
-        self.file.read(offset, len)
+        let mut buffer = vec![0; len];
+        self.file.read(offset, &mut buffer)?;
+        Ok(buffer)
     }
 
     // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
