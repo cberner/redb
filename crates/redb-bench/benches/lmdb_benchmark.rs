@@ -17,7 +17,7 @@ fn main() {
     })
     .unwrap();
 
-    let redb_latency_results = {
+    let redb_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
         let mut db = redb::Database::builder()
             .set_cache_size(CACHE_SIZE)
@@ -95,12 +95,12 @@ fn main() {
 
     let mut rows = Vec::new();
 
-    for (benchmark, _duration) in &redb_latency_results {
+    for (benchmark, _duration) in &redb_results {
         rows.push(vec![benchmark.to_string()]);
     }
 
     let results = [
-        redb_latency_results,
+        redb_results,
         lmdb_results,
         rocksdb_results,
         sled_results,
