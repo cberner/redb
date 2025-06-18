@@ -345,6 +345,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
     for BtreeExtractIf<'_, K, V, F>
 {
     fn drop(&mut self) {
+        self.inner.close();
         let mut master_free_list = self.master_free_list.lock().unwrap();
         let mut allocated = self.allocated.lock().unwrap();
         for page in self.free_on_drop.drain(..) {
@@ -439,6 +440,11 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                 _value_type: Default::default(),
             })
         }
+    }
+
+    fn close(&mut self) {
+        self.left = None;
+        self.right = None;
     }
 }
 

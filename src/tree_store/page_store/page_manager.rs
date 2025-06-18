@@ -771,6 +771,17 @@ impl TransactionalMemory {
     }
 
     fn free_helper(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
+        #[cfg(debug_assertions)]
+        {
+            assert!(
+                !self
+                    .read_page_ref_counts
+                    .lock()
+                    .unwrap()
+                    .contains_key(&page)
+            );
+            assert!(!self.open_dirty_pages.lock().unwrap().contains(&page));
+        }
         allocated.remove(page);
         let mut state = self.state.lock().unwrap();
         let region_index = page.region;
