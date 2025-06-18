@@ -20,7 +20,7 @@ release: pre
     cargo build --release
 
 flamegraph:
-    cargo flamegraph -p redb-bench --bench lmdb_benchmark
+    cargo flamegraph -p redb-bench --bench redb_benchmark
     firefox ./flamegraph.svg
 
 publish_py: test_py
@@ -45,7 +45,7 @@ test_wasi:
     cargo +nightly-2025-05-04 test -p $(cargo pkgid) --target=wasm32-wasip1-threads -- --nocapture
     cargo +nightly-2025-05-04 test -p redb-derive --target=wasm32-wasip1-threads -- --nocapture
 
-bench bench='lmdb_benchmark': pre
+bench bench='redb_benchmark': pre
     cargo bench -p redb-bench --bench {{bench}}
 
 watch +args='test':
