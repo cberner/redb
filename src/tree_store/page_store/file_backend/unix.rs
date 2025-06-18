@@ -53,10 +53,9 @@ impl StorageBackend for FileBackend {
         Ok(self.file.metadata()?.len())
     }
 
-    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
-        let mut buffer = vec![0; len];
-        self.file.read_exact_at(&mut buffer, offset)?;
-        Ok(buffer)
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+        self.file.read_exact_at(out, offset)?;
+        Ok(())
     }
 
     fn set_len(&self, len: u64) -> Result<(), io::Error> {

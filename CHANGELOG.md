@@ -22,6 +22,8 @@ Fixed width tuples, such as `(u32, u64)` are backwards compatible.
 * Add `chrono_v0_4` feature flag which enables serialization of the `NaiveDate`, `NaiveTime`,
   `NaiveDatetime`, `DateTime<FixedOffset>`, and `FixedOffset` types in the `chrono` crate
 * Add `uuid` feature flag which enables serialization of the `Uuid` type in the `uuid` crate
+* Change `StorageBackend::read()` to accept a `&mut [u8]` output argument instead of returning
+  a `Vec<u8>`
 * Change `TypeName::name()` to be public
 * Change `ReadTransactionStillInUse` to contain a `Box`
 * Change `set_durability()` to return a `Result`

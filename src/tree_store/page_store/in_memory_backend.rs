@@ -34,11 +34,12 @@ impl StorageBackend for InMemoryBackend {
         Ok(self.read().len() as u64)
     }
 
-    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
         let guard = self.read();
         let offset = usize::try_from(offset).map_err(|_| Self::out_of_range())?;
-        if offset + len <= guard.len() {
-            Ok(guard[offset..offset + len].to_owned())
+        if offset + out.len() <= guard.len() {
+            out.copy_from_slice(&guard[offset..offset + out.len()]);
+            Ok(())
         } else {
             Err(Self::out_of_range())
         }

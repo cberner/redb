@@ -24,12 +24,11 @@ impl StorageBackend for FileBackend {
         Ok(self.file.lock().unwrap().metadata()?.len())
     }
 
-    fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
-        let mut result = vec![0; len];
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
         let mut file = self.file.lock().unwrap();
         file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(&mut result)?;
-        Ok(result)
+        file.read_exact(out)?;
+        Ok(())
     }
 
     fn set_len(&self, len: u64) -> Result<(), io::Error> {

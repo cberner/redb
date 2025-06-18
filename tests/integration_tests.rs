@@ -66,8 +66,8 @@ fn previous_io_error() {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, std::io::Error> {
-            self.inner.read(offset, len)
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            self.inner.read(offset, out)
         }
 
         fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
