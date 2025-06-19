@@ -193,7 +193,7 @@ impl UntypedBtreeMut {
                     }
                 }
 
-                let mut mutator = BranchMutator::new(&mut page);
+                let mut mutator = BranchMutator::new(page.memory_mut());
                 for (child_index, child_page, child_checksum) in new_children.into_iter().flatten()
                 {
                     mutator.write_child_page(child_index, child_page, child_checksum);
@@ -294,7 +294,7 @@ impl UntypedBtreeMut {
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&old_page, self.key_width);
-                let mut mutator = BranchMutator::new(&mut new_page);
+                let mut mutator = BranchMutator::new(new_page.memory_mut());
                 for i in 0..accessor.count_children() {
                     let child = accessor.child_page(i).unwrap();
                     if let Some((new_child, new_checksum)) =
@@ -579,7 +579,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                     drop(old_child_page);
                     freed_pages.push(child_page);
 
-                    let mut mutator = BranchMutator::new(&mut page);
+                    let mut mutator = BranchMutator::new(page.memory_mut());
                     mutator.write_child_page(child_index, new_page.get_page_number(), DEFERRED);
                     new_page
                 };

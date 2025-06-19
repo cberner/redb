@@ -294,7 +294,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     drop(page);
                     let mut page_mut = self.mem.get_page_mut(page_number)?;
                     let mut mutator =
-                        LeafMutator::new(&mut page_mut, K::fixed_width(), V::fixed_width());
+                        LeafMutator::new(page_mut.memory_mut(), K::fixed_width(), V::fixed_width());
                     mutator.insert(position, found, key, value);
                     let new_page_accessor =
                         LeafAccessor::new(page_mut.memory(), K::fixed_width(), V::fixed_width());
@@ -431,7 +431,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let page_number = page.get_page_number();
                     drop(page);
                     let mut mutpage = self.mem.get_page_mut(page_number)?;
-                    let mut mutator = BranchMutator::new(&mut mutpage);
+                    let mut mutator = BranchMutator::new(mutpage.memory_mut());
                     mutator.write_child_page(
                         child_index,
                         sub_result.new_root,
@@ -550,14 +550,15 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 assert!(found);
                 let old_len = accessor.entry(position).unwrap().value().len();
                 assert!(value.len() <= old_len);
-                let mut mutator = LeafMutator::new(&mut page, K::fixed_width(), V::fixed_width());
+                let mut mutator =
+                    LeafMutator::new(page.memory_mut(), K::fixed_width(), V::fixed_width());
                 mutator.insert(position, true, key, value);
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
                 self.insert_inplace_helper(self.mem.get_page_mut(child_page)?, key, value)?;
-                let mut mutator = BranchMutator::new(&mut page);
+                let mut mutator = BranchMutator::new(page.memory_mut());
                 mutator.write_child_page(child_index, child_page, DEFERRED);
             }
             _ => unreachable!(),
@@ -694,7 +695,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 if self.mem.uncommitted(original_page_number) && self.modify_uncommitted {
                     drop(page);
                     let mut mutpage = self.mem.get_page_mut(original_page_number)?;
-                    let mut mutator = BranchMutator::new(&mut mutpage);
+                    let mut mutator = BranchMutator::new(mutpage.memory_mut());
                     mutator.write_child_page(child_index, new_child, new_child_checksum);
                     original_page_number
                 } else {
