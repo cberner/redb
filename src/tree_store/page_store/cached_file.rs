@@ -303,7 +303,7 @@ impl PagedCachedFile {
         self.file.set_len(len)
     }
 
-    pub(super) fn flush(&self, #[allow(unused_variables)] eventual: bool) -> Result {
+    pub(super) fn flush(&self, eventual: bool) -> Result {
         self.flush_write_buffer()?;
 
         self.file.sync_data(eventual)
