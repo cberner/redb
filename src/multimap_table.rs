@@ -218,7 +218,7 @@ pub(crate) fn relocate_subtrees(
             );
             // TODO: maybe there's a better abstraction, so that we don't need to call into this low-level method?
             let mut mutator = LeafMutator::new(
-                &mut new_page,
+                new_page.memory_mut(),
                 key_size,
                 UntypedDynamicCollection::fixed_width_with(value_size),
             );
@@ -245,7 +245,7 @@ pub(crate) fn relocate_subtrees(
         }
         BRANCH => {
             let accessor = BranchAccessor::new(&old_page, key_size);
-            let mut mutator = BranchMutator::new(&mut new_page);
+            let mut mutator = BranchMutator::new(new_page.memory_mut());
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
                     let child_checksum = accessor.child_checksum(i).unwrap();
@@ -318,7 +318,7 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
         }
         // TODO: maybe there's a better abstraction, so that we don't need to call into this low-level method?
         let mut mutator = LeafMutator::new(
-            &mut leaf_page,
+            leaf_page.memory_mut(),
             key_size,
             DynamicCollection::<()>::fixed_width_with(value_size),
         );
