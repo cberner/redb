@@ -4,6 +4,7 @@ use crate::tree_store::btree_base::{BtreeHeader, Checksum};
 use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, PageHint};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
+use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
 use crate::tree_store::page_store::header::{DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER};
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
@@ -14,6 +15,7 @@ use crate::{DatabaseError, Result, StorageError};
 use std::cmp::{max, min};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
+#[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::io::ErrorKind;
@@ -86,7 +88,7 @@ impl InMemoryState {
 pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
     // TODO: maybe this should be moved to WriteTransaction?
-    allocated_since_commit: Mutex<HashSet<PageNumber>>,
+    allocated_since_commit: Mutex<PageNumberHashSet>,
     // True if the allocator state was corrupted when the file was opened
     // TODO: maybe we can remove this flag now that CheckedBackend exists?
     needs_recovery: AtomicBool,
@@ -242,7 +244,7 @@ impl TransactionalMemory {
         assert!(page_size >= DB_HEADER_SIZE);
 
         Ok(Self {
-            allocated_since_commit: Mutex::new(HashSet::new()),
+            allocated_since_commit: Mutex::new(Default::default()),
             needs_recovery: AtomicBool::new(needs_recovery),
             storage,
             state: Mutex::new(state),
