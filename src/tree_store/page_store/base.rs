@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
+use std::hash::{Hash, Hasher};
 use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
@@ -22,11 +23,22 @@ pub(crate) const MAX_PAGE_INDEX: u32 = 0x000F_FFFF;
 // highest 5bits: page order exponent
 //
 // Assuming a reasonable page size, like 4kiB, this allows for 4kiB * 2^20 * 2^20 = 4PiB of usable space
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub(crate) struct PageNumber {
     pub(crate) region: u32,
     pub(crate) page_index: u32,
     pub(crate) page_order: u8,
+}
+
+impl Hash for PageNumber {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // TODO: maybe we should store these fields as a single u64 in PageNumber. The field access
+        // will be a little more expensive, but I think it's less frequent than these hashes
+        let mut temp = 0x000F_FFFF & u64::from(self.page_index);
+        temp |= (0x000F_FFFF & u64::from(self.region)) << 20;
+        temp |= (0b0001_1111 & u64::from(self.page_order)) << 59;
+        state.write_u64(temp);
+    }
 }
 
 // PageNumbers are ordered as determined by their starting address in the database file

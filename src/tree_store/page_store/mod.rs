@@ -2,6 +2,7 @@ mod base;
 mod bitmap;
 mod buddy_allocator;
 mod cached_file;
+mod fast_hash;
 pub mod file_backend;
 mod header;
 mod in_memory_backend;

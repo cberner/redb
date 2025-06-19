@@ -1,10 +1,11 @@
-use std::collections::{HashMap, VecDeque};
+use crate::tree_store::page_store::fast_hash::FastHashMapU64;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default)]
 pub struct LRUCache<T> {
     // AtomicBool is the second chance flag
-    cache: HashMap<u64, (T, AtomicBool)>,
+    cache: FastHashMapU64<(T, AtomicBool)>,
     lru_queue: VecDeque<u64>,
 }
 
