@@ -521,6 +521,7 @@ impl Database {
         Ok(compacted)
     }
 
+    #[cfg_attr(not(debug_assertions), expect(dead_code))]
     fn check_repaired_allocated_pages_table(
         system_root: Option<BtreeHeader>,
         mem: Arc<TransactionalMemory>,
