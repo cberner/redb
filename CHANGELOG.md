@@ -33,7 +33,7 @@ Fixed width tuples, such as `(u32, u64)` are backwards compatible.
 * Remove `Durability::Paranoid`
 * Disallow access to the database from read transactions after the `Database` as been
   dropped. Access will now return `DatabaseClosed`
-* Optimize writes: 5-10% performance improvement on benchmarks
+* Optimize writes: ~15% improvement on bulk load benchmarks
 
 ## 2.6.0 - 2025-05-22
 
