@@ -203,27 +203,40 @@ fn immediate_persistence() {
 }
 
 #[test]
-fn free() {
+fn immediate_free() {
+    test_free(Durability::Immediate);
+}
+
+#[test]
+fn eventual_free() {
+    test_free(Durability::Eventual);
+}
+
+fn test_free(durability: Durability) {
     let tmpfile = create_tempfile();
 
     let db = Database::create(tmpfile.path()).unwrap();
-    let txn = db.begin_write().unwrap();
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(durability).unwrap();
     {
         let _table = txn.open_table(SLICE_TABLE).unwrap();
         let mut table = txn.open_table(SLICE_TABLE2).unwrap();
         table.insert([].as_slice(), [].as_slice()).unwrap();
     }
     txn.commit().unwrap();
-    let txn = db.begin_write().unwrap();
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(durability).unwrap();
     {
         let mut table = txn.open_table(SLICE_TABLE2).unwrap();
         table.remove([].as_slice()).unwrap();
     }
     txn.commit().unwrap();
-    let txn = db.begin_write().unwrap();
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(durability).unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin_write().unwrap();
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(durability).unwrap();
     let allocated_pages = txn.stats().unwrap().allocated_pages();
 
     let key = vec![0; 100];
@@ -248,7 +261,8 @@ fn free() {
         let key_range: Vec<usize> = (0..num_writes).collect();
         // Delete in chunks to be sure that we don't run out of pages due to temp allocations
         for chunk in key_range.chunks(10) {
-            let txn = db.begin_write().unwrap();
+            let mut txn = db.begin_write().unwrap();
+            txn.set_durability(durability).unwrap();
             {
                 let mut table = txn.open_table(SLICE_TABLE).unwrap();
                 for i in chunk {
@@ -262,9 +276,11 @@ fn free() {
     }
 
     // Extra commit to finalize the cleanup of the freed pages
-    let txn = db.begin_write().unwrap();
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(durability).unwrap();
     txn.commit().unwrap();
-    let txn = db.begin_write().unwrap();
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(durability).unwrap();
     assert_eq!(allocated_pages, txn.stats().unwrap().allocated_pages());
     txn.abort().unwrap();
 }
