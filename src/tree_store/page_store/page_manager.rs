@@ -89,6 +89,7 @@ pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
     // TODO: maybe this should be moved to WriteTransaction?
     allocated_since_commit: Mutex<PageNumberHashSet>,
+    unpersisted: Mutex<PageNumberHashSet>,
     // True if the allocator state was corrupted when the file was opened
     // TODO: maybe we can remove this flag now that CheckedBackend exists?
     needs_recovery: AtomicBool,
@@ -245,6 +246,7 @@ impl TransactionalMemory {
 
         Ok(Self {
             allocated_since_commit: Mutex::new(Default::default()),
+            unpersisted: Mutex::new(Default::default()),
             needs_recovery: AtomicBool::new(needs_recovery),
             storage,
             state: Mutex::new(state),
@@ -564,6 +566,7 @@ impl TransactionalMemory {
             }
         }
         self.allocated_since_commit.lock().unwrap().clear();
+        self.unpersisted.lock().unwrap().clear();
 
         let mut state = self.state.lock().unwrap();
         assert_eq!(
@@ -593,7 +596,8 @@ impl TransactionalMemory {
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
         assert!(!self.needs_recovery.load(Ordering::Acquire));
 
-        self.allocated_since_commit.lock().unwrap().clear();
+        let mut unpersisted = self.unpersisted.lock().unwrap();
+        unpersisted.extend(self.allocated_since_commit.lock().unwrap().drain());
         self.storage.write_barrier()?;
 
         let mut state = self.state.lock().unwrap();
@@ -767,6 +771,11 @@ impl TransactionalMemory {
         }
     }
 
+    pub(crate) fn get_last_durable_transaction_id(&self) -> Result<TransactionId> {
+        let state = self.state.lock()?;
+        Ok(state.header.primary_slot().transaction_id)
+    }
+
     pub(crate) fn free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
         self.allocated_since_commit.lock().unwrap().remove(&page);
         self.free_helper(page, allocated);
@@ -809,6 +818,20 @@ impl TransactionalMemory {
         self.storage.cancel_pending_write(address_range.start, len);
     }
 
+    // Frees the page if no durable commit has occurred, since it was allocated. Returns true, if the page was freed
+    pub(crate) fn free_if_unpersisted(
+        &self,
+        page: PageNumber,
+        allocated: &mut PageTrackerPolicy,
+    ) -> bool {
+        if self.unpersisted.lock().unwrap().remove(&page) {
+            self.free_helper(page, allocated);
+            true
+        } else {
+            false
+        }
+    }
+
     // Frees the page if it was allocated since the last commit. Returns true, if the page was freed
     pub(crate) fn free_if_uncommitted(
         &self,
@@ -826,6 +849,10 @@ impl TransactionalMemory {
     // Page has not been committed
     pub(crate) fn uncommitted(&self, page: PageNumber) -> bool {
         self.allocated_since_commit.lock().unwrap().contains(&page)
+    }
+
+    pub(crate) fn unpersisted(&self, page: PageNumber) -> bool {
+        self.unpersisted.lock().unwrap().contains(&page)
     }
 
     pub(crate) fn allocate_helper(
