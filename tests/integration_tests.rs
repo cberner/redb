@@ -212,6 +212,11 @@ fn eventual_free() {
     test_free(Durability::Eventual);
 }
 
+#[test]
+fn nondurable_free() {
+    test_free(Durability::None);
+}
+
 fn test_free(durability: Durability) {
     let tmpfile = create_tempfile();
 
@@ -283,6 +288,74 @@ fn test_free(durability: Durability) {
     txn.set_durability(durability).unwrap();
     assert_eq!(allocated_pages, txn.stats().unwrap().allocated_pages());
     txn.abort().unwrap();
+}
+
+#[test]
+fn nondurable_live_and_free() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.remove(0).unwrap();
+    }
+    txn.commit().unwrap();
+    // Process frees
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+    let txn = db.begin_write().unwrap();
+    let allocated_pages = txn.stats().unwrap().allocated_pages();
+    txn.abort().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 1).unwrap();
+    }
+    txn.commit().unwrap();
+    let read_txn = db.begin_read().unwrap();
+
+    for i in 0..5 {
+        let mut txn = db.begin_write().unwrap();
+        txn.set_durability(Durability::None).unwrap();
+        {
+            let mut table = txn.open_table(U64_TABLE).unwrap();
+            table.insert(0, i).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    {
+        let table = read_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.get(0).unwrap().unwrap().value(), 1);
+    }
+    drop(read_txn);
+
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.remove(0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None).unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    // allocated * 2, because we can't free the original persisted pages
+    // + 2, because now we need freed trees to store those original pages to be freed
+    assert!(txn.stats().unwrap().allocated_pages() <= allocated_pages * 2 + 2);
 }
 
 #[test]

@@ -4,10 +4,12 @@ use crate::{Key, Result, Savepoint, TypeName, Value};
 use log::debug;
 use std::cmp::Ordering;
 use std::collections::btree_map::BTreeMap;
+use std::collections::{HashMap, HashSet};
+use std::mem;
 use std::mem::size_of;
 use std::sync::{Condvar, Mutex};
 
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Hash, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub(crate) struct TransactionId(u64);
 
 impl TransactionId {
@@ -27,14 +29,6 @@ impl TransactionId {
         let next = self.next();
         *self = next;
         next
-    }
-
-    pub(crate) fn parent(self) -> Option<TransactionId> {
-        if self.0 == 0 {
-            None
-        } else {
-            Some(TransactionId(self.0 - 1))
-        }
     }
 }
 
@@ -89,8 +83,12 @@ struct State {
     valid_savepoints: BTreeMap<SavepointId, TransactionId>,
     // Non-durable commits that are still in-memory, and waiting for a durable commit to get flushed
     // We need to make sure that the freed-table does not get processed for these, since they are not durable yet
-    // Therefore, we hold a read transaction on their parent
-    pending_non_durable_commits: Vec<TransactionId>,
+    // Therefore, we hold a read transaction on their nearest durable ancestor
+    //
+    // Maps non-durable transaction id -> durable ancestor
+    pending_non_durable_commits: HashMap<TransactionId, TransactionId>,
+    // Non-durable commits which have NOT been processed in the freed table
+    unprocessed_freed_non_durable_commits: HashSet<TransactionId>,
 }
 
 pub(crate) struct TransactionTracker {
@@ -108,6 +106,7 @@ impl TransactionTracker {
                 live_write_transaction: None,
                 valid_savepoints: Default::default(),
                 pending_non_durable_commits: Default::default(),
+                unprocessed_freed_non_durable_commits: Default::default(),
             }),
             live_write_transaction_available: Condvar::new(),
         }
@@ -136,28 +135,44 @@ impl TransactionTracker {
 
     pub(crate) fn clear_pending_non_durable_commits(&self) {
         let mut state = self.state.lock().unwrap();
-        let ids: Vec<TransactionId> = state.pending_non_durable_commits.drain(..).collect();
-        for id in ids {
-            if let Some(parent) = id.parent() {
-                let ref_count = state.live_read_transactions.get_mut(&parent).unwrap();
-                *ref_count -= 1;
-                if *ref_count == 0 {
-                    state.live_read_transactions.remove(&parent);
-                }
+        let ids = mem::take(&mut state.pending_non_durable_commits);
+        for (_, durable_ancestor) in ids {
+            let ref_count = state
+                .live_read_transactions
+                .get_mut(&durable_ancestor)
+                .unwrap();
+            *ref_count -= 1;
+            if *ref_count == 0 {
+                state.live_read_transactions.remove(&durable_ancestor);
             }
         }
     }
 
-    pub(crate) fn register_non_durable_commit(&self, id: TransactionId) {
+    pub(crate) fn is_unprocessed_non_durable_commit(&self, id: TransactionId) -> bool {
+        let state = self.state.lock().unwrap();
+        state.unprocessed_freed_non_durable_commits.contains(&id)
+    }
+
+    pub(crate) fn mark_unprocessed_non_durable_commit(&self, id: TransactionId) {
         let mut state = self.state.lock().unwrap();
-        if let Some(parent) = id.parent() {
-            state
-                .live_read_transactions
-                .entry(parent)
-                .and_modify(|x| *x += 1)
-                .or_insert(1);
-        }
-        state.pending_non_durable_commits.push(id);
+        state.unprocessed_freed_non_durable_commits.remove(&id);
+    }
+
+    pub(crate) fn register_non_durable_commit(
+        &self,
+        id: TransactionId,
+        durable_ancestor: TransactionId,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .live_read_transactions
+            .entry(durable_ancestor)
+            .and_modify(|x| *x += 1)
+            .or_insert(1);
+        state
+            .pending_non_durable_commits
+            .insert(id, durable_ancestor);
+        state.unprocessed_freed_non_durable_commits.insert(id);
     }
 
     pub(crate) fn restore_savepoint_counter_state(&self, next_savepoint: SavepointId) {
@@ -257,5 +272,17 @@ impl TransactionTracker {
             .keys()
             .next()
             .copied()
+    }
+
+    // Returns the transaction id of the oldest non-durable transaction which has not been processed
+    // for freeing, which has live read transactions
+    pub(crate) fn oldest_live_read_nondurable_transaction(&self) -> Option<TransactionId> {
+        let state = self.state.lock().unwrap();
+        for id in state.live_read_transactions.keys() {
+            if state.pending_non_durable_commits.contains_key(id) {
+                return Some(*id);
+            }
+        }
+        None
     }
 }
