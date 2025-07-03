@@ -238,17 +238,17 @@ impl<K: Key + 'static, V: MutInPlaceValue + 'static> Table<'_, K, V> {
     pub fn insert_reserve<'a>(
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
-        value_length: u32,
+        value_length: usize,
     ) -> Result<AccessGuardMutInPlace<'_, V>> {
-        if value_length as usize > MAX_VALUE_LENGTH {
-            return Err(StorageError::ValueTooLarge(value_length as usize));
+        if value_length > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_length));
         }
         let key_len = K::as_bytes(key.borrow()).as_ref().len();
         if key_len > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(key_len));
         }
-        if value_length as usize + key_len > MAX_PAIR_LENGTH {
-            return Err(StorageError::ValueTooLarge(value_length as usize + key_len));
+        if value_length + key_len > MAX_PAIR_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_length + key_len));
         }
         self.tree.insert_reserve(key.borrow(), value_length)
     }
