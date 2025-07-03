@@ -15,6 +15,14 @@ To load tuple data created prior to version 3.0, wrap them in the `Legacy` type.
 For example, `TableDefinition<u64, (&str, u32)>` becomes `TableDefinition<u64, Legacy<(&str, u32)>>`.
 Fixed width tuples, such as `(u32, u64)` are backwards compatible.
 
+### Enable garbage collection in Durability::None transactions
+Non-durable transactions will free pages, when possible (pages allocated in a preceding non-durable transaction).
+This resolves an issue where a long sequence of non-durable transactions led to significant growth
+in the size of the database file.
+This change increases the RAM required for a sequence of non-durable transactions, such that RAM
+proportional to the net change in the database is now used. However, it will never use more than
+about 0.2% of the database file size.
+
 ### Other changes
 
 * Add `StorageBackend::close()`
@@ -24,6 +32,7 @@ Fixed width tuples, such as `(u32, u64)` are backwards compatible.
 * Add `uuid` feature flag which enables serialization of the `Uuid` type in the `uuid` crate
 * Change `StorageBackend::read()` to accept a `&mut [u8]` output argument instead of returning
   a `Vec<u8>`
+* Change `Table::insert_reserve()` to take `usize` instead of `u32` as the argument type
 * Change `TypeName::name()` to be public
 * Change `ReadTransactionStillInUse` to contain a `Box`
 * Change `set_durability()` to return a `Result`
