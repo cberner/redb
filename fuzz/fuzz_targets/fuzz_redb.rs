@@ -453,7 +453,7 @@ fn handle_table_op(
         FuzzOperation::InsertReserve { key, value_size } => {
             let key = key.value;
             let value_size = value_size.value;
-            let mut value = table.insert_reserve(&key, value_size as u32)?;
+            let mut value = table.insert_reserve(&key, value_size)?;
             value.as_mut().fill(0xFF);
             reference.insert(key, value_size);
         }

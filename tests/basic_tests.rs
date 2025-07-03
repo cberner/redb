@@ -939,9 +939,7 @@ fn insert_reserve() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(def).unwrap();
-        let mut reserved = table
-            .insert_reserve("hello", value.len().try_into().unwrap())
-            .unwrap();
+        let mut reserved = table.insert_reserve("hello", value.len()).unwrap();
         reserved.as_mut().copy_from_slice(value.as_bytes());
     }
     write_txn.commit().unwrap();

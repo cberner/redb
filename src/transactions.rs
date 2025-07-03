@@ -469,17 +469,17 @@ impl<K: Key + 'static, V: MutInPlaceValue + 'static> SystemTable<'_, '_, K, V> {
     pub fn insert_reserve<'a>(
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
-        value_length: u32,
+        value_length: usize,
     ) -> Result<AccessGuardMutInPlace<'_, V>> {
-        if value_length as usize > MAX_VALUE_LENGTH {
-            return Err(StorageError::ValueTooLarge(value_length as usize));
+        if value_length > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_length));
         }
         let key_len = K::as_bytes(key.borrow()).as_ref().len();
         if key_len > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(key_len));
         }
-        if value_length as usize + key_len > MAX_PAIR_LENGTH {
-            return Err(StorageError::ValueTooLarge(value_length as usize + key_len));
+        if value_length + key_len > MAX_PAIR_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_length + key_len));
         }
         self.tree.insert_reserve(key.borrow(), value_length)
     }
@@ -1440,8 +1440,7 @@ impl WriteTransaction {
                 transaction_id: self.transaction_id.raw_id(),
                 pagination_id: pagination_counter,
             };
-            let mut access_guard =
-                freed_table.insert_reserve(&key, buffer_size.try_into().unwrap())?;
+            let mut access_guard = freed_table.insert_reserve(&key, buffer_size)?;
 
             let len = freed_pages.len();
             access_guard.as_mut().clear();
@@ -1472,8 +1471,7 @@ impl WriteTransaction {
                 transaction_id: self.transaction_id.raw_id(),
                 pagination_id: pagination_counter,
             };
-            let mut access_guard =
-                allocated_table.insert_reserve(&key, buffer_size.try_into().unwrap())?;
+            let mut access_guard = allocated_table.insert_reserve(&key, buffer_size)?;
 
             let len = data_allocated_pages.len();
             access_guard.as_mut().clear();
@@ -1834,8 +1832,7 @@ impl WriteTransaction {
                             data_freed.remove(&key)?;
                         } else {
                             let required = PageList::required_bytes(new_pages.len());
-                            let mut page_list_mut =
-                                data_freed.insert_reserve(&key, required.try_into().unwrap())?;
+                            let mut page_list_mut = data_freed.insert_reserve(&key, required)?;
                             for page in new_pages {
                                 page_list_mut.as_mut().push_back(page);
                             }
@@ -1891,8 +1888,7 @@ impl WriteTransaction {
                             data_freed.remove(&key)?;
                         } else {
                             let required = PageList::required_bytes(new_pages.len());
-                            let mut page_list_mut =
-                                data_freed.insert_reserve(&key, required.try_into().unwrap())?;
+                            let mut page_list_mut = data_freed.insert_reserve(&key, required)?;
                             for page in new_pages {
                                 page_list_mut.as_mut().push_back(page);
                             }
@@ -1931,8 +1927,7 @@ impl WriteTransaction {
                         transaction_id: self.transaction_id.raw_id(),
                         pagination_id: *pagination_counter,
                     };
-                    let mut access_guard =
-                        system_freed_tree.insert_reserve(&key, buffer_size.try_into().unwrap())?;
+                    let mut access_guard = system_freed_tree.insert_reserve(&key, buffer_size)?;
 
                     let mut freed_pages = system_freed_pages.lock().unwrap();
                     let len = freed_pages.len();
