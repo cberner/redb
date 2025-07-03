@@ -1841,6 +1841,25 @@ impl WriteTransaction {
             master_tree.print_debug(true)?;
         }
 
+        // Flush any pending updates to make sure we get the latest root
+        let mut system_tables = self.system_tables.lock().unwrap();
+        if let Some(page) = system_tables
+            .table_tree
+            .flush_table_root_updates()
+            .unwrap()
+            .finalize_dirty_checksums()
+            .unwrap()
+        {
+            eprintln!("System tree:");
+            let master_tree: Btree<&str, InternalTableDefinition> = Btree::new(
+                Some(page),
+                PageHint::None,
+                self.transaction_guard.clone(),
+                self.mem.clone(),
+            )?;
+            master_tree.print_debug(true)?;
+        }
+
         Ok(())
     }
 }
