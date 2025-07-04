@@ -173,7 +173,7 @@ impl CheckedBackend {
 
     fn sync_data(&self) -> Result<()> {
         self.check_failure()?;
-        let result = self.file.sync_data(false);
+        let result = self.file.sync_data();
         if result.is_err() {
             self.io_failed.store(true, Ordering::Release);
         }

@@ -74,11 +74,11 @@ fn previous_io_error() {
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self, eventual: bool) -> Result<(), std::io::Error> {
+        fn sync_data(&self) -> Result<(), std::io::Error> {
             if self.fail_flag.load(Ordering::SeqCst) {
                 Err(std::io::Error::from(ErrorKind::Other))
             } else {
-                self.inner.sync_data(eventual)
+                self.inner.sync_data()
             }
         }
 

@@ -84,7 +84,7 @@ impl StorageBackend for FuzzerBackend {
         self.inner.set_len(len)
     }
 
-    fn sync_data(&self, _eventual: bool) -> Result<(), std::io::Error> {
+    fn sync_data(&self) -> Result<(), std::io::Error> {
         self.decrement_countdown()?;
         // No-op. The fuzzer doesn't test crashes, so fsync is unnecessary
         Ok(())

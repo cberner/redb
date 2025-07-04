@@ -61,7 +61,7 @@ impl StorageBackend for InMemoryBackend {
         Ok(())
     }
 
-    fn sync_data(&self, _: bool) -> Result<(), io::Error> {
+    fn sync_data(&self) -> Result<(), io::Error> {
         Ok(())
     }
 

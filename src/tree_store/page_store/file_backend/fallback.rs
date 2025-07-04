@@ -35,7 +35,7 @@ impl StorageBackend for FileBackend {
         self.file.lock().unwrap().set_len(len)
     }
 
-    fn sync_data(&self, _eventual: bool) -> Result<(), io::Error> {
+    fn sync_data(&self) -> Result<(), io::Error> {
         self.file.lock().unwrap().sync_data()
     }
 
