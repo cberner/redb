@@ -360,9 +360,6 @@ pub enum Durability {
     /// Note: Pages are only freed during commits with higher durability levels. Exclusively using
     /// this durability level will result in rapid growth of the database file.
     None,
-    /// Commits with this durability level have been queued for persitance to disk, and should be
-    /// persistent some time after [`WriteTransaction::commit`] returns.
-    Eventual,
     /// Commits with this durability level are guaranteed to be persistent as soon as
     /// [`WriteTransaction::commit`] returns.
     Immediate,
@@ -373,7 +370,6 @@ pub enum Durability {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum InternalDurability {
     None,
-    Eventual,
     Immediate,
 }
 
@@ -1187,7 +1183,6 @@ impl WriteTransaction {
 
         self.durability = match durability {
             Durability::None => InternalDurability::None,
-            Durability::Eventual => InternalDurability::Eventual,
             Durability::Immediate => InternalDurability::Immediate,
         };
 
@@ -1392,8 +1387,7 @@ impl WriteTransaction {
         );
         match self.durability {
             InternalDurability::None => self.non_durable_commit(user_root)?,
-            InternalDurability::Eventual => self.durable_commit(user_root, true)?,
-            InternalDurability::Immediate => self.durable_commit(user_root, false)?,
+            InternalDurability::Immediate => self.durable_commit(user_root)?,
         }
 
         for (savepoint, transaction) in self.deleted_persistent_savepoints.lock().unwrap().iter() {
@@ -1542,11 +1536,7 @@ impl WriteTransaction {
         Ok(())
     }
 
-    pub(crate) fn durable_commit(
-        &mut self,
-        user_root: Option<BtreeHeader>,
-        eventual: bool,
-    ) -> Result {
+    pub(crate) fn durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
         let free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_transaction()
@@ -1605,7 +1595,6 @@ impl WriteTransaction {
             user_root,
             system_root,
             self.transaction_id,
-            eventual,
             self.two_phase_commit,
         )?;
 

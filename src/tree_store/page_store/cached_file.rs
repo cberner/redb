@@ -171,9 +171,9 @@ impl CheckedBackend {
         result.map_err(StorageError::from)
     }
 
-    fn sync_data(&self, eventual: bool) -> Result<()> {
+    fn sync_data(&self) -> Result<()> {
         self.check_failure()?;
-        let result = self.file.sync_data(eventual);
+        let result = self.file.sync_data(false);
         if result.is_err() {
             self.io_failed.store(true, Ordering::Release);
         }
@@ -303,10 +303,10 @@ impl PagedCachedFile {
         self.file.set_len(len)
     }
 
-    pub(super) fn flush(&self, eventual: bool) -> Result {
+    pub(super) fn flush(&self) -> Result {
         self.flush_write_buffer()?;
 
-        self.file.sync_data(eventual)
+        self.file.sync_data()
     }
 
     // Make writes visible to readers, but does not guarantee any durability

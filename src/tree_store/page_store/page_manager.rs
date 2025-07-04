@@ -201,14 +201,14 @@ impl TransactionalMemory {
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(false));
 
-            storage.flush(false)?;
+            storage.flush()?;
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true));
-            storage.flush(false)?;
+            storage.flush()?;
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
         let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
@@ -233,7 +233,7 @@ impl TransactionalMemory {
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true));
-            storage.flush(false)?;
+            storage.flush()?;
         }
 
         let layout = header.layout();
@@ -281,7 +281,7 @@ impl TransactionalMemory {
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool, DatabaseError> {
         assert!(self.allocated_since_commit.lock().unwrap().is_empty());
 
-        self.storage.flush(false)?;
+        self.storage.flush()?;
         self.storage.invalidate_cache_all();
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
@@ -300,7 +300,7 @@ impl TransactionalMemory {
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true));
-            self.storage.flush(false)?;
+            self.storage.flush()?;
         }
 
         self.needs_recovery
@@ -315,7 +315,7 @@ impl TransactionalMemory {
         assert!(!state.header.recovery_required);
         state.header.recovery_required = true;
         self.write_header(&state.header)?;
-        self.storage.flush(false)
+        self.storage.flush()
     }
 
     #[cfg(test)]
@@ -368,7 +368,7 @@ impl TransactionalMemory {
         let mut state = self.state.lock().unwrap();
         state.header.recovery_required = false;
         self.write_header(&state.header)?;
-        let result = self.storage.flush(false);
+        let result = self.storage.flush();
         self.needs_recovery.store(false, Ordering::Release);
 
         result
@@ -501,10 +501,9 @@ impl TransactionalMemory {
         data_root: Option<BtreeHeader>,
         system_root: Option<BtreeHeader>,
         transaction_id: TransactionId,
-        eventual: bool,
         two_phase: bool,
     ) -> Result {
-        let result = self.commit_inner(data_root, system_root, transaction_id, eventual, two_phase);
+        let result = self.commit_inner(data_root, system_root, transaction_id, two_phase);
         if result.is_err() {
             self.needs_recovery.store(true, Ordering::Release);
         }
@@ -517,7 +516,6 @@ impl TransactionalMemory {
         data_root: Option<BtreeHeader>,
         system_root: Option<BtreeHeader>,
         transaction_id: TransactionId,
-        eventual: bool,
         two_phase: bool,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
@@ -544,7 +542,7 @@ impl TransactionalMemory {
 
         // Use 2-phase commit, if checksums are disabled
         if two_phase {
-            self.storage.flush(eventual)?;
+            self.storage.flush()?;
         }
 
         // Make our new commit the primary, and record whether it was a 2-phase commit.
@@ -554,7 +552,7 @@ impl TransactionalMemory {
 
         // Write the new header to disk
         self.write_header(&header)?;
-        self.storage.flush(eventual)?;
+        self.storage.flush()?;
 
         if shrunk {
             let result = self.storage.resize(header.layout().len());
@@ -1067,10 +1065,10 @@ impl TransactionalMemory {
     pub(crate) fn close(&self) -> Result {
         if !self.needs_recovery.load(Ordering::Acquire) && !thread::panicking() {
             let mut state = self.state.lock()?;
-            if self.storage.flush(false).is_ok() {
+            if self.storage.flush().is_ok() {
                 state.header.recovery_required = false;
                 self.write_header(&state.header)?;
-                self.storage.flush(false)?;
+                self.storage.flush()?;
             }
         }
 
