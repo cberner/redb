@@ -62,23 +62,8 @@ impl StorageBackend for FileBackend {
         self.file.set_len(len)
     }
 
-    #[cfg(not(target_os = "macos"))]
-    fn sync_data(&self, _: bool) -> Result<(), io::Error> {
+    fn sync_data(&self) -> Result<(), io::Error> {
         self.file.sync_data()
-    }
-
-    #[cfg(target_os = "macos")]
-    fn sync_data(&self, eventual: bool) -> Result<(), io::Error> {
-        if eventual {
-            let code = unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_BARRIERFSYNC) };
-            if code == -1 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        } else {
-            self.file.sync_data()
-        }
     }
 
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {

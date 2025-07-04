@@ -79,7 +79,7 @@ impl StorageBackend for FileBackend {
         self.file.set_len(len)
     }
 
-    fn sync_data(&self, _: bool) -> Result<(), io::Error> {
+    fn sync_data(&self) -> Result<(), io::Error> {
         self.file.sync_data()
     }
 

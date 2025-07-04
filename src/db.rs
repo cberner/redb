@@ -44,11 +44,7 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
     fn set_len(&self, len: u64) -> std::result::Result<(), io::Error>;
 
     /// Syncs all buffered data with the persistent storage.
-    ///
-    /// If `eventual` is true, data may become persistent at some point after this call returns,
-    /// but the storage must gaurantee that a write barrier is inserted: i.e. all writes before this
-    /// call to `sync_data()` will become persistent before any writes that occur after.
-    fn sync_data(&self, eventual: bool) -> std::result::Result<(), io::Error>;
+    fn sync_data(&self) -> std::result::Result<(), io::Error>;
 
     /// Writes the specified array to the storage.
     fn write(&self, offset: u64, data: &[u8]) -> std::result::Result<(), io::Error>;
@@ -1111,9 +1107,9 @@ mod test {
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self, eventual: bool) -> Result<(), std::io::Error> {
+        fn sync_data(&self) -> Result<(), std::io::Error> {
             self.check_countdown()?;
-            self.inner.sync_data(eventual)
+            self.inner.sync_data()
         }
 
         fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
