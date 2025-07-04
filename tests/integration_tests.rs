@@ -193,11 +193,6 @@ fn test_persistence(durability: Durability) {
 }
 
 #[test]
-fn eventual_persistence() {
-    test_persistence(Durability::Eventual);
-}
-
-#[test]
 fn immediate_persistence() {
     test_persistence(Durability::Immediate);
 }
@@ -205,11 +200,6 @@ fn immediate_persistence() {
 #[test]
 fn immediate_free() {
     test_free(Durability::Immediate);
-}
-
-#[test]
-fn eventual_free() {
-    test_free(Durability::Eventual);
 }
 
 #[test]
@@ -1342,10 +1332,6 @@ fn no_downgrade_durability_with_savepoint() {
 
     let mut tx = db.begin_write().unwrap();
     tx.persistent_savepoint().unwrap();
-    assert!(matches!(
-        tx.set_durability(Durability::Eventual),
-        Err(SetDurabilityError::PersistentSavepointModified)
-    ));
     assert!(matches!(
         tx.set_durability(Durability::None),
         Err(SetDurabilityError::PersistentSavepointModified)

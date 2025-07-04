@@ -442,7 +442,7 @@ impl Database {
             let next_transaction_id = self.mem.get_last_committed_transaction_id()?.next();
             let [data_root, system_root] = new_roots;
             self.mem
-                .commit(data_root, system_root, next_transaction_id, false, true)?;
+                .commit(data_root, system_root, next_transaction_id, true)?;
         }
 
         self.mem.begin_writable()?;
@@ -727,7 +727,7 @@ impl Database {
             }
             let [data_root, system_root] = Self::do_repair(&mut mem, repair_callback)?;
             let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
-            mem.commit(data_root, system_root, next_transaction_id, false, true)?;
+            mem.commit(data_root, system_root, next_transaction_id, true)?;
         }
 
         mem.begin_writable()?;
