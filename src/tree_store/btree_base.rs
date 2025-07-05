@@ -667,10 +667,10 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         except: Option<usize>,
     ) {
         for i in 0..accessor.num_pairs() {
-            if let Some(except) = except {
-                if except == i {
-                    continue;
-                }
+            if let Some(except) = except
+                && except == i
+            {
+                continue;
             }
             let entry = accessor.entry(i).unwrap();
             self.push(entry.key(), entry.value());

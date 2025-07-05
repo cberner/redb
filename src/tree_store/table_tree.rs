@@ -101,17 +101,16 @@ impl TableTree {
                     fixed_value_size,
                     ..
                 } => {
-                    if let Some(header) = table_root {
-                        if !RawBtree::new(
+                    if let Some(header) = table_root
+                        && !RawBtree::new(
                             Some(header),
                             fixed_key_size,
                             fixed_value_size,
                             self.mem.clone(),
                         )
                         .verify_checksum()?
-                        {
-                            return Ok(false);
-                        }
+                    {
+                        return Ok(false);
                     }
                 }
                 InternalTableDefinition::Multimap {
@@ -488,10 +487,10 @@ impl TableTreeMut<'_> {
         )?;
         let mut result = tree.get_table_untyped(name, table_type);
 
-        if let Ok(Some(definition)) = result.as_mut() {
-            if let Some((updated_root, updated_length)) = self.pending_table_updates.get(name) {
-                definition.set_header(*updated_root, *updated_length);
-            }
+        if let Ok(Some(definition)) = result.as_mut()
+            && let Some((updated_root, updated_length)) = self.pending_table_updates.get(name)
+        {
+            definition.set_header(*updated_root, *updated_length);
         }
 
         result
@@ -511,10 +510,10 @@ impl TableTreeMut<'_> {
         )?;
         let mut result = tree.get_table::<K, V>(name, table_type);
 
-        if let Ok(Some(definition)) = result.as_mut() {
-            if let Some((updated_root, updated_length)) = self.pending_table_updates.get(name) {
-                definition.set_header(*updated_root, *updated_length);
-            }
+        if let Ok(Some(definition)) = result.as_mut()
+            && let Some((updated_root, updated_length)) = self.pending_table_updates.get(name)
+        {
+            definition.set_header(*updated_root, *updated_length);
         }
 
         result

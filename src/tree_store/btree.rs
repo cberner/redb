@@ -262,13 +262,12 @@ impl UntypedBtreeMut {
         &mut self,
         relocation_map: &HashMap<PageNumber, PageNumber>,
     ) -> Result<bool> {
-        if let Some(root) = self.get_root() {
-            if let Some((new_root, new_checksum)) =
+        if let Some(root) = self.get_root()
+            && let Some((new_root, new_checksum)) =
                 self.relocate_helper(root.root, relocation_map)?
-            {
-                self.root = Some(BtreeHeader::new(new_root, new_checksum, root.length));
-                return Ok(true);
-            }
+        {
+            self.root = Some(BtreeHeader::new(new_root, new_checksum, root.length));
+            return Ok(true);
         }
         Ok(false)
     }

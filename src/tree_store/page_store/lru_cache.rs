@@ -37,11 +37,11 @@ impl<T> LRUCache<T> {
             if self.lru_queue.len() > 2 * self.cache.len() {
                 // Cycle two elements of the LRU queue to ensure it doesn't grow without bound
                 for _ in 0..2 {
-                    if let Some(removed_key) = self.lru_queue.pop_front() {
-                        if let Some((_, second_chance)) = self.cache.get(&removed_key) {
-                            second_chance.store(false, Ordering::Release);
-                            self.lru_queue.push_back(removed_key);
-                        }
+                    if let Some(removed_key) = self.lru_queue.pop_front()
+                        && let Some((_, second_chance)) = self.cache.get(&removed_key)
+                    {
+                        second_chance.store(false, Ordering::Release);
+                        self.lru_queue.push_back(removed_key);
                     }
                 }
             }

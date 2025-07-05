@@ -464,13 +464,11 @@ impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
                 ..
             }),
         ) = (&self.left, &self.right)
+            && left_page.get_page_number() == right_page.get_page_number()
+            && (left_entry > right_entry
+                || (left_entry == right_entry && (!self.include_left || !self.include_right)))
         {
-            if left_page.get_page_number() == right_page.get_page_number()
-                && (left_entry > right_entry
-                    || (left_entry == right_entry && (!self.include_left || !self.include_right)))
-            {
-                return None;
-            }
+            return None;
         }
 
         loop {
@@ -499,13 +497,10 @@ impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
                     ..
                 }),
             ) = (&self.left, &self.right)
+                && left_page.get_page_number() == right_page.get_page_number()
+                && (left_entry > right_entry || (left_entry == right_entry && !self.include_right))
             {
-                if left_page.get_page_number() == right_page.get_page_number()
-                    && (left_entry > right_entry
-                        || (left_entry == right_entry && !self.include_right))
-                {
-                    return None;
-                }
+                return None;
             }
 
             self.include_left = false;
@@ -530,13 +525,11 @@ impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
                 ..
             }),
         ) = (&self.left, &self.right)
+            && left_page.get_page_number() == right_page.get_page_number()
+            && (left_entry > right_entry
+                || (left_entry == right_entry && (!self.include_left || !self.include_right)))
         {
-            if left_page.get_page_number() == right_page.get_page_number()
-                && (left_entry > right_entry
-                    || (left_entry == right_entry && (!self.include_left || !self.include_right)))
-            {
-                return None;
-            }
+            return None;
         }
 
         loop {
@@ -565,13 +558,10 @@ impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
                     ..
                 }),
             ) = (&self.left, &self.right)
+                && left_page.get_page_number() == right_page.get_page_number()
+                && (left_entry > right_entry || (left_entry == right_entry && !self.include_left))
             {
-                if left_page.get_page_number() == right_page.get_page_number()
-                    && (left_entry > right_entry
-                        || (left_entry == right_entry && !self.include_left))
-                {
-                    return None;
-                }
+                return None;
             }
 
             self.include_right = false;
