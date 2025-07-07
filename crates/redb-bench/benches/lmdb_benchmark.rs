@@ -91,6 +91,12 @@ fn main() {
         benchmark(table, tmpfile.path())
     };
 
+    let sqlite_results = {
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
+        let table = SqliteBenchDatabase::new(tmpfile.path());
+        benchmark(table, tmpfile.path())
+    };
+
     fs::remove_dir_all(&tmpdir).unwrap();
 
     let mut rows = Vec::new();
@@ -106,6 +112,7 @@ fn main() {
         sled_results,
         sanakirja_results,
         fjall_results,
+        sqlite_results,
     ];
 
     let mut identified_smallests = vec![vec![false; results.len()]; rows.len()];
@@ -136,7 +143,16 @@ fn main() {
     let mut table = comfy_table::Table::new();
     table.load_preset(comfy_table::presets::ASCII_MARKDOWN);
     table.set_width(100);
-    table.set_header(["", "redb", "lmdb", "rocksdb", "sled", "sanakirja", "fjall"]);
+    table.set_header([
+        "",
+        "redb",
+        "lmdb",
+        "rocksdb",
+        "sled",
+        "sanakirja",
+        "fjall",
+        "sqlite",
+    ]);
     for row in rows {
         table.add_row(row);
     }
