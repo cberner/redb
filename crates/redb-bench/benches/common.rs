@@ -3,6 +3,7 @@ use redb::{AccessGuard, ReadableDatabase, ReadableTableMetadata, TableDefinition
 use rocksdb::{
     Direction, IteratorMode, OptimisticTransactionDB, OptimisticTransactionOptions, WriteOptions,
 };
+use rusqlite::{Connection, Transaction};
 use sanakirja::btree::page_unsized;
 use sanakirja::{Commit, RootDb};
 use std::fs::File;
@@ -1521,5 +1522,197 @@ impl BenchInserter for FjallBenchInserter<'_, '_> {
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
         self.txn.remove(self.part, key);
         Ok(())
+    }
+}
+
+pub struct SqliteBenchDatabase {
+    path: PathBuf,
+}
+
+impl SqliteBenchDatabase {
+    pub fn new(path: &Path) -> Self {
+        let conn = Connection::open(path).unwrap();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS kv (key BLOB PRIMARY KEY, value BLOB)",
+            [],
+        )
+        .unwrap();
+        Self {
+            path: path.to_path_buf(),
+        }
+    }
+}
+
+impl BenchDatabase for SqliteBenchDatabase {
+    type C<'db>
+        = SqliteBenchDatabaseConnection
+    where
+        Self: 'db;
+
+    fn db_type_name() -> &'static str {
+        "sqlite"
+    }
+
+    fn connect(&self) -> Self::C<'_> {
+        let conn = Connection::open(&self.path).unwrap();
+        SqliteBenchDatabaseConnection { conn }
+    }
+
+    fn compact(&mut self) -> bool {
+        let conn = Connection::open(&self.path).unwrap();
+        conn.execute("VACUUM", []).unwrap();
+        true
+    }
+}
+
+pub struct SqliteBenchDatabaseConnection {
+    conn: Connection,
+}
+
+impl BenchDatabaseConnection for SqliteBenchDatabaseConnection {
+    type W<'db>
+        = SqliteBenchWriteTransaction<'db>
+    where
+        Self: 'db;
+    type R<'db>
+        = SqliteBenchReadTransaction<'db>
+    where
+        Self: 'db;
+
+    fn write_transaction(&self) -> Self::W<'_> {
+        let txn = self.conn.unchecked_transaction().unwrap();
+        SqliteBenchWriteTransaction { txn }
+    }
+
+    fn read_transaction(&self) -> Self::R<'_> {
+        SqliteBenchReadTransaction { conn: &self.conn }
+    }
+}
+
+pub struct SqliteBenchWriteTransaction<'db> {
+    txn: Transaction<'db>,
+}
+
+impl<'db> BenchWriteTransaction for SqliteBenchWriteTransaction<'db> {
+    type W<'txn>
+        = SqliteBenchInserter<'txn, 'db>
+    where
+        Self: 'txn;
+
+    fn get_inserter(&mut self) -> Self::W<'_> {
+        SqliteBenchInserter { txn: &self.txn }
+    }
+
+    fn commit(self) -> Result<(), ()> {
+        self.txn.commit().map_err(|_| ())
+    }
+}
+
+pub struct SqliteBenchInserter<'txn, 'db> {
+    txn: &'txn Transaction<'db>,
+}
+
+impl BenchInserter for SqliteBenchInserter<'_, '_> {
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
+        self.txn
+            .execute(
+                "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+                [key, value],
+            )
+            .map(|_| ())
+            .map_err(|_| ())
+    }
+
+    fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
+        self.txn
+            .execute("DELETE FROM kv WHERE key = ?", [key])
+            .map(|_| ())
+            .map_err(|_| ())
+    }
+}
+
+pub struct SqliteBenchReadTransaction<'db> {
+    conn: &'db Connection,
+}
+
+impl<'db> BenchReadTransaction for SqliteBenchReadTransaction<'db> {
+    type T<'txn>
+        = SqliteBenchReader<'db>
+    where
+        Self: 'txn;
+
+    fn get_reader(&self) -> Self::T<'_> {
+        SqliteBenchReader { conn: self.conn }
+    }
+}
+
+pub struct SqliteBenchReader<'db> {
+    conn: &'db Connection,
+}
+
+impl BenchReader for SqliteBenchReader<'_> {
+    type Output<'out>
+        = Vec<u8>
+    where
+        Self: 'out;
+    type Iterator<'out>
+        = SqliteBenchIterator
+    where
+        Self: 'out;
+
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM kv WHERE key = ?")
+            .unwrap();
+        stmt.query_row([key], |row| row.get(0)).ok()
+    }
+
+    fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM kv WHERE key >= ? ORDER BY key")
+            .unwrap();
+        let rows = stmt
+            .query_map([key], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .unwrap();
+
+        let mut results = Vec::new();
+        for row in rows {
+            if let Ok(kv) = row {
+                results.push(kv);
+            }
+            // TODO: this is kind of cheating, but I don't feel like refactoring the benchmark
+            // to handle rusqlite's Statement & MappedRows lifetimes
+            if results.len() > SCAN_LEN {
+                break;
+            }
+        }
+
+        SqliteBenchIterator {
+            results: results.into_iter(),
+        }
+    }
+
+    fn len(&self) -> u64 {
+        let mut stmt = self.conn.prepare("SELECT COUNT(*) FROM kv").unwrap();
+        stmt.query_row([], |row| row.get::<_, i64>(0)).unwrap() as u64
+    }
+}
+
+pub struct SqliteBenchIterator {
+    results: std::vec::IntoIter<(Vec<u8>, Vec<u8>)>,
+}
+
+impl BenchIterator for SqliteBenchIterator {
+    type Output<'out>
+        = Vec<u8>
+    where
+        Self: 'out;
+
+    fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
+        self.results.next()
     }
 }

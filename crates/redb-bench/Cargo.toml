@@ -25,6 +25,7 @@ sanakirja = "=1.4.1"
 sanakirja-core = "=1.4.1"
 rocksdb = { version = "0.22.0", default-features = false, features = ["lz4"] }
 fjall = "=2.10"
+rusqlite = { version = "0.37", features = ["bundled"] }
 comfy-table = "7.0.1"
 env_logger = "0.11"
 
