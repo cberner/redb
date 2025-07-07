@@ -35,7 +35,8 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
     let bigelements = 4000;
 
     let start = Instant::now();
-    let mut txn = db.write_transaction();
+    let connection = db.connect();
+    let mut txn = connection.write_transaction();
     let mut inserter = txn.get_inserter();
     {
         for _ in 0..bigelements {

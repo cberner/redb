@@ -58,13 +58,16 @@ fn make_rng_shards(shards: usize, elements: usize) -> Vec<fastrand::Rng> {
     rngs
 }
 
-pub fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(String, ResultType)> {
+pub fn benchmark<T: BenchDatabase + Send + Sync>(
+    mut db: T,
+    path: &Path,
+) -> Vec<(String, ResultType)> {
     let mut rng = make_rng();
     let mut results = Vec::new();
-    let mut db = Arc::new(db);
+    let connection = db.connect();
 
     let start = Instant::now();
-    let mut txn = db.write_transaction();
+    let mut txn = connection.write_transaction();
     let mut inserter = txn.get_inserter();
     {
         for _ in 0..BULK_ELEMENTS {
@@ -88,7 +91,7 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(Str
     let start = Instant::now();
     {
         for _ in 0..INDIVIDUAL_WRITES {
-            let mut txn = db.write_transaction();
+            let mut txn = connection.write_transaction();
             let mut inserter = txn.get_inserter();
             let (key, value) = random_pair(&mut rng);
             inserter.insert(&key, &value).unwrap();
@@ -113,7 +116,7 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(Str
     let start = Instant::now();
     {
         for _ in 0..BATCH_WRITES {
-            let mut txn = db.write_transaction();
+            let mut txn = connection.write_transaction();
             let mut inserter = txn.get_inserter();
             for _ in 0..BATCH_SIZE {
                 let (key, value) = random_pair(&mut rng);
@@ -136,7 +139,7 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(Str
     results.push(("batch writes".to_string(), ResultType::Duration(duration)));
 
     let elements = BULK_ELEMENTS + INDIVIDUAL_WRITES + BATCH_SIZE * BATCH_WRITES;
-    let txn = db.read_transaction();
+    let txn = connection.read_transaction();
     {
         {
             let start = Instant::now();
@@ -214,11 +217,11 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(Str
         thread::scope(|s| {
             for _ in 0..num_threads {
                 let barrier = barrier.clone();
-                let db2 = db.clone();
+                let connection = db.connect();
                 let rng = rngs.pop().unwrap();
                 s.spawn(move || {
                     barrier.wait();
-                    let txn = db2.read_transaction();
+                    let txn = connection.read_transaction();
                     let mut checksum = 0u64;
                     let mut expected_checksum = 0u64;
                     let reader = txn.get_reader();
@@ -253,7 +256,7 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(Str
     let deletes = elements / 2;
     {
         let mut rng = make_rng();
-        let mut txn = db.write_transaction();
+        let mut txn = connection.write_transaction();
         let mut inserter = txn.get_inserter();
         for _ in 0..deletes {
             let (key, _value) = random_pair(&mut rng);
@@ -279,7 +282,8 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(Str
         ResultType::SizeInBytes(uncompacted_size),
     ));
     let start = Instant::now();
-    if Arc::get_mut(&mut db).unwrap().compact() {
+    drop(connection);
+    if db.compact() {
         let end = Instant::now();
         let duration = end - start;
         println!(
@@ -288,7 +292,8 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(db: T, path: &Path) -> Vec<(Str
             duration.as_millis()
         );
         {
-            let mut txn = db.write_transaction();
+            let connection = db.connect();
+            let mut txn = connection.write_transaction();
             let mut inserter = txn.get_inserter();
             let (key, value) = random_pair(&mut rng);
             inserter.insert(&key, &value).unwrap();
@@ -339,6 +344,21 @@ impl std::fmt::Display for ResultType {
 }
 
 pub trait BenchDatabase {
+    type C<'db>: BenchDatabaseConnection
+    where
+        Self: 'db;
+
+    fn db_type_name() -> &'static str;
+
+    fn connect(&self) -> Self::C<'_>;
+
+    // Returns a boolean indicating whether compaction is supported
+    fn compact(&mut self) -> bool {
+        false
+    }
+}
+
+pub trait BenchDatabaseConnection: Send {
     type W<'db>: BenchWriteTransaction
     where
         Self: 'db;
@@ -346,16 +366,9 @@ pub trait BenchDatabase {
     where
         Self: 'db;
 
-    fn db_type_name() -> &'static str;
-
     fn write_transaction(&self) -> Self::W<'_>;
 
     fn read_transaction(&self) -> Self::R<'_>;
-
-    // Returns a boolean indicating whether compaction is supported
-    fn compact(&mut self) -> bool {
-        false
-    }
 }
 
 pub trait BenchWriteTransaction {
@@ -421,6 +434,30 @@ impl<'a> RedbBenchDatabase<'a> {
 }
 
 impl BenchDatabase for RedbBenchDatabase<'_> {
+    type C<'db>
+        = RedbBenchDatabaseConnection<'db>
+    where
+        Self: 'db;
+
+    fn db_type_name() -> &'static str {
+        "redb"
+    }
+
+    fn connect(&self) -> Self::C<'_> {
+        RedbBenchDatabaseConnection { db: self.db }
+    }
+
+    fn compact(&mut self) -> bool {
+        self.db.compact().unwrap();
+        true
+    }
+}
+
+pub struct RedbBenchDatabaseConnection<'a> {
+    db: &'a redb::Database,
+}
+
+impl BenchDatabaseConnection for RedbBenchDatabaseConnection<'_> {
     type W<'db>
         = RedbBenchWriteTransaction
     where
@@ -430,10 +467,6 @@ impl BenchDatabase for RedbBenchDatabase<'_> {
     where
         Self: 'db;
 
-    fn db_type_name() -> &'static str {
-        "redb"
-    }
-
     fn write_transaction(&self) -> Self::W<'_> {
         let txn = self.db.begin_write().unwrap();
         RedbBenchWriteTransaction { txn }
@@ -442,11 +475,6 @@ impl BenchDatabase for RedbBenchDatabase<'_> {
     fn read_transaction(&self) -> Self::R<'_> {
         let txn = self.db.begin_read().unwrap();
         RedbBenchReadTransaction { txn }
-    }
-
-    fn compact(&mut self) -> bool {
-        self.db.compact().unwrap();
-        true
     }
 }
 
@@ -574,6 +602,29 @@ impl<'a> SledBenchDatabase<'a> {
 }
 
 impl BenchDatabase for SledBenchDatabase<'_> {
+    type C<'db>
+        = SledBenchDatabaseConnection<'db>
+    where
+        Self: 'db;
+
+    fn db_type_name() -> &'static str {
+        "sled"
+    }
+
+    fn connect(&self) -> Self::C<'_> {
+        SledBenchDatabaseConnection {
+            db: self.db,
+            db_dir: self.db_dir,
+        }
+    }
+}
+
+pub struct SledBenchDatabaseConnection<'a> {
+    db: &'a sled::Db,
+    db_dir: &'a Path,
+}
+
+impl BenchDatabaseConnection for SledBenchDatabaseConnection<'_> {
     type W<'db>
         = SledBenchWriteTransaction<'db>
     where
@@ -582,10 +633,6 @@ impl BenchDatabase for SledBenchDatabase<'_> {
         = SledBenchReadTransaction<'db>
     where
         Self: 'db;
-
-    fn db_type_name() -> &'static str {
-        "sled"
-    }
 
     fn write_transaction(&self) -> Self::W<'_> {
         SledBenchWriteTransaction {
@@ -717,12 +764,8 @@ impl HeedBenchDatabase {
 }
 
 impl BenchDatabase for HeedBenchDatabase {
-    type W<'db>
-        = HeedBenchWriteTransaction<'db>
-    where
-        Self: 'db;
-    type R<'db>
-        = HeedBenchReadTransaction<'db>
+    type C<'db>
+        = HeedBenchDatabaseConnection<'db>
     where
         Self: 'db;
 
@@ -730,20 +773,11 @@ impl BenchDatabase for HeedBenchDatabase {
         "lmdb"
     }
 
-    fn write_transaction(&self) -> Self::W<'_> {
-        let env = self.env.as_ref().unwrap();
-        let txn = env.write_txn().unwrap();
-        Self::W {
+    fn connect(&self) -> Self::C<'_> {
+        HeedBenchDatabaseConnection {
+            env: &self.env,
             db: self.db,
-            db_dir: self.env.as_ref().unwrap().path().to_path_buf(),
-            txn,
         }
-    }
-
-    fn read_transaction(&self) -> Self::R<'_> {
-        let env = self.env.as_ref().unwrap();
-        let txn = env.read_txn().unwrap();
-        Self::R { db: self.db, txn }
     }
 
     fn compact(&mut self) -> bool {
@@ -777,6 +811,38 @@ impl BenchDatabase for HeedBenchDatabase {
         self.env = Some(env);
 
         true
+    }
+}
+
+pub struct HeedBenchDatabaseConnection<'a> {
+    env: &'a Option<heed::Env>,
+    db: heed::Database<heed::types::Bytes, heed::types::Bytes>,
+}
+
+impl BenchDatabaseConnection for HeedBenchDatabaseConnection<'_> {
+    type W<'db>
+        = HeedBenchWriteTransaction<'db>
+    where
+        Self: 'db;
+    type R<'db>
+        = HeedBenchReadTransaction<'db>
+    where
+        Self: 'db;
+
+    fn write_transaction(&self) -> Self::W<'_> {
+        let env = self.env.as_ref().unwrap();
+        let txn = env.write_txn().unwrap();
+        Self::W {
+            db: self.db,
+            db_dir: self.env.as_ref().unwrap().path().to_path_buf(),
+            txn,
+        }
+    }
+
+    fn read_transaction(&self) -> Self::R<'_> {
+        let env = self.env.as_ref().unwrap();
+        let txn = env.read_txn().unwrap();
+        Self::R { db: self.db, txn }
     }
 }
 
@@ -910,6 +976,30 @@ impl<'a> RocksdbBenchDatabase<'a> {
 }
 
 impl BenchDatabase for RocksdbBenchDatabase<'_> {
+    type C<'db>
+        = RocksdbBenchDatabaseConnection<'db>
+    where
+        Self: 'db;
+
+    fn db_type_name() -> &'static str {
+        "rocksdb"
+    }
+
+    fn connect(&self) -> Self::C<'_> {
+        RocksdbBenchDatabaseConnection { db: self.db }
+    }
+
+    fn compact(&mut self) -> bool {
+        self.db.compact_range::<&[u8], &[u8]>(None, None);
+        true
+    }
+}
+
+pub struct RocksdbBenchDatabaseConnection<'a> {
+    db: &'a OptimisticTransactionDB,
+}
+
+impl BenchDatabaseConnection for RocksdbBenchDatabaseConnection<'_> {
     type W<'db>
         = RocksdbBenchWriteTransaction<'db>
     where
@@ -918,10 +1008,6 @@ impl BenchDatabase for RocksdbBenchDatabase<'_> {
         = RocksdbBenchReadTransaction<'db>
     where
         Self: 'db;
-
-    fn db_type_name() -> &'static str {
-        "rocksdb"
-    }
 
     fn write_transaction(&self) -> Self::W<'_> {
         let mut write_opt = WriteOptions::new();
@@ -938,11 +1024,6 @@ impl BenchDatabase for RocksdbBenchDatabase<'_> {
     fn read_transaction(&self) -> Self::R<'_> {
         let snapshot = self.db.snapshot();
         RocksdbBenchReadTransaction { snapshot }
-    }
-
-    fn compact(&mut self) -> bool {
-        self.db.compact_range::<&[u8], &[u8]>(None, None);
-        true
     }
 }
 
@@ -1085,6 +1166,29 @@ impl<'a> SanakirjaBenchDatabase<'a> {
 }
 
 impl BenchDatabase for SanakirjaBenchDatabase<'_> {
+    type C<'db>
+        = SanakirjaBenchDatabaseConnection<'db>
+    where
+        Self: 'db;
+
+    fn db_type_name() -> &'static str {
+        "sanakirja"
+    }
+
+    fn connect(&self) -> Self::C<'_> {
+        SanakirjaBenchDatabaseConnection {
+            db: self.db,
+            db_dir: self.db_dir.clone(),
+        }
+    }
+}
+
+pub struct SanakirjaBenchDatabaseConnection<'a> {
+    db: &'a sanakirja::Env,
+    db_dir: PathBuf,
+}
+
+impl BenchDatabaseConnection for SanakirjaBenchDatabaseConnection<'_> {
     type W<'db>
         = SanakirjaBenchWriteTransaction<'db>
     where
@@ -1093,10 +1197,6 @@ impl BenchDatabase for SanakirjaBenchDatabase<'_> {
         = SanakirjaBenchReadTransaction<'db>
     where
         Self: 'db;
-
-    fn db_type_name() -> &'static str {
-        "sanakirja"
-    }
 
     fn write_transaction(&self) -> Self::W<'_> {
         let txn = sanakirja::Env::mut_txn_begin(self.db).unwrap();
@@ -1266,6 +1366,29 @@ impl<'a> FjallBenchDatabase<'a> {
 }
 
 impl BenchDatabase for FjallBenchDatabase<'_> {
+    type C<'db>
+        = FjallBenchDatabaseConnection<'db>
+    where
+        Self: 'db;
+
+    fn db_type_name() -> &'static str {
+        "fjall"
+    }
+
+    fn connect(&self) -> Self::C<'_> {
+        FjallBenchDatabaseConnection { db: self.db }
+    }
+
+    fn compact(&mut self) -> bool {
+        true
+    }
+}
+
+pub struct FjallBenchDatabaseConnection<'a> {
+    db: &'a fjall::TxKeyspace,
+}
+
+impl BenchDatabaseConnection for FjallBenchDatabaseConnection<'_> {
     type W<'db>
         = FjallBenchWriteTransaction<'db>
     where
@@ -1274,10 +1397,6 @@ impl BenchDatabase for FjallBenchDatabase<'_> {
         = FjallBenchReadTransaction
     where
         Self: 'db;
-
-    fn db_type_name() -> &'static str {
-        "fjall"
-    }
 
     fn write_transaction(&self) -> Self::W<'_> {
         let part = self.db.open_partition("test", Default::default()).unwrap();
@@ -1293,10 +1412,6 @@ impl BenchDatabase for FjallBenchDatabase<'_> {
         let part = self.db.open_partition("test", Default::default()).unwrap();
         let txn = self.db.read_tx();
         FjallBenchReadTransaction { txn, part }
-    }
-
-    fn compact(&mut self) -> bool {
-        true
     }
 }
 
