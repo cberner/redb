@@ -1764,6 +1764,70 @@ impl WriteTransaction {
         Ok(())
     }
 
+    fn process_freed_pages_nondurable_helper(
+        &mut self,
+        free_until: TransactionId,
+        definition: SystemTableDefinition<TransactionIdWithPagination, PageList>,
+    ) -> Result<Vec<TransactionId>> {
+        let mut processed = vec![];
+        let mut system_tables = self.system_tables.lock().unwrap();
+
+        let last_key = TransactionIdWithPagination {
+            transaction_id: free_until.raw_id(),
+            pagination_id: 0,
+        };
+        let mut data_freed = system_tables.open_system_table(self, definition)?;
+        let mut candidate_transactions = vec![];
+        for entry in data_freed.range(..last_key)? {
+            let (key, _) = entry?;
+            let transaction_id = TransactionId::new(key.value().transaction_id);
+            if self
+                .transaction_tracker
+                .is_unprocessed_non_durable_commit(transaction_id)
+            {
+                candidate_transactions.push(transaction_id);
+            }
+        }
+        for transaction_id in candidate_transactions {
+            let mut key = TransactionIdWithPagination {
+                transaction_id: transaction_id.raw_id(),
+                pagination_id: 0,
+            };
+            loop {
+                let Some(entry) = data_freed.get(&key)? else {
+                    break;
+                };
+                let pages = entry.value();
+                let mut new_pages = vec![];
+                for i in 0..pages.len() {
+                    let page = pages.get(i);
+                    if !self
+                        .mem
+                        .free_if_unpersisted(page, &mut PageTrackerPolicy::Ignore)
+                    {
+                        new_pages.push(page);
+                    }
+                }
+                if new_pages.len() != pages.len() {
+                    drop(entry);
+                    if new_pages.is_empty() {
+                        data_freed.remove(&key)?;
+                    } else {
+                        let required = PageList::required_bytes(new_pages.len());
+                        let mut page_list_mut = data_freed.insert_reserve(&key, required)?;
+                        for page in new_pages {
+                            page_list_mut.as_mut().push_back(page);
+                        }
+                    }
+                }
+                key.pagination_id += 1;
+            }
+            processed.push(transaction_id);
+        }
+
+        Ok(processed)
+    }
+
     // NOTE: must be called before store_system_freed_pages() during commit, since this can create
     // more pages freed by the current transaction
     //
@@ -1774,120 +1838,13 @@ impl WriteTransaction {
         // We assume below that PageNumber is length 8
         assert_eq!(PageNumber::serialized_size(), 8);
 
-        let mut processed = vec![];
-
         // Handle the data freed tree
-        let mut system_tables = self.system_tables.lock().unwrap();
-        {
-            let last_key = TransactionIdWithPagination {
-                transaction_id: free_until.raw_id(),
-                pagination_id: 0,
-            };
-            let mut data_freed = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
-            let mut candidate_transactions = vec![];
-            for entry in data_freed.range(..last_key)? {
-                let (key, _) = entry?;
-                let transaction_id = TransactionId::new(key.value().transaction_id);
-                if self
-                    .transaction_tracker
-                    .is_unprocessed_non_durable_commit(transaction_id)
-                {
-                    candidate_transactions.push(transaction_id);
-                }
-            }
-            for transaction_id in candidate_transactions {
-                let mut key = TransactionIdWithPagination {
-                    transaction_id: transaction_id.raw_id(),
-                    pagination_id: 0,
-                };
-                loop {
-                    let Some(entry) = data_freed.get(&key)? else {
-                        break;
-                    };
-                    let pages = entry.value();
-                    let mut new_pages = vec![];
-                    for i in 0..pages.len() {
-                        let page = pages.get(i);
-                        if !self
-                            .mem
-                            .free_if_unpersisted(page, &mut PageTrackerPolicy::Ignore)
-                        {
-                            new_pages.push(page);
-                        }
-                    }
-                    if new_pages.len() != pages.len() {
-                        drop(entry);
-                        if new_pages.is_empty() {
-                            data_freed.remove(&key)?;
-                        } else {
-                            let required = PageList::required_bytes(new_pages.len());
-                            let mut page_list_mut = data_freed.insert_reserve(&key, required)?;
-                            for page in new_pages {
-                                page_list_mut.as_mut().push_back(page);
-                            }
-                        }
-                    }
-                    key.pagination_id += 1;
-                }
-                processed.push(transaction_id);
-            }
-        }
+        let mut processed =
+            self.process_freed_pages_nondurable_helper(free_until, DATA_FREED_TABLE)?;
 
         // Handle the system freed tree
-        {
-            let last_key = TransactionIdWithPagination {
-                transaction_id: free_until.raw_id(),
-                pagination_id: 0,
-            };
-            let mut data_freed = system_tables.open_system_table(self, SYSTEM_FREED_TABLE)?;
-            let mut candidate_transactions = vec![];
-            for entry in data_freed.range(..last_key)? {
-                let (key, _) = entry?;
-                let transaction_id = TransactionId::new(key.value().transaction_id);
-                if self
-                    .transaction_tracker
-                    .is_unprocessed_non_durable_commit(transaction_id)
-                {
-                    candidate_transactions.push(transaction_id);
-                }
-            }
-            for transaction_id in candidate_transactions {
-                let mut key = TransactionIdWithPagination {
-                    transaction_id: transaction_id.raw_id(),
-                    pagination_id: 0,
-                };
-                loop {
-                    let Some(entry) = data_freed.get(&key)? else {
-                        break;
-                    };
-                    let pages = entry.value();
-                    let mut new_pages = vec![];
-                    for i in 0..pages.len() {
-                        let page = pages.get(i);
-                        if !self
-                            .mem
-                            .free_if_unpersisted(page, &mut PageTrackerPolicy::Ignore)
-                        {
-                            new_pages.push(page);
-                        }
-                    }
-                    if new_pages.len() != pages.len() {
-                        drop(entry);
-                        if new_pages.is_empty() {
-                            data_freed.remove(&key)?;
-                        } else {
-                            let required = PageList::required_bytes(new_pages.len());
-                            let mut page_list_mut = data_freed.insert_reserve(&key, required)?;
-                            for page in new_pages {
-                                page_list_mut.as_mut().push_back(page);
-                            }
-                        }
-                    }
-                    key.pagination_id += 1;
-                }
-                processed.push(transaction_id);
-            }
-        }
+        processed
+            .extend(self.process_freed_pages_nondurable_helper(free_until, SYSTEM_FREED_TABLE)?);
 
         for transaction_id in processed {
             self.transaction_tracker
