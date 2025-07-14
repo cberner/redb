@@ -842,7 +842,7 @@ impl WriteTransaction {
             .unwrap();
         println!("Tables");
         for p in table_pages {
-            all_allocated.remove(&p);
+            assert!(all_allocated.remove(&p));
             println!("{p:?}");
         }
 
@@ -858,7 +858,7 @@ impl WriteTransaction {
             .unwrap();
         println!("System tables");
         for p in system_table_pages {
-            all_allocated.remove(&p);
+            assert!(all_allocated.remove(&p));
             println!("{p:?}");
         }
 
@@ -873,7 +873,7 @@ impl WriteTransaction {
                 let value = entry.value();
                 for i in 0..value.len() {
                     let p = value.get(i);
-                    all_allocated.remove(&p);
+                    assert!(all_allocated.remove(&p));
                     println!("{p:?}");
                 }
             }
@@ -892,7 +892,7 @@ impl WriteTransaction {
                 let value = entry.value();
                 for i in 0..value.len() {
                     let p = value.get(i);
-                    all_allocated.remove(&p);
+                    assert!(all_allocated.remove(&p));
                     println!("{p:?}");
                 }
             }
@@ -904,7 +904,7 @@ impl WriteTransaction {
                 println!("Pages in in-memory data freed_pages");
                 for p in pages.iter() {
                     println!("{p:?}");
-                    all_allocated.remove(p);
+                    assert!(all_allocated.remove(p));
                 }
             }
         }
@@ -915,7 +915,7 @@ impl WriteTransaction {
                 println!("Pages in in-memory system freed_pages");
                 for p in pages.iter() {
                     println!("{p:?}");
-                    all_allocated.remove(p);
+                    assert!(all_allocated.remove(p));
                 }
             }
         }
