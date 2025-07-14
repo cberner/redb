@@ -1612,10 +1612,20 @@ impl WriteTransaction {
 
     // Commit without a durability guarantee
     pub(crate) fn non_durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
-        let free_until_transaction = self
+        let mut free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_nondurable_transaction()
             .map_or(self.transaction_id, |x| x.next());
+        // TODO: refactor the non-durable free'ed processing to remove this
+        // The reason it is needed is that non-durable commits edit previous non-durable commits,
+        // but they only edit the freed tree of unpersisted pages.
+        // The allocated tree, which savepoints rely, is not edited for performance reasons
+        // Therefore, we must not edit anything after a savepoint
+        // It would be better for non-durable transaction's unpersisted pages to be kept in-memory
+        // in a data structure where the allocated list can be efficiently edited
+        if let Some((_, oldest_savepoint)) = self.transaction_tracker.oldest_savepoint() {
+            free_until_transaction = TransactionId::min(free_until_transaction, oldest_savepoint);
+        }
         self.process_freed_pages_nondurable(free_until_transaction)?;
 
         let mut post_commit_frees = vec![];
