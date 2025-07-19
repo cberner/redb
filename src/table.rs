@@ -493,6 +493,8 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         })
     }
 
+    /// This method is like [`ReadableTable::get()`], but the [`AccessGuard`] is reference counted
+    /// and keeps the transaction alive until it is dropped.
     pub fn get<'a>(
         &self,
         key: impl Borrow<K::SelfType<'a>>,

@@ -355,10 +355,7 @@ impl DatabaseStats {
 #[non_exhaustive]
 pub enum Durability {
     /// Commits with this durability level will not be persisted to disk unless followed by a
-    /// commit with a higher durability level.
-    ///
-    /// Note: Pages are only freed during commits with higher durability levels. Exclusively using
-    /// this durability level will result in rapid growth of the database file.
+    /// commit with [`Durability::Immediate`].
     None,
     /// Commits with this durability level are guaranteed to be persistent as soon as
     /// [`WriteTransaction::commit`] returns.

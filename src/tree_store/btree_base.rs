@@ -160,6 +160,9 @@ impl EitherPage {
     }
 }
 
+/// Scoped accessor to data in the database
+///
+/// When this structure is dropped (goes out of scope), the data is released
 pub struct AccessGuard<'a, V: Value + 'static> {
     page: EitherPage,
     offset: usize,
@@ -225,6 +228,7 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
         }
     }
 
+    /// Access the stored value
     pub fn value(&self) -> V::SelfType<'_> {
         V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
     }
