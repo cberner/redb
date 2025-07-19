@@ -35,12 +35,12 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
 
     /// Reads the specified array of bytes from the storage.
     ///
-    /// If `out.len()` + `offset` exceeds the length of the storage an appropriate `Error` should be returned or a panic may occur.
+    /// If `out.len()` + `offset` exceeds the length of the storage an appropriate `Error` must be returned.
     fn read(&self, offset: u64, out: &mut [u8]) -> std::result::Result<(), io::Error>;
 
     /// Sets the length of the storage.
     ///
-    /// When extending the storage the new positions should be zero initialized.
+    /// New positions in the storage must be initialized to zero.
     fn set_len(&self, len: u64) -> std::result::Result<(), io::Error>;
 
     /// Syncs all buffered data with the persistent storage.

@@ -87,6 +87,7 @@ impl TypeName {
     }
 }
 
+/// Types that implement this trait can be used as values in a redb table
 pub trait Value: Debug {
     /// `SelfType<'a>` must be the same type as Self with all lifetimes replaced with 'a
     type SelfType<'a>: Debug + 'a
@@ -140,6 +141,7 @@ impl MutInPlaceValue for &[u8] {
     }
 }
 
+/// Trait which allows the type to be used as a key in a redb table
 pub trait Key: Value {
     /// Compare data1 with data2
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering;

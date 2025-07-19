@@ -5,6 +5,9 @@ use std::mem::size_of;
 
 #[repr(transparent)]
 #[derive(Debug)]
+/// Legacy wrapper for tuple types created with redb version 2.x
+///
+/// See the CHANGELOG.md file for more details
 pub struct Legacy<T>(T);
 
 fn serialize_tuple_elements_variable(slices: &[&[u8]]) -> Vec<u8> {

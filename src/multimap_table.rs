@@ -1374,7 +1374,6 @@ impl<K: Key + 'static, V: Key + 'static> ReadableTableMetadata for MultimapTable
 }
 
 impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for MultimapTable<'_, K, V> {
-    /// Returns an iterator over all values for the given key. Values are in ascending order.
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'_, V>> {
         let guard = self.transaction.transaction_guard();
         let iter = if let Some(collection) = self.tree.get(key.borrow())? {
@@ -1390,7 +1389,6 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
         Ok(iter)
     }
 
-    /// Returns a double-ended iterator over a range of elements in the table
     fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
@@ -1417,6 +1415,7 @@ pub trait ReadableMultimapTable<K: Key + 'static, V: Key + 'static>: ReadableTab
     /// Returns an iterator over all values for the given key. Values are in ascending order.
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'_, V>>;
 
+    /// Returns a double-ended iterator over a range of elements in the table
     fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a;

@@ -13,6 +13,12 @@ use std::sync::Arc;
 // * 1 byte: user root not-null
 // * 8 bytes: user root page
 // * 8 bytes: user root checksum
+/// A database savepoint
+///
+/// May be used with [`WriteTransaction::restore_savepoint`] to restore the database to the state
+/// when this savepoint was created
+///
+/// [`WriteTransaction::restore_savepoint`]: crate::WriteTransaction::restore_savepoint
 pub struct Savepoint {
     version: u8,
     id: SavepointId,
