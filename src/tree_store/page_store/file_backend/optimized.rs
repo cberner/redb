@@ -24,7 +24,17 @@ pub struct FileBackend {
 impl FileBackend {
     /// Creates a new backend which stores data to the given file.
     pub fn new(file: File) -> Result<Self, DatabaseError> {
-        match file.try_lock() {
+        Self::new_internal(file, false)
+    }
+
+    pub(crate) fn new_internal(file: File, read_only: bool) -> Result<Self, DatabaseError> {
+        let result = if read_only {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        };
+
+        match result {
             Ok(()) => Ok(Self {
                 file,
                 lock_supported: true,
