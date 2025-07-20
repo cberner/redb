@@ -11,7 +11,7 @@ use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::{fs, thread};
+use std::{fs, mem, thread};
 
 #[allow(dead_code)]
 const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
@@ -30,6 +30,9 @@ const VALUE_SIZE: usize = 150;
 const RNG_SEED: u64 = 3;
 
 pub const CACHE_SIZE: usize = 4 * 1_024 * 1_024 * 1_024; // 4GB
+
+// XXX: Awful hack because Rocksdb seems to have unbounded memory usage for bulk writes
+const ROCKSDB_MAX_WRITES_PER_TXN: u64 = 100_000;
 
 /// Returns pairs of key, value
 fn random_pair(rng: &mut fastrand::Rng) -> ([u8; KEY_SIZE], Vec<u8>) {
@@ -1018,6 +1021,7 @@ impl BenchDatabaseConnection for RocksdbBenchDatabaseConnection<'_> {
         let txn = self.db.transaction_opt(&write_opt, &txn_opt);
         RocksdbBenchWriteTransaction {
             txn,
+            db: self.db,
             db_dir: self.db.path().to_path_buf(),
         }
     }
@@ -1030,18 +1034,22 @@ impl BenchDatabaseConnection for RocksdbBenchDatabaseConnection<'_> {
 
 pub struct RocksdbBenchWriteTransaction<'a> {
     txn: rocksdb::Transaction<'a, OptimisticTransactionDB>,
+    db: &'a OptimisticTransactionDB,
     #[allow(dead_code)]
     db_dir: PathBuf,
 }
 
-impl BenchWriteTransaction for RocksdbBenchWriteTransaction<'_> {
+impl<'a> BenchWriteTransaction for RocksdbBenchWriteTransaction<'a> {
     type W<'txn>
-        = RocksdbBenchInserter<'txn>
+        = RocksdbBenchInserter<'txn, 'a>
     where
         Self: 'txn;
 
     fn get_inserter(&mut self) -> Self::W<'_> {
-        RocksdbBenchInserter { txn: &self.txn }
+        RocksdbBenchInserter {
+            txn: self,
+            counter: 0,
+        }
     }
 
     fn commit(self) -> Result<(), ()> {
@@ -1063,17 +1071,30 @@ impl BenchWriteTransaction for RocksdbBenchWriteTransaction<'_> {
     }
 }
 
-pub struct RocksdbBenchInserter<'a> {
-    txn: &'a rocksdb::Transaction<'a, OptimisticTransactionDB>,
+pub struct RocksdbBenchInserter<'a, 'b> {
+    txn: &'a mut RocksdbBenchWriteTransaction<'b>,
+    counter: u64,
 }
 
-impl BenchInserter for RocksdbBenchInserter<'_> {
+impl BenchInserter for RocksdbBenchInserter<'_, '_> {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
-        self.txn.put(key, value).map_err(|_| ())
+        self.counter += 1;
+        if self.counter == ROCKSDB_MAX_WRITES_PER_TXN {
+            let txn = mem::replace(&mut self.txn.txn, self.txn.db.transaction());
+            txn.commit().map_err(|_| ())?;
+            self.counter = 0;
+        }
+        self.txn.txn.put(key, value).map_err(|_| ())
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
-        self.txn.delete(key).map_err(|_| ())
+        self.counter += 1;
+        if self.counter == ROCKSDB_MAX_WRITES_PER_TXN {
+            let txn = mem::replace(&mut self.txn.txn, self.txn.db.transaction());
+            txn.commit().map_err(|_| ())?;
+            self.counter = 0;
+        }
+        self.txn.txn.delete(key).map_err(|_| ())
     }
 }
 
