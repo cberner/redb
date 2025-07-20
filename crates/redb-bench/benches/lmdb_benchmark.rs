@@ -42,12 +42,24 @@ fn main() {
     let rocksdb_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
 
+        let cache = rocksdb::Cache::new_lru_cache(CACHE_SIZE);
+        let write_buffer = rocksdb::WriteBufferManager::new_write_buffer_manager_with_cache(
+            CACHE_SIZE / 2,
+            false,
+            cache.clone(),
+        );
+
         let mut bb = rocksdb::BlockBasedOptions::default();
-        bb.set_block_cache(&rocksdb::Cache::new_lru_cache(CACHE_SIZE));
+        bb.set_block_cache(&cache);
         bb.set_bloom_filter(10.0, false);
+        bb.set_cache_index_and_filter_blocks(true);
+        bb.set_pin_l0_filter_and_index_blocks_in_cache(false);
+        bb.set_pin_top_level_index_and_filter(false);
 
         let mut opts = rocksdb::Options::default();
         opts.set_block_based_table_factory(&bb);
+        opts.set_write_buffer_manager(&write_buffer);
+        opts.set_max_write_buffer_size_to_maintain((CACHE_SIZE / 2) as i64);
         opts.create_if_missing(true);
         opts.increase_parallelism(
             std::thread::available_parallelism().map_or(1, |n| n.get()) as i32
