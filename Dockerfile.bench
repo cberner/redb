@@ -1,0 +1,15 @@
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt update && apt install -y git build-essential curl libclang-dev
+
+ENV PATH=/root/.cargo/bin:$PATH
+
+ADD rust-toolchain /code/redb/rust-toolchain
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain=$(cat /code/redb/rust-toolchain)
+
+ADD . /code/redb/
+
+RUN cd /code/redb && cargo bench --no-run -p redb-bench

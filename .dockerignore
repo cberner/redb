@@ -1,0 +1,11 @@
+*
+!src/
+!crates/
+!tests/
+!examples/
+!cargo/
+!./*.toml
+!./build.rs
+!./rust-toolchain
+!./LICENSE
+**/target/
