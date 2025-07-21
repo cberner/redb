@@ -17,7 +17,7 @@ use std::{fs, mem, thread};
 const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 
 const READ_ITERATIONS: usize = 2;
-const BULK_ELEMENTS: usize = 1_000_000;
+const BULK_ELEMENTS: usize = 5_000_000;
 const INDIVIDUAL_WRITES: usize = 1_000;
 const BATCH_WRITES: usize = 100;
 const BATCH_SIZE: usize = 1000;
