@@ -1,5 +1,8 @@
-use crate::tree_store::page_store::region::RegionHeader;
 use std::ops::Range;
+
+// The v2 file format had a region header of length 130 x 4096-byte pages
+// For ease of backward compatibility, this is preserved
+const LEGACY_REGION_HEADER_PAGES: u32 = 130;
 
 fn round_up_to_multiple_of(value: u64, multiple: u64) -> u64 {
     if value % multiple == 0 {
@@ -35,23 +38,20 @@ impl RegionLayout {
         page_size: u32,
     ) -> RegionLayout {
         assert!(desired_usable_bytes <= u64::from(page_capacity) * u64::from(page_size));
-        let header_pages = RegionHeader::header_pages_expensive(page_size, page_capacity);
         let num_pages =
             round_up_to_multiple_of(desired_usable_bytes, page_size.into()) / u64::from(page_size);
 
         Self {
             num_pages: num_pages.try_into().unwrap(),
-            header_pages,
+            header_pages: LEGACY_REGION_HEADER_PAGES,
             page_size,
         }
     }
 
     fn full_region_layout(page_capacity: u32, page_size: u32) -> RegionLayout {
-        let header_pages = RegionHeader::header_pages_expensive(page_size, page_capacity);
-
         Self {
             num_pages: page_capacity,
-            header_pages,
+            header_pages: LEGACY_REGION_HEADER_PAGES,
             page_size,
         }
     }

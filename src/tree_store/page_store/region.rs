@@ -219,17 +219,3 @@ impl Allocators {
         }
     }
 }
-
-// Region header
-// Note: unused as of v3 file format
-pub(crate) struct RegionHeader {}
-
-impl RegionHeader {
-    pub(crate) fn header_pages_expensive(page_size: u32, pages_per_region: u32) -> u32 {
-        let page_size = u64::from(page_size);
-        // TODO: this is kind of expensive. Maybe it should be cached
-        let allocator = BuddyAllocator::new(pages_per_region, pages_per_region);
-        let result = 8u64 + allocator.to_vec().len() as u64;
-        result.div_ceil(page_size).try_into().unwrap()
-    }
-}
