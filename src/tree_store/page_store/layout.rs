@@ -1,4 +1,3 @@
-use crate::tree_store::page_store::region::RegionHeader;
 use std::ops::Range;
 
 fn round_up_to_multiple_of(value: u64, multiple: u64) -> u64 {
@@ -32,26 +31,16 @@ impl RegionLayout {
     pub(super) fn calculate(
         desired_usable_bytes: u64,
         page_capacity: u32,
+        region_header_pages: u32,
         page_size: u32,
     ) -> RegionLayout {
         assert!(desired_usable_bytes <= u64::from(page_capacity) * u64::from(page_size));
-        let header_pages = RegionHeader::header_pages_expensive(page_size, page_capacity);
         let num_pages =
             round_up_to_multiple_of(desired_usable_bytes, page_size.into()) / u64::from(page_size);
 
         Self {
             num_pages: num_pages.try_into().unwrap(),
-            header_pages,
-            page_size,
-        }
-    }
-
-    fn full_region_layout(page_capacity: u32, page_size: u32) -> RegionLayout {
-        let header_pages = RegionHeader::header_pages_expensive(page_size, page_capacity);
-
-        Self {
-            num_pages: page_capacity,
-            header_pages,
+            header_pages: region_header_pages,
             page_size,
         }
     }
@@ -162,12 +151,21 @@ impl DatabaseLayout {
         }
     }
 
-    pub(super) fn calculate(desired_usable_bytes: u64, page_capacity: u32, page_size: u32) -> Self {
-        let full_region_layout = RegionLayout::full_region_layout(page_capacity, page_size);
+    pub(super) fn calculate(
+        desired_usable_bytes: u64,
+        page_capacity: u32,
+        region_header_pages: u32,
+        page_size: u32,
+    ) -> Self {
+        let full_region_layout = RegionLayout::new(page_capacity, region_header_pages, page_size);
         if desired_usable_bytes <= full_region_layout.usable_bytes() {
             // Single region layout
-            let region_layout =
-                RegionLayout::calculate(desired_usable_bytes, page_capacity, page_size);
+            let region_layout = RegionLayout::calculate(
+                desired_usable_bytes,
+                page_capacity,
+                region_header_pages,
+                page_size,
+            );
             DatabaseLayout {
                 full_region_layout,
                 num_full_regions: 0,
@@ -183,6 +181,7 @@ impl DatabaseLayout {
                 Some(RegionLayout::calculate(
                     remaining_desired,
                     page_capacity,
+                    region_header_pages,
                     page_size,
                 ))
             } else {
@@ -247,17 +246,5 @@ impl DatabaseLayout {
         } else {
             self.full_region_layout
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::tree_store::page_store::layout::RegionLayout;
-
-    #[test]
-    fn full_layout() {
-        let layout = RegionLayout::full_region_layout(512, 4096);
-        assert_eq!(layout.num_pages, 512);
-        assert_eq!(layout.page_size, 4096);
     }
 }

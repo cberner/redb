@@ -25,6 +25,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
+// The region header is optional in the v3 file format
+// It's an artifact of the v2 file format, so we initialize new databases without headers to save space
+const NO_HEADER: u32 = 0;
+
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
 // because the leaf node format uses 32bit offsets
 const MAX_USABLE_REGION_SPACE: u64 = 4 * 1024 * 1024 * 1024;
@@ -176,11 +180,13 @@ impl TransactionalMemory {
                 (page_size * region_tracker_required_bytes.div_ceil(page_size)) as u64;
             let starting_size = size + tracker_space;
 
+            let page_capacity = (region_size / u64::try_from(page_size).unwrap())
+                .try_into()
+                .unwrap();
             let layout = DatabaseLayout::calculate(
                 starting_size,
-                (region_size / u64::try_from(page_size).unwrap())
-                    .try_into()
-                    .unwrap(),
+                page_capacity,
+                NO_HEADER,
                 page_size.try_into().unwrap(),
             );
 
@@ -1010,6 +1016,11 @@ impl TransactionalMemory {
         let new_layout = DatabaseLayout::calculate(
             next_desired_size,
             state.header.layout().full_region_layout().num_pages(),
+            state
+                .header
+                .layout()
+                .full_region_layout()
+                .get_header_pages(),
             self.page_size,
         );
         assert!(new_layout.len() >= layout.len());
