@@ -52,9 +52,12 @@ pub(crate) const FILE_FORMAT_VERSION2: u8 = 2;
 // * New persistent savepoint format
 pub(crate) const FILE_FORMAT_VERSION3: u8 = 3;
 
+#[derive(Copy, Clone)]
 pub(crate) enum ShrinkPolicy {
     // Try to shrink the file by the default amount
     Default,
+    // Try to shrink the file by the maximum amount
+    Maximum,
     // Do not try to shrink the file
     Never,
 }
@@ -609,7 +612,7 @@ impl TransactionalMemory {
         let mut state = self.state.lock().unwrap();
         // Trim surplus file space, before finalizing the commit
         let shrunk = if !matches!(shrink_policy, ShrinkPolicy::Never) {
-            Self::try_shrink(&mut state)?
+            Self::try_shrink(&mut state, matches!(shrink_policy, ShrinkPolicy::Maximum))?
         } else {
             false
         };
@@ -1042,17 +1045,23 @@ impl TransactionalMemory {
         }
     }
 
-    fn try_shrink(state: &mut InMemoryState) -> Result<bool> {
+    fn try_shrink(state: &mut InMemoryState, force: bool) -> Result<bool> {
         let layout = state.header.layout();
         let last_region_index = layout.num_regions() - 1;
         let last_allocator = state.get_region(last_region_index);
         let trailing_free = last_allocator.trailing_free_pages();
         let last_allocator_len = last_allocator.len();
-        if trailing_free < last_allocator_len / 2 {
+        if trailing_free == 0 {
+            return Ok(false);
+        }
+        if trailing_free < last_allocator_len / 2 && !force {
             return Ok(false);
         }
         let reduce_by = if layout.num_regions() > 1 && trailing_free == last_allocator_len {
             trailing_free
+        } else if force {
+            // Do not shrink the database to zero size
+            min(last_allocator_len - 1, trailing_free)
         } else {
             trailing_free / 2
         };

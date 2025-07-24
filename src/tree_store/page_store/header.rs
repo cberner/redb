@@ -404,18 +404,81 @@ mod test {
         GOD_BYTE_OFFSET, MAGICNUMBER, PAGE_SIZE, PRIMARY_BIT, RECOVERY_REQUIRED,
         TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT, USER_ROOT_OFFSET,
     };
-    use crate::{Database, DatabaseError, ReadableTable};
+    use crate::{Database, DatabaseError, ReadableTable, StorageBackend};
     use crate::{ReadableDatabase, StorageError};
     use std::fs::OpenOptions;
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
     use std::mem::size_of;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    #[derive(Debug)]
+    struct FailingBackend {
+        inner: FileBackend,
+        fail: Arc<AtomicBool>,
+    }
+
+    impl FailingBackend {
+        fn new(backend: FileBackend) -> Self {
+            Self {
+                inner: backend,
+                fail: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn check_fail(&self) -> Result<(), std::io::Error> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(std::io::Error::from(ErrorKind::Other));
+            }
+
+            Ok(())
+        }
+    }
+
+    impl StorageBackend for FailingBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.check_fail()?;
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            self.check_fail()?;
+            self.inner.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.check_fail()?;
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            self.check_fail()?;
+            self.inner.sync_data()
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            self.check_fail()?;
+            self.inner.write(offset, data)
+        }
+
+        fn close(&self) -> Result<(), Error> {
+            self.inner.close()
+        }
+    }
 
     #[test]
     fn repair_allocator_checksums() {
         let tmpfile = crate::create_tempfile();
-        let db = Database::builder().create(tmpfile.path()).unwrap();
+        let cloned = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let backend = FailingBackend::new(FileBackend::new(cloned).unwrap());
+        let fail = backend.fail.clone();
+        let db = Database::builder().create_with_backend(backend).unwrap();
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
@@ -428,15 +491,15 @@ mod test {
 
         let mut write_txn = db.begin_write().unwrap();
         {
-            // We want this to be the last commit before the database is closed, so it needs to
-            // use quick-repair -- otherwise, Database::drop() will generate its own quick-repair
-            // commit on shutdown
             write_txn.set_quick_repair(true);
             let mut table = write_txn.open_table(X).unwrap();
             table.insert("hello", "world2").unwrap();
         }
         write_txn.commit().unwrap();
         drop(read_txn);
+        // We want our commit to be the last commit in the database, so block the Database drop()
+        // method from performing its own commit to trim the file
+        fail.store(true, Ordering::SeqCst);
         drop(db);
 
         let mut file = OpenOptions::new()

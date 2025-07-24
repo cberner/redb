@@ -417,6 +417,29 @@ fn value_too_large() {
 }
 
 #[test]
+fn small_db_is_small_file() {
+    let tmpfile = create_tempfile();
+    const TABLE: TableDefinition<u32, u32> = TableDefinition::new("TABLE");
+
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let wtx = db.begin_write().unwrap();
+    let mut table = wtx.open_table(TABLE).unwrap();
+    table.insert(0, 0).unwrap();
+    drop(table);
+    wtx.commit().unwrap();
+
+    db.compact().unwrap();
+
+    drop(db);
+    let metadata = tmpfile.as_file().metadata().unwrap();
+    assert!(
+        metadata.len() < 40 * 1024,
+        "File size: {:?}",
+        metadata.len()
+    );
+}
+
+#[test]
 fn many_pairs() {
     let tmpfile = create_tempfile();
     const TABLE: TableDefinition<u32, u32> = TableDefinition::new("TABLE");

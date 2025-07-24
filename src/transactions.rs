@@ -768,6 +768,7 @@ pub struct WriteTransaction {
     dirty: AtomicBool,
     durability: InternalDurability,
     two_phase_commit: bool,
+    shrink_policy: ShrinkPolicy,
     quick_repair: bool,
     // Persistent savepoints created during this transaction
     created_persistent_savepoints: Mutex<HashSet<SavepointId>>,
@@ -801,9 +802,14 @@ impl WriteTransaction {
             durability: InternalDurability::Immediate,
             two_phase_commit: false,
             quick_repair: false,
+            shrink_policy: ShrinkPolicy::Default,
             created_persistent_savepoints: Mutex::new(Default::default()),
             deleted_persistent_savepoints: Mutex::new(vec![]),
         })
+    }
+
+    pub(crate) fn set_shrink_policy(&mut self, shrink_policy: ShrinkPolicy) {
+        self.shrink_policy = shrink_policy;
     }
 
     pub(crate) fn pending_free_pages(&self) -> Result<bool> {
@@ -1601,7 +1607,7 @@ impl WriteTransaction {
             system_root,
             self.transaction_id,
             self.two_phase_commit,
-            ShrinkPolicy::Default,
+            self.shrink_policy,
         )?;
 
         // Mark any pending non-durable commits as fully committed.
