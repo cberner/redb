@@ -450,15 +450,20 @@ impl TransactionalMemory {
         let state = self.state.lock().unwrap();
         let layout = state.header.layout();
         let num_regions = layout.num_regions();
-        let region_header_len = layout.full_region_layout().get_header_pages()
-            * layout.full_region_layout().page_size();
         let region_tracker_len = state.allocators.region_tracker.to_vec().len();
+        let region_lens: Vec<usize> = state
+            .allocators
+            .region_allocators
+            .iter()
+            .map(|x| x.to_vec().len())
+            .collect();
         drop(state);
 
         for i in 0..num_regions {
+            let region_bytes_len = region_lens[i as usize];
             tree.insert(
                 &AllocatorStateKey::Region(i),
-                &vec![0; region_header_len as usize].as_ref(),
+                &vec![0; region_bytes_len].as_ref(),
             )?;
         }
 
