@@ -501,12 +501,16 @@ impl Database {
             // Double commit to free up the relocated pages for reuse
             let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
             txn.set_two_phase_commit(true);
+            // Also shrink the database file by the maximum amount
+            txn.set_shrink_policy(ShrinkPolicy::Maximum);
             txn.commit().map_err(|e| e.into_storage_error())?;
             // Triple commit to free up the relocated pages for reuse
             // TODO: this really shouldn't be necessary, but the data freed tree is a system table
             // and so free'ing up its pages causes more deletes from the system tree
             let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
             txn.set_two_phase_commit(true);
+            // Also shrink the database file by the maximum amount
+            txn.set_shrink_policy(ShrinkPolicy::Maximum);
             txn.commit().map_err(|e| e.into_storage_error())?;
             let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
             assert!(!txn.pending_free_pages()?);
@@ -890,17 +894,13 @@ impl Database {
             .map_err(|e| e.into())
     }
 
-    fn ensure_allocator_state_table(&self) -> Result<(), Error> {
-        // If the allocator state table is already up to date, we're done
-        if Self::get_allocator_state_table(&self.mem)?.is_some() {
-            return Ok(());
-        }
-
+    fn ensure_allocator_state_table_and_trim(&self) -> Result<(), Error> {
         // Make a new quick-repair commit to update the allocator state table
         #[cfg(feature = "logging")]
         debug!("Writing allocator state table");
         let mut tx = self.begin_write()?;
         tx.set_quick_repair(true);
+        tx.set_shrink_policy(ShrinkPolicy::Maximum);
         tx.commit()?;
 
         Ok(())
@@ -909,7 +909,7 @@ impl Database {
 
 impl Drop for Database {
     fn drop(&mut self) {
-        if !thread::panicking() && self.ensure_allocator_state_table().is_err() {
+        if !thread::panicking() && self.ensure_allocator_state_table_and_trim().is_err() {
             #[cfg(feature = "logging")]
             warn!("Failed to write allocator state table. Repair may be required at restart.");
         }
