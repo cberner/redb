@@ -1,5 +1,6 @@
 #[cfg(any(test, fuzzing))]
 use crate::tree_store::PageNumber;
+use crate::tree_store::page_store::base::MAX_REGIONS;
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::DatabaseLayout;
@@ -17,7 +18,7 @@ impl RegionTracker {
     pub(crate) fn new(regions: u32, orders: u8) -> Self {
         let mut data = vec![];
         for _ in 0..orders {
-            data.push(BtreeBitmap::new(regions, regions));
+            data.push(BtreeBitmap::new(regions, MAX_REGIONS));
         }
         Self {
             order_trackers: data,
@@ -26,31 +27,39 @@ impl RegionTracker {
 
     // Format:
     // num_orders: u32 number of order allocators
-    // allocator_len: u32 length of each allocator
+    // allocator_lens: u32 length of each allocator
     // data: BtreeBitmap data for each order
     pub(super) fn to_vec(&self) -> Vec<u8> {
         let mut result = vec![];
         let orders: u32 = self.order_trackers.len().try_into().unwrap();
-        let allocator_len: u32 = self.order_trackers[0].to_vec().len().try_into().unwrap();
+        let allocator_lens: Vec<u32> = self
+            .order_trackers
+            .iter()
+            .map(|x| x.to_vec().len().try_into().unwrap())
+            .collect();
         result.extend(orders.to_le_bytes());
-        result.extend(allocator_len.to_le_bytes());
+        for allocator_len in allocator_lens {
+            result.extend(allocator_len.to_le_bytes());
+        }
         for order in &self.order_trackers {
             result.extend(&order.to_vec());
         }
         result
     }
 
-    // May contain trailing data
-    pub(super) fn from_page(page: &[u8]) -> Self {
+    pub(super) fn from_bytes(page: &[u8]) -> Self {
         let orders = u32::from_le_bytes(page[..size_of::<u32>()].try_into().unwrap());
-        let allocator_len = u32::from_le_bytes(
-            page[size_of::<u32>()..2 * size_of::<u32>()]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        let mut data = vec![];
-        let mut start = 2 * size_of::<u32>();
+        let mut start = size_of::<u32>();
+        let mut allocator_lens = vec![];
         for _ in 0..orders {
+            let allocator_len =
+                u32::from_le_bytes(page[start..start + size_of::<u32>()].try_into().unwrap())
+                    as usize;
+            allocator_lens.push(allocator_len);
+            start += size_of::<u32>();
+        }
+        let mut data = vec![];
+        for allocator_len in allocator_lens {
             data.push(BtreeBitmap::from_bytes(
                 &page[start..(start + allocator_len)],
             ));
@@ -81,23 +90,10 @@ impl RegionTracker {
         }
     }
 
-    fn expand(&mut self, new_capacity: u32) {
-        let mut new_trackers = vec![];
-        for order in 0..self.order_trackers.len() {
-            let mut new_bitmap = BtreeBitmap::new(new_capacity, new_capacity);
-            for region in 0..self.order_trackers[order].len() {
-                if !self.order_trackers[order].get(region) {
-                    new_bitmap.clear(region);
-                }
-            }
-            new_trackers.push(new_bitmap);
+    fn resize(&mut self, new_capacity: u32) {
+        for order in &mut self.order_trackers {
+            order.resize(new_capacity, true);
         }
-
-        self.order_trackers = new_trackers;
-    }
-
-    fn capacity(&self) -> u32 {
-        self.order_trackers[0].capacity()
     }
 
     fn len(&self) -> u32 {
@@ -206,10 +202,8 @@ impl Allocators {
                         new_layout.full_region_layout().num_pages(),
                     );
                     let highest_free = allocator.highest_free_order().unwrap();
-                    // TODO: we should be calling .capacity(), and resizing if possible
                     if i >= self.region_tracker.len() {
-                        self.region_tracker
-                            .expand(self.region_tracker.capacity() * 2);
+                        self.region_tracker.resize(i + 1);
                     }
                     self.region_tracker.mark_free(highest_free, i);
                     self.region_allocators.push(allocator);

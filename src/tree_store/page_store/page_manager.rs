@@ -439,10 +439,30 @@ impl TransactionalMemory {
 
         for i in 0..num_regions {
             let region_bytes = &state.allocators.region_allocators[i as usize].to_vec();
+            if tree
+                .get(&AllocatorStateKey::Region(i))?
+                .unwrap()
+                .value()
+                .len()
+                < region_bytes.len()
+            {
+                // The allocator state grew too much since we reserved space
+                return Ok(false);
+            }
             tree.insert_inplace(&AllocatorStateKey::Region(i), &region_bytes.as_ref())?;
         }
 
         let region_tracker_bytes = state.allocators.region_tracker.to_vec();
+        if tree
+            .get(&AllocatorStateKey::RegionTracker)?
+            .unwrap()
+            .value()
+            .len()
+            < region_tracker_bytes.len()
+        {
+            // The allocator state grew too much since we reserved space
+            return Ok(false);
+        }
         tree.insert_inplace(
             &AllocatorStateKey::RegionTracker,
             &region_tracker_bytes.as_ref(),
@@ -480,7 +500,7 @@ impl TransactionalMemory {
             region_allocators.push(BuddyAllocator::from_bytes(region?.value()));
         }
 
-        let region_tracker = RegionTracker::from_page(
+        let region_tracker = RegionTracker::from_bytes(
             tree.get(&AllocatorStateKey::RegionTracker)?
                 .unwrap()
                 .value(),

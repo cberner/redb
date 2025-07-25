@@ -28,10 +28,6 @@ impl BtreeBitmap {
         self.get_level(self.get_height() - 1).get(i)
     }
 
-    pub(crate) fn capacity(&self) -> u32 {
-        self.get_level(self.get_height() - 1).capacity()
-    }
-
     pub(crate) fn len(&self) -> u32 {
         self.get_level(self.get_height() - 1).len()
     }
@@ -144,6 +140,7 @@ impl BtreeBitmap {
             height.resize(new_len, full);
             new_len = new_len.div_ceil(64);
         }
+        assert!(self.get_level(0).len() <= 64);
     }
 
     // Returns the first unset id, and sets it
@@ -295,7 +292,7 @@ impl U64GroupedBitmap {
     pub fn to_vec(&self) -> Vec<u8> {
         let mut result = vec![];
         result.extend(self.len.to_le_bytes());
-        for x in &self.data {
+        for x in &self.data[..Self::required_words(self.len)] {
             result.extend(x.to_le_bytes());
         }
         result
@@ -336,17 +333,15 @@ impl U64GroupedBitmap {
         U64GroupedBitmapIter::new(self.len, &self.data)
     }
 
-    pub fn capacity(&self) -> u32 {
-        let len: u32 = self.data.len().try_into().unwrap();
-        len * u64::BITS
-    }
-
     fn any_unset(&self) -> bool {
         self.data.iter().any(|x| x.count_zeros() > 0)
     }
 
     fn first_unset(&self, start_bit: u32, end_bit: u32) -> Option<u32> {
         assert_eq!(end_bit, (start_bit - start_bit % 64) + 64);
+        if self.len == 0 {
+            return None;
+        }
 
         let (index, bit) = Self::data_index_of(start_bit);
         let mask = (1 << bit) - 1;
@@ -363,7 +358,11 @@ impl U64GroupedBitmap {
     }
 
     pub fn resize(&mut self, new_len: u32, full: bool) {
-        assert!(new_len <= self.capacity());
+        if self.data.len() < Self::required_words(new_len) {
+            let default_value = if full { u64::MAX } else { 0 };
+            self.data
+                .resize(Self::required_words(new_len), default_value);
+        }
         let old_len = self.len;
         self.len = new_len;
         if old_len < new_len {

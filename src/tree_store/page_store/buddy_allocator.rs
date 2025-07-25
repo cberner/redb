@@ -184,10 +184,6 @@ impl BuddyAllocator {
         pages
     }
 
-    pub(crate) fn capacity(&self) -> u32 {
-        self.get_order_free(0).capacity()
-    }
-
     pub(crate) fn get_max_order(&self) -> u8 {
         self.max_order
     }
@@ -265,7 +261,6 @@ impl BuddyAllocator {
 
     pub(crate) fn resize(&mut self, new_size: u32) {
         self.debug_check_consistency();
-        assert!(new_size <= self.capacity());
         if new_size > self.len() {
             let mut pages_for_order = new_size;
             let mut processed_pages = self.len();
