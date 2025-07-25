@@ -192,6 +192,7 @@ impl Key for TransactionIdWithPagination {
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Debug)]
 pub(crate) enum AllocatorStateKey {
+    Deprecated,
     Region(u32),
     RegionTracker,
     TransactionId,
@@ -210,9 +211,11 @@ impl Value for AllocatorStateKey {
         Self: 'a,
     {
         match data[0] {
-            0 => Self::Region(u32::from_le_bytes(data[1..].try_into().unwrap())),
-            1 => Self::RegionTracker,
-            2 => Self::TransactionId,
+            // 0, 1, 2 were used in redb 2.x and have a different format
+            0..=2 => Self::Deprecated,
+            3 => Self::Region(u32::from_le_bytes(data[1..].try_into().unwrap())),
+            4 => Self::RegionTracker,
+            5 => Self::TransactionId,
             _ => unreachable!(),
         }
     }
@@ -225,14 +228,17 @@ impl Value for AllocatorStateKey {
         let mut result = Self::AsBytes::default();
         match value {
             Self::Region(region) => {
-                result[0] = 0;
+                result[0] = 3;
                 result[1..].copy_from_slice(&u32::to_le_bytes(*region));
             }
             Self::RegionTracker => {
-                result[0] = 1;
+                result[0] = 4;
             }
             Self::TransactionId => {
-                result[0] = 2;
+                result[0] = 5;
+            }
+            AllocatorStateKey::Deprecated => {
+                result[0] = 0;
             }
         }
 

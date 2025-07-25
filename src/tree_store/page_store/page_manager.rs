@@ -460,13 +460,11 @@ impl TransactionalMemory {
         // WriteTransaction. When that happens, any existing allocator state table will be left
         // in place but is no longer valid. (And even if there were no such calls today, it would
         // be an easy mistake to make! So it's good that we check.)
-        let transaction_id = TransactionId::new(u64::from_le_bytes(
-            tree.get(&AllocatorStateKey::TransactionId)?
-                .unwrap()
-                .value()
-                .try_into()
-                .unwrap(),
-        ));
+        let Some(value) = tree.get(&AllocatorStateKey::TransactionId)? else {
+            return Ok(false);
+        };
+        let transaction_id =
+            TransactionId::new(u64::from_le_bytes(value.value().try_into().unwrap()));
 
         Ok(transaction_id == self.get_last_committed_transaction_id()?)
     }
