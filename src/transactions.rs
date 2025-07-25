@@ -6,8 +6,8 @@ use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page,
-    PageHint, PageListMut, PageNumber, PageTrackerPolicy, SerializedSavepoint, TableTree,
-    TableTreeMut, TableType, TransactionalMemory,
+    PageHint, PageListMut, PageNumber, PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy,
+    TableTree, TableTreeMut, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -1593,6 +1593,7 @@ impl WriteTransaction {
             system_root,
             self.transaction_id,
             self.two_phase_commit,
+            ShrinkPolicy::Default,
         )?;
 
         // Mark any pending non-durable commits as fully committed.

@@ -52,6 +52,13 @@ pub(crate) const FILE_FORMAT_VERSION2: u8 = 2;
 // * New persistent savepoint format
 pub(crate) const FILE_FORMAT_VERSION3: u8 = 3;
 
+pub(crate) enum ShrinkPolicy {
+    // Try to shrink the file by the default amount
+    Default,
+    // Do not try to shrink the file
+    Never,
+}
+
 fn ceil_log2(x: usize) -> u8 {
     if x.is_power_of_two() {
         x.trailing_zeros().try_into().unwrap()
@@ -513,8 +520,15 @@ impl TransactionalMemory {
         system_root: Option<BtreeHeader>,
         transaction_id: TransactionId,
         two_phase: bool,
+        shrink_policy: ShrinkPolicy,
     ) -> Result {
-        let result = self.commit_inner(data_root, system_root, transaction_id, two_phase);
+        let result = self.commit_inner(
+            data_root,
+            system_root,
+            transaction_id,
+            two_phase,
+            shrink_policy,
+        );
         if result.is_err() {
             self.needs_recovery.store(true, Ordering::Release);
         }
@@ -528,6 +542,7 @@ impl TransactionalMemory {
         system_root: Option<BtreeHeader>,
         transaction_id: TransactionId,
         two_phase: bool,
+        shrink_policy: ShrinkPolicy,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
@@ -538,7 +553,11 @@ impl TransactionalMemory {
 
         let mut state = self.state.lock().unwrap();
         // Trim surplus file space, before finalizing the commit
-        let shrunk = Self::try_shrink(&mut state)?;
+        let shrunk = if !matches!(shrink_policy, ShrinkPolicy::Never) {
+            Self::try_shrink(&mut state)?
+        } else {
+            false
+        };
         // Copy the header so that we can release the state lock, while we flush the file
         let mut header = state.header.clone();
         drop(state);

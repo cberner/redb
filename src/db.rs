@@ -1,6 +1,6 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
-    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, TableTree, TableType,
+    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, ShrinkPolicy, TableTree, TableType,
     TransactionalMemory,
 };
 use crate::types::{Key, Value};
@@ -437,8 +437,13 @@ impl Database {
         if !was_clean {
             let next_transaction_id = self.mem.get_last_committed_transaction_id()?.next();
             let [data_root, system_root] = new_roots;
-            self.mem
-                .commit(data_root, system_root, next_transaction_id, true)?;
+            self.mem.commit(
+                data_root,
+                system_root,
+                next_transaction_id,
+                true,
+                ShrinkPolicy::Never,
+            )?;
         }
 
         self.mem.begin_writable()?;
@@ -723,7 +728,13 @@ impl Database {
             }
             let [data_root, system_root] = Self::do_repair(&mut mem, repair_callback)?;
             let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
-            mem.commit(data_root, system_root, next_transaction_id, true)?;
+            mem.commit(
+                data_root,
+                system_root,
+                next_transaction_id,
+                true,
+                ShrinkPolicy::Never,
+            )?;
         }
 
         mem.begin_writable()?;
