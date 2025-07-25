@@ -1,5 +1,10 @@
 # redb - Changelog
 
+## 2.6.1 - 2025-07-24
+* Fix a forward compatibility issue which caused a crash when opening databases created with redb
+  3.x. Note that opening 3.x databases with redb 2.x is not generally supported and only works
+  in certain situations.
+
 ## 2.6.0 - 2025-05-22
 
 ### Add support for the v3 file format.
