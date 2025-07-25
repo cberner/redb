@@ -4,7 +4,6 @@ use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, MAX_MAX_PAGE_ORDER};
-use crate::tree_store::page_store::xxh3_checksum;
 use std::cmp::{self, max};
 use std::mem::size_of;
 
@@ -18,7 +17,7 @@ impl RegionTracker {
     pub(crate) fn new(regions: u32, orders: u8) -> Self {
         let mut data = vec![];
         for _ in 0..orders {
-            data.push(BtreeBitmap::new(regions));
+            data.push(BtreeBitmap::new(regions, regions));
         }
         Self {
             order_trackers: data,
@@ -85,7 +84,7 @@ impl RegionTracker {
     fn expand(&mut self, new_capacity: u32) {
         let mut new_trackers = vec![];
         for order in 0..self.order_trackers.len() {
-            let mut new_bitmap = BtreeBitmap::new(new_capacity);
+            let mut new_bitmap = BtreeBitmap::new(new_capacity, new_capacity);
             for region in 0..self.order_trackers[order].len() {
                 if !self.order_trackers[order].get(region) {
                     new_bitmap.clear(region);
@@ -147,7 +146,7 @@ impl Allocators {
         // between repairs of the allocators
         let mut result = 0;
         for allocator in &self.region_allocators {
-            result ^= xxh3_checksum(&allocator.to_vec());
+            result ^= allocator.xxh3_hash();
         }
         result
     }

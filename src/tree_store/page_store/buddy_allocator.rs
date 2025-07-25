@@ -39,17 +39,19 @@ impl BuddyAllocator {
     pub(crate) fn new(num_pages: u32, max_page_capacity: u32) -> Self {
         let max_order = calculate_usable_order(max_page_capacity);
 
-        let mut pages_for_order = max_page_capacity;
+        let mut capacity_for_order = max_page_capacity;
+        let mut pages_for_order = num_pages;
         let mut free = vec![];
         let mut allocated = vec![];
         for _ in 0..=max_order {
-            free.push(BtreeBitmap::new(pages_for_order));
+            free.push(BtreeBitmap::new(pages_for_order, capacity_for_order));
 
             allocated.push(U64GroupedBitmap::new_empty(
                 pages_for_order,
-                pages_for_order,
+                capacity_for_order,
             ));
             pages_for_order = next_higher_order(pages_for_order);
+            capacity_for_order = next_higher_order(capacity_for_order);
         }
 
         // Mark the available pages, starting with the highest order
@@ -70,6 +72,18 @@ impl BuddyAllocator {
             len: num_pages,
             max_order,
         }
+    }
+
+    pub(crate) fn xxh3_hash(&self) -> u128 {
+        let mut result = 0;
+        for x in &self.allocated {
+            result ^= x.xxh3_hash();
+        }
+        for x in &self.free {
+            result ^= x.xxh3_hash();
+        }
+
+        result
     }
 
     // Data structure format:
@@ -180,7 +194,7 @@ impl BuddyAllocator {
 
     fn find_free_order(&self, mut page: u32) -> Option<u8> {
         for order in 0..=self.max_order {
-            if !self.get_order_free(order).get(page) {
+            if page < self.get_order_free(order).len() && !self.get_order_free(order).get(page) {
                 return Some(order);
             }
             page = next_higher_order(page);
@@ -253,7 +267,17 @@ impl BuddyAllocator {
         self.debug_check_consistency();
         assert!(new_size <= self.capacity());
         if new_size > self.len() {
+            let mut pages_for_order = new_size;
             let mut processed_pages = self.len();
+            for order in &mut self.allocated {
+                order.resize(pages_for_order, false);
+                pages_for_order = next_higher_order(pages_for_order);
+            }
+            let mut pages_for_order = new_size;
+            for order in &mut self.free {
+                order.resize(pages_for_order, true);
+                pages_for_order = next_higher_order(pages_for_order);
+            }
             // Align to the highest order possible
             while processed_pages < new_size {
                 let order: u8 = processed_pages.trailing_zeros().try_into().unwrap();
@@ -276,7 +300,6 @@ impl BuddyAllocator {
                 }
             }
             assert_eq!(processed_pages, new_size);
-            self.debug_check_consistency();
         } else {
             let mut processed_pages = new_size;
             // Align to the highest order possible
@@ -304,8 +327,19 @@ impl BuddyAllocator {
                 }
             }
             assert_eq!(processed_pages, self.len());
+            let mut pages_for_order = new_size;
+            for order in &mut self.allocated {
+                order.resize(pages_for_order, false);
+                pages_for_order = next_higher_order(pages_for_order);
+            }
+            let mut pages_for_order = new_size;
+            for order in &mut self.free {
+                order.resize(pages_for_order, true);
+                pages_for_order = next_higher_order(pages_for_order);
+            }
         }
         self.len = new_size;
+        self.debug_check_consistency();
     }
 
     #[allow(unused_variables)]
@@ -320,6 +354,9 @@ impl BuddyAllocator {
                 let mut page = processed;
                 for order in 0..=self.max_order {
                     let allocator = &self.free[order as usize];
+                    if allocator.len() <= page {
+                        break;
+                    }
                     if !allocator.get(page) {
                         assert!(!found);
                         found = true;
@@ -336,8 +373,10 @@ impl BuddyAllocator {
                 for page in 0..order_len {
                     if !allocator.get(page) {
                         let buddy = buddy_page(page);
-                        let buddy_allocated = allocator.get(buddy);
-                        assert!(buddy_allocated, "order={order} page={page} buddy={buddy}",);
+                        if buddy < allocator.len() {
+                            let buddy_allocated = allocator.get(buddy);
+                            assert!(buddy_allocated, "order={order} page={page} buddy={buddy}",);
+                        }
                     }
                 }
             }
@@ -473,7 +512,7 @@ impl BuddyAllocator {
 
         let allocator = self.get_order_free_mut(order);
         let buddy = buddy_page(page_number);
-        if allocator.get(buddy) {
+        if buddy >= allocator.len() || allocator.get(buddy) {
             allocator.clear(page_number);
         } else {
             // Merge into higher order page
