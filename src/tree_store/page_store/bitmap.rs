@@ -262,6 +262,7 @@ impl U64GroupedBitmap {
         Self { len, data }
     }
 
+    #[cfg(test)]
     pub fn new_empty(len: u32, capacity: u32) -> Self {
         let data = vec![0; Self::required_words(capacity)];
         Self { len, data }
