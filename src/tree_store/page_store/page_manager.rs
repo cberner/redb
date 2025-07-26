@@ -112,6 +112,9 @@ pub(crate) struct TransactionalMemory {
     // Reference counts of PageImpls that are outstanding
     #[cfg(debug_assertions)]
     read_page_ref_counts: Arc<Mutex<HashMap<PageNumber, u64>>>,
+    // Set of all allocated pages for debugging assertions
+    #[cfg(debug_assertions)]
+    allocated_pages: Arc<Mutex<PageNumberHashSet>>,
     // Indicates that a non-durable commit has been made, so reads should be served from the secondary meta page
     read_from_secondary: AtomicBool,
     page_size: u32,
@@ -267,6 +270,8 @@ impl TransactionalMemory {
             open_dirty_pages: Arc::new(Mutex::new(HashSet::new())),
             #[cfg(debug_assertions)]
             read_page_ref_counts: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(debug_assertions)]
+            allocated_pages: Arc::new(Mutex::new(Default::default())),
             read_from_secondary: AtomicBool::new(false),
             page_size: page_size.try_into().unwrap(),
             region_size,
@@ -282,9 +287,31 @@ impl TransactionalMemory {
         self.storage.check_io_errors()
     }
 
-    #[cfg(any(test, fuzzing))]
+    #[cfg(debug_assertions)]
+    pub(crate) fn mark_debug_allocated_page(&self, page: PageNumber) {
+        assert!(self.allocated_pages.lock().unwrap().insert(page));
+    }
+
+    #[cfg(debug_assertions)]
     pub(crate) fn all_allocated_pages(&self) -> Vec<PageNumber> {
-        self.state.lock().unwrap().allocators.all_allocated()
+        self.allocated_pages
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_check_allocator_consistency(&self) {
+        let state = self.state.lock().unwrap();
+        let mut region_pages = vec![vec![]; state.allocators.region_allocators.len()];
+        for p in self.allocated_pages.lock().unwrap().iter() {
+            region_pages[p.region as usize].push(*p);
+        }
+        for (i, allocator) in state.allocators.region_allocators.iter().enumerate() {
+            allocator.check_allocated_pages(i.try_into().unwrap(), &region_pages[i]);
+        }
     }
 
     pub(crate) fn clear_read_cache(&self) {
@@ -357,6 +384,8 @@ impl TransactionalMemory {
     pub(crate) fn begin_repair(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         state.allocators = Allocators::new(state.header.layout());
+        #[cfg(debug_assertions)]
+        self.allocated_pages.lock().unwrap().clear();
 
         Ok(())
     }
@@ -366,6 +395,8 @@ impl TransactionalMemory {
         let region_index = page_number.region;
         let allocator = state.get_region_mut(region_index);
         allocator.record_alloc(page_number.page_index, page_number.page_order);
+        #[cfg(debug_assertions)]
+        assert!(self.allocated_pages.lock().unwrap().insert(page_number));
     }
 
     fn write_header(&self, header: &DatabaseHeader) -> Result {
@@ -523,11 +554,17 @@ impl TransactionalMemory {
         Ok(())
     }
 
+    #[cfg_attr(not(debug_assertions), expect(unused_variables))]
     pub(crate) fn is_allocated(&self, page: PageNumber) -> bool {
-        let state = self.state.lock().unwrap();
-        let allocator = state.get_region(page.region);
-
-        allocator.is_allocated(page.page_index, page.page_order)
+        #[cfg(debug_assertions)]
+        {
+            let allocated = self.allocated_pages.lock().unwrap();
+            allocated.contains(&page)
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            unreachable!()
+        }
     }
 
     // Commit all outstanding changes and make them visible as the primary
@@ -686,6 +723,8 @@ impl TransactionalMemory {
             state
                 .get_region_mut(region_index)
                 .free(page_number.page_index, page_number.page_order);
+            #[cfg(debug_assertions)]
+            assert!(self.allocated_pages.lock().unwrap().remove(page_number));
 
             let address = page_number.address_range(
                 self.page_size.into(),
@@ -837,6 +876,7 @@ impl TransactionalMemory {
                     .unwrap()
                     .contains_key(&page)
             );
+            assert!(self.allocated_pages.lock().unwrap().remove(&page));
             assert!(!self.open_dirty_pages.lock().unwrap().contains(&page));
         }
         allocated.remove(page);
@@ -923,6 +963,7 @@ impl TransactionalMemory {
 
         #[cfg(debug_assertions)]
         {
+            assert!(self.allocated_pages.lock().unwrap().insert(page_number));
             assert!(
                 !self
                     .read_page_ref_counts

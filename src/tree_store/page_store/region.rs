@@ -1,5 +1,3 @@
-#[cfg(any(test, fuzzing))]
-use crate::tree_store::PageNumber;
 use crate::tree_store::page_store::base::MAX_REGIONS;
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
@@ -126,15 +124,6 @@ impl Allocators {
             region_tracker,
             region_allocators,
         }
-    }
-
-    #[cfg(any(test, fuzzing))]
-    pub(super) fn all_allocated(&self) -> Vec<PageNumber> {
-        let mut pages = vec![];
-        for (i, allocator) in self.region_allocators.iter().enumerate() {
-            allocator.get_allocated_pages(i.try_into().unwrap(), &mut pages);
-        }
-        pages
     }
 
     pub(crate) fn xxh3_hash(&self) -> u128 {

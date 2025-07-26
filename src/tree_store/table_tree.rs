@@ -245,7 +245,7 @@ impl TableTreeMut<'_> {
         self.tree.set_root(root);
     }
 
-    #[cfg(any(test, fuzzing))]
+    #[cfg_attr(not(debug_assertions), expect(dead_code))]
     pub(crate) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
     where
         F: FnMut(&PagePath) -> Result,
