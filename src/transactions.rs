@@ -828,10 +828,12 @@ impl WriteTransaction {
         Ok(false)
     }
 
-    #[cfg(any(test, fuzzing))]
+    #[cfg(debug_assertions)]
     pub fn print_allocated_page_debug(&self) {
         let mut all_allocated: HashSet<PageNumber> =
             HashSet::from_iter(self.mem.all_allocated_pages());
+
+        self.mem.debug_check_allocator_consistency();
 
         let mut table_pages = vec![];
         self.tables

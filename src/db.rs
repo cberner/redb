@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
-    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, ShrinkPolicy, TableTree, TableType,
-    TransactionalMemory,
+    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, ShrinkPolicy, TableTree,
+    TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -561,11 +561,15 @@ impl Database {
         Ok(())
     }
 
-    fn mark_freed_tree<K: Key, V: Value>(
+    fn visit_freed_tree<K: Key, V: Value, F>(
         system_root: Option<BtreeHeader>,
         table_def: SystemTableDefinition<K, V>,
         mem: Arc<TransactionalMemory>,
-    ) -> Result {
+        mut visitor: F,
+    ) -> Result
+    where
+        F: FnMut(PageNumber) -> Result,
+    {
         let fake_guard = Arc::new(TransactionGuard::fake());
         let system_tree = TableTree::new(system_root, PageHint::None, fake_guard, mem.clone())?;
         let table_name = table_def.name();
@@ -600,10 +604,46 @@ impl Database {
             for result in table.range::<TransactionIdWithPagination>(..)? {
                 let (_, page_list) = result?;
                 for i in 0..page_list.value().len() {
-                    mem.mark_page_allocated(page_list.value().get(i));
+                    visitor(page_list.value().get(i))?;
                 }
             }
         }
+
+        Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    fn mark_allocated_page_for_debug(
+        mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
+    ) -> Result {
+        let data_root = mem.get_data_root();
+        {
+            let fake = Arc::new(TransactionGuard::fake());
+            let tables = TableTree::new(data_root, PageHint::None, fake, mem.clone())?;
+            tables.visit_all_pages(|path| {
+                mem.mark_debug_allocated_page(path.page_number());
+                Ok(())
+            })?;
+        }
+
+        let system_root = mem.get_system_root();
+        {
+            let fake = Arc::new(TransactionGuard::fake());
+            let system_tables = TableTree::new(system_root, PageHint::None, fake, mem.clone())?;
+            system_tables.visit_all_pages(|path| {
+                mem.mark_debug_allocated_page(path.page_number());
+                Ok(())
+            })?;
+        }
+
+        Self::visit_freed_tree(system_root, DATA_FREED_TABLE, mem.clone(), |page| {
+            mem.mark_debug_allocated_page(page);
+            Ok(())
+        })?;
+        Self::visit_freed_tree(system_root, SYSTEM_FREED_TABLE, mem.clone(), |page| {
+            mem.mark_debug_allocated_page(page);
+            Ok(())
+        })?;
 
         Ok(())
     }
@@ -673,8 +713,14 @@ impl Database {
             })?;
         }
 
-        Self::mark_freed_tree(system_root, DATA_FREED_TABLE, mem.clone())?;
-        Self::mark_freed_tree(system_root, SYSTEM_FREED_TABLE, mem.clone())?;
+        Self::visit_freed_tree(system_root, DATA_FREED_TABLE, mem.clone(), |page| {
+            mem.mark_page_allocated(page);
+            Ok(())
+        })?;
+        Self::visit_freed_tree(system_root, SYSTEM_FREED_TABLE, mem.clone(), |page| {
+            mem.mark_page_allocated(page);
+            Ok(())
+        })?;
         #[cfg(debug_assertions)]
         {
             Self::check_repaired_allocated_pages_table(system_root, mem.clone())?;
@@ -718,6 +764,8 @@ impl Database {
             #[cfg(feature = "logging")]
             info!("Found valid allocator state, full repair not needed");
             mem.load_allocator_state(&tree)?;
+            #[cfg(debug_assertions)]
+            Self::mark_allocated_page_for_debug(&mut mem)?;
         } else {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);

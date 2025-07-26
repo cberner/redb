@@ -191,7 +191,8 @@ impl BtreeBitmap {
     }
 }
 
-#[cfg(any(test, fuzzing))]
+// TODO: remove this class?
+#[cfg(test)]
 pub(crate) struct U64GroupedBitmapIter<'a> {
     len: u32,
     data: &'a [u64],
@@ -199,7 +200,7 @@ pub(crate) struct U64GroupedBitmapIter<'a> {
     current: u64,
 }
 
-#[cfg(any(test, fuzzing))]
+#[cfg(test)]
 impl<'a> U64GroupedBitmapIter<'a> {
     fn new(len: u32, data: &'a [u64]) -> Self {
         Self {
@@ -211,7 +212,7 @@ impl<'a> U64GroupedBitmapIter<'a> {
     }
 }
 
-#[cfg(any(test, fuzzing))]
+#[cfg(test)]
 impl Iterator for U64GroupedBitmapIter<'_> {
     type Item = u32;
 
@@ -328,7 +329,7 @@ impl U64GroupedBitmap {
         self.data.iter().map(|x| x.count_zeros()).sum()
     }
 
-    #[cfg(any(test, fuzzing))]
+    #[cfg(test)]
     pub fn iter(&self) -> U64GroupedBitmapIter<'_> {
         U64GroupedBitmapIter::new(self.len, &self.data)
     }

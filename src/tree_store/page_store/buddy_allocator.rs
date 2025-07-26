@@ -1,4 +1,3 @@
-#[cfg(any(test, fuzzing))]
 use crate::tree_store::PageNumber;
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, U64GroupedBitmap};
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
@@ -213,33 +212,13 @@ impl BuddyAllocator {
         free_pages
     }
 
-    #[cfg(any(test, fuzzing))]
-    pub(crate) fn get_allocated_pages(&self, region: u32, output: &mut Vec<PageNumber>) {
-        for order in 0..=self.max_order {
-            let allocated = self.get_order_allocated(order);
-            for i in allocated.iter() {
-                if i >= self.len() {
-                    break;
-                }
-                output.push(PageNumber::new(region, i, order));
-            }
-        }
-
+    #[cfg_attr(not(debug_assertions), expect(dead_code))]
+    #[cfg_attr(not(test), expect(clippy::unused_self))]
+    #[cfg_attr(not(test), expect(unused_variables))]
+    pub(crate) fn check_allocated_pages(&self, region: u32, allocated_pages: &[PageNumber]) {
         #[cfg(test)]
         // Check the result against the free index to be sure it matches
         {
-            let mut allocated_check = HashSet::new();
-
-            for order in 0..=self.max_order {
-                let allocated = self.get_order_allocated(order);
-                for i in allocated.iter() {
-                    if i >= self.len() {
-                        break;
-                    }
-                    allocated_check.insert(PageNumber::new(region, i, order));
-                }
-            }
-
             let mut free_check = HashSet::new();
             for i in 0..self.len() {
                 if self.find_free_order(i).is_none() {
@@ -248,7 +227,7 @@ impl BuddyAllocator {
             }
 
             let mut check_result = HashSet::new();
-            for page in &allocated_check {
+            for page in allocated_pages {
                 check_result.extend(page.to_order0());
             }
             assert_eq!(free_check, check_result);
@@ -514,10 +493,6 @@ impl BuddyAllocator {
             allocator.set(buddy);
             self.free_inner(next_higher_order(page_number), order + 1);
         }
-    }
-
-    pub(crate) fn is_allocated(&self, page_number: u32, order: u8) -> bool {
-        self.get_order_allocated(order).get(page_number)
     }
 
     fn get_order_free_mut(&mut self, order: u8) -> &mut BtreeBitmap {
