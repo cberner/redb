@@ -191,60 +191,6 @@ impl BtreeBitmap {
     }
 }
 
-// TODO: remove this class?
-#[cfg(test)]
-pub(crate) struct U64GroupedBitmapIter<'a> {
-    len: u32,
-    data: &'a [u64],
-    data_index: usize,
-    current: u64,
-}
-
-#[cfg(test)]
-impl<'a> U64GroupedBitmapIter<'a> {
-    fn new(len: u32, data: &'a [u64]) -> Self {
-        Self {
-            len,
-            data,
-            data_index: 0,
-            current: data[0],
-        }
-    }
-}
-
-#[cfg(test)]
-impl Iterator for U64GroupedBitmapIter<'_> {
-    type Item = u32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let data_index_u32: u32 = self.data_index.try_into().unwrap();
-        if data_index_u32 * u64::BITS >= self.len {
-            return None;
-        }
-        if self.current != 0 {
-            let mut result: u32 = self.data_index.try_into().unwrap();
-            result *= u64::BITS;
-            let bit = self.current.trailing_zeros();
-            result += bit;
-            self.current &= !U64GroupedBitmap::select_mask(bit as usize);
-            if result >= self.len {
-                return None;
-            }
-            return Some(result);
-        }
-        self.data_index += 1;
-        while self.data_index < self.data.len() {
-            let next = self.data[self.data_index];
-            if next != 0 {
-                self.current = next;
-                return self.next();
-            }
-            self.data_index += 1;
-        }
-        None
-    }
-}
-
 // A bitmap which groups consecutive groups of 64bits together
 pub(crate) struct U64GroupedBitmap {
     len: u32,
@@ -259,12 +205,6 @@ impl U64GroupedBitmap {
 
     pub fn new_full(len: u32, capacity: u32) -> Self {
         let data = vec![u64::MAX; Self::required_words(capacity)];
-        Self { len, data }
-    }
-
-    #[cfg(test)]
-    pub fn new_empty(len: u32, capacity: u32) -> Self {
-        let data = vec![0; Self::required_words(capacity)];
         Self { len, data }
     }
 
@@ -328,11 +268,6 @@ impl U64GroupedBitmap {
 
     fn count_unset(&self) -> u32 {
         self.data.iter().map(|x| x.count_zeros()).sum()
-    }
-
-    #[cfg(test)]
-    pub fn iter(&self) -> U64GroupedBitmapIter<'_> {
-        U64GroupedBitmapIter::new(self.len, &self.data)
     }
 
     fn any_unset(&self) -> bool {
@@ -406,7 +341,7 @@ impl U64GroupedBitmap {
 
 #[cfg(test)]
 mod test {
-    use crate::tree_store::page_store::bitmap::{BtreeBitmap, U64GroupedBitmap};
+    use crate::tree_store::page_store::bitmap::BtreeBitmap;
     use rand::prelude::IteratorRandom;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -491,20 +426,6 @@ mod test {
         assert_eq!(allocator.find_first_unset().unwrap(), 8);
         allocator.clear(0);
         assert_eq!(allocator.find_first_unset().unwrap(), 0);
-    }
-
-    #[test]
-    fn iter() {
-        let num_pages = 129;
-        let mut bitmap = U64GroupedBitmap::new_empty(num_pages, num_pages);
-        let values = [0, 1, 33, 63, 64, 65, 90, 126, 127, 128];
-        for x in values {
-            bitmap.set(x);
-        }
-        for (i, x) in bitmap.iter().enumerate() {
-            assert_eq!(values[i], x);
-        }
-        assert_eq!(bitmap.iter().count(), values.len());
     }
 
     #[test]
