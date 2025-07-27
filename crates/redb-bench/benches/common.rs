@@ -789,11 +789,11 @@ impl BenchDatabase for HeedBenchDatabase {
         let env = self.env.take().unwrap();
         let EnvInfo { map_size, .. } = env.info();
         let path = env.path().to_owned();
-        let file = env
-            .copy_to_file(path.join("data2.mdb"), CompactionOption::Enabled)
+        let mut file2 = File::create_new(path.join("data2.mdb")).unwrap();
+        env.copy_to_file(&mut file2, CompactionOption::Enabled)
             .unwrap();
-        file.sync_all().unwrap();
-        drop(file);
+        file2.sync_all().unwrap();
+        drop(file2);
 
         // We close the env
         env.prepare_for_closing().wait();
@@ -906,7 +906,7 @@ impl BenchInserter for HeedBenchInserter<'_, '_> {
 
 pub struct HeedBenchReadTransaction<'db> {
     db: heed::Database<heed::types::Bytes, heed::types::Bytes>,
-    txn: heed::RoTxn<'db>,
+    txn: heed::RoTxn<'db, heed::WithTls>,
 }
 
 impl<'db> BenchReadTransaction for HeedBenchReadTransaction<'db> {
