@@ -361,11 +361,6 @@ impl TransactionalMemory {
         self.storage.flush()
     }
 
-    #[cfg(test)]
-    pub(crate) fn needs_repair(&self) -> Result<bool> {
-        Ok(self.state.lock().unwrap().header.recovery_required)
-    }
-
     pub(crate) fn used_two_phase_commit(&self) -> bool {
         self.state.lock().unwrap().header.two_phase_commit
     }
