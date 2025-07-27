@@ -24,3 +24,5 @@ flamegraph.svg
 # benchmark and test temporary files
 /.tmp*
 .vscode/settings.json
+
+**/*.redb
