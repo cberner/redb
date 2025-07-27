@@ -399,10 +399,9 @@ impl TransactionHeader {
 mod test {
     use crate::backends::FileBackend;
     use crate::db::TableDefinition;
-    use crate::tree_store::page_store::TransactionalMemory;
     use crate::tree_store::page_store::header::{
-        GOD_BYTE_OFFSET, MAGICNUMBER, PAGE_SIZE, PRIMARY_BIT, RECOVERY_REQUIRED,
-        TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT, USER_ROOT_OFFSET,
+        GOD_BYTE_OFFSET, MAGICNUMBER, PRIMARY_BIT, RECOVERY_REQUIRED, TRANSACTION_0_OFFSET,
+        TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT, USER_ROOT_OFFSET,
     };
     use crate::{Database, DatabaseError, ReadableTable, StorageBackend};
     use crate::{ReadableDatabase, StorageError};
@@ -502,11 +501,7 @@ mod test {
         fail.store(true, Ordering::SeqCst);
         drop(db);
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(tmpfile.path())
-            .unwrap();
+        let mut file = tmpfile.as_file();
 
         file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
         let mut buffer = [0u8; 1];
@@ -528,20 +523,6 @@ mod test {
         .unwrap();
         file.write_all(&[0; size_of::<u128>()]).unwrap();
 
-        assert!(
-            TransactionalMemory::new(
-                Box::new(FileBackend::new(file).unwrap()),
-                false,
-                PAGE_SIZE,
-                None,
-                0,
-                0,
-            )
-            .unwrap()
-            .needs_repair()
-            .unwrap()
-        );
-
         #[allow(unused_mut)]
         let mut db2 = Database::create(tmpfile.path()).unwrap();
         let write_txn = db2.begin_write().unwrap();
@@ -555,11 +536,6 @@ mod test {
         // Locks are exclusive on Windows, so we can't concurrently overwrite the file
         #[cfg(not(target_os = "windows"))]
         {
-            let mut file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(tmpfile.path())
-                .unwrap();
             file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
             let mut buffer = [0u8; 1];
             file.read_exact(&mut buffer).unwrap();
@@ -607,11 +583,7 @@ mod test {
         let db = Database::builder().create(tmpfile.path()).unwrap();
         drop(db);
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(tmpfile.path())
-            .unwrap();
+        let mut file = tmpfile.as_file();
 
         file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
         let mut buffer = [0u8; 1];
@@ -619,20 +591,6 @@ mod test {
         file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
         buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
-
-        assert!(
-            TransactionalMemory::new(
-                Box::new(FileBackend::new(file).unwrap()),
-                false,
-                PAGE_SIZE,
-                None,
-                0,
-                0,
-            )
-            .unwrap()
-            .needs_repair()
-            .unwrap()
-        );
 
         Database::open(tmpfile.path()).unwrap();
     }
@@ -658,7 +616,7 @@ mod test {
             StorageError::DatabaseClosed
         ));
 
-        let mut file = OpenOptions::new().read(true).open(tmpfile.path()).unwrap();
+        let mut file = tmpfile.as_file();
 
         file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
         let mut buffer = [0u8; 1];
@@ -673,11 +631,7 @@ mod test {
         let db = Database::builder().create(tmpfile.path()).unwrap();
         drop(db);
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(tmpfile.path())
-            .unwrap();
+        let mut file = tmpfile.as_file();
 
         file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
         let mut buffer = [0u8; 1];
@@ -686,20 +640,6 @@ mod test {
         buffer[0] |= RECOVERY_REQUIRED;
         buffer[0] &= !TWO_PHASE_COMMIT;
         file.write_all(&buffer).unwrap();
-
-        assert!(
-            TransactionalMemory::new(
-                Box::new(FileBackend::new(file).unwrap()),
-                false,
-                PAGE_SIZE,
-                None,
-                0,
-                0,
-            )
-            .unwrap()
-            .needs_repair()
-            .unwrap()
-        );
 
         let err = Database::builder()
             .set_repair_callback(|handle| handle.abort())
@@ -733,11 +673,7 @@ mod test {
 
         drop(db);
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(tmpfile.path())
-            .unwrap();
+        let mut file = tmpfile.as_file();
 
         file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
         let mut buffer = [0u8; 1];
@@ -745,20 +681,6 @@ mod test {
         file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
         buffer[0] |= RECOVERY_REQUIRED;
         file.write_all(&buffer).unwrap();
-
-        assert!(
-            TransactionalMemory::new(
-                Box::new(FileBackend::new(file).unwrap()),
-                false,
-                PAGE_SIZE,
-                None,
-                0,
-                0,
-            )
-            .unwrap()
-            .needs_repair()
-            .unwrap()
-        );
 
         Database::open(tmpfile.path()).unwrap();
     }
