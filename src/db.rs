@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
-    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, ShrinkPolicy, TableTree,
-    TableType, TransactionalMemory,
+    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, ReadOnlyBackend,
+    ShrinkPolicy, TableTree, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -314,6 +314,118 @@ pub trait ReadableDatabase {
     ///
     /// Note: these metrics are only collected when the "`cache_metrics`" feature is enabled
     fn cache_stats(&self) -> CacheStats;
+}
+
+/// A redb database opened in read-only mode
+///
+/// Use [`Self::begin_read`] to get a [`ReadTransaction`] object that can be used to read from the database
+///
+/// Multiple processes may open a [`ReadOnlyDatabase`], but it may not be opened concurrently
+/// with a [`Database`].
+///
+/// # Examples
+///
+/// Basic usage:
+///
+/// ```rust
+/// use redb::*;
+/// # use tempfile::NamedTempFile;
+/// const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
+///
+/// # fn main() -> Result<(), Error> {
+/// # #[cfg(not(target_os = "wasi"))]
+/// # let tmpfile = NamedTempFile::new().unwrap();
+/// # #[cfg(target_os = "wasi")]
+/// # let tmpfile = NamedTempFile::new_in("/tmp").unwrap();
+/// # let filename = tmpfile.path();
+/// let db = Database::create(filename)?;
+/// let txn = db.begin_write()?;
+/// {
+///     let mut table = txn.open_table(TABLE)?;
+///     table.insert(&0, &0)?;
+/// }
+/// txn.commit()?;
+/// drop(db);
+///
+/// let db = ReadOnlyDatabase::open(filename)?;
+/// let txn = db.begin_read()?;
+/// {
+///     let mut table = txn.open_table(TABLE)?;
+///     println!("{}", table.get(&0)?.unwrap().value());
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub struct ReadOnlyDatabase {
+    mem: Arc<TransactionalMemory>,
+    transaction_tracker: Arc<TransactionTracker>,
+}
+
+impl ReadableDatabase for ReadOnlyDatabase {
+    fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
+        let id = self
+            .transaction_tracker
+            .register_read_transaction(&self.mem)?;
+        #[cfg(feature = "logging")]
+        debug!("Beginning read transaction id={id:?}");
+
+        let guard = TransactionGuard::new_read(id, self.transaction_tracker.clone());
+
+        ReadTransaction::new(self.mem.clone(), guard)
+    }
+
+    fn cache_stats(&self) -> CacheStats {
+        self.mem.cache_stats()
+    }
+}
+
+impl ReadOnlyDatabase {
+    /// Opens an existing redb database.
+    pub fn open(path: impl AsRef<Path>) -> Result<ReadOnlyDatabase, DatabaseError> {
+        Builder::new().open_read_only(path)
+    }
+
+    fn new(
+        file: Box<dyn StorageBackend>,
+        page_size: usize,
+        region_size: Option<u64>,
+        read_cache_size_bytes: usize,
+    ) -> Result<Self, DatabaseError> {
+        #[cfg(feature = "logging")]
+        let file_path = format!("{:?}", &file);
+        #[cfg(feature = "logging")]
+        info!("Opening database in read-only {:?}", &file_path);
+        let mem = TransactionalMemory::new(
+            Box::new(ReadOnlyBackend::new(file)),
+            false,
+            page_size,
+            region_size,
+            read_cache_size_bytes,
+            0,
+            true,
+        )?;
+        let mem = Arc::new(mem);
+        // If the last transaction used 2-phase commit and updated the allocator state table, then
+        // we can just load the allocator state from there. Otherwise, we need a full repair
+        if let Some(tree) = Database::get_allocator_state_table(&mem)? {
+            mem.load_allocator_state(&tree)?;
+        } else {
+            #[cfg(feature = "logging")]
+            warn!(
+                "Database {:?} not shutdown cleanly. Repair required",
+                &file_path
+            );
+            return Err(DatabaseError::RepairAborted);
+        }
+
+        let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
+        let db = Self {
+            mem,
+            transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
+        };
+
+        Ok(db)
+    }
 }
 
 /// Opened redb database file
@@ -760,6 +872,7 @@ impl Database {
             region_size,
             read_cache_size_bytes,
             write_cache_size_bytes,
+            false,
         )?;
         let mut mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
@@ -1062,6 +1175,25 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+        )
+    }
+
+    /// Opens an existing redb database.
+    ///
+    /// If the file has been opened for writing (i.e. as a [`Database`]) [`DatabaseError::DatabaseAlreadyOpen`]
+    /// will be returned on platforms which support file locks (macOS, Windows, Linux). On other platforms,
+    /// the caller MUST avoid calling this method when the database is open for writing.
+    pub fn open_read_only(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<ReadOnlyDatabase, DatabaseError> {
+        let file = OpenOptions::new().read(true).open(path)?;
+
+        ReadOnlyDatabase::new(
+            Box::new(FileBackend::new_internal(file, true)?),
+            self.page_size,
+            None,
+            self.read_cache_size_bytes,
         )
     }
 
