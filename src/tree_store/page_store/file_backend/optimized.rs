@@ -11,9 +11,6 @@ use std::os::unix::fs::FileExt;
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
 
-#[cfg(target_os = "wasi")]
-use std::os::wasi::fs::FileExt;
-
 /// Stores a database as a file on-disk.
 #[derive(Debug)]
 pub struct FileBackend {
@@ -61,9 +58,15 @@ impl StorageBackend for FileBackend {
         Ok(self.file.metadata()?.len())
     }
 
-    #[cfg(any(unix, target_os = "wasi"))]
+    #[cfg(unix)]
     fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
         self.file.read_exact_at(out, offset)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "wasi")]
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+        read_exact_at(&self.file, out, offset)?;
         Ok(())
     }
 
@@ -86,9 +89,14 @@ impl StorageBackend for FileBackend {
         self.file.sync_data()
     }
 
-    #[cfg(any(unix, target_os = "wasi"))]
+    #[cfg(unix)]
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
         self.file.write_all_at(data, offset)
+    }
+
+    #[cfg(target_os = "wasi")]
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
+        write_all_at(&self.file, data, offset)
     }
 
     #[cfg(windows)]
@@ -109,4 +117,75 @@ impl StorageBackend for FileBackend {
 
         Ok(())
     }
+}
+
+// TODO: replace these with wasi::FileExt when https://github.com/rust-lang/rust/issues/71213
+// is stable
+#[cfg(target_os = "wasi")]
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    while !buf.is_empty() {
+        let nbytes = unsafe {
+            libc::pread(
+                file.as_raw_fd(),
+                buf.as_mut_ptr() as _,
+                std::cmp::min(buf.len(), libc::ssize_t::MAX as _),
+                offset as _,
+            )
+        };
+        match nbytes {
+            0 => break,
+            -1 => match io::Error::last_os_error() {
+                err if err.kind() == io::ErrorKind::Interrupted => {}
+                err => return Err(err),
+            },
+            n => {
+                let tmp = buf;
+                buf = &mut tmp[n as usize..];
+                offset += n as u64;
+            }
+        }
+    }
+    if !buf.is_empty() {
+        Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "failed to fill whole buffer",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "wasi")]
+fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    while !buf.is_empty() {
+        let nbytes = unsafe {
+            libc::pwrite(
+                file.as_raw_fd(),
+                buf.as_ptr() as _,
+                std::cmp::min(buf.len(), libc::ssize_t::MAX as _),
+                offset as _,
+            )
+        };
+        match nbytes {
+            0 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                ));
+            }
+            -1 => match io::Error::last_os_error() {
+                err if err.kind() == io::ErrorKind::Interrupted => {}
+                err => return Err(err),
+            },
+            n => {
+                buf = &buf[n as usize..];
+                offset += n as u64
+            }
+        }
+    }
+    Ok(())
 }
