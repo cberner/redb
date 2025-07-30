@@ -40,7 +40,7 @@ test_all: build_all
     RUST_BACKTRACE=1 cargo test --all --all-features
 
 test_wasi:
-    rustup install stable --target wasm32-wasip1-threads
+    rustup target add wasm32-wasip1-threads
     # Uses cargo pkgid because "redb" is ambiguous with the test dependency on an old version of redb
     cargo test -p $(cargo pkgid) --target=wasm32-wasip1-threads -- --nocapture
     cargo test -p redb-derive --target=wasm32-wasip1-threads -- --nocapture
