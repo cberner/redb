@@ -109,6 +109,8 @@ impl StorageBackend for FileBackend {
     }
 }
 
+// TODO: replace these with wasi::FileExt when https://github.com/rust-lang/rust/issues/71213
+// is stable
 #[cfg(target_os = "wasi")]
 fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
     use std::os::fd::AsRawFd;
