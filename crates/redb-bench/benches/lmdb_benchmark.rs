@@ -83,14 +83,6 @@ fn main() {
         benchmark(table, tmpfile.path())
     };
 
-    let sanakirja_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
-        fs::remove_file(tmpfile.path()).unwrap();
-        let db = sanakirja::Env::new(tmpfile.path(), 4096 * 1024 * 1024, 2).unwrap();
-        let table = SanakirjaBenchDatabase::new(&db, &tmpdir);
-        benchmark(table, tmpfile.path())
-    };
-
     let fjall_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
 
@@ -122,7 +114,6 @@ fn main() {
         lmdb_results,
         rocksdb_results,
         sled_results,
-        sanakirja_results,
         fjall_results,
         sqlite_results,
     ];
@@ -155,16 +146,7 @@ fn main() {
     let mut table = comfy_table::Table::new();
     table.load_preset(comfy_table::presets::ASCII_MARKDOWN);
     table.set_width(100);
-    table.set_header([
-        "",
-        "redb",
-        "lmdb",
-        "rocksdb",
-        "sled",
-        "sanakirja",
-        "fjall",
-        "sqlite",
-    ]);
+    table.set_header(["", "redb", "lmdb", "rocksdb", "sled", "fjall", "sqlite"]);
     for row in rows {
         table.add_row(row);
     }
