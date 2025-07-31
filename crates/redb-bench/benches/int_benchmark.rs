@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use std::env::current_dir;
-use std::fs;
 use tempfile::{NamedTempFile, TempDir};
 
 mod common;
@@ -106,27 +105,13 @@ fn main() {
         benchmark(table)
     };
 
-    let sanakirja_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        fs::remove_file(tmpfile.path()).unwrap();
-        let db = sanakirja::Env::new(tmpfile.path(), 4096 * 1024 * 1024, 2).unwrap();
-        let table = SanakirjaBenchDatabase::new(&db, tmpfile.path());
-        benchmark(table)
-    };
-
     let mut rows = Vec::new();
 
     for (benchmark, _duration) in &redb_results {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [
-        redb_results,
-        lmdb_results,
-        rocksdb_results,
-        sled_results,
-        sanakirja_results,
-    ] {
+    for results in [redb_results, lmdb_results, rocksdb_results, sled_results] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
         }
@@ -134,7 +119,7 @@ fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_width(100);
-    table.set_header(["", "redb", "lmdb", "rocksdb", "sled", "sanakirja"]);
+    table.set_header(["", "redb", "lmdb", "rocksdb", "sled"]);
     for row in rows {
         table.add_row(row);
     }
