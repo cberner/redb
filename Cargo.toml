@@ -38,7 +38,7 @@ tempfile = "3.5.0"
 bincode = "2.0.1"
 uuid = { version= "1.17.0", features = ["v4"] }
 
-[target.'cfg(not(target_os="wasi"))'.dependencies]
+[target.'cfg(not(target_os="wasi"))'.dev-dependencies]
 # for backwards compatibility testing - pin at 2.6.0
 redb2_6 = { version = "=2.6.0", package = "redb" }
 
