@@ -35,10 +35,12 @@ libc = "0.2.174"
 [dev-dependencies]
 rand = "0.9"
 tempfile = "3.5.0"
-# for backwards compatibility testing - pin at 2.6.0
-redb2_6 = { version = "=2.6.0", package = "redb" }
 bincode = "2.0.1"
 uuid = { version= "1.17.0", features = ["v4"] }
+
+[target.'cfg(not(target_os="wasi"))'.dependencies]
+# for backwards compatibility testing - pin at 2.6.0
+redb2_6 = { version = "=2.6.0", package = "redb" }
 
 [features]
 # Enables log messages

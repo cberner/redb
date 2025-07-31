@@ -1,3 +1,5 @@
+#![cfg(not(target_os = "wasi"))]
+
 use redb::{Legacy, ReadableDatabase, ReadableTableMetadata, TableError};
 
 const ELEMENTS: usize = 3;
