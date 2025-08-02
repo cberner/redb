@@ -18,7 +18,11 @@ pub(crate) const MAX_PAGE_INDEX: u32 = 0x000F_FFFF;
 pub(crate) const MAX_REGIONS: u32 = 0x0010_0000;
 
 // On-disk format is:
-// lowest 20bits: page index within the region
+// TODO: consider implementing an optimization in which we store the number of order-0 pages that
+// are actually used, in these reserved bits, so that the reads to the PagedCachedFile layer can avoid
+// reading all the zeros at the end of the page.
+// lowest 20bits: page index within the region. Only the lowest `20 - order_exponent` bits may be read.
+// The remaining bits are reserved for future use and must be ignored
 // second 20bits: region number
 // 19bits: reserved
 // highest 5bits: page order exponent
@@ -92,9 +96,9 @@ impl PageNumber {
 
     pub(crate) fn from_le_bytes(bytes: [u8; 8]) -> Self {
         let temp = u64::from_le_bytes(bytes);
-        let index = (temp & 0x000F_FFFF) as u32;
-        let region = ((temp >> 20) & 0x000F_FFFF) as u32;
         let order = (temp >> 59) as u8;
+        let index = u32::try_from(temp & (0x000F_FFFF >> order)).unwrap();
+        let region = ((temp >> 20) & 0x000F_FFFF) as u32;
 
         Self {
             region,
@@ -343,5 +347,14 @@ mod test {
             region_header_size,
             page_size.try_into().unwrap(),
         );
+    }
+
+    #[test]
+    fn reserved_bits() {
+        let page_number = PageNumber::new(0, 0, 12);
+        let mut bytes = page_number.to_le_bytes();
+        bytes[1] = 0xFF;
+        let page_number2 = PageNumber::from_le_bytes(bytes);
+        assert_eq!(page_number, page_number2);
     }
 }
