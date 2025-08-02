@@ -40,9 +40,15 @@ about 0.2% of the database file size.
 * Rename `AccessGuardMut` to `AccessGuardMutInPlace`. Note that a new `AccessGuardMut` struct has
   been added; it serves a different purpose
 * Remove `Durability::Paranoid`
+* Fix a rare case where `check_integrity()` returned `Ok(false)`, even though no repair was required
+  when called on a database that was not shutdown cleanly, and was automatically repaired when opened
 * Disallow access to the database from read transactions after the `Database` as been
   dropped. Access will now return `DatabaseClosed`
 * Optimize writes: ~15% improvement on bulk load benchmarks
+* Optimize the file format to reduce the size of the database. Databases with only a few small keys
+  will see the largest benefit, where the minimum size of a database file has decreased from about
+  2.5MiB to about 50KiB. To achieve the smallest file size, call `Database::compact()` before
+  dropping the `Database`
 
 ## 2.6.1 - 2025-07-24
 * Fix a forward compatibility issue which caused a crash when opening databases created with redb
