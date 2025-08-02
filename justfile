@@ -70,15 +70,15 @@ fuzz_ci: pre_all
 fuzz_coverage: pre
     #!/usr/bin/env bash
     set -euxo pipefail
+    rustup component add llvm-tools-preview
     RUST_SYSROOT=`cargo rustc -- --print sysroot 2>/dev/null`
     LLVM_COV=`find $RUST_SYSROOT -name llvm-cov`
     echo $LLVM_COV
-    rustup component add llvm-tools-preview
     cargo fuzz coverage --sanitizer=none fuzz_redb
-    $LLVM_COV show fuzz/target/*/release/fuzz_redb --format html \
+    $LLVM_COV show target/*/coverage/*/release/fuzz_redb --format html \
           -instr-profile=fuzz/coverage/fuzz_redb/coverage.profdata \
           -ignore-filename-regex='.*(cargo/registry|redb/fuzz|rustc).*' > fuzz/coverage/coverage_report.html
-    $LLVM_COV report fuzz/target/*/release/fuzz_redb \
+    $LLVM_COV report target/*/coverage/*/release/fuzz_redb \
           -instr-profile=fuzz/coverage/fuzz_redb/coverage.profdata \
           -ignore-filename-regex='.*(cargo/registry|redb/fuzz|rustc).*'
     firefox ./fuzz/coverage/coverage_report.html
