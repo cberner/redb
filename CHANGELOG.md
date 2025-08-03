@@ -50,6 +50,10 @@ about 0.2% of the database file size.
   2.5MiB to about 50KiB. To achieve the smallest file size, call `Database::compact()` before
   dropping the `Database`
 
+## 2.6.2 - 2025-08-02
+* Forward compatibility improvement which makes the file format more flexible to support a potential
+  future optimization
+
 ## 2.6.1 - 2025-07-24
 * Fix a forward compatibility issue which caused a crash when opening databases created with redb
   3.x. Note that opening 3.x databases with redb 2.x is not generally supported and only works
