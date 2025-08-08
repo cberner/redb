@@ -53,25 +53,25 @@ To run all the tests and benchmarks a few extra dependencies are required:
 ## Benchmarks
 redb has similar performance to other top embedded key-value stores such as lmdb and rocksdb
 
-|                           | redb       | lmdb       | rocksdb        | sled       | sanakirja   |
-|---------------------------|------------|------------|----------------|------------|-------------|
-| bulk load                 | 2689ms     | 1247ms     | 5330ms         | 5892ms     | **1187ms**  |
-| individual writes         | **226ms**  | 419ms      | 703ms          | 816ms      | 398ms       |
-| batch writes              | 2522ms     | 2070ms     | **1047ms**     | 1867ms     | 2776ms      |
-| len()                     | **0ms**    | **0ms**    | 304ms          | 444ms      | 64ms        |
-| random reads              | 860ms      | **624ms**  | 2432ms         | 1596ms     | 875ms       |
-| random reads              | 866ms      | **624ms**  | 2464ms         | 1588ms     | 842ms       |
-| random range reads        | 2347ms     | **1179ms** | 4436ms         | 4907ms     | 1367ms      |
-| random range reads        | 2322ms     | **1207ms** | 4465ms         | 4732ms     | 1373ms      |
-| random reads (4 threads)  | 337ms      | **158ms**  | 732ms          | 488ms      | 349ms       |
-| random reads (8 threads)  | 185ms      | **81ms**   | 433ms          | 259ms      | 277ms       |
-| random reads (16 threads) | 116ms      | **49ms**   | 238ms          | 165ms      | 1708ms      |
-| random reads (32 threads) | 100ms      | **44ms**   | 203ms          | 142ms      | 4714ms      |
-| removals                  | 1889ms     | **803ms**  | 2038ms         | 2371ms     | 1170ms      |
-| uncompacted size          | 1.00 GiB   | 582.22 MiB | **206.38 MiB** | 457.01 MiB | 4.00 GiB    |
-| compacted size            | 311.23 MiB | 284.46 MiB | **106.26 MiB** | N/A        | N/A         |
+|                           | redb      | lmdb       | rocksdb        | sled     | fjall       | sqlite     |
+|---------------------------|-----------|------------|----------------|----------|-------------|------------|
+| bulk load                 | 17063ms   | **9232ms** | 13969ms        | 24971ms  | 18619ms     | 15341ms    |
+| individual writes         | **920ms** | 1598ms     | 2432ms         | 2701ms   | 3488ms      | 7040ms     |
+| batch writes              | 1595ms    | 942ms      | 451ms          | 853ms    | **353ms**   | 2625ms     |
+| len()                     | **0ms**   | **0ms**    | 749ms          | 1573ms   | 1181ms      | 30ms       |
+| random reads              | 1138ms    | **637ms**  | 2911ms         | 1601ms   | 2177ms      | 4283ms     |
+| random reads              | 934ms     | **631ms**  | 2884ms         | 1592ms   | 2357ms      | 4281ms     |
+| random range reads        | 1174ms    | **565ms**  | 2734ms         | 1992ms   | 2564ms      | 8431ms     |
+| random range reads        | 1173ms    | **565ms**  | 2742ms         | 1993ms   | 2690ms      | 8449ms     |
+| random reads (4 threads)  | 1390ms    | **840ms**  | 3995ms         | 1913ms   | 2606ms      | 7000ms     |
+| random reads (8 threads)  | 757ms     | **427ms**  | 2147ms         | 1019ms   | 1352ms      | 8123ms     |
+| random reads (16 threads) | 652ms     | **216ms**  | 1478ms         | 690ms    | 963ms       | 23022ms    |
+| random reads (32 threads) | 410ms     | **125ms**  | 1100ms         | 444ms    | 576ms       | 26536ms    |
+| removals                  | 23297ms   | 10435ms    | 6900ms         | 11088ms  | **6004ms**  | 10323ms    |
+| uncompacted size          | 4.00 GiB  | 2.61 GiB   | **893.18 MiB** | 2.13 GiB | 1000.95 MiB | 1.09 GiB   |
+| compacted size            | 1.69 GiB  | 1.26 GiB   | **454.71 MiB** | N/A      | 1000.95 MiB | 556.85 MiB |
 
-Source code for benchmark [here](./crates/redb-bench/benches/lmdb_benchmark.rs). Results collected on a Ryzen 5900X with Samsung 980 PRO NVMe.
+Source code for benchmark [here](./crates/redb-bench/benches/lmdb_benchmark.rs). Results collected on a Ryzen 9950X3D with Samsung 9100 PRO NVMe.
 
 ## License
 
