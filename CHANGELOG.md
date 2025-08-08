@@ -25,6 +25,8 @@ about 0.2% of the database file size.
 
 ### Other changes
 
+* Add `ReadOnlyDatabase` which is read-only and multi-process safe
+* Add `Builder::open_read_only()`
 * Add `StorageBackend::close()`
 * Add `Table::get_mut()`
 * Add `chrono_v0_4` feature flag which enables serialization of the `NaiveDate`, `NaiveTime`,
