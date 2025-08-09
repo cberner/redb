@@ -1,6 +1,6 @@
 # redb - Changelog
 
-## 3.0.0 - 2025-XX-XX
+## 3.0.0 - 2025-08-09
 
 ### Removes support for file format v2.
 Use `Database::upgrade()`, in redb 2.6, to migrate to the v3 file format.
