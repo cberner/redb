@@ -1,7 +1,7 @@
 [package]
 name = "redb-derive"
 description = "Derive macros for redb"
-version = "0.0.0"
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
