@@ -25,6 +25,11 @@ To load tuple data created prior to version 3.0, wrap them in the `Legacy` type.
 For example, `TableDefinition<u64, (&str, u32)>` becomes `TableDefinition<u64, Legacy<(&str, u32)>>`.
 Fixed width tuples, such as `(u32, u64)` are backwards compatible.
 
+### Derive for Key and Value traits
+`Key` and `Value` can be derived using the `redb-derive` crate. Note that it does not support
+schema migration. The recommended pattern to migrate schema is to create a new table, and then
+perform a migration from the old table to the new table.
+
 ### Read-only multi-process support
 Multiple processes may open the same database file for reading by using the new `ReadOnlyDatabase`
 type. On platforms which support file locks, this acquires a shared lock on the database file.
