@@ -2,7 +2,7 @@
 name = "redb"
 description = "Rust Embedded DataBase"
 readme = "README.md"
-version = "2.6.0"
+version = "3.0.0"
 exclude = ["fuzz/"]
 edition.workspace = true
 rust-version.workspace = true
