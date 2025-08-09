@@ -3,20 +3,35 @@
 ## 3.0.0 - 2025-XX-XX
 
 ### Removes support for file format v2.
-Use `Database::upgrade()` in redb 2.6 migrate to the v3 file format.
+Use `Database::upgrade()`, in redb 2.6, to migrate to the v3 file format.
+
+### General storage optimizations
+The v3 file format has been further optimized to reduce the size of the database. Databases with only
+a few small keys will see the largest benefit, and the minimum size of a database file has decreased
+from ~2.5MiB to ~50KiB. To achieve the smallest file size call `Database::compact()` before
+dropping the `Database`.
+
+Additionally, performance is ~15% better in bulk load benchmarks. This was achieved by implementing
+a custom hash function for various in-memory `HashSet`s and `HashMap`s, and by optimizing the usage
+of buffers held in `Arc`s to reduce the number of atomic instructions executed.
 
 ### Optimize storage of tuple types
-Optimize storage of variable width tuple types with arity greater than 1. The new format elides the
-length of any fixed width fields and uses varint encoding for the lengths of all variable width
-fields.
+Storage of variable width tuple types with arity greater than 1 is more efficient. The new format
+elides the length of any fixed width fields and uses varint encoding for the lengths of all variable
+width fields.
 
 Note that this encoding is not compatible with the serialization of variable width tuples used in prior versions.
 To load tuple data created prior to version 3.0, wrap them in the `Legacy` type.
 For example, `TableDefinition<u64, (&str, u32)>` becomes `TableDefinition<u64, Legacy<(&str, u32)>>`.
 Fixed width tuples, such as `(u32, u64)` are backwards compatible.
 
+### Read-only multi-process support
+Multiple processes may open the same database file for reading by using the new `ReadOnlyDatabase`
+type. On platforms which support file locks, this acquires a shared lock on the database file.
+
 ### Enable garbage collection in Durability::None transactions
-Non-durable transactions will free pages, when possible (pages allocated in a preceding non-durable transaction).
+Non-durable transactions will now free pages when possible (pages allocated in a preceding
+non-durable transaction which are no longer referenced).
 This resolves an issue where a long sequence of non-durable transactions led to significant growth
 in the size of the database file.
 This change increases the RAM required for a sequence of non-durable transactions, such that RAM
@@ -25,7 +40,7 @@ about 0.2% of the database file size.
 
 ### Other changes
 
-* Add `ReadOnlyDatabase` which is read-only and multi-process safe
+* Add `ReadOnlyDatabase`
 * Add `Builder::open_read_only()`
 * Add `StorageBackend::close()`
 * Add `Table::get_mut()`
@@ -42,15 +57,10 @@ about 0.2% of the database file size.
 * Rename `AccessGuardMut` to `AccessGuardMutInPlace`. Note that a new `AccessGuardMut` struct has
   been added; it serves a different purpose
 * Remove `Durability::Paranoid`
-* Fix a rare case where `check_integrity()` returned `Ok(false)`, even though no repair was required
-  when called on a database that was not shutdown cleanly, and was automatically repaired when opened
+* Fix a rare case where `check_integrity()` returned `Ok(false)` even though no repair was required,
+  when called on a database that was not shutdown cleanly and was automatically repaired when opened
 * Disallow access to the database from read transactions after the `Database` as been
   dropped. Access will now return `DatabaseClosed`
-* Optimize writes: ~15% improvement on bulk load benchmarks
-* Optimize the file format to reduce the size of the database. Databases with only a few small keys
-  will see the largest benefit, where the minimum size of a database file has decreased from about
-  2.5MiB to about 50KiB. To achieve the smallest file size, call `Database::compact()` before
-  dropping the `Database`
 
 ## 2.6.2 - 2025-08-02
 * Forward compatibility improvement which makes the file format more flexible to support a potential
