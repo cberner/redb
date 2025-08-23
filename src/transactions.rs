@@ -1798,9 +1798,18 @@ impl WriteTransaction {
             transaction_id: free_until.raw_id(),
             pagination_id: 0,
         };
+        let oldest_unprocessed = self
+            .transaction_tracker
+            .oldest_unprocessed_non_durable_commit()
+            .map_or(free_until.raw_id(), |x| x.raw_id());
+        let first_key = TransactionIdWithPagination {
+            transaction_id: oldest_unprocessed,
+            pagination_id: 0,
+        };
         let mut data_freed = system_tables.open_system_table(self, definition)?;
+
         let mut candidate_transactions = vec![];
-        for entry in data_freed.range(..last_key)? {
+        for entry in data_freed.range(first_key..last_key)? {
             let (key, _) = entry?;
             let transaction_id = TransactionId::new(key.value().transaction_id);
             if self
