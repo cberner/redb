@@ -4,7 +4,7 @@ use crate::{Key, Result, Savepoint, TypeName, Value};
 use log::debug;
 use std::cmp::Ordering;
 use std::collections::btree_map::BTreeMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::mem;
 use std::mem::size_of;
 use std::sync::{Condvar, Mutex};
@@ -88,7 +88,7 @@ struct State {
     // Maps non-durable transaction id -> durable ancestor
     pending_non_durable_commits: HashMap<TransactionId, TransactionId>,
     // Non-durable commits which have NOT been processed in the freed table
-    unprocessed_freed_non_durable_commits: HashSet<TransactionId>,
+    unprocessed_freed_non_durable_commits: BTreeSet<TransactionId>,
 }
 
 pub(crate) struct TransactionTracker {
@@ -156,6 +156,15 @@ impl TransactionTracker {
     pub(crate) fn mark_unprocessed_non_durable_commit(&self, id: TransactionId) {
         let mut state = self.state.lock().unwrap();
         state.unprocessed_freed_non_durable_commits.remove(&id);
+    }
+
+    pub(crate) fn oldest_unprocessed_non_durable_commit(&self) -> Option<TransactionId> {
+        let state = self.state.lock().unwrap();
+        state
+            .unprocessed_freed_non_durable_commits
+            .iter()
+            .next()
+            .copied()
     }
 
     pub(crate) fn register_non_durable_commit(
