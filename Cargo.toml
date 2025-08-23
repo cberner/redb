@@ -7,7 +7,7 @@ readme = "README.md"
 license = "MIT OR Apache-2.0"
 version = "1.5.1"
 edition = "2021"
-rust-version = "1.66"
+rust-version = "1.70"
 authors = ["Christopher Berner <christopherberner@gmail.com>"]
 exclude = ["fuzz/"]
 
