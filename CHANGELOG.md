@@ -16,6 +16,13 @@
   pairs were between the two keys) then these methods would perform as if the argument had been
   `start..`
 
+## 1.5.2 - 2025-08-23
+* Fix correctness issue with `range()`, `drain()`, and `drain_filter()`. If a RangeBounds
+  with `start` > `end` was passed as an argument and `start` and `end` keys were stored in different
+  internal pages in the database (i.e. a sufficient condition is that more than 4KiB of key-value
+  pairs were between the two keys) then these methods would perform as if the argument had been
+  `start..`
+
 ## 3.0.0 - 2025-08-09
 
 ### Removes support for file format v2.
