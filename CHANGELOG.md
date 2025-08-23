@@ -1,5 +1,21 @@
 # redb - Changelog
 
+## 3.0.1 - 2025-08-23
+* Fix correctness issue with `range()`, `extract_from_if()`, and `retain_in()`. If a RangeBounds
+  with `start` > `end` was passed as an argument and `start` and `end` keys were stored in different
+  internal pages in the database (i.e. a sufficient condition is that more than 4KiB of key-value
+  pairs were between the two keys) then these methods would perform as if the argument had been
+  `start..`
+* Fix performance regression, from redb 2.x, where `Durability::None` commits could become linearly
+  slower during a series of transactions.
+
+## 2.6.3 - 2025-08-23
+* Fix correctness issue with `range()`, `extract_from_if()`, and `retain_in()`. If a RangeBounds
+  with `start` > `end` was passed as an argument and `start` and `end` keys were stored in different
+  internal pages in the database (i.e. a sufficient condition is that more than 4KiB of key-value
+  pairs were between the two keys) then these methods would perform as if the argument had been
+  `start..`
+
 ## 3.0.0 - 2025-08-09
 
 ### Removes support for file format v2.
