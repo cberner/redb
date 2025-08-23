@@ -6,6 +6,7 @@ use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{BtreeHeader, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, Value};
+use Bound::{Excluded, Included, Unbounded};
 use std::borrow::Borrow;
 use std::collections::Bound;
 use std::marker::PhantomData;
@@ -367,29 +368,62 @@ pub(crate) struct BtreeRangeIter<K: Key + 'static, V: Value + 'static> {
     _value_type: PhantomData<V>,
 }
 
+fn range_is_empty<'a, K: Key + 'static, KR: Borrow<K::SelfType<'a>>, T: RangeBounds<KR>>(
+    range: &T,
+) -> bool {
+    match (range.start_bound(), range.end_bound()) {
+        (Unbounded, _) | (_, Unbounded) => false,
+        (Included(start), Excluded(end)) | (Excluded(start), Included(end) | Excluded(end)) => {
+            let start_tmp = K::as_bytes(start.borrow());
+            let start_value = start_tmp.as_ref();
+            let end_tmp = K::as_bytes(end.borrow());
+            let end_value = end_tmp.as_ref();
+            K::compare(start_value, end_value).is_ge()
+        }
+        (Included(start), Included(end)) => {
+            let start_tmp = K::as_bytes(start.borrow());
+            let start_value = start_tmp.as_ref();
+            let end_tmp = K::as_bytes(end.borrow());
+            let end_value = end_tmp.as_ref();
+            K::compare(start_value, end_value).is_gt()
+        }
+    }
+}
+
 impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
     pub(crate) fn new<'a, T: RangeBounds<KR>, KR: Borrow<K::SelfType<'a>>>(
         query_range: &'_ T,
         table_root: Option<PageNumber>,
         manager: Arc<TransactionalMemory>,
     ) -> Result<Self> {
+        if range_is_empty::<K, KR, T>(query_range) {
+            return Ok(Self {
+                left: None,
+                right: None,
+                include_left: false,
+                include_right: false,
+                manager,
+                _key_type: Default::default(),
+                _value_type: Default::default(),
+            });
+        }
         if let Some(root) = table_root {
             let (include_left, left) = match query_range.start_bound() {
-                Bound::Included(k) => find_iter_left::<K, V>(
+                Included(k) => find_iter_left::<K, V>(
                     manager.get_page(root)?,
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     true,
                     &manager,
                 )?,
-                Bound::Excluded(k) => find_iter_left::<K, V>(
+                Excluded(k) => find_iter_left::<K, V>(
                     manager.get_page(root)?,
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     false,
                     &manager,
                 )?,
-                Bound::Unbounded => {
+                Unbounded => {
                     let state = find_iter_unbounded::<K, V>(
                         manager.get_page(root)?,
                         None,
@@ -400,21 +434,21 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                 }
             };
             let (include_right, right) = match query_range.end_bound() {
-                Bound::Included(k) => find_iter_right::<K, V>(
+                Included(k) => find_iter_right::<K, V>(
                     manager.get_page(root)?,
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     true,
                     &manager,
                 )?,
-                Bound::Excluded(k) => find_iter_right::<K, V>(
+                Excluded(k) => find_iter_right::<K, V>(
                     manager.get_page(root)?,
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     false,
                     &manager,
                 )?,
-                Bound::Unbounded => {
+                Unbounded => {
                     let state =
                         find_iter_unbounded::<K, V>(manager.get_page(root)?, None, true, &manager)?;
                     (true, state)

@@ -1577,6 +1577,66 @@ fn range_lifetime() {
 }
 
 #[test]
+fn range_empty() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u128, u128> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..1000 {
+            table.insert(i, i).unwrap();
+        }
+        #[expect(clippy::reversed_empty_ranges)]
+        let mut iter = table.range(500..0).unwrap();
+        assert!(iter.next().is_none());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn extract_from_if_empty() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u128, u128> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..1000 {
+            table.insert(i, i).unwrap();
+        }
+        #[expect(clippy::reversed_empty_ranges)]
+        let mut iter = table.extract_from_if(500..0, |_, _| true).unwrap();
+        assert!(iter.next().is_none());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn retain_in_empty() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u128, u128> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..1000 {
+            table.insert(i, i).unwrap();
+        }
+        #[expect(clippy::reversed_empty_ranges)]
+        table.retain_in(500..0, |_, _| false).unwrap();
+        assert_eq!(table.len().unwrap(), 1000);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
 fn range_arc() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
