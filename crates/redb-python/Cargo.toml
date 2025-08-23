@@ -21,6 +21,3 @@ pyo3-build-config = "0.25.1"
 [dependencies]
 pyo3 = { version = "0.25.1", features=["extension-module", "abi3-py37"] }
 redb = { path = "../.." }
-
-[dev-dependencies]
-tempfile = "3.5.0"
