@@ -113,3 +113,39 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           RUSTFLAGS="" just test_wasi
+
+  wasm32-unknown-unknown:
+    runs-on: ubuntu-latest
+
+    env:
+      RUSTFLAGS: --deny warnings
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache
+        id: rust-cache
+        uses: actions/cache@v4
+        with:
+            path: |
+                ~/.cargo/bin/
+                ~/.cargo/registry/index/
+                ~/.cargo/registry/cache/
+                ~/.cargo/git/db/
+                target/
+                fuzz/target/
+            key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '.github/workflows/*.yml', 'rust-toolchain') }}
+
+      - name: Install Rust
+        run: |
+            rustup component add rustfmt
+            rustup component add clippy
+            rustup target add wasm32-unknown-unknown
+
+      - name: Compile (default features)
+        run: cargo check -p "$(cargo pkgid)" -p redb-derive --target wasm32-unknown-unknown
+
+      - name: Compile (all features)
+        run: cargo check -p "$(cargo pkgid)" -p redb-derive --target wasm32-unknown-unknown --all-features
+
+      - name: Compile (no features)
+        run: cargo check -p "$(cargo pkgid)" -p redb-derive --target wasm32-unknown-unknown --no-default-features
