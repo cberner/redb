@@ -7,7 +7,13 @@ use std::collections::btree_map::BTreeMap;
 use std::collections::{BTreeSet, HashMap};
 use std::mem;
 use std::mem::size_of;
-use std::sync::{Condvar, Mutex};
+use std::sync::Mutex;
+
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+use wasm_sync::Condvar;
+
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+use std::sync::Condvar;
 
 #[derive(Copy, Clone, Hash, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub(crate) struct TransactionId(u64);
