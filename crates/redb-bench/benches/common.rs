@@ -1,5 +1,5 @@
-use heed::{CompactionOption, EnvInfo};
-use redb::{AccessGuard, ReadableDatabase, ReadableTableMetadata, TableDefinition};
+use heed::{CompactionOption, EnvFlags, EnvInfo, FlagSetMode};
+use redb::{AccessGuard, Durability, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 use rocksdb::{
     Direction, IteratorMode, OptimisticTransactionDB, OptimisticTransactionOptions, WriteOptions,
 };
@@ -17,6 +17,7 @@ const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 const READ_ITERATIONS: usize = 2;
 const BULK_ELEMENTS: usize = 5_000_000;
 const INDIVIDUAL_WRITES: usize = 1_000;
+const NOSYNC_WRITES: usize = 50_000;
 const BATCH_WRITES: usize = 100;
 const BATCH_SIZE: usize = 1000;
 const SCAN_ITERATIONS: usize = 2;
@@ -60,13 +61,42 @@ fn make_rng_shards(shards: usize, elements: usize) -> Vec<fastrand::Rng> {
     rngs
 }
 
+#[inline(never)]
+fn nosync_writes<T: BenchDatabase + Send + Sync>(
+    connection: &T::C<'_>,
+    rng: &mut fastrand::Rng,
+) -> ResultType {
+    let start = Instant::now();
+    {
+        for _ in 0..NOSYNC_WRITES {
+            let mut txn = connection.write_transaction();
+            let mut inserter = txn.get_inserter();
+            let (key, value) = random_pair(rng);
+            inserter.insert(&key, &value).unwrap();
+            drop(inserter);
+            txn.commit().unwrap();
+        }
+    }
+
+    let end = Instant::now();
+    let duration = end - start;
+    println!(
+        "{}: Wrote {} individual items in {}ms, with nosync",
+        T::db_type_name(),
+        NOSYNC_WRITES,
+        duration.as_millis()
+    );
+
+    ResultType::Duration(duration)
+}
+
 pub fn benchmark<T: BenchDatabase + Send + Sync>(
     mut db: T,
     path: &Path,
 ) -> Vec<(String, ResultType)> {
     let mut rng = make_rng();
     let mut results = Vec::new();
-    let connection = db.connect();
+    let mut connection = db.connect();
 
     let start = Instant::now();
     let mut txn = connection.write_transaction();
@@ -140,7 +170,24 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
     );
     results.push(("batch writes".to_string(), ResultType::Duration(duration)));
 
-    let elements = BULK_ELEMENTS + INDIVIDUAL_WRITES + BATCH_SIZE * BATCH_WRITES;
+    if connection.set_sync(false) {
+        let result = nosync_writes::<T>(&connection, &mut rng);
+        results.push(("nosync writes".to_string(), result));
+    } else {
+        // Still perform the writes to make sure that future benchmarks aren't skewed
+        let mut txn = connection.write_transaction();
+        let mut inserter = txn.get_inserter();
+        for _ in 0..NOSYNC_WRITES {
+            let (key, value) = random_pair(&mut rng);
+            inserter.insert(&key, &value).unwrap();
+        }
+        drop(inserter);
+        txn.commit().unwrap();
+        results.push(("nosync writes".to_string(), ResultType::NA));
+    }
+    connection.set_sync(true);
+
+    let elements = BULK_ELEMENTS + INDIVIDUAL_WRITES + BATCH_SIZE * BATCH_WRITES + NOSYNC_WRITES;
     let txn = connection.read_transaction();
     {
         {
@@ -368,6 +415,11 @@ pub trait BenchDatabaseConnection: Send {
     where
         Self: 'db;
 
+    // Returns a boolean indicating whether the database supports changing the synchronization mode
+    fn set_sync(&mut self, _sync: bool) -> bool {
+        false
+    }
+
     fn write_transaction(&self) -> Self::W<'_>;
 
     fn read_transaction(&self) -> Self::R<'_>;
@@ -446,7 +498,10 @@ impl BenchDatabase for RedbBenchDatabase<'_> {
     }
 
     fn connect(&self) -> Self::C<'_> {
-        RedbBenchDatabaseConnection { db: self.db }
+        RedbBenchDatabaseConnection {
+            db: self.db,
+            sync: false,
+        }
     }
 
     fn compact(&mut self) -> bool {
@@ -457,6 +512,7 @@ impl BenchDatabase for RedbBenchDatabase<'_> {
 
 pub struct RedbBenchDatabaseConnection<'a> {
     db: &'a redb::Database,
+    sync: bool,
 }
 
 impl BenchDatabaseConnection for RedbBenchDatabaseConnection<'_> {
@@ -469,8 +525,16 @@ impl BenchDatabaseConnection for RedbBenchDatabaseConnection<'_> {
     where
         Self: 'db;
 
+    fn set_sync(&mut self, sync: bool) -> bool {
+        self.sync = sync;
+        true
+    }
+
     fn write_transaction(&self) -> Self::W<'_> {
-        let txn = self.db.begin_write().unwrap();
+        let mut txn = self.db.begin_write().unwrap();
+        if !self.sync {
+            txn.set_durability(Durability::None).unwrap();
+        }
         RedbBenchWriteTransaction { txn }
     }
 
@@ -617,6 +681,7 @@ impl BenchDatabase for SledBenchDatabase<'_> {
         SledBenchDatabaseConnection {
             db: self.db,
             db_dir: self.db_dir,
+            sync: true,
         }
     }
 }
@@ -624,6 +689,7 @@ impl BenchDatabase for SledBenchDatabase<'_> {
 pub struct SledBenchDatabaseConnection<'a> {
     db: &'a sled::Db,
     db_dir: &'a Path,
+    sync: bool,
 }
 
 impl BenchDatabaseConnection for SledBenchDatabaseConnection<'_> {
@@ -636,10 +702,16 @@ impl BenchDatabaseConnection for SledBenchDatabaseConnection<'_> {
     where
         Self: 'db;
 
+    fn set_sync(&mut self, sync: bool) -> bool {
+        self.sync = sync;
+        true
+    }
+
     fn write_transaction(&self) -> Self::W<'_> {
         SledBenchWriteTransaction {
             db: self.db,
             db_dir: self.db_dir,
+            sync: self.sync,
         }
     }
 
@@ -709,6 +781,7 @@ impl BenchIterator for SledBenchIterator {
 pub struct SledBenchWriteTransaction<'a> {
     db: &'a sled::Db,
     db_dir: &'a Path,
+    sync: bool,
 }
 
 impl BenchWriteTransaction for SledBenchWriteTransaction<'_> {
@@ -722,6 +795,9 @@ impl BenchWriteTransaction for SledBenchWriteTransaction<'_> {
     }
 
     fn commit(self) -> Result<(), ()> {
+        if !self.sync {
+            return Ok(());
+        }
         self.db.flush().unwrap();
         // Workaround for sled durability
         // Fsync all the files, because sled doesn't guarantee durability (it uses sync_file_range())
@@ -830,6 +906,22 @@ impl BenchDatabaseConnection for HeedBenchDatabaseConnection<'_> {
         = HeedBenchReadTransaction<'db>
     where
         Self: 'db;
+
+    fn set_sync(&mut self, sync: bool) -> bool {
+        let env = self.env.as_ref().unwrap();
+        if sync {
+            unsafe {
+                env.set_flags(EnvFlags::NO_SYNC, FlagSetMode::Disable)
+                    .unwrap();
+            }
+        } else {
+            unsafe {
+                env.set_flags(EnvFlags::NO_SYNC, FlagSetMode::Enable)
+                    .unwrap();
+            }
+        }
+        true
+    }
 
     fn write_transaction(&self) -> Self::W<'_> {
         let env = self.env.as_ref().unwrap();
@@ -988,7 +1080,10 @@ impl BenchDatabase for RocksdbBenchDatabase<'_> {
     }
 
     fn connect(&self) -> Self::C<'_> {
-        RocksdbBenchDatabaseConnection { db: self.db }
+        RocksdbBenchDatabaseConnection {
+            db: self.db,
+            sync: true,
+        }
     }
 
     fn compact(&mut self) -> bool {
@@ -999,6 +1094,7 @@ impl BenchDatabase for RocksdbBenchDatabase<'_> {
 
 pub struct RocksdbBenchDatabaseConnection<'a> {
     db: &'a OptimisticTransactionDB,
+    sync: bool,
 }
 
 impl BenchDatabaseConnection for RocksdbBenchDatabaseConnection<'_> {
@@ -1011,9 +1107,14 @@ impl BenchDatabaseConnection for RocksdbBenchDatabaseConnection<'_> {
     where
         Self: 'db;
 
+    fn set_sync(&mut self, sync: bool) -> bool {
+        self.sync = sync;
+        true
+    }
+
     fn write_transaction(&self) -> Self::W<'_> {
         let mut write_opt = WriteOptions::new();
-        write_opt.set_sync(true);
+        write_opt.set_sync(self.sync);
         let mut txn_opt = OptimisticTransactionOptions::new();
         txn_opt.set_snapshot(true);
         let txn = self.db.transaction_opt(&write_opt, &txn_opt);
@@ -1021,6 +1122,7 @@ impl BenchDatabaseConnection for RocksdbBenchDatabaseConnection<'_> {
             txn,
             db: self.db,
             db_dir: self.db.path().to_path_buf(),
+            sync: self.sync,
         }
     }
 
@@ -1035,6 +1137,8 @@ pub struct RocksdbBenchWriteTransaction<'a> {
     db: &'a OptimisticTransactionDB,
     #[allow(dead_code)]
     db_dir: PathBuf,
+    #[allow(dead_code)]
+    sync: bool,
 }
 
 impl<'a> BenchWriteTransaction for RocksdbBenchWriteTransaction<'a> {
@@ -1053,7 +1157,7 @@ impl<'a> BenchWriteTransaction for RocksdbBenchWriteTransaction<'a> {
     fn commit(self) -> Result<(), ()> {
         let result = self.txn.commit().map_err(|_| ());
         #[cfg(target_os = "macos")]
-        {
+        if self.sync {
             // Workaround for broken durability on MacOS in rocksdb
             // See: https://github.com/cberner/redb/pull/928#issuecomment-2567032808
             for entry in fs::read_dir(self.db_dir).unwrap() {
@@ -1184,7 +1288,10 @@ impl BenchDatabase for FjallBenchDatabase<'_> {
     }
 
     fn connect(&self) -> Self::C<'_> {
-        FjallBenchDatabaseConnection { db: self.db }
+        FjallBenchDatabaseConnection {
+            db: self.db,
+            sync: true,
+        }
     }
 
     fn compact(&mut self) -> bool {
@@ -1194,6 +1301,7 @@ impl BenchDatabase for FjallBenchDatabase<'_> {
 
 pub struct FjallBenchDatabaseConnection<'a> {
     db: &'a fjall::TxKeyspace,
+    sync: bool,
 }
 
 impl BenchDatabaseConnection for FjallBenchDatabaseConnection<'_> {
@@ -1206,6 +1314,11 @@ impl BenchDatabaseConnection for FjallBenchDatabaseConnection<'_> {
     where
         Self: 'db;
 
+    fn set_sync(&mut self, sync: bool) -> bool {
+        self.sync = sync;
+        true
+    }
+
     fn write_transaction(&self) -> Self::W<'_> {
         let part = self.db.open_partition("test", Default::default()).unwrap();
         let txn = self.db.write_tx();
@@ -1213,6 +1326,7 @@ impl BenchDatabaseConnection for FjallBenchDatabaseConnection<'_> {
             txn,
             part,
             keyspace: self.db,
+            sync: self.sync,
         }
     }
 
@@ -1290,6 +1404,7 @@ pub struct FjallBenchWriteTransaction<'db> {
     keyspace: &'db fjall::TxKeyspace,
     part: fjall::TxPartitionHandle,
     txn: fjall::WriteTransaction<'db>,
+    sync: bool,
 }
 
 impl<'db> BenchWriteTransaction for FjallBenchWriteTransaction<'db> {
@@ -1303,15 +1418,19 @@ impl<'db> BenchWriteTransaction for FjallBenchWriteTransaction<'db> {
             part,
             txn,
             keyspace: _,
+            sync: _,
         } = self;
         FjallBenchInserter { part, txn }
     }
 
     fn commit(self) -> Result<(), ()> {
         self.txn.commit().map_err(|_| ())?;
-        self.keyspace
-            .persist(fjall::PersistMode::SyncAll)
-            .map_err(|_| ())
+        let mode = if self.sync {
+            fjall::PersistMode::SyncAll
+        } else {
+            fjall::PersistMode::Buffer
+        };
+        self.keyspace.persist(mode).map_err(|_| ())
     }
 }
 
@@ -1385,6 +1504,15 @@ impl BenchDatabaseConnection for SqliteBenchDatabaseConnection {
         = SqliteBenchReadTransaction<'db>
     where
         Self: 'db;
+
+    fn set_sync(&mut self, sync: bool) -> bool {
+        if sync {
+            self.conn.execute("PRAGMA synchronous = FULL;", []).unwrap();
+        } else {
+            self.conn.execute("PRAGMA synchronous = OFF;", []).unwrap();
+        }
+        true
+    }
 
     fn write_transaction(&self) -> Self::W<'_> {
         let txn = self.conn.unchecked_transaction().unwrap();
