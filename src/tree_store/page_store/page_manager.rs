@@ -650,8 +650,12 @@ impl TransactionalMemory {
                 return result;
             }
         }
-        self.allocated_since_commit.lock().unwrap().clear();
-        self.unpersisted.lock().unwrap().clear();
+        let mut allocated_since_commit = self.allocated_since_commit.lock().unwrap();
+        allocated_since_commit.clear();
+        allocated_since_commit.shrink_to_fit();
+        let mut unpersisted = self.unpersisted.lock().unwrap();
+        unpersisted.clear();
+        unpersisted.shrink_to_fit();
 
         let mut state = self.state.lock().unwrap();
         assert_eq!(
@@ -682,7 +686,9 @@ impl TransactionalMemory {
         assert!(!self.needs_recovery.load(Ordering::Acquire));
 
         let mut unpersisted = self.unpersisted.lock().unwrap();
-        unpersisted.extend(self.allocated_since_commit.lock().unwrap().drain());
+        let mut allocated_since_commit = self.allocated_since_commit.lock().unwrap();
+        unpersisted.extend(allocated_since_commit.drain());
+        allocated_since_commit.shrink_to_fit();
         self.storage.write_barrier()?;
 
         let mut state = self.state.lock().unwrap();
@@ -739,6 +745,7 @@ impl TransactionalMemory {
             self.storage.cancel_pending_write(address.start, len);
         }
         guard.clear();
+        guard.shrink_to_fit();
 
         Ok(())
     }
