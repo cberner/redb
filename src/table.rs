@@ -380,7 +380,7 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     ///
     /// Usage:
     /// ```rust
-    /// use redb::*;
+    /// use redbx::*;
     /// # use tempfile::NamedTempFile;
     /// const TABLE: TableDefinition<&str, u64> = TableDefinition::new("my_data");
     ///
@@ -390,7 +390,7 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     /// # #[cfg(target_os = "wasi")]
     /// # let tmpfile = NamedTempFile::new_in("/tmp").unwrap();
     /// # let filename = tmpfile.path();
-    /// let db = Database::create(filename)?;
+    /// let db = Database::create(filename, "password")?;
     /// let write_txn = db.begin_write()?;
     /// {
     ///     let mut table = write_txn.open_table(TABLE)?;

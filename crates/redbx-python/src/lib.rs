@@ -17,4 +17,4 @@
 )]
 
 mod python;
-pub use crate::python::redb;
+pub use crate::python::redbx;

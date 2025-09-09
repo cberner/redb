@@ -7,3 +7,6 @@ pub use optimized::FileBackend;
 mod fallback;
 #[cfg(not(any(windows, unix, target_os = "wasi")))]
 pub use fallback::FileBackend;
+
+mod encrypted;
+pub use encrypted::EncryptedFileBackend;

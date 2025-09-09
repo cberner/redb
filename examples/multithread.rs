@@ -1,11 +1,11 @@
-use redb::{Database, Error, TableDefinition};
-use redb::{ReadableDatabase, TableHandle};
+use redbx::{Database, Error, TableDefinition};
+use redbx::{ReadableDatabase, TableHandle};
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
 
 #[allow(clippy::result_large_err)]
 fn main() -> Result<(), Error> {
-    let db = Database::create("my_db.redb")?;
+    let db = Database::create("my_db.redb", "password")?;
     let definition: TableDefinition<&str, u32> = TableDefinition::new("my_data");
 
     let db = Arc::new(db);

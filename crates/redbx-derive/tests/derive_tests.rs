@@ -1,5 +1,5 @@
-use redb::{Database, Key, ReadableDatabase, TableDefinition, Value};
-use redb_derive::{Key, Value};
+use redbx::{Database, Key, ReadableDatabase, TableDefinition, Value};
+use redbx_derive::{Key, Value};
 use std::fmt::Debug;
 use tempfile::NamedTempFile;
 
@@ -47,7 +47,7 @@ struct UnitStruct;
 
 fn test_key_helper<K: Key + 'static>(key: &<K as Value>::SelfType<'_>) {
     let file = create_tempfile();
-    let db = Database::create(file.path()).unwrap();
+    let db = Database::create(file.path(), "test_password").unwrap();
     let table_def: TableDefinition<K, u32> = TableDefinition::new("test");
 
     let write_txn = db.begin_write().unwrap();
@@ -74,7 +74,7 @@ fn test_value_helper<V: Value + 'static>(
     assert_eq!(type_name.name(), expected_type_name);
 
     let file = create_tempfile();
-    let db = Database::create(file.path()).unwrap();
+    let db = Database::create(file.path(), "test_password").unwrap();
     let table_def: TableDefinition<u32, V> = TableDefinition::new("test");
 
     let write_txn = db.begin_write().unwrap();

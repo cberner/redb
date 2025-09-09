@@ -33,7 +33,7 @@ fn generate_key_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     Ok(quote! {
-        impl #impl_generics redb::Key for #name #ty_generics #where_clause {
+        impl #impl_generics redbx::Key for #name #ty_generics #where_clause {
             fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
                 let value1 = #name::from_bytes(data1);
                 let value2 = #name::from_bytes(data2);
@@ -73,7 +73,7 @@ fn generate_value_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
     let fixed_width_impl = generate_fixed_width(&data_struct.fields);
 
     Ok(quote! {
-        impl #impl_generics redb::Value for #name #ty_generics #where_clause {
+        impl #impl_generics redbx::Value for #name #ty_generics #where_clause {
             type SelfType<'a> = #self_type
             where
                 Self: 'a;
@@ -99,7 +99,7 @@ fn generate_value_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
                 #as_bytes_impl
             }
 
-            fn type_name() -> redb::TypeName {
+            fn type_name() -> redbx::TypeName {
                 #type_name_impl
             }
         }
@@ -153,13 +153,13 @@ fn generate_type_name(struct_name: &Ident, fields: &Fields) -> proc_macro2::Toke
 
             if field_strings.is_empty() {
                 quote! {
-                    redb::TypeName::new(&format!("{} {{}}",
+                    redbx::TypeName::new(&format!("{} {{}}",
                         stringify!(#struct_name),
                     ))
                 }
             } else {
                 quote! {
-                    redb::TypeName::new(&format!("{} {{{}}}",
+                    redbx::TypeName::new(&format!("{} {{{}}}",
                         stringify!(#struct_name),
                         [#(#field_strings),*].join(", ")
                     ))
@@ -180,13 +180,13 @@ fn generate_type_name(struct_name: &Ident, fields: &Fields) -> proc_macro2::Toke
 
             if field_strings.is_empty() {
                 quote! {
-                    redb::TypeName::new(&format!("{}()",
+                    redbx::TypeName::new(&format!("{}()",
                         stringify!(#struct_name),
                     ))
                 }
             } else {
                 quote! {
-                    redb::TypeName::new(&format!("{}({})",
+                    redbx::TypeName::new(&format!("{}({})",
                         stringify!(#struct_name),
                         [#(#field_strings),*].join(", ")
                     ))
@@ -195,7 +195,7 @@ fn generate_type_name(struct_name: &Ident, fields: &Fields) -> proc_macro2::Toke
         }
         Fields::Unit => {
             quote! {
-                redb::TypeName::new(stringify!(#struct_name))
+                redbx::TypeName::new(stringify!(#struct_name))
             }
         }
     }

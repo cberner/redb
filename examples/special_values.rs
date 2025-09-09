@@ -1,4 +1,4 @@
-use redb::{
+use redbx::{
     Database, Error, Key, ReadableTable, Table, TableDefinition, TableHandle, Value,
     WriteTransaction,
 };
@@ -16,7 +16,7 @@ struct SpecialValuesDb {
 impl SpecialValuesDb {
     fn new() -> Self {
         SpecialValuesDb {
-            database: Database::create("index.redb").unwrap(),
+            database: Database::create("index.redb", "password").unwrap(),
             file: OpenOptions::new()
                 .write(true)
                 .truncate(true)

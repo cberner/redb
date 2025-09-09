@@ -13,6 +13,10 @@ pub struct FileBackend {
 impl FileBackend {
     /// Creates a new backend which stores data to the given file.
     pub fn new(file: File) -> Result<Self, DatabaseError> {
+        Self::new_internal(file, false)
+    }
+
+    pub(crate) fn new_internal(file: File, _read_only: bool) -> Result<Self, DatabaseError> {
         Ok(Self {
             file: Mutex::new(file),
         })

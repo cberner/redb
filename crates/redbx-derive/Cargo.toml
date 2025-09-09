@@ -1,6 +1,6 @@
 [package]
-name = "redb-derive"
-description = "Derive macros for redb"
+name = "redbx-derive"
+description = "Derive macros for redbx"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -18,5 +18,5 @@ quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
 
 [dev-dependencies]
-redb = { path = "../.." }
+redbx = { path = "../.." }
 tempfile = "3.5.0"

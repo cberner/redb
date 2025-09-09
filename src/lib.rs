@@ -16,12 +16,13 @@
     clippy::unreadable_literal
 )]
 
-//! # redb
+//! # redbx
 //!
-//! A simple, portable, high-performance, ACID, embedded key-value store.
+//! A simple, portable, high-performance, ACID, embedded key-value store with built-in AES encryption.
 //!
-//! redb is written in pure Rust and is loosely inspired by [lmdb][lmdb]. Data is stored in a collection
-//! of copy-on-write B-trees. For more details, see the [design doc][design].
+//! redbx is a fork of redb that provides transparent encryption for all user data. It's written in pure Rust 
+//! and is loosely inspired by [lmdb][lmdb]. Data is stored in a collection of copy-on-write B-trees with 
+//! AES-256-GCM encryption. For more details, see the [design doc][design].
 //!
 //! # Features
 //!
@@ -30,11 +31,14 @@
 //! - MVCC support for concurrent readers & writer, without blocking
 //! - Crash-safe by default
 //! - Savepoints and rollbacks
+//! - **Built-in AES-256-GCM encryption** for all user data
+//! - **PBKDF2-SHA256 key derivation** with 100,000 iterations
+//! - **Transparent encryption/decryption** at the storage layer
 //!
 //! # Example
 //!
 //! ```
-//! use redb::{Database, Error, ReadableDatabase, ReadableTable, TableDefinition};
+//! use redbx::{Database, Error, ReadableDatabase, ReadableTable, TableDefinition};
 //!
 //! const TABLE: TableDefinition<&str, u64> = TableDefinition::new("my_data");
 //!
@@ -43,14 +47,18 @@
 //!     let file = tempfile::NamedTempFile::new().unwrap();
 //!   # #[cfg(target_os = "wasi")]
 //!   # let file = tempfile::NamedTempFile::new_in("/tmp").unwrap();
-//!     let db = Database::create(file.path())?;
+//!     // Create an encrypted database with a password
+//!     let db = Database::create(file.path(), "my_secure_password")?;
 //!     let write_txn = db.begin_write()?;
 //!     {
 //!         let mut table = write_txn.open_table(TABLE)?;
 //!         table.insert("my_key", &123)?;
 //!     }
 //!     write_txn.commit()?;
+//!     drop(db);
 //!
+//!     // Open the encrypted database with the same password
+//!     let db = Database::open(file.path(), "my_secure_password")?;
 //!     let read_txn = db.begin_read()?;
 //!     let table = read_txn.open_table(TABLE)?;
 //!     assert_eq!(table.get("my_key")?.unwrap().value(), 123);
@@ -89,6 +97,7 @@ pub type Result<T = (), E = StorageError> = std::result::Result<T, E>;
 pub mod backends;
 mod complex_types;
 mod db;
+mod encryption;
 mod error;
 mod legacy_tuple_types;
 mod multimap_table;

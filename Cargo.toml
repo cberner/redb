@@ -1,6 +1,6 @@
 [package]
-name = "redb"
-description = "Rust Embedded DataBase"
+name = "redbx"
+description = "Rust Embedded DataBase with AES Encryption - Fork of redb"
 readme = "README.md"
 version = "3.0.1"
 exclude = ["fuzz/"]
@@ -12,21 +12,32 @@ repository.workspace = true
 authors.workspace = true
 
 [workspace]
-members = [".", "crates/redb-bench", "crates/redb-derive", "crates/redb-python"]
-default-members = [".", "crates/redb-derive", "crates/redb-python"]
+members = [
+    ".",
+    "crates/redbx-bench",
+    "crates/redbx-derive",
+    "crates/redbx-python",
+]
+default-members = [".", "crates/redbx-derive", "crates/redbx-python"]
 
 [workspace.package]
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
-homepage = "https://www.redb.org"
-repository = "https://github.com/cberner/redb"
-authors = ["Christopher Berner <me@cberner.com>"]
+homepage = "https://redbx.inoerawan.id"
+repository = "https://github.com/inoerawan/redbx"
+authors = ["Abe Inoe <abeinoe@gmail.com>"]
 
 [dependencies]
 log = { version = "0.4.17", optional = true }
-chrono_v0_4 = { package = "chrono", version= "0.4.41", optional = true }
-uuid = { version= "1.17.0", optional = true }
+chrono_v0_4 = { package = "chrono", version = "0.4.41", optional = true }
+uuid = { version = "1.17.0", optional = true }
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+getrandom = "0.2"
+zeroize = { version = "1.7", features = ["zeroize_derive"] }
+hmac = "0.12"
 
 [target.'cfg(target_os = "wasi")'.dependencies]
 libc = "0.2.174"
@@ -38,7 +49,7 @@ tempfile = "3.5.0"
 # for backwards compatibility testing - pin at 2.6.0
 redb2_6 = { version = "=2.6.0", package = "redb" }
 bincode = "2.0.1"
-uuid = { version= "1.17.0", features = ["v4"] }
+uuid = { version = "1.17.0", features = ["v4"] }
 
 [features]
 # Enables log messages

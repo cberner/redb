@@ -1,10 +1,10 @@
-use redb::{Database, Error, ReadableDatabase, TableDefinition};
+use redbx::{Database, Error, ReadableDatabase, TableDefinition};
 
 const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
 
 #[allow(clippy::result_large_err)]
 fn main() -> Result<(), Error> {
-    let db = Database::create("int_keys.redb")?;
+    let db = Database::create("int_keys.redb", "password")?;
     let write_txn = db.begin_write()?;
     {
         let mut table = write_txn.open_table(TABLE)?;

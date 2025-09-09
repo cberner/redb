@@ -213,6 +213,22 @@ pub enum DatabaseError {
     UpgradeRequired(u8),
     /// Error from underlying storage
     Storage(StorageError),
+    /// Incorrect password provided for encrypted database
+    IncorrectPassword,
+    /// Encryption data is corrupted
+    CorruptedEncryption(String),
+    /// Unsupported encryption algorithm or parameters
+    UnsupportedEncryption(String),
+    /// Key derivation failed
+    KeyDerivationFailed,
+    /// Encryption operation failed
+    EncryptionFailed(String),
+    /// Decryption operation failed
+    DecryptionFailed(String),
+    /// Salt generation failed
+    SaltGenerationFailed,
+    /// Incompatible file format
+    IncompatibleFileFormat,
 }
 
 impl From<DatabaseError> for Error {
@@ -222,6 +238,14 @@ impl From<DatabaseError> for Error {
             DatabaseError::RepairAborted => Error::RepairAborted,
             DatabaseError::UpgradeRequired(x) => Error::UpgradeRequired(x),
             DatabaseError::Storage(storage) => storage.into(),
+            DatabaseError::IncorrectPassword => Error::IncorrectPassword,
+            DatabaseError::CorruptedEncryption(msg) => Error::CorruptedEncryption(msg),
+            DatabaseError::UnsupportedEncryption(msg) => Error::UnsupportedEncryption(msg),
+            DatabaseError::KeyDerivationFailed => Error::KeyDerivationFailed,
+            DatabaseError::EncryptionFailed(msg) => Error::EncryptionFailed(msg),
+            DatabaseError::DecryptionFailed(msg) => Error::DecryptionFailed(msg),
+            DatabaseError::SaltGenerationFailed => Error::SaltGenerationFailed,
+            DatabaseError::IncompatibleFileFormat => Error::IncompatibleFileFormat,
         }
     }
 }
@@ -254,6 +278,30 @@ impl Display for DatabaseError {
                 write!(f, "Database already open. Cannot acquire lock.")
             }
             DatabaseError::Storage(storage) => storage.fmt(f),
+            DatabaseError::IncorrectPassword => {
+                write!(f, "Incorrect password provided for encrypted database.")
+            }
+            DatabaseError::CorruptedEncryption(msg) => {
+                write!(f, "Encryption data is corrupted: {msg}")
+            }
+            DatabaseError::UnsupportedEncryption(msg) => {
+                write!(f, "Unsupported encryption algorithm or parameters: {msg}")
+            }
+            DatabaseError::KeyDerivationFailed => {
+                write!(f, "Key derivation failed.")
+            }
+            DatabaseError::EncryptionFailed(msg) => {
+                write!(f, "Encryption operation failed: {msg}")
+            }
+            DatabaseError::DecryptionFailed(msg) => {
+                write!(f, "Decryption operation failed: {msg}")
+            }
+            DatabaseError::SaltGenerationFailed => {
+                write!(f, "Salt generation failed.")
+            }
+            DatabaseError::IncompatibleFileFormat => {
+                write!(f, "Incompatible file format.")
+            }
         }
     }
 }
@@ -534,6 +582,22 @@ pub enum Error {
     LockPoisoned(&'static panic::Location<'static>),
     /// The transaction is still referenced by a table or other object
     ReadTransactionStillInUse(Box<ReadTransaction>),
+    /// Incorrect password provided for encrypted database
+    IncorrectPassword,
+    /// Encryption data is corrupted
+    CorruptedEncryption(String),
+    /// Unsupported encryption algorithm or parameters
+    UnsupportedEncryption(String),
+    /// Key derivation failed
+    KeyDerivationFailed,
+    /// Encryption operation failed
+    EncryptionFailed(String),
+    /// Decryption operation failed
+    DecryptionFailed(String),
+    /// Salt generation failed
+    SaltGenerationFailed,
+    /// Incompatible file format
+    IncompatibleFileFormat,
 }
 
 impl<T> From<PoisonError<T>> for Error {
@@ -653,6 +717,30 @@ impl Display for Error {
             }
             Error::ReadTransactionStillInUse(_) => {
                 write!(f, "Transaction still in use")
+            }
+            Error::IncorrectPassword => {
+                write!(f, "Incorrect password provided for encrypted database.")
+            }
+            Error::CorruptedEncryption(msg) => {
+                write!(f, "Encryption data is corrupted: {msg}")
+            }
+            Error::UnsupportedEncryption(msg) => {
+                write!(f, "Unsupported encryption algorithm or parameters: {msg}")
+            }
+            Error::KeyDerivationFailed => {
+                write!(f, "Key derivation failed.")
+            }
+            Error::EncryptionFailed(msg) => {
+                write!(f, "Encryption operation failed: {msg}")
+            }
+            Error::DecryptionFailed(msg) => {
+                write!(f, "Decryption operation failed: {msg}")
+            }
+            Error::SaltGenerationFailed => {
+                write!(f, "Salt generation failed.")
+            }
+            Error::IncompatibleFileFormat => {
+                write!(f, "Incompatible file format.")
             }
         }
     }

@@ -1,5 +1,5 @@
 [project]
-name = "redb"
+name = "redbx"
 requires-python = ">=3.7"
 dynamic = ["version"]
 classifier = ["Development Status :: 4 - Beta",

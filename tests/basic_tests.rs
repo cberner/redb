@@ -1,8 +1,8 @@
 use rand::random;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use redb::DatabaseError;
-use redb::backends::InMemoryBackend;
-use redb::{
+use redbx::DatabaseError;
+use redbx::backends::InMemoryBackend;
+use redbx::{
     Database, Key, Legacy, MultimapTableDefinition, MultimapTableHandle, Range, ReadOnlyDatabase,
     ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableError,
     TableHandle, TypeName, Value,
@@ -26,7 +26,7 @@ fn create_tempfile() -> tempfile::NamedTempFile {
 #[test]
 fn len() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -47,7 +47,7 @@ fn len() {
 fn read_only() {
     let tmpfile = create_tempfile();
     {
-        let db = Database::create(tmpfile.path()).unwrap();
+        let db = Database::create(tmpfile.path(), "password").unwrap();
         let write_txn = db.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -59,25 +59,25 @@ fn read_only() {
 
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         assert!(matches!(
-            ReadOnlyDatabase::open(tmpfile.path()),
+            ReadOnlyDatabase::open(tmpfile.path(), "password"),
             Err(DatabaseError::DatabaseAlreadyOpen)
         ));
         drop(db);
     }
 
-    let db = ReadOnlyDatabase::open(tmpfile.path()).unwrap();
+    let db = ReadOnlyDatabase::open(tmpfile.path(), "password").unwrap();
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(STR_TABLE).unwrap();
     assert_eq!(table.len().unwrap(), 3);
 
-    let db2 = ReadOnlyDatabase::open(tmpfile.path()).unwrap();
+    let db2 = ReadOnlyDatabase::open(tmpfile.path(), "password").unwrap();
     let read_txn2 = db.begin_read().unwrap();
     let table2 = read_txn2.open_table(STR_TABLE).unwrap();
     assert_eq!(table2.len().unwrap(), 3);
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     assert!(matches!(
-        Database::open(tmpfile.path()),
+        Database::open(tmpfile.path(), "password"),
         Err(DatabaseError::DatabaseAlreadyOpen)
     ));
     drop(db);
@@ -87,7 +87,7 @@ fn read_only() {
 #[test]
 fn table_stats() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -126,7 +126,7 @@ fn in_memory() {
 #[test]
 fn first_last() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -149,7 +149,7 @@ fn first_last() {
 #[test]
 fn pop() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -191,7 +191,7 @@ fn pop() {
 #[test]
 fn extract_if() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
@@ -254,7 +254,7 @@ fn extract_if() {
 #[test]
 fn retain() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
@@ -323,7 +323,7 @@ fn retain() {
 #[test]
 fn stored_size() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -341,7 +341,7 @@ fn stored_size() {
 #[test]
 fn create_open() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
@@ -350,7 +350,7 @@ fn create_open() {
     write_txn.commit().unwrap();
     drop(db);
 
-    let db2 = Database::open(tmpfile.path()).unwrap();
+    let db2 = Database::open(tmpfile.path(), "password").unwrap();
 
     let read_txn = db2.begin_read().unwrap();
     let table = read_txn.open_table(U64_TABLE).unwrap();
@@ -363,7 +363,7 @@ fn multiple_tables() {
     let definition2: TableDefinition<&str, &str> = TableDefinition::new("2");
 
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(definition1).unwrap();
@@ -386,7 +386,7 @@ fn multiple_tables() {
 #[test]
 fn list_tables() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition_x: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
     let definition_y: TableDefinition<&[u8], &[u8]> = TableDefinition::new("y");
@@ -431,28 +431,9 @@ fn list_tables() {
 }
 
 #[test]
-// Test that these signatures compile
-fn tuple_type_function_lifetime() {
-    #[allow(dead_code)]
-    fn insert_inferred_lifetime(table: &mut redb::Table<(&str, u8), u64>) {
-        table
-            .insert(&(String::from("hello").as_str(), 8), &1)
-            .unwrap();
-    }
-
-    #[allow(dead_code)]
-    #[allow(clippy::needless_lifetimes)]
-    fn insert_explicit_lifetime<'a>(table: &mut redb::Table<(&'a str, u8), u64>) {
-        table
-            .insert(&(String::from("hello").as_str(), 8), &1)
-            .unwrap();
-    }
-}
-
-#[test]
 fn tuple_type_lifetime() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<(&str, u8), (u16, u32)> = TableDefinition::new("table");
 
@@ -473,7 +454,7 @@ fn tuple_type_lifetime() {
 #[test]
 fn tuple2_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<(&str, u8), (u16, u32)> = TableDefinition::new("table");
 
@@ -492,7 +473,7 @@ fn tuple2_type() {
 #[test]
 fn tuple3_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16), (u16, u32)> = TableDefinition::new("table");
 
@@ -514,7 +495,7 @@ fn tuple3_type() {
 #[test]
 fn tuple4_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32), (u16, u32)> =
         TableDefinition::new("table");
@@ -538,7 +519,7 @@ fn tuple4_type() {
 #[allow(clippy::type_complexity)]
 fn tuple5_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32, u64), (u16, u32)> =
         TableDefinition::new("table");
@@ -562,7 +543,7 @@ fn tuple5_type() {
 #[allow(clippy::type_complexity)]
 fn tuple6_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128), (u16, u32)> =
         TableDefinition::new("table");
@@ -590,7 +571,7 @@ fn tuple6_type() {
 #[allow(clippy::type_complexity)]
 fn tuple7_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8), (u16, u32)> =
         TableDefinition::new("table");
@@ -620,7 +601,7 @@ fn tuple7_type() {
 #[allow(clippy::type_complexity)]
 fn tuple8_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8, i16), (u16, u32)> =
         TableDefinition::new("table");
@@ -650,7 +631,7 @@ fn tuple8_type() {
 #[allow(clippy::type_complexity)]
 fn tuple9_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8, i16, i32), (u16, u32)> =
         TableDefinition::new("table");
@@ -680,7 +661,7 @@ fn tuple9_type() {
 #[allow(clippy::type_complexity)]
 fn tuple10_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8, i16, i32, i64), (u16, u32)> =
         TableDefinition::new("table");
@@ -710,7 +691,7 @@ fn tuple10_type() {
 #[allow(clippy::type_complexity)]
 fn tuple11_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<
         (&str, u8, u16, u32, u64, u128, i8, i16, i32, i64, i128),
@@ -742,7 +723,7 @@ fn tuple11_type() {
 #[allow(clippy::type_complexity)]
 fn tuple12_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<
         (
@@ -789,7 +770,7 @@ fn tuple12_type() {
 #[test]
 fn legacy_tuple2_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     #[expect(clippy::type_complexity)]
     let table_def: TableDefinition<Legacy<(&str, u8)>, Legacy<(u16, u32)>> =
         TableDefinition::new("table");
@@ -810,7 +791,7 @@ fn legacy_tuple2_type() {
 #[allow(clippy::type_complexity)]
 fn legacy_tuple12_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def: TableDefinition<
         Legacy<(&str, u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, &str)>,
@@ -845,7 +826,7 @@ fn legacy_tuple12_type() {
 #[allow(clippy::type_complexity)]
 fn generic_array_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let table_def1: TableDefinition<[u8; 3], [u64; 2]> = TableDefinition::new("table1");
     let table_def2: TableDefinition<[(u8, &str); 2], [Option<&str>; 2]> =
@@ -899,7 +880,7 @@ fn generic_array_type() {
 #[test]
 fn is_empty() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -918,7 +899,7 @@ fn is_empty() {
 #[test]
 fn abort() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -948,7 +929,7 @@ fn abort() {
 #[test]
 fn insert_overwrite() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -976,7 +957,7 @@ fn insert_overwrite() {
 #[test]
 fn insert_reserve() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let def: TableDefinition<&str, &[u8]> = TableDefinition::new("x");
     let value = "world";
     let write_txn = db.begin_write().unwrap();
@@ -998,7 +979,7 @@ fn insert_reserve() {
 #[test]
 fn get_mut() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -1043,7 +1024,7 @@ fn get_mut() {
 #[test]
 fn delete() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -1074,7 +1055,7 @@ fn delete() {
 #[test]
 fn delete_open_table() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let table = write_txn.open_table(STR_TABLE).unwrap();
@@ -1090,7 +1071,7 @@ fn delete_open_table() {
 #[test]
 fn delete_table() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let table = write_txn.open_table(STR_TABLE).unwrap();
@@ -1107,7 +1088,7 @@ fn rename_table() {
     let multitable_def2: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("x2");
 
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(table_def).unwrap();
@@ -1145,7 +1126,7 @@ fn rename_table() {
 #[test]
 fn rename_open_table() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let table = write_txn.open_table(STR_TABLE).unwrap();
@@ -1161,7 +1142,7 @@ fn rename_open_table() {
 #[test]
 fn no_dirty_reads() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -1181,7 +1162,7 @@ fn no_dirty_reads() {
 #[test]
 fn read_isolation() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -1218,7 +1199,7 @@ fn read_isolation() {
 #[test]
 fn read_isolation2() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -1254,7 +1235,7 @@ fn read_isolation2() {
 #[test]
 fn reopen_table() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
@@ -1270,7 +1251,7 @@ fn reopen_table() {
 #[test]
 fn u64_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
@@ -1295,7 +1276,7 @@ fn u64_type() {
 #[test]
 fn i128_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
 
     let definition: TableDefinition<i128, i128> = TableDefinition::new("x");
@@ -1321,7 +1302,7 @@ fn i128_type() {
 #[test]
 fn f32_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<u8, f32> = TableDefinition::new("x");
 
@@ -1340,7 +1321,7 @@ fn f32_type() {
 #[test]
 fn str_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
 
@@ -1367,7 +1348,7 @@ fn str_type() {
 #[test]
 fn string_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<String, String> = TableDefinition::new("x");
 
@@ -1399,7 +1380,7 @@ fn string_type() {
 #[test]
 fn empty_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<u8, ()> = TableDefinition::new("x");
 
@@ -1419,7 +1400,7 @@ fn empty_type() {
 #[allow(clippy::bool_assert_comparison)]
 fn bool_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<bool, bool> = TableDefinition::new("x");
 
@@ -1445,7 +1426,7 @@ fn bool_type() {
 #[test]
 fn option_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<Option<u8>, Option<u32>> = TableDefinition::new("x");
 
@@ -1470,7 +1451,7 @@ fn option_type() {
 #[test]
 fn array_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<&[u8; 5], &[u8; 9]> = TableDefinition::new("x");
 
@@ -1494,7 +1475,7 @@ fn array_type() {
 #[test]
 fn vec_fixed_width_value_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<u8, Vec<u64>> = TableDefinition::new("x");
 
@@ -1514,7 +1495,7 @@ fn vec_fixed_width_value_type() {
 #[test]
 fn vec_var_width_value_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<u8, Vec<&str>> = TableDefinition::new("x");
 
@@ -1534,7 +1515,7 @@ fn vec_var_width_value_type() {
 #[test]
 fn vec_vec_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<u8, Vec<Vec<&str>>> = TableDefinition::new("x");
 
@@ -1554,7 +1535,7 @@ fn vec_vec_type() {
 #[test]
 fn range_lifetime() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
 
@@ -1579,7 +1560,7 @@ fn range_lifetime() {
 #[test]
 fn range_empty() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<u128, u128> = TableDefinition::new("x");
 
@@ -1599,7 +1580,7 @@ fn range_empty() {
 #[test]
 fn extract_from_if_empty() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<u128, u128> = TableDefinition::new("x");
 
@@ -1619,7 +1600,7 @@ fn extract_from_if_empty() {
 #[test]
 fn retain_in_empty() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<u128, u128> = TableDefinition::new("x");
 
@@ -1639,7 +1620,7 @@ fn retain_in_empty() {
 #[test]
 fn range_arc() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
 
@@ -1663,7 +1644,7 @@ fn range_arc() {
 #[test]
 fn range_clone() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
 
@@ -1729,7 +1710,7 @@ fn custom_ordering() {
     let definition: TableDefinition<ReverseKey, &str> = TableDefinition::new("x");
 
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(definition).unwrap();
@@ -1756,7 +1737,7 @@ fn custom_ordering() {
 #[test]
 fn owned_get_signatures() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<u32, u32> = TableDefinition::new("x");
 
@@ -1794,7 +1775,7 @@ fn owned_get_signatures() {
 #[test]
 fn ref_get_signatures() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
@@ -1844,7 +1825,7 @@ fn ref_get_signatures() {
 #[test]
 fn concurrent_write_transactions_block() {
     let tmpfile = create_tempfile();
-    let db = sync::Arc::new(Database::create(tmpfile.path()).unwrap());
+    let db = sync::Arc::new(Database::create(tmpfile.path(), "password").unwrap());
     let wtx = db.begin_write().unwrap();
     let (sender, receiver) = sync::mpsc::channel();
 
@@ -1864,7 +1845,7 @@ fn concurrent_write_transactions_block() {
 #[test]
 fn iter() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
@@ -1887,7 +1868,7 @@ fn iter() {
 #[test]
 fn signature_lifetimes() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(STR_TABLE).unwrap();
@@ -1951,7 +1932,7 @@ fn generic_signature_lifetimes() {
     }
 
     let tmpfile = create_tempfile();
-    let db = &Database::create(tmpfile.path()).unwrap();
+    let db = &Database::create(tmpfile.path(), "password").unwrap();
     {
         let (table, key) = (TableDefinition::<&str, _>::new("&str"), "key");
         write_key_generic(table, key, db);
@@ -1967,7 +1948,7 @@ fn generic_signature_lifetimes() {
 #[test]
 fn char_type() {
     let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path(), "password").unwrap();
 
     let definition: TableDefinition<char, char> = TableDefinition::new("x");
 

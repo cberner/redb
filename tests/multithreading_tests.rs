@@ -1,6 +1,6 @@
 #[cfg(not(target_os = "wasi"))]
 mod multithreading_test {
-    use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+    use redbx::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
     use std::sync::Arc;
     use std::thread;
 
@@ -16,7 +16,7 @@ mod multithreading_test {
     #[test]
     fn len() {
         let tmpfile = create_tempfile();
-        let db = Database::create(tmpfile.path()).unwrap();
+        let db = Database::create(tmpfile.path(), "password").unwrap();
         let db = Arc::new(db);
         let write_txn = db.begin_write().unwrap();
         {
@@ -43,7 +43,7 @@ mod multithreading_test {
     #[test]
     fn multithreaded_insert() {
         let tmpfile = create_tempfile();
-        let db = Database::create(tmpfile.path()).unwrap();
+        let db = Database::create(tmpfile.path(), "password").unwrap();
 
         const DEF1: TableDefinition<&str, &str> = TableDefinition::new("x");
         const DEF2: TableDefinition<&str, &str> = TableDefinition::new("y");
@@ -74,7 +74,7 @@ mod multithreading_test {
     #[test]
     fn multithreaded_re_read() {
         let tmpfile = create_tempfile();
-        let db = Database::create(tmpfile.path()).unwrap();
+        let db = Database::create(tmpfile.path(), "password").unwrap();
 
         const DEF1: TableDefinition<&str, &str> = TableDefinition::new("x");
         const DEF2: TableDefinition<&str, &str> = TableDefinition::new("y");

@@ -231,7 +231,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                 // Fast-path to avoid re-building and splitting pages with a single large value
                 let single_large_value = accessor.num_pairs() == 1
-                    && accessor.total_length() >= self.mem.get_page_size();
+                    && accessor.total_length() >= crate::tree_store::EFFECTIVE_LEAF_PAGE_SIZE;
                 if !found && single_large_value {
                     let mut builder = LeafBuilder::new(
                         &self.mem,
@@ -591,7 +591,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         // Fast-path for dirty pages
         if uncommitted
             && self.modify_uncommitted
-            && new_required_bytes >= self.mem.get_page_size() / 2
+            && new_required_bytes >= crate::tree_store::EFFECTIVE_LEAF_PAGE_SIZE / 2
             && accessor.num_pairs() > 1
         {
             let (start, end) = accessor.value_range(position).unwrap();
@@ -611,7 +611,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
         let result = if accessor.num_pairs() == 1 {
             DeletedLeaf
-        } else if new_required_bytes < self.mem.get_page_size() / 3 {
+        } else if new_required_bytes < crate::tree_store::EFFECTIVE_LEAF_PAGE_SIZE / 3 {
             // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
             // full pages, so we use 33% instead of 50% to avoid oscillating
             PartialLeaf {
@@ -768,7 +768,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     LeafAccessor::new(merge_with_page.memory(), K::fixed_width(), V::fixed_width());
 
                 let single_large_value = merge_with_accessor.num_pairs() == 1
-                    && merge_with_accessor.total_length() >= self.mem.get_page_size();
+                    && merge_with_accessor.total_length() >= crate::tree_store::EFFECTIVE_LEAF_PAGE_SIZE;
                 // Don't try to merge or rebalance, if the sibling contains a single large value
                 if single_large_value {
                     let mut child_builder = LeafBuilder::new(

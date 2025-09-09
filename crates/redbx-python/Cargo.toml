@@ -1,6 +1,6 @@
 [package]
-name = "redb-python"
-description = "Python bindings for redb"
+name = "redbx-python"
+description = "Python bindings for redbx"
 publish = false
 version = "0.5.0"
 edition.workspace = true
@@ -11,7 +11,7 @@ repository.workspace = true
 authors.workspace = true
 
 [lib]
-name = "redb"
+name = "redbx"
 doc = false
 crate-type = ["cdylib"]
 
@@ -20,7 +20,7 @@ pyo3-build-config = "0.24.1"
 
 [dependencies]
 pyo3 = { version = "0.24.1", features=["extension-module", "abi3-py37"] }
-redb = { path = "../.." }
+redbx = { path = "../.." }
 
 [dev-dependencies]
 tempfile = "3.5.0"

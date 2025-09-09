@@ -686,7 +686,9 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
         );
-        required_size > self.mem.get_page_size() && self.pairs.len() > 1
+        // Use effective LEAF page size (4068 bytes) instead of full page size (4096 bytes)
+        // to account for encryption overhead
+        required_size > crate::tree_store::EFFECTIVE_LEAF_PAGE_SIZE && self.pairs.len() > 1
     }
 
     pub(super) fn build_split(self) -> Result<(PageMut, &'a [u8], PageMut)> {
