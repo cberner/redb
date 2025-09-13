@@ -311,6 +311,8 @@ impl PagedCachedFile {
 
     // Make writes visible to readers, but does not guarantee any durability
     pub(super) fn write_barrier(&self) -> Result {
+        // TODO: non-durable commits would be much faster, if this did not issues writes to disk,
+        // and instead just made the data visible to readers
         self.flush_write_buffer()
     }
 
