@@ -52,11 +52,6 @@ jobs:
           # For some reason this is required to run the fuzzer on OSX
           rustup target add x86_64-apple-darwin
 
-      - name: Setup wasmtime
-        uses: bytecodealliance/actions/wasmtime/setup@v1
-        with:
-            version: "36.0.2"
-
       - name: Install cargo-deny
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: cargo install --force --version 0.18.4 cargo-deny --locked
@@ -69,6 +64,14 @@ jobs:
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: cargo install --force --version 1.42.4 just --locked
 
+      - name: Install LLVM, clang and libclang
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          apt update
+          apt install -y llvm clang libclang-dev
+          echo "Installed LLVM $(llvm-config --version)"
+          find / -name "libclang*.so" | grep -F '.so'
+
       - name: Compile (default features)
         run: cargo check --all --all-targets
 
@@ -79,7 +82,7 @@ jobs:
         run: cargo check --all --all-targets --no-default-features
 
       - name: Fuzzer
-        if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
+        if: runner.os != 'Windows'
         run: just fuzz_ci
 
       - name: Run tests
@@ -94,6 +97,7 @@ jobs:
       - name: Run CPython wrapper tests
         if: runner.os != 'Windows'
         run: |
+          python3 -V
           python3 -m venv venv
           source venv/bin/activate
           pip3 install --upgrade pip
@@ -103,11 +107,18 @@ jobs:
       - name: Run CPython wrapper tests
         if: runner.os == 'Windows'
         run: |
+          python3 -V
           python3 -m venv venv
           venv\Scripts\activate
           pip3 install --upgrade pip
           pip3 install maturin
           just test_py
+
+      - name: Setup wasmtime
+        if: runner.os != 'Windows'
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+            version: "36.0.2"
 
       - name: Run WASI tests
         if: runner.os != 'Windows'
