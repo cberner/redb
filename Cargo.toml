@@ -48,3 +48,8 @@ cache_metrics = []
 
 [profile.bench]
 debug = true
+
+[lints.clippy]
+big_endian_bytes = "deny"
+dbg_macro = "deny"
+host_endian_bytes = "deny"
