@@ -78,6 +78,18 @@ jobs:
       - name: Compile (no features)
         run: cargo check --all --all-targets --no-default-features
 
+      - name: Compile (`wasm32-unknown-unknown`)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+            rustup target add wasm32-unknown-unknown
+            # Not possible to set default members for specific a target:
+            # https://github.com/rust-lang/cargo/issues/6179
+            command="cargo check -p $(cargo pkgid) -p redb-derive --target wasm32-unknown-unknown"
+            $command
+            $command --all-features
+            $command --no-default-features
+            rustup target remove wasm32-unknown-unknown
+
       - name: Fuzzer
         if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
         run: just fuzz_ci
