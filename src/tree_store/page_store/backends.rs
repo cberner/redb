@@ -1,19 +1,23 @@
 use crate::StorageBackend;
 use std::io;
+#[cfg(not(target_os = "unknown"))]
 use std::io::Error;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+#[cfg(not(target_os = "unknown"))]
 #[derive(Debug)]
 pub(crate) struct ReadOnlyBackend {
     inner: Box<dyn StorageBackend>,
 }
 
+#[cfg(not(target_os = "unknown"))]
 impl ReadOnlyBackend {
     pub fn new(inner: Box<dyn StorageBackend>) -> Self {
         Self { inner }
     }
 }
 
+#[cfg(not(target_os = "unknown"))]
 impl StorageBackend for ReadOnlyBackend {
     fn len(&self) -> Result<u64, Error> {
         self.inner.len()

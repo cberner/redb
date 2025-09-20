@@ -1,7 +1,9 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
+#[cfg(not(target_os = "unknown"))]
+use crate::tree_store::ReadOnlyBackend;
 use crate::tree_store::{
-    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, ReadOnlyBackend,
-    ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, ShrinkPolicy, TableTree,
+    TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -10,8 +12,10 @@ use crate::{
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Debug, Display, Formatter};
 
+#[cfg(not(target_os = "unknown"))]
 use std::fs::{File, OpenOptions};
 use std::marker::PhantomData;
+#[cfg(not(target_os = "unknown"))]
 use std::path::Path;
 use std::sync::Arc;
 use std::{io, thread};
@@ -23,6 +27,7 @@ use crate::transactions::{
     DATA_FREED_TABLE, PageList, SYSTEM_FREED_TABLE, SystemTableDefinition,
     TransactionIdWithPagination,
 };
+#[cfg(not(target_os = "unknown"))]
 use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
 use log::{debug, info, warn};
@@ -381,10 +386,12 @@ impl ReadableDatabase for ReadOnlyDatabase {
 
 impl ReadOnlyDatabase {
     /// Opens an existing redb database.
+    #[cfg(not(target_os = "unknown"))]
     pub fn open(path: impl AsRef<Path>) -> Result<ReadOnlyDatabase, DatabaseError> {
         Builder::new().open_read_only(path)
     }
 
+    #[cfg(not(target_os = "unknown"))]
     fn new(
         file: Box<dyn StorageBackend>,
         page_size: usize,
@@ -484,11 +491,13 @@ impl Database {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
+    #[cfg(not(target_os = "unknown"))]
     pub fn create(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().create(path)
     }
 
     /// Opens an existing redb database.
+    #[cfg(not(target_os = "unknown"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
     }
@@ -1144,6 +1153,7 @@ impl Builder {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
+    #[cfg(not(target_os = "unknown"))]
     pub fn create(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new()
             .read(true)
@@ -1164,6 +1174,7 @@ impl Builder {
     }
 
     /// Opens an existing redb database.
+    #[cfg(not(target_os = "unknown"))]
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
@@ -1183,6 +1194,7 @@ impl Builder {
     /// If the file has been opened for writing (i.e. as a [`Database`]) [`DatabaseError::DatabaseAlreadyOpen`]
     /// will be returned on platforms which support file locks (macOS, Windows, Linux). On other platforms,
     /// the caller MUST avoid calling this method when the database is open for writing.
+    #[cfg(not(target_os = "unknown"))]
     pub fn open_read_only(
         &self,
         path: impl AsRef<Path>,
@@ -1200,6 +1212,7 @@ impl Builder {
     /// Open an existing or create a new database in the given `file`.
     ///
     /// The file must be empty or contain a valid database.
+    #[cfg(not(target_os = "unknown"))]
     pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
         Database::new(
             Box::new(FileBackend::new(file)?),
