@@ -18,7 +18,7 @@ jobs:
       RUSTFLAGS: --deny warnings
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Cache
         id: rust-cache
         uses: actions/cache@v4
@@ -33,9 +33,9 @@ jobs:
             key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '.github/workflows/*.yml', 'rust-toolchain') }}
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Install Rust
         run: |
@@ -48,22 +48,25 @@ jobs:
           # For some reason this is required to run the fuzzer on OSX
           rustup target add x86_64-apple-darwin
 
-      - name: Setup wasmtime
-        uses: bytecodealliance/actions/wasmtime/setup@v1
-        with:
-            version: "24.0.0"
-
       - name: Install cargo-deny
         if: steps.rust-cache.outputs.cache-hit != 'true'
-        run: cargo install --force --version 0.16.2 cargo-deny --locked
+        run: cargo install --force --version 0.18.4 cargo-deny --locked
 
       - name: Install cargo-fuzz
         if: steps.rust-cache.outputs.cache-hit != 'true'
-        run: cargo install --force --version 0.12.0 cargo-fuzz --locked
+        run: cargo install --force --version 0.13.1 cargo-fuzz --locked
 
       - name: Install just
         if: steps.rust-cache.outputs.cache-hit != 'true'
-        run: cargo install --force --version 1.36.0 just --locked
+        run: cargo install --force --version 1.42.4 just --locked
+
+      - name: Install LLVM, clang and libclang
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          apt update
+          apt install -y llvm clang libclang-dev
+          echo "Installed LLVM $(llvm-config --version)"
+          find / -name "libclang*.so" | grep -F '.so'
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -93,7 +96,7 @@ jobs:
         run: cargo clippy --all --all-targets -- -Dwarnings
 
       - name: Fuzzer
-        if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
+        if: runner.os != 'Windows'
         run: just fuzz_ci
 
       - name: Run tests
@@ -102,6 +105,7 @@ jobs:
       - name: Run CPython wrapper tests
         if: runner.os != 'Windows'
         run: |
+          python3 -V
           python3 -m venv venv
           source venv/bin/activate
           pip3 install --upgrade pip
@@ -111,11 +115,18 @@ jobs:
       - name: Run CPython wrapper tests
         if: runner.os == 'Windows'
         run: |
+          python3 -V
           python3 -m venv venv
           venv\Scripts\activate
           pip3 install --upgrade pip
           pip3 install maturin
           just test_py
+
+      - name: Setup wasmtime
+        if: runner.os != 'Windows'
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+            version: "36.0.2"
 
       - name: Run WASI tests
         if: runner.os != 'Windows'

@@ -4,7 +4,7 @@ PYTHON3=/opt/python/cp311-cp311/bin/python3
 
 cp -r /redb-ro /redb
 cd /redb
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain=1.85.0
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain=1.89.0
 source $HOME/.cargo/env
 
 cd /tmp
