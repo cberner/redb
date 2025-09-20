@@ -32,10 +32,6 @@ jobs:
                 fuzz/target/
             key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '.github/workflows/*.yml', 'rust-toolchain') }}
 
-      - name: Check for forbidden words
-        if: runner.os != 'Windows'
-        run: "! grep --include='*.rs' -RE 'to_be_bytes|from_be_bytes|dbg!' ."
-
       - name: Install Python
         uses: actions/setup-python@v5
         with:
@@ -69,6 +65,9 @@ jobs:
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: cargo install --force --version 1.36.0 just --locked
 
+      - name: Format
+        run: cargo fmt --all -- --check
+
       - name: Compile (default features)
         run: cargo check --all --all-targets
 
@@ -78,18 +77,27 @@ jobs:
       - name: Compile (no features)
         run: cargo check --all --all-targets --no-default-features
 
+      - name: Compile (`wasm32-unknown-unknown`)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+            rustup target add wasm32-unknown-unknown
+            # Not possible to set default members for specific a target:
+            # https://github.com/rust-lang/cargo/issues/6179
+            command="cargo check -p $(cargo pkgid) -p redb-derive --target wasm32-unknown-unknown"
+            $command
+            $command --all-features
+            $command --no-default-features
+            rustup target remove wasm32-unknown-unknown
+
+      - name: Clippy
+        run: cargo clippy --all --all-targets -- -Dwarnings
+
       - name: Fuzzer
         if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
         run: just fuzz_ci
 
       - name: Run tests
         run: just test_all
-
-      - name: Clippy
-        run: cargo clippy --all --all-targets -- -Dwarnings
-
-      - name: Format
-        run: cargo fmt --all -- --check
 
       - name: Run CPython wrapper tests
         if: runner.os != 'Windows'

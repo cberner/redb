@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 3.0.2 - 2025-09-16
+* Fix performance issue where a transaction with a large number of writes would cause
+  `WriteTransaction::abort()` and committing non-durable transactions to become slow.
+
 ## 3.0.1 - 2025-08-23
 * Fix correctness issue with `range()`, `extract_from_if()`, and `retain_in()`. If a RangeBounds
   with `start` > `end` was passed as an argument and `start` and `end` keys were stored in different

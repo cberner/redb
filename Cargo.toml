@@ -2,7 +2,7 @@
 name = "redb"
 description = "Rust Embedded DataBase"
 readme = "README.md"
-version = "3.0.1"
+version = "3.0.2"
 exclude = ["fuzz/"]
 edition.workspace = true
 rust-version.workspace = true
@@ -51,3 +51,8 @@ cache_metrics = []
 
 [profile.bench]
 debug = true
+
+[lints.clippy]
+big_endian_bytes = "deny"
+dbg_macro = "deny"
+host_endian_bytes = "deny"

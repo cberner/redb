@@ -95,7 +95,9 @@ impl<T> LRUCache<T> {
     }
 
     pub(crate) fn clear(&mut self) {
+        self.cache.shrink_to_fit();
         self.cache.clear();
+        self.lru_queue.shrink_to_fit();
         self.lru_queue.clear();
     }
 }
