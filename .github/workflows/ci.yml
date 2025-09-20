@@ -65,6 +65,9 @@ jobs:
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: cargo install --force --version 1.36.0 just --locked
 
+      - name: Format
+        run: cargo fmt --all -- --check
+
       - name: Compile (default features)
         run: cargo check --all --all-targets
 
@@ -86,18 +89,15 @@ jobs:
             $command --no-default-features
             rustup target remove wasm32-unknown-unknown
 
+      - name: Clippy
+        run: cargo clippy --all --all-targets -- -Dwarnings
+
       - name: Fuzzer
         if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
         run: just fuzz_ci
 
       - name: Run tests
         run: just test_all
-
-      - name: Clippy
-        run: cargo clippy --all --all-targets -- -Dwarnings
-
-      - name: Format
-        run: cargo fmt --all -- --check
 
       - name: Run CPython wrapper tests
         if: runner.os != 'Windows'
