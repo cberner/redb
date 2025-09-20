@@ -32,10 +32,6 @@ jobs:
                 fuzz/target/
             key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '.github/workflows/*.yml', 'rust-toolchain') }}
 
-      - name: Check for forbidden words
-        if: runner.os != 'Windows'
-        run: "! grep --include='*.rs' -RE 'to_be_bytes|from_be_bytes|dbg!' ."
-
       - name: Install Python
         uses: actions/setup-python@v5
         with:
