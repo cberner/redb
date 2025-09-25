@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 3.1.0 - 2025-09-25
+* Implement `std::error::Error` for `SetDurabilityError`
+* Fix compilation error on various non-tier-1 platforms, such as wasm32-unknown
+
 ## 3.0.2 - 2025-09-16
 * Fix performance issue where a transaction with a large number of writes would cause
   `WriteTransaction::abort()` and committing non-durable transactions to become slow.
