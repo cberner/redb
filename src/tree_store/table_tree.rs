@@ -15,8 +15,9 @@ use std::cmp::max;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
 use std::ops::RangeFull;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::{mem, thread};
+use crate::mutex::Mutex;
 
 #[derive(Debug)]
 #[repr(transparent)]
@@ -286,7 +287,7 @@ impl TableTreeMut<'_> {
 
     pub(crate) fn clear_root_updates_and_close(&mut self) {
         self.pending_table_updates.clear();
-        self.allocated_pages.lock().unwrap().close();
+        self.allocated_pages.lock().close();
     }
 
     pub(crate) fn flush_and_close(
@@ -294,16 +295,16 @@ impl TableTreeMut<'_> {
     ) -> Result<(Option<BtreeHeader>, HashSet<PageNumber>, Vec<PageNumber>)> {
         match self.flush_inner() {
             Ok(header) => {
-                let allocated = self.allocated_pages.lock()?.close();
+                let allocated = self.allocated_pages.lock().close();
                 let mut old = vec![];
-                let mut freed_pages = self.freed_pages.lock()?;
+                let mut freed_pages = self.freed_pages.lock();
                 mem::swap(freed_pages.as_mut(), &mut old);
                 Ok((header, allocated, old))
             }
             Err(err) => {
                 // Ensure that the allocated pages get clear. Otherwise it will cause a panic
                 // when they are dropped
-                self.allocated_pages.lock()?.close();
+                self.allocated_pages.lock().close();
                 Err(err)
             }
         }
@@ -548,7 +549,7 @@ impl TableTreeMut<'_> {
         table_type: TableType,
     ) -> Result<bool, TableError> {
         if let Some(definition) = self.get_table_untyped(name, table_type)? {
-            let mut freed_pages = self.freed_pages.lock().unwrap();
+            let mut freed_pages = self.freed_pages.lock();
             definition.visit_all_pages(self.mem.clone(), |path| {
                 freed_pages.push(path.page_number());
                 Ok(())
@@ -734,7 +735,7 @@ impl Drop for TableTreeMut<'_> {
         if thread::panicking() {
             return;
         }
-        assert!(self.allocated_pages.lock().unwrap().is_empty());
+        assert!(self.allocated_pages.lock().is_empty());
     }
 }
 

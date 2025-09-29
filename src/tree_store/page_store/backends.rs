@@ -1,7 +1,7 @@
 use crate::StorageBackend;
 use std::io;
 use std::io::Error;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use crate::rw_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Debug)]
 pub(crate) struct ReadOnlyBackend {
@@ -58,12 +58,12 @@ impl InMemoryBackend {
 
     /// Gets a read guard for this backend.
     fn read(&self) -> RwLockReadGuard<'_, Vec<u8>> {
-        self.0.read().expect("Could not acquire read lock.")
+        self.0.read()
     }
 
     /// Gets a write guard for this backend.
     fn write(&self) -> RwLockWriteGuard<'_, Vec<u8>> {
-        self.0.write().expect("Could not acquire write lock.")
+        self.0.write()
     }
 }
 

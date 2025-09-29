@@ -27,6 +27,7 @@ authors = ["Christopher Berner <me@cberner.com>"]
 log = { version = "0.4.17", optional = true }
 chrono_v0_4 = { package = "chrono", version= "0.4.41", optional = true }
 uuid = { version= "1.17.0", optional = true }
+parking_lot = { version = "0.12.4", default-features = false,  optional = true }
 
 [target.'cfg(target_os = "wasi")'.dependencies]
 libc = "0.2.174"
@@ -45,6 +46,8 @@ uuid = { version= "1.17.0", features = ["v4"] }
 logging = ["dep:log"]
 # Enable cache hit metrics
 cache_metrics = []
+# Enable parking_lot for faster locking
+parking_lot = ["dep:parking_lot"]
 
 [profile.bench]
 debug = true

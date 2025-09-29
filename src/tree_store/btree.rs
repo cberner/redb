@@ -19,7 +19,8 @@ use std::cmp::max;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use crate::mutex::Mutex;
 
 pub(crate) struct BtreeStats {
     pub(crate) tree_height: u32,
@@ -306,7 +307,7 @@ impl UntypedBtreeMut {
             _ => unreachable!(),
         }
 
-        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut freed_pages = self.freed_pages.lock();
         // No need to track allocations, because this method is only called during compaction when
         // there can't be any savepoints
         let mut ignore = PageTrackerPolicy::Ignore;
@@ -421,7 +422,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             key,
             V::as_bytes(value).as_ref().len()
         );
-        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut freed_pages = self.freed_pages.lock();
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             &mut self.root,
             self.mem.clone(),
@@ -457,7 +458,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     pub(crate) fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'_, V>>> {
         #[cfg(feature = "logging")]
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
-        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut freed_pages = self.freed_pages.lock();
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             &mut self.root,
             self.mem.clone(),
@@ -505,8 +506,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             let page_mut = if self.mem.uncommitted(root.root) {
                 self.mem.get_page_mut(root.root)?
             } else {
-                let mut freed_pages = self.freed_pages.lock().unwrap();
-                let mut allocated = self.allocated_pages.lock().unwrap();
+                let mut freed_pages = self.freed_pages.lock();
+                let mut allocated = self.allocated_pages.lock();
                 let required: usize = root
                     .root
                     .page_size_bytes(self.mem.get_page_size().try_into().unwrap())
@@ -564,8 +565,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                 let child_page_mut = if self.mem.uncommitted(child_page) {
                     self.mem.get_page_mut(child_page)?
                 } else {
-                    let mut freed_pages = self.freed_pages.lock().unwrap();
-                    let mut allocated = self.allocated_pages.lock().unwrap();
+                    let mut freed_pages = self.freed_pages.lock();
+                    let mut allocated = self.allocated_pages.lock();
                     let required: usize = child_page
                         .page_size_bytes(self.mem.get_page_size().try_into().unwrap())
                         .try_into()
@@ -662,8 +663,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                 assert!(operation.delete(&entry.key())?.is_some());
             }
         }
-        let mut freed_pages = self.freed_pages.lock().unwrap();
-        let mut allocated_pages = self.allocated_pages.lock().unwrap();
+        let mut freed_pages = self.freed_pages.lock();
+        let mut allocated_pages = self.allocated_pages.lock();
         for page in freed {
             if !self.mem.free_if_uncommitted(page, &mut allocated_pages) {
                 freed_pages.push(page);
@@ -692,7 +693,7 @@ impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
             "Btree(root={:?}): Inserting {:?} with {} reserved bytes for the value",
             &self.root, key, value_length
         );
-        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut freed_pages = self.freed_pages.lock();
         let mut value = vec![0u8; value_length];
         V::initialize(&mut value);
         let mut operation = MutateHelper::<K, V>::new(

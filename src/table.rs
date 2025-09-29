@@ -12,7 +12,8 @@ use std::borrow::Borrow;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use crate::mutex::Mutex;
 
 /// Informational storage stats about a table
 #[derive(Debug)]

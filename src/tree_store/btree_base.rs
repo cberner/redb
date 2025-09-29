@@ -7,8 +7,9 @@ use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
+use crate::mutex::Mutex;
 
 pub(crate) const LEAF: u8 = 1;
 pub(crate) const BRANCH: u8 = 2;
@@ -357,7 +358,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
 
             let old_page_number = self.page.get_page_number();
             self.page = new_page;
-            let mut allocated = self.allocated.lock().unwrap();
+            let mut allocated = self.allocated.lock();
             assert!(
                 self.mem
                     .free_if_uncommitted(old_page_number, &mut allocated)
@@ -705,7 +706,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
 
         let required_size =
             self.required_bytes(division, first_split_key_bytes + first_split_value_bytes);
-        let mut allocated_pages = self.allocated_pages.lock().unwrap();
+        let mut allocated_pages = self.allocated_pages.lock();
         let mut page1 = self.mem.allocate(required_size, &mut allocated_pages)?;
         let mut builder = RawLeafBuilder::new(
             page1.memory_mut(),
@@ -746,7 +747,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
         );
-        let mut allocated_pages = self.allocated_pages.lock().unwrap();
+        let mut allocated_pages = self.allocated_pages.lock();
         let mut page = self.mem.allocate(required_size, &mut allocated_pages)?;
         let mut builder = RawLeafBuilder::new(
             page.memory_mut(),
@@ -1444,7 +1445,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
             self.total_key_bytes,
             self.fixed_key_size,
         );
-        let mut allocated_pages = self.allocated_pages.lock().unwrap();
+        let mut allocated_pages = self.allocated_pages.lock();
         let mut page = self.mem.allocate(size, &mut allocated_pages)?;
         let mut builder =
             RawBranchBuilder::new(page.memory_mut(), self.keys.len(), self.fixed_key_size);
@@ -1468,7 +1469,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
     }
 
     pub(super) fn build_split(self) -> Result<(PageMut, &'a [u8], PageMut)> {
-        let mut allocated_pages = self.allocated_pages.lock().unwrap();
+        let mut allocated_pages = self.allocated_pages.lock();
         assert_eq!(self.children.len(), self.keys.len() + 1);
         assert!(self.keys.len() >= 3);
         let division = self.keys.len() / 2;

@@ -5,7 +5,8 @@ use crate::tree_store::{
 use crate::{Key, Result, TableError, TypeName, Value};
 use std::collections::HashMap;
 use std::mem::size_of;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use crate::mutex::Mutex;
 
 // Forward compatibility feature in case alignment can be supported in the future
 // See https://github.com/cberner/redb/issues/360

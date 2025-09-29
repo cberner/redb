@@ -6,7 +6,8 @@ use std::slice::SliceIndex;
 #[cfg(feature = "cache_metrics")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc};
+use crate::{rw_lock::RwLock, mutex::Mutex};
 
 pub(super) struct WritablePage {
     buffer: Arc<Mutex<LRUWriteCache>>,
@@ -28,7 +29,6 @@ impl Drop for WritablePage {
     fn drop(&mut self) {
         self.buffer
             .lock()
-            .unwrap()
             .return_value(self.offset, self.data.clone());
     }
 }
@@ -264,7 +264,7 @@ impl PagedCachedFile {
     }
 
     fn flush_write_buffer(&self) -> Result {
-        let mut write_buffer = self.write_buffer.lock().unwrap();
+        let mut write_buffer = self.write_buffer.lock();
 
         for (offset, buffer) in write_buffer.cache.iter() {
             self.file.write(*offset, buffer.as_ref().unwrap())?;
@@ -277,7 +277,7 @@ impl PagedCachedFile {
 
             if cache_size + buffer.len() <= self.max_read_cache_bytes {
                 let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
-                let mut lock = self.read_cache[cache_slot].write().unwrap();
+                let mut lock = self.read_cache[cache_slot].write();
                 if let Some(replaced) = lock.insert(*offset, buffer) {
                     // A race could cause us to replace an existing buffer
                     self.read_cache_bytes
@@ -331,7 +331,7 @@ impl PagedCachedFile {
         self.reads_total.fetch_add(1, Ordering::AcqRel);
 
         if !matches!(hint, PageHint::Clean) {
-            let lock = self.write_buffer.lock().unwrap();
+            let lock = self.write_buffer.lock();
             if let Some(cached) = lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
@@ -342,7 +342,7 @@ impl PagedCachedFile {
 
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         {
-            let read_lock = self.read_cache[cache_slot].read().unwrap();
+            let read_lock = self.read_cache[cache_slot].read();
             if let Some(cached) = read_lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
@@ -353,7 +353,7 @@ impl PagedCachedFile {
 
         let buffer: Arc<[u8]> = self.read_direct(offset, len)?.into();
         let cache_size = self.read_cache_bytes.fetch_add(len, Ordering::AcqRel);
-        let mut write_lock = self.read_cache[cache_slot].write().unwrap();
+        let mut write_lock = self.read_cache[cache_slot].write();
         let cache_size = if let Some(replaced) = write_lock.insert(offset, buffer.clone()) {
             // A race could cause us to replace an existing buffer
             self.read_cache_bytes
@@ -385,7 +385,7 @@ impl PagedCachedFile {
     // Discard pending writes to the given range
     pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
         assert_eq!(0, offset % self.page_size);
-        if let Some(removed) = self.write_buffer.lock().unwrap().remove(offset) {
+        if let Some(removed) = self.write_buffer.lock().remove(offset) {
             self.write_buffer_bytes
                 .fetch_sub(removed.len(), Ordering::Release);
         }
@@ -396,7 +396,7 @@ impl PagedCachedFile {
     // NOTE: Invalidating a cached region in subsections is permitted, as long as all subsections are invalidated
     pub(super) fn invalidate_cache(&self, offset: u64, len: usize) {
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
-        let mut lock = self.read_cache[cache_slot].write().unwrap();
+        let mut lock = self.read_cache[cache_slot].write();
         if let Some(removed) = lock.remove(offset) {
             assert_eq!(len, removed.len());
             self.read_cache_bytes
@@ -406,7 +406,7 @@ impl PagedCachedFile {
 
     pub(super) fn invalidate_cache_all(&self) {
         for cache_slot in 0..self.read_cache.len() {
-            let mut lock = self.read_cache[cache_slot].write().unwrap();
+            let mut lock = self.read_cache[cache_slot].write();
             while let Some((_, removed)) = lock.pop_lowest_priority() {
                 self.read_cache_bytes
                     .fetch_sub(removed.len(), Ordering::AcqRel);
@@ -418,12 +418,12 @@ impl PagedCachedFile {
     // cache_policy takes the existing data as an argument and returns the priority. The priority should be stable and not change after WritablePage is dropped
     pub(super) fn write(&self, offset: u64, len: usize, overwrite: bool) -> Result<WritablePage> {
         assert_eq!(0, offset % self.page_size);
-        let mut lock = self.write_buffer.lock().unwrap();
+        let mut lock = self.write_buffer.lock();
 
         // TODO: allow hint that page is known to be dirty and will not be in the read cache
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         let existing = {
-            let mut lock = self.read_cache[cache_slot].write().unwrap();
+            let mut lock = self.read_cache[cache_slot].write();
             if let Some(removed) = lock.remove(offset) {
                 assert_eq!(
                     len,

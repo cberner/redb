@@ -99,6 +99,8 @@ mod transactions;
 mod tree_store;
 mod tuple_types;
 mod types;
+mod rw_lock;
+mod mutex;
 
 #[cfg(test)]
 fn create_tempfile() -> tempfile::NamedTempFile {

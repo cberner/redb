@@ -10,7 +10,7 @@ use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 #[cfg(debug_assertions)]
-use std::sync::Mutex;
+use crate::mutex::Mutex;
 
 pub(crate) const MAX_VALUE_LENGTH: usize = 3 * 1024 * 1024 * 1024;
 pub(crate) const MAX_PAIR_LENGTH: usize = 3 * 1024 * 1024 * 1024 + 768 * 1024 * 1024;
@@ -199,7 +199,7 @@ impl Debug for PageImpl {
 #[cfg(debug_assertions)]
 impl Drop for PageImpl {
     fn drop(&mut self) {
-        let mut open_pages = self.open_pages.lock().unwrap();
+        let mut open_pages = self.open_pages.lock();
         let value = open_pages.get_mut(&self.page_number).unwrap();
         assert!(*value > 0);
         *value -= 1;
@@ -226,7 +226,6 @@ impl Clone for PageImpl {
             *self
                 .open_pages
                 .lock()
-                .unwrap()
                 .get_mut(&self.page_number)
                 .unwrap() += 1;
         }
@@ -265,7 +264,7 @@ impl Page for PageMut {
 #[cfg(debug_assertions)]
 impl Drop for PageMut {
     fn drop(&mut self) {
-        assert!(self.open_pages.lock().unwrap().remove(&self.page_number));
+        assert!(self.open_pages.lock().remove(&self.page_number));
     }
 }
 

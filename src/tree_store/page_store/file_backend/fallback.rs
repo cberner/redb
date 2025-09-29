@@ -2,7 +2,6 @@ use crate::{DatabaseError, Result, StorageBackend};
 use std::fs::File;
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::Mutex;
 
 /// Stores a database as a file on-disk.
 #[derive(Debug)]

@@ -14,7 +14,8 @@ use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
 use std::cmp::{max, min};
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use crate::mutex::Mutex;
 
 // TODO: it seems like Checksum can be removed from most/all of these, now that we're using deferred checksums
 #[derive(Debug)]
@@ -99,7 +100,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
     fn conditional_free(&mut self, page_number: PageNumber) {
         if self.modify_uncommitted {
-            let mut allocated = self.allocated.lock().unwrap();
+            let mut allocated = self.allocated.lock();
             if !self.mem.free_if_uncommitted(page_number, &mut allocated) {
                 self.freed.push(page_number);
             }
@@ -337,7 +338,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         if self.modify_uncommitted && self.mem.uncommitted(page_number) {
                             let arc = page.to_arc();
                             drop(page);
-                            let mut allocated = self.allocated.lock().unwrap();
+                            let mut allocated = self.allocated.lock();
                             self.mem.free(page_number, &mut allocated);
                             Some(AccessGuard::with_arc_page(arc, start..end))
                         } else {
@@ -372,7 +373,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         if self.modify_uncommitted && self.mem.uncommitted(page_number) {
                             let arc = page.to_arc();
                             drop(page);
-                            let mut allocated = self.allocated.lock().unwrap();
+                            let mut allocated = self.allocated.lock();
                             self.mem.free(page_number, &mut allocated);
                             Some(AccessGuard::with_arc_page(arc, start..end))
                         } else {
@@ -641,7 +642,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             let page_number = page.get_page_number();
             let arc = page.to_arc();
             drop(page);
-            let mut allocated = self.allocated.lock().unwrap();
+            let mut allocated = self.allocated.lock();
             self.mem.free(page_number, &mut allocated);
             Some(AccessGuard::with_arc_page(arc, start..end))
         } else {

@@ -11,7 +11,8 @@ use std::borrow::Borrow;
 use std::collections::Bound;
 use std::marker::PhantomData;
 use std::ops::{Range, RangeBounds};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use crate::mutex::Mutex;
 
 #[derive(Debug, Clone)]
 pub enum RangeIterState {
@@ -347,8 +348,8 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
 {
     fn drop(&mut self) {
         self.inner.close();
-        let mut master_free_list = self.master_free_list.lock().unwrap();
-        let mut allocated = self.allocated.lock().unwrap();
+        let mut master_free_list = self.master_free_list.lock();
+        let mut allocated = self.allocated.lock();
         for page in self.free_on_drop.drain(..) {
             if !self.mem.free_if_uncommitted(page, &mut allocated) {
                 master_free_list.push(page);
