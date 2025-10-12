@@ -221,6 +221,11 @@ impl<K: Key + 'static, V: Key + 'static> Display for MultimapTableDefinition<'_,
 #[derive(Debug)]
 pub struct CacheStats {
     pub(crate) evictions: u64,
+    pub(crate) read_hits: u64,
+    pub(crate) read_misses: u64,
+    pub(crate) write_hits: u64,
+    pub(crate) write_misses: u64,
+    pub(crate) used_bytes: usize,
 }
 
 impl CacheStats {
@@ -229,6 +234,31 @@ impl CacheStats {
     /// To increase the cache size use [`Builder::set_cache_size`]
     pub fn evictions(&self) -> u64 {
         self.evictions
+    }
+
+    /// Number of times that unmodified data has been read from the cache
+    pub fn read_hits(&self) -> u64 {
+        self.read_hits
+    }
+
+    /// Number of times that unmodified data was not in the cache and was read from storage
+    pub fn read_misses(&self) -> u64 {
+        self.read_misses
+    }
+
+    /// Number of times that data modified in a transaction has been read from the cache
+    pub fn write_hits(&self) -> u64 {
+        self.write_hits
+    }
+
+    /// Number of times that data modified in a transaction was not in the cache and was read from storage
+    pub fn write_misses(&self) -> u64 {
+        self.write_misses
+    }
+
+    /// Number of bytes in the cache
+    pub fn used_bytes(&self) -> usize {
+        self.used_bytes
     }
 }
 
