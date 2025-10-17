@@ -12,7 +12,7 @@ redb is written in pure Rust and is loosely inspired by [lmdb](http://www.lmdb.t
 of copy-on-write B-trees. For more details, see the [design doc](docs/design.md)
 
 ```rust
-use redb::{Database, Error, ReadableTable, TableDefinition};
+use redb::{Database, Error, ReadableDatabase, TableDefinition};
 
 const TABLE: TableDefinition<&str, u64> = TableDefinition::new("my_data");
 
