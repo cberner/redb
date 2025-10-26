@@ -278,8 +278,7 @@ fn generate_as_bytes(fields: &Fields) -> proc_macro2::TokenStream {
                         let len = bytes.len();
                         if len < 254 {
                             result.push(len.try_into().unwrap());
-                        } else if len <= u16::MAX.into() {
-                            let u16_len: u16 = len.try_into().unwrap();
+                        } else if let Ok(u16_len) = u16::try_from(len) {
                             result.push(254u8);
                             result.extend_from_slice(&u16_len.to_le_bytes());
                         } else {
