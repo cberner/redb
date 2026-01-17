@@ -39,6 +39,7 @@ tempfile = "3.5.0"
 redb2_6 = { version = "=2.6.0", package = "redb" }
 bincode = "2.0.1"
 uuid = { version= "1.17.0", features = ["v4"] }
+redb-derive = { path = "./crates/redb-derive" }
 
 [features]
 # Enables log messages
