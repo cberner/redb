@@ -344,7 +344,7 @@ mod test {
     use crate::tree_store::page_store::bitmap::BtreeBitmap;
     use rand::prelude::IteratorRandom;
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use std::collections::HashSet;
 
     #[test]

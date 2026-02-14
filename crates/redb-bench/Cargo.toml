@@ -23,7 +23,7 @@ ctrlc = "3.2.3"
 heed = "0.22"
 rocksdb = { version = "0.22.0", default-features = false, features = ["lz4"] }
 fjall = "=2.11"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.38.0", features = ["bundled"] }
 comfy-table = "7.0.1"
 env_logger = "0.11"
 
