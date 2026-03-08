@@ -1,5 +1,8 @@
 # redb - Changelog
 
+## 3.1.1 - UNRELEASED
+* Fix occasional panic when inserting into a table with fixed size keys when `debug_assertions` are enabled
+
 ## 3.1.0 - 2025-09-25
 * Implement `std::error::Error` for `SetDurabilityError`
 * Fix compilation error on various non-tier-1 platforms, such as wasm32-unknown
