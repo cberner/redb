@@ -1296,6 +1296,26 @@ fn regression24() {
 }
 
 #[test]
+fn regression25() {
+    let tmpfile = create_tempfile();
+    let table_def: TableDefinition<u16, (u64, u64, u64, u64)> = TableDefinition::new("issue_1108");
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    for i in 0..2730u16 {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_def).unwrap();
+            for j in 0..24u16 {
+                let key: u16 = i * 24 + j;
+                let value = key as u64;
+                table.insert(key, (value, value, value, value)).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+}
+
+#[test]
 fn check_integrity_clean() {
     let tmpfile = create_tempfile();
 

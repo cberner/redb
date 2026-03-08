@@ -1568,9 +1568,11 @@ impl<'b> RawBranchBuilder<'b> {
         {
             // Poison all the child pointers & key offsets, in case the caller forgets to write them
             let start = 8 + size_of::<Checksum>() * (num_keys + 1);
-            let last = 8
-                + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1)
-                + size_of::<u32>() * num_keys;
+            let mut last =
+                8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1);
+            if fixed_key_size.is_none() {
+                last += size_of::<u32>() * num_keys;
+            }
             for x in &mut page[start..last] {
                 *x = 0xFF;
             }
