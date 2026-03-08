@@ -1,7 +1,7 @@
 # redb - Changelog
 
-## 3.1.1 - UNRELEASED
-* Fix occasional panic when inserting into a table with fixed size keys when `debug_assertions` are enabled
+## 3.1.1 - 2026-03-08
+* Fix panic which could occur when inserting into a table with fixed size keys when `debug_assertions` are enabled
 
 ## 3.1.0 - 2025-09-25
 * Implement `std::error::Error` for `SetDurabilityError`
