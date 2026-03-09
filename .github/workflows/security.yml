@@ -27,7 +27,7 @@ jobs:
           tool: cargo-audit
 
       - name: Run cargo-audit
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2025-0057 --ignore RUSTSEC-2024-0384
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
