@@ -2,8 +2,10 @@ use crate::transaction_tracker::TransactionId;
 use crate::tree_store::Checksum;
 use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
+use crate::tree_store::page_store::compression::CompressionConfig;
 use crate::tree_store::page_store::page_manager::{
-    FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, xxh3_checksum,
+    FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, FILE_FORMAT_VERSION4,
+    xxh3_checksum,
 };
 use crate::{DatabaseError, Result, StorageError};
 use std::mem::size_of;
@@ -50,6 +52,9 @@ const NUM_FULL_REGIONS_OFFSET: usize = REGION_MAX_DATA_PAGES_OFFSET + size_of::<
 const TRAILING_REGION_DATA_PAGES_OFFSET: usize = NUM_FULL_REGIONS_OFFSET + size_of::<u32>();
 // Formerly the region tracker page
 const _UNUSED3_OFFSET: usize = TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>();
+// Compression algorithm stored in main header (1 byte at offset 36)
+// 0 = none, 1 = LZ4, 2 = zstd
+const COMPRESSION_ALGO_OFFSET: usize = _UNUSED3_OFFSET + size_of::<u32>();
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 64;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
@@ -102,17 +107,27 @@ pub(super) struct DatabaseHeader {
     region_max_data_pages: u32,
     full_regions: u32,
     trailing_partial_region_pages: u32,
+    pub(super) compression: CompressionConfig,
     transaction_slots: [TransactionHeader; 2],
 }
 
 impl DatabaseHeader {
-    pub(super) fn new(layout: DatabaseLayout, transaction_id: TransactionId) -> Self {
+    pub(super) fn new(
+        layout: DatabaseLayout,
+        transaction_id: TransactionId,
+        compression: CompressionConfig,
+    ) -> Self {
         #[allow(clippy::assertions_on_constants)]
         {
             assert!(TRANSACTION_LAST_FIELD <= SLOT_CHECKSUM_OFFSET);
         }
 
-        let slot = TransactionHeader::new(transaction_id);
+        let version = if compression.is_enabled() {
+            FILE_FORMAT_VERSION4
+        } else {
+            FILE_FORMAT_VERSION3
+        };
+        let slot = TransactionHeader::new(transaction_id, version);
         Self {
             primary_slot: 0,
             recovery_required: true,
@@ -125,6 +140,7 @@ impl DatabaseHeader {
                 .trailing_region_layout()
                 .map(|x| x.num_pages())
                 .unwrap_or_default(),
+            compression,
             transaction_slots: [slot.clone(), slot],
         }
     }
@@ -250,6 +266,15 @@ impl DatabaseHeader {
             (slot1_corrupted, slot0_corrupted)
         };
 
+        // Only read compression config from V4+ databases. V3 databases may have
+        // garbage at this offset (the bytes were previously unused/uninitialized).
+        let primary = if primary_slot == 0 { &slot0 } else { &slot1 };
+        let compression = if primary.version >= FILE_FORMAT_VERSION4 {
+            CompressionConfig::from_header_byte(data[COMPRESSION_ALGO_OFFSET])?
+        } else {
+            CompressionConfig::None
+        };
+
         let result = Self {
             primary_slot,
             recovery_required,
@@ -259,6 +284,7 @@ impl DatabaseHeader {
             region_max_data_pages,
             full_regions,
             trailing_partial_region_pages: trailing_data_pages,
+            compression,
             transaction_slots: [slot0, slot1],
         };
         let repair = HeaderRepairInfo {
@@ -292,6 +318,7 @@ impl DatabaseHeader {
         result[TRAILING_REGION_DATA_PAGES_OFFSET
             ..(TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>())]
             .copy_from_slice(&self.trailing_partial_region_pages.to_le_bytes());
+        result[COMPRESSION_ALGO_OFFSET] = self.compression.header_byte();
         let slot0 = self.transaction_slots[0].to_bytes();
         result[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + slot0.len())].copy_from_slice(&slot0);
         let slot1 = self.transaction_slots[1].to_bytes();
@@ -310,9 +337,9 @@ pub(super) struct TransactionHeader {
 }
 
 impl TransactionHeader {
-    fn new(transaction_id: TransactionId) -> Self {
+    fn new(transaction_id: TransactionId, version: u8) -> Self {
         Self {
-            version: FILE_FORMAT_VERSION3,
+            version,
             user_root: None,
             system_root: None,
             transaction_id,
@@ -326,10 +353,10 @@ impl TransactionHeader {
             FILE_FORMAT_VERSION1 | FILE_FORMAT_VERSION2 => {
                 return Err(DatabaseError::UpgradeRequired(version));
             }
-            FILE_FORMAT_VERSION3 => {}
+            FILE_FORMAT_VERSION3 | FILE_FORMAT_VERSION4 => {}
             _ => {
                 return Err(StorageError::Corrupted(format!(
-                    "Expected file format version <= {FILE_FORMAT_VERSION3}, found {version}",
+                    "Expected file format version <= {FILE_FORMAT_VERSION4}, found {version}",
                 ))
                 .into());
             }
@@ -372,7 +399,9 @@ impl TransactionHeader {
     }
 
     pub(super) fn to_bytes(&self) -> [u8; TRANSACTION_SIZE] {
-        assert_eq!(self.version, FILE_FORMAT_VERSION3);
+        assert!(
+            self.version == FILE_FORMAT_VERSION3 || self.version == FILE_FORMAT_VERSION4
+        );
         let mut result = [0; TRANSACTION_SIZE];
         result[VERSION_OFFSET] = self.version;
         if let Some(header) = self.user_root {

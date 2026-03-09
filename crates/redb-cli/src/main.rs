@@ -104,9 +104,13 @@ fn cmd_info(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     txn.abort()?;
     drop(db);
 
+    // Read compression algorithm from raw header byte 36
+    let compression_name = read_compression_name(path);
+
     println!("Database: {}", path.display());
     println!("File size:        {}", format_bytes(file_size));
     println!("Page size:        {} bytes", stats.page_size());
+    println!("Compression:      {compression_name}");
     println!("Allocated pages:  {}", stats.allocated_pages());
     println!("Tree height:      {}", stats.tree_height());
     println!("Tables:           {table_count}");
@@ -530,6 +534,26 @@ fn cmd_header(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // Compression algorithm (byte 36 in main header)
+    // Only meaningful for format version 4+; earlier versions have garbage here
+    let primary_version = {
+        let primary_offset = if primary_slot == 0 { 64 } else { 64 + 128 };
+        buf[primary_offset]
+    };
+    let compression_algo = buf[36];
+    let compression_display = if primary_version >= 4 {
+        match compression_algo {
+            0 => "none".to_string(),
+            1 => "lz4".to_string(),
+            2 => "zstd".to_string(),
+            other => format!("unknown ({other})"),
+        }
+    } else {
+        "none (v3 format)".to_string()
+    };
+    println!();
+    println!("Compression algo: {compression_display} (byte 36 = 0x{compression_algo:02x})");
+
     // Full regions and trailing (bytes 24-31 in main header)
     let full_regions = u32::from_le_bytes(buf[24..28].try_into().unwrap());
     let trailing_pages = u32::from_le_bytes(buf[28..32].try_into().unwrap());
@@ -576,6 +600,31 @@ fn format_hex(data: &[u8]) -> String {
             .collect::<Vec<_>>()
             .join(" ");
         format!("{preview}... ({} bytes)", data.len())
+    }
+}
+
+/// Read the compression algorithm name from the raw database header.
+/// Returns a human-readable string like "lz4", "zstd", or "none".
+fn read_compression_name(path: &PathBuf) -> String {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return "unknown".to_string();
+    };
+    let mut buf = [0u8; 320];
+    if file.read_exact(&mut buf).is_err() {
+        return "unknown".to_string();
+    }
+    // Primary slot version determines if compression byte is valid
+    let god = buf[9];
+    let primary_slot_offset = if god & 0x01 != 0 { 64 + 128 } else { 64 };
+    let version = buf[primary_slot_offset];
+    if version < 4 {
+        return "none".to_string();
+    }
+    match buf[36] {
+        0 => "none".to_string(),
+        1 => "lz4".to_string(),
+        2 => "zstd".to_string(),
+        other => format!("unknown ({other})"),
     }
 }
 

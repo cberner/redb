@@ -82,7 +82,8 @@ pub use table::{
 };
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
 pub use tree_store::{
-    AccessGuard, AccessGuardMut, AccessGuardMutInPlace, RawEntryGuard, RawEntryIter, Savepoint,
+    AccessGuard, AccessGuardMut, AccessGuardMutInPlace, CompressionConfig, RawEntryGuard,
+    RawEntryIter, Savepoint,
 };
 pub use types::{Key, MutInPlaceValue, TypeName, Value};
 
