@@ -32,7 +32,7 @@ jobs:
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny@0.16.2
+          tool: cargo-deny@0.19.0
 
       - name: Check advisories
         run: cargo deny check advisories
