@@ -1,0 +1,47 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Every Monday at 06:00 UTC
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "deny.toml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "deny.toml"
+
+jobs:
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Run cargo-audit
+        run: cargo audit
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.16.2
+
+      - name: Check advisories
+        run: cargo deny check advisories
+
+      - name: Check licenses
+        run: cargo deny --workspace --all-features check licenses
+
+      - name: Check bans
+        run: cargo deny --workspace check bans
+
+      - name: Check sources
+        run: cargo deny --workspace check sources

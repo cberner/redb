@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup target add ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (aarch64-apple-darwin)
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          # macOS runners are already ARM64; this target compiles natively
+          echo "Native ARM64 build on macOS runner"
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p redb-cli
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          STAGING="redb-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "$STAGING"
+          cp "target/${{ matrix.target }}/release/redb" "$STAGING/"
+          cp LICENSE* README.md "$STAGING/" 2>/dev/null || true
+          tar czf "$STAGING.tar.gz" "$STAGING"
+          echo "ASSET=$STAGING.tar.gz" >> $GITHUB_ENV
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          STAGING="redb-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "$STAGING"
+          cp "target/${{ matrix.target }}/release/redb.exe" "$STAGING/"
+          cp LICENSE* README.md "$STAGING/" 2>/dev/null || true
+          7z a "$STAGING.zip" "$STAGING"
+          echo "ASSET=$STAGING.zip" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ env.ASSET }}
+          retention-days: 1
+
+  # ──────────────────────────────────────────────
+  # Create GitHub Release with all artifacts
+  # ──────────────────────────────────────────────
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum * > checksums-sha256.txt
+          cat checksums-sha256.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

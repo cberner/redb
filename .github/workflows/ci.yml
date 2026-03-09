@@ -2,35 +2,168 @@ name: CI
 
 on:
   pull_request:
-  push: # required for actions/cache to work
+  push:
     branches:
       - master
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  ci:
+  # ──────────────────────────────────────────────
+  # Fast checks: format, clippy, deny (runs first)
+  # ──────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --deny warnings
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: lint-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: lint-
+
+      - name: Install Rust
+        run: |
+          rustup component add rustfmt
+          rustup component add clippy
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.16.2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (all features)
+        run: cargo clippy --all --all-targets --all-features -- -Dwarnings
+
+      - name: Clippy (no features)
+        run: cargo clippy --all --all-targets --no-default-features -- -Dwarnings
+
+      - name: License check
+        run: cargo deny --workspace --all-features check licenses
+
+      - name: Advisory check
+        run: cargo deny --workspace check advisories
+
+      - name: Ban check
+        run: cargo deny --workspace check bans
+
+      - name: Source check
+        run: cargo deny --workspace check sources
+
+  # ──────────────────────────────────────────────
+  # Compile checks across feature combinations
+  # ──────────────────────────────────────────────
+  compile:
+    name: Compile (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --deny warnings
     strategy:
+      fail-fast: false
       matrix:
-        os: ["ubuntu-latest", "macos-latest", "windows-latest", "ubuntu-24.04-arm"]
+        include:
+          - name: default
+            args: "--all --all-targets"
+          - name: all-features
+            args: "--all --all-targets --all-features"
+          - name: no-features
+            args: "--all --all-targets --no-default-features"
+          - name: wasm32
+            args: ""
+            wasm: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: compile-${{ matrix.name }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: compile-${{ matrix.name }}-
+
+      - name: Compile
+        if: ${{ !matrix.wasm }}
+        run: cargo check ${{ matrix.args }}
+
+      - name: Compile (wasm32-unknown-unknown)
+        if: ${{ matrix.wasm }}
+        run: |
+          rustup target add wasm32-unknown-unknown
+          command="cargo check -p $(cargo pkgid) -p redb-derive --target wasm32-unknown-unknown"
+          $command
+          $command --all-features
+          $command --no-default-features
+
+  # ──────────────────────────────────────────────
+  # Test matrix: multi-platform
+  # ──────────────────────────────────────────────
+  test:
+    name: Test (${{ matrix.name }})
+    needs: [lint, compile]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            fuzz: true
+            wasi: true
+            python: true
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+            fuzz: true
+            wasi: true
+            python: true
+          - name: macOS
+            os: macos-latest
+            fuzz: true
+            wasi: true
+            python: true
+          - name: Windows
+            os: windows-latest
+            fuzz: false
+            wasi: false
+            python: true
 
     runs-on: ${{ matrix.os }}
-
     env:
       RUSTFLAGS: --deny warnings
 
     steps:
       - uses: actions/checkout@v4
+
       - name: Cache
-        id: rust-cache
         uses: actions/cache@v4
         with:
-            path: |
-                ~/.cargo/bin/
-                ~/.cargo/registry/index/
-                ~/.cargo/registry/cache/
-                ~/.cargo/git/db/
-                target/
-                fuzz/target/
-            key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '.github/workflows/*.yml', 'rust-toolchain') }}
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            fuzz/target/
+          key: test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: test-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install Python
         uses: actions/setup-python@v5
@@ -39,68 +172,71 @@ jobs:
 
       - name: Install Rust
         run: |
-            rustup component add rustfmt
-            rustup component add clippy
+          rustup component add rustfmt
+          rustup component add clippy
 
       - name: OSX x86 rust
         if: startsWith(matrix.os, 'macos')
-        run: |
-          # For some reason this is required to run the fuzzer on OSX
-          rustup target add x86_64-apple-darwin
+        run: rustup target add x86_64-apple-darwin
 
       - name: Setup wasmtime
+        if: matrix.wasi
         uses: bytecodealliance/actions/wasmtime/setup@v1
         with:
-            version: "24.0.0"
-
-      - name: Install cargo-deny
-        if: steps.rust-cache.outputs.cache-hit != 'true'
-        run: cargo install --force --version 0.16.2 cargo-deny --locked
+          version: "24.0.0"
 
       - name: Install cargo-fuzz
-        if: steps.rust-cache.outputs.cache-hit != 'true'
-        run: cargo install --force --version 0.12.0 cargo-fuzz --locked
+        if: matrix.fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.12.0
 
       - name: Install just
-        if: steps.rust-cache.outputs.cache-hit != 'true'
-        run: cargo install --force --version 1.36.0 just --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.36.0
 
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      - name: Compile (default features)
-        run: cargo check --all --all-targets
-
-      - name: Compile (all features)
-        run: cargo check --all --all-targets --all-features
-
-      - name: Compile (no features)
-        run: cargo check --all --all-targets --no-default-features
-
-      - name: Compile (`wasm32-unknown-unknown`)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-            rustup target add wasm32-unknown-unknown
-            # Not possible to set default members for specific a target:
-            # https://github.com/rust-lang/cargo/issues/6179
-            command="cargo check -p $(cargo pkgid) -p redb-derive --target wasm32-unknown-unknown"
-            $command
-            $command --all-features
-            $command --no-default-features
-            rustup target remove wasm32-unknown-unknown
-
-      - name: Clippy
-        run: cargo clippy --all --all-targets -- -Dwarnings
-
-      - name: Fuzzer
-        if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
-        run: just fuzz_ci
+      - name: Build all
+        run: cargo build --all --all-targets --all-features
 
       - name: Run tests
         run: just test_all
 
-      - name: Run CPython wrapper tests
+      - name: Fuzzer (60s)
+        if: matrix.fuzz
+        run: just fuzz_ci
+
+      # ── CLI smoke tests ──
+      - name: CLI smoke test (Unix)
         if: runner.os != 'Windows'
+        run: |
+          cargo run --example create_test_db
+          cargo run -p redb-cli -- info test.redb
+          cargo run -p redb-cli -- tables test.redb
+          cargo run -p redb-cli -- stats test.redb
+          cargo run -p redb-cli -- header test.redb
+          cargo run -p redb-cli -- dump test.redb -t users -l 5
+          cargo run -p redb-cli -- verify test.redb
+          cargo run -p redb-cli -- compact test.redb
+          rm test.redb
+
+      - name: CLI smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo run --example create_test_db
+          cargo run -p redb-cli -- info test.redb
+          cargo run -p redb-cli -- tables test.redb
+          cargo run -p redb-cli -- stats test.redb
+          cargo run -p redb-cli -- header test.redb
+          cargo run -p redb-cli -- dump test.redb -t users -l 5
+          cargo run -p redb-cli -- verify test.redb
+          cargo run -p redb-cli -- compact test.redb
+          rm test.redb
+
+      # ── Python binding tests ──
+      - name: Python tests (Unix)
+        if: matrix.python && runner.os != 'Windows'
         run: |
           python3 -m venv venv
           source venv/bin/activate
@@ -108,8 +244,8 @@ jobs:
           pip3 install maturin
           just test_py
 
-      - name: Run CPython wrapper tests
-        if: runner.os == 'Windows'
+      - name: Python tests (Windows)
+        if: matrix.python && runner.os == 'Windows'
         run: |
           python3 -m venv venv
           venv\Scripts\activate
@@ -117,7 +253,65 @@ jobs:
           pip3 install maturin
           just test_py
 
-      - name: Run WASI tests
-        if: runner.os != 'Windows'
+      # ── WASI tests ──
+      - name: WASI tests
+        if: matrix.wasi
+        run: RUSTFLAGS="" just test_wasi
+
+  # ──────────────────────────────────────────────
+  # MSRV check: ensure we compile on minimum supported Rust
+  # ──────────────────────────────────────────────
+  msrv:
+    name: MSRV (1.89)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSRV toolchain
         run: |
-          RUSTFLAGS="" just test_wasi
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup override set 1.89.0
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: msrv-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: msrv-
+
+      - name: Check MSRV
+        run: cargo check --all --all-features
+
+  # ──────────────────────────────────────────────
+  # Summary gate for branch protection
+  # ──────────────────────────────────────────────
+  ci-pass:
+    name: CI Pass
+    if: always()
+    needs: [lint, compile, test, msrv]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all jobs
+        run: |
+          if [[ "${{ needs.lint.result }}" != "success" ]]; then
+            echo "Lint failed"
+            exit 1
+          fi
+          if [[ "${{ needs.compile.result }}" != "success" ]]; then
+            echo "Compile failed"
+            exit 1
+          fi
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "Test failed"
+            exit 1
+          fi
+          if [[ "${{ needs.msrv.result }}" != "success" ]]; then
+            echo "MSRV failed"
+            exit 1
+          fi
+          echo "All checks passed"
