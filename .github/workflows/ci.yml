@@ -109,6 +109,8 @@ jobs:
         if: ${{ matrix.wasm }}
         run: |
           rustup target add wasm32-unknown-unknown
+          # Ensure lockfile exists (cargo pkgid requires it)
+          test -f Cargo.lock || cargo generate-lockfile
           command="cargo check -p $(cargo pkgid) -p redb-derive --target wasm32-unknown-unknown"
           $command
           $command --all-features
