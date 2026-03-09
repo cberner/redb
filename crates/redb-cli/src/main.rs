@@ -231,8 +231,14 @@ fn cmd_stats(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     println!("Stored data:        {}", format_bytes(stats.stored_bytes()));
     println!("Leaf pages:         {}", stats.leaf_pages());
     println!("Branch pages:       {}", stats.branch_pages());
-    println!("Metadata:           {}", format_bytes(stats.metadata_bytes()));
-    println!("Fragmented:         {}", format_bytes(stats.fragmented_bytes()));
+    println!(
+        "Metadata:           {}",
+        format_bytes(stats.metadata_bytes())
+    );
+    println!(
+        "Fragmented:         {}",
+        format_bytes(stats.fragmented_bytes())
+    );
     println!("Tree height:        {}", stats.tree_height());
     println!();
     println!("--- Space Efficiency ---");
@@ -434,8 +440,13 @@ fn cmd_header(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let magic_valid = buf[..9] == MAGIC;
     println!("=== File Header (320 bytes) ===");
     println!();
-    println!("Magic number:     {} {}",
-        buf[..9].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "),
+    println!(
+        "Magic number:     {} {}",
+        buf[..9]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" "),
         if magic_valid { "(valid)" } else { "(INVALID)" },
     );
 
@@ -465,7 +476,11 @@ fn cmd_header(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         let offset = 64 + (slot_idx as usize) * 128;
         let slot = &buf[offset..offset + 128];
         let is_primary = slot_idx as usize == primary_slot;
-        let label = if is_primary { " (PRIMARY)" } else { " (secondary)" };
+        let label = if is_primary {
+            " (PRIMARY)"
+        } else {
+            " (secondary)"
+        };
 
         println!("--- Commit Slot {slot_idx}{label} ---");
 
@@ -480,7 +495,9 @@ fn cmd_header(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             let root_page = u64::from_le_bytes(slot[8..16].try_into().unwrap());
             let root_checksum = u128::from_le_bytes(slot[16..32].try_into().unwrap());
             let root_length = u64::from_le_bytes(slot[32..40].try_into().unwrap());
-            println!("  User root:      page={root_page}, checksum=0x{root_checksum:032x}, length={root_length}");
+            println!(
+                "  User root:      page={root_page}, checksum=0x{root_checksum:032x}, length={root_length}"
+            );
         } else {
             println!("  User root:      (null)");
         }
@@ -489,7 +506,9 @@ fn cmd_header(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             let root_page = u64::from_le_bytes(slot[40..48].try_into().unwrap());
             let root_checksum = u128::from_le_bytes(slot[48..64].try_into().unwrap());
             let root_length = u64::from_le_bytes(slot[64..72].try_into().unwrap());
-            println!("  System root:    page={root_page}, checksum=0x{root_checksum:032x}, length={root_length}");
+            println!(
+                "  System root:    page={root_page}, checksum=0x{root_checksum:032x}, length={root_length}"
+            );
         } else {
             println!("  System root:    (null)");
         }
@@ -501,8 +520,13 @@ fn cmd_header(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         let stored_checksum = u128::from_le_bytes(slot[112..128].try_into().unwrap());
         let computed_checksum = xxhash_rust::xxh3::xxh3_128_with_seed(&slot[..112], 0);
         let checksum_valid = stored_checksum == computed_checksum;
-        println!("  Slot checksum:  0x{stored_checksum:032x} {}",
-            if checksum_valid { "(valid)" } else { "(INVALID)" },
+        println!(
+            "  Slot checksum:  0x{stored_checksum:032x} {}",
+            if checksum_valid {
+                "(valid)"
+            } else {
+                "(INVALID)"
+            },
         );
     }
 
@@ -541,9 +565,16 @@ fn format_raw_bytes(data: &[u8], force_hex: bool) -> String {
 
 fn format_hex(data: &[u8]) -> String {
     if data.len() <= 32 {
-        data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+        data.iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     } else {
-        let preview: String = data[..32].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+        let preview: String = data[..32]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         format!("{preview}... ({} bytes)", data.len())
     }
 }

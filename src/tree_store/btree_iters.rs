@@ -761,15 +761,13 @@ fn find_iter_unbounded_raw(
 ) -> Result<Option<RangeIterState>> {
     let node_mem = page.memory();
     match node_mem[0] {
-        LEAF => {
-            Ok(Some(Leaf {
-                page,
-                fixed_key_size,
-                fixed_value_size,
-                entry: 0,
-                parent,
-            }))
-        }
+        LEAF => Ok(Some(Leaf {
+            page,
+            fixed_key_size,
+            fixed_value_size,
+            entry: 0,
+            parent,
+        })),
         BRANCH => {
             let accessor = BranchAccessor::new(&page, fixed_key_size);
             let child_page_number = accessor.child_page(0).unwrap();
@@ -781,7 +779,13 @@ fn find_iter_unbounded_raw(
                 child: 1,
                 parent,
             }));
-            find_iter_unbounded_raw(child_page, parent, fixed_key_size, fixed_value_size, manager)
+            find_iter_unbounded_raw(
+                child_page,
+                parent,
+                fixed_key_size,
+                fixed_value_size,
+                manager,
+            )
         }
         _ => unreachable!(),
     }
