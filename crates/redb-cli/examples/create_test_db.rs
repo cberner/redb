@@ -5,7 +5,9 @@ const EMBEDDINGS: TableDefinition<u64, &[u8]> = TableDefinition::new("embeddings
 const TAGS: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("tags");
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "test.redb".to_string());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "test.redb".to_string());
     let db = Database::create(&path).unwrap();
 
     let txn = db.begin_write().unwrap();
