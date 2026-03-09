@@ -194,15 +194,7 @@ jobs:
           tool: cargo-fuzz@0.12.0
 
       - name: Setup fuzz toolchain
-        if: matrix.fuzz && runner.os == 'Linux'
-        run: |
-          rustup install nightly
-          MUSL_TARGET=$(rustc -vV | awk '/^host:/ {sub(/-gnu$/, "-musl", $2); print $2}')
-          rustup target add --toolchain nightly "$MUSL_TARGET"
-          sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Setup fuzz toolchain (macOS)
-        if: matrix.fuzz && runner.os == 'macOS'
+        if: matrix.fuzz
         run: rustup install nightly
 
       - name: Install just
@@ -220,7 +212,9 @@ jobs:
 
       - name: Fuzzer (60s)
         if: matrix.fuzz
-        run: cargo +nightly fuzz run --sanitizer=none fuzz_redb -- -max_len=10000 -max_total_time=60
+        run: |
+          HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
+          cargo +nightly fuzz run --sanitizer=none --target "$HOST_TARGET" fuzz_redb -- -max_len=10000 -max_total_time=60
         env:
           RUSTFLAGS: ""
 
