@@ -202,11 +202,13 @@ jobs:
         run: cargo build --all --all-targets --all-features
 
       - name: Run tests
-        run: just test_all
+        run: cargo test --all --all-features
+        env:
+          RUST_BACKTRACE: "1"
 
       - name: Fuzzer (60s)
         if: matrix.fuzz
-        run: just fuzz_ci
+        run: cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=10000 -max_total_time=60
 
       # ── CLI smoke tests ──
       - name: CLI smoke test (Unix)
