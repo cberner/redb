@@ -12,8 +12,8 @@ repository.workspace = true
 authors.workspace = true
 
 [workspace]
-members = [".", "crates/redb-bench", "crates/redb-derive", "crates/redb-python"]
-default-members = [".", "crates/redb-derive", "crates/redb-python"]
+members = [".", "crates/redb-bench", "crates/redb-cli", "crates/redb-derive", "crates/redb-python"]
+default-members = [".", "crates/redb-cli", "crates/redb-derive", "crates/redb-python"]
 
 [workspace.package]
 edition = "2024"

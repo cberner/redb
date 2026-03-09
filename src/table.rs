@@ -3,7 +3,7 @@ use crate::sealed::Sealed;
 use crate::tree_store::{
     AccessGuardMutInPlace, Btree, BtreeExtractIf, BtreeHeader, BtreeMut, BtreeRangeIter,
     MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageHint, PageNumber, PageTrackerPolicy, RawBtree,
-    TransactionalMemory,
+    RawEntryIter, TransactionalMemory,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, AccessGuardMut, StorageError, WriteTransaction};
@@ -462,6 +462,12 @@ impl ReadOnlyUntypedTable {
         Self {
             tree: RawBtree::new(root_page, fixed_key_size, fixed_value_size, mem),
         }
+    }
+
+    /// Iterate all entries as raw key/value byte slices.
+    /// Useful for CLI tools, debugging, and migration without knowing types at compile time.
+    pub fn iter_raw(&self) -> Result<RawEntryIter> {
+        self.tree.raw_iter()
     }
 }
 

@@ -747,3 +747,128 @@ fn find_iter_right<K: Key, V: Value>(
         _ => unreachable!(),
     }
 }
+
+// --- Raw (untyped) iteration ---
+// Walks all leaf entries yielding raw key/value byte slices without type information.
+// Used by ReadOnlyUntypedTable for CLI dump and debugging tools.
+
+fn find_iter_unbounded_raw(
+    page: PageImpl,
+    mut parent: Option<Box<RangeIterState>>,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    manager: &TransactionalMemory,
+) -> Result<Option<RangeIterState>> {
+    let node_mem = page.memory();
+    match node_mem[0] {
+        LEAF => {
+            Ok(Some(Leaf {
+                page,
+                fixed_key_size,
+                fixed_value_size,
+                entry: 0,
+                parent,
+            }))
+        }
+        BRANCH => {
+            let accessor = BranchAccessor::new(&page, fixed_key_size);
+            let child_page_number = accessor.child_page(0).unwrap();
+            let child_page = manager.get_page(child_page_number)?;
+            parent = Some(Box::new(Internal {
+                page,
+                fixed_key_size,
+                fixed_value_size,
+                child: 1,
+                parent,
+            }));
+            find_iter_unbounded_raw(child_page, parent, fixed_key_size, fixed_value_size, manager)
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Entry from raw (untyped) table iteration, holding references to key and value bytes.
+pub struct RawEntryGuard {
+    page: PageImpl,
+    key_range: Range<usize>,
+    value_range: Range<usize>,
+}
+
+impl RawEntryGuard {
+    /// Raw key bytes as stored in the database.
+    pub fn key(&self) -> &[u8] {
+        &self.page.memory()[self.key_range.clone()]
+    }
+
+    /// Raw value bytes as stored in the database.
+    pub fn value(&self) -> &[u8] {
+        &self.page.memory()[self.value_range.clone()]
+    }
+}
+
+/// Iterator over all entries in a table as raw key/value byte slices.
+/// Does not require knowing the key or value types at compile time.
+pub struct RawEntryIter {
+    state: Option<RangeIterState>,
+    include_current: bool,
+    manager: Arc<TransactionalMemory>,
+}
+
+impl RawEntryIter {
+    pub(crate) fn new(
+        root: Option<PageNumber>,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+        manager: Arc<TransactionalMemory>,
+    ) -> Result<Self> {
+        let state = if let Some(root_page) = root {
+            let page = manager.get_page(root_page)?;
+            find_iter_unbounded_raw(page, None, fixed_key_size, fixed_value_size, &manager)?
+        } else {
+            None
+        };
+        Ok(Self {
+            state,
+            include_current: true,
+            manager,
+        })
+    }
+}
+
+impl Iterator for RawEntryIter {
+    type Item = Result<RawEntryGuard>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if !self.include_current {
+                match self.state.take()?.next(false, &self.manager) {
+                    Ok(s) => self.state = s,
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            self.include_current = false;
+
+            let state = self.state.as_ref()?;
+            match state {
+                Leaf {
+                    page,
+                    fixed_key_size,
+                    fixed_value_size,
+                    entry,
+                    ..
+                } => {
+                    let accessor =
+                        LeafAccessor::new(page.memory(), *fixed_key_size, *fixed_value_size);
+                    if let Some((key_range, value_range)) = accessor.entry_ranges(*entry) {
+                        return Some(Ok(RawEntryGuard {
+                            page: page.clone(),
+                            key_range,
+                            value_range,
+                        }));
+                    }
+                }
+                Internal { .. } => {}
+            }
+        }
+    }
+}

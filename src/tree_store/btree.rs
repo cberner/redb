@@ -745,6 +745,16 @@ impl RawBtree {
         Ok(self.root.map_or(0, |x| x.length))
     }
 
+    /// Iterate all entries as raw key/value byte slices.
+    pub(crate) fn raw_iter(&self) -> Result<crate::tree_store::btree_iters::RawEntryIter> {
+        crate::tree_store::btree_iters::RawEntryIter::new(
+            self.root.map(|h| h.root),
+            self.fixed_key_size,
+            self.fixed_value_size,
+            self.mem.clone(),
+        )
+    }
+
     pub(crate) fn verify_checksum(&self) -> Result<bool> {
         if let Some(header) = self.root {
             self.verify_checksum_helper(header.root, header.checksum)
