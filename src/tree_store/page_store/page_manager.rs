@@ -4,6 +4,7 @@ use crate::tree_store::btree_base::{BtreeHeader, Checksum};
 use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, PageHint};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
+use crate::tree_store::page_store::compression::CompressionConfig;
 use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
 use crate::tree_store::page_store::header::{DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER};
 use crate::tree_store::page_store::layout::DatabaseLayout;
@@ -51,6 +52,11 @@ pub(crate) const FILE_FORMAT_VERSION2: u8 = 2;
 //   This is a system table. It is only written when a savepoint exists
 // * New persistent savepoint format
 pub(crate) const FILE_FORMAT_VERSION3: u8 = 3;
+// New file format:
+// * Adds transparent page-level compression (LZ4 / zstd)
+// * Compression algorithm stored in database header
+// * Compressed pages use page[1] as algorithm ID on disk
+pub(crate) const FILE_FORMAT_VERSION4: u8 = 4;
 
 #[derive(Copy, Clone)]
 pub(crate) enum ShrinkPolicy {
@@ -125,6 +131,8 @@ pub(crate) struct TransactionalMemory {
     // code path where there is no locking
     region_size: u64,
     region_header_with_padding_size: u64,
+    #[allow(dead_code)]
+    compression: CompressionConfig,
 }
 
 impl TransactionalMemory {
@@ -138,6 +146,7 @@ impl TransactionalMemory {
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
         read_only: bool,
+        compression: CompressionConfig,
     ) -> Result<Self, DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
@@ -148,7 +157,7 @@ impl TransactionalMemory {
         );
         assert!(region_size.is_power_of_two());
 
-        let storage = PagedCachedFile::new(
+        let mut storage = PagedCachedFile::new(
             file,
             page_size as u64,
             read_cache_size_bytes,
@@ -212,7 +221,7 @@ impl TransactionalMemory {
                 }
             }
 
-            let mut header = DatabaseHeader::new(layout, TransactionId::new(0));
+            let mut header = DatabaseHeader::new(layout, TransactionId::new(0), compression);
 
             header.recovery_required = false;
             header.two_phase_commit = true;
@@ -232,6 +241,10 @@ impl TransactionalMemory {
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
         let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
+        // For existing databases, the on-disk compression config takes precedence.
+        // This ensures we can always decompress pages written with the original algorithm.
+        let compression = header.compression;
+        storage.set_compression(compression);
 
         assert_eq!(header.page_size() as usize, page_size);
         assert!(storage.raw_file_len()? >= header.layout().len());
@@ -283,7 +296,13 @@ impl TransactionalMemory {
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,
+            compression,
         })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn compression(&self) -> CompressionConfig {
+        self.compression
     }
 
     pub(crate) fn cache_stats(&self) -> CacheStats {

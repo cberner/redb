@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
-    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, ReadOnlyBackend,
-    ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    BtreeHeader, CompressionConfig, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
+    ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -420,6 +420,7 @@ impl ReadOnlyDatabase {
         page_size: usize,
         region_size: Option<u64>,
         read_cache_size_bytes: usize,
+        compression: CompressionConfig,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -433,6 +434,7 @@ impl ReadOnlyDatabase {
             read_cache_size_bytes,
             0,
             true,
+            compression,
         )?;
         let mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
@@ -890,6 +892,7 @@ impl Database {
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
+        compression: CompressionConfig,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -903,6 +906,7 @@ impl Database {
             read_cache_size_bytes,
             write_cache_size_bytes,
             false,
+            compression,
         )?;
         let mut mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
@@ -1098,6 +1102,7 @@ pub struct Builder {
     region_size: Option<u64>,
     read_cache_size_bytes: usize,
     write_cache_size_bytes: usize,
+    compression: CompressionConfig,
     repair_callback: Box<dyn Fn(&mut RepairSession)>,
 }
 
@@ -1119,6 +1124,7 @@ impl Builder {
             read_cache_size_bytes: 0,
             // TODO: Default should probably take into account the total system memory
             write_cache_size_bytes: 0,
+            compression: CompressionConfig::None,
             repair_callback: Box::new(|_| {}),
         };
 
@@ -1170,6 +1176,18 @@ impl Builder {
         self
     }
 
+    /// Set the page compression algorithm.
+    ///
+    /// When creating a new database, pages will be compressed using this algorithm
+    /// before writing to disk. When opening an existing database, the compression
+    /// setting stored in the database header takes precedence.
+    ///
+    /// Requires the corresponding feature flag (`compression_lz4` or `compression_zstd`).
+    pub fn set_compression(&mut self, compression: CompressionConfig) -> &mut Self {
+        self.compression = compression;
+        self
+    }
+
     /// Opens the specified file as a redb database.
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
@@ -1190,6 +1208,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+            self.compression,
         )
     }
 
@@ -1205,6 +1224,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+            self.compression,
         )
     }
 
@@ -1224,6 +1244,7 @@ impl Builder {
             self.page_size,
             None,
             self.read_cache_size_bytes,
+            self.compression,
         )
     }
 
@@ -1239,6 +1260,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+            self.compression,
         )
     }
 
@@ -1255,6 +1277,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+            self.compression,
         )
     }
 }

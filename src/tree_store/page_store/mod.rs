@@ -3,6 +3,7 @@ mod base;
 mod bitmap;
 mod buddy_allocator;
 mod cached_file;
+pub(crate) mod compression;
 mod fast_hash;
 pub mod file_backend;
 mod header;
@@ -19,6 +20,7 @@ pub(crate) use backends::ReadOnlyBackend;
 pub(crate) use base::{
     MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PageTrackerPolicy,
 };
+pub use compression::CompressionConfig;
 pub(crate) use header::PAGE_SIZE;
 pub(crate) use page_manager::{
     FILE_FORMAT_VERSION3, ShrinkPolicy, TransactionalMemory, xxh3_checksum,
