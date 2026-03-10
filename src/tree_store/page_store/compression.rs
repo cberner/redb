@@ -430,16 +430,13 @@ mod tests {
         assert_eq!(stats.pages_skipped.load(Ordering::Relaxed), 1);
     }
 
+    #[cfg(feature = "compression_lz4")]
     #[test]
     fn small_page_skipped() {
         let page = make_test_page(64);
         let stats = CompressionStats::new();
-
-        #[cfg(feature = "compression_lz4")]
-        {
-            let config = CompressionConfig::Lz4;
-            assert!(compress_page(&page, config, &stats).is_none());
-        }
+        let config = CompressionConfig::Lz4;
+        assert!(compress_page(&page, config, &stats).is_none());
     }
 
     #[cfg(feature = "compression_lz4")]
