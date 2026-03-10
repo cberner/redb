@@ -5,6 +5,7 @@ use crate::tree_store::btree_base::{
 use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,
 };
+use crate::tree_store::page_store::compression::{CompressionConfig, compress_value};
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
     AccessGuardMutInPlace, BtreeHeader, PageNumber, PageTrackerPolicy, RawLeafBuilder,
@@ -53,6 +54,7 @@ pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
     mem: Arc<TransactionalMemory>,
     freed: &'b mut Vec<PageNumber>,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
+    compression: CompressionConfig,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
     _lifetime: PhantomData<&'a ()>,
@@ -64,6 +66,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         mem: Arc<TransactionalMemory>,
         freed: &'b mut Vec<PageNumber>,
         allocated: Arc<Mutex<PageTrackerPolicy>>,
+        compression: CompressionConfig,
     ) -> Self {
         Self {
             root,
@@ -71,6 +74,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             mem,
             freed,
             allocated,
+            compression,
             _key_type: Default::default(),
             _value_type: Default::default(),
             _lifetime: Default::default(),
@@ -84,6 +88,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         mem: Arc<TransactionalMemory>,
         freed: &'b mut Vec<PageNumber>,
         allocated: Arc<Mutex<PageTrackerPolicy>>,
+        compression: CompressionConfig,
     ) -> Self {
         Self {
             root,
@@ -91,9 +96,21 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             mem,
             freed,
             allocated,
+            compression,
             _key_type: Default::default(),
             _value_type: Default::default(),
             _lifetime: Default::default(),
+        }
+    }
+
+    /// Returns the effective value width for B-tree leaf layout.
+    /// When compression is enabled, values become variable-width (compressed sizes vary),
+    /// so we return `None` to force the leaf to use offset-pointer storage.
+    fn value_width(&self) -> Option<usize> {
+        if self.compression.is_enabled() {
+            None
+        } else {
+            V::fixed_width()
         }
     }
 
@@ -116,19 +133,19 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         }) = *self.root
         {
             let (deletion_result, found) =
-                self.delete_helper(self.mem.get_page(p)?, checksum, K::as_bytes(key).as_ref())?;
+                *self.delete_helper(self.mem.get_page(p)?, checksum, K::as_bytes(key).as_ref())?;
             let new_length = if found.is_some() { length - 1 } else { length };
             let new_root = match deletion_result {
                 Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum, new_length)),
                 DeletedLeaf => None,
                 PartialLeaf { page, deleted_pair } => {
-                    let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+                    let accessor = LeafAccessor::new(&page, K::fixed_width(), self.value_width());
                     let mut builder = LeafBuilder::new(
                         &self.mem,
                         &self.allocated,
                         accessor.num_pairs() - 1,
                         K::fixed_width(),
-                        V::fixed_width(),
+                        self.value_width(),
                     );
                     builder.push_all_except(&accessor, Some(deleted_pair));
                     let page = builder.build()?;
@@ -159,6 +176,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
     ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMutInPlace<'a, V>)> {
+        // Compress value bytes before storing in the B-tree.
+        // Shorter values → more fit per leaf → fewer pages → smaller files.
+        let raw_value_bytes = V::as_bytes(value);
+        let compressed_value = compress_value(raw_value_bytes.as_ref(), self.compression);
+        let value_bytes_ref = compressed_value.as_slice();
+
         let (new_root, old_value, guard) = if let Some(BtreeHeader {
             root: p,
             checksum,
@@ -169,7 +192,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 self.mem.get_page(p)?,
                 checksum,
                 K::as_bytes(key).as_ref(),
-                V::as_bytes(value).as_ref(),
+                value_bytes_ref,
             )?;
 
             let new_length = if result.old_value.is_some() {
@@ -192,23 +215,21 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             (new_root, result.old_value, result.inserted_value)
         } else {
             let key_bytes = K::as_bytes(key);
-            let value_bytes = V::as_bytes(value);
             let key_bytes = key_bytes.as_ref();
-            let value_bytes = value_bytes.as_ref();
             let mut builder = LeafBuilder::new(
                 &self.mem,
                 &self.allocated,
                 1,
                 K::fixed_width(),
-                V::fixed_width(),
+                self.value_width(),
             );
-            builder.push(key_bytes, value_bytes);
+            builder.push(key_bytes, value_bytes_ref);
             let page = builder.build()?;
 
-            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
             let offset = accessor.offset_of_first_value();
             let page_num = page.get_page_number();
-            let guard = AccessGuardMutInPlace::new(page, offset, value_bytes.len());
+            let guard = AccessGuardMutInPlace::new(page, offset, value_bytes_ref.len());
 
             (BtreeHeader::new(page_num, DEFERRED, 1), None, guard)
         };
@@ -222,11 +243,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         page_checksum: Checksum,
         key: &[u8],
         value: &[u8],
-    ) -> Result<InsertionResult<'a, V>> {
+    ) -> Result<Box<InsertionResult<'a, V>>> {
         let node_mem = page.memory();
         Ok(match node_mem[0] {
             LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                let accessor =
+                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
                 let (position, found) = accessor.position::<K>(key);
 
                 // Fast-path to avoid re-building and splitting pages with a single large value
@@ -238,17 +260,17 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         &self.allocated,
                         1,
                         K::fixed_width(),
-                        V::fixed_width(),
+                        self.value_width(),
                     );
                     builder.push(key, value);
                     let new_page = builder.build()?;
                     let new_page_number = new_page.get_page_number();
                     let new_page_accessor =
-                        LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
+                        LeafAccessor::new(new_page.memory(), K::fixed_width(), self.value_width());
                     let offset = new_page_accessor.offset_of_first_value();
                     let guard = AccessGuardMutInPlace::new(new_page, offset, value.len());
                     return if position == 0 {
-                        Ok(InsertionResult {
+                        Ok(Box::new(InsertionResult {
                             new_root: new_page_number,
                             root_checksum: DEFERRED,
                             additional_sibling: Some((
@@ -258,16 +280,16 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             )),
                             inserted_value: guard,
                             old_value: None,
-                        })
+                        }))
                     } else {
                         let split_key = accessor.last_entry().key().to_vec();
-                        Ok(InsertionResult {
+                        Ok(Box::new(InsertionResult {
                             new_root: page.get_page_number(),
                             root_checksum: page_checksum,
                             additional_sibling: Some((split_key, new_page_number, DEFERRED)),
                             inserted_value: guard,
                             old_value: None,
-                        })
+                        }))
                     };
                 }
 
@@ -279,7 +301,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         position,
                         found,
                         K::fixed_width(),
-                        V::fixed_width(),
+                        self.value_width(),
                         key,
                         value,
                     )
@@ -287,26 +309,33 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let page_number = page.get_page_number();
                     let existing_value = if found {
                         let copied_value = accessor.entry(position).unwrap().value().to_vec();
-                        Some(AccessGuard::with_owned_value(copied_value))
+                        if self.compression.is_enabled() {
+                            Some(AccessGuard::with_owned_value_decompress(copied_value)?)
+                        } else {
+                            Some(AccessGuard::with_owned_value(copied_value))
+                        }
                     } else {
                         None
                     };
                     drop(page);
                     let mut page_mut = self.mem.get_page_mut(page_number)?;
-                    let mut mutator =
-                        LeafMutator::new(page_mut.memory_mut(), K::fixed_width(), V::fixed_width());
+                    let mut mutator = LeafMutator::new(
+                        page_mut.memory_mut(),
+                        K::fixed_width(),
+                        self.value_width(),
+                    );
                     mutator.insert(position, found, key, value);
                     let new_page_accessor =
-                        LeafAccessor::new(page_mut.memory(), K::fixed_width(), V::fixed_width());
+                        LeafAccessor::new(page_mut.memory(), K::fixed_width(), self.value_width());
                     let offset = new_page_accessor.offset_of_value(position).unwrap();
                     let guard = AccessGuardMutInPlace::new(page_mut, offset, value.len());
-                    return Ok(InsertionResult {
+                    return Ok(Box::new(InsertionResult {
                         new_root: page_number,
                         root_checksum: DEFERRED,
                         additional_sibling: None,
                         inserted_value: guard,
                         old_value: existing_value,
-                    });
+                    }));
                 }
 
                 let mut builder = LeafBuilder::new(
@@ -314,7 +343,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     &self.allocated,
                     accessor.num_pairs() + 1,
                     K::fixed_width(),
-                    V::fixed_width(),
+                    self.value_width(),
                 );
                 for i in 0..accessor.num_pairs() {
                     if i == position {
@@ -339,10 +368,18 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             drop(page);
                             let mut allocated = self.allocated.lock().unwrap();
                             self.mem.free(page_number, &mut allocated);
-                            Some(AccessGuard::with_arc_page(arc, start..end))
+                            if self.compression.is_enabled() {
+                                Some(AccessGuard::with_arc_page_decompress(arc, start..end)?)
+                            } else {
+                                Some(AccessGuard::with_arc_page(arc, start..end))
+                            }
                         } else {
                             self.freed.push(page_number);
-                            Some(AccessGuard::with_page(page, start..end))
+                            if self.compression.is_enabled() {
+                                Some(AccessGuard::with_page_decompress(page, start..end)?)
+                            } else {
+                                Some(AccessGuard::with_page(page, start..end))
+                            }
                         }
                     } else {
                         drop(page);
@@ -352,17 +389,17 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                     let new_page_number = new_page.get_page_number();
                     let accessor =
-                        LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
+                        LeafAccessor::new(new_page.memory(), K::fixed_width(), self.value_width());
                     let offset = accessor.offset_of_value(position).unwrap();
                     let guard = AccessGuardMutInPlace::new(new_page, offset, value.len());
 
-                    InsertionResult {
+                    Box::new(InsertionResult {
                         new_root: new_page_number,
                         root_checksum: DEFERRED,
                         additional_sibling: None,
                         inserted_value: guard,
                         old_value: existing_value,
-                    }
+                    })
                 } else {
                     let (new_page1, split_key, new_page2) = builder.build_split()?;
                     let split_key = split_key.to_vec();
@@ -374,10 +411,18 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             drop(page);
                             let mut allocated = self.allocated.lock().unwrap();
                             self.mem.free(page_number, &mut allocated);
-                            Some(AccessGuard::with_arc_page(arc, start..end))
+                            if self.compression.is_enabled() {
+                                Some(AccessGuard::with_arc_page_decompress(arc, start..end)?)
+                            } else {
+                                Some(AccessGuard::with_arc_page(arc, start..end))
+                            }
                         } else {
                             self.freed.push(page_number);
-                            Some(AccessGuard::with_page(page, start..end))
+                            if self.compression.is_enabled() {
+                                Some(AccessGuard::with_page_decompress(page, start..end)?)
+                            } else {
+                                Some(AccessGuard::with_page(page, start..end))
+                            }
                         }
                     } else {
                         drop(page);
@@ -388,13 +433,13 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let new_page_number = new_page1.get_page_number();
                     let new_page_number2 = new_page2.get_page_number();
                     let accessor =
-                        LeafAccessor::new(new_page1.memory(), K::fixed_width(), V::fixed_width());
+                        LeafAccessor::new(new_page1.memory(), K::fixed_width(), self.value_width());
                     let division = accessor.num_pairs();
                     let guard = if position < division {
                         let accessor = LeafAccessor::new(
                             new_page1.memory(),
                             K::fixed_width(),
-                            V::fixed_width(),
+                            self.value_width(),
                         );
                         let offset = accessor.offset_of_value(position).unwrap();
                         AccessGuardMutInPlace::new(new_page1, offset, value.len())
@@ -402,19 +447,19 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         let accessor = LeafAccessor::new(
                             new_page2.memory(),
                             K::fixed_width(),
-                            V::fixed_width(),
+                            self.value_width(),
                         );
                         let offset = accessor.offset_of_value(position - division).unwrap();
                         AccessGuardMutInPlace::new(new_page2, offset, value.len())
                     };
 
-                    InsertionResult {
+                    Box::new(InsertionResult {
                         new_root: new_page_number,
                         root_checksum: DEFERRED,
                         additional_sibling: Some((split_key, new_page_number2, DEFERRED)),
                         inserted_value: guard,
                         old_value: existing_value,
-                    }
+                    })
                 }
             }
             BRANCH => {
@@ -437,13 +482,13 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         sub_result.new_root,
                         sub_result.root_checksum,
                     );
-                    return Ok(InsertionResult {
+                    return Ok(Box::new(InsertionResult {
                         new_root: mutpage.get_page_number(),
                         root_checksum: DEFERRED,
                         additional_sibling: None,
                         inserted_value: sub_result.inserted_value,
                         old_value: sub_result.old_value,
-                    });
+                    }));
                 }
 
                 // A child was added, or we couldn't use the fast-path above
@@ -491,7 +536,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                 let result = if builder.should_split() {
                     let (new_page1, split_key, new_page2) = builder.build_split()?;
-                    InsertionResult {
+                    Box::new(InsertionResult {
                         new_root: new_page1.get_page_number(),
                         root_checksum: DEFERRED,
                         additional_sibling: Some((
@@ -501,16 +546,16 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         )),
                         inserted_value: sub_result.inserted_value,
                         old_value: sub_result.old_value,
-                    }
+                    })
                 } else {
                     let new_page = builder.build()?;
-                    InsertionResult {
+                    Box::new(InsertionResult {
                         new_root: new_page.get_page_number(),
                         root_checksum: DEFERRED,
                         additional_sibling: None,
                         inserted_value: sub_result.inserted_value,
                         old_value: sub_result.old_value,
-                    }
+                    })
                 };
                 // Free the original page, since we've replaced it
                 let page_number = page.get_page_number();
@@ -530,10 +575,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
     ) -> Result<()> {
         assert!(self.modify_uncommitted);
         let header = self.root.expect("Key not found (tree is empty)");
+        let raw_value = V::as_bytes(value);
+        let stored_value = compress_value(raw_value.as_ref(), self.compression);
         self.insert_inplace_helper(
             self.mem.get_page_mut(header.root)?,
             K::as_bytes(key).as_ref(),
-            V::as_bytes(value).as_ref(),
+            &stored_value,
         )?;
         *self.root = Some(BtreeHeader::new(header.root, DEFERRED, header.length));
         Ok(())
@@ -545,13 +592,14 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                let accessor =
+                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
                 let (position, found) = accessor.position::<K>(key);
                 assert!(found);
                 let old_len = accessor.entry(position).unwrap().value().len();
                 assert!(value.len() <= old_len);
                 let mut mutator =
-                    LeafMutator::new(page.memory_mut(), K::fixed_width(), V::fixed_width());
+                    LeafMutator::new(page.memory_mut(), K::fixed_width(), self.value_width());
                 mutator.insert(position, true, key, value);
             }
             BRANCH => {
@@ -572,11 +620,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         page: PageImpl,
         checksum: Checksum,
         key: &[u8],
-    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
-        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+    ) -> Result<Box<(DeletionResult, Option<AccessGuard<'a, V>>)>> {
+        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
         let (position, found) = accessor.position::<K>(key);
         if !found {
-            return Ok((Subtree(page.get_page_number(), checksum), None));
+            return Ok(Box::new((Subtree(page.get_page_number(), checksum), None)));
         }
         let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
             - accessor.length_of_pairs(position, position + 1);
@@ -584,7 +632,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             accessor.num_pairs() - 1,
             new_kv_bytes,
             K::fixed_width(),
-            V::fixed_width(),
+            self.value_width(),
         );
         let uncommitted = self.mem.uncommitted(page.get_page_number());
 
@@ -599,14 +647,26 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             drop(page);
             let page_mut = self.mem.get_page_mut(page_number)?;
 
-            let guard = AccessGuard::remove_on_drop(
-                page_mut,
-                start,
-                end - start,
-                position,
-                K::fixed_width(),
-            );
-            return Ok((Subtree(page_number, DEFERRED), Some(guard)));
+            let guard = if self.compression.is_enabled() {
+                AccessGuard::remove_on_drop_decompress(
+                    page_mut,
+                    start,
+                    end - start,
+                    position,
+                    K::fixed_width(),
+                    self.value_width(),
+                )?
+            } else {
+                AccessGuard::remove_on_drop(
+                    page_mut,
+                    start,
+                    end - start,
+                    position,
+                    K::fixed_width(),
+                    self.value_width(),
+                )
+            };
+            return Ok(Box::new((Subtree(page_number, DEFERRED), Some(guard))));
         }
 
         let result = if accessor.num_pairs() == 1 {
@@ -624,7 +684,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 &self.allocated,
                 accessor.num_pairs() - 1,
                 K::fixed_width(),
-                V::fixed_width(),
+                self.value_width(),
             );
             for i in 0..accessor.num_pairs() {
                 if i == position {
@@ -643,14 +703,22 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             drop(page);
             let mut allocated = self.allocated.lock().unwrap();
             self.mem.free(page_number, &mut allocated);
-            Some(AccessGuard::with_arc_page(arc, start..end))
+            if self.compression.is_enabled() {
+                Some(AccessGuard::with_arc_page_decompress(arc, start..end)?)
+            } else {
+                Some(AccessGuard::with_arc_page(arc, start..end))
+            }
         } else {
             // Won't be freed until the end of the transaction, so returning the page
             // in the AccessGuard below is still safe
             self.freed.push(page.get_page_number());
-            Some(AccessGuard::with_page(page, start..end))
+            if self.compression.is_enabled() {
+                Some(AccessGuard::with_page_decompress(page, start..end)?)
+            } else {
+                Some(AccessGuard::with_page(page, start..end))
+            }
         };
-        Ok((result, guard))
+        Ok(Box::new((result, guard)))
     }
 
     fn finalize_branch_builder(
@@ -680,15 +748,15 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         page: PageImpl,
         checksum: Checksum,
         key: &[u8],
-    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+    ) -> Result<Box<(DeletionResult, Option<AccessGuard<'a, V>>)>> {
         let accessor = BranchAccessor::new(&page, K::fixed_width());
         let original_page_number = page.get_page_number();
         let (child_index, child_page_number) = accessor.child_for_key::<K>(key);
         let child_checksum = accessor.child_checksum(child_index).unwrap();
         let (result, found) =
-            self.delete_helper(self.mem.get_page(child_page_number)?, child_checksum, key)?;
+            *self.delete_helper(self.mem.get_page(child_page_number)?, child_checksum, key)?;
         if found.is_none() {
-            return Ok((Subtree(original_page_number, checksum), None));
+            return Ok(Box::new((Subtree(original_page_number, checksum), None)));
         }
         if let Subtree(new_child, new_child_checksum) = result {
             let result_page =
@@ -711,7 +779,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     self.conditional_free(original_page_number);
                     new_page.get_page_number()
                 };
-            return Ok((Subtree(result_page, DEFERRED), found));
+            return Ok(Box::new((Subtree(result_page, DEFERRED), found)));
         }
 
         // Child is requesting to be merged with a sibling
@@ -756,7 +824,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 deleted_pair,
             } => {
                 let partial_child_accessor =
-                    LeafAccessor::new(&partial_child_page, K::fixed_width(), V::fixed_width());
+                    LeafAccessor::new(&partial_child_page, K::fixed_width(), self.value_width());
                 debug_assert!(partial_child_accessor.num_pairs() > 1);
 
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
@@ -764,8 +832,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 let merge_with_page = self
                     .mem
                     .get_page(accessor.child_page(merge_with).unwrap())?;
-                let merge_with_accessor =
-                    LeafAccessor::new(merge_with_page.memory(), K::fixed_width(), V::fixed_width());
+                let merge_with_accessor = LeafAccessor::new(
+                    merge_with_page.memory(),
+                    K::fixed_width(),
+                    self.value_width(),
+                );
 
                 let single_large_value = merge_with_accessor.num_pairs() == 1
                     && merge_with_accessor.total_length() >= self.mem.get_page_size();
@@ -776,7 +847,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         &self.allocated,
                         partial_child_accessor.num_pairs() - 1,
                         K::fixed_width(),
-                        V::fixed_width(),
+                        self.value_width(),
                     );
                     child_builder.push_all_except(&partial_child_accessor, Some(deleted_pair));
                     let new_page = child_builder.build()?;
@@ -790,7 +861,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     // child_page_number does not need to be freed, because it's a leaf and the
                     // MutAccessGuard will free it
 
-                    return Ok((result, found));
+                    return Ok(Box::new((result, found)));
                 }
 
                 for i in 0..accessor.count_children() {
@@ -806,7 +877,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                             partial_child_accessor.num_pairs() - 1
                                 + merge_with_accessor.num_pairs(),
                             K::fixed_width(),
-                            V::fixed_width(),
+                            self.value_width(),
                         );
                         if child_index < merge_with {
                             child_builder
@@ -978,7 +1049,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         drop(page);
         self.conditional_free(original_page_number);
 
-        Ok((final_result, found))
+        Ok(Box::new((final_result, found)))
     }
 
     // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
@@ -988,7 +1059,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         page: PageImpl,
         checksum: Checksum,
         key: &[u8],
-    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+    ) -> Result<Box<(DeletionResult, Option<AccessGuard<'a, V>>)>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => self.delete_leaf_helper(page, checksum, key),

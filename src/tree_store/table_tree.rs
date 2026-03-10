@@ -77,7 +77,7 @@ impl TableTree {
         mem: Arc<TransactionalMemory>,
     ) -> Result<Self> {
         Ok(Self {
-            tree: Btree::new(master_root, page_hint, guard, mem.clone())?,
+            tree: Btree::new_uncompressed(master_root, page_hint, guard, mem.clone())?,
             mem,
         })
     }
@@ -101,11 +101,16 @@ impl TableTree {
                     fixed_value_size,
                     ..
                 } => {
+                    let effective_value_size = if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        fixed_value_size
+                    };
                     if let Some(header) = table_root
                         && !RawBtree::new(
                             Some(header),
                             fixed_key_size,
-                            fixed_value_size,
+                            effective_value_size,
                             self.mem.clone(),
                         )
                         .verify_checksum()?
@@ -119,10 +124,15 @@ impl TableTree {
                     fixed_value_size,
                     ..
                 } => {
+                    let effective_value_size = if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        fixed_value_size
+                    };
                     if !verify_tree_and_subtree_checksums(
                         table_root,
                         fixed_key_size,
-                        fixed_value_size,
+                        effective_value_size,
                         self.mem.clone(),
                     )? {
                         return Ok(false);
@@ -226,7 +236,7 @@ impl TableTreeMut<'_> {
         allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
     ) -> Self {
         Self {
-            tree: BtreeMut::new(
+            tree: BtreeMut::new_uncompressed(
                 master_root,
                 guard.clone(),
                 mem.clone(),
@@ -335,12 +345,19 @@ impl TableTreeMut<'_> {
                     fixed_value_size,
                     ..
                 } => {
+                    // When compression is enabled, values are stored variable-width
+                    // regardless of the original fixed_value_size
+                    let effective_value_size = if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        fixed_value_size
+                    };
                     let mut tree = UntypedBtreeMut::new(
                         new_root,
                         self.mem.clone(),
                         self.freed_pages.clone(),
                         fixed_key_size,
-                        fixed_value_size,
+                        effective_value_size,
                     );
                     *table_root = tree.finalize_dirty_checksums()?;
                     *table_length = new_length;
@@ -352,10 +369,15 @@ impl TableTreeMut<'_> {
                     fixed_value_size,
                     ..
                 } => {
+                    let effective_value_size = if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        fixed_value_size
+                    };
                     *table_root = finalize_tree_and_subtree_checksums(
                         new_root,
                         fixed_key_size,
-                        fixed_value_size,
+                        effective_value_size,
                         self.mem.clone(),
                     )?;
                     *table_length = new_length;
@@ -397,7 +419,9 @@ impl TableTreeMut<'_> {
         };
 
         // Open the table and call the provided closure on it
-        let mut tree: BtreeMut<K, V> = BtreeMut::new(
+        // Internal trees must not use value compression — insert_inplace requires
+        // deterministic value sizes, and compression would make them variable.
+        let mut tree: BtreeMut<K, V> = BtreeMut::new_uncompressed(
             table_root,
             self.guard.clone(),
             self.mem.clone(),
@@ -437,7 +461,9 @@ impl TableTreeMut<'_> {
         )?;
 
         // Create an empty table and call the provided closure on it
-        let mut tree: BtreeMut<K, V> = BtreeMut::new(
+        // Internal trees must not use value compression — insert_inplace requires
+        // deterministic value sizes, and compression would make them variable.
+        let mut tree: BtreeMut<K, V> = BtreeMut::new_uncompressed(
             None,
             self.guard.clone(),
             self.mem.clone(),
@@ -682,11 +708,16 @@ impl TableTreeMut<'_> {
                     fixed_value_size,
                     ..
                 } => {
+                    let effective_value_size = if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        fixed_value_size
+                    };
                     let subtree_stats = btree_stats(
                         table_root.map(|x| x.root),
                         &self.mem,
                         fixed_key_size,
-                        fixed_value_size,
+                        effective_value_size,
                     )?;
                     max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
                     total_stored_bytes += subtree_stats.stored_leaf_bytes;
@@ -701,11 +732,16 @@ impl TableTreeMut<'_> {
                     fixed_value_size,
                     ..
                 } => {
+                    let effective_value_size = if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        fixed_value_size
+                    };
                     let subtree_stats = multimap_btree_stats(
                         table_root.map(|x| x.root),
                         &self.mem,
                         fixed_key_size,
-                        fixed_value_size,
+                        effective_value_size,
                     )?;
                     max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
                     total_stored_bytes += subtree_stats.stored_leaf_bytes;

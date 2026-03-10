@@ -192,7 +192,13 @@ impl InternalTableDefinition {
                 fixed_value_size,
                 ..
             } => {
-                let tree = UntypedBtree::new(*table_root, mem, *fixed_key_size, *fixed_value_size);
+                let effective_value_size = if mem.compression().is_enabled() {
+                    None
+                } else {
+                    *fixed_value_size
+                };
+                let tree =
+                    UntypedBtree::new(*table_root, mem, *fixed_key_size, effective_value_size);
                 tree.visit_all_pages(visitor)?;
             }
             InternalTableDefinition::Multimap {
@@ -201,8 +207,13 @@ impl InternalTableDefinition {
                 fixed_value_size,
                 ..
             } => {
+                let effective_value_size = if mem.compression().is_enabled() {
+                    None
+                } else {
+                    *fixed_value_size
+                };
                 let tree =
-                    UntypedMultiBtree::new(*table_root, mem, *fixed_key_size, *fixed_value_size);
+                    UntypedMultiBtree::new(*table_root, mem, *fixed_key_size, effective_value_size);
                 tree.visit_all_pages(visitor)?;
             }
         }
@@ -217,19 +228,23 @@ impl InternalTableDefinition {
         relocation_map: &HashMap<PageNumber, PageNumber>,
     ) -> Result<Option<BtreeHeader>> {
         let original_root = self.private_get_root();
+        let effective_value_size = if mem.compression().is_enabled() {
+            None
+        } else {
+            self.private_get_fixed_value_size()
+        };
         let relocated_root = match self {
             InternalTableDefinition::Normal { table_root, .. } => *table_root,
             InternalTableDefinition::Multimap {
                 table_root,
                 fixed_key_size,
-                fixed_value_size,
                 ..
             } => {
                 if let Some(header) = table_root {
                     let (page_number, checksum) = relocate_subtrees(
                         (header.root, header.checksum),
                         *fixed_key_size,
-                        *fixed_value_size,
+                        effective_value_size,
                         mem.clone(),
                         freed_pages.clone(),
                         relocation_map,
@@ -245,7 +260,7 @@ impl InternalTableDefinition {
             mem,
             freed_pages,
             self.private_get_fixed_key_size(),
-            self.private_get_fixed_value_size(),
+            effective_value_size,
         );
         tree.relocate(relocation_map)?;
         if tree.get_root() != original_root {

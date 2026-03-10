@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
-    BtreeHeader, CompressionConfig, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
-    ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    Btree, BtreeHeader, CompressionConfig, InternalTableDefinition, PAGE_SIZE, PageHint,
+    PageNumber, ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -691,13 +691,14 @@ impl Database {
             let InternalTableDefinition::Normal { table_root, .. } = table_def else {
                 unreachable!()
             };
-            let table: ReadOnlyTable<TransactionIdWithPagination, PageList> = ReadOnlyTable::new(
-                DATA_ALLOCATED_TABLE.name().to_string(),
-                table_root,
-                PageHint::None,
-                Arc::new(TransactionGuard::fake()),
-                mem.clone(),
-            )?;
+            let table: ReadOnlyTable<TransactionIdWithPagination, PageList> =
+                ReadOnlyTable::new_uncompressed(
+                    DATA_ALLOCATED_TABLE.name().to_string(),
+                    table_root,
+                    PageHint::None,
+                    Arc::new(TransactionGuard::fake()),
+                    mem.clone(),
+                )?;
             for result in table.range::<TransactionIdWithPagination>(..)? {
                 let (_, pages) = result?;
                 for i in 0..pages.value().len() {
@@ -742,7 +743,7 @@ impl Database {
                 InternalTableDefinition::Multimap { .. } => unreachable!(),
             };
             let table: ReadOnlyTable<TransactionIdWithPagination, PageList<'static>> =
-                ReadOnlyTable::new(
+                ReadOnlyTable::new_uncompressed(
                     table_name.to_string(),
                     table_root,
                     PageHint::None,
@@ -994,7 +995,7 @@ impl Database {
         let InternalTableDefinition::Normal { table_root, .. } = allocator_state_table else {
             unreachable!();
         };
-        let tree = AllocatorStateTree::new(
+        let tree = Btree::new_uncompressed(
             table_root,
             PageHint::None,
             Arc::new(TransactionGuard::fake()),

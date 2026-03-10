@@ -1,8 +1,11 @@
+use crate::tree_store::page_store::compression::{
+    CompressionConfig, compress_value, decompress_value,
+};
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory, xxh3_checksum};
 use crate::tree_store::{PageNumber, PageTrackerPolicy};
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::mem::size_of;
@@ -139,6 +142,7 @@ enum OnDrop {
     RemoveEntry {
         position: usize,
         fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
     },
 }
 
@@ -168,6 +172,9 @@ pub struct AccessGuard<'a, V: Value + 'static> {
     offset: usize,
     len: usize,
     on_drop: OnDrop,
+    // Boxed to minimize struct size — AccessGuard is returned from recursive B-tree
+    // operations, and every byte matters for stack depth on Windows (1MB default stack).
+    decompressed_value: Option<Box<[u8]>>,
     _value_type: PhantomData<V>,
     // Used so that logical references into a Table respect the appropriate lifetime
     _lifetime: PhantomData<&'a ()>,
@@ -180,8 +187,22 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
             offset: range.start,
             len: range.len(),
             on_drop: OnDrop::None,
+            decompressed_value: None,
             _value_type: Default::default(),
             _lifetime: Default::default(),
+        }
+    }
+
+    /// Construct an `AccessGuard` for a value, decompressing if needed.
+    /// Only call for values from compressed databases.
+    pub(crate) fn with_page_decompress(page: PageImpl, range: Range<usize>) -> Result<Self> {
+        let raw = &page.memory()[range.clone()];
+        match decompress_value(raw)? {
+            Cow::Borrowed(_) => {
+                // Uncompressed passthrough — flags byte stripped, data starts at offset+1
+                Ok(Self::with_page(page, (range.start + 1)..range.end))
+            }
+            Cow::Owned(decompressed) => Ok(Self::with_owned_value(decompressed)),
         }
     }
 
@@ -191,8 +212,21 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
             offset: range.start,
             len: range.len(),
             on_drop: OnDrop::None,
+            decompressed_value: None,
             _value_type: Default::default(),
             _lifetime: Default::default(),
+        }
+    }
+
+    /// Construct an `AccessGuard` for a value from an Arc page, decompressing if needed.
+    pub(crate) fn with_arc_page_decompress(page: Arc<[u8]>, range: Range<usize>) -> Result<Self> {
+        let raw = &page[range.clone()];
+        match decompress_value(raw)? {
+            Cow::Borrowed(_) => {
+                // Uncompressed — flags byte stripped, skip 1 byte
+                Ok(Self::with_arc_page(page, (range.start + 1)..range.end))
+            }
+            Cow::Owned(decompressed) => Ok(Self::with_owned_value(decompressed)),
         }
     }
 
@@ -203,8 +237,20 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
             offset: 0,
             len,
             on_drop: OnDrop::None,
+            decompressed_value: None,
             _value_type: Default::default(),
             _lifetime: Default::default(),
+        }
+    }
+
+    /// Construct an `AccessGuard` with an owned value, decompressing if needed.
+    pub(crate) fn with_owned_value_decompress(value: Vec<u8>) -> Result<Self> {
+        match decompress_value(&value)? {
+            Cow::Borrowed(_) => {
+                // Not compressed envelope — strip flags byte
+                Ok(Self::with_owned_value(value[1..].to_vec()))
+            }
+            Cow::Owned(decompressed) => Ok(Self::with_owned_value(decompressed)),
         }
     }
 
@@ -214,6 +260,7 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
         len: usize,
         position: usize,
         fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
     ) -> Self {
         Self {
             page: EitherPage::Mutable(page),
@@ -222,15 +269,53 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
             on_drop: OnDrop::RemoveEntry {
                 position,
                 fixed_key_size,
+                fixed_value_size,
             },
+            decompressed_value: None,
             _value_type: Default::default(),
             _lifetime: Default::default(),
         }
     }
 
+    /// Construct a remove-on-drop `AccessGuard` with decompression.
+    pub(super) fn remove_on_drop_decompress(
+        page: PageMut,
+        offset: usize,
+        len: usize,
+        position: usize,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+    ) -> Result<Self> {
+        let raw = &page.memory()[offset..(offset + len)];
+        let decompressed_value = match decompress_value(raw)? {
+            Cow::Borrowed(_) => {
+                // Uncompressed — strip flags byte
+                Some(raw[1..].to_vec().into_boxed_slice())
+            }
+            Cow::Owned(decompressed) => Some(decompressed.into_boxed_slice()),
+        };
+        Ok(Self {
+            page: EitherPage::Mutable(page),
+            offset,
+            len,
+            on_drop: OnDrop::RemoveEntry {
+                position,
+                fixed_key_size,
+                fixed_value_size,
+            },
+            decompressed_value,
+            _value_type: Default::default(),
+            _lifetime: Default::default(),
+        })
+    }
+
     /// Access the stored value
     pub fn value(&self) -> V::SelfType<'_> {
-        V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+        if let Some(ref decompressed) = self.decompressed_value {
+            V::from_bytes(decompressed)
+        } else {
+            V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+        }
     }
 }
 
@@ -241,10 +326,11 @@ impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
             OnDrop::RemoveEntry {
                 position,
                 fixed_key_size,
+                fixed_value_size,
             } => {
                 if let EitherPage::Mutable(ref mut mut_page) = self.page {
                     let mut mutator =
-                        LeafMutator::new(mut_page.memory_mut(), fixed_key_size, V::fixed_width());
+                        LeafMutator::new(mut_page.memory_mut(), fixed_key_size, fixed_value_size);
                     mutator.remove(position);
                 } else if !thread::panicking() {
                     unreachable!();
@@ -264,6 +350,9 @@ pub struct AccessGuardMut<'a, V: Value + 'static> {
     allocated: Arc<Mutex<PageTrackerPolicy>>,
     root_ref: &'a mut BtreeHeader,
     key_width: Option<usize>,
+    fixed_value_size: Option<usize>,
+    compression: CompressionConfig,
+    decompressed_value: Option<Box<[u8]>>,
     _value_type: PhantomData<V>,
 }
 
@@ -279,12 +368,24 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
         allocated: Arc<Mutex<PageTrackerPolicy>>,
         root_ref: &'a mut BtreeHeader,
         key_width: Option<usize>,
-    ) -> Self {
+        fixed_value_size: Option<usize>,
+        compression: CompressionConfig,
+    ) -> Result<Self> {
         assert!(mem.uncommitted(page.get_page_number()));
         if let Some((ref parent_page, _)) = parent {
             assert!(mem.uncommitted(parent_page.get_page_number()));
         }
-        AccessGuardMut {
+        let decompressed_value = if compression.is_enabled() && len > 0 {
+            let raw = &page.memory()[offset..(offset + len)];
+            let decompressed = decompress_value(raw)?;
+            match decompressed {
+                Cow::Borrowed(_) => None,
+                Cow::Owned(v) => Some(v.into_boxed_slice()),
+            }
+        } else {
+            None
+        };
+        Ok(AccessGuardMut {
             page,
             offset,
             len,
@@ -294,22 +395,37 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             allocated,
             root_ref,
             key_width,
+            fixed_value_size,
+            compression,
+            decompressed_value,
             _value_type: Default::default(),
-        }
+        })
     }
 
     /// Access the stored value
     pub fn value(&self) -> V::SelfType<'_> {
-        V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+        if let Some(ref decompressed) = self.decompressed_value {
+            V::from_bytes(decompressed)
+        } else if self.compression.is_enabled() && self.len > 0 {
+            // Flags byte 0x00 passthrough: strip it
+            V::from_bytes(&self.page.memory()[(self.offset + 1)..(self.offset + self.len)])
+        } else {
+            V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+        }
     }
 
     /// Replace the stored value
     pub fn insert<'v>(&mut self, value: impl Borrow<V::SelfType<'v>>) -> Result<()> {
-        let value_bytes = V::as_bytes(value.borrow());
+        let raw_value_bytes = V::as_bytes(value.borrow());
+        let stored_value = if self.compression.is_enabled() {
+            compress_value(raw_value_bytes.as_ref(), self.compression)
+        } else {
+            raw_value_bytes.as_ref().to_vec()
+        };
 
-        // TODO: optimize this to avoid copying the key
         let key_bytes = {
-            let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
+            let accessor =
+                LeafAccessor::new(self.page.memory(), self.key_width, self.fixed_value_size);
             accessor.key_unchecked(self.entry_index).to_vec()
         };
 
@@ -318,26 +434,30 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             self.entry_index,
             true,
             self.key_width,
-            V::fixed_width(),
+            self.fixed_value_size,
             key_bytes.as_slice(),
-            value_bytes.as_ref(),
+            &stored_value,
         ) {
-            let mut mutator =
-                LeafMutator::new(self.page.memory_mut(), self.key_width, V::fixed_width());
-            mutator.insert(self.entry_index, true, &key_bytes, value_bytes.as_ref());
+            let mut mutator = LeafMutator::new(
+                self.page.memory_mut(),
+                self.key_width,
+                self.fixed_value_size,
+            );
+            mutator.insert(self.entry_index, true, &key_bytes, &stored_value);
         } else {
-            let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
+            let accessor =
+                LeafAccessor::new(self.page.memory(), self.key_width, self.fixed_value_size);
             let mut builder = LeafBuilder::new(
                 &self.mem,
                 &self.allocated,
                 accessor.num_pairs(),
                 self.key_width,
-                V::fixed_width(),
+                self.fixed_value_size,
             );
 
             for i in 0..accessor.num_pairs() {
                 if i == self.entry_index {
-                    builder.push(&key_bytes, value_bytes.as_ref());
+                    builder.push(&key_bytes, &stored_value);
                 } else {
                     let entry = accessor.entry(i).unwrap();
                     builder.push(entry.key(), entry.value());
@@ -365,11 +485,23 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
         }
 
         // Update our page reference to the new page and recalculate offset/length
-        let new_accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
+        let new_accessor =
+            LeafAccessor::new(self.page.memory(), self.key_width, self.fixed_value_size);
         let (new_start, new_end) = new_accessor.value_range(self.entry_index).unwrap();
 
         self.offset = new_start;
         self.len = new_end - new_start;
+
+        // Update decompressed value cache
+        if self.compression.is_enabled() && self.len > 0 {
+            let raw = &self.page.memory()[self.offset..(self.offset + self.len)];
+            self.decompressed_value = match decompress_value(raw)? {
+                Cow::Borrowed(_) => None,
+                Cow::Owned(v) => Some(v.into_boxed_slice()),
+            };
+        } else {
+            self.decompressed_value = None;
+        }
 
         Ok(())
     }

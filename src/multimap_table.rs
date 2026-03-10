@@ -652,7 +652,17 @@ impl<V: Key> DynamicCollection<V> {
             SubtreeV2 => {
                 let root = collection.value().as_subtree().root;
                 MultimapValue::new_subtree(
-                    BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), Some(root), mem)?,
+                    BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                        &(..),
+                        Some(root),
+                        if mem.compression().is_enabled() {
+                            None
+                        } else {
+                            <() as Value>::fixed_width()
+                        },
+                        mem,
+                        false,
+                    )?,
                     collection.value().get_num_values(),
                     guard,
                 )
@@ -680,7 +690,13 @@ impl<V: Key> DynamicCollection<V> {
                 let inner = BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     Some(root),
+                    if mem.compression().is_enabled() {
+                        None
+                    } else {
+                        <() as Value>::fixed_width()
+                    },
                     mem.clone(),
+                    false,
                 )?;
                 MultimapValue::new_subtree_free_on_drop(
                     inner,
@@ -909,8 +925,12 @@ impl<'a, K: Key + 'static, V: Key + 'static> Iterator for MultimapRange<'a, K, V
         match self.inner.next()? {
             Ok(entry) => {
                 let key = AccessGuard::with_owned_value(entry.key_data());
-                let (page, _, value_range) = entry.into_raw();
-                let collection = AccessGuard::with_page(page, value_range);
+                let (page, _, value_range, decompressed_value) = entry.into_raw();
+                let collection = if let Some(bytes) = decompressed_value {
+                    AccessGuard::with_owned_value(bytes)
+                } else {
+                    AccessGuard::with_page(page, value_range)
+                };
                 Some(
                     DynamicCollection::iter(
                         collection,
@@ -930,8 +950,12 @@ impl<K: Key + 'static, V: Key + 'static> DoubleEndedIterator for MultimapRange<'
         match self.inner.next_back()? {
             Ok(entry) => {
                 let key = AccessGuard::with_owned_value(entry.key_data());
-                let (page, _, value_range) = entry.into_raw();
-                let collection = AccessGuard::with_page(page, value_range);
+                let (page, _, value_range, decompressed_value) = entry.into_raw();
+                let collection = if let Some(bytes) = decompressed_value {
+                    AccessGuard::with_owned_value(bytes)
+                } else {
+                    AccessGuard::with_page(page, value_range)
+                };
                 Some(
                     DynamicCollection::iter(
                         collection,
@@ -1338,7 +1362,17 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
             )?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    &(..),
+                    None,
+                    if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        <() as Value>::fixed_width()
+                    },
+                    self.mem.clone(),
+                    false,
+                )?,
                 0,
                 self.transaction.transaction_guard(),
             )
@@ -1380,7 +1414,17 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
             DynamicCollection::iter(collection, guard, self.mem.clone())?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    &(..),
+                    None,
+                    if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        <() as Value>::fixed_width()
+                    },
+                    self.mem.clone(),
+                    false,
+                )?,
                 0,
                 guard,
             )
@@ -1519,7 +1563,17 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
             DynamicCollection::iter(collection, self.transaction_guard.clone(), self.mem.clone())?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    &(..),
+                    None,
+                    if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        <() as Value>::fixed_width()
+                    },
+                    self.mem.clone(),
+                    false,
+                )?,
                 0,
                 self.transaction_guard.clone(),
             )
@@ -1576,7 +1630,17 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
             DynamicCollection::iter(collection, self.transaction_guard.clone(), self.mem.clone())?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    &(..),
+                    None,
+                    if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        <() as Value>::fixed_width()
+                    },
+                    self.mem.clone(),
+                    false,
+                )?,
                 0,
                 self.transaction_guard.clone(),
             )

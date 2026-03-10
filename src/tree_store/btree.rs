@@ -5,6 +5,7 @@ use crate::tree_store::btree_base::{
 };
 use crate::tree_store::btree_iters::BtreeExtractIf;
 use crate::tree_store::btree_mutator::MutateHelper;
+use crate::tree_store::page_store::compression::CompressionConfig;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::{
     AccessGuardMutInPlace, AllPageNumbersBtreeIter, BtreeRangeIter, PageHint, PageNumber,
@@ -324,6 +325,7 @@ pub(crate) struct BtreeMut<'a, K: Key + 'static, V: Value + 'static> {
     root: Option<BtreeHeader>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+    compression_override: Option<CompressionConfig>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
     _lifetime: PhantomData<&'a ()>,
@@ -343,9 +345,45 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             root,
             freed_pages,
             allocated_pages,
+            compression_override: None,
             _key_type: Default::default(),
             _value_type: Default::default(),
             _lifetime: Default::default(),
+        }
+    }
+
+    /// Create a `BtreeMut` that never compresses values, regardless of database config.
+    /// Used for internal metadata trees (table tree, allocator state).
+    pub(crate) fn new_uncompressed(
+        root: Option<BtreeHeader>,
+        guard: Arc<TransactionGuard>,
+        mem: Arc<TransactionalMemory>,
+        freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+        allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+    ) -> Self {
+        Self {
+            mem,
+            transaction_guard: guard,
+            root,
+            freed_pages,
+            allocated_pages,
+            compression_override: Some(CompressionConfig::None),
+            _key_type: Default::default(),
+            _value_type: Default::default(),
+            _lifetime: Default::default(),
+        }
+    }
+
+    fn compression(&self) -> CompressionConfig {
+        self.compression_override
+            .unwrap_or_else(|| self.mem.compression())
+    }
+
+    fn value_width(&self) -> Option<usize> {
+        if self.compression().is_enabled() {
+            None
+        } else {
+            V::fixed_width()
         }
     }
 
@@ -355,7 +393,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.mem.clone(),
             self.freed_pages.clone(),
             K::fixed_width(),
-            V::fixed_width(),
+            self.value_width(),
         );
         self.root = tree.finalize_dirty_checksums()?;
         Ok(self.root)
@@ -367,7 +405,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             Ok(Some(AllPageNumbersBtreeIter::new(
                 root,
                 K::fixed_width(),
-                V::fixed_width(),
+                self.value_width(),
                 self.mem.clone(),
             )?))
         } else {
@@ -399,7 +437,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.mem.clone(),
             self.freed_pages.clone(),
             K::fixed_width(),
-            V::fixed_width(),
+            self.value_width(),
         );
         if tree.relocate(relocation_map)? {
             self.root = tree.get_root();
@@ -421,12 +459,14 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             key,
             V::as_bytes(value).as_ref().len()
         );
+        let compression = self.compression();
         let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             &mut self.root,
             self.mem.clone(),
             freed_pages.as_mut(),
             self.allocated_pages.clone(),
+            compression,
         );
         let (old_value, _) = operation.insert(key, value)?;
         Ok(old_value)
@@ -441,6 +481,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
     ) -> Result<()> {
+        let compression = self.compression();
         let mut fake_freed_pages = vec![];
         let fake_allocated_pages = Arc::new(Mutex::new(PageTrackerPolicy::Closed));
         let mut operation = MutateHelper::<K, V>::new(
@@ -448,6 +489,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.mem.clone(),
             fake_freed_pages.as_mut(),
             fake_allocated_pages,
+            compression,
         );
         operation.insert_inplace(key, value)?;
         assert!(fake_freed_pages.is_empty());
@@ -457,12 +499,14 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     pub(crate) fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'_, V>>> {
         #[cfg(feature = "logging")]
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
+        let compression = self.compression();
         let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             &mut self.root,
             self.mem.clone(),
             freed_pages.as_mut(),
             self.allocated_pages.clone(),
+            compression,
         );
         let result = operation.delete(key)?;
         Ok(result)
@@ -478,17 +522,26 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.get_root().map(|x| x.root),
             &self.mem,
             K::fixed_width(),
-            V::fixed_width(),
+            self.value_width(),
         )
     }
 
     fn read_tree(&self) -> Result<Btree<K, V>> {
-        Btree::new(
-            self.get_root(),
-            PageHint::None,
-            self.transaction_guard.clone(),
-            self.mem.clone(),
-        )
+        if self.compression_override == Some(CompressionConfig::None) {
+            Btree::new_uncompressed(
+                self.get_root(),
+                PageHint::None,
+                self.transaction_guard.clone(),
+                self.mem.clone(),
+            )
+        } else {
+            Btree::new(
+                self.get_root(),
+                PageHint::None,
+                self.transaction_guard.clone(),
+                self.mem.clone(),
+            )
+        }
     }
 
     pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'_, V>>> {
@@ -537,7 +590,9 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                let value_width = self.value_width();
+                let compression = self.compression();
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), value_width);
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
                     let (start, end) = accessor.value_range(entry_index).unwrap();
                     let guard = AccessGuardMut::new(
@@ -550,7 +605,9 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                         self.allocated_pages.clone(),
                         self.root.as_mut().unwrap(),
                         K::fixed_width(),
-                    );
+                        value_width,
+                        compression,
+                    )?;
                     Ok(Some(guard))
                 } else {
                     Ok(None)
@@ -625,6 +682,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         K: 'a0,
     {
         let iter = self.range(range)?;
+        let compression = self.compression();
 
         let result = BtreeExtractIf::new(
             &mut self.root,
@@ -633,6 +691,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.freed_pages.clone(),
             self.allocated_pages.clone(),
             self.mem.clone(),
+            compression,
         );
 
         Ok(result)
@@ -648,6 +707,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     {
         let iter = self.range(&range)?;
         let mut freed = vec![];
+        let compression = self.compression();
         // Do not modify the existing tree, because we're iterating over it concurrently with the removals
         // TODO: optimize this to iterate and remove at the same time
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new_do_not_modify(
@@ -655,6 +715,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.mem.clone(),
             &mut freed,
             self.allocated_pages.clone(),
+            compression,
         );
         for entry in iter {
             let entry = entry?;
@@ -692,6 +753,7 @@ impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
             "Btree(root={:?}): Inserting {:?} with {} reserved bytes for the value",
             &self.root, key, value_length
         );
+        let compression = self.compression();
         let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut value = vec![0u8; value_length];
         V::initialize(&mut value);
@@ -700,6 +762,7 @@ impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
             self.mem.clone(),
             freed_pages.as_mut(),
             self.allocated_pages.clone(),
+            compression,
         );
         let (_, guard) = operation.insert(key, &V::from_bytes(&value))?;
         Ok(guard)
@@ -811,6 +874,7 @@ pub(crate) struct Btree<K: Key + 'static, V: Value + 'static> {
     cached_root: Option<PageImpl>,
     root: Option<BtreeHeader>,
     hint: PageHint,
+    compression_override: Option<CompressionConfig>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
@@ -833,9 +897,46 @@ impl<K: Key, V: Value> Btree<K, V> {
             cached_root,
             root,
             hint,
+            compression_override: None,
             _key_type: Default::default(),
             _value_type: Default::default(),
         })
+    }
+
+    pub(crate) fn new_uncompressed(
+        root: Option<BtreeHeader>,
+        hint: PageHint,
+        guard: Arc<TransactionGuard>,
+        mem: Arc<TransactionalMemory>,
+    ) -> Result<Self> {
+        let cached_root = if let Some(header) = root {
+            Some(mem.get_page_extended(header.root, hint)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            mem,
+            transaction_guard: guard,
+            cached_root,
+            root,
+            hint,
+            compression_override: Some(CompressionConfig::None),
+            _key_type: Default::default(),
+            _value_type: Default::default(),
+        })
+    }
+
+    fn compression(&self) -> CompressionConfig {
+        self.compression_override
+            .unwrap_or_else(|| self.mem.compression())
+    }
+
+    fn value_width(&self) -> Option<usize> {
+        if self.compression().is_enabled() {
+            None
+        } else {
+            V::fixed_width()
+        }
     }
 
     pub(crate) fn transaction_guard(&self) -> &Arc<TransactionGuard> {
@@ -850,7 +951,7 @@ impl<K: Key, V: Value> Btree<K, V> {
         RawBtree::new(
             self.get_root(),
             K::fixed_width(),
-            V::fixed_width(),
+            self.value_width(),
             self.mem.clone(),
         )
         .verify_checksum()
@@ -864,7 +965,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             self.root,
             self.mem.clone(),
             K::fixed_width(),
-            V::fixed_width(),
+            self.value_width(),
         );
         tree.visit_all_pages(visitor)
     }
@@ -882,10 +983,15 @@ impl<K: Key, V: Value> Btree<K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                let accessor =
+                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
                     let (start, end) = accessor.value_range(entry_index).unwrap();
-                    let guard = AccessGuard::with_page(page, start..end);
+                    let guard = if self.compression().is_enabled() {
+                        AccessGuard::with_page_decompress(page, start..end)?
+                    } else {
+                        AccessGuard::with_page(page, start..end)
+                    };
                     Ok(Some(guard))
                 } else {
                     Ok(None)
@@ -917,10 +1023,15 @@ impl<K: Key, V: Value> Btree<K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                let accessor =
+                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
                 let (key_range, value_range) = accessor.entry_ranges(0).unwrap();
                 let key_guard = AccessGuard::with_page(page.clone(), key_range);
-                let value_guard = AccessGuard::with_page(page, value_range);
+                let value_guard = if self.compression().is_enabled() {
+                    AccessGuard::with_page_decompress(page, value_range)?
+                } else {
+                    AccessGuard::with_page(page, value_range)
+                };
                 Ok(Some((key_guard, value_guard)))
             }
             BRANCH => {
@@ -949,11 +1060,16 @@ impl<K: Key, V: Value> Btree<K, V> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                let accessor =
+                    LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width());
                 let (key_range, value_range) =
                     accessor.entry_ranges(accessor.num_pairs() - 1).unwrap();
                 let key_guard = AccessGuard::with_page(page.clone(), key_range);
-                let value_guard = AccessGuard::with_page(page, value_range);
+                let value_guard = if self.compression().is_enabled() {
+                    AccessGuard::with_page_decompress(page, value_range)?
+                } else {
+                    AccessGuard::with_page(page, value_range)
+                };
                 Ok(Some((key_guard, value_guard)))
             }
             BRANCH => {
@@ -969,7 +1085,13 @@ impl<K: Key, V: Value> Btree<K, V> {
         &self,
         range: &'_ T,
     ) -> Result<BtreeRangeIter<K, V>> {
-        BtreeRangeIter::new(range, self.root.map(|x| x.root), self.mem.clone())
+        BtreeRangeIter::new(
+            range,
+            self.root.map(|x| x.root),
+            self.value_width(),
+            self.mem.clone(),
+            self.compression().is_enabled(),
+        )
     }
 
     pub(crate) fn len(&self) -> Result<u64> {
@@ -981,7 +1103,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             self.root.map(|x| x.root),
             &self.mem,
             K::fixed_width(),
-            V::fixed_width(),
+            self.value_width(),
         )
     }
 
@@ -996,7 +1118,7 @@ impl<K: Key, V: Value> Btree<K, V> {
                     match node_mem[0] {
                         LEAF => {
                             eprint!("Leaf[ (page={:?})", page.get_page_number());
-                            LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width())
+                            LeafAccessor::new(page.memory(), K::fixed_width(), self.value_width())
                                 .print_node::<K, V>(include_values);
                             eprint!("]");
                         }

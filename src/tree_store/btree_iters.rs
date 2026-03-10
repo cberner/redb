@@ -3,11 +3,12 @@ use crate::tree_store::btree_base::{BRANCH, LEAF};
 use crate::tree_store::btree_base::{BranchAccessor, LeafAccessor};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::btree_mutator::MutateHelper;
+use crate::tree_store::page_store::compression::{CompressionConfig, decompress_value};
 use crate::tree_store::page_store::{Page, PageImpl, TransactionalMemory};
 use crate::tree_store::{BtreeHeader, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, Value};
 use Bound::{Excluded, Included, Unbounded};
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::collections::Bound;
 use std::marker::PhantomData;
 use std::ops::{Range, RangeBounds};
@@ -124,7 +125,7 @@ impl RangeIterState {
         }
     }
 
-    fn get_entry<K: Key, V: Value>(&self) -> Option<EntryGuard<K, V>> {
+    fn get_entry<K: Key, V: Value>(&self, compression_enabled: bool) -> Option<EntryGuard<K, V>> {
         match self {
             Leaf {
                 page,
@@ -136,7 +137,12 @@ impl RangeIterState {
                 let (key, value) =
                     LeafAccessor::new(page.memory(), *fixed_key_size, *fixed_value_size)
                         .entry_ranges(*entry)?;
-                Some(EntryGuard::new(page.clone(), key, value))
+                Some(EntryGuard::new(
+                    page.clone(),
+                    key,
+                    value,
+                    compression_enabled,
+                ))
             }
             Internal { .. } => None,
         }
@@ -147,16 +153,33 @@ pub(crate) struct EntryGuard<K: Key, V: Value> {
     page: PageImpl,
     key_range: Range<usize>,
     value_range: Range<usize>,
+    decompressed_value: Option<Vec<u8>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
 impl<K: Key, V: Value> EntryGuard<K, V> {
-    fn new(page: PageImpl, key_range: Range<usize>, value_range: Range<usize>) -> Self {
+    fn new(
+        page: PageImpl,
+        key_range: Range<usize>,
+        value_range: Range<usize>,
+        compression_enabled: bool,
+    ) -> Self {
+        let decompressed_value = if compression_enabled {
+            let raw = &page.memory()[value_range.clone()];
+            match decompress_value(raw) {
+                Ok(Cow::Owned(decompressed)) => Some(decompressed),
+                // Borrowed (uncompressed) or error — defer to value() call
+                _ => None,
+            }
+        } else {
+            None
+        };
         Self {
             page,
             key_range,
             value_range,
+            decompressed_value,
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -171,11 +194,20 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
     }
 
     pub(crate) fn value(&self) -> V::SelfType<'_> {
-        V::from_bytes(&self.page.memory()[self.value_range.clone()])
+        if let Some(ref decompressed) = self.decompressed_value {
+            V::from_bytes(decompressed)
+        } else {
+            V::from_bytes(&self.page.memory()[self.value_range.clone()])
+        }
     }
 
-    pub(crate) fn into_raw(self) -> (PageImpl, Range<usize>, Range<usize>) {
-        (self.page, self.key_range, self.value_range)
+    pub(crate) fn into_raw(self) -> (PageImpl, Range<usize>, Range<usize>, Option<Vec<u8>>) {
+        (
+            self.page,
+            self.key_range,
+            self.value_range,
+            self.decompressed_value,
+        )
     }
 }
 
@@ -257,6 +289,7 @@ pub(crate) struct BtreeExtractIf<
     master_free_list: Arc<Mutex<Vec<PageNumber>>>,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
     mem: Arc<TransactionalMemory>,
+    compression: CompressionConfig,
 }
 
 impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>
@@ -269,6 +302,7 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
         master_free_list: Arc<Mutex<Vec<PageNumber>>>,
         allocated: Arc<Mutex<PageTrackerPolicy>>,
         mem: Arc<TransactionalMemory>,
+        compression: CompressionConfig,
     ) -> Self {
         Self {
             root,
@@ -278,6 +312,7 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
             master_free_list,
             allocated,
             mem,
+            compression,
         }
     }
 }
@@ -296,6 +331,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
                     self.mem.clone(),
                     &mut self.free_on_drop,
                     self.allocated.clone(),
+                    self.compression,
                 );
                 match operation.delete(&entry.key()) {
                     Ok(x) => {
@@ -325,6 +361,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
                     self.mem.clone(),
                     &mut self.free_on_drop,
                     self.allocated.clone(),
+                    self.compression,
                 );
                 match operation.delete(&entry.key()) {
                     Ok(x) => {
@@ -363,6 +400,7 @@ pub(crate) struct BtreeRangeIter<K: Key + 'static, V: Value + 'static> {
     right: Option<RangeIterState>, // Exclusive. The previous element returned
     include_left: bool,           // left is inclusive, instead of exclusive
     include_right: bool,          // right is inclusive, instead of exclusive
+    compression_enabled: bool,
     manager: Arc<TransactionalMemory>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -394,7 +432,9 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
     pub(crate) fn new<'a, T: RangeBounds<KR>, KR: Borrow<K::SelfType<'a>>>(
         query_range: &'_ T,
         table_root: Option<PageNumber>,
+        fixed_value_size: Option<usize>,
         manager: Arc<TransactionalMemory>,
+        compression_enabled: bool,
     ) -> Result<Self> {
         if range_is_empty::<K, KR, T>(query_range) {
             return Ok(Self {
@@ -402,6 +442,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                 right: None,
                 include_left: false,
                 include_right: false,
+                compression_enabled,
                 manager,
                 _key_type: Default::default(),
                 _value_type: Default::default(),
@@ -414,6 +455,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     true,
+                    fixed_value_size,
                     &manager,
                 )?,
                 Excluded(k) => find_iter_left::<K, V>(
@@ -421,6 +463,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     false,
+                    fixed_value_size,
                     &manager,
                 )?,
                 Unbounded => {
@@ -428,6 +471,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                         manager.get_page(root)?,
                         None,
                         false,
+                        fixed_value_size,
                         &manager,
                     )?;
                     (true, state)
@@ -439,6 +483,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     true,
+                    fixed_value_size,
                     &manager,
                 )?,
                 Excluded(k) => find_iter_right::<K, V>(
@@ -446,11 +491,17 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     false,
+                    fixed_value_size,
                     &manager,
                 )?,
                 Unbounded => {
-                    let state =
-                        find_iter_unbounded::<K, V>(manager.get_page(root)?, None, true, &manager)?;
+                    let state = find_iter_unbounded::<K, V>(
+                        manager.get_page(root)?,
+                        None,
+                        true,
+                        fixed_value_size,
+                        &manager,
+                    )?;
                     (true, state)
                 }
             };
@@ -459,6 +510,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                 right,
                 include_left,
                 include_right,
+                compression_enabled,
                 manager,
                 _key_type: Default::default(),
                 _value_type: Default::default(),
@@ -469,6 +521,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                 right: None,
                 include_left: false,
                 include_right: false,
+                compression_enabled,
                 manager,
                 _key_type: Default::default(),
                 _value_type: Default::default(),
@@ -538,8 +591,9 @@ impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
             }
 
             self.include_left = false;
-            if self.left.as_ref().unwrap().get_entry::<K, V>().is_some() {
-                return self.left.as_ref().map(|s| s.get_entry().unwrap()).map(Ok);
+            let ce = self.compression_enabled;
+            if self.left.as_ref().unwrap().get_entry::<K, V>(ce).is_some() {
+                return self.left.as_ref().map(|s| s.get_entry(ce).unwrap()).map(Ok);
             }
         }
     }
@@ -599,8 +653,13 @@ impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
             }
 
             self.include_right = false;
-            if self.right.as_ref().unwrap().get_entry::<K, V>().is_some() {
-                return self.right.as_ref().map(|s| s.get_entry().unwrap()).map(Ok);
+            let ce = self.compression_enabled;
+            if self.right.as_ref().unwrap().get_entry::<K, V>(ce).is_some() {
+                return self
+                    .right
+                    .as_ref()
+                    .map(|s| s.get_entry(ce).unwrap())
+                    .map(Ok);
             }
         }
     }
@@ -610,17 +669,18 @@ fn find_iter_unbounded<K: Key, V: Value>(
     page: PageImpl,
     mut parent: Option<Box<RangeIterState>>,
     reverse: bool,
+    fixed_value_size: Option<usize>,
     manager: &TransactionalMemory,
 ) -> Result<Option<RangeIterState>> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
             let entry = if reverse { accessor.num_pairs() - 1 } else { 0 };
             Ok(Some(Leaf {
                 page,
                 fixed_key_size: K::fixed_width(),
-                fixed_value_size: V::fixed_width(),
+                fixed_value_size,
                 entry,
                 parent,
             }))
@@ -638,13 +698,13 @@ fn find_iter_unbounded<K: Key, V: Value>(
             parent = Some(Box::new(Internal {
                 page,
                 fixed_key_size: K::fixed_width(),
-                fixed_value_size: V::fixed_width(),
+                fixed_value_size,
                 child: (isize::try_from(child_index).unwrap() + direction)
                     .try_into()
                     .unwrap(),
                 parent,
             }));
-            find_iter_unbounded::<K, V>(child_page, parent, reverse, manager)
+            find_iter_unbounded::<K, V>(child_page, parent, reverse, fixed_value_size, manager)
         }
         _ => unreachable!(),
     }
@@ -657,12 +717,13 @@ fn find_iter_left<K: Key, V: Value>(
     mut parent: Option<Box<RangeIterState>>,
     query: &[u8],
     include_query: bool,
+    fixed_value_size: Option<usize>,
     manager: &TransactionalMemory,
 ) -> Result<(bool, Option<RangeIterState>)> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
             let (mut position, found) = accessor.position::<K>(query);
             let include = if position < accessor.num_pairs() {
                 include_query || !found
@@ -675,7 +736,7 @@ fn find_iter_left<K: Key, V: Value>(
             let result = Leaf {
                 page,
                 fixed_key_size: K::fixed_width(),
-                fixed_value_size: V::fixed_width(),
+                fixed_value_size,
                 entry: position,
                 parent,
             };
@@ -689,12 +750,19 @@ fn find_iter_left<K: Key, V: Value>(
                 parent = Some(Box::new(Internal {
                     page,
                     fixed_key_size: K::fixed_width(),
-                    fixed_value_size: V::fixed_width(),
+                    fixed_value_size,
                     child: child_index + 1,
                     parent,
                 }));
             }
-            find_iter_left::<K, V>(child_page, parent, query, include_query, manager)
+            find_iter_left::<K, V>(
+                child_page,
+                parent,
+                query,
+                include_query,
+                fixed_value_size,
+                manager,
+            )
         }
         _ => unreachable!(),
     }
@@ -705,12 +773,13 @@ fn find_iter_right<K: Key, V: Value>(
     mut parent: Option<Box<RangeIterState>>,
     query: &[u8],
     include_query: bool,
+    fixed_value_size: Option<usize>,
     manager: &TransactionalMemory,
 ) -> Result<(bool, Option<RangeIterState>)> {
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), fixed_value_size);
             let (mut position, found) = accessor.position::<K>(query);
             let include = if position < accessor.num_pairs() {
                 include_query && found
@@ -723,7 +792,7 @@ fn find_iter_right<K: Key, V: Value>(
             let result = Leaf {
                 page,
                 fixed_key_size: K::fixed_width(),
-                fixed_value_size: V::fixed_width(),
+                fixed_value_size,
                 entry: position,
                 parent,
             };
@@ -737,12 +806,19 @@ fn find_iter_right<K: Key, V: Value>(
                 parent = Some(Box::new(Internal {
                     page,
                     fixed_key_size: K::fixed_width(),
-                    fixed_value_size: V::fixed_width(),
+                    fixed_value_size,
                     child: child_index - 1,
                     parent,
                 }));
             }
-            find_iter_right::<K, V>(child_page, parent, query, include_query, manager)
+            find_iter_right::<K, V>(
+                child_page,
+                parent,
+                query,
+                include_query,
+                fixed_value_size,
+                manager,
+            )
         }
         _ => unreachable!(),
     }

@@ -399,7 +399,7 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
         SystemTable {
             name: name.to_string(),
             namespace,
-            tree: BtreeMut::new(table_root, guard.clone(), mem, freed_pages, ignore),
+            tree: BtreeMut::new_uncompressed(table_root, guard.clone(), mem, freed_pages, ignore),
             transaction_guard: guard,
         }
     }
@@ -1970,7 +1970,7 @@ impl WriteTransaction {
             .unwrap()
         {
             eprintln!("Master tree:");
-            let master_tree: Btree<&str, InternalTableDefinition> = Btree::new(
+            let master_tree: Btree<&str, InternalTableDefinition> = Btree::new_uncompressed(
                 Some(page),
                 PageHint::None,
                 self.transaction_guard.clone(),
@@ -1989,7 +1989,7 @@ impl WriteTransaction {
             .unwrap()
         {
             eprintln!("System tree:");
-            let master_tree: Btree<&str, InternalTableDefinition> = Btree::new(
+            let master_tree: Btree<&str, InternalTableDefinition> = Btree::new_uncompressed(
                 Some(page),
                 PageHint::None,
                 self.transaction_guard.clone(),

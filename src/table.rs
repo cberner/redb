@@ -499,6 +499,22 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         })
     }
 
+    /// Create a `ReadOnlyTable` that never applies value-level decompression.
+    /// Used for system/internal tables whose values are always stored uncompressed.
+    pub(crate) fn new_uncompressed(
+        name: String,
+        root_page: Option<BtreeHeader>,
+        hint: PageHint,
+        guard: Arc<TransactionGuard>,
+        mem: Arc<TransactionalMemory>,
+    ) -> Result<ReadOnlyTable<K, V>> {
+        Ok(ReadOnlyTable {
+            name,
+            tree: Btree::new_uncompressed(root_page, hint, guard.clone(), mem)?,
+            transaction_guard: guard,
+        })
+    }
+
     /// This method is like [`ReadableTable::get()`], but the [`AccessGuard`] is reference counted
     /// and keeps the transaction alive until it is dropped.
     pub fn get<'a>(
@@ -603,9 +619,13 @@ impl<
     fn next(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next()?;
         Some(entry.map(|entry| {
-            let (page, key_range, value_range) = entry.into_raw();
+            let (page, key_range, value_range, decompressed_value) = entry.into_raw();
             let key = AccessGuard::with_page(page.clone(), key_range);
-            let value = AccessGuard::with_page(page, value_range);
+            let value = if let Some(bytes) = decompressed_value {
+                AccessGuard::with_owned_value(bytes)
+            } else {
+                AccessGuard::with_page(page, value_range)
+            };
             (key, value)
         }))
     }
@@ -620,9 +640,13 @@ impl<
     fn next_back(&mut self) -> Option<Self::Item> {
         let entry = self.inner.next_back()?;
         Some(entry.map(|entry| {
-            let (page, key_range, value_range) = entry.into_raw();
+            let (page, key_range, value_range, decompressed_value) = entry.into_raw();
             let key = AccessGuard::with_page(page.clone(), key_range);
-            let value = AccessGuard::with_page(page, value_range);
+            let value = if let Some(bytes) = decompressed_value {
+                AccessGuard::with_owned_value(bytes)
+            } else {
+                AccessGuard::with_page(page, value_range)
+            };
             (key, value)
         }))
     }
@@ -652,9 +676,13 @@ impl<'a, K: Key + 'static, V: Value + 'static> Iterator for Range<'a, K, V> {
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|x| {
             x.map(|entry| {
-                let (page, key_range, value_range) = entry.into_raw();
+                let (page, key_range, value_range, decompressed_value) = entry.into_raw();
                 let key = AccessGuard::with_page(page.clone(), key_range);
-                let value = AccessGuard::with_page(page, value_range);
+                let value = if let Some(bytes) = decompressed_value {
+                    AccessGuard::with_owned_value(bytes)
+                } else {
+                    AccessGuard::with_page(page, value_range)
+                };
                 (key, value)
             })
         })
@@ -665,9 +693,13 @@ impl<K: Key + 'static, V: Value + 'static> DoubleEndedIterator for Range<'_, K, 
     fn next_back(&mut self) -> Option<Self::Item> {
         self.inner.next_back().map(|x| {
             x.map(|entry| {
-                let (page, key_range, value_range) = entry.into_raw();
+                let (page, key_range, value_range, decompressed_value) = entry.into_raw();
                 let key = AccessGuard::with_page(page.clone(), key_range);
-                let value = AccessGuard::with_page(page, value_range);
+                let value = if let Some(bytes) = decompressed_value {
+                    AccessGuard::with_owned_value(bytes)
+                } else {
+                    AccessGuard::with_page(page, value_range)
+                };
                 (key, value)
             })
         })
