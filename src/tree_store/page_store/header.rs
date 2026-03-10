@@ -1,8 +1,8 @@
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::Checksum;
 use crate::tree_store::btree_base::BtreeHeader;
-use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::compression::CompressionConfig;
+use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::page_manager::{
     FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, FILE_FORMAT_VERSION4,
     xxh3_checksum,
@@ -399,9 +399,7 @@ impl TransactionHeader {
     }
 
     pub(super) fn to_bytes(&self) -> [u8; TRANSACTION_SIZE] {
-        assert!(
-            self.version == FILE_FORMAT_VERSION3 || self.version == FILE_FORMAT_VERSION4
-        );
+        assert!(self.version == FILE_FORMAT_VERSION3 || self.version == FILE_FORMAT_VERSION4);
         let mut result = [0; TRANSACTION_SIZE];
         result[VERSION_OFFSET] = self.version;
         if let Some(header) = self.user_root {
