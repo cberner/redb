@@ -893,6 +893,7 @@ impl TableTreeMut<'_> {
         Ok(DatabaseStats {
             tree_height: master_tree_stats.tree_height + max_subtree_height,
             allocated_pages: self.mem.count_allocated_pages()?,
+            free_pages: self.mem.count_free_pages()?,
             leaf_pages,
             branch_pages,
             stored_leaf_bytes: total_stored_bytes,

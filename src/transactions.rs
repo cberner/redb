@@ -306,6 +306,7 @@ impl<K: Key + 'static, V: Value + 'static> Display for SystemTableDefinition<'_,
 pub struct DatabaseStats {
     pub(crate) tree_height: u32,
     pub(crate) allocated_pages: u64,
+    pub(crate) free_pages: u64,
     pub(crate) leaf_pages: u64,
     pub(crate) branch_pages: u64,
     pub(crate) stored_leaf_bytes: u64,
@@ -323,6 +324,11 @@ impl DatabaseStats {
     /// Number of pages allocated
     pub fn allocated_pages(&self) -> u64 {
         self.allocated_pages
+    }
+
+    /// Number of pages currently free in the buddy allocator, available for immediate reuse
+    pub fn free_pages(&self) -> u64 {
+        self.free_pages
     }
 
     /// Number of leaf pages that store user data
@@ -1385,6 +1391,28 @@ impl WriteTransaction {
             self.two_phase_commit = true;
         }
 
+        // Early freed page processing: reclaim pages from previous transactions BEFORE
+        // this transaction's B-tree mutations, so the buddy allocator can reuse them.
+        // Without this, freed pages from transaction N are only returned to the allocator
+        // during transaction N+1's commit — after N+1 has already allocated fresh pages.
+        //
+        // Only done for durable commits. Non-durable commits have complex savepoint
+        // interactions that require freed page processing to stay in the commit path.
+        if matches!(self.durability, InternalDurability::Immediate) {
+            let free_until_transaction = self
+                .transaction_tracker
+                .oldest_live_read_transaction()
+                .map_or(self.transaction_id, |x| x.next());
+            if let Err(err) = self.process_freed_pages(free_until_transaction) {
+                self.tables
+                    .lock()
+                    .unwrap()
+                    .table_tree
+                    .clear_root_updates_and_close();
+                return Err(err.into());
+            }
+        }
+
         let (user_root, allocated_pages, data_freed) =
             self.tables.lock().unwrap().table_tree.flush_and_close()?;
 
@@ -1548,11 +1576,8 @@ impl WriteTransaction {
     }
 
     pub(crate) fn durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
-        let free_until_transaction = self
-            .transaction_tracker
-            .oldest_live_read_transaction()
-            .map_or(self.transaction_id, |x| x.next());
-        self.process_freed_pages(free_until_transaction)?;
+        // NOTE: process_freed_pages() has already run in commit_inner() before flush_and_close(),
+        // so previously freed pages are already returned to the buddy allocator.
 
         let mut system_tables = self.system_tables.lock().unwrap();
         let system_freed_pages = system_tables.system_freed_pages();
@@ -1949,6 +1974,7 @@ impl WriteTransaction {
         Ok(DatabaseStats {
             tree_height: data_tree_stats.tree_height(),
             allocated_pages: self.mem.count_allocated_pages()?,
+            free_pages: self.mem.count_free_pages()?,
             leaf_pages: data_tree_stats.leaf_pages(),
             branch_pages: data_tree_stats.branch_pages(),
             stored_leaf_bytes: data_tree_stats.stored_bytes(),

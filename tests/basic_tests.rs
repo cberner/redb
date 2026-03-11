@@ -3,9 +3,9 @@ use rand::random;
 use redb::DatabaseError;
 use redb::backends::InMemoryBackend;
 use redb::{
-    Database, Key, Legacy, MultimapTableDefinition, MultimapTableHandle, Range, ReadOnlyDatabase,
-    ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableError,
-    TableHandle, TypeName, Value, VerifyLevel,
+    Database, Durability, Key, Legacy, MultimapTableDefinition, MultimapTableHandle, Range,
+    ReadOnlyDatabase, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
+    TableError, TableHandle, TypeName, Value, VerifyLevel,
 };
 use std::cmp::Ordering;
 #[cfg(not(target_os = "wasi"))]
@@ -2343,4 +2343,277 @@ fn verify_backup_with_multimap_table() {
     assert!(report.pages_checked > 0);
     assert_eq!(report.pages_corrupt, 0);
     assert_eq!(report.structural_valid, Some(true));
+}
+
+#[test]
+fn page_reuse_across_transactions() {
+    let tmpfile = create_tempfile();
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("data");
+    let value = vec![0u8; 1024];
+
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Fill with data
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..1000u64 {
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Do a delete + re-insert cycle to establish baseline (first cycle causes file growth
+    // due to COW during delete)
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..1000u64 {
+            table.remove(&i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..1000u64 {
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let file_size_after_cycle_1 = tmpfile.as_file().metadata().unwrap().len();
+
+    // Second delete + re-insert cycle — with early freed page processing, the file
+    // should NOT grow because freed pages from cycle 1 are reused
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..1000u64 {
+            table.remove(&i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..1000u64 {
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let file_size_after_cycle_2 = tmpfile.as_file().metadata().unwrap().len();
+
+    // With page reuse, the second cycle should not cause significant growth beyond
+    // the first cycle. Without early freed page processing, each cycle would add ~2x.
+    assert!(
+        file_size_after_cycle_2 <= file_size_after_cycle_1 * 110 / 100,
+        "File grew from {} to {} bytes ({:.1}x) across cycles, expected stable size with page reuse",
+        file_size_after_cycle_1,
+        file_size_after_cycle_2,
+        file_size_after_cycle_2 as f64 / file_size_after_cycle_1 as f64,
+    );
+}
+
+#[test]
+fn page_reuse_with_live_reader() {
+    let tmpfile = create_tempfile();
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("data");
+    let value = vec![0u8; 1024];
+
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Fill with data
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..500u64 {
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Hold a read transaction open — this prevents freed pages from being reclaimed
+    let read_txn = db.begin_read().unwrap();
+    let _table = read_txn.open_table(table_def).unwrap();
+
+    // Delete all data
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..500u64 {
+            table.remove(&i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Re-insert — freed pages should NOT be reused because the reader holds them
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..500u64 {
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let file_size_with_reader = tmpfile.as_file().metadata().unwrap().len();
+
+    // Drop the reader
+    drop(_table);
+    drop(read_txn);
+
+    // Delete and re-insert again — now freed pages SHOULD be reused
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..500u64 {
+            table.remove(&i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..500u64 {
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let file_size_after_reader_dropped = tmpfile.as_file().metadata().unwrap().len();
+
+    // After reader is dropped, the file should not have grown much beyond the reader-held size
+    // because freed pages are now reclaimable
+    assert!(
+        file_size_after_reader_dropped <= file_size_with_reader * 110 / 100,
+        "File grew from {} to {} after reader dropped, expected page reuse",
+        file_size_with_reader,
+        file_size_after_reader_dropped,
+    );
+}
+
+#[test]
+fn page_reuse_non_durable() {
+    let tmpfile = create_tempfile();
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("data");
+    let value = vec![0u8; 1024];
+
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Fill with data
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..500u64 {
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // First cycle: delete + re-insert with non-durable commits
+    let mut txn = db.begin_write().unwrap();
+    let _ = txn.set_durability(Durability::None);
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..500u64 {
+            table.remove(&i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    let _ = txn.set_durability(Durability::None);
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..500u64 {
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Durable commit to flush
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    let file_size_after_cycle_1 = tmpfile.as_file().metadata().unwrap().len();
+
+    // Second cycle with non-durable commits
+    let mut txn = db.begin_write().unwrap();
+    let _ = txn.set_durability(Durability::None);
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..500u64 {
+            table.remove(&i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    let _ = txn.set_durability(Durability::None);
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..500u64 {
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Durable commit to flush
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    let file_size_after_cycle_2 = tmpfile.as_file().metadata().unwrap().len();
+
+    assert!(
+        file_size_after_cycle_2 <= file_size_after_cycle_1 * 110 / 100,
+        "Non-durable: file grew from {} to {} bytes ({:.1}x) across cycles, expected stable size",
+        file_size_after_cycle_1,
+        file_size_after_cycle_2,
+        file_size_after_cycle_2 as f64 / file_size_after_cycle_1 as f64,
+    );
+}
+
+#[test]
+fn database_stats_free_pages() {
+    let tmpfile = create_tempfile();
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("data");
+    let value = vec![0u8; 4096];
+
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Insert data
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..100u64 {
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Delete data — creates freed pages
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..100u64 {
+            table.remove(&i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Start a new transaction — early freed page processing should have run,
+    // making free_pages > 0
+    let txn = db.begin_write().unwrap();
+    let stats = txn.stats().unwrap();
+    assert!(
+        stats.free_pages() > 0,
+        "Expected free_pages > 0 after deleting data, got {}",
+        stats.free_pages()
+    );
+    txn.commit().unwrap();
 }
