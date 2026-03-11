@@ -296,6 +296,100 @@ impl TransactionalMemory {
         })
     }
 
+    /// Creates a `TransactionalMemory` for read-only verification.
+    ///
+    /// Unlike `new()`, this method never writes to the storage backend.
+    /// When the file needs recovery (backup files always do), the header is
+    /// recalculated in memory only.
+    ///
+    /// Returns `(Self, header_valid)` where `header_valid` is `true` when the
+    /// primary commit slot checksum was intact (no slot swap needed).
+    pub(crate) fn new_for_verify(
+        storage: Box<dyn StorageBackend>,
+        page_size: usize,
+        region_size: Option<u64>,
+        compression: CompressionConfig,
+    ) -> std::result::Result<(Self, bool), DatabaseError> {
+        let _region_size = region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
+        #[allow(clippy::cast_possible_truncation)]
+        let storage = PagedCachedFile::new(storage, page_size as u64, 0, 0)?;
+
+        let initial_storage_len = storage.raw_file_len()?;
+        if initial_storage_len < DB_HEADER_SIZE as u64 {
+            return Err(StorageError::Io(ErrorKind::InvalidData.into()).into());
+        }
+
+        let magic_number: [u8; MAGICNUMBER.len()] = storage
+            .read_direct(0, MAGICNUMBER.len())?
+            .try_into()
+            .unwrap();
+
+        if magic_number != MAGICNUMBER {
+            return Err(StorageError::Io(ErrorKind::InvalidData.into()).into());
+        }
+
+        let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
+        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
+
+        let mut header_valid = !repair_info.primary_corrupted;
+
+        let needs_recovery =
+            header.recovery_required || header.layout().len() != storage.raw_file_len()?;
+        if needs_recovery {
+            // Recalculate layout in memory — never write to the file
+            let layout = header.layout();
+            let region_max_pages = layout.full_region_layout().num_pages();
+            let region_header_pages = layout.full_region_layout().get_header_pages();
+            header.set_layout(DatabaseLayout::recalculate(
+                storage.raw_file_len()?,
+                region_header_pages,
+                region_max_pages,
+                page_size.try_into().unwrap(),
+            ));
+            // pick_primary_for_repair can return Err for both-slots-corrupted
+            match header.pick_primary_for_repair(repair_info) {
+                Ok(primary_was_valid) => {
+                    header_valid = primary_was_valid;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        let layout = header.layout();
+        let file_len = storage.raw_file_len()?;
+        if file_len < layout.len() {
+            return Err(StorageError::Corrupted(format!(
+                "File too short: {file_len} bytes, expected at least {} bytes",
+                layout.len()
+            ))
+            .into());
+        }
+        let actual_region_size = layout.full_region_layout().len();
+        let region_header_size = layout.full_region_layout().data_section().start;
+        let state = InMemoryState::new(header);
+
+        let mem = Self {
+            allocated_since_commit: Mutex::new(Default::default()),
+            unpersisted: Mutex::new(Default::default()),
+            needs_recovery: AtomicBool::new(needs_recovery),
+            storage,
+            state: Mutex::new(state),
+            #[cfg(debug_assertions)]
+            open_dirty_pages: Arc::new(Mutex::new(HashSet::new())),
+            #[cfg(debug_assertions)]
+            read_page_ref_counts: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(debug_assertions)]
+            allocated_pages: Arc::new(Mutex::new(Default::default())),
+            read_from_secondary: AtomicBool::new(false),
+            page_size: page_size.try_into().unwrap(),
+            region_size: actual_region_size,
+            region_header_with_padding_size: region_header_size,
+            compression,
+        };
+
+        Ok((mem, header_valid))
+    }
+
     pub(crate) fn compression(&self) -> CompressionConfig {
         self.compression
     }

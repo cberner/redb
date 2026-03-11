@@ -1,7 +1,8 @@
-use crate::db::TransactionGuard;
+use crate::db::{CorruptPageInfo, TransactionGuard};
 use crate::error::TableError;
 use crate::multimap_table::{
     finalize_tree_and_subtree_checksums, multimap_btree_stats, verify_tree_and_subtree_checksums,
+    verify_tree_and_subtree_checksums_detailed, verify_tree_and_subtree_structure,
 };
 use crate::tree_store::btree::{UntypedBtreeMut, btree_stats};
 use crate::tree_store::btree_base::BtreeHeader;
@@ -142,6 +143,143 @@ impl TableTree {
         }
 
         Ok(true)
+    }
+
+    /// Verifies checksums for all tables, collecting corruption details.
+    /// Returns (`pages_checked`, `corrupt_pages`).
+    pub(crate) fn verify_checksums_detailed(&self) -> Result<(u64, Vec<CorruptPageInfo>)> {
+        let mut total_pages = 0u64;
+        let mut all_corruptions = Vec::new();
+
+        // Verify the master table tree itself
+        let (pages, corruptions) = self.tree.verify_checksum_detailed()?;
+        total_pages += pages;
+        all_corruptions.extend(corruptions);
+
+        // Verify each user table
+        for entry in self.tree.range::<RangeFull, &str>(&(..))? {
+            let entry = entry?;
+            let table_name = entry.key().to_string();
+            let definition = entry.value();
+            match definition {
+                InternalTableDefinition::Normal {
+                    table_root,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => {
+                    let effective_value_size = if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        fixed_value_size
+                    };
+                    if let Some(header) = table_root {
+                        let tree = RawBtree::new(
+                            Some(header),
+                            fixed_key_size,
+                            effective_value_size,
+                            self.mem.clone(),
+                        );
+                        let (pages, mut corruptions) = tree.verify_checksum_detailed()?;
+                        total_pages += pages;
+                        for c in &mut corruptions {
+                            c.table_name = Some(table_name.clone());
+                        }
+                        all_corruptions.extend(corruptions);
+                    }
+                }
+                InternalTableDefinition::Multimap {
+                    table_root,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => {
+                    let effective_value_size = if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        fixed_value_size
+                    };
+                    let (pages, mut corruptions) = verify_tree_and_subtree_checksums_detailed(
+                        table_root,
+                        fixed_key_size,
+                        effective_value_size,
+                        self.mem.clone(),
+                    )?;
+                    total_pages += pages;
+                    for c in &mut corruptions {
+                        c.table_name = Some(table_name.clone());
+                    }
+                    all_corruptions.extend(corruptions);
+                }
+            }
+        }
+
+        Ok((total_pages, all_corruptions))
+    }
+
+    /// Verifies B-tree structural invariants for all tables.
+    pub(crate) fn verify_structure_detailed(&self) -> Result<Vec<CorruptPageInfo>> {
+        let mut all_corruptions = Vec::new();
+
+        // Verify master table tree structure
+        all_corruptions.extend(self.tree.verify_structure()?);
+
+        for entry in self.tree.range::<RangeFull, &str>(&(..))? {
+            let entry = entry?;
+            let table_name = entry.key().to_string();
+            let definition = entry.value();
+            match definition {
+                InternalTableDefinition::Normal {
+                    table_root,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => {
+                    let effective_value_size = if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        fixed_value_size
+                    };
+                    if let Some(header) = table_root {
+                        let tree = RawBtree::new(
+                            Some(header),
+                            fixed_key_size,
+                            effective_value_size,
+                            self.mem.clone(),
+                        );
+                        let mut corruptions = tree.verify_structure()?;
+                        for c in &mut corruptions {
+                            c.table_name = Some(table_name.clone());
+                        }
+                        all_corruptions.extend(corruptions);
+                    }
+                }
+                InternalTableDefinition::Multimap {
+                    table_root,
+                    fixed_key_size,
+                    fixed_value_size,
+                    ..
+                } => {
+                    let effective_value_size = if self.mem.compression().is_enabled() {
+                        None
+                    } else {
+                        fixed_value_size
+                    };
+                    let mut corruptions = verify_tree_and_subtree_structure(
+                        table_root,
+                        fixed_key_size,
+                        effective_value_size,
+                        self.mem.clone(),
+                    )?;
+                    for c in &mut corruptions {
+                        c.table_name = Some(table_name.clone());
+                    }
+                    all_corruptions.extend(corruptions);
+                }
+            }
+        }
+
+        Ok(all_corruptions)
     }
 
     // root_page: the root of the master table

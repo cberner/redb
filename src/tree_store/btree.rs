@@ -1,4 +1,4 @@
-use crate::db::TransactionGuard;
+use crate::db::{CorruptPageInfo, TransactionGuard};
 use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
     LeafAccessor, branch_checksum, leaf_checksum,
@@ -865,6 +865,194 @@ impl RawBtree {
             _ => false,
         })
     }
+
+    /// Verifies all page checksums, collecting details for every corrupt page found.
+    /// Returns a `(pages_checked, corrupt_pages)` tuple.
+    pub(crate) fn verify_checksum_detailed(&self) -> Result<(u64, Vec<CorruptPageInfo>)> {
+        let mut pages_checked = 0u64;
+        let mut corruptions = Vec::new();
+        if let Some(header) = self.root {
+            self.verify_checksum_detailed_helper(
+                header.root,
+                header.checksum,
+                &mut pages_checked,
+                &mut corruptions,
+            )?;
+        }
+        Ok((pages_checked, corruptions))
+    }
+
+    fn verify_checksum_detailed_helper(
+        &self,
+        page_number: PageNumber,
+        expected_checksum: Checksum,
+        pages_checked: &mut u64,
+        corruptions: &mut Vec<CorruptPageInfo>,
+    ) -> Result {
+        let page = self.mem.get_page(page_number)?;
+        let node_mem = page.memory();
+        *pages_checked += 1;
+
+        match node_mem[0] {
+            LEAF => {
+                let valid = if let Ok(computed) =
+                    leaf_checksum(&page, self.fixed_key_size, self.fixed_value_size)
+                {
+                    expected_checksum == computed
+                } else {
+                    false
+                };
+                if !valid {
+                    corruptions.push(CorruptPageInfo {
+                        page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+                        table_name: None,
+                        description: "leaf page checksum mismatch".to_string(),
+                    });
+                }
+            }
+            BRANCH => {
+                let valid = if let Ok(computed) = branch_checksum(&page, self.fixed_key_size) {
+                    expected_checksum == computed
+                } else {
+                    false
+                };
+                if !valid {
+                    corruptions.push(CorruptPageInfo {
+                        page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+                        table_name: None,
+                        description: "branch page checksum mismatch".to_string(),
+                    });
+                }
+                let accessor = BranchAccessor::new(&page, self.fixed_key_size);
+                for i in 0..accessor.count_children() {
+                    self.verify_checksum_detailed_helper(
+                        accessor.child_page(i).unwrap(),
+                        accessor.child_checksum(i).unwrap(),
+                        pages_checked,
+                        corruptions,
+                    )?;
+                }
+            }
+            other => {
+                corruptions.push(CorruptPageInfo {
+                    page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+                    table_name: None,
+                    description: format!("unknown page type tag: {other}"),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Verifies B-tree structural invariants:
+    /// - Keys in each leaf are sorted (byte-order comparison)
+    /// - Branch child pointers reference valid page types (LEAF or BRANCH)
+    /// - All paths from root to leaf have the same depth
+    ///
+    /// Returns corruption details for any violations found.
+    pub(crate) fn verify_structure(&self) -> Result<Vec<CorruptPageInfo>> {
+        let mut corruptions = Vec::new();
+        if let Some(header) = self.root {
+            let expected_depth = self.measure_depth(header.root)?;
+            self.verify_structure_helper(header.root, 0, expected_depth, &mut corruptions)?;
+        }
+        Ok(corruptions)
+    }
+
+    /// Measures the depth of the leftmost path from root to leaf.
+    fn measure_depth(&self, page_number: PageNumber) -> Result<u32> {
+        let page = self.mem.get_page(page_number)?;
+        let node_mem = page.memory();
+        if node_mem[0] == BRANCH {
+            let accessor = BranchAccessor::new(&page, self.fixed_key_size);
+            if let Some(child) = accessor.child_page(0) {
+                return Ok(1 + self.measure_depth(child)?);
+            }
+        }
+        Ok(0)
+    }
+
+    fn verify_structure_helper(
+        &self,
+        page_number: PageNumber,
+        current_depth: u32,
+        expected_depth: u32,
+        corruptions: &mut Vec<CorruptPageInfo>,
+    ) -> Result {
+        let page = self.mem.get_page(page_number)?;
+        let node_mem = page.memory();
+
+        match node_mem[0] {
+            LEAF => {
+                if current_depth != expected_depth {
+                    corruptions.push(CorruptPageInfo {
+                        page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+                        table_name: None,
+                        description: format!(
+                            "leaf at depth {current_depth}, expected {expected_depth}"
+                        ),
+                    });
+                }
+                let accessor =
+                    LeafAccessor::new(node_mem, self.fixed_key_size, self.fixed_value_size);
+                let num = accessor.num_pairs();
+                for i in 1..num {
+                    if let (Some(prev), Some(curr)) = (accessor.entry(i - 1), accessor.entry(i))
+                        && prev.key() >= curr.key()
+                    {
+                        corruptions.push(CorruptPageInfo {
+                            page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+                            table_name: None,
+                            description: format!(
+                                "leaf keys not sorted at index {i} (key[{}] >= key[{i}])",
+                                i - 1
+                            ),
+                        });
+                        break;
+                    }
+                }
+            }
+            BRANCH => {
+                if current_depth >= expected_depth {
+                    corruptions.push(CorruptPageInfo {
+                        page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+                        table_name: None,
+                        description: format!(
+                            "branch at depth {current_depth}, expected leaf at depth {expected_depth}"
+                        ),
+                    });
+                    return Ok(());
+                }
+                let accessor = BranchAccessor::new(&page, self.fixed_key_size);
+                for i in 0..accessor.count_children() {
+                    if let Some(child) = accessor.child_page(i) {
+                        self.verify_structure_helper(
+                            child,
+                            current_depth + 1,
+                            expected_depth,
+                            corruptions,
+                        )?;
+                    } else {
+                        corruptions.push(CorruptPageInfo {
+                            page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+                            table_name: None,
+                            description: format!("branch child {i} has invalid page pointer"),
+                        });
+                    }
+                }
+            }
+            other => {
+                corruptions.push(CorruptPageInfo {
+                    page_number: u64::from_le_bytes(page_number.to_le_bytes()),
+                    table_name: None,
+                    description: format!("unknown page type tag: {other}"),
+                });
+            }
+        }
+
+        Ok(())
+    }
 }
 
 pub(crate) struct Btree<K: Key + 'static, V: Value + 'static> {
@@ -955,6 +1143,26 @@ impl<K: Key, V: Value> Btree<K, V> {
             self.mem.clone(),
         )
         .verify_checksum()
+    }
+
+    pub(crate) fn verify_checksum_detailed(&self) -> Result<(u64, Vec<CorruptPageInfo>)> {
+        RawBtree::new(
+            self.get_root(),
+            K::fixed_width(),
+            self.value_width(),
+            self.mem.clone(),
+        )
+        .verify_checksum_detailed()
+    }
+
+    pub(crate) fn verify_structure(&self) -> Result<Vec<CorruptPageInfo>> {
+        RawBtree::new(
+            self.get_root(),
+            K::fixed_width(),
+            self.value_width(),
+            self.mem.clone(),
+        )
+        .verify_structure()
     }
 
     pub(crate) fn visit_all_pages<F>(&self, visitor: F) -> Result

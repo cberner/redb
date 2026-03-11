@@ -5,7 +5,7 @@ use redb::backends::InMemoryBackend;
 use redb::{
     Database, Key, Legacy, MultimapTableDefinition, MultimapTableHandle, Range, ReadOnlyDatabase,
     ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableError,
-    TableHandle, TypeName, Value,
+    TableHandle, TypeName, Value, VerifyLevel,
 };
 use std::cmp::Ordering;
 #[cfg(not(target_os = "wasi"))]
@@ -2136,4 +2136,211 @@ fn u8_array_serialization() {
         let generic_order = <[u8; 16] as Key>::compare(&x_serialized, &fixed_serialized);
         assert_eq!(ref_order, generic_order);
     }
+}
+
+#[test]
+fn verify_backup_header_level() {
+    let tmpfile = create_tempfile();
+    let backup_file = create_tempfile();
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..100 {
+            table.insert(i, i * 10).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+    db.backup(backup_file.path()).unwrap();
+    drop(db);
+
+    let report = Database::verify_backup(backup_file.path(), VerifyLevel::Header).unwrap();
+    assert!(report.valid);
+    assert!(report.header_valid);
+    assert_eq!(report.pages_checked, 0);
+    assert_eq!(report.pages_corrupt, 0);
+    assert!(report.structural_valid.is_none());
+    assert!(report.corrupt_details.is_empty());
+}
+
+#[test]
+fn verify_backup_pages_level() {
+    let tmpfile = create_tempfile();
+    let backup_file = create_tempfile();
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..100 {
+            table.insert(i, i * 10).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+    db.backup(backup_file.path()).unwrap();
+    drop(db);
+
+    let report = Database::verify_backup(backup_file.path(), VerifyLevel::Pages).unwrap();
+    assert!(report.valid);
+    assert!(report.header_valid);
+    assert!(report.pages_checked > 0);
+    assert_eq!(report.pages_corrupt, 0);
+    assert!(report.structural_valid.is_none());
+    assert!(report.corrupt_details.is_empty());
+}
+
+#[test]
+fn verify_backup_full_level() {
+    let tmpfile = create_tempfile();
+    let backup_file = create_tempfile();
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..100 {
+            table.insert(i, i * 10).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+    db.backup(backup_file.path()).unwrap();
+    drop(db);
+
+    let report = Database::verify_backup(backup_file.path(), VerifyLevel::Full).unwrap();
+    assert!(report.valid);
+    assert!(report.header_valid);
+    assert!(report.pages_checked > 0);
+    assert_eq!(report.pages_corrupt, 0);
+    assert_eq!(report.structural_valid, Some(true));
+    assert!(report.corrupt_details.is_empty());
+}
+
+#[test]
+fn verify_backup_corrupt_header() {
+    let tmpfile = create_tempfile();
+    let backup_file = create_tempfile();
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 2u64).unwrap();
+    }
+    write_txn.commit().unwrap();
+    db.backup(backup_file.path()).unwrap();
+    drop(db);
+
+    // Corrupt the magic number (first 9 bytes)
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(backup_file.path())
+            .unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(&[0xFF; 4]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    // Should return an error (invalid magic number is detected before header parsing)
+    let result = Database::verify_backup(backup_file.path(), VerifyLevel::Header);
+    assert!(result.is_err());
+}
+
+#[test]
+fn verify_backup_corrupt_slot() {
+    let tmpfile = create_tempfile();
+    let backup_file = create_tempfile();
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..100 {
+            table.insert(i, i * 10).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+    db.backup(backup_file.path()).unwrap();
+    drop(db);
+
+    // Corrupt the checksum of commit slot 0 (last 16 bytes of the 128-byte slot)
+    // Slot 0 starts at file offset 64, checksum at offset 64 + 112 = 176
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(backup_file.path())
+            .unwrap();
+        f.seek(SeekFrom::Start(176)).unwrap();
+        f.write_all(&[0xDE; 16]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    let report = Database::verify_backup(backup_file.path(), VerifyLevel::Pages).unwrap();
+    // Primary slot checksum was corrupted — verification falls back to secondary
+    // but header_valid should be false (primary wasn't valid)
+    assert!(!report.header_valid);
+    assert!(!report.valid);
+}
+
+#[test]
+fn verify_integrity_open_db() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..50 {
+            table.insert(i, i * 100).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let report = db.verify_integrity(VerifyLevel::Full).unwrap();
+    assert!(report.valid);
+    assert!(report.header_valid);
+    assert!(report.pages_checked > 0);
+    assert_eq!(report.pages_corrupt, 0);
+    assert_eq!(report.structural_valid, Some(true));
+}
+
+#[test]
+fn verify_backup_nonexistent_file() {
+    let result = Database::verify_backup("/nonexistent/path/to/db.redb", VerifyLevel::Header);
+    assert!(result.is_err());
+}
+
+#[test]
+fn verify_backup_with_multimap_table() {
+    let tmpfile = create_tempfile();
+    let backup_file = create_tempfile();
+    const MM_TABLE: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("mm");
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..50 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    {
+        let mut mm = write_txn.open_multimap_table(MM_TABLE).unwrap();
+        for i in 0..20u64 {
+            for j in 0..5u64 {
+                mm.insert(i, i * 10 + j).unwrap();
+            }
+        }
+    }
+    write_txn.commit().unwrap();
+    db.backup(backup_file.path()).unwrap();
+    drop(db);
+
+    let report = Database::verify_backup(backup_file.path(), VerifyLevel::Full).unwrap();
+    assert!(report.valid);
+    assert!(report.pages_checked > 0);
+    assert_eq!(report.pages_corrupt, 0);
+    assert_eq!(report.structural_valid, Some(true));
 }

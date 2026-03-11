@@ -14,6 +14,7 @@ use std::fs::{File, OpenOptions};
 use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use std::{io, thread};
 
 use crate::error::TransactionError;
@@ -213,6 +214,48 @@ impl<K: Key + 'static, V: Key + 'static> Display for MultimapTableDefinition<'_,
             V::type_name().name()
         )
     }
+}
+
+/// Controls the depth of integrity verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyLevel {
+    /// Header and commit slot checksums only (fast: reads header once)
+    Header,
+    /// Header + per-page XXH3-128 checksums (medium: walks all B-tree pages)
+    Pages,
+    /// Full: checksums + B-tree structural integrity — key ordering, valid child
+    /// pointers, consistent tree depth (slow: walks and decodes entire tree)
+    Full,
+}
+
+/// Details about a single corrupt page found during verification.
+#[derive(Debug, Clone)]
+pub struct CorruptPageInfo {
+    /// Page number within the database file
+    pub page_number: u64,
+    /// Which table the page belongs to, if determinable
+    pub table_name: Option<String>,
+    /// Human-readable description of the corruption
+    pub description: String,
+}
+
+/// Results of a database integrity verification.
+#[derive(Debug)]
+pub struct VerifyReport {
+    /// Overall pass/fail
+    pub valid: bool,
+    /// Whether header magic number and slot checksums are valid
+    pub header_valid: bool,
+    /// Number of B-tree pages checked (0 for Header level)
+    pub pages_checked: u64,
+    /// Number of pages with checksum mismatches
+    pub pages_corrupt: u64,
+    /// Whether B-tree structural invariants hold (only checked at Full level)
+    pub structural_valid: Option<bool>,
+    /// Detailed corruption info for each corrupt page
+    pub corrupt_details: Vec<CorruptPageInfo>,
+    /// Time taken
+    pub duration: Duration,
 }
 
 /// Information regarding the usage of the in-memory cache
@@ -450,6 +493,13 @@ impl ReadOnlyDatabase {
             return Err(DatabaseError::RepairAborted);
         }
 
+        // Verify B-tree checksums to catch corruption that the header check alone misses
+        if !Database::verify_primary_checksums(mem.clone())? {
+            return Err(DatabaseError::Storage(StorageError::Corrupted(
+                "B-tree checksum verification failed".to_string(),
+            )));
+        }
+
         let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
         let db = Self {
             mem,
@@ -552,6 +602,61 @@ impl Database {
         Ok(true)
     }
 
+    /// Like `verify_primary_checksums` but collects per-page corruption details.
+    pub(crate) fn verify_primary_checksums_detailed(
+        mem: Arc<TransactionalMemory>,
+    ) -> Result<(u64, Vec<CorruptPageInfo>)> {
+        let mut total_pages = 0u64;
+        let mut all_corruptions = Vec::new();
+
+        let table_tree = TableTree::new(
+            mem.get_data_root(),
+            PageHint::None,
+            Arc::new(TransactionGuard::fake()),
+            mem.clone(),
+        )?;
+        let (pages, corruptions) = table_tree.verify_checksums_detailed()?;
+        total_pages += pages;
+        all_corruptions.extend(corruptions);
+
+        let system_table_tree = TableTree::new(
+            mem.get_system_root(),
+            PageHint::None,
+            Arc::new(TransactionGuard::fake()),
+            mem.clone(),
+        )?;
+        let (pages, corruptions) = system_table_tree.verify_checksums_detailed()?;
+        total_pages += pages;
+        all_corruptions.extend(corruptions);
+
+        Ok((total_pages, all_corruptions))
+    }
+
+    /// Like `verify_primary_checksums` but verifies B-tree structural invariants.
+    pub(crate) fn verify_primary_structure(
+        mem: Arc<TransactionalMemory>,
+    ) -> Result<Vec<CorruptPageInfo>> {
+        let mut all_corruptions = Vec::new();
+
+        let table_tree = TableTree::new(
+            mem.get_data_root(),
+            PageHint::None,
+            Arc::new(TransactionGuard::fake()),
+            mem.clone(),
+        )?;
+        all_corruptions.extend(table_tree.verify_structure_detailed()?);
+
+        let system_table_tree = TableTree::new(
+            mem.get_system_root(),
+            PageHint::None,
+            Arc::new(TransactionGuard::fake()),
+            mem.clone(),
+        )?;
+        all_corruptions.extend(system_table_tree.verify_structure_detailed()?);
+
+        Ok(all_corruptions)
+    }
+
     /// Creates a consistent backup of the database at the given path.
     ///
     /// The backup captures a snapshot of the last committed transaction. This method
@@ -589,6 +694,129 @@ impl Database {
         dest.sync_all().map_err(StorageError::Io)?;
 
         Ok(())
+    }
+
+    /// Verifies the integrity of a backup (or any redb database file) without modifying it.
+    ///
+    /// This is a standalone function that does not require an open [`Database`].
+    /// The file is opened read-only and is never modified, making it safe to run on
+    /// backup files, read-only media, or files in use by another process.
+    ///
+    /// # Verification levels
+    /// - [`VerifyLevel::Header`]: Verifies magic number and commit slot checksums (~instant)
+    /// - [`VerifyLevel::Pages`]: Header + walks all B-tree pages verifying XXH3-128 checksums
+    /// - [`VerifyLevel::Full`]: Pages + verifies B-tree structural invariants (key ordering,
+    ///   valid child pointers, consistent tree depth)
+    pub fn verify_backup(
+        path: impl AsRef<Path>,
+        level: VerifyLevel,
+    ) -> std::result::Result<VerifyReport, DatabaseError> {
+        let start = Instant::now();
+        let file = OpenOptions::new().read(true).open(path.as_ref())?;
+        let backend: Box<dyn StorageBackend> = Box::new(
+            crate::tree_store::file_backend::FileBackend::new_internal(file, true)?,
+        );
+
+        let (mem, header_valid) =
+            TransactionalMemory::new_for_verify(backend, PAGE_SIZE, None, CompressionConfig::None)?;
+
+        if level == VerifyLevel::Header {
+            return Ok(VerifyReport {
+                valid: header_valid,
+                header_valid,
+                pages_checked: 0,
+                pages_corrupt: 0,
+                structural_valid: None,
+                corrupt_details: Vec::new(),
+                duration: start.elapsed(),
+            });
+        }
+
+        let mem = Arc::new(mem);
+        let (pages_checked, mut corrupt_details) =
+            Self::verify_primary_checksums_detailed(mem.clone())?;
+        let pages_corrupt = corrupt_details.len() as u64;
+
+        let structural_valid = if level == VerifyLevel::Full {
+            let structural_corruptions = Self::verify_primary_structure(mem)?;
+            if !structural_corruptions.is_empty() {
+                corrupt_details.extend(structural_corruptions);
+                Some(false)
+            } else {
+                Some(true)
+            }
+        } else {
+            None
+        };
+
+        let valid = header_valid && pages_corrupt == 0 && structural_valid.unwrap_or(true);
+
+        Ok(VerifyReport {
+            valid,
+            header_valid,
+            pages_checked,
+            pages_corrupt,
+            structural_valid,
+            corrupt_details,
+            duration: start.elapsed(),
+        })
+    }
+
+    /// Verifies the integrity of an open database without modifying it.
+    ///
+    /// Unlike [`check_integrity`](Self::check_integrity) which repairs the database and
+    /// commits changes, this method is purely read-only and returns a detailed report.
+    /// It can be called while read or write transactions are active.
+    ///
+    /// # Verification levels
+    /// - [`VerifyLevel::Header`]: Verifies commit slot checksums (~instant)
+    /// - [`VerifyLevel::Pages`]: Header + walks all B-tree pages verifying XXH3-128 checksums
+    /// - [`VerifyLevel::Full`]: Pages + verifies B-tree structural invariants
+    pub fn verify_integrity(&self, level: VerifyLevel) -> Result<VerifyReport> {
+        let start = Instant::now();
+
+        // Header is always valid for an open database (it was validated on open)
+        let header_valid = true;
+
+        if level == VerifyLevel::Header {
+            return Ok(VerifyReport {
+                valid: true,
+                header_valid,
+                pages_checked: 0,
+                pages_corrupt: 0,
+                structural_valid: None,
+                corrupt_details: Vec::new(),
+                duration: start.elapsed(),
+            });
+        }
+
+        let (pages_checked, mut corrupt_details) =
+            Self::verify_primary_checksums_detailed(self.mem.clone())?;
+        let pages_corrupt = corrupt_details.len() as u64;
+
+        let structural_valid = if level == VerifyLevel::Full {
+            let structural_corruptions = Self::verify_primary_structure(self.mem.clone())?;
+            if !structural_corruptions.is_empty() {
+                corrupt_details.extend(structural_corruptions);
+                Some(false)
+            } else {
+                Some(true)
+            }
+        } else {
+            None
+        };
+
+        let valid = pages_corrupt == 0 && structural_valid.unwrap_or(true);
+
+        Ok(VerifyReport {
+            valid,
+            header_valid,
+            pages_checked,
+            pages_corrupt,
+            structural_valid,
+            corrupt_details,
+            duration: start.elapsed(),
+        })
     }
 
     /// Force a check of the integrity of the database file, and repair it if possible.

@@ -1,4 +1,4 @@
-use crate::db::TransactionGuard;
+use crate::db::{CorruptPageInfo, TransactionGuard};
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
 use crate::table::{ReadableTableMetadata, TableStats};
@@ -189,6 +189,95 @@ pub(crate) fn verify_tree_and_subtree_checksums(
     }
 
     Ok(true)
+}
+
+/// Like `verify_tree_and_subtree_checksums` but collects corruption details.
+pub(crate) fn verify_tree_and_subtree_checksums_detailed(
+    root: Option<BtreeHeader>,
+    key_size: Option<usize>,
+    value_size: Option<usize>,
+    mem: Arc<TransactionalMemory>,
+) -> Result<(u64, Vec<CorruptPageInfo>)> {
+    let mut total_pages = 0u64;
+    let mut all_corruptions = Vec::new();
+
+    if let Some(header) = root {
+        let tree = RawBtree::new(
+            Some(header),
+            key_size,
+            DynamicCollection::<()>::fixed_width_with(value_size),
+            mem.clone(),
+        );
+        let (pages, corruptions) = tree.verify_checksum_detailed()?;
+        total_pages += pages;
+        all_corruptions.extend(corruptions);
+
+        let table_pages_iter = AllPageNumbersBtreeIter::new(
+            header.root,
+            key_size,
+            DynamicCollection::<()>::fixed_width_with(value_size),
+            mem.clone(),
+        )?;
+        for table_page in table_pages_iter {
+            let page = mem.get_page(table_page?)?;
+            let subtree_roots = parse_subtree_roots(&page, key_size, value_size);
+            for sub_header in subtree_roots {
+                let sub_tree = RawBtree::new(
+                    Some(sub_header),
+                    value_size,
+                    <()>::fixed_width(),
+                    mem.clone(),
+                );
+                let (pages, corruptions) = sub_tree.verify_checksum_detailed()?;
+                total_pages += pages;
+                all_corruptions.extend(corruptions);
+            }
+        }
+    }
+
+    Ok((total_pages, all_corruptions))
+}
+
+/// Like `verify_tree_and_subtree_checksums` but verifies structural integrity.
+pub(crate) fn verify_tree_and_subtree_structure(
+    root: Option<BtreeHeader>,
+    key_size: Option<usize>,
+    value_size: Option<usize>,
+    mem: Arc<TransactionalMemory>,
+) -> Result<Vec<CorruptPageInfo>> {
+    let mut all_corruptions = Vec::new();
+
+    if let Some(header) = root {
+        let tree = RawBtree::new(
+            Some(header),
+            key_size,
+            DynamicCollection::<()>::fixed_width_with(value_size),
+            mem.clone(),
+        );
+        all_corruptions.extend(tree.verify_structure()?);
+
+        let table_pages_iter = AllPageNumbersBtreeIter::new(
+            header.root,
+            key_size,
+            DynamicCollection::<()>::fixed_width_with(value_size),
+            mem.clone(),
+        )?;
+        for table_page in table_pages_iter {
+            let page = mem.get_page(table_page?)?;
+            let subtree_roots = parse_subtree_roots(&page, key_size, value_size);
+            for sub_header in subtree_roots {
+                let sub_tree = RawBtree::new(
+                    Some(sub_header),
+                    value_size,
+                    <()>::fixed_width(),
+                    mem.clone(),
+                );
+                all_corruptions.extend(sub_tree.verify_structure()?);
+            }
+        }
+    }
+
+    Ok(all_corruptions)
 }
 
 // Relocate all subtrees to lower index pages, if possible
