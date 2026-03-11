@@ -1185,6 +1185,23 @@ impl TransactionalMemory {
         self.page_size.try_into().unwrap()
     }
 
+    /// Flush all pending writes to the underlying storage
+    pub(crate) fn flush_data(&self) -> Result {
+        self.storage.flush()
+    }
+
+    /// Read raw bytes from the underlying storage, bypassing the cache
+    pub(crate) fn read_raw(&self, offset: u64, buf: &mut [u8]) -> Result {
+        let data = self.storage.read_direct(offset, buf.len())?;
+        buf.copy_from_slice(&data);
+        Ok(())
+    }
+
+    /// Get the raw file length of the underlying storage
+    pub(crate) fn raw_len(&self) -> Result<u64> {
+        self.storage.raw_file_len()
+    }
+
     pub(crate) fn close(&self) -> Result {
         if !self.needs_recovery.load(Ordering::Acquire) && !thread::panicking() {
             let mut state = self.state.lock()?;

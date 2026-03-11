@@ -417,3 +417,70 @@ fn multimap_signature_lifetimes() {
     }
     write_txn.commit().unwrap();
 }
+
+#[test]
+fn multimap_drain_range() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        for i in 0..20u64 {
+            table.insert(&i, &(i * 10)).unwrap();
+            table.insert(&i, &(i * 10 + 1)).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Drain keys 5..15
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        let removed_keys = table.drain(5u64..15).unwrap();
+        assert_eq!(removed_keys, 10);
+    }
+    write_txn.commit().unwrap();
+
+    // Verify remaining
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
+    // 10 keys remain (0..5 and 15..20), each with 2 values
+    assert_eq!(table.len().unwrap(), 20);
+    for i in 0..5u64 {
+        let mut iter = table.get(&i).unwrap();
+        assert!(iter.next().is_some());
+    }
+    for i in 5..15u64 {
+        let mut iter = table.get(&i).unwrap();
+        assert!(iter.next().is_none());
+    }
+    for i in 15..20u64 {
+        let mut iter = table.get(&i).unwrap();
+        assert!(iter.next().is_some());
+    }
+}
+
+#[test]
+fn multimap_drain_all() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        for i in 0..10u64 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        let removed = table.drain_all().unwrap();
+        assert_eq!(removed, 10);
+        assert_eq!(table.len().unwrap(), 0);
+    }
+    write_txn.commit().unwrap();
+}

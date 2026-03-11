@@ -552,6 +552,45 @@ impl Database {
         Ok(true)
     }
 
+    /// Creates a consistent backup of the database at the given path.
+    ///
+    /// The backup captures a snapshot of the last committed transaction. This method
+    /// can be called while other read or write transactions are active — it will not
+    /// block writers and will not include uncommitted data.
+    ///
+    /// The resulting file is a valid redb database. Open it with [`Database::open`]
+    /// (recommended, handles any needed repair) or [`Builder::open`].
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn backup(&self, path: impl AsRef<Path>) -> Result<(), StorageError> {
+        use std::io::Write;
+
+        const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB
+
+        // Pin a consistent snapshot so pages aren't reclaimed during the copy
+        let _read_txn = self.begin_read().map_err(|e| e.into_storage_error())?;
+
+        // Flush pending writes to ensure we copy a complete state
+        self.mem.flush_data()?;
+
+        let file_len = self.mem.raw_len()?;
+        let mut dest = File::create(path.as_ref()).map_err(StorageError::Io)?;
+        let mut buf = vec![0u8; CHUNK_SIZE];
+        let mut offset = 0u64;
+
+        while offset < file_len {
+            let remaining = (file_len - offset) as usize;
+            let to_read = remaining.min(CHUNK_SIZE);
+            let chunk = &mut buf[..to_read];
+            self.mem.read_raw(offset, chunk)?;
+            dest.write_all(chunk).map_err(StorageError::Io)?;
+            offset += to_read as u64;
+        }
+
+        dest.sync_all().map_err(StorageError::Io)?;
+
+        Ok(())
+    }
+
     /// Force a check of the integrity of the database file, and repair it if possible.
     ///
     /// Note: Calling this function is unnecessary during normal operation. redb will automatically

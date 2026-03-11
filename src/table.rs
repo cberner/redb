@@ -194,6 +194,28 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         self.tree.retain_in(predicate, range)
     }
 
+    /// Removes all key-value pairs in the given range
+    ///
+    /// Returns the number of entries removed
+    pub fn drain<'a, KR>(&mut self, range: impl RangeBounds<KR> + 'a) -> Result<u64>
+    where
+        KR: Borrow<K::SelfType<'a>> + 'a,
+    {
+        let mut count = 0u64;
+        for result in self.extract_from_if(range, |_, _| true)? {
+            result?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Removes all key-value pairs from the table
+    ///
+    /// Returns the number of entries removed
+    pub fn drain_all(&mut self) -> Result<u64> {
+        self.drain::<K::SelfType<'_>>(..)
+    }
+
     /// Insert mapping of the given key to the given value
     ///
     /// If key is already present it is replaced

@@ -1325,6 +1325,38 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
         Ok(existed)
     }
 
+    /// Removes all keys (and their associated values) in the given range
+    ///
+    /// Returns the number of keys removed
+    pub fn drain<'a, KR>(&mut self, range: impl RangeBounds<KR> + 'a) -> Result<u64>
+    where
+        KR: Borrow<K::SelfType<'a>> + 'a,
+    {
+        // Collect keys first to avoid borrow conflict with remove_all
+        let keys: Vec<Vec<u8>> = self
+            .range(range)?
+            .map(|result| result.map(|(k, _)| K::as_bytes(&k.value()).as_ref().to_vec()))
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut count = 0u64;
+        for key_bytes in &keys {
+            let key = K::from_bytes(key_bytes);
+            // Consume the returned iterator to trigger page cleanup
+            for result in self.remove_all(&key)? {
+                result?;
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Removes all keys (and their associated values) from the table
+    ///
+    /// Returns the number of keys removed
+    pub fn drain_all(&mut self) -> Result<u64> {
+        self.drain::<K::SelfType<'_>>(..)
+    }
+
     /// Removes all values for the given key
     ///
     /// Returns an iterator over the removed values. Values are in ascending order.

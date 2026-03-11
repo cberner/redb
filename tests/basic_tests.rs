@@ -1990,6 +1990,128 @@ fn char_type() {
     assert!(iter.next().is_none());
 }
 
+#[test]
+fn drain_range() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..100 {
+            table.insert(&i, &(i * 10)).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Drain a subrange
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let removed = table.drain(50u64..80).unwrap();
+        assert_eq!(removed, 30);
+        assert_eq!(table.len().unwrap(), 70);
+    }
+    write_txn.commit().unwrap();
+
+    // Verify remaining keys
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 70);
+    // Keys 0..50 should exist
+    for i in 0..50 {
+        assert!(table.get(&i).unwrap().is_some());
+    }
+    // Keys 50..80 should be gone
+    for i in 50..80 {
+        assert!(table.get(&i).unwrap().is_none());
+    }
+    // Keys 80..100 should exist
+    for i in 80..100 {
+        assert!(table.get(&i).unwrap().is_some());
+    }
+}
+
+#[test]
+fn drain_all() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..50 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let removed = table.drain_all().unwrap();
+        assert_eq!(removed, 50);
+        assert_eq!(table.len().unwrap(), 0);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[test]
+fn backup_and_restore() {
+    let tmpfile = create_tempfile();
+    let backup_file = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Insert test data
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..1000 {
+            table.insert(&i, &(i * 3)).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Create backup
+    db.backup(backup_file.path()).unwrap();
+
+    // Open backup with Database::open (handles quick repair on first open)
+    let backup_db = Database::open(backup_file.path()).unwrap();
+    let read_txn = backup_db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 1000);
+    for i in 0..1000 {
+        assert_eq!(table.get(&i).unwrap().unwrap().value(), i * 3);
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[test]
+fn backup_while_reading() {
+    let tmpfile = create_tempfile();
+    let backup_file = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..100 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Hold a read transaction while backing up
+    let _read_txn = db.begin_read().unwrap();
+    db.backup(backup_file.path()).unwrap();
+
+    let backup_db = Database::open(backup_file.path()).unwrap();
+    let read_txn = backup_db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 100);
+}
+
 // Test that &[u8; N] and [u8; N] are effectively the same
 #[test]
 fn u8_array_serialization() {
