@@ -53,9 +53,8 @@ pub(crate) const FILE_FORMAT_VERSION2: u8 = 2;
 // * New persistent savepoint format
 pub(crate) const FILE_FORMAT_VERSION3: u8 = 3;
 // New file format:
-// * Adds transparent page-level compression (LZ4 / zstd)
+// * Adds value-level compression (LZ4 / zstd)
 // * Compression algorithm stored in database header
-// * Compressed pages use page[1] as algorithm ID on disk
 pub(crate) const FILE_FORMAT_VERSION4: u8 = 4;
 
 #[derive(Copy, Clone)]
@@ -131,7 +130,6 @@ pub(crate) struct TransactionalMemory {
     // code path where there is no locking
     region_size: u64,
     region_header_with_padding_size: u64,
-    #[allow(dead_code)]
     compression: CompressionConfig,
 }
 
@@ -157,7 +155,7 @@ impl TransactionalMemory {
         );
         assert!(region_size.is_power_of_two());
 
-        let mut storage = PagedCachedFile::new(
+        let storage = PagedCachedFile::new(
             file,
             page_size as u64,
             read_cache_size_bytes,
@@ -242,9 +240,7 @@ impl TransactionalMemory {
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
         let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
         // For existing databases, the on-disk compression config takes precedence.
-        // This ensures we can always decompress pages written with the original algorithm.
         let compression = header.compression;
-        storage.set_compression(compression);
 
         assert_eq!(header.page_size() as usize, page_size);
         assert!(storage.raw_file_len()? >= header.layout().len());
@@ -300,7 +296,6 @@ impl TransactionalMemory {
         })
     }
 
-    #[allow(dead_code)]
     pub(crate) fn compression(&self) -> CompressionConfig {
         self.compression
     }

@@ -1,7 +1,4 @@
 use crate::tree_store::page_store::base::PageHint;
-use crate::tree_store::page_store::compression::{
-    CompressionConfig, CompressionStats, compress_page, decompress_page,
-};
 use crate::tree_store::page_store::lru_cache::LRUCache;
 use crate::{CacheStats, DatabaseError, Result, StorageBackend, StorageError};
 use std::ops::{Index, IndexMut};
@@ -213,8 +210,6 @@ pub(super) struct PagedCachedFile {
     read_cache: Vec<RwLock<LRUCache<Arc<[u8]>>>>,
     // TODO: maybe move this cache to WriteTransaction?
     write_buffer: Arc<Mutex<LRUWriteCache>>,
-    compression: CompressionConfig,
-    compression_stats: CompressionStats,
 }
 
 impl PagedCachedFile {
@@ -247,13 +242,7 @@ impl PagedCachedFile {
             evictions: Default::default(),
             read_cache,
             write_buffer: Arc::new(Mutex::new(LRUWriteCache::new())),
-            compression: CompressionConfig::None,
-            compression_stats: CompressionStats::new(),
         })
-    }
-
-    pub(super) fn set_compression(&mut self, config: CompressionConfig) {
-        self.compression = config;
     }
 
     #[allow(clippy::unused_self)]
@@ -305,42 +294,12 @@ impl PagedCachedFile {
         131
     }
 
-    /// Whether the given offset is eligible for compression.
-    /// The super-header (first `page_size` bytes) is never compressed.
-    fn is_compressible_offset(&self, offset: u64) -> bool {
-        offset >= self.page_size
-    }
-
-    /// Try to compress a page buffer for writing to disk.
-    /// Returns the compressed buffer if successful, or the original buffer if not.
-    fn compress_for_write(&self, offset: u64, buffer: &[u8]) -> Vec<u8> {
-        if self.compression.is_enabled()
-            && self.is_compressible_offset(offset)
-            && let Some(compressed) =
-                compress_page(buffer, self.compression, &self.compression_stats)
-        {
-            return compressed;
-        }
-        buffer.to_vec()
-    }
-
-    /// Try to decompress a page buffer read from disk.
-    /// Returns the decompressed data if the page was compressed, or None if not.
-    /// Only checks for compression markers if the database was opened with compression enabled.
-    fn decompress_from_read(&self, offset: u64, buffer: &[u8]) -> Result<Option<Vec<u8>>> {
-        if !self.compression.is_enabled() || !self.is_compressible_offset(offset) {
-            return Ok(None);
-        }
-        decompress_page(buffer, &self.compression_stats)
-    }
-
     fn flush_write_buffer(&self) -> Result {
         let mut write_buffer = self.write_buffer.lock().unwrap();
 
         for (offset, buffer) in write_buffer.cache.iter() {
             let raw = buffer.as_ref().unwrap();
-            let disk_data = self.compress_for_write(*offset, raw);
-            self.file.write(*offset, &disk_data)?;
+            self.file.write(*offset, raw)?;
         }
         for (offset, buffer) in write_buffer.cache.iter_mut() {
             let buffer = buffer.take().unwrap();
@@ -396,17 +355,6 @@ impl PagedCachedFile {
         Ok(buffer)
     }
 
-    /// Read a page from disk and decompress if necessary.
-    /// Returns the uncompressed page data.
-    fn read_page_direct(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
-        let buffer = self.read_direct(offset, len)?;
-        if let Some(decompressed) = self.decompress_from_read(offset, &buffer)? {
-            Ok(decompressed)
-        } else {
-            Ok(buffer)
-        }
-    }
-
     // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
     // Doing so will not cause UB, but is a logic error.
     pub(super) fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<Arc<[u8]>> {
@@ -435,8 +383,8 @@ impl PagedCachedFile {
             }
         }
 
-        // Cache miss — read from disk and decompress if needed
-        let buffer: Arc<[u8]> = self.read_page_direct(offset, len)?.into();
+        // Cache miss — read from disk
+        let buffer: Arc<[u8]> = self.read_direct(offset, len)?.into();
         let cache_size = self
             .read_cache_bytes
             .fetch_add(buffer.len(), Ordering::AcqRel);
@@ -537,9 +485,7 @@ impl PagedCachedFile {
                 while removed_bytes < len {
                     if let Some((evict_offset, buffer)) = lock.pop_lowest_priority() {
                         let removed_len = buffer.len();
-                        // Compress before writing evicted page to disk
-                        let disk_data = self.compress_for_write(evict_offset, &buffer);
-                        let result = self.file.write(evict_offset, &disk_data);
+                        let result = self.file.write(evict_offset, &buffer);
                         if result.is_err() {
                             lock.insert(evict_offset, buffer);
                         }
@@ -565,8 +511,7 @@ impl PagedCachedFile {
                 self.writes_hits.fetch_add(1, Ordering::AcqRel);
                 vec![0; len].into()
             } else {
-                // Reading existing page from disk — decompress if needed
-                self.read_page_direct(offset, len)?.into()
+                self.read_direct(offset, len)?.into()
             };
             lock.insert(offset, result);
             lock.take_value(offset).unwrap()
