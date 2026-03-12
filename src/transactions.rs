@@ -1,13 +1,15 @@
+use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, ContentType, TemporalKey};
 use crate::db::TransactionGuard;
 use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
 use crate::sealed::Sealed;
 use crate::table::ReadOnlyUntypedTable;
+use crate::temporal::HybridLogicalClock;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page,
     PageHint, PageListMut, PageNumber, PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy,
-    TableTree, TableTreeMut, TableType, TransactionalMemory,
+    TableTree, TableTreeMut, TableType, TransactionalMemory, hash64_with_seed, hash128_with_seed,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -31,6 +33,14 @@ use std::sync::{Arc, Mutex};
 use std::{panic, thread};
 
 const MAX_PAGES_PER_COMPACTION: usize = 1_000_000;
+
+fn xxh3_hash64(data: &[u8]) -> u64 {
+    hash64_with_seed(data, 0)
+}
+
+fn xxh3_hash128(data: &[u8]) -> u128 {
+    hash128_with_seed(data, 0)
+}
 const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), SavepointId> =
     SystemTableDefinition::new("next_savepoint_id");
 pub(crate) const SAVEPOINT_TABLE: SystemTableDefinition<SavepointId, SerializedSavepoint> =
@@ -49,6 +59,13 @@ pub(crate) const DATA_FREED_TABLE: SystemTableDefinition<TransactionIdWithPagina
 // root as of the given transaction.
 pub(crate) const SYSTEM_FREED_TABLE: SystemTableDefinition<TransactionIdWithPagination, PageList> =
     SystemTableDefinition::new("system_pages_unreachable");
+// Blob store system tables
+const BLOB_TABLE: SystemTableDefinition<BlobId, BlobMeta> =
+    SystemTableDefinition::new("blob_store");
+const BLOB_TEMPORAL_INDEX: SystemTableDefinition<TemporalKey, ()> =
+    SystemTableDefinition::new("blob_temporal_idx");
+const BLOB_CAUSAL_CHILDREN: SystemTableDefinition<BlobId, BlobId> =
+    SystemTableDefinition::new("blob_causal_children");
 // The allocator state table is stored in the system table tree, but it's accessed using
 // raw btree operations rather than open_system_table(), so there's no SystemTableDefinition
 pub(crate) const ALLOCATOR_STATE_TABLE_NAME: &str = "allocator_state";
@@ -1375,6 +1392,184 @@ impl WriteTransaction {
             .map(|x| x.into_iter().map(UntypedMultimapTableHandle::new))
     }
 
+    // -----------------------------------------------------------------------
+    // Blob store operations
+    // -----------------------------------------------------------------------
+
+    /// Store a blob with temporal and causal metadata.
+    ///
+    /// The blob data is written to the append-only blob region, and indexed in
+    /// the `BLOB_TABLE`, `BLOB_TEMPORAL_INDEX`, and (if `causal_parent` is set)
+    /// `BLOB_CAUSAL_CHILDREN` system tables.
+    ///
+    /// Returns the assigned `BlobId`.
+    pub fn store_blob(
+        &self,
+        data: &[u8],
+        content_type: ContentType,
+        label: &str,
+        causal_parent: Option<BlobId>,
+    ) -> Result<BlobId> {
+        // 1. Get current blob state
+        let mut blob_state = self.mem.get_blob_state();
+
+        // 2. Initialize blob region offset on first use
+        if blob_state.region_offset == 0 {
+            let file_len = self.mem.file_len()?;
+            blob_state.region_offset = file_len;
+        }
+
+        // 3. Assign sequence number and compute content prefix hash
+        let sequence = blob_state.next_sequence;
+        blob_state.next_sequence = sequence + 1;
+
+        let prefix_len = data.len().min(4096);
+        let content_prefix_hash = xxh3_hash64(&data[..prefix_len]);
+        let blob_id = BlobId::new(sequence, content_prefix_hash);
+
+        // 4. Compute full checksum
+        let checksum = xxh3_hash128(data);
+
+        // 5. Write blob data to the blob region
+        let blob_offset = blob_state.region_length;
+        let file_offset = blob_state.region_offset + blob_offset;
+        self.mem.blob_write(file_offset, data)?;
+        blob_state.region_length += data.len() as u64;
+
+        // 6. Advance HLC
+        let hlc = HybridLogicalClock::from_raw(blob_state.hlc_state).advance();
+        blob_state.hlc_state = hlc.to_raw();
+
+        // as_nanos() returns u128, but u64 nanoseconds covers ~584 years from epoch.
+        // Truncation is intentional and safe for any realistic timestamp.
+        #[allow(clippy::cast_possible_truncation)]
+        let wall_clock_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before UNIX epoch")
+            .as_nanos() as u64;
+
+        // 7. Build BlobRef and BlobMeta
+        let blob_ref = BlobRef {
+            offset: blob_offset,
+            length: data.len() as u64,
+            checksum,
+            ref_count: 1,
+            content_type: content_type.as_byte(),
+            compression: 0,
+        };
+
+        let meta = BlobMeta::new(blob_ref, wall_clock_ns, hlc.to_raw(), causal_parent, label);
+
+        // 8. Index in system tables
+        {
+            let mut system_tables = self.system_tables.lock().unwrap();
+
+            let mut blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+            blob_table.insert(&blob_id, &meta)?;
+            drop(blob_table);
+
+            let temporal_key = TemporalKey::new(wall_clock_ns, hlc, blob_id);
+            let mut temporal_table = system_tables.open_system_table(self, BLOB_TEMPORAL_INDEX)?;
+            temporal_table.insert(&temporal_key, &())?;
+            drop(temporal_table);
+
+            if let Some(parent) = causal_parent {
+                let mut causal_table =
+                    system_tables.open_system_table(self, BLOB_CAUSAL_CHILDREN)?;
+                causal_table.insert(&parent, &blob_id)?;
+                drop(causal_table);
+            }
+        }
+
+        // 9. Update pending blob state for commit
+        self.mem.set_pending_blob_state(blob_state);
+        self.dirty.store(true, Ordering::Release);
+
+        Ok(blob_id)
+    }
+
+    /// Retrieve a blob's data and metadata by its `BlobId`.
+    ///
+    /// The returned data is verified against the stored xxh3-128 checksum.
+    pub fn get_blob(&self, blob_id: &BlobId) -> Result<Option<(Vec<u8>, BlobMeta)>> {
+        let meta = {
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+            match blob_table.get(blob_id)? {
+                Some(g) => g.value(),
+                None => return Ok(None),
+            }
+        };
+
+        let blob_state = self.mem.get_blob_state();
+        let file_offset = blob_state.region_offset + meta.blob_ref.offset;
+        #[allow(clippy::cast_possible_truncation)]
+        let data = self
+            .mem
+            .blob_read(file_offset, meta.blob_ref.length as usize)?;
+
+        let actual = xxh3_hash128(&data);
+        if actual != meta.blob_ref.checksum {
+            return Err(StorageError::BlobChecksumMismatch {
+                sequence: blob_id.sequence,
+                expected: meta.blob_ref.checksum,
+                actual,
+            });
+        }
+
+        Ok(Some((data, meta)))
+    }
+
+    /// Retrieve only a blob's metadata (no data read).
+    pub fn get_blob_meta(&self, blob_id: &BlobId) -> Result<Option<BlobMeta>> {
+        let mut system_tables = self.system_tables.lock().unwrap();
+        let blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+
+        let guard = blob_table.get(blob_id)?;
+        Ok(guard.map(|g| g.value()))
+    }
+
+    /// Delete a blob and remove it from all indexes.
+    pub fn delete_blob(&self, blob_id: &BlobId) -> Result<bool> {
+        let mut system_tables = self.system_tables.lock().unwrap();
+
+        // Read metadata to find temporal key and causal parent
+        let meta = {
+            let blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+            match blob_table.get(blob_id)? {
+                Some(g) => g.value(),
+                None => return Ok(false),
+            }
+        };
+
+        // Remove from temporal index
+        let temporal_key = TemporalKey::new(
+            meta.wall_clock_ns,
+            HybridLogicalClock::from_raw(meta.hlc),
+            *blob_id,
+        );
+
+        let mut temporal_table = system_tables.open_system_table(self, BLOB_TEMPORAL_INDEX)?;
+        temporal_table.remove(&temporal_key)?;
+        drop(temporal_table);
+
+        // Remove from causal children index (parent → this blob)
+        if let Some(parent) = meta.causal_parent {
+            let mut causal_table =
+                system_tables.open_system_table(self, BLOB_CAUSAL_CHILDREN)?;
+            causal_table.remove(&parent)?;
+            drop(causal_table);
+        }
+
+        // Remove from primary table
+        let mut blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+        blob_table.remove(blob_id)?;
+        drop(blob_table);
+
+        self.dirty.store(true, Ordering::Release);
+        Ok(true)
+    }
+
     /// Commit the transaction
     ///
     /// All writes performed in this transaction will be visible to future transactions, and are
@@ -2182,6 +2377,232 @@ impl ReadTransaction {
         self.tree
             .list_tables(TableType::Multimap)
             .map(|x| x.into_iter().map(UntypedMultimapTableHandle::new))
+    }
+
+    /// Open a read-only B-tree over a system table.
+    ///
+    /// Returns `None` if the system table does not exist (e.g. no blobs stored yet).
+    fn open_system_btree<K: Key + 'static, V: Value + 'static>(
+        &self,
+        definition: SystemTableDefinition<K, V>,
+    ) -> Result<Option<Btree<K, V>>> {
+        let system_root = self.mem.get_system_root();
+        let system_tree = TableTree::new(
+            system_root,
+            PageHint::Clean,
+            self.tree.transaction_guard().clone(),
+            self.mem.clone(),
+        )?;
+
+        let header = system_tree.get_table::<K, V>(definition.name(), TableType::Normal);
+        match header {
+            Ok(Some(InternalTableDefinition::Normal { table_root, .. })) => {
+                let btree = Btree::new_uncompressed(
+                    table_root,
+                    PageHint::Clean,
+                    self.tree.transaction_guard().clone(),
+                    self.mem.clone(),
+                )?;
+                Ok(Some(btree))
+            }
+            Ok(Some(InternalTableDefinition::Multimap { .. })) => unreachable!(),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                Err(e
+                    .into_storage_error_or_corrupted("Internal error: blob system table corrupted"))
+            }
+        }
+    }
+
+    /// Retrieve a blob's data and metadata by ID.
+    ///
+    /// The returned data is verified against the stored xxh3-128 checksum.
+    pub fn get_blob(&self, blob_id: &BlobId) -> Result<Option<(Vec<u8>, BlobMeta)>> {
+        let Some(btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(None);
+        };
+
+        let Some(guard) = btree.get(blob_id)? else {
+            return Ok(None);
+        };
+        let meta = guard.value();
+
+        let blob_state = self.mem.get_committed_blob_state();
+        let file_offset = blob_state.region_offset + meta.blob_ref.offset;
+        #[allow(clippy::cast_possible_truncation)]
+        let data = self
+            .mem
+            .blob_read(file_offset, meta.blob_ref.length as usize)?;
+
+        let actual = xxh3_hash128(&data);
+        if actual != meta.blob_ref.checksum {
+            return Err(StorageError::BlobChecksumMismatch {
+                sequence: blob_id.sequence,
+                expected: meta.blob_ref.checksum,
+                actual,
+            });
+        }
+
+        Ok(Some((data, meta)))
+    }
+
+    /// Retrieve only a blob's metadata (no data read).
+    pub fn get_blob_meta(&self, blob_id: &BlobId) -> Result<Option<BlobMeta>> {
+        let Some(btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(None);
+        };
+
+        Ok(btree.get(blob_id)?.map(|g| g.value()))
+    }
+
+    /// Query blobs within a wall-clock time range (nanoseconds).
+    ///
+    /// Returns `(TemporalKey, BlobMeta)` pairs ordered by timestamp.
+    /// Complexity: O(log N + K) where K is the number of results.
+    /// Returns an empty vec if `start_ns > end_ns`.
+    pub fn blobs_in_time_range(
+        &self,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> Result<Vec<(TemporalKey, BlobMeta)>> {
+        if start_ns > end_ns {
+            return Ok(Vec::new());
+        }
+        let Some(temporal_btree) = self.open_system_btree(BLOB_TEMPORAL_INDEX)? else {
+            return Ok(Vec::new());
+        };
+        let Some(blob_btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(Vec::new());
+        };
+
+        let start = TemporalKey::range_start(start_ns);
+        let end = TemporalKey::range_end(end_ns);
+        let range = temporal_btree.range(&(start..=end))?;
+
+        let mut results = Vec::new();
+        for entry in range {
+            let entry = entry?;
+            let temporal_key = entry.key();
+            if let Some(meta_guard) = blob_btree.get(&temporal_key.blob_id)? {
+                results.push((temporal_key, meta_guard.value()));
+            }
+        }
+        Ok(results)
+    }
+
+    /// Find blobs near a reference blob within a time window.
+    ///
+    /// Looks up the reference blob's timestamp, then scans ±`window_ns`/2.
+    /// Used for sensor fusion queries ("all inputs within 100ms of X").
+    pub fn blobs_near(
+        &self,
+        reference: &BlobId,
+        window_ns: u64,
+    ) -> Result<Vec<(TemporalKey, BlobMeta)>> {
+        let Some(blob_btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(Vec::new());
+        };
+
+        let Some(guard) = blob_btree.get(reference)? else {
+            return Ok(Vec::new());
+        };
+        let ref_meta = guard.value();
+
+        let half_window = window_ns / 2;
+        let start_ns = ref_meta.wall_clock_ns.saturating_sub(half_window);
+        let end_ns = ref_meta.wall_clock_ns.saturating_add(half_window);
+
+        self.blobs_in_time_range(start_ns, end_ns)
+    }
+
+    /// Traverse the causal chain backwards from a blob.
+    ///
+    /// Follows `causal_parent` links up to `max_hops` steps.
+    /// Returns blobs from newest to oldest (starting with the given blob).
+    pub fn causal_chain(
+        &self,
+        blob_id: &BlobId,
+        max_hops: usize,
+    ) -> Result<Vec<(BlobId, BlobMeta)>> {
+        let Some(blob_btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(Vec::new());
+        };
+
+        let mut chain = Vec::new();
+        let mut current = *blob_id;
+
+        for _ in 0..=max_hops {
+            let Some(g) = blob_btree.get(&current)? else {
+                break;
+            };
+            let meta = g.value();
+            let parent = meta.causal_parent;
+            chain.push((current, meta));
+            match parent {
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+
+        Ok(chain)
+    }
+
+    /// Get the direct causal child of a blob (if any).
+    ///
+    /// The current causal children index maps each parent to at most one child.
+    /// If a parent has multiple children, only the most recently inserted child
+    /// is retained. Full multi-child support requires a multimap table (tracked
+    /// in issue #28).
+    pub fn causal_children(&self, blob_id: &BlobId) -> Result<Vec<BlobId>> {
+        let Some(children_btree) = self.open_system_btree(BLOB_CAUSAL_CHILDREN)? else {
+            return Ok(Vec::new());
+        };
+
+        let mut children = Vec::new();
+        if let Some(g) = children_btree.get(blob_id)? {
+            children.push(g.value());
+        }
+        Ok(children)
+    }
+
+    /// Find a causal path between two blobs via backward traversal.
+    ///
+    /// Walks from `to` toward `from` via `causal_parent` links.
+    /// Returns the path including both endpoints, or `None` if
+    /// no path exists within `max_depth` hops.
+    pub fn causal_path(
+        &self,
+        from: &BlobId,
+        to: &BlobId,
+        max_depth: usize,
+    ) -> Result<Option<Vec<BlobId>>> {
+        if from == to {
+            return Ok(Some(vec![*from]));
+        }
+
+        let Some(blob_btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(None);
+        };
+
+        let mut path = vec![*to];
+        let mut current = *to;
+        for _ in 0..max_depth {
+            let Some(g) = blob_btree.get(&current)? else {
+                break;
+            };
+            let meta = g.value();
+            let Some(parent) = meta.causal_parent else {
+                break;
+            };
+            path.push(parent);
+            if parent == *from {
+                path.reverse();
+                return Ok(Some(path));
+            }
+            current = parent;
+        }
+
+        Ok(None)
     }
 
     /// Close the transaction

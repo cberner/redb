@@ -12,6 +12,17 @@ pub enum StorageError {
     Corrupted(String),
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
+    /// A blob with the given sequence ID was not found in the blob store
+    BlobNotFound(u64),
+    /// Blob data checksum does not match the stored checksum
+    BlobChecksumMismatch {
+        /// Blob sequence number
+        sequence: u64,
+        /// Checksum stored in metadata
+        expected: u128,
+        /// Checksum computed from the blob data
+        actual: u128,
+    },
     Io(io::Error),
     PreviousIo,
     DatabaseClosed,
@@ -35,6 +46,16 @@ impl From<StorageError> for Error {
         match err {
             StorageError::Corrupted(msg) => Error::Corrupted(msg),
             StorageError::ValueTooLarge(x) => Error::ValueTooLarge(x),
+            StorageError::BlobNotFound(seq) => Error::BlobNotFound(seq),
+            StorageError::BlobChecksumMismatch {
+                sequence,
+                expected,
+                actual,
+            } => Error::BlobChecksumMismatch {
+                sequence,
+                expected,
+                actual,
+            },
             StorageError::Io(x) => Error::Io(x),
             StorageError::PreviousIo => Error::PreviousIo,
             StorageError::DatabaseClosed => Error::DatabaseClosed,
@@ -54,6 +75,19 @@ impl Display for StorageError {
                     f,
                     "The value (length={len}) being inserted exceeds the maximum of {}GiB",
                     MAX_VALUE_LENGTH / 1024 / 1024 / 1024
+                )
+            }
+            StorageError::BlobNotFound(seq) => {
+                write!(f, "Blob not found: sequence={seq}")
+            }
+            StorageError::BlobChecksumMismatch {
+                sequence,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "Blob checksum mismatch: sequence={sequence}, expected={expected:#034x}, actual={actual:#034x}"
                 )
             }
             StorageError::Io(err) => {
@@ -529,6 +563,17 @@ pub enum Error {
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
     TableAlreadyOpen(String, &'static panic::Location<'static>),
+    /// A blob with the given sequence ID was not found in the blob store
+    BlobNotFound(u64),
+    /// Blob data checksum does not match the stored checksum
+    BlobChecksumMismatch {
+        /// Blob sequence number
+        sequence: u64,
+        /// Checksum stored in metadata
+        expected: u128,
+        /// Checksum computed from the blob data
+        actual: u128,
+    },
     Io(io::Error),
     DatabaseClosed,
     /// A previous IO error occurred. The database must be closed and re-opened
@@ -604,6 +649,19 @@ impl Display for Error {
             }
             Error::TableAlreadyOpen(name, location) => {
                 write!(f, "Table '{name}' already opened at: {location}")
+            }
+            Error::BlobNotFound(seq) => {
+                write!(f, "Blob not found: sequence={seq}")
+            }
+            Error::BlobChecksumMismatch {
+                sequence,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "Blob checksum mismatch: sequence={sequence}, expected={expected:#034x}, actual={actual:#034x}"
+                )
             }
             Error::Io(err) => {
                 write!(f, "I/O error: {err}")
