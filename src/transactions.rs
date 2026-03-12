@@ -1555,8 +1555,7 @@ impl WriteTransaction {
 
         // Remove from causal children index (parent → this blob)
         if let Some(parent) = meta.causal_parent {
-            let mut causal_table =
-                system_tables.open_system_table(self, BLOB_CAUSAL_CHILDREN)?;
+            let mut causal_table = system_tables.open_system_table(self, BLOB_CAUSAL_CHILDREN)?;
             causal_table.remove(&parent)?;
             drop(causal_table);
         }

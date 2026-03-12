@@ -17,11 +17,11 @@ pub(crate) use btree_base::{
 pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeExtractIf, BtreeRangeIter};
 pub use btree_iters::{RawEntryGuard, RawEntryIter};
 pub(crate) use page_store::ReadOnlyBackend;
+pub use page_store::{CompressionConfig, InMemoryBackend, Savepoint, file_backend};
 pub(crate) use page_store::{
     FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE, Page, PageHint, PageNumber,
     PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy, TransactionalMemory, hash64_with_seed,
     hash128_with_seed,
 };
-pub use page_store::{CompressionConfig, InMemoryBackend, Savepoint, file_backend};
 pub(crate) use table_tree::{PageListMut, TableTree, TableTreeMut};
 pub(crate) use table_tree_base::{InternalTableDefinition, TableType};
