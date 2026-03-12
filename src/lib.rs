@@ -87,7 +87,7 @@ pub use tree_store::{
 };
 pub use types::{Key, MutInPlaceValue, TypeName, Value};
 
-pub use blob_store::{BlobId, BlobInput, BlobMeta, BlobRef, ContentType, TemporalKey};
+pub use blob_store::{BlobId, BlobInput, BlobMeta, BlobRef, BlobWriter, ContentType, TemporalKey};
 pub use temporal::HybridLogicalClock;
 
 pub type Result<T = (), E = StorageError> = std::result::Result<T, E>;

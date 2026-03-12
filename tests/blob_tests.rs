@@ -1,4 +1,4 @@
-use redb::{BlobId, ContentType, Database, ReadableDatabase};
+use redb::{BlobId, ContentType, Database, ReadableDatabase, StorageError};
 
 fn create_tempfile() -> tempfile::NamedTempFile {
     if cfg!(target_os = "wasi") {
@@ -577,4 +577,301 @@ fn multiple_transactions_blob_state() {
 
     // Sequence numbers across transactions should be monotonic
     assert!(id1.sequence < id2.sequence);
+}
+
+// ---------------------------------------------------------------------------
+// Streaming blob writer tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn streaming_blob_basic() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let data = b"hello streaming world!";
+    let write_txn = db.begin_write().unwrap();
+    let blob_id = {
+        let mut writer = write_txn
+            .blob_writer(ContentType::OctetStream, "basic", None)
+            .unwrap();
+        writer.write(&data[..5]).unwrap();
+        writer.write(&data[5..14]).unwrap();
+        writer.write(&data[14..]).unwrap();
+        writer.finish().unwrap()
+    };
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let (read_data, meta) = read_txn.get_blob(&blob_id).unwrap().unwrap();
+    assert_eq!(read_data, data);
+    assert_eq!(meta.blob_ref.length, data.len() as u64);
+}
+
+#[test]
+fn streaming_blob_large() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // 4 MB in 64 KB chunks — exercises the streaming hasher's large mode
+    let total = 4 * 1024 * 1024;
+    let chunk_size = 64 * 1024;
+    let full_data: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+
+    let write_txn = db.begin_write().unwrap();
+    let blob_id = {
+        let mut writer = write_txn
+            .blob_writer(ContentType::PointCloudLas, "lidar", None)
+            .unwrap();
+        for chunk in full_data.chunks(chunk_size) {
+            writer.write(chunk).unwrap();
+        }
+        writer.finish().unwrap()
+    };
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let (read_data, meta) = read_txn.get_blob(&blob_id).unwrap().unwrap();
+    assert_eq!(read_data.len(), total);
+    assert_eq!(read_data, full_data);
+    assert_eq!(meta.blob_ref.length, total as u64);
+
+    // The checksum should match what store_blob would compute
+    // (implicitly verified by get_blob's checksum validation)
+}
+
+#[test]
+fn streaming_blob_small() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // < 240 bytes: exercises the streaming hasher's small/one-shot path
+    let data = b"tiny";
+    let write_txn = db.begin_write().unwrap();
+    let blob_id = {
+        let mut writer = write_txn
+            .blob_writer(ContentType::Metadata, "small", None)
+            .unwrap();
+        writer.write(data).unwrap();
+        writer.finish().unwrap()
+    };
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let (read_data, _) = read_txn.get_blob(&blob_id).unwrap().unwrap();
+    assert_eq!(read_data, data);
+}
+
+#[test]
+fn streaming_blob_io_write_trait() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let data = b"data via std::io::Write trait";
+    let write_txn = db.begin_write().unwrap();
+    let blob_id = {
+        let mut writer = write_txn
+            .blob_writer(ContentType::OctetStream, "io_write", None)
+            .unwrap();
+        // Use std::io::Write::write_all
+        std::io::Write::write_all(&mut writer, data).unwrap();
+        writer.finish().unwrap()
+    };
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let (read_data, _) = read_txn.get_blob(&blob_id).unwrap().unwrap();
+    assert_eq!(read_data, data);
+}
+
+#[test]
+fn streaming_blob_abort() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Write some data then drop without finish
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut writer = write_txn
+            .blob_writer(ContentType::OctetStream, "aborted", None)
+            .unwrap();
+        writer.write(b"partial data").unwrap();
+        // drop without finish
+    }
+    // After drop, we should be able to create a new writer
+    let blob_id = {
+        let mut writer = write_txn
+            .blob_writer(ContentType::OctetStream, "real", None)
+            .unwrap();
+        writer.write(b"actual data").unwrap();
+        writer.finish().unwrap()
+    };
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let (data, _) = read_txn.get_blob(&blob_id).unwrap().unwrap();
+    assert_eq!(data, b"actual data");
+}
+
+#[test]
+fn streaming_blob_mixed_with_store_blob() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+
+    // store_blob first
+    let id1 = write_txn
+        .store_blob(b"one-shot", ContentType::OctetStream, "first", None)
+        .unwrap();
+
+    // Then streaming
+    let id2 = {
+        let mut writer = write_txn
+            .blob_writer(ContentType::OctetStream, "streaming", None)
+            .unwrap();
+        writer.write(b"streamed").unwrap();
+        writer.finish().unwrap()
+    };
+
+    // Then store_blob again
+    let id3 = write_txn
+        .store_blob(b"another", ContentType::OctetStream, "third", None)
+        .unwrap();
+
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let (d1, _) = read_txn.get_blob(&id1).unwrap().unwrap();
+    let (d2, _) = read_txn.get_blob(&id2).unwrap().unwrap();
+    let (d3, _) = read_txn.get_blob(&id3).unwrap().unwrap();
+    assert_eq!(d1, b"one-shot");
+    assert_eq!(d2, b"streamed");
+    assert_eq!(d3, b"another");
+
+    // Sequence numbers should be monotonically increasing
+    assert!(id1.sequence < id2.sequence);
+    assert!(id2.sequence < id3.sequence);
+}
+
+#[test]
+fn streaming_blob_empty() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let blob_id = {
+        let writer = write_txn
+            .blob_writer(ContentType::OctetStream, "empty", None)
+            .unwrap();
+        // finish immediately without writing anything
+        writer.finish().unwrap()
+    };
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let (data, meta) = read_txn.get_blob(&blob_id).unwrap().unwrap();
+    assert!(data.is_empty());
+    assert_eq!(meta.blob_ref.length, 0);
+}
+
+#[test]
+fn streaming_blob_survives_reopen() {
+    let tmpfile = create_tempfile();
+
+    let blob_id;
+    let data = b"persistent streaming blob";
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        blob_id = {
+            let mut writer = write_txn
+                .blob_writer(ContentType::ImagePng, "persistent", None)
+                .unwrap();
+            writer.write(data).unwrap();
+            writer.finish().unwrap()
+        };
+        write_txn.commit().unwrap();
+    }
+
+    // Reopen and verify
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let read_txn = db.begin_read().unwrap();
+        let (read_data, _) = read_txn.get_blob(&blob_id).unwrap().unwrap();
+        assert_eq!(read_data, data);
+    }
+}
+
+#[test]
+fn streaming_blob_concurrent_writer_rejected() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let mut writer = write_txn
+        .blob_writer(ContentType::OctetStream, "first", None)
+        .unwrap();
+    writer.write(b"data").unwrap();
+
+    // Attempting a second writer should fail
+    {
+        let result = write_txn.blob_writer(ContentType::OctetStream, "second", None);
+        assert!(matches!(result, Err(StorageError::BlobWriterActive)));
+    }
+
+    // store_blob should also fail while writer is active
+    {
+        let result = write_txn.store_blob(b"data", ContentType::OctetStream, "blocked", None);
+        assert!(matches!(result, Err(StorageError::BlobWriterActive)));
+    }
+
+    // After finishing the writer, operations should succeed
+    writer.finish().unwrap();
+    let _id = write_txn
+        .store_blob(b"ok", ContentType::OctetStream, "unblocked", None)
+        .unwrap();
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn streaming_blob_checksum_matches_oneshot() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let data: Vec<u8> = (0..10_000).map(|i| (i % 251) as u8).collect();
+
+    let write_txn = db.begin_write().unwrap();
+
+    // Store via one-shot
+    let id_oneshot = write_txn
+        .store_blob(&data, ContentType::OctetStream, "oneshot", None)
+        .unwrap();
+
+    // Store via streaming (byte-at-a-time for maximum stress)
+    let id_streaming = {
+        let mut writer = write_txn
+            .blob_writer(ContentType::OctetStream, "streaming", None)
+            .unwrap();
+        for byte in &data {
+            writer.write(std::slice::from_ref(byte)).unwrap();
+        }
+        writer.finish().unwrap()
+    };
+
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let (_, meta_oneshot) = read_txn.get_blob(&id_oneshot).unwrap().unwrap();
+    let (_, meta_streaming) = read_txn.get_blob(&id_streaming).unwrap().unwrap();
+
+    // Checksums should be identical
+    assert_eq!(
+        meta_oneshot.blob_ref.checksum,
+        meta_streaming.blob_ref.checksum
+    );
+    // Content prefix hashes should be identical
+    assert_eq!(
+        id_oneshot.content_prefix_hash,
+        id_streaming.content_prefix_hash
+    );
 }

@@ -1,4 +1,5 @@
 use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, ContentType, TemporalKey};
+use crate::blob_store::writer::BlobWriter;
 use crate::db::TransactionGuard;
 use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
@@ -796,6 +797,8 @@ pub struct WriteTransaction {
     // Persistent savepoints created during this transaction
     created_persistent_savepoints: Mutex<HashSet<SavepointId>>,
     deleted_persistent_savepoints: Mutex<Vec<(SavepointId, TransactionId)>>,
+    // Guard: true while a BlobWriter is active, preventing concurrent blob ops
+    blob_writer_active: AtomicBool,
 }
 
 impl WriteTransaction {
@@ -828,6 +831,7 @@ impl WriteTransaction {
             shrink_policy: ShrinkPolicy::Default,
             created_persistent_savepoints: Mutex::new(Default::default()),
             deleted_persistent_savepoints: Mutex::new(vec![]),
+            blob_writer_active: AtomicBool::new(false),
         })
     }
 
@@ -1410,6 +1414,9 @@ impl WriteTransaction {
         label: &str,
         causal_parent: Option<BlobId>,
     ) -> Result<BlobId> {
+        if self.blob_writer_active.load(Ordering::Acquire) {
+            return Err(StorageError::BlobWriterActive);
+        }
         // 1. Get current blob state
         let mut blob_state = self.mem.get_blob_state();
 
@@ -1486,6 +1493,113 @@ impl WriteTransaction {
         self.dirty.store(true, Ordering::Release);
 
         Ok(blob_id)
+    }
+
+    /// Create a streaming blob writer that writes data in arbitrary-sized
+    /// chunks with constant memory overhead.
+    ///
+    /// Only one `BlobWriter` may be active at a time. Calling `blob_writer()`
+    /// or `store_blob()` while a writer is active returns
+    /// [`StorageError::BlobWriterActive`].
+    pub fn blob_writer(
+        &self,
+        content_type: ContentType,
+        label: &str,
+        causal_parent: Option<BlobId>,
+    ) -> Result<BlobWriter<'_>> {
+        if self
+            .blob_writer_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(StorageError::BlobWriterActive);
+        }
+
+        let mut blob_state = self.mem.get_blob_state();
+
+        if blob_state.region_offset == 0 {
+            let file_len = self.mem.file_len()?;
+            blob_state.region_offset = file_len;
+        }
+
+        let sequence = blob_state.next_sequence;
+        blob_state.next_sequence = sequence + 1;
+
+        let blob_region_start = blob_state.region_length;
+        let blob_file_offset = blob_state.region_offset + blob_region_start;
+
+        // Persist the incremented sequence immediately so that a concurrent
+        // store_blob (after this writer finishes) picks up the right counter.
+        self.mem.set_pending_blob_state(blob_state);
+
+        Ok(BlobWriter::new(
+            self,
+            sequence,
+            content_type,
+            label,
+            causal_parent,
+            blob_file_offset,
+            blob_region_start,
+        ))
+    }
+
+    /// Low-level: write bytes directly to the blob region (bypasses page cache).
+    /// Used by `BlobWriter`.
+    pub(crate) fn blob_write_raw(&self, file_offset: u64, data: &[u8]) -> Result {
+        self.mem.blob_write(file_offset, data)
+    }
+
+    /// Low-level: called by `BlobWriter::finish()` to index the completed blob
+    /// in system tables and update pending blob state.
+    pub(crate) fn finalize_blob_writer(
+        &self,
+        blob_id: BlobId,
+        mut meta: BlobMeta,
+        bytes_written: u64,
+        causal_parent: Option<BlobId>,
+    ) -> Result {
+        let mut blob_state = self.mem.get_blob_state();
+
+        // Advance HLC
+        let hlc = HybridLogicalClock::from_raw(blob_state.hlc_state).advance();
+        blob_state.hlc_state = hlc.to_raw();
+
+        // Update the HLC in the meta
+        meta.hlc = hlc.to_raw();
+
+        // Update region length to account for the written data
+        blob_state.region_length = meta.blob_ref.offset + bytes_written;
+
+        // Index in system tables
+        {
+            let mut system_tables = self.system_tables.lock().unwrap();
+
+            let mut blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+            blob_table.insert(&blob_id, &meta)?;
+            drop(blob_table);
+
+            let temporal_key = TemporalKey::new(meta.wall_clock_ns, hlc, blob_id);
+            let mut temporal_table = system_tables.open_system_table(self, BLOB_TEMPORAL_INDEX)?;
+            temporal_table.insert(&temporal_key, &())?;
+            drop(temporal_table);
+
+            if let Some(parent) = causal_parent {
+                let mut causal_table =
+                    system_tables.open_system_table(self, BLOB_CAUSAL_CHILDREN)?;
+                causal_table.insert(&parent, &blob_id)?;
+                drop(causal_table);
+            }
+        }
+
+        self.mem.set_pending_blob_state(blob_state);
+        self.dirty.store(true, Ordering::Release);
+
+        Ok(())
+    }
+
+    /// Access the blob-writer-active flag. Used by `BlobWriter::drop`.
+    pub(crate) fn blob_writer_active(&self) -> &AtomicBool {
+        &self.blob_writer_active
     }
 
     /// Retrieve a blob's data and metadata by its `BlobId`.

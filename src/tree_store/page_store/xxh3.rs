@@ -813,13 +813,276 @@ fn hash128_large_generic(
     ((high as u128) << 64) | low as u128
 }
 
+// ---------------------------------------------------------------------------
+// Streaming xxh3 hasher
+// ---------------------------------------------------------------------------
+
+const STRIPES_PER_BLOCK: usize = (DEFAULT_SECRET.len() - STRIPE_LENGTH) / SECRET_CONSUME_RATE;
+
+/// Incremental xxh3 hasher that produces results identical to the one-shot
+/// `hash64_with_seed` / `hash128_with_seed` functions, but processes data in
+/// arbitrary-sized chunks with constant memory overhead.
+///
+/// For inputs <= 240 bytes the data is buffered and hashed at finalization
+/// using the one-shot path. For larger inputs, 64-byte stripes are accumulated
+/// incrementally and the trailing stripe is applied at finalization.
+pub(crate) struct Xxh3StreamHasher {
+    seed: u64,
+    total_len: usize,
+    accumulators: [u64; 8],
+    stripe_count_in_block: usize,
+    /// Unprocessed bytes. In small mode (total_len <= 240), this holds ALL
+    /// data. In large mode, it holds at most STRIPE_LENGTH bytes — we always
+    /// retain the last incomplete stripe so we can correctly identify the
+    /// trailing stripe at finalization.
+    buf: Vec<u8>,
+    /// The last STRIPE_LENGTH bytes of all data seen so far (for the trailing
+    /// stripe in large mode). Only meaningful when total_len >= STRIPE_LENGTH.
+    last_stripe: [u8; STRIPE_LENGTH],
+    secret: [u8; DEFAULT_SECRET.len()],
+}
+
+impl Xxh3StreamHasher {
+    pub(crate) fn new(seed: u64) -> Self {
+        let secret = if seed == 0 {
+            DEFAULT_SECRET
+        } else {
+            gen_secret_generic(seed)
+        };
+        Self {
+            seed,
+            total_len: 0,
+            accumulators: INIT_ACCUMULATORS,
+            stripe_count_in_block: 0,
+            buf: Vec::with_capacity(256),
+            last_stripe: [0u8; STRIPE_LENGTH],
+            secret,
+        }
+    }
+
+    pub(crate) fn update(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        self.total_len += data.len();
+        self.update_last_stripe(data);
+        self.buf.extend_from_slice(data);
+
+        if self.total_len > 240 {
+            self.drain_stripes();
+        }
+    }
+
+    pub(crate) fn finish_128(self) -> u128 {
+        if self.total_len <= 240 {
+            return hash128_0to240(&self.buf, &DEFAULT_SECRET, self.seed);
+        }
+
+        let mut accumulators = self.accumulators;
+        accumulate_stripe_generic(
+            &mut accumulators,
+            &self.last_stripe,
+            &self.secret[self.secret.len() - STRIPE_LENGTH - 7..],
+        );
+
+        let low = merge_accumulators(
+            accumulators,
+            &self.secret[11..],
+            PRIME64[0].wrapping_mul(self.total_len as u64),
+        );
+        let high = merge_accumulators(
+            accumulators,
+            &self.secret[self.secret.len() - 64 - 11..],
+            !(PRIME64[1].wrapping_mul(self.total_len as u64)),
+        );
+
+        ((high as u128) << 64) | low as u128
+    }
+
+    pub(crate) fn finish_64(self) -> u64 {
+        if self.total_len <= 240 {
+            return hash64_0to240(&self.buf, &DEFAULT_SECRET, self.seed);
+        }
+
+        let mut accumulators = self.accumulators;
+        accumulate_stripe_generic(
+            &mut accumulators,
+            &self.last_stripe,
+            &self.secret[self.secret.len() - STRIPE_LENGTH - 7..],
+        );
+
+        merge_accumulators(
+            accumulators,
+            &self.secret[11..],
+            PRIME64[0].wrapping_mul(self.total_len as u64),
+        )
+    }
+
+    /// Process as many complete stripes as possible from `buf`, always leaving
+    /// at most `STRIPE_LENGTH` bytes. The invariant: after this call,
+    /// `buf.len() <= STRIPE_LENGTH`.
+    ///
+    /// We use `> STRIPE_LENGTH` (not `>=`) so that when the total length is an
+    /// exact multiple of 64, the final complete stripe remains in `buf` rather
+    /// than being processed as a regular stripe. This matches the one-shot
+    /// algorithm which computes `(total_len - 1) / STRIPE_LENGTH` regular
+    /// stripes.
+    fn drain_stripes(&mut self) {
+        let mut pos = 0;
+        while self.buf.len() - pos > STRIPE_LENGTH {
+            accumulate_stripe_generic(
+                &mut self.accumulators,
+                &self.buf[pos..pos + STRIPE_LENGTH],
+                &self.secret[self.stripe_count_in_block * SECRET_CONSUME_RATE..],
+            );
+            pos += STRIPE_LENGTH;
+            self.stripe_count_in_block += 1;
+            if self.stripe_count_in_block == STRIPES_PER_BLOCK {
+                scramble_accumulators_generic(
+                    &mut self.accumulators,
+                    &self.secret[self.secret.len() - STRIPE_LENGTH..],
+                );
+                self.stripe_count_in_block = 0;
+            }
+        }
+        if pos > 0 {
+            self.buf.drain(..pos);
+        }
+    }
+
+    /// Maintain `last_stripe` as the last STRIPE_LENGTH bytes of all data seen.
+    fn update_last_stripe(&mut self, data: &[u8]) {
+        if data.len() >= STRIPE_LENGTH {
+            self.last_stripe
+                .copy_from_slice(&data[data.len() - STRIPE_LENGTH..]);
+        } else {
+            let shift = data.len();
+            self.last_stripe.copy_within(shift.., 0);
+            self.last_stripe[STRIPE_LENGTH - shift..].copy_from_slice(data);
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use crate::tree_store::page_store::xxh3::hash64_with_seed;
+    use crate::tree_store::page_store::xxh3::{
+        Xxh3StreamHasher, hash64_with_seed, hash128_with_seed,
+    };
 
     #[test]
     fn test_empty() {
         let actual = hash64_with_seed(&[], 0);
         assert_eq!(actual, 3244421341483603138);
+    }
+
+    #[test]
+    fn streaming_xxh3_matches_oneshot_128() {
+        let sizes = [
+            0,
+            1,
+            3,
+            4,
+            8,
+            16,
+            17,
+            63,
+            64,
+            65,
+            127,
+            128,
+            129,
+            200,
+            240,
+            241,
+            256,
+            300,
+            512,
+            1023,
+            1024,
+            1025,
+            4096,
+            65536,
+            1024 * 1024,
+        ];
+        for &size in &sizes {
+            let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let expected = hash128_with_seed(&data, 0);
+
+            // Single-shot streaming
+            let mut h = Xxh3StreamHasher::new(0);
+            h.update(&data);
+            let actual = h.finish_128();
+            assert_eq!(actual, expected, "size={size} single-update mismatch");
+
+            // Chunked streaming (various chunk sizes)
+            for chunk_size in [1, 3, 7, 13, 31, 63, 64, 65, 128, 256] {
+                if chunk_size > size && size > 0 {
+                    continue;
+                }
+                let mut h = Xxh3StreamHasher::new(0);
+                for chunk in data.chunks(chunk_size.max(1)) {
+                    h.update(chunk);
+                }
+                let actual = h.finish_128();
+                assert_eq!(
+                    actual, expected,
+                    "size={size} chunk_size={chunk_size} mismatch"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_xxh3_matches_oneshot_64() {
+        let sizes = [0, 1, 16, 128, 240, 241, 1024, 65536];
+        for &size in &sizes {
+            let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let expected = hash64_with_seed(&data, 0);
+
+            let mut h = Xxh3StreamHasher::new(0);
+            h.update(&data);
+            let actual = h.finish_64();
+            assert_eq!(actual, expected, "size={size} mismatch");
+
+            // Chunked
+            let mut h = Xxh3StreamHasher::new(0);
+            for chunk in data.chunks(64) {
+                h.update(chunk);
+            }
+            let actual = h.finish_64();
+            assert_eq!(actual, expected, "size={size} chunked mismatch");
+        }
+    }
+
+    #[test]
+    fn streaming_xxh3_with_seed() {
+        let data: Vec<u8> = (0..1000).map(|i| (i % 251) as u8).collect();
+        let seed = 0xDEAD_BEEF_u64;
+
+        let expected_128 = hash128_with_seed(&data, seed);
+        let expected_64 = hash64_with_seed(&data, seed);
+
+        let mut h128 = Xxh3StreamHasher::new(seed);
+        let mut h64 = Xxh3StreamHasher::new(seed);
+        for chunk in data.chunks(77) {
+            h128.update(chunk);
+            h64.update(chunk);
+        }
+        assert_eq!(h128.finish_128(), expected_128);
+        assert_eq!(h64.finish_64(), expected_64);
+    }
+
+    #[test]
+    fn streaming_xxh3_empty_updates() {
+        let data = b"hello world";
+        let expected = hash128_with_seed(data, 0);
+
+        let mut h = Xxh3StreamHasher::new(0);
+        h.update(b"");
+        h.update(b"hello");
+        h.update(b"");
+        h.update(b" world");
+        h.update(b"");
+        assert_eq!(h.finish_128(), expected);
     }
 }

@@ -23,6 +23,8 @@ pub enum StorageError {
         /// Checksum computed from the blob data
         actual: u128,
     },
+    /// A streaming blob writer is already active on this transaction
+    BlobWriterActive,
     Io(io::Error),
     PreviousIo,
     DatabaseClosed,
@@ -56,6 +58,7 @@ impl From<StorageError> for Error {
                 expected,
                 actual,
             },
+            StorageError::BlobWriterActive => Error::BlobWriterActive,
             StorageError::Io(x) => Error::Io(x),
             StorageError::PreviousIo => Error::PreviousIo,
             StorageError::DatabaseClosed => Error::DatabaseClosed,
@@ -88,6 +91,12 @@ impl Display for StorageError {
                 write!(
                     f,
                     "Blob checksum mismatch: sequence={sequence}, expected={expected:#034x}, actual={actual:#034x}"
+                )
+            }
+            StorageError::BlobWriterActive => {
+                write!(
+                    f,
+                    "Cannot create blob writer or store blob while another writer is active"
                 )
             }
             StorageError::Io(err) => {
@@ -574,6 +583,8 @@ pub enum Error {
         /// Checksum computed from the blob data
         actual: u128,
     },
+    /// A streaming blob writer is already active on this transaction
+    BlobWriterActive,
     Io(io::Error),
     DatabaseClosed,
     /// A previous IO error occurred. The database must be closed and re-opened
@@ -661,6 +672,12 @@ impl Display for Error {
                 write!(
                     f,
                     "Blob checksum mismatch: sequence={sequence}, expected={expected:#034x}, actual={actual:#034x}"
+                )
+            }
+            Error::BlobWriterActive => {
+                write!(
+                    f,
+                    "Cannot create blob writer or store blob while another writer is active"
                 )
             }
             Error::Io(err) => {

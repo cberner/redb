@@ -29,4 +29,4 @@ pub use savepoint::Savepoint;
 pub(crate) use savepoint::SerializedSavepoint;
 
 pub(super) use base::{PageImpl, PageMut};
-pub(crate) use xxh3::{hash64_with_seed, hash128_with_seed};
+pub(crate) use xxh3::{Xxh3StreamHasher, hash64_with_seed, hash128_with_seed};
