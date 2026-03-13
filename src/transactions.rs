@@ -1,3 +1,4 @@
+use crate::blob_store::reader::BlobReader;
 use crate::blob_store::types::{
     BlobId, BlobMeta, BlobRef, CausalEdge, CausalPath, ContentType, MAX_TAGS_PER_BLOB,
     NamespaceKey, NamespaceVal, StoreOptions, TagKey, TemporalKey,
@@ -1735,6 +1736,74 @@ impl WriteTransaction {
         Ok(guard.map(|g| g.value()))
     }
 
+    /// Read a byte range from a blob without checksum verification.
+    ///
+    /// Returns `None` if the blob does not exist. Returns
+    /// [`StorageError::BlobRangeOutOfBounds`] if `offset + length` exceeds the
+    /// blob's total size.
+    pub fn read_blob_range(
+        &self,
+        blob_id: &BlobId,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        let meta = {
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+            match blob_table.get(blob_id)? {
+                Some(g) => g.value(),
+                None => return Ok(None),
+            }
+        };
+
+        if length == 0 {
+            return Ok(Some(Vec::new()));
+        }
+
+        let end = offset.saturating_add(length);
+        if end > meta.blob_ref.length {
+            return Err(StorageError::BlobRangeOutOfBounds {
+                blob_length: meta.blob_ref.length,
+                requested_offset: offset,
+                requested_length: length,
+            });
+        }
+
+        let blob_state = self.mem.get_blob_state();
+        let file_offset = blob_state.region_offset + meta.blob_ref.offset + offset;
+        #[allow(clippy::cast_possible_truncation)]
+        let data = self.mem.blob_read(file_offset, length as usize)?;
+
+        Ok(Some(data))
+    }
+
+    /// Get a seekable reader for a blob's data.
+    ///
+    /// Returns `None` if the blob does not exist. The returned [`BlobReader`]
+    /// implements [`std::io::Read`] and [`std::io::Seek`] for streaming access.
+    ///
+    /// Range reads bypass checksum verification since the stored checksum
+    /// covers the entire blob.
+    pub fn blob_reader(&self, blob_id: &BlobId) -> Result<Option<BlobReader>> {
+        let meta = {
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+            match blob_table.get(blob_id)? {
+                Some(g) => g.value(),
+                None => return Ok(None),
+            }
+        };
+
+        let blob_state = self.mem.get_blob_state();
+        let file_offset = blob_state.region_offset + meta.blob_ref.offset;
+
+        Ok(Some(BlobReader::new(
+            Arc::clone(&self.mem),
+            file_offset,
+            meta.blob_ref.length,
+        )))
+    }
+
     /// Delete a blob and remove it from all indexes.
     pub fn delete_blob(&self, blob_id: &BlobId) -> Result<bool> {
         let mut system_tables = self.system_tables.lock().unwrap();
@@ -2705,6 +2774,74 @@ impl ReadTransaction {
         };
 
         Ok(btree.get(blob_id)?.map(|g| g.value()))
+    }
+
+    /// Read a byte range from a blob without checksum verification.
+    ///
+    /// Returns `None` if the blob does not exist. Returns
+    /// [`StorageError::BlobRangeOutOfBounds`] if `offset + length` exceeds the
+    /// blob's total size.
+    pub fn read_blob_range(
+        &self,
+        blob_id: &BlobId,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(None);
+        };
+
+        let Some(guard) = btree.get(blob_id)? else {
+            return Ok(None);
+        };
+        let meta = guard.value();
+
+        if length == 0 {
+            return Ok(Some(Vec::new()));
+        }
+
+        let end = offset.saturating_add(length);
+        if end > meta.blob_ref.length {
+            return Err(StorageError::BlobRangeOutOfBounds {
+                blob_length: meta.blob_ref.length,
+                requested_offset: offset,
+                requested_length: length,
+            });
+        }
+
+        let blob_state = self.mem.get_committed_blob_state();
+        let file_offset = blob_state.region_offset + meta.blob_ref.offset + offset;
+        #[allow(clippy::cast_possible_truncation)]
+        let data = self.mem.blob_read(file_offset, length as usize)?;
+
+        Ok(Some(data))
+    }
+
+    /// Get a seekable reader for a blob's data.
+    ///
+    /// Returns `None` if the blob does not exist. The returned [`BlobReader`]
+    /// implements [`std::io::Read`] and [`std::io::Seek`] for streaming access.
+    ///
+    /// Range reads bypass checksum verification since the stored checksum
+    /// covers the entire blob.
+    pub fn blob_reader(&self, blob_id: &BlobId) -> Result<Option<BlobReader>> {
+        let Some(btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(None);
+        };
+
+        let Some(guard) = btree.get(blob_id)? else {
+            return Ok(None);
+        };
+        let meta = guard.value();
+
+        let blob_state = self.mem.get_committed_blob_state();
+        let file_offset = blob_state.region_offset + meta.blob_ref.offset;
+
+        Ok(Some(BlobReader::new(
+            Arc::clone(&self.mem),
+            file_offset,
+            meta.blob_ref.length,
+        )))
     }
 
     /// Query blobs within a wall-clock time range (nanoseconds).
