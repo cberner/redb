@@ -228,7 +228,6 @@ unsafe fn scramble_accumulators_neon(
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
 fn scramble_accumulators_generic(accumulators: &mut [u64; INIT_ACCUMULATORS.len()], secret: &[u8]) {
     for (i, x) in accumulators.iter_mut().enumerate() {
         let s = get_u64(secret, i);
@@ -383,7 +382,6 @@ unsafe fn accumulate_stripe_avx2(accumulators: &mut [u64; 8], data: &[u8], secre
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
 fn accumulate_stripe_generic(accumulators: &mut [u64; 8], data: &[u8], secret: &[u8]) {
     for i in 0..accumulators.len() {
         let x = get_u64(&data[i * 8..], 0);
