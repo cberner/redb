@@ -148,7 +148,7 @@ impl Drop for BlobWriter<'_> {
 
 impl io::Write for BlobWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        BlobWriter::write(self, buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        BlobWriter::write(self, buf).map_err(io::Error::other)?;
         Ok(buf.len())
     }
 
