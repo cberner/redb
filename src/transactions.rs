@@ -1,4 +1,6 @@
-use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, ContentType, TemporalKey};
+use crate::blob_store::types::{
+    BlobId, BlobMeta, BlobRef, CausalEdge, CausalLink, CausalPath, ContentType, TemporalKey,
+};
 use crate::blob_store::writer::BlobWriter;
 use crate::db::TransactionGuard;
 use crate::error::CommitError;
@@ -67,6 +69,8 @@ const BLOB_TEMPORAL_INDEX: SystemTableDefinition<TemporalKey, ()> =
     SystemTableDefinition::new("blob_temporal_idx");
 const BLOB_CAUSAL_CHILDREN: SystemTableDefinition<BlobId, BlobId> =
     SystemTableDefinition::new("blob_causal_children");
+const BLOB_CAUSAL_EDGES: SystemTableDefinition<BlobId, CausalEdge> =
+    SystemTableDefinition::new("blob_causal_edges");
 // The allocator state table is stored in the system table tree, but it's accessed using
 // raw btree operations rather than open_system_table(), so there's no SystemTableDefinition
 pub(crate) const ALLOCATOR_STATE_TABLE_NAME: &str = "allocator_state";
@@ -1403,8 +1407,8 @@ impl WriteTransaction {
     /// Store a blob with temporal and causal metadata.
     ///
     /// The blob data is written to the append-only blob region, and indexed in
-    /// the `BLOB_TABLE`, `BLOB_TEMPORAL_INDEX`, and (if `causal_parent` is set)
-    /// `BLOB_CAUSAL_CHILDREN` system tables.
+    /// the `BLOB_TABLE`, `BLOB_TEMPORAL_INDEX`, and (if `causal_link` is set)
+    /// `BLOB_CAUSAL_EDGES` system tables.
     ///
     /// Returns the assigned `BlobId`.
     pub fn store_blob(
@@ -1412,7 +1416,7 @@ impl WriteTransaction {
         data: &[u8],
         content_type: ContentType,
         label: &str,
-        causal_parent: Option<BlobId>,
+        causal_link: Option<CausalLink>,
     ) -> Result<BlobId> {
         if self.blob_writer_active.load(Ordering::Acquire) {
             return Err(StorageError::BlobWriterActive);
@@ -1465,6 +1469,7 @@ impl WriteTransaction {
             compression: 0,
         };
 
+        let causal_parent = causal_link.as_ref().map(|l| l.parent);
         let meta = BlobMeta::new(blob_ref, wall_clock_ns, hlc.to_raw(), causal_parent, label);
 
         // 8. Index in system tables
@@ -1480,10 +1485,10 @@ impl WriteTransaction {
             temporal_table.insert(&temporal_key, &())?;
             drop(temporal_table);
 
-            if let Some(parent) = causal_parent {
-                let mut causal_table =
-                    system_tables.open_system_table(self, BLOB_CAUSAL_CHILDREN)?;
-                causal_table.insert(&parent, &blob_id)?;
+            if let Some(link) = &causal_link {
+                let edge = CausalEdge::new(blob_id, link.relation, &link.context);
+                let mut causal_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
+                causal_table.insert(&link.parent, &edge)?;
                 drop(causal_table);
             }
         }
@@ -1505,7 +1510,7 @@ impl WriteTransaction {
         &self,
         content_type: ContentType,
         label: &str,
-        causal_parent: Option<BlobId>,
+        causal_link: Option<CausalLink>,
     ) -> Result<BlobWriter<'_>> {
         if self
             .blob_writer_active
@@ -1537,7 +1542,7 @@ impl WriteTransaction {
             sequence,
             content_type,
             label,
-            causal_parent,
+            causal_link,
             blob_file_offset,
             blob_region_start,
         ))
@@ -1556,7 +1561,7 @@ impl WriteTransaction {
         blob_id: BlobId,
         mut meta: BlobMeta,
         bytes_written: u64,
-        causal_parent: Option<BlobId>,
+        causal_link: Option<CausalLink>,
     ) -> Result {
         let mut blob_state = self.mem.get_blob_state();
 
@@ -1583,10 +1588,10 @@ impl WriteTransaction {
             temporal_table.insert(&temporal_key, &())?;
             drop(temporal_table);
 
-            if let Some(parent) = causal_parent {
-                let mut causal_table =
-                    system_tables.open_system_table(self, BLOB_CAUSAL_CHILDREN)?;
-                causal_table.insert(&parent, &blob_id)?;
+            if let Some(link) = &causal_link {
+                let edge = CausalEdge::new(blob_id, link.relation, &link.context);
+                let mut causal_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
+                causal_table.insert(&link.parent, &edge)?;
                 drop(causal_table);
             }
         }
@@ -1667,11 +1672,16 @@ impl WriteTransaction {
         temporal_table.remove(&temporal_key)?;
         drop(temporal_table);
 
-        // Remove from causal children index (parent → this blob)
+        // Remove from causal edges index (new table) and legacy causal children
         if let Some(parent) = meta.causal_parent {
-            let mut causal_table = system_tables.open_system_table(self, BLOB_CAUSAL_CHILDREN)?;
-            causal_table.remove(&parent)?;
-            drop(causal_table);
+            let mut edges_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
+            edges_table.remove(&parent)?;
+            drop(edges_table);
+
+            // Also remove from legacy table if it exists
+            let mut legacy_table = system_tables.open_system_table(self, BLOB_CAUSAL_CHILDREN)?;
+            legacy_table.remove(&parent)?;
+            drop(legacy_table);
         }
 
         // Remove from primary table
@@ -2632,14 +2642,19 @@ impl ReadTransaction {
     ///
     /// Follows `causal_parent` links up to `max_hops` steps.
     /// Returns blobs from newest to oldest (starting with the given blob).
+    /// The `Option<CausalEdge>` is the edge from the blob's parent to itself
+    /// (`None` for the root of the chain or if no edge metadata exists).
     pub fn causal_chain(
         &self,
         blob_id: &BlobId,
         max_hops: usize,
-    ) -> Result<Vec<(BlobId, BlobMeta)>> {
+    ) -> Result<Vec<(BlobId, BlobMeta, Option<CausalEdge>)>> {
         let Some(blob_btree) = self.open_system_btree(BLOB_TABLE)? else {
             return Ok(Vec::new());
         };
+
+        let edges_btree = self.open_system_btree(BLOB_CAUSAL_EDGES)?;
+        let legacy_btree = self.open_system_btree(BLOB_CAUSAL_CHILDREN)?;
 
         let mut chain = Vec::new();
         let mut current = *blob_id;
@@ -2650,7 +2665,15 @@ impl ReadTransaction {
             };
             let meta = g.value();
             let parent = meta.causal_parent;
-            chain.push((current, meta));
+
+            // Look up the edge from parent → current
+            let edge = if let Some(parent_id) = parent {
+                Self::lookup_causal_edge(&parent_id, edges_btree.as_ref(), legacy_btree.as_ref())?
+            } else {
+                None
+            };
+
+            chain.push((current, meta, edge));
             match parent {
                 Some(p) => current = p,
                 None => break,
@@ -2660,45 +2683,58 @@ impl ReadTransaction {
         Ok(chain)
     }
 
-    /// Get the direct causal child of a blob (if any).
+    /// Get the direct causal child of a blob (if any), with edge metadata.
     ///
-    /// The current causal children index maps each parent to at most one child.
+    /// The current causal edges index maps each parent to at most one child.
     /// If a parent has multiple children, only the most recently inserted child
     /// is retained. Full multi-child support requires a multimap table (tracked
     /// in issue #28).
-    pub fn causal_children(&self, blob_id: &BlobId) -> Result<Vec<BlobId>> {
-        let Some(children_btree) = self.open_system_btree(BLOB_CAUSAL_CHILDREN)? else {
-            return Ok(Vec::new());
-        };
-
-        let mut children = Vec::new();
-        if let Some(g) = children_btree.get(blob_id)? {
-            children.push(g.value());
+    pub fn causal_children(&self, blob_id: &BlobId) -> Result<Vec<CausalEdge>> {
+        // Try new edges table first
+        if let Some(edges_btree) = self.open_system_btree(BLOB_CAUSAL_EDGES)?
+            && let Some(g) = edges_btree.get(blob_id)?
+        {
+            return Ok(vec![g.value()]);
         }
-        Ok(children)
+
+        // Fall back to legacy table
+        if let Some(legacy_btree) = self.open_system_btree(BLOB_CAUSAL_CHILDREN)?
+            && let Some(g) = legacy_btree.get(blob_id)?
+        {
+            return Ok(vec![CausalEdge::legacy(g.value())]);
+        }
+
+        Ok(Vec::new())
     }
 
     /// Find a causal path between two blobs via backward traversal.
     ///
     /// Walks from `to` toward `from` via `causal_parent` links.
-    /// Returns the path including both endpoints, or `None` if
-    /// no path exists within `max_depth` hops.
+    /// Returns the path including both endpoints with edge metadata,
+    /// or `None` if no path exists within `max_depth` hops.
+    /// The `Option<CausalEdge>` is the edge from parent to the node
+    /// (`None` for the `from` endpoint which has no incoming edge).
     pub fn causal_path(
         &self,
         from: &BlobId,
         to: &BlobId,
         max_depth: usize,
-    ) -> Result<Option<Vec<BlobId>>> {
+    ) -> Result<Option<CausalPath>> {
         if from == to {
-            return Ok(Some(vec![*from]));
+            return Ok(Some(vec![(*from, None)]));
         }
 
         let Some(blob_btree) = self.open_system_btree(BLOB_TABLE)? else {
             return Ok(None);
         };
 
-        let mut path = vec![*to];
+        let edges_btree = self.open_system_btree(BLOB_CAUSAL_EDGES)?;
+        let legacy_btree = self.open_system_btree(BLOB_CAUSAL_CHILDREN)?;
+
+        // path stores (blob_id, edge from parent→this)
+        let mut path: CausalPath = Vec::new();
         let mut current = *to;
+        // We'll fill in edges as we walk backward; the `to` node has an edge from its parent
         for _ in 0..max_depth {
             let Some(g) = blob_btree.get(&current)? else {
                 break;
@@ -2707,14 +2743,39 @@ impl ReadTransaction {
             let Some(parent) = meta.causal_parent else {
                 break;
             };
-            path.push(parent);
+
+            // Edge from parent → current
+            let edge =
+                Self::lookup_causal_edge(&parent, edges_btree.as_ref(), legacy_btree.as_ref())?;
+            path.push((current, edge));
+
             if parent == *from {
+                path.push((*from, None));
                 path.reverse();
                 return Ok(Some(path));
             }
             current = parent;
         }
 
+        Ok(None)
+    }
+
+    /// Look up a causal edge by parent key, checking new table then legacy.
+    fn lookup_causal_edge(
+        parent: &BlobId,
+        edges_btree: Option<&Btree<BlobId, CausalEdge>>,
+        legacy_btree: Option<&Btree<BlobId, BlobId>>,
+    ) -> Result<Option<CausalEdge>> {
+        if let Some(bt) = edges_btree
+            && let Some(g) = bt.get(parent)?
+        {
+            return Ok(Some(g.value()));
+        }
+        if let Some(bt) = legacy_btree
+            && let Some(g) = bt.get(parent)?
+        {
+            return Ok(Some(CausalEdge::legacy(g.value())));
+        }
         Ok(None)
     }
 

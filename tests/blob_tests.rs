@@ -1,4 +1,6 @@
-use redb::{BlobId, ContentType, Database, ReadableDatabase, StorageError};
+use redb::{
+    BlobId, CausalLink, ContentType, Database, ReadableDatabase, RelationType, StorageError,
+};
 
 fn create_tempfile() -> tempfile::NamedTempFile {
     if cfg!(target_os = "wasi") {
@@ -305,14 +307,19 @@ fn causal_chain() {
         .store_blob(b"root", ContentType::OctetStream, "root", None)
         .unwrap();
     let child = write_txn
-        .store_blob(b"child", ContentType::OctetStream, "child", Some(root))
+        .store_blob(
+            b"child",
+            ContentType::OctetStream,
+            "child",
+            Some(CausalLink::new(root, RelationType::Derived, "processed")),
+        )
         .unwrap();
     let grandchild = write_txn
         .store_blob(
             b"grandchild",
             ContentType::OctetStream,
             "grandchild",
-            Some(child),
+            Some(CausalLink::new(child, RelationType::Supports, "evidence")),
         )
         .unwrap();
     write_txn.commit().unwrap();
@@ -325,6 +332,18 @@ fn causal_chain() {
     assert_eq!(chain[0].0, grandchild);
     assert_eq!(chain[1].0, child);
     assert_eq!(chain[2].0, root);
+
+    // Edge metadata should be present
+    let edge_gc = chain[0].2.as_ref().unwrap();
+    assert_eq!(edge_gc.relation, RelationType::Supports);
+    assert_eq!(edge_gc.context_str(), "evidence");
+
+    let edge_c = chain[1].2.as_ref().unwrap();
+    assert_eq!(edge_c.relation, RelationType::Derived);
+    assert_eq!(edge_c.context_str(), "processed");
+
+    // Root has no incoming edge
+    assert!(chain[2].2.is_none());
 
     // Max hops = 1: only gets grandchild + child
     let short_chain = read_txn.causal_chain(&grandchild, 1).unwrap();
@@ -343,14 +362,25 @@ fn causal_children() {
         .store_blob(b"parent", ContentType::OctetStream, "p", None)
         .unwrap();
     let child = write_txn
-        .store_blob(b"child", ContentType::OctetStream, "c", Some(parent))
+        .store_blob(
+            b"child",
+            ContentType::OctetStream,
+            "c",
+            Some(CausalLink::new(
+                parent,
+                RelationType::Contradicts,
+                "revised output",
+            )),
+        )
         .unwrap();
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
     let children = read_txn.causal_children(&parent).unwrap();
     assert_eq!(children.len(), 1);
-    assert_eq!(children[0], child);
+    assert_eq!(children[0].child, child);
+    assert_eq!(children[0].relation, RelationType::Contradicts);
+    assert_eq!(children[0].context_str(), "revised output");
 
     // No children for the child
     let grandchildren = read_txn.causal_children(&child).unwrap();
@@ -367,10 +397,20 @@ fn causal_path_found() {
         .store_blob(b"a", ContentType::OctetStream, "a", None)
         .unwrap();
     let b = write_txn
-        .store_blob(b"b", ContentType::OctetStream, "b", Some(a))
+        .store_blob(
+            b"b",
+            ContentType::OctetStream,
+            "b",
+            Some(CausalLink::derived(a)),
+        )
         .unwrap();
     let c = write_txn
-        .store_blob(b"c", ContentType::OctetStream, "c", Some(b))
+        .store_blob(
+            b"c",
+            ContentType::OctetStream,
+            "c",
+            Some(CausalLink::derived(b)),
+        )
         .unwrap();
     write_txn.commit().unwrap();
 
@@ -378,11 +418,18 @@ fn causal_path_found() {
 
     // Path from a to c
     let path = read_txn.causal_path(&a, &c, 10).unwrap().unwrap();
-    assert_eq!(path, vec![a, b, c]);
+    assert_eq!(path.len(), 3);
+    assert_eq!(path[0].0, a);
+    assert!(path[0].1.is_none()); // from endpoint has no incoming edge
+    assert_eq!(path[1].0, b);
+    assert!(path[1].1.is_some());
+    assert_eq!(path[2].0, c);
+    assert!(path[2].1.is_some());
 
     // Path from a to a (trivial)
     let self_path = read_txn.causal_path(&a, &a, 10).unwrap().unwrap();
-    assert_eq!(self_path, vec![a]);
+    assert_eq!(self_path.len(), 1);
+    assert_eq!(self_path[0].0, a);
 }
 
 #[test]
@@ -874,4 +921,191 @@ fn streaming_blob_checksum_matches_oneshot() {
         id_oneshot.content_prefix_hash,
         id_streaming.content_prefix_hash
     );
+}
+
+// ---------------------------------------------------------------------------
+// Causal edge metadata (Cmeta) tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn causal_edge_relation_types() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let relations = [
+        RelationType::Derived,
+        RelationType::Similar,
+        RelationType::Contradicts,
+        RelationType::Supports,
+        RelationType::Supersedes,
+    ];
+
+    let write_txn = db.begin_write().unwrap();
+    let mut pairs = Vec::new();
+    for rel in &relations {
+        let parent = write_txn
+            .store_blob(b"parent", ContentType::OctetStream, "p", None)
+            .unwrap();
+        let child = write_txn
+            .store_blob(
+                b"child",
+                ContentType::OctetStream,
+                "c",
+                Some(CausalLink::new(parent, *rel, rel.label())),
+            )
+            .unwrap();
+        pairs.push((parent, child, *rel));
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    for (parent, child, expected_rel) in &pairs {
+        let edges = read_txn.causal_children(parent).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].child, *child);
+        assert_eq!(edges[0].relation, *expected_rel);
+        assert_eq!(edges[0].context_str(), expected_rel.label());
+    }
+}
+
+#[test]
+fn causal_edge_context_string() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+
+    // Context up to 62 bytes should be preserved
+    let ctx = "inference result contradicts calibration baseline v2.3";
+    let parent = write_txn
+        .store_blob(b"p", ContentType::OctetStream, "p", None)
+        .unwrap();
+    let _child = write_txn
+        .store_blob(
+            b"c",
+            ContentType::OctetStream,
+            "c",
+            Some(CausalLink::new(parent, RelationType::Contradicts, ctx)),
+        )
+        .unwrap();
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let edges = read_txn.causal_children(&parent).unwrap();
+    assert_eq!(edges[0].context_str(), ctx);
+
+    // Context > 62 bytes should be truncated
+    drop(read_txn);
+    let write_txn2 = db.begin_write().unwrap();
+    let long_ctx = "x".repeat(200);
+    let p2 = write_txn2
+        .store_blob(b"p2", ContentType::OctetStream, "p2", None)
+        .unwrap();
+    write_txn2
+        .store_blob(
+            b"c2",
+            ContentType::OctetStream,
+            "c2",
+            Some(CausalLink::new(p2, RelationType::Derived, &long_ctx)),
+        )
+        .unwrap();
+    write_txn2.commit().unwrap();
+
+    let read_txn2 = db.begin_read().unwrap();
+    let edges2 = read_txn2.causal_children(&p2).unwrap();
+    assert_eq!(edges2[0].context_str().len(), 62);
+}
+
+#[test]
+fn causal_chain_with_mixed_relations() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+
+    let a = write_txn
+        .store_blob(b"a", ContentType::OctetStream, "a", None)
+        .unwrap();
+    let b = write_txn
+        .store_blob(
+            b"b",
+            ContentType::OctetStream,
+            "b",
+            Some(CausalLink::new(a, RelationType::Derived, "step 1")),
+        )
+        .unwrap();
+    let c = write_txn
+        .store_blob(
+            b"c",
+            ContentType::OctetStream,
+            "c",
+            Some(CausalLink::new(b, RelationType::Contradicts, "step 2")),
+        )
+        .unwrap();
+    let d = write_txn
+        .store_blob(
+            b"d",
+            ContentType::OctetStream,
+            "d",
+            Some(CausalLink::new(c, RelationType::Supersedes, "step 3")),
+        )
+        .unwrap();
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let chain = read_txn.causal_chain(&d, 10).unwrap();
+    assert_eq!(chain.len(), 4);
+
+    // d's edge: c->d with Supersedes
+    let e_d = chain[0].2.as_ref().unwrap();
+    assert_eq!(e_d.relation, RelationType::Supersedes);
+    assert_eq!(e_d.context_str(), "step 3");
+
+    // c's edge: b->c with Contradicts
+    let e_c = chain[1].2.as_ref().unwrap();
+    assert_eq!(e_c.relation, RelationType::Contradicts);
+    assert_eq!(e_c.context_str(), "step 2");
+
+    // b's edge: a->b with Derived
+    let e_b = chain[2].2.as_ref().unwrap();
+    assert_eq!(e_b.relation, RelationType::Derived);
+    assert_eq!(e_b.context_str(), "step 1");
+
+    // a is root, no edge
+    assert!(chain[3].2.is_none());
+}
+
+#[test]
+fn causal_edge_with_streaming_writer() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let parent = write_txn
+        .store_blob(b"parent", ContentType::OctetStream, "p", None)
+        .unwrap();
+
+    let child = {
+        let mut writer = write_txn
+            .blob_writer(
+                ContentType::OctetStream,
+                "streamed-child",
+                Some(CausalLink::new(
+                    parent,
+                    RelationType::Similar,
+                    "augmented version",
+                )),
+            )
+            .unwrap();
+        writer.write(b"streamed child data").unwrap();
+        writer.finish().unwrap()
+    };
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let edges = read_txn.causal_children(&parent).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].child, child);
+    assert_eq!(edges[0].relation, RelationType::Similar);
+    assert_eq!(edges[0].context_str(), "augmented version");
 }

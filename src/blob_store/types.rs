@@ -478,6 +478,226 @@ impl Value for BlobMeta {
 }
 
 // ---------------------------------------------------------------------------
+// RelationType — describes the semantic relationship in a causal edge
+// ---------------------------------------------------------------------------
+
+/// Semantic relationship type for a causal edge between two blobs.
+///
+/// Stored as a single byte discriminant within [`CausalEdge`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum RelationType {
+    /// Child was produced by processing the parent (default).
+    Derived = 0,
+    /// Child is semantically similar to the parent.
+    Similar = 1,
+    /// Child contradicts or invalidates the parent.
+    Contradicts = 2,
+    /// Child provides supporting evidence for the parent.
+    Supports = 3,
+    /// Child replaces the parent entirely.
+    Supersedes = 4,
+}
+
+impl RelationType {
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            1 => Self::Similar,
+            2 => Self::Contradicts,
+            3 => Self::Supports,
+            4 => Self::Supersedes,
+            _ => Self::Derived,
+        }
+    }
+
+    pub fn as_byte(self) -> u8 {
+        self as u8
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Derived => "derived",
+            Self::Similar => "similar",
+            Self::Contradicts => "contradicts",
+            Self::Supports => "supports",
+            Self::Supersedes => "supersedes",
+        }
+    }
+}
+
+impl fmt::Debug for RelationType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RelationType({})", self.label())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CausalEdge — 80-byte fixed-width edge metadata in causal graph
+// ---------------------------------------------------------------------------
+
+/// Rich metadata for a causal edge between two blobs, stored as the value
+/// in the `blob_causal_edges` system table.
+///
+/// Layout (80 bytes):
+/// - `child` (`BlobId`, 16 bytes): the child blob in this edge
+/// - `relation` (`u8`, 1 byte): [`RelationType`] discriminant
+/// - `context_len` (`u8`, 1 byte): length of the context string (max 62)
+/// - `context` (`[u8; 62]`): UTF-8 description of why this edge exists
+#[derive(Clone)]
+pub struct CausalEdge {
+    /// The child blob in this directed edge.
+    pub child: BlobId,
+    /// Semantic relationship from parent to child.
+    pub relation: RelationType,
+    /// Length of the context string (0–62).
+    pub context_len: u8,
+    /// UTF-8 context describing the reason for this causal link.
+    pub context: [u8; 62],
+}
+
+impl CausalEdge {
+    pub const SERIALIZED_SIZE: usize = BlobId::SERIALIZED_SIZE + 1 + 1 + 62; // 80
+
+    pub fn new(child: BlobId, relation: RelationType, context: &str) -> Self {
+        let ctx_bytes = context.as_bytes();
+        #[allow(clippy::cast_possible_truncation)]
+        let context_len = ctx_bytes.len().min(62) as u8;
+        let mut context_buf = [0u8; 62];
+        context_buf[..context_len as usize].copy_from_slice(&ctx_bytes[..context_len as usize]);
+        Self {
+            child,
+            relation,
+            context_len,
+            context: context_buf,
+        }
+    }
+
+    /// Synthesize a legacy edge with [`RelationType::Derived`] and empty context.
+    pub fn legacy(child: BlobId) -> Self {
+        Self::new(child, RelationType::Derived, "")
+    }
+
+    pub fn context_str(&self) -> &str {
+        std::str::from_utf8(&self.context[..self.context_len as usize]).unwrap_or("")
+    }
+
+    pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
+        let mut buf = [0u8; Self::SERIALIZED_SIZE];
+        let mut pos = 0;
+        buf[pos..pos + BlobId::SERIALIZED_SIZE].copy_from_slice(&self.child.to_le_bytes());
+        pos += BlobId::SERIALIZED_SIZE;
+        buf[pos] = self.relation.as_byte();
+        pos += 1;
+        buf[pos] = self.context_len;
+        pos += 1;
+        buf[pos..pos + 62].copy_from_slice(&self.context);
+        buf
+    }
+
+    pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+        let mut pos = 0;
+        let child =
+            BlobId::from_le_bytes(data[pos..pos + BlobId::SERIALIZED_SIZE].try_into().unwrap());
+        pos += BlobId::SERIALIZED_SIZE;
+        let relation = RelationType::from_byte(data[pos]);
+        pos += 1;
+        let context_len = data[pos];
+        pos += 1;
+        let mut context = [0u8; 62];
+        context.copy_from_slice(&data[pos..pos + 62]);
+        Self {
+            child,
+            relation,
+            context_len,
+            context,
+        }
+    }
+}
+
+#[allow(clippy::missing_fields_in_debug)]
+impl fmt::Debug for CausalEdge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CausalEdge")
+            .field("child", &self.child)
+            .field("relation", &self.relation)
+            .field("context_len", &self.context_len)
+            .field("context", &self.context_str())
+            .finish()
+    }
+}
+
+impl Value for CausalEdge {
+    type SelfType<'a>
+        = CausalEdge
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = [u8; CausalEdge::SERIALIZED_SIZE]
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(Self::SERIALIZED_SIZE)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        value.to_le_bytes()
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("redb::blob::CausalEdge")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CausalLink — API input for creating causal edges
+// ---------------------------------------------------------------------------
+
+/// User-facing input for specifying a causal link when storing a blob.
+///
+/// This is the API-level struct that replaces `Option<BlobId>` in write methods.
+/// It carries the parent reference along with rich edge metadata.
+#[derive(Clone, Debug)]
+pub struct CausalLink {
+    /// The parent blob that this new blob is causally linked to.
+    pub parent: BlobId,
+    /// Semantic relationship from parent to child.
+    pub relation: RelationType,
+    /// Human-readable context describing why this link exists (truncated to 62 bytes).
+    pub context: String,
+}
+
+impl CausalLink {
+    pub fn new(parent: BlobId, relation: RelationType, context: &str) -> Self {
+        Self {
+            parent,
+            relation,
+            context: context.to_string(),
+        }
+    }
+
+    /// Shorthand for a [`RelationType::Derived`] link with empty context.
+    pub fn derived(parent: BlobId) -> Self {
+        Self::new(parent, RelationType::Derived, "")
+    }
+}
+
+/// A causal path is a sequence of blobs with optional edge metadata.
+/// Each element is `(BlobId, Option<CausalEdge>)` where the edge describes
+/// the link from the previous node to this one (`None` for the path origin).
+pub type CausalPath = Vec<(BlobId, Option<CausalEdge>)>;
+
+// ---------------------------------------------------------------------------
 // BlobInput — convenience struct for batch blob storage
 // ---------------------------------------------------------------------------
 
@@ -486,7 +706,7 @@ pub struct BlobInput<'a> {
     pub data: &'a [u8],
     pub content_type: ContentType,
     pub label: &'a str,
-    pub causal_parent: Option<BlobId>,
+    pub causal_link: Option<CausalLink>,
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +854,7 @@ const _: () = {
     assert!(BlobRef::SERIALIZED_SIZE == 40);
     assert!(BlobMeta::SERIALIZED_SIZE == 137);
     assert!(TemporalKey::SERIALIZED_SIZE == 32);
+    assert!(CausalEdge::SERIALIZED_SIZE == 80);
 };
 
 #[cfg(test)]
@@ -811,6 +1032,66 @@ mod tests {
         );
         assert!(start <= mid);
         assert!(mid <= end);
+    }
+
+    #[test]
+    fn relation_type_roundtrip() {
+        for b in 0..=4 {
+            let rt = RelationType::from_byte(b);
+            assert_eq!(rt.as_byte(), b);
+        }
+        // Unknown maps to Derived
+        assert_eq!(RelationType::from_byte(255), RelationType::Derived);
+    }
+
+    #[test]
+    fn causal_edge_roundtrip() {
+        let child = BlobId::new(42, 0xCAFE);
+        let edge = CausalEdge::new(child, RelationType::Contradicts, "inference conflict");
+        let bytes = edge.to_le_bytes();
+        let recovered = CausalEdge::from_le_bytes(bytes);
+        assert_eq!(recovered.child, child);
+        assert_eq!(recovered.relation, RelationType::Contradicts);
+        assert_eq!(recovered.context_str(), "inference conflict");
+    }
+
+    #[test]
+    fn causal_edge_empty_context() {
+        let child = BlobId::new(1, 0);
+        let edge = CausalEdge::new(child, RelationType::Derived, "");
+        assert_eq!(edge.context_len, 0);
+        assert_eq!(edge.context_str(), "");
+        let bytes = edge.to_le_bytes();
+        let recovered = CausalEdge::from_le_bytes(bytes);
+        assert_eq!(recovered.context_str(), "");
+    }
+
+    #[test]
+    fn causal_edge_context_truncation() {
+        let child = BlobId::new(1, 0);
+        let long_ctx = "x".repeat(200);
+        let edge = CausalEdge::new(child, RelationType::Supports, &long_ctx);
+        assert_eq!(edge.context_len, 62);
+        assert_eq!(edge.context_str().len(), 62);
+    }
+
+    #[test]
+    fn causal_edge_legacy() {
+        let child = BlobId::new(99, 0xFF);
+        let edge = CausalEdge::legacy(child);
+        assert_eq!(edge.relation, RelationType::Derived);
+        assert_eq!(edge.context_str(), "");
+        assert_eq!(edge.child, child);
+    }
+
+    #[test]
+    fn causal_edge_value_trait() {
+        let edge = CausalEdge::new(BlobId::new(1, 2), RelationType::Similar, "test");
+        let bytes = CausalEdge::as_bytes(&edge);
+        let recovered = CausalEdge::from_bytes(bytes.as_ref());
+        assert_eq!(recovered.child, edge.child);
+        assert_eq!(recovered.relation, edge.relation);
+        assert_eq!(recovered.context_str(), edge.context_str());
     }
 
     #[test]

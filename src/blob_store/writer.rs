@@ -1,5 +1,5 @@
 use crate::WriteTransaction;
-use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, ContentType};
+use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, CausalLink, ContentType};
 use crate::tree_store::{Xxh3StreamHasher, hash64_with_seed};
 use std::io;
 use std::sync::atomic::Ordering;
@@ -23,7 +23,7 @@ pub struct BlobWriter<'txn> {
     sequence: u64,
     content_type: ContentType,
     label: String,
-    causal_parent: Option<BlobId>,
+    causal_link: Option<CausalLink>,
     /// Absolute file offset where this blob's data starts.
     blob_file_offset: u64,
     /// Offset within the blob region where this blob starts.
@@ -45,7 +45,7 @@ impl<'txn> BlobWriter<'txn> {
         sequence: u64,
         content_type: ContentType,
         label: &str,
-        causal_parent: Option<BlobId>,
+        causal_link: Option<CausalLink>,
         blob_file_offset: u64,
         blob_region_start: u64,
     ) -> Self {
@@ -54,7 +54,7 @@ impl<'txn> BlobWriter<'txn> {
             sequence,
             content_type,
             label: label.to_string(),
-            causal_parent,
+            causal_link,
             blob_file_offset,
             blob_region_start,
             bytes_written: 0,
@@ -117,17 +117,19 @@ impl<'txn> BlobWriter<'txn> {
             .expect("system clock before UNIX epoch")
             .as_nanos() as u64;
 
+        let causal_parent = self.causal_link.as_ref().map(|l| l.parent);
         let meta = BlobMeta::new(
             blob_ref,
             wall_clock_ns,
             0, // HLC placeholder — set by finalize_blob_writer
-            self.causal_parent,
+            causal_parent,
             &self.label,
         );
 
         // Delegate indexing and state updates to WriteTransaction
+        let causal_link = self.causal_link.take();
         self.txn
-            .finalize_blob_writer(blob_id, meta, self.bytes_written, self.causal_parent)?;
+            .finalize_blob_writer(blob_id, meta, self.bytes_written, causal_link)?;
 
         Ok(blob_id)
     }
