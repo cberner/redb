@@ -1,5 +1,5 @@
 use crate::WriteTransaction;
-use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, CausalLink, ContentType};
+use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, ContentType, StoreOptions};
 use crate::tree_store::{Xxh3StreamHasher, hash64_with_seed};
 use std::io;
 use std::sync::atomic::Ordering;
@@ -23,7 +23,7 @@ pub struct BlobWriter<'txn> {
     sequence: u64,
     content_type: ContentType,
     label: String,
-    causal_link: Option<CausalLink>,
+    opts: Option<StoreOptions>,
     /// Absolute file offset where this blob's data starts.
     blob_file_offset: u64,
     /// Offset within the blob region where this blob starts.
@@ -45,7 +45,7 @@ impl<'txn> BlobWriter<'txn> {
         sequence: u64,
         content_type: ContentType,
         label: &str,
-        causal_link: Option<CausalLink>,
+        opts: StoreOptions,
         blob_file_offset: u64,
         blob_region_start: u64,
     ) -> Self {
@@ -54,7 +54,7 @@ impl<'txn> BlobWriter<'txn> {
             sequence,
             content_type,
             label: label.to_string(),
-            causal_link,
+            opts: Some(opts),
             blob_file_offset,
             blob_region_start,
             bytes_written: 0,
@@ -117,7 +117,8 @@ impl<'txn> BlobWriter<'txn> {
             .expect("system clock before UNIX epoch")
             .as_nanos() as u64;
 
-        let causal_parent = self.causal_link.as_ref().map(|l| l.parent);
+        let opts = self.opts.take().unwrap_or_default();
+        let causal_parent = opts.causal_link.as_ref().map(|l| l.parent);
         let meta = BlobMeta::new(
             blob_ref,
             wall_clock_ns,
@@ -127,9 +128,8 @@ impl<'txn> BlobWriter<'txn> {
         );
 
         // Delegate indexing and state updates to WriteTransaction
-        let causal_link = self.causal_link.take();
         self.txn
-            .finalize_blob_writer(blob_id, meta, self.bytes_written, causal_link)?;
+            .finalize_blob_writer(blob_id, meta, self.bytes_written, opts)?;
 
         Ok(blob_id)
     }

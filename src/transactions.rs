@@ -1,5 +1,6 @@
 use crate::blob_store::types::{
-    BlobId, BlobMeta, BlobRef, CausalEdge, CausalLink, CausalPath, ContentType, TemporalKey,
+    BlobId, BlobMeta, BlobRef, CausalEdge, CausalPath, ContentType, MAX_TAGS_PER_BLOB,
+    NamespaceKey, NamespaceVal, StoreOptions, TagKey, TemporalKey,
 };
 use crate::blob_store::writer::BlobWriter;
 use crate::db::TransactionGuard;
@@ -71,6 +72,12 @@ const BLOB_CAUSAL_CHILDREN: SystemTableDefinition<BlobId, BlobId> =
     SystemTableDefinition::new("blob_causal_children");
 const BLOB_CAUSAL_EDGES: SystemTableDefinition<BlobId, CausalEdge> =
     SystemTableDefinition::new("blob_causal_edges");
+const BLOB_TAG_INDEX: SystemTableDefinition<TagKey, ()> =
+    SystemTableDefinition::new("blob_tag_idx");
+const BLOB_NAMESPACE: SystemTableDefinition<BlobId, NamespaceVal> =
+    SystemTableDefinition::new("blob_namespace");
+const BLOB_NAMESPACE_INDEX: SystemTableDefinition<NamespaceKey, ()> =
+    SystemTableDefinition::new("blob_namespace_idx");
 // The allocator state table is stored in the system table tree, but it's accessed using
 // raw btree operations rather than open_system_table(), so there's no SystemTableDefinition
 pub(crate) const ALLOCATOR_STATE_TABLE_NAME: &str = "allocator_state";
@@ -1404,11 +1411,11 @@ impl WriteTransaction {
     // Blob store operations
     // -----------------------------------------------------------------------
 
-    /// Store a blob with temporal and causal metadata.
+    /// Store a blob with temporal, causal, tag, and namespace metadata.
     ///
     /// The blob data is written to the append-only blob region, and indexed in
-    /// the `BLOB_TABLE`, `BLOB_TEMPORAL_INDEX`, and (if `causal_link` is set)
-    /// `BLOB_CAUSAL_EDGES` system tables.
+    /// the `BLOB_TABLE`, `BLOB_TEMPORAL_INDEX`, and optionally
+    /// `BLOB_CAUSAL_EDGES`, `BLOB_TAG_INDEX`, `BLOB_NAMESPACE` system tables.
     ///
     /// Returns the assigned `BlobId`.
     pub fn store_blob(
@@ -1416,7 +1423,7 @@ impl WriteTransaction {
         data: &[u8],
         content_type: ContentType,
         label: &str,
-        causal_link: Option<CausalLink>,
+        opts: StoreOptions,
     ) -> Result<BlobId> {
         if self.blob_writer_active.load(Ordering::Acquire) {
             return Err(StorageError::BlobWriterActive);
@@ -1469,7 +1476,7 @@ impl WriteTransaction {
             compression: 0,
         };
 
-        let causal_parent = causal_link.as_ref().map(|l| l.parent);
+        let causal_parent = opts.causal_link.as_ref().map(|l| l.parent);
         let meta = BlobMeta::new(blob_ref, wall_clock_ns, hlc.to_raw(), causal_parent, label);
 
         // 8. Index in system tables
@@ -1485,12 +1492,20 @@ impl WriteTransaction {
             temporal_table.insert(&temporal_key, &())?;
             drop(temporal_table);
 
-            if let Some(link) = &causal_link {
+            if let Some(link) = &opts.causal_link {
                 let edge = CausalEdge::new(blob_id, link.relation, &link.context);
                 let mut causal_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
                 causal_table.insert(&link.parent, &edge)?;
                 drop(causal_table);
             }
+
+            Self::index_tags_and_namespace(
+                &mut system_tables,
+                self,
+                blob_id,
+                &opts.tags,
+                opts.namespace.as_deref(),
+            )?;
         }
 
         // 9. Update pending blob state for commit
@@ -1510,7 +1525,7 @@ impl WriteTransaction {
         &self,
         content_type: ContentType,
         label: &str,
-        causal_link: Option<CausalLink>,
+        opts: StoreOptions,
     ) -> Result<BlobWriter<'_>> {
         if self
             .blob_writer_active
@@ -1542,7 +1557,7 @@ impl WriteTransaction {
             sequence,
             content_type,
             label,
-            causal_link,
+            opts,
             blob_file_offset,
             blob_region_start,
         ))
@@ -1561,7 +1576,7 @@ impl WriteTransaction {
         blob_id: BlobId,
         mut meta: BlobMeta,
         bytes_written: u64,
-        causal_link: Option<CausalLink>,
+        opts: StoreOptions,
     ) -> Result {
         let mut blob_state = self.mem.get_blob_state();
 
@@ -1588,12 +1603,20 @@ impl WriteTransaction {
             temporal_table.insert(&temporal_key, &())?;
             drop(temporal_table);
 
-            if let Some(link) = &causal_link {
+            if let Some(link) = &opts.causal_link {
                 let edge = CausalEdge::new(blob_id, link.relation, &link.context);
                 let mut causal_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
                 causal_table.insert(&link.parent, &edge)?;
                 drop(causal_table);
             }
+
+            Self::index_tags_and_namespace(
+                &mut system_tables,
+                self,
+                blob_id,
+                &opts.tags,
+                opts.namespace.as_deref(),
+            )?;
         }
 
         self.mem.set_pending_blob_state(blob_state);
@@ -1605,6 +1628,70 @@ impl WriteTransaction {
     /// Access the blob-writer-active flag. Used by `BlobWriter::drop`.
     pub(crate) fn blob_writer_active(&self) -> &AtomicBool {
         &self.blob_writer_active
+    }
+
+    /// Index tags and namespace for a blob. Called from both `store_blob` and
+    /// `finalize_blob_writer`.
+    fn index_tags_and_namespace(
+        system_tables: &mut SystemNamespace<'_>,
+        txn: &WriteTransaction,
+        blob_id: BlobId,
+        tags: &[String],
+        namespace: Option<&str>,
+    ) -> Result {
+        let tag_count = tags.len().min(MAX_TAGS_PER_BLOB);
+        if tag_count > 0 {
+            let mut tag_table = system_tables.open_system_table(txn, BLOB_TAG_INDEX)?;
+            for tag in &tags[..tag_count] {
+                let tag_key = TagKey::new(tag, blob_id);
+                tag_table.insert(&tag_key, &())?;
+            }
+            drop(tag_table);
+        }
+
+        if let Some(ns) = namespace {
+            let ns_val = NamespaceVal::new(ns);
+            let mut ns_table = system_tables.open_system_table(txn, BLOB_NAMESPACE)?;
+            ns_table.insert(&blob_id, &ns_val)?;
+            drop(ns_table);
+
+            let ns_key = NamespaceKey::new(ns, blob_id);
+            let mut ns_idx = system_tables.open_system_table(txn, BLOB_NAMESPACE_INDEX)?;
+            ns_idx.insert(&ns_key, &())?;
+            drop(ns_idx);
+        }
+
+        Ok(())
+    }
+
+    /// Get tags for a blob within a write transaction.
+    pub fn blob_tags(&self, blob_id: &BlobId) -> Result<Vec<String>> {
+        let mut system_tables = self.system_tables.lock().unwrap();
+        let tag_table = system_tables.open_system_table(self, BLOB_TAG_INDEX)?;
+
+        let mut tags = Vec::new();
+        // Scan all tag keys — we need to find entries where blob_id matches.
+        // Since TagKey is ordered (tag, blob_id), we scan the full table.
+        // This is acceptable for the write-path read (low frequency).
+        let range = tag_table.range::<TagKey>(..)?;
+        for entry in range {
+            let (key_guard, _) = entry?;
+            let key = key_guard.value();
+            if key.blob_id == *blob_id {
+                tags.push(key.tag_str().to_string());
+            }
+        }
+        Ok(tags)
+    }
+
+    /// Get namespace for a blob within a write transaction.
+    pub fn blob_namespace(&self, blob_id: &BlobId) -> Result<Option<String>> {
+        let mut system_tables = self.system_tables.lock().unwrap();
+        let ns_table = system_tables.open_system_table(self, BLOB_NAMESPACE)?;
+        match ns_table.get(blob_id)? {
+            Some(g) => Ok(Some(g.value().namespace_str().to_string())),
+            None => Ok(None),
+        }
     }
 
     /// Retrieve a blob's data and metadata by its `BlobId`.
@@ -1682,6 +1769,48 @@ impl WriteTransaction {
             let mut legacy_table = system_tables.open_system_table(self, BLOB_CAUSAL_CHILDREN)?;
             legacy_table.remove(&parent)?;
             drop(legacy_table);
+        }
+
+        // Remove tag index entries — scan for all TagKeys that reference this blob
+        {
+            let mut tag_table = system_tables.open_system_table(self, BLOB_TAG_INDEX)?;
+            let mut to_remove = Vec::new();
+            let range = tag_table.range::<TagKey>(..)?;
+            for entry in range {
+                let (key_guard, _) = entry?;
+                let key = key_guard.value();
+                if key.blob_id == *blob_id {
+                    to_remove.push(key);
+                }
+            }
+            for key in &to_remove {
+                tag_table.remove(key)?;
+            }
+            drop(tag_table);
+        }
+
+        // Remove namespace entries
+        {
+            let ns_key = {
+                let ns_table = system_tables.open_system_table(self, BLOB_NAMESPACE)?;
+                match ns_table.get(blob_id)? {
+                    Some(ns_guard) => {
+                        let ns_str = ns_guard.value().namespace_str().to_string();
+                        Some(NamespaceKey::new(&ns_str, *blob_id))
+                    }
+                    None => None,
+                }
+            };
+
+            if let Some(ns_key) = ns_key {
+                let mut ns_table = system_tables.open_system_table(self, BLOB_NAMESPACE)?;
+                ns_table.remove(blob_id)?;
+                drop(ns_table);
+
+                let mut ns_idx = system_tables.open_system_table(self, BLOB_NAMESPACE_INDEX)?;
+                ns_idx.remove(&ns_key)?;
+                drop(ns_idx);
+            }
         }
 
         // Remove from primary table
@@ -2777,6 +2906,122 @@ impl ReadTransaction {
             return Ok(Some(CausalEdge::legacy(g.value())));
         }
         Ok(None)
+    }
+
+    /// Get all blobs with a given tag.
+    ///
+    /// Uses a prefix range scan on the tag index for O(log N + K) performance
+    /// where K is the number of matching blobs.
+    pub fn blobs_by_tag(&self, tag: &str) -> Result<Vec<BlobId>> {
+        let Some(tag_btree) = self.open_system_btree(BLOB_TAG_INDEX)? else {
+            return Ok(Vec::new());
+        };
+
+        let start = TagKey::range_start(tag);
+        let end = TagKey::range_end(tag);
+        let range = tag_btree.range(&(start..=end))?;
+
+        let mut results = Vec::new();
+        for entry in range {
+            let entry = entry?;
+            results.push(entry.key().blob_id);
+        }
+        Ok(results)
+    }
+
+    /// Get all blobs in a namespace, with their metadata.
+    ///
+    /// Uses the namespace index for efficient prefix scanning.
+    pub fn blobs_in_namespace(&self, namespace: &str) -> Result<Vec<(BlobId, BlobMeta)>> {
+        let Some(ns_idx_btree) = self.open_system_btree(BLOB_NAMESPACE_INDEX)? else {
+            return Ok(Vec::new());
+        };
+        let Some(blob_btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(Vec::new());
+        };
+
+        let start = NamespaceKey::range_start(namespace);
+        let end = NamespaceKey::range_end(namespace);
+        let range = ns_idx_btree.range(&(start..=end))?;
+
+        let mut results = Vec::new();
+        for entry in range {
+            let entry = entry?;
+            let blob_id = entry.key().blob_id;
+            if let Some(meta_guard) = blob_btree.get(&blob_id)? {
+                results.push((blob_id, meta_guard.value()));
+            }
+        }
+        Ok(results)
+    }
+
+    /// Query blobs within a time range, optionally filtered by namespace.
+    ///
+    /// When `namespace` is `Some`, only blobs belonging to that namespace are
+    /// included. When `None`, behaves identically to `blobs_in_time_range`.
+    pub fn blobs_in_time_range_ns(
+        &self,
+        start_ns: u64,
+        end_ns: u64,
+        namespace: Option<&str>,
+    ) -> Result<Vec<(TemporalKey, BlobMeta)>> {
+        let results = self.blobs_in_time_range(start_ns, end_ns)?;
+        let Some(ns) = namespace else {
+            return Ok(results);
+        };
+
+        let Some(ns_btree) = self.open_system_btree(BLOB_NAMESPACE)? else {
+            return Ok(Vec::new());
+        };
+
+        let mut filtered = Vec::new();
+        for (tk, meta) in results {
+            if let Some(ns_guard) = ns_btree.get(&tk.blob_id)?
+                && ns_guard.value().namespace_str() == ns
+            {
+                filtered.push((tk, meta));
+            }
+        }
+        Ok(filtered)
+    }
+
+    /// Get tags for a blob.
+    pub fn blob_tags(&self, blob_id: &BlobId) -> Result<Vec<String>> {
+        let Some(tag_btree) = self.open_system_btree(BLOB_TAG_INDEX)? else {
+            return Ok(Vec::new());
+        };
+
+        // TagKey is ordered (tag, blob_id), so we must do a full scan to find
+        // all tags for a given blob_id. Acceptable because the tag index is
+        // typically small.
+        let start = TagKey::new("", BlobId::MIN);
+        let end = TagKey {
+            tag: [0xFF; 32],
+            tag_len: 32,
+            blob_id: BlobId::MAX,
+        };
+        let range = tag_btree.range(&(start..=end))?;
+        let mut tags = Vec::new();
+        for entry in range {
+            let entry = entry?;
+            let key = entry.key();
+            if key.blob_id == *blob_id {
+                tags.push(key.tag_str().to_string());
+            }
+        }
+        Ok(tags)
+    }
+
+    /// Get namespace for a blob.
+    pub fn blob_namespace(&self, blob_id: &BlobId) -> Result<Option<String>> {
+        let Some(ns_btree) = self.open_system_btree(BLOB_NAMESPACE)? else {
+            return Ok(None);
+        };
+
+        match ns_btree.get(blob_id)? {
+            Some(g) => Ok(Some(g.value().namespace_str().to_string())),
+            None => Ok(None),
+        }
     }
 
     /// Close the transaction

@@ -698,6 +698,418 @@ impl CausalLink {
 pub type CausalPath = Vec<(BlobId, Option<CausalEdge>)>;
 
 // ---------------------------------------------------------------------------
+// TagKey — 49-byte composite key for the blob tag index
+// ---------------------------------------------------------------------------
+
+/// Composite key for the `BLOB_TAG_INDEX` B-tree.
+///
+/// Layout (49 bytes):
+/// - `tag` (`[u8; 32]`): zero-padded tag string
+/// - `tag_len` (`u8`): actual length of the tag (max 32)
+/// - `blob_id` (`BlobId`, 16 bytes): the tagged blob
+///
+/// Ordering: tag bytes (lexicographic) first, then `blob_id`, enabling
+/// efficient prefix range scans for "all blobs with tag X".
+#[derive(Clone, PartialEq, Eq)]
+pub struct TagKey {
+    pub tag: [u8; 32],
+    pub tag_len: u8,
+    pub blob_id: BlobId,
+}
+
+impl TagKey {
+    pub const SERIALIZED_SIZE: usize = 32 + 1 + BlobId::SERIALIZED_SIZE; // 49
+
+    pub fn new(tag: &str, blob_id: BlobId) -> Self {
+        let tag_bytes = tag.as_bytes();
+        #[allow(clippy::cast_possible_truncation)]
+        let tag_len = tag_bytes.len().min(32) as u8;
+        let mut tag_buf = [0u8; 32];
+        tag_buf[..tag_len as usize].copy_from_slice(&tag_bytes[..tag_len as usize]);
+        Self {
+            tag: tag_buf,
+            tag_len,
+            blob_id,
+        }
+    }
+
+    /// Lower bound for scanning all blobs with a given tag.
+    pub fn range_start(tag: &str) -> Self {
+        Self::new(tag, BlobId::MIN)
+    }
+
+    /// Upper bound for scanning all blobs with a given tag.
+    pub fn range_end(tag: &str) -> Self {
+        Self::new(tag, BlobId::MAX)
+    }
+
+    pub fn tag_str(&self) -> &str {
+        std::str::from_utf8(&self.tag[..self.tag_len as usize]).unwrap_or("")
+    }
+
+    pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
+        let mut buf = [0u8; Self::SERIALIZED_SIZE];
+        buf[..32].copy_from_slice(&self.tag);
+        buf[32] = self.tag_len;
+        buf[33..49].copy_from_slice(&self.blob_id.to_le_bytes());
+        buf
+    }
+
+    pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+        let mut tag = [0u8; 32];
+        tag.copy_from_slice(&data[..32]);
+        let tag_len = data[32];
+        let blob_id = BlobId::from_le_bytes(data[33..49].try_into().unwrap());
+        Self {
+            tag,
+            tag_len,
+            blob_id,
+        }
+    }
+}
+
+impl PartialOrd for TagKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TagKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.tag
+            .cmp(&other.tag)
+            .then(self.tag_len.cmp(&other.tag_len))
+            .then(self.blob_id.cmp(&other.blob_id))
+    }
+}
+
+#[allow(clippy::missing_fields_in_debug)]
+impl fmt::Debug for TagKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TagKey")
+            .field("tag", &self.tag_str())
+            .field("blob_id", &self.blob_id)
+            .finish()
+    }
+}
+
+impl Value for TagKey {
+    type SelfType<'a>
+        = TagKey
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = [u8; TagKey::SERIALIZED_SIZE]
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(Self::SERIALIZED_SIZE)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        value.to_le_bytes()
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("redb::blob::TagKey")
+    }
+}
+
+impl Key for TagKey {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        let a = Self::from_bytes(data1);
+        let b = Self::from_bytes(data2);
+        a.cmp(&b)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NamespaceKey — 80-byte composite key for the namespace index
+// ---------------------------------------------------------------------------
+
+/// Composite key for the `BLOB_NAMESPACE_INDEX` B-tree.
+///
+/// Layout (80 bytes):
+/// - `namespace` (`[u8; 63]`): zero-padded namespace string
+/// - `ns_len` (`u8`): actual length (max 63)
+/// - `blob_id` (`BlobId`, 16 bytes): the blob in this namespace
+///
+/// Ordering: namespace bytes first (lexicographic), then `blob_id`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NamespaceKey {
+    pub namespace: [u8; 63],
+    pub ns_len: u8,
+    pub blob_id: BlobId,
+}
+
+impl NamespaceKey {
+    pub const SERIALIZED_SIZE: usize = 63 + 1 + BlobId::SERIALIZED_SIZE; // 80
+
+    pub fn new(namespace: &str, blob_id: BlobId) -> Self {
+        let ns_bytes = namespace.as_bytes();
+        #[allow(clippy::cast_possible_truncation)]
+        let ns_len = ns_bytes.len().min(63) as u8;
+        let mut ns_buf = [0u8; 63];
+        ns_buf[..ns_len as usize].copy_from_slice(&ns_bytes[..ns_len as usize]);
+        Self {
+            namespace: ns_buf,
+            ns_len,
+            blob_id,
+        }
+    }
+
+    pub fn range_start(namespace: &str) -> Self {
+        Self::new(namespace, BlobId::MIN)
+    }
+
+    pub fn range_end(namespace: &str) -> Self {
+        Self::new(namespace, BlobId::MAX)
+    }
+
+    pub fn namespace_str(&self) -> &str {
+        std::str::from_utf8(&self.namespace[..self.ns_len as usize]).unwrap_or("")
+    }
+
+    pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
+        let mut buf = [0u8; Self::SERIALIZED_SIZE];
+        buf[..63].copy_from_slice(&self.namespace);
+        buf[63] = self.ns_len;
+        buf[64..80].copy_from_slice(&self.blob_id.to_le_bytes());
+        buf
+    }
+
+    pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+        let mut namespace = [0u8; 63];
+        namespace.copy_from_slice(&data[..63]);
+        let ns_len = data[63];
+        let blob_id = BlobId::from_le_bytes(data[64..80].try_into().unwrap());
+        Self {
+            namespace,
+            ns_len,
+            blob_id,
+        }
+    }
+}
+
+impl PartialOrd for NamespaceKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for NamespaceKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.namespace
+            .cmp(&other.namespace)
+            .then(self.ns_len.cmp(&other.ns_len))
+            .then(self.blob_id.cmp(&other.blob_id))
+    }
+}
+
+#[allow(clippy::missing_fields_in_debug)]
+impl fmt::Debug for NamespaceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NamespaceKey")
+            .field("namespace", &self.namespace_str())
+            .field("blob_id", &self.blob_id)
+            .finish()
+    }
+}
+
+impl Value for NamespaceKey {
+    type SelfType<'a>
+        = NamespaceKey
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = [u8; NamespaceKey::SERIALIZED_SIZE]
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(Self::SERIALIZED_SIZE)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        value.to_le_bytes()
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("redb::blob::NamespaceKey")
+    }
+}
+
+impl Key for NamespaceKey {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        let a = Self::from_bytes(data1);
+        let b = Self::from_bytes(data2);
+        a.cmp(&b)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NamespaceVal — 64-byte value storing namespace for a blob
+// ---------------------------------------------------------------------------
+
+/// Namespace value stored per blob in the `BLOB_NAMESPACE` table.
+///
+/// Layout (64 bytes):
+/// - `ns_len` (`u8`): actual length (max 63)
+/// - `namespace` (`[u8; 63]`): zero-padded namespace string
+#[derive(Clone, PartialEq, Eq)]
+pub struct NamespaceVal {
+    pub ns_len: u8,
+    pub namespace: [u8; 63],
+}
+
+impl NamespaceVal {
+    pub const SERIALIZED_SIZE: usize = 1 + 63; // 64
+
+    pub fn new(namespace: &str) -> Self {
+        let ns_bytes = namespace.as_bytes();
+        #[allow(clippy::cast_possible_truncation)]
+        let ns_len = ns_bytes.len().min(63) as u8;
+        let mut ns_buf = [0u8; 63];
+        ns_buf[..ns_len as usize].copy_from_slice(&ns_bytes[..ns_len as usize]);
+        Self {
+            ns_len,
+            namespace: ns_buf,
+        }
+    }
+
+    pub fn namespace_str(&self) -> &str {
+        std::str::from_utf8(&self.namespace[..self.ns_len as usize]).unwrap_or("")
+    }
+
+    pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
+        let mut buf = [0u8; Self::SERIALIZED_SIZE];
+        buf[0] = self.ns_len;
+        buf[1..64].copy_from_slice(&self.namespace);
+        buf
+    }
+
+    pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+        let ns_len = data[0];
+        let mut namespace = [0u8; 63];
+        namespace.copy_from_slice(&data[1..64]);
+        Self { ns_len, namespace }
+    }
+}
+
+impl fmt::Debug for NamespaceVal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "NamespaceVal(\"{}\")", self.namespace_str())
+    }
+}
+
+impl Value for NamespaceVal {
+    type SelfType<'a>
+        = NamespaceVal
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = [u8; NamespaceVal::SERIALIZED_SIZE]
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(Self::SERIALIZED_SIZE)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        value.to_le_bytes()
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("redb::blob::NamespaceVal")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StoreOptions — API input for blob storage with tags and namespace
+// ---------------------------------------------------------------------------
+
+/// Options for storing a blob, grouping causal link, tags, and namespace.
+///
+/// Used by [`WriteTransaction::store_blob`] and [`WriteTransaction::blob_writer`].
+///
+/// # Example
+/// ```rust,ignore
+/// let opts = StoreOptions {
+///     causal_link: Some(CausalLink::derived(parent_id)),
+///     namespace: Some("agent-session-42".into()),
+///     tags: vec!["lidar".into(), "outdoor".into()],
+/// };
+/// write_txn.store_blob(data, ContentType::PointCloudLas, "scan", opts)?;
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct StoreOptions {
+    /// Optional causal link to a parent blob.
+    pub causal_link: Option<CausalLink>,
+    /// Optional namespace for session/domain isolation (max 63 bytes).
+    pub namespace: Option<String>,
+    /// Tags for categorization (max 8 tags, each max 32 bytes).
+    pub tags: Vec<String>,
+}
+
+impl StoreOptions {
+    pub fn with_causal_link(link: CausalLink) -> Self {
+        Self {
+            causal_link: Some(link),
+            ..Default::default()
+        }
+    }
+
+    pub fn with_namespace(namespace: &str) -> Self {
+        Self {
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        }
+    }
+
+    pub fn with_tags(tags: &[&str]) -> Self {
+        Self {
+            tags: tags.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Maximum number of tags per blob.
+pub const MAX_TAGS_PER_BLOB: usize = 8;
+
+// ---------------------------------------------------------------------------
 // BlobInput — convenience struct for batch blob storage
 // ---------------------------------------------------------------------------
 
@@ -706,7 +1118,7 @@ pub struct BlobInput<'a> {
     pub data: &'a [u8],
     pub content_type: ContentType,
     pub label: &'a str,
-    pub causal_link: Option<CausalLink>,
+    pub opts: StoreOptions,
 }
 
 // ---------------------------------------------------------------------------
@@ -855,6 +1267,9 @@ const _: () = {
     assert!(BlobMeta::SERIALIZED_SIZE == 137);
     assert!(TemporalKey::SERIALIZED_SIZE == 32);
     assert!(CausalEdge::SERIALIZED_SIZE == 80);
+    assert!(TagKey::SERIALIZED_SIZE == 49);
+    assert!(NamespaceKey::SERIALIZED_SIZE == 80);
+    assert!(NamespaceVal::SERIALIZED_SIZE == 64);
 };
 
 #[cfg(test)]
@@ -1092,6 +1507,57 @@ mod tests {
         assert_eq!(recovered.child, edge.child);
         assert_eq!(recovered.relation, edge.relation);
         assert_eq!(recovered.context_str(), edge.context_str());
+    }
+
+    #[test]
+    fn tag_key_roundtrip() {
+        let tk = TagKey::new("lidar", BlobId::new(42, 0xCAFE));
+        let bytes = tk.to_le_bytes();
+        let recovered = TagKey::from_le_bytes(bytes);
+        assert_eq!(recovered.tag_str(), "lidar");
+        assert_eq!(recovered.blob_id, BlobId::new(42, 0xCAFE));
+    }
+
+    #[test]
+    fn tag_key_ordering() {
+        let a = TagKey::new("alpha", BlobId::new(1, 0));
+        let b = TagKey::new("beta", BlobId::new(1, 0));
+        let c = TagKey::new("alpha", BlobId::new(2, 0));
+        assert!(a < b); // tag first
+        assert!(a < c); // same tag, blob_id tiebreaker
+    }
+
+    #[test]
+    fn tag_key_truncation() {
+        let long_tag = "x".repeat(100);
+        let tk = TagKey::new(&long_tag, BlobId::new(1, 0));
+        assert_eq!(tk.tag_len, 32);
+        assert_eq!(tk.tag_str().len(), 32);
+    }
+
+    #[test]
+    fn namespace_key_roundtrip() {
+        let nk = NamespaceKey::new("agent-session-42", BlobId::new(7, 0xFF));
+        let bytes = nk.to_le_bytes();
+        let recovered = NamespaceKey::from_le_bytes(bytes);
+        assert_eq!(recovered.namespace_str(), "agent-session-42");
+        assert_eq!(recovered.blob_id, BlobId::new(7, 0xFF));
+    }
+
+    #[test]
+    fn namespace_val_roundtrip() {
+        let nv = NamespaceVal::new("my-namespace");
+        let bytes = nv.to_le_bytes();
+        let recovered = NamespaceVal::from_le_bytes(bytes);
+        assert_eq!(recovered.namespace_str(), "my-namespace");
+    }
+
+    #[test]
+    fn store_options_default() {
+        let opts = StoreOptions::default();
+        assert!(opts.causal_link.is_none());
+        assert!(opts.namespace.is_none());
+        assert!(opts.tags.is_empty());
     }
 
     #[test]
