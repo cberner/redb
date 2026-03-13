@@ -348,6 +348,21 @@ impl PagedCachedFile {
         self.flush_write_buffer()
     }
 
+    /// Write directly to the file, bypassing the page cache.
+    /// Used for blob region writes which are not page-aligned.
+    pub(super) fn write_direct(&self, offset: u64, data: &[u8]) -> Result {
+        self.file.write(offset, data)
+    }
+
+    /// Ensure the file is at least `len` bytes, extending with zeros if needed.
+    pub(super) fn ensure_len(&self, len: u64) -> Result {
+        let current = self.file.len()?;
+        if len > current {
+            self.file.set_len(len)?;
+        }
+        Ok(())
+    }
+
     // Read directly from the file, ignoring any cached data
     pub(super) fn read_direct(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
         let mut buffer = vec![0; len];

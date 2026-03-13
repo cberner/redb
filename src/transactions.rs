@@ -1,13 +1,19 @@
+use crate::blob_store::types::{
+    BlobId, BlobMeta, BlobRef, CausalEdge, CausalPath, ContentType, MAX_TAGS_PER_BLOB,
+    NamespaceKey, NamespaceVal, StoreOptions, TagKey, TemporalKey,
+};
+use crate::blob_store::writer::BlobWriter;
 use crate::db::TransactionGuard;
 use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
 use crate::sealed::Sealed;
 use crate::table::ReadOnlyUntypedTable;
+use crate::temporal::HybridLogicalClock;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page,
     PageHint, PageListMut, PageNumber, PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy,
-    TableTree, TableTreeMut, TableType, TransactionalMemory,
+    TableTree, TableTreeMut, TableType, TransactionalMemory, hash64_with_seed, hash128_with_seed,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -31,6 +37,14 @@ use std::sync::{Arc, Mutex};
 use std::{panic, thread};
 
 const MAX_PAGES_PER_COMPACTION: usize = 1_000_000;
+
+fn xxh3_hash64(data: &[u8]) -> u64 {
+    hash64_with_seed(data, 0)
+}
+
+fn xxh3_hash128(data: &[u8]) -> u128 {
+    hash128_with_seed(data, 0)
+}
 const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), SavepointId> =
     SystemTableDefinition::new("next_savepoint_id");
 pub(crate) const SAVEPOINT_TABLE: SystemTableDefinition<SavepointId, SerializedSavepoint> =
@@ -49,6 +63,21 @@ pub(crate) const DATA_FREED_TABLE: SystemTableDefinition<TransactionIdWithPagina
 // root as of the given transaction.
 pub(crate) const SYSTEM_FREED_TABLE: SystemTableDefinition<TransactionIdWithPagination, PageList> =
     SystemTableDefinition::new("system_pages_unreachable");
+// Blob store system tables
+const BLOB_TABLE: SystemTableDefinition<BlobId, BlobMeta> =
+    SystemTableDefinition::new("blob_store");
+const BLOB_TEMPORAL_INDEX: SystemTableDefinition<TemporalKey, ()> =
+    SystemTableDefinition::new("blob_temporal_idx");
+const BLOB_CAUSAL_CHILDREN: SystemTableDefinition<BlobId, BlobId> =
+    SystemTableDefinition::new("blob_causal_children");
+const BLOB_CAUSAL_EDGES: SystemTableDefinition<BlobId, CausalEdge> =
+    SystemTableDefinition::new("blob_causal_edges");
+const BLOB_TAG_INDEX: SystemTableDefinition<TagKey, ()> =
+    SystemTableDefinition::new("blob_tag_idx");
+const BLOB_NAMESPACE: SystemTableDefinition<BlobId, NamespaceVal> =
+    SystemTableDefinition::new("blob_namespace");
+const BLOB_NAMESPACE_INDEX: SystemTableDefinition<NamespaceKey, ()> =
+    SystemTableDefinition::new("blob_namespace_idx");
 // The allocator state table is stored in the system table tree, but it's accessed using
 // raw btree operations rather than open_system_table(), so there's no SystemTableDefinition
 pub(crate) const ALLOCATOR_STATE_TABLE_NAME: &str = "allocator_state";
@@ -779,6 +808,8 @@ pub struct WriteTransaction {
     // Persistent savepoints created during this transaction
     created_persistent_savepoints: Mutex<HashSet<SavepointId>>,
     deleted_persistent_savepoints: Mutex<Vec<(SavepointId, TransactionId)>>,
+    // Guard: true while a BlobWriter is active, preventing concurrent blob ops
+    blob_writer_active: AtomicBool,
 }
 
 impl WriteTransaction {
@@ -811,6 +842,7 @@ impl WriteTransaction {
             shrink_policy: ShrinkPolicy::Default,
             created_persistent_savepoints: Mutex::new(Default::default()),
             deleted_persistent_savepoints: Mutex::new(vec![]),
+            blob_writer_active: AtomicBool::new(false),
         })
     }
 
@@ -1373,6 +1405,421 @@ impl WriteTransaction {
             .table_tree
             .list_tables(TableType::Multimap)
             .map(|x| x.into_iter().map(UntypedMultimapTableHandle::new))
+    }
+
+    // -----------------------------------------------------------------------
+    // Blob store operations
+    // -----------------------------------------------------------------------
+
+    /// Store a blob with temporal, causal, tag, and namespace metadata.
+    ///
+    /// The blob data is written to the append-only blob region, and indexed in
+    /// the `BLOB_TABLE`, `BLOB_TEMPORAL_INDEX`, and optionally
+    /// `BLOB_CAUSAL_EDGES`, `BLOB_TAG_INDEX`, `BLOB_NAMESPACE` system tables.
+    ///
+    /// Returns the assigned `BlobId`.
+    pub fn store_blob(
+        &self,
+        data: &[u8],
+        content_type: ContentType,
+        label: &str,
+        opts: StoreOptions,
+    ) -> Result<BlobId> {
+        if self.blob_writer_active.load(Ordering::Acquire) {
+            return Err(StorageError::BlobWriterActive);
+        }
+        // 1. Get current blob state
+        let mut blob_state = self.mem.get_blob_state();
+
+        // 2. Initialize blob region offset on first use
+        if blob_state.region_offset == 0 {
+            let file_len = self.mem.file_len()?;
+            blob_state.region_offset = file_len;
+        }
+
+        // 3. Assign sequence number and compute content prefix hash
+        let sequence = blob_state.next_sequence;
+        blob_state.next_sequence = sequence + 1;
+
+        let prefix_len = data.len().min(4096);
+        let content_prefix_hash = xxh3_hash64(&data[..prefix_len]);
+        let blob_id = BlobId::new(sequence, content_prefix_hash);
+
+        // 4. Compute full checksum
+        let checksum = xxh3_hash128(data);
+
+        // 5. Write blob data to the blob region
+        let blob_offset = blob_state.region_length;
+        let file_offset = blob_state.region_offset + blob_offset;
+        self.mem.blob_write(file_offset, data)?;
+        blob_state.region_length += data.len() as u64;
+
+        // 6. Advance HLC
+        let hlc = HybridLogicalClock::from_raw(blob_state.hlc_state).advance();
+        blob_state.hlc_state = hlc.to_raw();
+
+        // as_nanos() returns u128, but u64 nanoseconds covers ~584 years from epoch.
+        // Truncation is intentional and safe for any realistic timestamp.
+        #[allow(clippy::cast_possible_truncation)]
+        let wall_clock_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before UNIX epoch")
+            .as_nanos() as u64;
+
+        // 7. Build BlobRef and BlobMeta
+        let blob_ref = BlobRef {
+            offset: blob_offset,
+            length: data.len() as u64,
+            checksum,
+            ref_count: 1,
+            content_type: content_type.as_byte(),
+            compression: 0,
+        };
+
+        let causal_parent = opts.causal_link.as_ref().map(|l| l.parent);
+        let meta = BlobMeta::new(blob_ref, wall_clock_ns, hlc.to_raw(), causal_parent, label);
+
+        // 8. Index in system tables
+        {
+            let mut system_tables = self.system_tables.lock().unwrap();
+
+            let mut blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+            blob_table.insert(&blob_id, &meta)?;
+            drop(blob_table);
+
+            let temporal_key = TemporalKey::new(wall_clock_ns, hlc, blob_id);
+            let mut temporal_table = system_tables.open_system_table(self, BLOB_TEMPORAL_INDEX)?;
+            temporal_table.insert(&temporal_key, &())?;
+            drop(temporal_table);
+
+            if let Some(link) = &opts.causal_link {
+                let edge = CausalEdge::new(blob_id, link.relation, &link.context);
+                let mut causal_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
+                causal_table.insert(&link.parent, &edge)?;
+                drop(causal_table);
+            }
+
+            Self::index_tags_and_namespace(
+                &mut system_tables,
+                self,
+                blob_id,
+                &opts.tags,
+                opts.namespace.as_deref(),
+            )?;
+        }
+
+        // 9. Update pending blob state for commit
+        self.mem.set_pending_blob_state(blob_state);
+        self.dirty.store(true, Ordering::Release);
+
+        Ok(blob_id)
+    }
+
+    /// Create a streaming blob writer that writes data in arbitrary-sized
+    /// chunks with constant memory overhead.
+    ///
+    /// Only one `BlobWriter` may be active at a time. Calling `blob_writer()`
+    /// or `store_blob()` while a writer is active returns
+    /// [`StorageError::BlobWriterActive`].
+    pub fn blob_writer(
+        &self,
+        content_type: ContentType,
+        label: &str,
+        opts: StoreOptions,
+    ) -> Result<BlobWriter<'_>> {
+        if self
+            .blob_writer_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(StorageError::BlobWriterActive);
+        }
+
+        let mut blob_state = self.mem.get_blob_state();
+
+        if blob_state.region_offset == 0 {
+            let file_len = self.mem.file_len()?;
+            blob_state.region_offset = file_len;
+        }
+
+        let sequence = blob_state.next_sequence;
+        blob_state.next_sequence = sequence + 1;
+
+        let blob_region_start = blob_state.region_length;
+        let blob_file_offset = blob_state.region_offset + blob_region_start;
+
+        // Persist the incremented sequence immediately so that a concurrent
+        // store_blob (after this writer finishes) picks up the right counter.
+        self.mem.set_pending_blob_state(blob_state);
+
+        Ok(BlobWriter::new(
+            self,
+            sequence,
+            content_type,
+            label,
+            opts,
+            blob_file_offset,
+            blob_region_start,
+        ))
+    }
+
+    /// Low-level: write bytes directly to the blob region (bypasses page cache).
+    /// Used by `BlobWriter`.
+    pub(crate) fn blob_write_raw(&self, file_offset: u64, data: &[u8]) -> Result {
+        self.mem.blob_write(file_offset, data)
+    }
+
+    /// Low-level: called by `BlobWriter::finish()` to index the completed blob
+    /// in system tables and update pending blob state.
+    pub(crate) fn finalize_blob_writer(
+        &self,
+        blob_id: BlobId,
+        mut meta: BlobMeta,
+        bytes_written: u64,
+        opts: StoreOptions,
+    ) -> Result {
+        let mut blob_state = self.mem.get_blob_state();
+
+        // Advance HLC
+        let hlc = HybridLogicalClock::from_raw(blob_state.hlc_state).advance();
+        blob_state.hlc_state = hlc.to_raw();
+
+        // Update the HLC in the meta
+        meta.hlc = hlc.to_raw();
+
+        // Update region length to account for the written data
+        blob_state.region_length = meta.blob_ref.offset + bytes_written;
+
+        // Index in system tables
+        {
+            let mut system_tables = self.system_tables.lock().unwrap();
+
+            let mut blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+            blob_table.insert(&blob_id, &meta)?;
+            drop(blob_table);
+
+            let temporal_key = TemporalKey::new(meta.wall_clock_ns, hlc, blob_id);
+            let mut temporal_table = system_tables.open_system_table(self, BLOB_TEMPORAL_INDEX)?;
+            temporal_table.insert(&temporal_key, &())?;
+            drop(temporal_table);
+
+            if let Some(link) = &opts.causal_link {
+                let edge = CausalEdge::new(blob_id, link.relation, &link.context);
+                let mut causal_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
+                causal_table.insert(&link.parent, &edge)?;
+                drop(causal_table);
+            }
+
+            Self::index_tags_and_namespace(
+                &mut system_tables,
+                self,
+                blob_id,
+                &opts.tags,
+                opts.namespace.as_deref(),
+            )?;
+        }
+
+        self.mem.set_pending_blob_state(blob_state);
+        self.dirty.store(true, Ordering::Release);
+
+        Ok(())
+    }
+
+    /// Access the blob-writer-active flag. Used by `BlobWriter::drop`.
+    pub(crate) fn blob_writer_active(&self) -> &AtomicBool {
+        &self.blob_writer_active
+    }
+
+    /// Index tags and namespace for a blob. Called from both `store_blob` and
+    /// `finalize_blob_writer`.
+    fn index_tags_and_namespace(
+        system_tables: &mut SystemNamespace<'_>,
+        txn: &WriteTransaction,
+        blob_id: BlobId,
+        tags: &[String],
+        namespace: Option<&str>,
+    ) -> Result {
+        let tag_count = tags.len().min(MAX_TAGS_PER_BLOB);
+        if tag_count > 0 {
+            let mut tag_table = system_tables.open_system_table(txn, BLOB_TAG_INDEX)?;
+            for tag in &tags[..tag_count] {
+                let tag_key = TagKey::new(tag, blob_id);
+                tag_table.insert(&tag_key, &())?;
+            }
+            drop(tag_table);
+        }
+
+        if let Some(ns) = namespace {
+            let ns_val = NamespaceVal::new(ns);
+            let mut ns_table = system_tables.open_system_table(txn, BLOB_NAMESPACE)?;
+            ns_table.insert(&blob_id, &ns_val)?;
+            drop(ns_table);
+
+            let ns_key = NamespaceKey::new(ns, blob_id);
+            let mut ns_idx = system_tables.open_system_table(txn, BLOB_NAMESPACE_INDEX)?;
+            ns_idx.insert(&ns_key, &())?;
+            drop(ns_idx);
+        }
+
+        Ok(())
+    }
+
+    /// Get tags for a blob within a write transaction.
+    pub fn blob_tags(&self, blob_id: &BlobId) -> Result<Vec<String>> {
+        let mut system_tables = self.system_tables.lock().unwrap();
+        let tag_table = system_tables.open_system_table(self, BLOB_TAG_INDEX)?;
+
+        let mut tags = Vec::new();
+        // Scan all tag keys — we need to find entries where blob_id matches.
+        // Since TagKey is ordered (tag, blob_id), we scan the full table.
+        // This is acceptable for the write-path read (low frequency).
+        let range = tag_table.range::<TagKey>(..)?;
+        for entry in range {
+            let (key_guard, _) = entry?;
+            let key = key_guard.value();
+            if key.blob_id == *blob_id {
+                tags.push(key.tag_str().to_string());
+            }
+        }
+        Ok(tags)
+    }
+
+    /// Get namespace for a blob within a write transaction.
+    pub fn blob_namespace(&self, blob_id: &BlobId) -> Result<Option<String>> {
+        let mut system_tables = self.system_tables.lock().unwrap();
+        let ns_table = system_tables.open_system_table(self, BLOB_NAMESPACE)?;
+        match ns_table.get(blob_id)? {
+            Some(g) => Ok(Some(g.value().namespace_str().to_string())),
+            None => Ok(None),
+        }
+    }
+
+    /// Retrieve a blob's data and metadata by its `BlobId`.
+    ///
+    /// The returned data is verified against the stored xxh3-128 checksum.
+    pub fn get_blob(&self, blob_id: &BlobId) -> Result<Option<(Vec<u8>, BlobMeta)>> {
+        let meta = {
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+            match blob_table.get(blob_id)? {
+                Some(g) => g.value(),
+                None => return Ok(None),
+            }
+        };
+
+        let blob_state = self.mem.get_blob_state();
+        let file_offset = blob_state.region_offset + meta.blob_ref.offset;
+        #[allow(clippy::cast_possible_truncation)]
+        let data = self
+            .mem
+            .blob_read(file_offset, meta.blob_ref.length as usize)?;
+
+        let actual = xxh3_hash128(&data);
+        if actual != meta.blob_ref.checksum {
+            return Err(StorageError::BlobChecksumMismatch {
+                sequence: blob_id.sequence,
+                expected: meta.blob_ref.checksum,
+                actual,
+            });
+        }
+
+        Ok(Some((data, meta)))
+    }
+
+    /// Retrieve only a blob's metadata (no data read).
+    pub fn get_blob_meta(&self, blob_id: &BlobId) -> Result<Option<BlobMeta>> {
+        let mut system_tables = self.system_tables.lock().unwrap();
+        let blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+
+        let guard = blob_table.get(blob_id)?;
+        Ok(guard.map(|g| g.value()))
+    }
+
+    /// Delete a blob and remove it from all indexes.
+    pub fn delete_blob(&self, blob_id: &BlobId) -> Result<bool> {
+        let mut system_tables = self.system_tables.lock().unwrap();
+
+        // Read metadata to find temporal key and causal parent
+        let meta = {
+            let blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+            match blob_table.get(blob_id)? {
+                Some(g) => g.value(),
+                None => return Ok(false),
+            }
+        };
+
+        // Remove from temporal index
+        let temporal_key = TemporalKey::new(
+            meta.wall_clock_ns,
+            HybridLogicalClock::from_raw(meta.hlc),
+            *blob_id,
+        );
+
+        let mut temporal_table = system_tables.open_system_table(self, BLOB_TEMPORAL_INDEX)?;
+        temporal_table.remove(&temporal_key)?;
+        drop(temporal_table);
+
+        // Remove from causal edges index (new table) and legacy causal children
+        if let Some(parent) = meta.causal_parent {
+            let mut edges_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
+            edges_table.remove(&parent)?;
+            drop(edges_table);
+
+            // Also remove from legacy table if it exists
+            let mut legacy_table = system_tables.open_system_table(self, BLOB_CAUSAL_CHILDREN)?;
+            legacy_table.remove(&parent)?;
+            drop(legacy_table);
+        }
+
+        // Remove tag index entries — scan for all TagKeys that reference this blob
+        {
+            let mut tag_table = system_tables.open_system_table(self, BLOB_TAG_INDEX)?;
+            let mut to_remove = Vec::new();
+            let range = tag_table.range::<TagKey>(..)?;
+            for entry in range {
+                let (key_guard, _) = entry?;
+                let key = key_guard.value();
+                if key.blob_id == *blob_id {
+                    to_remove.push(key);
+                }
+            }
+            for key in &to_remove {
+                tag_table.remove(key)?;
+            }
+            drop(tag_table);
+        }
+
+        // Remove namespace entries
+        {
+            let ns_key = {
+                let ns_table = system_tables.open_system_table(self, BLOB_NAMESPACE)?;
+                match ns_table.get(blob_id)? {
+                    Some(ns_guard) => {
+                        let ns_str = ns_guard.value().namespace_str().to_string();
+                        Some(NamespaceKey::new(&ns_str, *blob_id))
+                    }
+                    None => None,
+                }
+            };
+
+            if let Some(ns_key) = ns_key {
+                let mut ns_table = system_tables.open_system_table(self, BLOB_NAMESPACE)?;
+                ns_table.remove(blob_id)?;
+                drop(ns_table);
+
+                let mut ns_idx = system_tables.open_system_table(self, BLOB_NAMESPACE_INDEX)?;
+                ns_idx.remove(&ns_key)?;
+                drop(ns_idx);
+            }
+        }
+
+        // Remove from primary table
+        let mut blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+        blob_table.remove(blob_id)?;
+        drop(blob_table);
+
+        self.dirty.store(true, Ordering::Release);
+        Ok(true)
     }
 
     /// Commit the transaction
@@ -2182,6 +2629,399 @@ impl ReadTransaction {
         self.tree
             .list_tables(TableType::Multimap)
             .map(|x| x.into_iter().map(UntypedMultimapTableHandle::new))
+    }
+
+    /// Open a read-only B-tree over a system table.
+    ///
+    /// Returns `None` if the system table does not exist (e.g. no blobs stored yet).
+    fn open_system_btree<K: Key + 'static, V: Value + 'static>(
+        &self,
+        definition: SystemTableDefinition<K, V>,
+    ) -> Result<Option<Btree<K, V>>> {
+        let system_root = self.mem.get_system_root();
+        let system_tree = TableTree::new(
+            system_root,
+            PageHint::Clean,
+            self.tree.transaction_guard().clone(),
+            self.mem.clone(),
+        )?;
+
+        let header = system_tree.get_table::<K, V>(definition.name(), TableType::Normal);
+        match header {
+            Ok(Some(InternalTableDefinition::Normal { table_root, .. })) => {
+                let btree = Btree::new_uncompressed(
+                    table_root,
+                    PageHint::Clean,
+                    self.tree.transaction_guard().clone(),
+                    self.mem.clone(),
+                )?;
+                Ok(Some(btree))
+            }
+            Ok(Some(InternalTableDefinition::Multimap { .. })) => unreachable!(),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                Err(e
+                    .into_storage_error_or_corrupted("Internal error: blob system table corrupted"))
+            }
+        }
+    }
+
+    /// Retrieve a blob's data and metadata by ID.
+    ///
+    /// The returned data is verified against the stored xxh3-128 checksum.
+    pub fn get_blob(&self, blob_id: &BlobId) -> Result<Option<(Vec<u8>, BlobMeta)>> {
+        let Some(btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(None);
+        };
+
+        let Some(guard) = btree.get(blob_id)? else {
+            return Ok(None);
+        };
+        let meta = guard.value();
+
+        let blob_state = self.mem.get_committed_blob_state();
+        let file_offset = blob_state.region_offset + meta.blob_ref.offset;
+        #[allow(clippy::cast_possible_truncation)]
+        let data = self
+            .mem
+            .blob_read(file_offset, meta.blob_ref.length as usize)?;
+
+        let actual = xxh3_hash128(&data);
+        if actual != meta.blob_ref.checksum {
+            return Err(StorageError::BlobChecksumMismatch {
+                sequence: blob_id.sequence,
+                expected: meta.blob_ref.checksum,
+                actual,
+            });
+        }
+
+        Ok(Some((data, meta)))
+    }
+
+    /// Retrieve only a blob's metadata (no data read).
+    pub fn get_blob_meta(&self, blob_id: &BlobId) -> Result<Option<BlobMeta>> {
+        let Some(btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(None);
+        };
+
+        Ok(btree.get(blob_id)?.map(|g| g.value()))
+    }
+
+    /// Query blobs within a wall-clock time range (nanoseconds).
+    ///
+    /// Returns `(TemporalKey, BlobMeta)` pairs ordered by timestamp.
+    /// Complexity: O(log N + K) where K is the number of results.
+    /// Returns an empty vec if `start_ns > end_ns`.
+    pub fn blobs_in_time_range(
+        &self,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> Result<Vec<(TemporalKey, BlobMeta)>> {
+        if start_ns > end_ns {
+            return Ok(Vec::new());
+        }
+        let Some(temporal_btree) = self.open_system_btree(BLOB_TEMPORAL_INDEX)? else {
+            return Ok(Vec::new());
+        };
+        let Some(blob_btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(Vec::new());
+        };
+
+        let start = TemporalKey::range_start(start_ns);
+        let end = TemporalKey::range_end(end_ns);
+        let range = temporal_btree.range(&(start..=end))?;
+
+        let mut results = Vec::new();
+        for entry in range {
+            let entry = entry?;
+            let temporal_key = entry.key();
+            if let Some(meta_guard) = blob_btree.get(&temporal_key.blob_id)? {
+                results.push((temporal_key, meta_guard.value()));
+            }
+        }
+        Ok(results)
+    }
+
+    /// Find blobs near a reference blob within a time window.
+    ///
+    /// Looks up the reference blob's timestamp, then scans ±`window_ns`/2.
+    /// Used for sensor fusion queries ("all inputs within 100ms of X").
+    pub fn blobs_near(
+        &self,
+        reference: &BlobId,
+        window_ns: u64,
+    ) -> Result<Vec<(TemporalKey, BlobMeta)>> {
+        let Some(blob_btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(Vec::new());
+        };
+
+        let Some(guard) = blob_btree.get(reference)? else {
+            return Ok(Vec::new());
+        };
+        let ref_meta = guard.value();
+
+        let half_window = window_ns / 2;
+        let start_ns = ref_meta.wall_clock_ns.saturating_sub(half_window);
+        let end_ns = ref_meta.wall_clock_ns.saturating_add(half_window);
+
+        self.blobs_in_time_range(start_ns, end_ns)
+    }
+
+    /// Traverse the causal chain backwards from a blob.
+    ///
+    /// Follows `causal_parent` links up to `max_hops` steps.
+    /// Returns blobs from newest to oldest (starting with the given blob).
+    /// The `Option<CausalEdge>` is the edge from the blob's parent to itself
+    /// (`None` for the root of the chain or if no edge metadata exists).
+    pub fn causal_chain(
+        &self,
+        blob_id: &BlobId,
+        max_hops: usize,
+    ) -> Result<Vec<(BlobId, BlobMeta, Option<CausalEdge>)>> {
+        let Some(blob_btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(Vec::new());
+        };
+
+        let edges_btree = self.open_system_btree(BLOB_CAUSAL_EDGES)?;
+        let legacy_btree = self.open_system_btree(BLOB_CAUSAL_CHILDREN)?;
+
+        let mut chain = Vec::new();
+        let mut current = *blob_id;
+
+        for _ in 0..=max_hops {
+            let Some(g) = blob_btree.get(&current)? else {
+                break;
+            };
+            let meta = g.value();
+            let parent = meta.causal_parent;
+
+            // Look up the edge from parent → current
+            let edge = if let Some(parent_id) = parent {
+                Self::lookup_causal_edge(&parent_id, edges_btree.as_ref(), legacy_btree.as_ref())?
+            } else {
+                None
+            };
+
+            chain.push((current, meta, edge));
+            match parent {
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+
+        Ok(chain)
+    }
+
+    /// Get the direct causal child of a blob (if any), with edge metadata.
+    ///
+    /// The current causal edges index maps each parent to at most one child.
+    /// If a parent has multiple children, only the most recently inserted child
+    /// is retained. Full multi-child support requires a multimap table (tracked
+    /// in issue #28).
+    pub fn causal_children(&self, blob_id: &BlobId) -> Result<Vec<CausalEdge>> {
+        // Try new edges table first
+        if let Some(edges_btree) = self.open_system_btree(BLOB_CAUSAL_EDGES)?
+            && let Some(g) = edges_btree.get(blob_id)?
+        {
+            return Ok(vec![g.value()]);
+        }
+
+        // Fall back to legacy table
+        if let Some(legacy_btree) = self.open_system_btree(BLOB_CAUSAL_CHILDREN)?
+            && let Some(g) = legacy_btree.get(blob_id)?
+        {
+            return Ok(vec![CausalEdge::legacy(g.value())]);
+        }
+
+        Ok(Vec::new())
+    }
+
+    /// Find a causal path between two blobs via backward traversal.
+    ///
+    /// Walks from `to` toward `from` via `causal_parent` links.
+    /// Returns the path including both endpoints with edge metadata,
+    /// or `None` if no path exists within `max_depth` hops.
+    /// The `Option<CausalEdge>` is the edge from parent to the node
+    /// (`None` for the `from` endpoint which has no incoming edge).
+    pub fn causal_path(
+        &self,
+        from: &BlobId,
+        to: &BlobId,
+        max_depth: usize,
+    ) -> Result<Option<CausalPath>> {
+        if from == to {
+            return Ok(Some(vec![(*from, None)]));
+        }
+
+        let Some(blob_btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(None);
+        };
+
+        let edges_btree = self.open_system_btree(BLOB_CAUSAL_EDGES)?;
+        let legacy_btree = self.open_system_btree(BLOB_CAUSAL_CHILDREN)?;
+
+        // path stores (blob_id, edge from parent→this)
+        let mut path: CausalPath = Vec::new();
+        let mut current = *to;
+        // We'll fill in edges as we walk backward; the `to` node has an edge from its parent
+        for _ in 0..max_depth {
+            let Some(g) = blob_btree.get(&current)? else {
+                break;
+            };
+            let meta = g.value();
+            let Some(parent) = meta.causal_parent else {
+                break;
+            };
+
+            // Edge from parent → current
+            let edge =
+                Self::lookup_causal_edge(&parent, edges_btree.as_ref(), legacy_btree.as_ref())?;
+            path.push((current, edge));
+
+            if parent == *from {
+                path.push((*from, None));
+                path.reverse();
+                return Ok(Some(path));
+            }
+            current = parent;
+        }
+
+        Ok(None)
+    }
+
+    /// Look up a causal edge by parent key, checking new table then legacy.
+    fn lookup_causal_edge(
+        parent: &BlobId,
+        edges_btree: Option<&Btree<BlobId, CausalEdge>>,
+        legacy_btree: Option<&Btree<BlobId, BlobId>>,
+    ) -> Result<Option<CausalEdge>> {
+        if let Some(bt) = edges_btree
+            && let Some(g) = bt.get(parent)?
+        {
+            return Ok(Some(g.value()));
+        }
+        if let Some(bt) = legacy_btree
+            && let Some(g) = bt.get(parent)?
+        {
+            return Ok(Some(CausalEdge::legacy(g.value())));
+        }
+        Ok(None)
+    }
+
+    /// Get all blobs with a given tag.
+    ///
+    /// Uses a prefix range scan on the tag index for O(log N + K) performance
+    /// where K is the number of matching blobs.
+    pub fn blobs_by_tag(&self, tag: &str) -> Result<Vec<BlobId>> {
+        let Some(tag_btree) = self.open_system_btree(BLOB_TAG_INDEX)? else {
+            return Ok(Vec::new());
+        };
+
+        let start = TagKey::range_start(tag);
+        let end = TagKey::range_end(tag);
+        let range = tag_btree.range(&(start..=end))?;
+
+        let mut results = Vec::new();
+        for entry in range {
+            let entry = entry?;
+            results.push(entry.key().blob_id);
+        }
+        Ok(results)
+    }
+
+    /// Get all blobs in a namespace, with their metadata.
+    ///
+    /// Uses the namespace index for efficient prefix scanning.
+    pub fn blobs_in_namespace(&self, namespace: &str) -> Result<Vec<(BlobId, BlobMeta)>> {
+        let Some(ns_idx_btree) = self.open_system_btree(BLOB_NAMESPACE_INDEX)? else {
+            return Ok(Vec::new());
+        };
+        let Some(blob_btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(Vec::new());
+        };
+
+        let start = NamespaceKey::range_start(namespace);
+        let end = NamespaceKey::range_end(namespace);
+        let range = ns_idx_btree.range(&(start..=end))?;
+
+        let mut results = Vec::new();
+        for entry in range {
+            let entry = entry?;
+            let blob_id = entry.key().blob_id;
+            if let Some(meta_guard) = blob_btree.get(&blob_id)? {
+                results.push((blob_id, meta_guard.value()));
+            }
+        }
+        Ok(results)
+    }
+
+    /// Query blobs within a time range, optionally filtered by namespace.
+    ///
+    /// When `namespace` is `Some`, only blobs belonging to that namespace are
+    /// included. When `None`, behaves identically to `blobs_in_time_range`.
+    pub fn blobs_in_time_range_ns(
+        &self,
+        start_ns: u64,
+        end_ns: u64,
+        namespace: Option<&str>,
+    ) -> Result<Vec<(TemporalKey, BlobMeta)>> {
+        let results = self.blobs_in_time_range(start_ns, end_ns)?;
+        let Some(ns) = namespace else {
+            return Ok(results);
+        };
+
+        let Some(ns_btree) = self.open_system_btree(BLOB_NAMESPACE)? else {
+            return Ok(Vec::new());
+        };
+
+        let mut filtered = Vec::new();
+        for (tk, meta) in results {
+            if let Some(ns_guard) = ns_btree.get(&tk.blob_id)?
+                && ns_guard.value().namespace_str() == ns
+            {
+                filtered.push((tk, meta));
+            }
+        }
+        Ok(filtered)
+    }
+
+    /// Get tags for a blob.
+    pub fn blob_tags(&self, blob_id: &BlobId) -> Result<Vec<String>> {
+        let Some(tag_btree) = self.open_system_btree(BLOB_TAG_INDEX)? else {
+            return Ok(Vec::new());
+        };
+
+        // TagKey is ordered (tag, blob_id), so we must do a full scan to find
+        // all tags for a given blob_id. Acceptable because the tag index is
+        // typically small.
+        let start = TagKey::new("", BlobId::MIN);
+        let end = TagKey {
+            tag: [0xFF; 32],
+            tag_len: 32,
+            blob_id: BlobId::MAX,
+        };
+        let range = tag_btree.range(&(start..=end))?;
+        let mut tags = Vec::new();
+        for entry in range {
+            let entry = entry?;
+            let key = entry.key();
+            if key.blob_id == *blob_id {
+                tags.push(key.tag_str().to_string());
+            }
+        }
+        Ok(tags)
+    }
+
+    /// Get namespace for a blob.
+    pub fn blob_namespace(&self, blob_id: &BlobId) -> Result<Option<String>> {
+        let Some(ns_btree) = self.open_system_btree(BLOB_NAMESPACE)? else {
+            return Ok(None);
+        };
+
+        match ns_btree.get(blob_id)? {
+            Some(g) => Ok(Some(g.value().namespace_str().to_string())),
+            None => Ok(None),
+        }
     }
 
     /// Close the transaction

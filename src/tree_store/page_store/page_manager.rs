@@ -56,6 +56,10 @@ pub(crate) const FILE_FORMAT_VERSION3: u8 = 3;
 // * Adds value-level compression (LZ4 / zstd)
 // * Compression algorithm stored in database header
 pub(crate) const FILE_FORMAT_VERSION4: u8 = 4;
+// New file format:
+// * Adds blob store with temporal indexing
+// * Blob region metadata stored in commit slot _UNUSED2 area (4 × u64)
+pub(crate) const FILE_FORMAT_VERSION5: u8 = 5;
 
 #[derive(Copy, Clone)]
 pub(crate) enum ShrinkPolicy {
@@ -104,6 +108,15 @@ impl InMemoryState {
     }
 }
 
+/// Blob region commit state, applied atomically during commit.
+#[derive(Clone, Default)]
+pub(crate) struct BlobCommitState {
+    pub(crate) region_offset: u64,
+    pub(crate) region_length: u64,
+    pub(crate) next_sequence: u64,
+    pub(crate) hlc_state: u64,
+}
+
 pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
     // TODO: maybe this should be moved to WriteTransaction?
@@ -131,6 +144,8 @@ pub(crate) struct TransactionalMemory {
     region_size: u64,
     region_header_with_padding_size: u64,
     compression: CompressionConfig,
+    // Pending blob region state, applied to the commit slot during commit
+    pending_blob_state: Mutex<BlobCommitState>,
 }
 
 impl TransactionalMemory {
@@ -243,9 +258,16 @@ impl TransactionalMemory {
         let compression = header.compression;
 
         assert_eq!(header.page_size() as usize, page_size);
-        assert!(storage.raw_file_len()? >= header.layout().len());
-        let needs_recovery =
-            header.recovery_required || header.layout().len() != storage.raw_file_len()?;
+        // The blob region (if any) is appended after the B-tree region.
+        // blob_region_offset marks where the B-tree region ends and blobs begin.
+        let blob_region_offset = header.primary_slot().blob_region_offset;
+        let btree_file_len = if blob_region_offset > 0 {
+            blob_region_offset
+        } else {
+            storage.raw_file_len()?
+        };
+        assert!(btree_file_len >= header.layout().len());
+        let needs_recovery = header.recovery_required || header.layout().len() != btree_file_len;
         if needs_recovery {
             if read_only {
                 return Err(DatabaseError::RepairAborted);
@@ -254,7 +276,7 @@ impl TransactionalMemory {
             let region_max_pages = layout.full_region_layout().num_pages();
             let region_header_pages = layout.full_region_layout().get_header_pages();
             header.set_layout(DatabaseLayout::recalculate(
-                storage.raw_file_len()?,
+                btree_file_len,
                 region_header_pages,
                 region_max_pages,
                 page_size.try_into().unwrap(),
@@ -269,7 +291,7 @@ impl TransactionalMemory {
         }
 
         let layout = header.layout();
-        assert_eq!(layout.len(), storage.raw_file_len()?);
+        assert_eq!(layout.len(), btree_file_len);
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
         let state = InMemoryState::new(header);
@@ -293,6 +315,7 @@ impl TransactionalMemory {
             region_size,
             region_header_with_padding_size: region_header_size,
             compression,
+            pending_blob_state: Mutex::new(BlobCommitState::default()),
         })
     }
 
@@ -385,6 +408,7 @@ impl TransactionalMemory {
             region_size: actual_region_size,
             region_header_with_padding_size: region_header_size,
             compression,
+            pending_blob_state: Mutex::new(BlobCommitState::default()),
         };
 
         Ok((mem, header_valid))
@@ -392,6 +416,58 @@ impl TransactionalMemory {
 
     pub(crate) fn compression(&self) -> CompressionConfig {
         self.compression
+    }
+
+    /// Get the blob state for a write transaction.
+    ///
+    /// Returns the pending (in-transaction) state if any blob writes have occurred
+    /// in the current transaction, otherwise falls back to the committed state.
+    /// Must only be called from `WriteTransaction` methods.
+    pub(crate) fn get_blob_state(&self) -> BlobCommitState {
+        let pending = self.pending_blob_state.lock().unwrap().clone();
+        if pending.region_offset != 0 || pending.next_sequence != 0 {
+            return pending;
+        }
+        self.get_committed_blob_state()
+    }
+
+    /// Get the committed blob state from the header slot.
+    ///
+    /// Safe for concurrent readers — only returns durably committed values.
+    pub(crate) fn get_committed_blob_state(&self) -> BlobCommitState {
+        let state = self.state.lock().unwrap();
+        let slot = if self.read_from_secondary.load(Ordering::Acquire) {
+            state.header.secondary_slot()
+        } else {
+            state.header.primary_slot()
+        };
+        BlobCommitState {
+            region_offset: slot.blob_region_offset,
+            region_length: slot.blob_region_length,
+            next_sequence: slot.blob_next_sequence,
+            hlc_state: slot.blob_hlc_state,
+        }
+    }
+
+    /// Set pending blob state to be committed in the next transaction.
+    pub(crate) fn set_pending_blob_state(&self, state: BlobCommitState) {
+        *self.pending_blob_state.lock().unwrap() = state;
+    }
+
+    /// Write blob data directly to the file (bypasses page cache).
+    pub(crate) fn blob_write(&self, file_offset: u64, data: &[u8]) -> Result {
+        self.storage.ensure_len(file_offset + data.len() as u64)?;
+        self.storage.write_direct(file_offset, data)
+    }
+
+    /// Read blob data directly from the file (bypasses page cache).
+    pub(crate) fn blob_read(&self, file_offset: u64, length: usize) -> Result<Vec<u8>> {
+        self.storage.read_direct(file_offset, length)
+    }
+
+    /// Get the current file length (for initializing the blob region offset).
+    pub(crate) fn file_len(&self) -> Result<u64> {
+        self.storage.raw_file_len()
     }
 
     pub(crate) fn cache_stats(&self) -> CacheStats {
@@ -733,6 +809,18 @@ impl TransactionalMemory {
         secondary.user_root = data_root;
         secondary.system_root = system_root;
 
+        // Apply blob region state: use pending if set, otherwise carry forward committed
+        let blob_state = self.get_blob_state();
+        secondary.blob_region_offset = blob_state.region_offset;
+        secondary.blob_region_length = blob_state.region_length;
+        secondary.blob_next_sequence = blob_state.next_sequence;
+        secondary.blob_hlc_state = blob_state.hlc_state;
+
+        // Upgrade to V5 when blob store is in use
+        if blob_state.region_offset > 0 && secondary.version < FILE_FORMAT_VERSION5 {
+            secondary.version = FILE_FORMAT_VERSION5;
+        }
+
         self.write_header(&header)?;
 
         // Use 2-phase commit, if checksums are disabled
@@ -776,6 +864,9 @@ impl TransactionalMemory {
         // TODO: maybe we can remove the whole read_from_secondary flag?
         drop(state);
 
+        // Reset pending blob state so the next transaction starts from committed header
+        *self.pending_blob_state.lock().unwrap() = BlobCommitState::default();
+
         Ok(())
     }
 
@@ -799,11 +890,24 @@ impl TransactionalMemory {
         allocated_since_commit.shrink_to_fit();
         self.storage.write_barrier()?;
 
+        // Read blob state before locking `state` to avoid deadlock
+        // (get_blob_state may lock `state` internally via get_committed_blob_state)
+        let blob_state = self.get_blob_state();
+
         let mut state = self.state.lock().unwrap();
         let secondary = state.header.secondary_slot_mut();
         secondary.transaction_id = transaction_id;
         secondary.user_root = data_root;
         secondary.system_root = system_root;
+        secondary.blob_region_offset = blob_state.region_offset;
+        secondary.blob_region_length = blob_state.region_length;
+        secondary.blob_next_sequence = blob_state.next_sequence;
+        secondary.blob_hlc_state = blob_state.hlc_state;
+
+        // Upgrade to V5 when blob store is in use
+        if blob_state.region_offset > 0 && secondary.version < FILE_FORMAT_VERSION5 {
+            secondary.version = FILE_FORMAT_VERSION5;
+        }
 
         // TODO: maybe we can remove this flag and just update the in-memory DatabaseHeader state?
         self.read_from_secondary.store(true, Ordering::Release);
@@ -854,6 +958,10 @@ impl TransactionalMemory {
         }
         guard.clear();
         guard.shrink_to_fit();
+
+        // Reset pending blob state so aborted writes don't leak sequence numbers
+        // or region length to the next transaction
+        *self.pending_blob_state.lock().unwrap() = BlobCommitState::default();
 
         Ok(())
     }

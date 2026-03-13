@@ -87,9 +87,17 @@ pub use tree_store::{
 };
 pub use types::{Key, MutInPlaceValue, TypeName, Value};
 
+pub use blob_store::{
+    BlobId, BlobInput, BlobMeta, BlobRef, BlobWriter, CausalEdge, CausalLink, CausalPath,
+    ContentType, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal, RelationType, StoreOptions, TagKey,
+    TemporalKey,
+};
+pub use temporal::HybridLogicalClock;
+
 pub type Result<T = (), E = StorageError> = std::result::Result<T, E>;
 
 pub mod backends;
+pub mod blob_store;
 mod complex_types;
 mod db;
 mod error;
@@ -97,6 +105,7 @@ mod legacy_tuple_types;
 mod multimap_table;
 mod sealed;
 mod table;
+pub mod temporal;
 mod transaction_tracker;
 mod transactions;
 mod tree_store;

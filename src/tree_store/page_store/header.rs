@@ -5,7 +5,7 @@ use crate::tree_store::page_store::compression::CompressionConfig;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::page_manager::{
     FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, FILE_FORMAT_VERSION4,
-    xxh3_checksum,
+    FILE_FORMAT_VERSION5, xxh3_checksum,
 };
 use crate::{DatabaseError, Result, StorageError};
 use std::mem::size_of;
@@ -75,6 +75,13 @@ const PADDING: usize = 4;
 const USER_ROOT_OFFSET: usize = _UNUSED_OFFSET + size_of::<u8>() + PADDING;
 const SYSTEM_ROOT_OFFSET: usize = USER_ROOT_OFFSET + BtreeHeader::serialized_size();
 const _UNUSED2_OFFSET: usize = SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size();
+// In V5+, the _UNUSED2 area stores blob region metadata (4 × u64 = 32 bytes).
+// In V3/V4, these bytes are zeros (formerly freed table root, unused).
+const BLOB_REGION_OFFSET_OFFSET: usize = _UNUSED2_OFFSET;
+const BLOB_REGION_LENGTH_OFFSET: usize = BLOB_REGION_OFFSET_OFFSET + size_of::<u64>();
+const BLOB_NEXT_SEQUENCE_OFFSET: usize = BLOB_REGION_LENGTH_OFFSET + size_of::<u64>();
+const BLOB_HLC_STATE_OFFSET: usize = BLOB_NEXT_SEQUENCE_OFFSET + size_of::<u64>();
+
 const TRANSACTION_ID_OFFSET: usize = _UNUSED2_OFFSET + BtreeHeader::serialized_size();
 const TRANSACTION_LAST_FIELD: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
 
@@ -334,6 +341,11 @@ pub(super) struct TransactionHeader {
     pub(super) user_root: Option<BtreeHeader>,
     pub(super) system_root: Option<BtreeHeader>,
     pub(super) transaction_id: TransactionId,
+    // V5+ blob store fields (stored in the formerly-unused _UNUSED2 area)
+    pub(super) blob_region_offset: u64,
+    pub(super) blob_region_length: u64,
+    pub(super) blob_next_sequence: u64,
+    pub(super) blob_hlc_state: u64,
 }
 
 impl TransactionHeader {
@@ -343,6 +355,10 @@ impl TransactionHeader {
             user_root: None,
             system_root: None,
             transaction_id,
+            blob_region_offset: 0,
+            blob_region_length: 0,
+            blob_next_sequence: 0,
+            blob_hlc_state: 0,
         }
     }
 
@@ -353,10 +369,10 @@ impl TransactionHeader {
             FILE_FORMAT_VERSION1 | FILE_FORMAT_VERSION2 => {
                 return Err(DatabaseError::UpgradeRequired(version));
             }
-            FILE_FORMAT_VERSION3 | FILE_FORMAT_VERSION4 => {}
+            FILE_FORMAT_VERSION3 | FILE_FORMAT_VERSION4 | FILE_FORMAT_VERSION5 => {}
             _ => {
                 return Err(StorageError::Corrupted(format!(
-                    "Expected file format version <= {FILE_FORMAT_VERSION4}, found {version}",
+                    "Expected file format version <= {FILE_FORMAT_VERSION5}, found {version}",
                 ))
                 .into());
             }
@@ -388,18 +404,39 @@ impl TransactionHeader {
         };
         let transaction_id = TransactionId::new(get_u64(&data[TRANSACTION_ID_OFFSET..]));
 
+        // V5+ blob store fields; V3/V4 databases must not interpret these bytes
+        let (blob_region_offset, blob_region_length, blob_next_sequence, blob_hlc_state) =
+            if version >= FILE_FORMAT_VERSION5 {
+                (
+                    get_u64(&data[BLOB_REGION_OFFSET_OFFSET..]),
+                    get_u64(&data[BLOB_REGION_LENGTH_OFFSET..]),
+                    get_u64(&data[BLOB_NEXT_SEQUENCE_OFFSET..]),
+                    get_u64(&data[BLOB_HLC_STATE_OFFSET..]),
+                )
+            } else {
+                (0, 0, 0, 0)
+            };
+
         let result = Self {
             version,
             user_root,
             system_root,
             transaction_id,
+            blob_region_offset,
+            blob_region_length,
+            blob_next_sequence,
+            blob_hlc_state,
         };
 
         Ok((result, corrupted))
     }
 
     pub(super) fn to_bytes(&self) -> [u8; TRANSACTION_SIZE] {
-        assert!(self.version == FILE_FORMAT_VERSION3 || self.version == FILE_FORMAT_VERSION4);
+        assert!(
+            self.version == FILE_FORMAT_VERSION3
+                || self.version == FILE_FORMAT_VERSION4
+                || self.version == FILE_FORMAT_VERSION5
+        );
         let mut result = [0; TRANSACTION_SIZE];
         result[VERSION_OFFSET] = self.version;
         if let Some(header) = self.user_root {
@@ -412,6 +449,16 @@ impl TransactionHeader {
             result[SYSTEM_ROOT_OFFSET..(SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size())]
                 .copy_from_slice(&header.to_le_bytes());
         }
+        // Blob store fields (V5+); for V3/V4 these are zeros (the _UNUSED2 area)
+        result[BLOB_REGION_OFFSET_OFFSET..(BLOB_REGION_OFFSET_OFFSET + size_of::<u64>())]
+            .copy_from_slice(&self.blob_region_offset.to_le_bytes());
+        result[BLOB_REGION_LENGTH_OFFSET..(BLOB_REGION_LENGTH_OFFSET + size_of::<u64>())]
+            .copy_from_slice(&self.blob_region_length.to_le_bytes());
+        result[BLOB_NEXT_SEQUENCE_OFFSET..(BLOB_NEXT_SEQUENCE_OFFSET + size_of::<u64>())]
+            .copy_from_slice(&self.blob_next_sequence.to_le_bytes());
+        result[BLOB_HLC_STATE_OFFSET..(BLOB_HLC_STATE_OFFSET + size_of::<u64>())]
+            .copy_from_slice(&self.blob_hlc_state.to_le_bytes());
+
         result[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
             .copy_from_slice(&self.transaction_id.raw_id().to_le_bytes());
         let checksum = xxh3_checksum(&result[..SLOT_CHECKSUM_OFFSET]);
