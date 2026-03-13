@@ -2,6 +2,7 @@ use redb::{
     BlobId, CausalLink, ContentType, Database, ReadableDatabase, RelationType, StorageError,
     StoreOptions,
 };
+use std::io::{Read, Seek, SeekFrom};
 
 fn create_tempfile() -> tempfile::NamedTempFile {
     if cfg!(target_os = "wasi") {
@@ -1650,4 +1651,414 @@ fn blob_tags_with_streaming_writer() {
 
     let tags = read_txn.blob_tags(&blob_id).unwrap();
     assert_eq!(tags.len(), 2);
+}
+
+// ── Partial / Range Blob Read Tests ──────────────────────────────────────────
+
+#[test]
+fn blob_range_read_basic() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let data: Vec<u8> = (0..=255).cycle().take(1024).collect();
+    let blob_id;
+    {
+        let write_txn = db.begin_write().unwrap();
+        blob_id = write_txn
+            .store_blob(
+                &data,
+                ContentType::OctetStream,
+                "range-test",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+
+    // Read a middle slice
+    let slice = read_txn
+        .read_blob_range(&blob_id, 100, 200)
+        .unwrap()
+        .unwrap();
+    assert_eq!(slice.len(), 200);
+    assert_eq!(slice, &data[100..300]);
+}
+
+#[test]
+fn blob_range_read_full() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let data = b"complete blob data for full range read test";
+    let blob_id;
+    {
+        let write_txn = db.begin_write().unwrap();
+        blob_id = write_txn
+            .store_blob(
+                data,
+                ContentType::OctetStream,
+                "full",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let full_range = read_txn
+        .read_blob_range(&blob_id, 0, data.len() as u64)
+        .unwrap()
+        .unwrap();
+    let (full_get, _) = read_txn.get_blob(&blob_id).unwrap().unwrap();
+
+    assert_eq!(full_range, full_get);
+    assert_eq!(full_range, data);
+}
+
+#[test]
+fn blob_range_read_start() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let data = b"HEADER_DATA_REST_OF_BLOB_CONTENT";
+    let blob_id;
+    {
+        let write_txn = db.begin_write().unwrap();
+        blob_id = write_txn
+            .store_blob(
+                data,
+                ContentType::OctetStream,
+                "start",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let first_11 = read_txn.read_blob_range(&blob_id, 0, 11).unwrap().unwrap();
+    assert_eq!(&first_11, b"HEADER_DATA");
+}
+
+#[test]
+fn blob_range_read_end() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let data = b"beginning_TAIL_BYTES";
+    let blob_id;
+    {
+        let write_txn = db.begin_write().unwrap();
+        blob_id = write_txn
+            .store_blob(
+                data,
+                ContentType::OctetStream,
+                "end",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let last_10 = read_txn
+        .read_blob_range(&blob_id, data.len() as u64 - 10, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(&last_10, b"TAIL_BYTES");
+}
+
+#[test]
+fn blob_range_read_out_of_bounds() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let data = b"short";
+    let blob_id;
+    {
+        let write_txn = db.begin_write().unwrap();
+        blob_id = write_txn
+            .store_blob(
+                data,
+                ContentType::OctetStream,
+                "oob",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let result = read_txn.read_blob_range(&blob_id, 3, 10);
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        StorageError::BlobRangeOutOfBounds {
+            blob_length,
+            requested_offset,
+            requested_length,
+        } => {
+            assert_eq!(blob_length, 5);
+            assert_eq!(requested_offset, 3);
+            assert_eq!(requested_length, 10);
+        }
+        other => panic!("Expected BlobRangeOutOfBounds, got: {other}"),
+    }
+}
+
+#[test]
+fn blob_range_read_zero_length() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let data = b"nonempty";
+    let blob_id;
+    {
+        let write_txn = db.begin_write().unwrap();
+        blob_id = write_txn
+            .store_blob(
+                data,
+                ContentType::OctetStream,
+                "zero",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let empty = read_txn.read_blob_range(&blob_id, 0, 0).unwrap().unwrap();
+    assert!(empty.is_empty());
+}
+
+#[test]
+fn blob_range_read_nonexistent() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Store one blob so blob tables exist
+    {
+        let write_txn = db.begin_write().unwrap();
+        write_txn
+            .store_blob(b"x", ContentType::OctetStream, "x", StoreOptions::default())
+            .unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let fake_id = BlobId::new(999_999, 0);
+    let read_txn = db.begin_read().unwrap();
+    let result = read_txn.read_blob_range(&fake_id, 0, 1).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn blob_reader_seek_and_read() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let data: Vec<u8> = (0u8..=255).cycle().take(512).collect();
+    let blob_id;
+    {
+        let write_txn = db.begin_write().unwrap();
+        blob_id = write_txn
+            .store_blob(
+                &data,
+                ContentType::OctetStream,
+                "seek",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let mut reader = read_txn.blob_reader(&blob_id).unwrap().unwrap();
+
+    assert_eq!(reader.len(), 512);
+    assert_eq!(reader.position(), 0);
+
+    // Read first 10 bytes
+    let mut buf = [0u8; 10];
+    reader.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, &data[..10]);
+    assert_eq!(reader.position(), 10);
+
+    // Seek to position 200
+    reader.seek(SeekFrom::Start(200)).unwrap();
+    assert_eq!(reader.position(), 200);
+
+    reader.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, &data[200..210]);
+
+    // Seek from end
+    reader.seek(SeekFrom::End(-20)).unwrap();
+    assert_eq!(reader.position(), 492);
+
+    let mut tail = [0u8; 20];
+    reader.read_exact(&mut tail).unwrap();
+    assert_eq!(&tail, &data[492..512]);
+
+    // Seek from current
+    reader.seek(SeekFrom::Start(100)).unwrap();
+    reader.seek(SeekFrom::Current(50)).unwrap();
+    assert_eq!(reader.position(), 150);
+
+    reader.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, &data[150..160]);
+
+    // EOF: read returns 0
+    reader.seek(SeekFrom::Start(512)).unwrap();
+    let n = reader.read(&mut buf).unwrap();
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn blob_reader_read_sequential() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let data: Vec<u8> = (0..=255).cycle().take(1000).collect();
+    let blob_id;
+    {
+        let write_txn = db.begin_write().unwrap();
+        blob_id = write_txn
+            .store_blob(
+                &data,
+                ContentType::OctetStream,
+                "seq",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let mut reader = read_txn.blob_reader(&blob_id).unwrap().unwrap();
+
+    // Read entire blob in 64-byte chunks
+    let mut result = Vec::new();
+    let mut buf = [0u8; 64];
+    loop {
+        let n = reader.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        result.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(result, data);
+}
+
+#[test]
+fn blob_range_read_streaming_writer() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let blob_id;
+    {
+        let write_txn = db.begin_write().unwrap();
+        let mut writer = write_txn
+            .blob_writer(
+                ContentType::OctetStream,
+                "stream-range",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        // Write in 3 chunks
+        writer.write(b"AAAAAAAAAA").unwrap(); // 10 bytes of 'A'
+        writer.write(b"BBBBBBBBBB").unwrap(); // 10 bytes of 'B'
+        writer.write(b"CCCCCCCCCC").unwrap(); // 10 bytes of 'C'
+        blob_id = writer.finish().unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+
+    // Range read spanning chunk boundaries
+    let slice = read_txn.read_blob_range(&blob_id, 5, 20).unwrap().unwrap();
+    assert_eq!(slice.len(), 20);
+    assert_eq!(&slice[..5], b"AAAAA"); // last 5 of first chunk
+    assert_eq!(&slice[5..15], b"BBBBBBBBBB"); // entire second chunk
+    assert_eq!(&slice[15..20], b"CCCCC"); // first 5 of third chunk
+}
+
+#[test]
+fn blob_range_read_within_write_txn() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let data = b"read range within uncommitted txn";
+    let blob_id = write_txn
+        .store_blob(
+            data,
+            ContentType::OctetStream,
+            "write-range",
+            StoreOptions::default(),
+        )
+        .unwrap();
+
+    // Range read within the same write transaction
+    let slice = write_txn.read_blob_range(&blob_id, 5, 5).unwrap().unwrap();
+    assert_eq!(&slice, b"range");
+
+    // BlobReader within write txn
+    let mut reader = write_txn.blob_reader(&blob_id).unwrap().unwrap();
+    let mut buf = [0u8; 4];
+    reader.seek(SeekFrom::Start(0)).unwrap();
+    reader.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"read");
+
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn blob_reader_nonexistent() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    {
+        let write_txn = db.begin_write().unwrap();
+        write_txn
+            .store_blob(b"x", ContentType::OctetStream, "x", StoreOptions::default())
+            .unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let fake_id = BlobId::new(999_999, 0);
+    let read_txn = db.begin_read().unwrap();
+    let result = read_txn.blob_reader(&fake_id).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn blob_reader_read_range_method() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let data: Vec<u8> = (0u8..=255).cycle().take(500).collect();
+    let blob_id;
+    {
+        let write_txn = db.begin_write().unwrap();
+        blob_id = write_txn
+            .store_blob(
+                &data,
+                ContentType::OctetStream,
+                "rr",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let mut reader = read_txn.blob_reader(&blob_id).unwrap().unwrap();
+
+    let slice = reader.read_range(100, 50).unwrap();
+    assert_eq!(slice, &data[100..150]);
+    assert_eq!(reader.position(), 150);
+
+    // Out-of-bounds read_range
+    let err = reader.read_range(490, 20);
+    assert!(err.is_err());
 }
