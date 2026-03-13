@@ -890,14 +890,15 @@ impl TransactionalMemory {
         allocated_since_commit.shrink_to_fit();
         self.storage.write_barrier()?;
 
+        // Read blob state before locking `state` to avoid deadlock
+        // (get_blob_state may lock `state` internally via get_committed_blob_state)
+        let blob_state = self.get_blob_state();
+
         let mut state = self.state.lock().unwrap();
         let secondary = state.header.secondary_slot_mut();
         secondary.transaction_id = transaction_id;
         secondary.user_root = data_root;
         secondary.system_root = system_root;
-
-        // Apply blob region state: use pending if set, otherwise carry forward committed
-        let blob_state = self.get_blob_state();
         secondary.blob_region_offset = blob_state.region_offset;
         secondary.blob_region_length = blob_state.region_length;
         secondary.blob_next_sequence = blob_state.next_sequence;
