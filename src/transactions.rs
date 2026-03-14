@@ -1,7 +1,8 @@
 use crate::blob_store::reader::BlobReader;
 use crate::blob_store::types::{
-    BlobId, BlobMeta, BlobRef, CausalEdge, CausalPath, ContentType, MAX_TAGS_PER_BLOB,
-    NamespaceKey, NamespaceVal, StoreOptions, TagKey, TemporalKey,
+    BlobDedupConfig, BlobId, BlobMeta, BlobRef, CausalEdge, CausalPath, ContentType, DedupStats,
+    DedupVal, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal, Sha256Key, StoreOptions, TagKey,
+    TemporalKey,
 };
 use crate::blob_store::writer::BlobWriter;
 use crate::db::TransactionGuard;
@@ -26,13 +27,14 @@ use crate::{
 };
 #[cfg(feature = "logging")]
 use log::{debug, warn};
+use sha2::{Digest, Sha256};
 use std::borrow::Borrow;
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::mem::size_of;
-use std::ops::RangeBounds;
+use std::ops::{RangeBounds, RangeFull};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{panic, thread};
@@ -79,6 +81,10 @@ const BLOB_NAMESPACE: SystemTableDefinition<BlobId, NamespaceVal> =
     SystemTableDefinition::new("blob_namespace");
 const BLOB_NAMESPACE_INDEX: SystemTableDefinition<NamespaceKey, ()> =
     SystemTableDefinition::new("blob_namespace_idx");
+const BLOB_DEDUP_INDEX: SystemTableDefinition<Sha256Key, DedupVal> =
+    SystemTableDefinition::new("blob_dedup_idx");
+const BLOB_DEDUP_MAP: SystemTableDefinition<BlobId, Sha256Key> =
+    SystemTableDefinition::new("blob_dedup_map");
 // The allocator state table is stored in the system table tree, but it's accessed using
 // raw btree operations rather than open_system_table(), so there's no SystemTableDefinition
 pub(crate) const ALLOCATOR_STATE_TABLE_NAME: &str = "allocator_state";
@@ -811,6 +817,8 @@ pub struct WriteTransaction {
     deleted_persistent_savepoints: Mutex<Vec<(SavepointId, TransactionId)>>,
     // Guard: true while a BlobWriter is active, preventing concurrent blob ops
     blob_writer_active: AtomicBool,
+    // Content-addressable blob dedup configuration
+    blob_dedup_config: BlobDedupConfig,
 }
 
 impl WriteTransaction {
@@ -818,6 +826,7 @@ impl WriteTransaction {
         guard: TransactionGuard,
         transaction_tracker: Arc<TransactionTracker>,
         mem: Arc<TransactionalMemory>,
+        blob_dedup_config: BlobDedupConfig,
     ) -> Result<Self> {
         let transaction_id = guard.id();
         let guard = Arc::new(guard);
@@ -844,6 +853,7 @@ impl WriteTransaction {
             created_persistent_savepoints: Mutex::new(Default::default()),
             deleted_persistent_savepoints: Mutex::new(vec![]),
             blob_writer_active: AtomicBool::new(false),
+            blob_dedup_config,
         })
     }
 
@@ -1449,11 +1459,50 @@ impl WriteTransaction {
         // 4. Compute full checksum
         let checksum = xxh3_hash128(data);
 
-        // 5. Write blob data to the blob region
-        let blob_offset = blob_state.region_length;
-        let file_offset = blob_state.region_offset + blob_offset;
-        self.mem.blob_write(file_offset, data)?;
-        blob_state.region_length += data.len() as u64;
+        // 5. Dedup check: compute SHA-256 and look for existing identical blob
+        let dedup_eligible =
+            self.blob_dedup_config.enabled && data.len() >= self.blob_dedup_config.min_size;
+        let sha_key = if dedup_eligible {
+            let hash: [u8; 32] = Sha256::digest(data).into();
+            Some(Sha256Key(hash))
+        } else {
+            None
+        };
+
+        let dedup_hit = if let Some(ref sha_key) = sha_key {
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let dedup_table = system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
+            dedup_table.get(sha_key)?.map(|g| g.value())
+        } else {
+            None
+        };
+
+        let blob_ref = if let Some(existing) = dedup_hit {
+            // Reuse existing physical data — skip writing to blob region
+            BlobRef {
+                offset: existing.offset,
+                length: existing.length,
+                checksum: existing.checksum,
+                ref_count: 1,
+                content_type: content_type.as_byte(),
+                compression: 0,
+            }
+        } else {
+            // 5b. Write blob data to the blob region
+            let blob_offset = blob_state.region_length;
+            let file_offset = blob_state.region_offset + blob_offset;
+            self.mem.blob_write(file_offset, data)?;
+            blob_state.region_length += data.len() as u64;
+
+            BlobRef {
+                offset: blob_offset,
+                length: data.len() as u64,
+                checksum,
+                ref_count: 1,
+                content_type: content_type.as_byte(),
+                compression: 0,
+            }
+        };
 
         // 6. Advance HLC
         let hlc = HybridLogicalClock::from_raw(blob_state.hlc_state).advance();
@@ -1467,16 +1516,7 @@ impl WriteTransaction {
             .expect("system clock before UNIX epoch")
             .as_nanos() as u64;
 
-        // 7. Build BlobRef and BlobMeta
-        let blob_ref = BlobRef {
-            offset: blob_offset,
-            length: data.len() as u64,
-            checksum,
-            ref_count: 1,
-            content_type: content_type.as_byte(),
-            compression: 0,
-        };
-
+        // 7. Build BlobMeta
         let causal_parent = opts.causal_link.as_ref().map(|l| l.parent);
         let meta = BlobMeta::new(blob_ref, wall_clock_ns, hlc.to_raw(), causal_parent, label);
 
@@ -1507,6 +1547,38 @@ impl WriteTransaction {
                 &opts.tags,
                 opts.namespace.as_deref(),
             )?;
+
+            // 8b. Update dedup index
+            if let Some(sha_key) = sha_key {
+                if let Some(existing) = dedup_hit {
+                    // Increment ref_count on existing dedup entry
+                    let mut dedup_table =
+                        system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
+                    let updated = DedupVal {
+                        ref_count: existing.ref_count + 1,
+                        ..existing
+                    };
+                    dedup_table.insert(&sha_key, &updated)?;
+                    drop(dedup_table);
+                } else {
+                    // New dedup entry
+                    let mut dedup_table =
+                        system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
+                    let entry = DedupVal {
+                        offset: blob_ref.offset,
+                        length: blob_ref.length,
+                        checksum: blob_ref.checksum,
+                        ref_count: 1,
+                    };
+                    dedup_table.insert(&sha_key, &entry)?;
+                    drop(dedup_table);
+                }
+
+                // Reverse map: BlobId → Sha256Key
+                let mut dedup_map = system_tables.open_system_table(self, BLOB_DEDUP_MAP)?;
+                dedup_map.insert(&blob_id, &sha_key)?;
+                drop(dedup_map);
+            }
         }
 
         // 9. Update pending blob state for commit
@@ -1561,6 +1633,7 @@ impl WriteTransaction {
             opts,
             blob_file_offset,
             blob_region_start,
+            self.blob_dedup_config.enabled,
         ))
     }
 
@@ -1578,6 +1651,7 @@ impl WriteTransaction {
         mut meta: BlobMeta,
         bytes_written: u64,
         opts: StoreOptions,
+        sha_key: Option<Sha256Key>,
     ) -> Result {
         let mut blob_state = self.mem.get_blob_state();
 
@@ -1618,6 +1692,42 @@ impl WriteTransaction {
                 &opts.tags,
                 opts.namespace.as_deref(),
             )?;
+
+            // Update dedup index for streaming writes
+            if let Some(sha_key) = sha_key {
+                let existing = {
+                    let dedup_table = system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
+                    dedup_table.get(&sha_key)?.map(|g| g.value())
+                };
+
+                if let Some(existing) = existing {
+                    // Another blob with same content already exists — increment ref_count
+                    let mut dedup_table =
+                        system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
+                    let updated = DedupVal {
+                        ref_count: existing.ref_count + 1,
+                        ..existing
+                    };
+                    dedup_table.insert(&sha_key, &updated)?;
+                    drop(dedup_table);
+                } else {
+                    // First occurrence — create new dedup entry
+                    let mut dedup_table =
+                        system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
+                    let entry = DedupVal {
+                        offset: meta.blob_ref.offset,
+                        length: meta.blob_ref.length,
+                        checksum: meta.blob_ref.checksum,
+                        ref_count: 1,
+                    };
+                    dedup_table.insert(&sha_key, &entry)?;
+                    drop(dedup_table);
+                }
+
+                let mut dedup_map = system_tables.open_system_table(self, BLOB_DEDUP_MAP)?;
+                dedup_map.insert(&blob_id, &sha_key)?;
+                drop(dedup_map);
+            }
         }
 
         self.mem.set_pending_blob_state(blob_state);
@@ -1880,6 +1990,44 @@ impl WriteTransaction {
                 ns_idx.remove(&ns_key)?;
                 drop(ns_idx);
             }
+        }
+
+        // Remove dedup entries (if this blob was dedup-indexed)
+        let sha_key = {
+            let dedup_map = system_tables.open_system_table(self, BLOB_DEDUP_MAP)?;
+            let result = dedup_map.get(blob_id)?.map(|g| g.value());
+            drop(dedup_map);
+            result
+        };
+
+        if let Some(sha_key) = sha_key {
+            // Read current dedup entry to decide whether to decrement or remove
+            let dedup_val = {
+                let dedup_idx = system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
+                let result = dedup_idx.get(&sha_key)?.map(|g| g.value());
+                drop(dedup_idx);
+                result
+            };
+
+            if let Some(val) = dedup_val {
+                let mut dedup_idx = system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
+                if val.ref_count > 1 {
+                    let updated = DedupVal {
+                        offset: val.offset,
+                        length: val.length,
+                        checksum: val.checksum,
+                        ref_count: val.ref_count - 1,
+                    };
+                    dedup_idx.insert(&sha_key, &updated)?;
+                } else {
+                    dedup_idx.remove(&sha_key)?;
+                }
+                drop(dedup_idx);
+            }
+
+            let mut dedup_map = system_tables.open_system_table(self, BLOB_DEDUP_MAP)?;
+            dedup_map.remove(blob_id)?;
+            drop(dedup_map);
         }
 
         // Remove from primary table
@@ -2842,6 +2990,43 @@ impl ReadTransaction {
             file_offset,
             meta.blob_ref.length,
         )))
+    }
+
+    /// Query deduplication statistics.
+    ///
+    /// Scans the dedup index and returns the number of unique content entries,
+    /// total reference count across all entries, and estimated bytes saved by dedup.
+    /// Returns zeroed stats if dedup has never been used.
+    pub fn dedup_stats(&self) -> Result<DedupStats> {
+        let Some(btree) = self.open_system_btree(BLOB_DEDUP_INDEX)? else {
+            return Ok(DedupStats {
+                total_dedup_entries: 0,
+                total_ref_count: 0,
+                bytes_saved: 0,
+            });
+        };
+
+        let mut total_dedup_entries: u64 = 0;
+        let mut total_ref_count: u64 = 0;
+        let mut bytes_saved: u64 = 0;
+
+        let range = btree.range::<RangeFull, Sha256Key>(&(..))?;
+        for entry in range {
+            let entry = entry?;
+            let val = entry.value();
+            total_dedup_entries += 1;
+            total_ref_count += u64::from(val.ref_count);
+            // Each extra reference beyond the first saves `length` bytes
+            if val.ref_count > 1 {
+                bytes_saved += val.length * u64::from(val.ref_count - 1);
+            }
+        }
+
+        Ok(DedupStats {
+            total_dedup_entries,
+            total_ref_count,
+            bytes_saved,
+        })
     }
 
     /// Query blobs within a wall-clock time range (nanoseconds).
