@@ -88,9 +88,9 @@ pub use tree_store::{
 pub use types::{Key, MutInPlaceValue, TypeName, Value};
 
 pub use blob_store::{
-    BlobId, BlobInput, BlobMeta, BlobRef, BlobWriter, CausalEdge, CausalLink, CausalPath,
-    ContentType, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal, RelationType, StoreOptions, TagKey,
-    TemporalKey,
+    BlobId, BlobInput, BlobMeta, BlobReader, BlobRef, BlobWriter, CausalEdge, CausalLink,
+    CausalPath, ContentType, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal, RelationType,
+    StoreOptions, TagKey, TemporalKey,
 };
 pub use temporal::HybridLogicalClock;
 

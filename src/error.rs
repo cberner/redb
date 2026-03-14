@@ -25,6 +25,15 @@ pub enum StorageError {
     },
     /// A streaming blob writer is already active on this transaction
     BlobWriterActive,
+    /// The requested byte range exceeds the blob's length
+    BlobRangeOutOfBounds {
+        /// Total blob length in bytes
+        blob_length: u64,
+        /// Requested range start offset
+        requested_offset: u64,
+        /// Requested range length
+        requested_length: u64,
+    },
     Io(io::Error),
     PreviousIo,
     DatabaseClosed,
@@ -59,6 +68,15 @@ impl From<StorageError> for Error {
                 actual,
             },
             StorageError::BlobWriterActive => Error::BlobWriterActive,
+            StorageError::BlobRangeOutOfBounds {
+                blob_length,
+                requested_offset,
+                requested_length,
+            } => Error::BlobRangeOutOfBounds {
+                blob_length,
+                requested_offset,
+                requested_length,
+            },
             StorageError::Io(x) => Error::Io(x),
             StorageError::PreviousIo => Error::PreviousIo,
             StorageError::DatabaseClosed => Error::DatabaseClosed,
@@ -97,6 +115,16 @@ impl Display for StorageError {
                 write!(
                     f,
                     "Cannot create blob writer or store blob while another writer is active"
+                )
+            }
+            StorageError::BlobRangeOutOfBounds {
+                blob_length,
+                requested_offset,
+                requested_length,
+            } => {
+                write!(
+                    f,
+                    "Blob range out of bounds: blob_length={blob_length}, requested offset={requested_offset}, length={requested_length}"
                 )
             }
             StorageError::Io(err) => {
@@ -585,6 +613,15 @@ pub enum Error {
     },
     /// A streaming blob writer is already active on this transaction
     BlobWriterActive,
+    /// The requested byte range exceeds the blob's length
+    BlobRangeOutOfBounds {
+        /// Total blob length in bytes
+        blob_length: u64,
+        /// Requested range start offset
+        requested_offset: u64,
+        /// Requested range length
+        requested_length: u64,
+    },
     Io(io::Error),
     DatabaseClosed,
     /// A previous IO error occurred. The database must be closed and re-opened
@@ -678,6 +715,16 @@ impl Display for Error {
                 write!(
                     f,
                     "Cannot create blob writer or store blob while another writer is active"
+                )
+            }
+            Error::BlobRangeOutOfBounds {
+                blob_length,
+                requested_offset,
+                requested_length,
+            } => {
+                write!(
+                    f,
+                    "Blob range out of bounds: blob_length={blob_length}, requested offset={requested_offset}, length={requested_length}"
                 )
             }
             Error::Io(err) => {
