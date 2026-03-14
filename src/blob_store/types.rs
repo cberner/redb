@@ -1270,7 +1270,221 @@ const _: () = {
     assert!(TagKey::SERIALIZED_SIZE == 49);
     assert!(NamespaceKey::SERIALIZED_SIZE == 80);
     assert!(NamespaceVal::SERIALIZED_SIZE == 64);
+    assert!(Sha256Key::SERIALIZED_SIZE == 32);
+    assert!(DedupVal::SERIALIZED_SIZE == 40);
 };
+
+// ---------------------------------------------------------------------------
+// Sha256Key — 32-byte content hash key for the dedup index
+// ---------------------------------------------------------------------------
+
+/// SHA-256 content hash used as a key in the blob dedup index.
+///
+/// Layout (32 bytes): raw SHA-256 digest.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Sha256Key(pub [u8; 32]);
+
+impl Sha256Key {
+    pub const SERIALIZED_SIZE: usize = 32;
+
+    pub fn to_le_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
+        self.0
+    }
+
+    pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+        Self(data)
+    }
+}
+
+impl PartialOrd for Sha256Key {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Sha256Key {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl fmt::Debug for Sha256Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Sha256Key(")?;
+        for b in &self.0[..4] {
+            write!(f, "{b:02x}")?;
+        }
+        write!(f, "..)")
+    }
+}
+
+impl Value for Sha256Key {
+    type SelfType<'a>
+        = Sha256Key
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = [u8; Sha256Key::SERIALIZED_SIZE]
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(Self::SERIALIZED_SIZE)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        value.to_le_bytes()
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("redb::blob::Sha256Key")
+    }
+}
+
+impl Key for Sha256Key {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        let a = Self::from_bytes(data1);
+        let b = Self::from_bytes(data2);
+        a.cmp(&b)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DedupVal — 40-byte value in the dedup index
+// ---------------------------------------------------------------------------
+
+/// Value stored in `BLOB_DEDUP_INDEX`, tracking the physical location and
+/// reference count of a content-addressable blob.
+///
+/// Layout (40 bytes):
+/// - `offset` (`u64`): byte offset within the blob region
+/// - `length` (`u64`): blob data size in bytes
+/// - `checksum` (`u128`): xxh3-128 of the full blob data
+/// - `ref_count` (`u32`): number of `BlobId`s sharing this physical data
+/// - 4 bytes reserved
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct DedupVal {
+    pub offset: u64,
+    pub length: u64,
+    pub checksum: u128,
+    pub ref_count: u32,
+}
+
+impl DedupVal {
+    pub const SERIALIZED_SIZE: usize = 8 + 8 + 16 + 4 + 4; // 40
+
+    pub fn to_le_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
+        let mut buf = [0u8; Self::SERIALIZED_SIZE];
+        buf[0..8].copy_from_slice(&self.offset.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.length.to_le_bytes());
+        buf[16..32].copy_from_slice(&self.checksum.to_le_bytes());
+        buf[32..36].copy_from_slice(&self.ref_count.to_le_bytes());
+        // bytes 36..40 reserved
+        buf
+    }
+
+    pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+        Self {
+            offset: u64::from_le_bytes(data[0..8].try_into().unwrap()),
+            length: u64::from_le_bytes(data[8..16].try_into().unwrap()),
+            checksum: u128::from_le_bytes(data[16..32].try_into().unwrap()),
+            ref_count: u32::from_le_bytes(data[32..36].try_into().unwrap()),
+        }
+    }
+}
+
+#[allow(clippy::missing_fields_in_debug)]
+impl fmt::Debug for DedupVal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DedupVal")
+            .field("offset", &self.offset)
+            .field("length", &self.length)
+            .field("ref_count", &self.ref_count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Value for DedupVal {
+    type SelfType<'a>
+        = DedupVal
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = [u8; DedupVal::SERIALIZED_SIZE]
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(Self::SERIALIZED_SIZE)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        value.to_le_bytes()
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("redb::blob::DedupVal")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BlobDedupConfig — database-level dedup configuration
+// ---------------------------------------------------------------------------
+
+/// Configuration for content-addressable blob deduplication.
+#[derive(Clone, Debug)]
+pub(crate) struct BlobDedupConfig {
+    /// Whether dedup is enabled.
+    pub enabled: bool,
+    /// Minimum blob size (bytes) to consider for dedup. Blobs smaller than
+    /// this are always stored without dedup to avoid SHA-256 overhead on
+    /// tiny values.
+    pub min_size: usize,
+}
+
+impl Default for BlobDedupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_size: 4096,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DedupStats — dedup statistics returned by query methods
+// ---------------------------------------------------------------------------
+
+/// Statistics about content-addressable blob deduplication.
+#[derive(Clone, Debug, Default)]
+pub struct DedupStats {
+    /// Number of unique content hashes in the dedup index.
+    pub total_dedup_entries: u64,
+    /// Sum of all reference counts across dedup entries.
+    pub total_ref_count: u64,
+    /// Total bytes saved by dedup (sum of `length * (ref_count - 1)`).
+    pub bytes_saved: u64,
+}
 
 #[cfg(test)]
 mod tests {
