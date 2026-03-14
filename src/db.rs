@@ -1,3 +1,4 @@
+use crate::blob_store::BlobDedupConfig;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeHeader, CompressionConfig, InternalTableDefinition, PAGE_SIZE, PageHint,
@@ -546,6 +547,7 @@ impl ReadOnlyDatabase {
 pub struct Database {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
+    blob_dedup_config: BlobDedupConfig,
 }
 
 impl ReadableDatabase for Database {
@@ -1161,6 +1163,7 @@ impl Database {
         write_cache_size_bytes: usize,
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
         compression: CompressionConfig,
+        blob_dedup_config: BlobDedupConfig,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -1210,6 +1213,7 @@ impl Database {
         let db = Database {
             mem,
             transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
+            blob_dedup_config: blob_dedup_config.clone(),
         };
 
         // Restore the tracker state for any persistent savepoints
@@ -1305,8 +1309,13 @@ impl Database {
             self.transaction_tracker.start_write_transaction(),
             self.transaction_tracker.clone(),
         );
-        WriteTransaction::new(guard, self.transaction_tracker.clone(), self.mem.clone())
-            .map_err(|e| e.into())
+        WriteTransaction::new(
+            guard,
+            self.transaction_tracker.clone(),
+            self.mem.clone(),
+            self.blob_dedup_config.clone(),
+        )
+        .map_err(|e| e.into())
     }
 
     fn ensure_allocator_state_table_and_trim(&self) -> Result<(), Error> {
@@ -1372,6 +1381,7 @@ pub struct Builder {
     write_cache_size_bytes: usize,
     compression: CompressionConfig,
     repair_callback: Box<dyn Fn(&mut RepairSession)>,
+    blob_dedup_config: BlobDedupConfig,
 }
 
 impl Builder {
@@ -1394,6 +1404,7 @@ impl Builder {
             write_cache_size_bytes: 0,
             compression: CompressionConfig::None,
             repair_callback: Box::new(|_| {}),
+            blob_dedup_config: BlobDedupConfig::default(),
         };
 
         result.set_cache_size(1024 * 1024 * 1024);
@@ -1456,6 +1467,24 @@ impl Builder {
         self
     }
 
+    /// Enable or disable content-addressable blob deduplication using SHA-256.
+    ///
+    /// When enabled, identical blobs are stored once with reference counting.
+    /// Disabled by default.
+    pub fn set_blob_dedup(&mut self, enabled: bool) -> &mut Self {
+        self.blob_dedup_config.enabled = enabled;
+        self
+    }
+
+    /// Set the minimum blob size (bytes) for dedup consideration.
+    ///
+    /// Blobs smaller than this threshold skip SHA-256 computation and are
+    /// always stored as separate copies. Default: 4096 bytes.
+    pub fn set_blob_dedup_min_size(&mut self, min_size: usize) -> &mut Self {
+        self.blob_dedup_config.min_size = min_size;
+        self
+    }
+
     /// Opens the specified file as a redb database.
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
@@ -1477,6 +1506,7 @@ impl Builder {
             self.write_cache_size_bytes,
             &self.repair_callback,
             self.compression,
+            self.blob_dedup_config.clone(),
         )
     }
 
@@ -1493,6 +1523,7 @@ impl Builder {
             self.write_cache_size_bytes,
             &self.repair_callback,
             self.compression,
+            self.blob_dedup_config.clone(),
         )
     }
 
@@ -1529,6 +1560,7 @@ impl Builder {
             self.write_cache_size_bytes,
             &self.repair_callback,
             self.compression,
+            self.blob_dedup_config.clone(),
         )
     }
 
@@ -1546,6 +1578,7 @@ impl Builder {
             self.write_cache_size_bytes,
             &self.repair_callback,
             self.compression,
+            self.blob_dedup_config.clone(),
         )
     }
 }
