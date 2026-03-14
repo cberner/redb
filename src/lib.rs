@@ -89,8 +89,8 @@ pub use types::{Key, MutInPlaceValue, TypeName, Value};
 
 pub use blob_store::{
     BlobId, BlobInput, BlobMeta, BlobReader, BlobRef, BlobWriter, CausalEdge, CausalLink,
-    CausalPath, ContentType, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal, RelationType,
-    StoreOptions, TagKey, TemporalKey,
+    CausalPath, ContentType, DedupStats, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal,
+    RelationType, Sha256Key, StoreOptions, TagKey, TemporalKey,
 };
 pub use temporal::HybridLogicalClock;
 
