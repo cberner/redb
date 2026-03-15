@@ -1317,6 +1317,19 @@ impl WriteTransaction {
         self.tables.lock().unwrap().open_table(self, definition)
     }
 
+    /// Open a TTL-enabled table.
+    ///
+    /// The table will be created if it does not exist. Values are stored with an
+    /// 8-byte expiry header; use `insert_with_ttl()` to set per-key lifetimes.
+    #[track_caller]
+    pub fn open_ttl_table<K: Key + 'static, V: Value + 'static>(
+        &self,
+        definition: crate::ttl_table::TtlTableDefinition<K, V>,
+    ) -> Result<crate::ttl_table::TtlTable<'_, K, V>, TableError> {
+        let inner = self.open_table(definition.inner_def())?;
+        Ok(crate::ttl_table::TtlTable::new(inner))
+    }
+
     /// Open the given table
     ///
     /// The table will be created if it does not exist
@@ -2941,6 +2954,17 @@ impl ReadTransaction {
             )?),
             InternalTableDefinition::Multimap { .. } => unreachable!(),
         }
+    }
+
+    /// Open a TTL-enabled table for reading.
+    ///
+    /// Returns an error if the table does not exist.
+    pub fn open_ttl_table<K: Key + 'static, V: Value + 'static>(
+        &self,
+        definition: crate::ttl_table::TtlTableDefinition<K, V>,
+    ) -> Result<crate::ttl_table::ReadOnlyTtlTable<K, V>, TableError> {
+        let inner = self.open_table(definition.inner_def())?;
+        Ok(crate::ttl_table::ReadOnlyTtlTable::new(inner))
     }
 
     /// Open the given table without a type

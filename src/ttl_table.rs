@@ -2,7 +2,7 @@ use crate::sealed::Sealed;
 use crate::table::{Range, ReadableTable, ReadableTableMetadata, TableStats};
 use crate::tree_store::AccessGuard;
 use crate::types::{Key, TypeName, Value};
-use crate::{Result, Table, TableHandle};
+use crate::{ReadOnlyTable, Result, Table, TableHandle};
 use std::borrow::Borrow;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
@@ -398,5 +398,71 @@ impl<K: Key + 'static, V: Value + 'static> DoubleEndedIterator for TtlRange<'_, 
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReadOnlyTtlTable
+// ---------------------------------------------------------------------------
+
+/// A read-only TTL table, obtained from `ReadTransaction::open_ttl_table()`.
+pub struct ReadOnlyTtlTable<K: Key + 'static, V: Value + 'static> {
+    inner: ReadOnlyTable<K, TtlValueOf<V>>,
+}
+
+impl<K: Key + 'static, V: Value + 'static> TableHandle for ReadOnlyTtlTable<K, V> {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+}
+
+impl<K: Key + 'static, V: Value + 'static> Sealed for ReadOnlyTtlTable<K, V> {}
+
+impl<K: Key + 'static, V: Value + 'static> ReadOnlyTtlTable<K, V> {
+    pub(crate) fn new(inner: ReadOnlyTable<K, TtlValueOf<V>>) -> Self {
+        Self { inner }
+    }
+
+    /// Returns the value for the given key, or `None` if absent or expired.
+    pub fn get<'a>(
+        &self,
+        key: impl Borrow<K::SelfType<'a>>,
+    ) -> Result<Option<TtlAccessGuard<'_, V>>> {
+        match self.inner.get(key)? {
+            Some(guard) => Ok(extract_ttl_guard_if_alive(guard)),
+            None => Ok(None),
+        }
+    }
+
+    /// Returns a double-ended iterator over non-expired entries in the given range.
+    pub fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<TtlRange<'_, K, V>>
+    where
+        KR: Borrow<K::SelfType<'a>> + 'a,
+    {
+        let inner = self.inner.range(range)?;
+        Ok(TtlRange {
+            inner,
+            _value_type: PhantomData,
+        })
+    }
+
+    /// Returns an iterator over all non-expired entries.
+    pub fn iter(&self) -> Result<TtlRange<'_, K, V>> {
+        self.range::<K::SelfType<'_>>(..)
+    }
+
+    /// Returns the total number of entries (including expired but not yet purged).
+    pub fn len_with_expired(&self) -> Result<u64> {
+        self.inner.len()
+    }
+}
+
+impl<K: Key + 'static, V: Value + 'static> ReadableTableMetadata for ReadOnlyTtlTable<K, V> {
+    fn stats(&self) -> Result<TableStats> {
+        self.inner.stats()
+    }
+
+    fn len(&self) -> Result<u64> {
+        self.inner.len()
     }
 }
