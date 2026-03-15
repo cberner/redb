@@ -1,3 +1,4 @@
+use crate::group_commit::GroupCommitError;
 use crate::tree_store::{FILE_FORMAT_VERSION3, MAX_VALUE_LENGTH};
 use crate::{ReadTransaction, TypeName};
 use std::fmt::{Display, Formatter};
@@ -629,6 +630,21 @@ pub enum Error {
     LockPoisoned(&'static panic::Location<'static>),
     /// The transaction is still referenced by a table or other object
     ReadTransactionStillInUse(Box<ReadTransaction>),
+    /// A group commit batch was rolled back because a peer batch failed
+    GroupCommitPeerFailed,
+    /// The database group committer is shutting down
+    GroupCommitShutdown,
+}
+
+impl From<GroupCommitError> for Error {
+    fn from(err: GroupCommitError) -> Error {
+        match err {
+            GroupCommitError::BatchFailed(e) => e,
+            GroupCommitError::PeerFailed => Error::GroupCommitPeerFailed,
+            GroupCommitError::TransactionFailed(e) | GroupCommitError::CommitFailed(e) => e.into(),
+            GroupCommitError::Shutdown => Error::GroupCommitShutdown,
+        }
+    }
 }
 
 impl<T> From<PoisonError<T>> for Error {
@@ -777,6 +793,15 @@ impl Display for Error {
             }
             Error::ReadTransactionStillInUse(_) => {
                 write!(f, "Transaction still in use")
+            }
+            Error::GroupCommitPeerFailed => {
+                write!(
+                    f,
+                    "Group commit batch rolled back: another batch in the group failed"
+                )
+            }
+            Error::GroupCommitShutdown => {
+                write!(f, "Group commit failed: database is shutting down")
             }
         }
     }

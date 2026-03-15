@@ -71,6 +71,7 @@ pub use error::{
     CommitError, CompactionError, DatabaseError, Error, SavepointError, SetDurabilityError,
     StorageError, TableError, TransactionError,
 };
+pub use group_commit::{GroupCommitError, WriteBatch};
 pub use legacy_tuple_types::Legacy;
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, ReadOnlyMultimapTable,
@@ -101,6 +102,7 @@ pub mod blob_store;
 mod complex_types;
 mod db;
 mod error;
+pub mod group_commit;
 mod legacy_tuple_types;
 mod multimap_table;
 mod sealed;

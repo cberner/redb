@@ -1,4 +1,5 @@
 use crate::blob_store::{BlobCompactionReport, BlobDedupConfig};
+use crate::group_commit::{GroupCommitError, GroupCommitter, WriteBatch};
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeHeader, CompressionConfig, InternalTableDefinition, PAGE_SIZE, PageHint,
@@ -548,6 +549,7 @@ pub struct Database {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
     blob_dedup_config: BlobDedupConfig,
+    group_committer: GroupCommitter,
 }
 
 impl ReadableDatabase for Database {
@@ -1315,6 +1317,7 @@ impl Database {
             mem,
             transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
             blob_dedup_config: blob_dedup_config.clone(),
+            group_committer: GroupCommitter::new(),
         };
 
         // Restore the tracker state for any persistent savepoints
@@ -1419,6 +1422,100 @@ impl Database {
         .map_err(|e| e.into())
     }
 
+    /// Submit a write batch to the group commit pipeline.
+    ///
+    /// Multiple concurrent callers will have their batches combined into a single
+    /// write transaction with a single fsync, amortizing the durability cost across
+    /// all participants.
+    ///
+    /// The batch closure receives a `&WriteTransaction` and performs all desired
+    /// mutations (open tables, insert, remove, etc.). Do not call `commit()` or
+    /// `abort()` within the closure — the group committer manages the transaction
+    /// lifecycle.
+    ///
+    /// If any batch in a group fails, the entire group is rolled back. The failed
+    /// batch receives its specific error; all others receive `GroupCommitError::PeerFailed`
+    /// and may retry.
+    pub fn submit_write_batch(&self, batch: WriteBatch) -> Result<(), GroupCommitError> {
+        let (should_lead, result_rx) = self.group_committer.enqueue(batch)?;
+
+        if should_lead {
+            self.run_group_commit();
+        }
+
+        result_rx.recv().unwrap_or(Err(GroupCommitError::Shutdown))
+    }
+
+    fn run_group_commit(&self) {
+        loop {
+            let batches = self.group_committer.drain_pending();
+            if batches.is_empty() {
+                self.group_committer.finish_leader();
+                return;
+            }
+
+            let txn = match self.begin_write() {
+                Ok(txn) => txn,
+                Err(e) => {
+                    let storage_err = e.into_storage_error();
+                    for b in batches {
+                        let _ = b.result_tx.send(Err(GroupCommitError::TransactionFailed(
+                            StorageError::Corrupted(storage_err.to_string()),
+                        )));
+                    }
+                    self.group_committer.finish_leader();
+                    return;
+                }
+            };
+
+            let mut senders = Vec::with_capacity(batches.len());
+            let mut failed = false;
+
+            for pending in batches {
+                if failed {
+                    let _ = pending.result_tx.send(Err(GroupCommitError::PeerFailed));
+                    continue;
+                }
+
+                match pending.batch.apply(&txn) {
+                    Ok(()) => {
+                        senders.push(pending.result_tx);
+                    }
+                    Err(e) => {
+                        failed = true;
+                        let _ = pending
+                            .result_tx
+                            .send(Err(GroupCommitError::BatchFailed(e)));
+                        for tx in senders.drain(..) {
+                            let _ = tx.send(Err(GroupCommitError::PeerFailed));
+                        }
+                    }
+                }
+            }
+
+            if failed {
+                let _ = txn.abort();
+                continue;
+            }
+
+            match txn.commit() {
+                Ok(()) => {
+                    for tx in senders {
+                        let _ = tx.send(Ok(()));
+                    }
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    for tx in senders {
+                        let _ = tx.send(Err(GroupCommitError::CommitFailed(
+                            StorageError::Corrupted(msg.clone()),
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
     fn ensure_allocator_state_table_and_trim(&self) -> Result<(), Error> {
         // Make a new quick-repair commit to update the allocator state table
         #[cfg(feature = "logging")]
@@ -1434,6 +1531,8 @@ impl Database {
 
 impl Drop for Database {
     fn drop(&mut self) {
+        self.group_committer.shutdown();
+
         if !thread::panicking() && self.ensure_allocator_state_table_and_trim().is_err() {
             #[cfg(feature = "logging")]
             warn!("Failed to write allocator state table. Repair may be required at restart.");
