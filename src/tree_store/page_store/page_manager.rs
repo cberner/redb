@@ -470,6 +470,15 @@ impl TransactionalMemory {
         self.storage.raw_file_len()
     }
 
+    /// Truncate the file to the given length.
+    ///
+    /// Used by blob compaction to reclaim space after the blob region shrinks.
+    /// The caller must ensure `len` is at least `layout().len()` (the B-tree
+    /// region size) and covers the committed blob region.
+    pub(crate) fn truncate_to(&self, len: u64) -> Result {
+        self.storage.resize(len)
+    }
+
     pub(crate) fn cache_stats(&self) -> CacheStats {
         self.storage.cache_stats()
     }
@@ -838,7 +847,14 @@ impl TransactionalMemory {
         self.storage.flush()?;
 
         if shrunk {
-            let result = self.storage.resize(header.layout().len());
+            // When a blob region exists past the B-tree layout, the file must be
+            // at least large enough to hold both. Never truncate into the blob region.
+            let btree_len = header.layout().len();
+            let blob_end = blob_state
+                .region_offset
+                .saturating_add(blob_state.region_length);
+            let target_len = btree_len.max(blob_end);
+            let result = self.storage.resize(target_len);
             if result.is_err() {
                 // TODO: it would be nice to have a more cohesive approach to setting this.
                 // we do it in commit() & rollback() on failure, but there are probably other places that need it
