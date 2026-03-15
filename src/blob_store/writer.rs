@@ -1,6 +1,7 @@
 use crate::WriteTransaction;
-use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, ContentType, StoreOptions};
+use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, ContentType, Sha256Key, StoreOptions};
 use crate::tree_store::{Xxh3StreamHasher, hash64_with_seed};
+use sha2::{Digest, Sha256};
 use std::io;
 use std::sync::atomic::Ordering;
 
@@ -34,12 +35,16 @@ pub struct BlobWriter<'txn> {
     /// Incremental xxh3-128 hasher for the full blob checksum.
     /// Wrapped in Option so `finish()` can take ownership despite Drop impl.
     hasher: Option<Xxh3StreamHasher>,
+    /// Incremental SHA-256 hasher for content-addressable dedup.
+    /// Present only when dedup is enabled and blob meets `min_size` threshold.
+    sha256_hasher: Option<Sha256>,
     finished: bool,
 }
 
 const PREFIX_HASH_LEN: usize = 4096;
 
 impl<'txn> BlobWriter<'txn> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         txn: &'txn WriteTransaction,
         sequence: u64,
@@ -48,6 +53,7 @@ impl<'txn> BlobWriter<'txn> {
         opts: StoreOptions,
         blob_file_offset: u64,
         blob_region_start: u64,
+        dedup_enabled: bool,
     ) -> Self {
         Self {
             txn,
@@ -60,6 +66,11 @@ impl<'txn> BlobWriter<'txn> {
             bytes_written: 0,
             prefix_buf: Vec::with_capacity(PREFIX_HASH_LEN),
             hasher: Some(Xxh3StreamHasher::new(0)),
+            sha256_hasher: if dedup_enabled {
+                Some(Sha256::new())
+            } else {
+                None
+            },
             finished: false,
         }
     }
@@ -81,8 +92,11 @@ impl<'txn> BlobWriter<'txn> {
         let file_offset = self.blob_file_offset + self.bytes_written;
         self.txn.blob_write_raw(file_offset, data)?;
 
-        // Feed the streaming hasher
+        // Feed the streaming hashers
         self.hasher.as_mut().expect("hasher taken").update(data);
+        if let Some(ref mut sha) = self.sha256_hasher {
+            sha.update(data);
+        }
         self.bytes_written += data.len() as u64;
 
         Ok(())
@@ -127,9 +141,15 @@ impl<'txn> BlobWriter<'txn> {
             &self.label,
         );
 
+        // Finalize SHA-256 if dedup is active
+        let sha_key = self.sha256_hasher.take().map(|sha| {
+            let hash: [u8; 32] = sha.finalize().into();
+            Sha256Key(hash)
+        });
+
         // Delegate indexing and state updates to WriteTransaction
         self.txn
-            .finalize_blob_writer(blob_id, meta, self.bytes_written, opts)?;
+            .finalize_blob_writer(blob_id, meta, self.bytes_written, opts, sha_key)?;
 
         Ok(blob_id)
     }

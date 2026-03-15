@@ -1,6 +1,6 @@
 use redb::{
-    BlobId, CausalLink, ContentType, Database, ReadableDatabase, RelationType, StorageError,
-    StoreOptions,
+    BlobId, Builder, CausalLink, ContentType, Database, ReadableDatabase, RelationType,
+    StorageError, StoreOptions,
 };
 use std::io::{Read, Seek, SeekFrom};
 
@@ -2061,4 +2061,392 @@ fn blob_reader_read_range_method() {
     // Out-of-bounds read_range
     let err = reader.read_range(490, 20);
     assert!(err.is_err());
+}
+
+// ─── Dedup tests ────────────────────────────────────────────────────────────
+
+fn create_dedup_db(min_size: usize) -> (tempfile::NamedTempFile, Database) {
+    let tmpfile = create_tempfile();
+    let mut builder = Builder::new();
+    builder.set_blob_dedup(true);
+    builder.set_blob_dedup_min_size(min_size);
+    let db = builder.create(tmpfile.path()).unwrap();
+    (tmpfile, db)
+}
+
+#[test]
+fn blob_dedup_identical() {
+    let (_tmpfile, db) = create_dedup_db(0);
+    let data = b"identical content for dedup test";
+
+    let id1;
+    let id2;
+    {
+        let txn = db.begin_write().unwrap();
+        id1 = txn
+            .store_blob(data, ContentType::OctetStream, "a", StoreOptions::default())
+            .unwrap();
+        id2 = txn
+            .store_blob(data, ContentType::OctetStream, "b", StoreOptions::default())
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Both ids should be different (unique sequence numbers)
+    assert_ne!(id1, id2);
+
+    // Both should return the same data
+    let read_txn = db.begin_read().unwrap();
+    let (d1, _) = read_txn.get_blob(&id1).unwrap().unwrap();
+    let (d2, _) = read_txn.get_blob(&id2).unwrap().unwrap();
+    assert_eq!(d1, data);
+    assert_eq!(d2, data);
+
+    // Dedup stats: 1 unique entry, ref_count 2
+    let stats = read_txn.dedup_stats().unwrap();
+    assert_eq!(stats.total_dedup_entries, 1);
+    assert_eq!(stats.total_ref_count, 2);
+    assert_eq!(stats.bytes_saved, data.len() as u64);
+}
+
+#[test]
+fn blob_dedup_different() {
+    let (_tmpfile, db) = create_dedup_db(0);
+
+    let id1;
+    let id2;
+    {
+        let txn = db.begin_write().unwrap();
+        id1 = txn
+            .store_blob(
+                b"content A",
+                ContentType::OctetStream,
+                "a",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        id2 = txn
+            .store_blob(
+                b"content B",
+                ContentType::OctetStream,
+                "b",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let (d1, _) = read_txn.get_blob(&id1).unwrap().unwrap();
+    let (d2, _) = read_txn.get_blob(&id2).unwrap().unwrap();
+    assert_eq!(d1, b"content A");
+    assert_eq!(d2, b"content B");
+
+    let stats = read_txn.dedup_stats().unwrap();
+    assert_eq!(stats.total_dedup_entries, 2);
+    assert_eq!(stats.total_ref_count, 2);
+    assert_eq!(stats.bytes_saved, 0);
+}
+
+#[test]
+fn blob_dedup_ref_count() {
+    let (_tmpfile, db) = create_dedup_db(0);
+    let data = b"triple stored blob data";
+
+    {
+        let txn = db.begin_write().unwrap();
+        txn.store_blob(data, ContentType::OctetStream, "x", StoreOptions::default())
+            .unwrap();
+        txn.store_blob(data, ContentType::OctetStream, "y", StoreOptions::default())
+            .unwrap();
+        txn.store_blob(data, ContentType::OctetStream, "z", StoreOptions::default())
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.dedup_stats().unwrap();
+    assert_eq!(stats.total_dedup_entries, 1);
+    assert_eq!(stats.total_ref_count, 3);
+    assert_eq!(stats.bytes_saved, data.len() as u64 * 2);
+}
+
+#[test]
+fn blob_dedup_delete_decrement() {
+    let (_tmpfile, db) = create_dedup_db(0);
+    let data = b"data to be partially deleted";
+
+    let id1;
+    let id2;
+    let id3;
+    {
+        let txn = db.begin_write().unwrap();
+        id1 = txn
+            .store_blob(data, ContentType::OctetStream, "a", StoreOptions::default())
+            .unwrap();
+        id2 = txn
+            .store_blob(data, ContentType::OctetStream, "b", StoreOptions::default())
+            .unwrap();
+        id3 = txn
+            .store_blob(data, ContentType::OctetStream, "c", StoreOptions::default())
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Delete one copy
+    {
+        let txn = db.begin_write().unwrap();
+        assert!(txn.delete_blob(&id1).unwrap());
+        txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.dedup_stats().unwrap();
+    assert_eq!(stats.total_dedup_entries, 1);
+    assert_eq!(stats.total_ref_count, 2);
+    assert_eq!(stats.bytes_saved, data.len() as u64);
+
+    // Remaining blobs still readable
+    assert!(read_txn.get_blob(&id2).unwrap().is_some());
+    assert!(read_txn.get_blob(&id3).unwrap().is_some());
+    assert!(read_txn.get_blob(&id1).unwrap().is_none());
+}
+
+#[test]
+fn blob_dedup_delete_last() {
+    let (_tmpfile, db) = create_dedup_db(0);
+    let data = b"will be fully deleted";
+
+    let id1;
+    let id2;
+    {
+        let txn = db.begin_write().unwrap();
+        id1 = txn
+            .store_blob(data, ContentType::OctetStream, "a", StoreOptions::default())
+            .unwrap();
+        id2 = txn
+            .store_blob(data, ContentType::OctetStream, "b", StoreOptions::default())
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Delete both
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_blob(&id1).unwrap();
+        txn.delete_blob(&id2).unwrap();
+        txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.dedup_stats().unwrap();
+    assert_eq!(stats.total_dedup_entries, 0);
+    assert_eq!(stats.total_ref_count, 0);
+    assert_eq!(stats.bytes_saved, 0);
+}
+
+#[test]
+fn blob_dedup_min_size() {
+    let (_tmpfile, db) = create_dedup_db(1024);
+    let small = b"tiny";
+    let large = vec![0xAB_u8; 2048];
+
+    {
+        let txn = db.begin_write().unwrap();
+        // Small blobs — below min_size, not deduped
+        txn.store_blob(
+            small,
+            ContentType::OctetStream,
+            "s1",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.store_blob(
+            small,
+            ContentType::OctetStream,
+            "s2",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        // Large blobs — above min_size, deduped
+        txn.store_blob(
+            &large,
+            ContentType::OctetStream,
+            "l1",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.store_blob(
+            &large,
+            ContentType::OctetStream,
+            "l2",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.dedup_stats().unwrap();
+    // Only the large blob has a dedup entry
+    assert_eq!(stats.total_dedup_entries, 1);
+    assert_eq!(stats.total_ref_count, 2);
+    assert_eq!(stats.bytes_saved, 2048);
+}
+
+#[test]
+fn blob_dedup_disabled() {
+    let tmpfile = create_tempfile();
+    // Default: dedup off
+    let db = Database::create(tmpfile.path()).unwrap();
+    let data = b"dedup is off so both stored separately";
+
+    {
+        let txn = db.begin_write().unwrap();
+        txn.store_blob(data, ContentType::OctetStream, "a", StoreOptions::default())
+            .unwrap();
+        txn.store_blob(data, ContentType::OctetStream, "b", StoreOptions::default())
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.dedup_stats().unwrap();
+    assert_eq!(stats.total_dedup_entries, 0);
+    assert_eq!(stats.total_ref_count, 0);
+    assert_eq!(stats.bytes_saved, 0);
+}
+
+#[test]
+fn blob_dedup_streaming_writer() {
+    let (_tmpfile, db) = create_dedup_db(0);
+    let chunk1 = b"streaming ";
+    let chunk2 = b"blob data";
+    let full_data: Vec<u8> = [&chunk1[..], &chunk2[..]].concat();
+
+    // Write via streaming writer
+    let stream_id;
+    {
+        let txn = db.begin_write().unwrap();
+        let mut writer = txn
+            .blob_writer(ContentType::OctetStream, "stream", StoreOptions::default())
+            .unwrap();
+        writer.write(chunk1).unwrap();
+        writer.write(chunk2).unwrap();
+        stream_id = writer.finish().unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Now store the same content via one-shot — should hit dedup
+    let oneshot_id;
+    {
+        let txn = db.begin_write().unwrap();
+        oneshot_id = txn
+            .store_blob(
+                &full_data,
+                ContentType::OctetStream,
+                "oneshot",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.dedup_stats().unwrap();
+    assert_eq!(stats.total_dedup_entries, 1);
+    assert_eq!(stats.total_ref_count, 2);
+    assert_eq!(stats.bytes_saved, full_data.len() as u64);
+
+    // Both blobs should return the same data
+    let (d1, _) = read_txn.get_blob(&stream_id).unwrap().unwrap();
+    let (d2, _) = read_txn.get_blob(&oneshot_id).unwrap().unwrap();
+    assert_eq!(d1, full_data);
+    assert_eq!(d2, full_data);
+}
+
+#[test]
+fn blob_dedup_mixed() {
+    let (_tmpfile, db) = create_dedup_db(0);
+
+    {
+        let txn = db.begin_write().unwrap();
+        // 3 copies of "aaa", 2 copies of "bbb", 1 copy of "ccc"
+        txn.store_blob(
+            b"aaa",
+            ContentType::OctetStream,
+            "a1",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.store_blob(
+            b"aaa",
+            ContentType::OctetStream,
+            "a2",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.store_blob(
+            b"aaa",
+            ContentType::OctetStream,
+            "a3",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.store_blob(
+            b"bbb",
+            ContentType::OctetStream,
+            "b1",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.store_blob(
+            b"bbb",
+            ContentType::OctetStream,
+            "b2",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.store_blob(
+            b"ccc",
+            ContentType::OctetStream,
+            "c1",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.dedup_stats().unwrap();
+    assert_eq!(stats.total_dedup_entries, 3); // aaa, bbb, ccc
+    assert_eq!(stats.total_ref_count, 6); // 3+2+1
+    // bytes_saved: aaa saves 2*3=6, bbb saves 1*3=3, ccc saves 0
+    assert_eq!(stats.bytes_saved, 6 + 3);
+}
+
+#[test]
+fn blob_dedup_bytes_saved() {
+    let (_tmpfile, db) = create_dedup_db(0);
+    let data = vec![0xFF_u8; 10_000];
+
+    {
+        let txn = db.begin_write().unwrap();
+        for i in 0..5 {
+            txn.store_blob(
+                &data,
+                ContentType::OctetStream,
+                &format!("copy-{i}"),
+                StoreOptions::default(),
+            )
+            .unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.dedup_stats().unwrap();
+    assert_eq!(stats.total_dedup_entries, 1);
+    assert_eq!(stats.total_ref_count, 5);
+    assert_eq!(stats.bytes_saved, 10_000 * 4); // 4 extra copies saved
 }
