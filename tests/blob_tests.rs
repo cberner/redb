@@ -2450,3 +2450,425 @@ fn blob_dedup_bytes_saved() {
     assert_eq!(stats.total_ref_count, 5);
     assert_eq!(stats.bytes_saved, 10_000 * 4); // 4 extra copies saved
 }
+
+// ─── Compaction tests ───────────────────────────────────────────────────────
+
+#[test]
+fn blob_compact_basic() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let data_a = b"blob-aaa-data";
+    let data_b = b"blob-bbb-data-longer";
+    let data_c = b"blob-ccc";
+    let id_a;
+    let id_b;
+    let id_c;
+
+    {
+        let txn = db.begin_write().unwrap();
+        id_a = txn
+            .store_blob(
+                data_a,
+                ContentType::OctetStream,
+                "a",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        id_b = txn
+            .store_blob(
+                data_b,
+                ContentType::OctetStream,
+                "b",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        id_c = txn
+            .store_blob(
+                data_c,
+                ContentType::OctetStream,
+                "c",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Delete the middle blob
+    {
+        let txn = db.begin_write().unwrap();
+        assert!(txn.delete_blob(&id_b).unwrap());
+        txn.commit().unwrap();
+    }
+
+    // Verify fragmentation exists
+    {
+        let read_txn = db.begin_read().unwrap();
+        let stats = read_txn.blob_stats().unwrap();
+        assert_eq!(stats.blob_count, 2);
+        assert!(stats.dead_bytes > 0);
+        assert!(stats.fragmentation_ratio > 0.0);
+    }
+
+    // Compact
+    let report = db.compact_blobs().unwrap();
+    assert!(!report.was_noop);
+    assert_eq!(report.blobs_relocated, 2);
+    assert_eq!(report.live_bytes, data_a.len() as u64 + data_c.len() as u64);
+    assert!(report.bytes_reclaimed > 0);
+
+    // Verify surviving blobs still readable
+    let read_txn = db.begin_read().unwrap();
+    let (d_a, _) = read_txn.get_blob(&id_a).unwrap().unwrap();
+    let (d_c, _) = read_txn.get_blob(&id_c).unwrap().unwrap();
+    assert_eq!(d_a, data_a);
+    assert_eq!(d_c, data_c);
+    assert!(read_txn.get_blob(&id_b).unwrap().is_none());
+
+    // Verify no fragmentation after compact
+    let stats = read_txn.blob_stats().unwrap();
+    assert_eq!(stats.dead_bytes, 0);
+}
+
+#[test]
+fn blob_compact_noop() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    {
+        let txn = db.begin_write().unwrap();
+        txn.store_blob(
+            b"data",
+            ContentType::OctetStream,
+            "x",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let report = db.compact_blobs().unwrap();
+    assert!(report.was_noop);
+    assert_eq!(report.bytes_reclaimed, 0);
+}
+
+#[test]
+fn blob_compact_empty_region() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let report = db.compact_blobs().unwrap();
+    assert!(report.was_noop);
+}
+
+#[test]
+fn blob_compact_all_deleted() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let id1;
+    let id2;
+    {
+        let txn = db.begin_write().unwrap();
+        id1 = txn
+            .store_blob(
+                b"first",
+                ContentType::OctetStream,
+                "1",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        id2 = txn
+            .store_blob(
+                b"second",
+                ContentType::OctetStream,
+                "2",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_blob(&id1).unwrap();
+        txn.delete_blob(&id2).unwrap();
+        txn.commit().unwrap();
+    }
+
+    let report = db.compact_blobs().unwrap();
+    assert!(!report.was_noop);
+    assert_eq!(report.live_bytes, 0);
+    assert!(report.bytes_reclaimed > 0);
+
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.blob_stats().unwrap();
+    assert_eq!(stats.region_bytes, 0);
+    assert_eq!(stats.dead_bytes, 0);
+}
+
+#[test]
+fn blob_compact_with_dedup() {
+    let (_tmpfile, db) = create_dedup_db(0);
+    let mut db = db;
+    let shared = b"shared content for compaction test";
+    let unique = b"unique blob that will be deleted";
+
+    let id_shared1;
+    let id_shared2;
+    let id_unique;
+    {
+        let txn = db.begin_write().unwrap();
+        id_shared1 = txn
+            .store_blob(
+                shared,
+                ContentType::OctetStream,
+                "s1",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        id_unique = txn
+            .store_blob(
+                unique,
+                ContentType::OctetStream,
+                "u",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        id_shared2 = txn
+            .store_blob(
+                shared,
+                ContentType::OctetStream,
+                "s2",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Delete one dedup copy and the unique blob (creates dead space)
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_blob(&id_shared1).unwrap();
+        txn.delete_blob(&id_unique).unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Compact
+    let report = db.compact_blobs().unwrap();
+    assert!(!report.was_noop);
+    assert!(report.bytes_reclaimed > 0);
+
+    // Surviving dedup blob still readable
+    let read_txn = db.begin_read().unwrap();
+    let (d, _) = read_txn.get_blob(&id_shared2).unwrap().unwrap();
+    assert_eq!(d, shared);
+    assert!(read_txn.get_blob(&id_shared1).unwrap().is_none());
+    assert!(read_txn.get_blob(&id_unique).unwrap().is_none());
+
+    // Dedup stats still valid after compaction
+    let dedup = read_txn.dedup_stats().unwrap();
+    assert_eq!(dedup.total_dedup_entries, 1);
+    assert_eq!(dedup.total_ref_count, 1);
+}
+
+#[test]
+fn blob_stats_accuracy() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let data_a = vec![0xAA_u8; 1000];
+    let data_b = vec![0xBB_u8; 2000];
+    let data_c = vec![0xCC_u8; 3000];
+
+    let id_b;
+    {
+        let txn = db.begin_write().unwrap();
+        txn.store_blob(
+            &data_a,
+            ContentType::OctetStream,
+            "a",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        id_b = txn
+            .store_blob(
+                &data_b,
+                ContentType::OctetStream,
+                "b",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.store_blob(
+            &data_c,
+            ContentType::OctetStream,
+            "c",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Delete B (2000 bytes)
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_blob(&id_b).unwrap();
+        txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.blob_stats().unwrap();
+    assert_eq!(stats.blob_count, 2);
+    assert_eq!(stats.live_bytes, 4000); // A(1000) + C(3000)
+    assert_eq!(stats.region_bytes, 6000); // all 3 stored
+    assert_eq!(stats.dead_bytes, 2000); // B deleted
+    assert!(stats.fragmentation_ratio > 0.33);
+    assert!(stats.fragmentation_ratio < 0.34);
+}
+
+#[test]
+fn blob_compact_large() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let data1 = vec![0x11_u8; 50_000];
+    let data2 = vec![0x22_u8; 100_000];
+    let data3 = vec![0x33_u8; 75_000];
+
+    let id2;
+    {
+        let txn = db.begin_write().unwrap();
+        txn.store_blob(
+            &data1,
+            ContentType::OctetStream,
+            "big1",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        id2 = txn
+            .store_blob(
+                &data2,
+                ContentType::OctetStream,
+                "big2",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.store_blob(
+            &data3,
+            ContentType::OctetStream,
+            "big3",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_blob(&id2).unwrap();
+        txn.commit().unwrap();
+    }
+
+    let report = db.compact_blobs().unwrap();
+    assert!(!report.was_noop);
+    assert_eq!(report.live_bytes, 125_000); // 50K + 75K
+    assert_eq!(report.bytes_reclaimed, 100_000);
+
+    // Verify data integrity after compaction
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.blob_stats().unwrap();
+    assert_eq!(stats.blob_count, 2);
+    assert_eq!(stats.dead_bytes, 0);
+}
+
+#[test]
+fn blob_compact_read_txn_blocks() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    {
+        let txn = db.begin_write().unwrap();
+        txn.store_blob(b"x", ContentType::OctetStream, "x", StoreOptions::default())
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Hold a read transaction
+    let _read_txn = db.begin_read().unwrap();
+
+    // compact_blobs should fail with TransactionInProgress
+    let result = db.compact_blobs();
+    assert!(result.is_err());
+}
+
+#[test]
+fn blob_compact_then_store() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let id1;
+    {
+        let txn = db.begin_write().unwrap();
+        id1 = txn
+            .store_blob(
+                b"old-data",
+                ContentType::OctetStream,
+                "old",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_blob(&id1).unwrap();
+        txn.commit().unwrap();
+    }
+
+    db.compact_blobs().unwrap();
+
+    // Store new blob after compaction
+    let new_id;
+    {
+        let txn = db.begin_write().unwrap();
+        new_id = txn
+            .store_blob(
+                b"new-data-after-compact",
+                ContentType::OctetStream,
+                "new",
+                StoreOptions::default(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let (data, _) = read_txn.get_blob(&new_id).unwrap().unwrap();
+    assert_eq!(data, b"new-data-after-compact");
+}
+
+#[test]
+fn blob_stats_read_txn() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    {
+        let txn = db.begin_write().unwrap();
+        txn.store_blob(
+            b"stats-test",
+            ContentType::OctetStream,
+            "s",
+            StoreOptions::default(),
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let stats = read_txn.blob_stats().unwrap();
+    assert_eq!(stats.blob_count, 1);
+    assert_eq!(stats.live_bytes, 10);
+    assert_eq!(stats.region_bytes, 10);
+    assert_eq!(stats.dead_bytes, 0);
+    assert_eq!(stats.fragmentation_ratio, 0.0);
+}

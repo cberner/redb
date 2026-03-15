@@ -1,4 +1,4 @@
-use crate::blob_store::BlobDedupConfig;
+use crate::blob_store::{BlobCompactionReport, BlobDedupConfig};
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
     Btree, BtreeHeader, CompressionConfig, InternalTableDefinition, PAGE_SIZE, PageHint,
@@ -937,6 +937,107 @@ impl Database {
         }
 
         Ok(compacted)
+    }
+
+    /// Compacts the blob region, removing dead space left by deleted blobs.
+    ///
+    /// Uses a two-pass crash-safe algorithm:
+    /// 1. Appends live blobs after the current region end, updates all offsets, commits.
+    /// 2. Shifts live data to the start of the region, updates offsets, commits.
+    /// 3. Truncates the file.
+    ///
+    /// Same constraints as [`compact()`](Self::compact): no active read transactions
+    /// or persistent/ephemeral savepoints.
+    pub fn compact_blobs(&mut self) -> std::result::Result<BlobCompactionReport, CompactionError> {
+        if self
+            .transaction_tracker
+            .oldest_live_read_transaction()
+            .is_some()
+        {
+            return Err(CompactionError::TransactionInProgress);
+        }
+
+        // Check savepoint constraints (same as compact())
+        {
+            let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            if txn.list_persistent_savepoints()?.next().is_some() {
+                txn.abort().map_err(CompactionError::Storage)?;
+                return Err(CompactionError::PersistentSavepointExists);
+            }
+            if self.transaction_tracker.any_savepoint_exists() {
+                txn.abort().map_err(CompactionError::Storage)?;
+                return Err(CompactionError::EphemeralSavepointExists);
+            }
+            txn.abort().map_err(CompactionError::Storage)?;
+        }
+
+        // Gather stats to check if compaction is needed
+        let stats = {
+            let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            let s = txn.blob_stats().map_err(CompactionError::Storage)?;
+            txn.abort().map_err(CompactionError::Storage)?;
+            s
+        };
+
+        if stats.dead_bytes == 0 {
+            return Ok(BlobCompactionReport {
+                blobs_relocated: 0,
+                live_bytes: stats.live_bytes,
+                bytes_reclaimed: 0,
+                was_noop: true,
+            });
+        }
+
+        let old_region_length = stats.region_bytes;
+
+        // ── Pass 1: Append live blobs after current region end ────────────────
+        let (blobs_relocated, total_live_size) = {
+            let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            let result = txn.compact_blobs_pass(false);
+            match result {
+                Ok(r) => {
+                    txn.set_two_phase_commit(true);
+                    txn.commit().map_err(|e| e.into_storage_error())?;
+                    r
+                }
+                Err(e) => {
+                    txn.abort().map_err(CompactionError::Storage)?;
+                    return Err(CompactionError::Storage(e));
+                }
+            }
+        };
+
+        // ── Pass 2: Shift data to region start ───────────────────────────────
+        {
+            let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            let result = txn.compact_blobs_pass(true);
+            match result {
+                Ok(_) => {
+                    txn.set_two_phase_commit(true);
+                    txn.commit().map_err(|e| e.into_storage_error())?;
+                }
+                Err(e) => {
+                    txn.abort().map_err(CompactionError::Storage)?;
+                    return Err(CompactionError::Storage(e));
+                }
+            }
+        }
+
+        // ── Truncate the file ────────────────────────────────────────────────
+        let blob_state = self.mem.get_blob_state();
+        let target_len = blob_state.region_offset + blob_state.region_length;
+        if target_len > 0 {
+            self.mem
+                .truncate_to(target_len)
+                .map_err(CompactionError::Storage)?;
+        }
+
+        Ok(BlobCompactionReport {
+            blobs_relocated,
+            live_bytes: total_live_size,
+            bytes_reclaimed: old_region_length - total_live_size,
+            was_noop: false,
+        })
     }
 
     #[cfg_attr(not(debug_assertions), expect(dead_code))]
