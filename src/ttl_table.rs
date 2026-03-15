@@ -1,9 +1,10 @@
 use crate::sealed::Sealed;
+use crate::tree_store::AccessGuard;
 use crate::types::{Key, TypeName, Value};
 use crate::TableHandle;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const EXPIRY_HEADER_SIZE: usize = 8;
 
@@ -154,4 +155,72 @@ impl<K: Key + 'static, V: Value + 'static> std::fmt::Display for TtlTableDefinit
             self.name,
         )
     }
+}
+
+// ---------------------------------------------------------------------------
+// TtlAccessGuard — strips the 8-byte expiry header
+// ---------------------------------------------------------------------------
+
+/// Access guard for TTL table values. Transparently strips the expiry header.
+pub struct TtlAccessGuard<'a, V: Value + 'static> {
+    /// Raw bytes: [u64 LE expiry][value_bytes]
+    raw: Vec<u8>,
+    _value_type: PhantomData<V>,
+    _lifetime: PhantomData<&'a ()>,
+}
+
+impl<V: Value + 'static> TtlAccessGuard<'_, V> {
+    fn from_raw(raw: Vec<u8>) -> Self {
+        Self {
+            raw,
+            _value_type: PhantomData,
+            _lifetime: PhantomData,
+        }
+    }
+
+    /// Returns the deserialized value (without the expiry header).
+    pub fn value(&self) -> V::SelfType<'_> {
+        V::from_bytes(&self.raw[EXPIRY_HEADER_SIZE..])
+    }
+
+    /// Returns the expiry timestamp in milliseconds since UNIX epoch, or 0 for no expiry.
+    pub fn expires_at_ms(&self) -> u64 {
+        read_expiry(&self.raw)
+    }
+}
+
+/// Build a `TtlAccessGuard` from an inner `AccessGuard<TtlValueOf<V>>`, consuming it.
+fn extract_ttl_guard<'a, V: Value + 'static>(
+    inner: AccessGuard<'_, TtlValueOf<V>>,
+) -> TtlAccessGuard<'a, V> {
+    let val_ref: TtlValueRef<'_> = inner.value();
+    let raw = val_ref.data.to_vec();
+    TtlAccessGuard::from_raw(raw)
+}
+
+/// Build a `TtlAccessGuard` from an inner guard, returning `None` if expired.
+fn extract_ttl_guard_if_alive<'a, V: Value + 'static>(
+    inner: AccessGuard<'_, TtlValueOf<V>>,
+) -> Option<TtlAccessGuard<'a, V>> {
+    let val_ref: TtlValueRef<'_> = inner.value();
+    let expires = val_ref.expires_at_ms();
+    if is_expired(expires) {
+        None
+    } else {
+        let raw = val_ref.data.to_vec();
+        Some(TtlAccessGuard::from_raw(raw))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Encode helpers
+// ---------------------------------------------------------------------------
+
+fn encode_ttl_value<V: Value>(expires_at_ms: u64, value: &V::SelfType<'_>) -> Vec<u8> {
+    let val_bytes = V::as_bytes(value);
+    let val_ref = val_bytes.as_ref();
+    let mut buf = Vec::with_capacity(EXPIRY_HEADER_SIZE + val_ref.len());
+    buf.extend_from_slice(&expires_at_ms.to_le_bytes());
+    buf.extend_from_slice(val_ref);
+    buf
 }

@@ -94,7 +94,7 @@ pub use blob_store::{
     NamespaceVal, RelationType, Sha256Key, StoreOptions, TagKey, TemporalKey,
 };
 pub use temporal::HybridLogicalClock;
-pub use ttl_table::TtlTableDefinition;
+pub use ttl_table::{TtlAccessGuard, TtlTableDefinition};
 
 pub type Result<T = (), E = StorageError> = std::result::Result<T, E>;
 
