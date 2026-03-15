@@ -1,8 +1,8 @@
 use crate::blob_store::reader::BlobReader;
 use crate::blob_store::types::{
-    BlobDedupConfig, BlobId, BlobMeta, BlobRef, CausalEdge, CausalPath, ContentType, DedupStats,
-    DedupVal, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal, Sha256Key, StoreOptions, TagKey,
-    TemporalKey,
+    BlobDedupConfig, BlobId, BlobMeta, BlobRef, BlobStats, CausalEdge, CausalPath, ContentType,
+    DedupStats, DedupVal, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal, Sha256Key, StoreOptions,
+    TagKey, TemporalKey,
 };
 use crate::blob_store::writer::BlobWriter;
 use crate::db::TransactionGuard;
@@ -2039,6 +2039,195 @@ impl WriteTransaction {
         Ok(true)
     }
 
+    /// Returns statistics about blob region space usage.
+    ///
+    /// Scans the primary blob table to compute live bytes, then compares with
+    /// the total region length to determine dead space and fragmentation.
+    pub fn blob_stats(&self) -> Result<BlobStats> {
+        let blob_state = self.mem.get_blob_state();
+        let region_bytes = blob_state.region_length;
+
+        if region_bytes == 0 {
+            return Ok(BlobStats {
+                blob_count: 0,
+                live_bytes: 0,
+                region_bytes: 0,
+                dead_bytes: 0,
+                fragmentation_ratio: 0.0,
+            });
+        }
+
+        let mut system_tables = self.system_tables.lock().unwrap();
+        let blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+
+        let mut blob_count: u64 = 0;
+        let mut unique_offsets = std::collections::HashSet::new();
+        let mut live_bytes: u64 = 0;
+
+        let range = blob_table.range::<BlobId>(..)?;
+        for entry in range {
+            let (_, value_guard) = entry?;
+            let meta = value_guard.value();
+            blob_count += 1;
+            // Dedup: multiple BlobIds may share the same physical offset.
+            // Only count each physical region once.
+            if unique_offsets.insert(meta.blob_ref.offset) {
+                live_bytes += meta.blob_ref.length;
+            }
+        }
+        drop(blob_table);
+
+        let dead_bytes = region_bytes.saturating_sub(live_bytes);
+        #[allow(clippy::cast_precision_loss)]
+        let fragmentation_ratio = if region_bytes > 0 {
+            dead_bytes as f64 / region_bytes as f64
+        } else {
+            0.0
+        };
+
+        Ok(BlobStats {
+            blob_count,
+            live_bytes,
+            region_bytes,
+            dead_bytes,
+            fragmentation_ratio,
+        })
+    }
+
+    /// Single pass of blob compaction: reads all live blobs, copies them
+    /// contiguously to a destination offset, updates all offsets in
+    /// `BLOB_TABLE` and `BLOB_DEDUP_INDEX`, and updates the pending blob state.
+    ///
+    /// When `write_from_zero` is false (Pass 1), data is appended after the
+    /// current region end — safe even on crash since old data is untouched.
+    /// When `write_from_zero` is true (Pass 2), data is written from offset 0 —
+    /// safe because committed offsets point to the appended area from Pass 1.
+    ///
+    /// Returns `(unique_blobs_relocated, total_live_bytes)`.
+    pub(crate) fn compact_blobs_pass(&self, write_from_zero: bool) -> Result<(u64, u64)> {
+        let mut blob_state = self.mem.get_blob_state();
+        let region_offset = blob_state.region_offset;
+        let old_region_length = blob_state.region_length;
+
+        if old_region_length == 0 {
+            return Ok((0, 0));
+        }
+
+        // Step 1: Collect all live blobs from BLOB_TABLE
+        let mut live_blobs: Vec<(BlobId, BlobMeta)> = Vec::new();
+        {
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+            let range = blob_table.range::<BlobId>(..)?;
+            for entry in range {
+                let (key_guard, value_guard) = entry?;
+                live_blobs.push((key_guard.value(), value_guard.value()));
+            }
+            drop(blob_table);
+        }
+
+        if live_blobs.is_empty() {
+            // All blobs deleted — reset region
+            blob_state.region_length = 0;
+            self.mem.set_pending_blob_state(blob_state);
+            self.dirty.store(true, Ordering::Release);
+            return Ok((0, 0));
+        }
+
+        // Step 2: Deduplicate physical locations and sort by offset
+        let mut unique_physical: Vec<(u64, u64)> = Vec::new(); // (offset, length)
+        {
+            let mut seen = std::collections::HashSet::new();
+            for (_, meta) in &live_blobs {
+                if seen.insert(meta.blob_ref.offset) {
+                    unique_physical.push((meta.blob_ref.offset, meta.blob_ref.length));
+                }
+            }
+        }
+        unique_physical.sort_by_key(|&(offset, _)| offset);
+
+        // Step 3: Copy each unique physical blob to new contiguous position
+        let write_base = if write_from_zero {
+            0
+        } else {
+            old_region_length
+        };
+        let mut offset_map = std::collections::HashMap::new();
+        let mut write_cursor: u64 = 0;
+
+        for &(old_offset, length) in &unique_physical {
+            let src_file_offset = region_offset + old_offset;
+            let new_offset = write_base + write_cursor;
+            let dst_file_offset = region_offset + new_offset;
+
+            #[allow(clippy::cast_possible_truncation)]
+            let data = self.mem.blob_read(src_file_offset, length as usize)?;
+            self.mem.blob_write(dst_file_offset, &data)?;
+
+            offset_map.insert(old_offset, new_offset);
+            write_cursor += length;
+        }
+
+        let total_live_size = write_cursor;
+        let blobs_relocated = unique_physical.len() as u64;
+
+        // Step 4: Update all BlobRef offsets in BLOB_TABLE
+        {
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let mut blob_table = system_tables.open_system_table(self, BLOB_TABLE)?;
+            for (blob_id, meta) in &live_blobs {
+                if let Some(&new_offset) = offset_map.get(&meta.blob_ref.offset)
+                    && new_offset != meta.blob_ref.offset
+                {
+                    let mut updated_meta = meta.clone();
+                    updated_meta.blob_ref.offset = new_offset;
+                    blob_table.insert(blob_id, &updated_meta)?;
+                }
+            }
+            drop(blob_table);
+
+            // Step 5: Update BLOB_DEDUP_INDEX offsets
+            let dedup_table = system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
+            let mut dedup_entries: Vec<(Sha256Key, DedupVal)> = Vec::new();
+            let range = dedup_table.range::<Sha256Key>(..)?;
+            for entry in range {
+                let (key_guard, value_guard) = entry?;
+                dedup_entries.push((key_guard.value(), value_guard.value()));
+            }
+            drop(dedup_table);
+
+            if !dedup_entries.is_empty() {
+                let mut dedup_table_mut =
+                    system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
+                for (sha_key, val) in &dedup_entries {
+                    if let Some(&new_offset) = offset_map.get(&val.offset)
+                        && new_offset != val.offset
+                    {
+                        let updated = DedupVal {
+                            offset: new_offset,
+                            length: val.length,
+                            checksum: val.checksum,
+                            ref_count: val.ref_count,
+                        };
+                        dedup_table_mut.insert(sha_key, &updated)?;
+                    }
+                }
+                drop(dedup_table_mut);
+            }
+        }
+
+        // Step 6: Update blob state
+        if write_from_zero {
+            blob_state.region_length = total_live_size;
+        } else {
+            blob_state.region_length = old_region_length + total_live_size;
+        }
+        self.mem.set_pending_blob_state(blob_state);
+        self.dirty.store(true, Ordering::Release);
+
+        Ok((blobs_relocated, total_live_size))
+    }
+
     /// Commit the transaction
     ///
     /// All writes performed in this transaction will be visible to future transactions, and are
@@ -3026,6 +3215,65 @@ impl ReadTransaction {
             total_dedup_entries,
             total_ref_count,
             bytes_saved,
+        })
+    }
+
+    /// Returns statistics about blob region space usage (committed state).
+    ///
+    /// Scans the primary blob table to compute live bytes, then compares with
+    /// the committed region length to determine dead space and fragmentation.
+    pub fn blob_stats(&self) -> Result<BlobStats> {
+        let blob_state = self.mem.get_committed_blob_state();
+        let region_bytes = blob_state.region_length;
+
+        if region_bytes == 0 {
+            return Ok(BlobStats {
+                blob_count: 0,
+                live_bytes: 0,
+                region_bytes: 0,
+                dead_bytes: 0,
+                fragmentation_ratio: 0.0,
+            });
+        }
+
+        let Some(btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(BlobStats {
+                blob_count: 0,
+                live_bytes: 0,
+                region_bytes,
+                dead_bytes: region_bytes,
+                fragmentation_ratio: 1.0,
+            });
+        };
+
+        let mut blob_count: u64 = 0;
+        let mut unique_offsets = std::collections::HashSet::new();
+        let mut live_bytes: u64 = 0;
+
+        let range = btree.range::<RangeFull, BlobId>(&(..))?;
+        for entry in range {
+            let entry = entry?;
+            let meta = entry.value();
+            blob_count += 1;
+            if unique_offsets.insert(meta.blob_ref.offset) {
+                live_bytes += meta.blob_ref.length;
+            }
+        }
+
+        let dead_bytes = region_bytes.saturating_sub(live_bytes);
+        #[allow(clippy::cast_precision_loss)]
+        let fragmentation_ratio = if region_bytes > 0 {
+            dead_bytes as f64 / region_bytes as f64
+        } else {
+            0.0
+        };
+
+        Ok(BlobStats {
+            blob_count,
+            live_bytes,
+            region_bytes,
+            dead_bytes,
+            fragmentation_ratio,
         })
     }
 

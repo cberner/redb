@@ -1794,3 +1794,36 @@ mod tests {
         );
     }
 }
+
+// ─── Blob Compaction Types ──────────────────────────────────────────────────
+
+/// Statistics about blob region space usage.
+///
+/// Returned by [`WriteTransaction::blob_stats`] and [`ReadTransaction::blob_stats`].
+/// Use `fragmentation_ratio` to decide whether compaction is worthwhile.
+#[derive(Debug, Clone, Copy)]
+pub struct BlobStats {
+    /// Number of live blobs in the primary blob table.
+    pub blob_count: u64,
+    /// Total bytes occupied by live blob data (sum of unique physical blob sizes).
+    pub live_bytes: u64,
+    /// Total size of the blob region on disk (includes dead space).
+    pub region_bytes: u64,
+    /// Bytes reclaimable by compaction (`region_bytes - live_bytes`).
+    pub dead_bytes: u64,
+    /// Ratio of dead bytes to region bytes (0.0–1.0). Higher means more waste.
+    pub fragmentation_ratio: f64,
+}
+
+/// Report returned by [`Database::compact_blobs`] describing what was accomplished.
+#[derive(Debug, Clone, Copy)]
+pub struct BlobCompactionReport {
+    /// Number of unique physical blobs relocated during compaction.
+    pub blobs_relocated: u64,
+    /// Total bytes of live blob data after compaction.
+    pub live_bytes: u64,
+    /// Bytes reclaimed (old region size minus new region size).
+    pub bytes_reclaimed: u64,
+    /// `true` if compaction was a no-op (no dead space existed).
+    pub was_noop: bool,
+}
