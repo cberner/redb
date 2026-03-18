@@ -73,7 +73,7 @@ fn budget_eviction_under_pressure() {
     }
     write_txn.commit().unwrap();
 
-    // Read all data back — this will repeatedly fill the cache
+    // Read all data back -- this will repeatedly fill the cache
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(TABLE).unwrap();
     for i in 0..500u64 {
@@ -96,7 +96,7 @@ fn budget_eviction_under_pressure() {
 #[test]
 fn budget_write_buffer_auto_flush() {
     let tmpfile = create_tempfile();
-    // Small budget — write buffer gets 20% = 200 KiB
+    // Small budget -- write buffer gets 20% = 200 KiB
     let budget = 1024 * 1024;
     let db = Database::builder()
         .set_memory_budget(budget)
@@ -105,7 +105,7 @@ fn budget_write_buffer_auto_flush() {
 
     let value = vec![0xFFu8; 8192];
 
-    // Write many pages within a single transaction — this should trigger auto-flush
+    // Write many pages within a single transaction -- this should trigger auto-flush
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(TABLE).unwrap();
@@ -147,7 +147,7 @@ fn budget_graceful_degradation() {
     }
     write_txn.commit().unwrap();
 
-    // Read everything back — should still work correctly, just slower
+    // Read everything back -- should still work correctly, just slower
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(TABLE).unwrap();
     for i in 0..1000u64 {
@@ -164,7 +164,7 @@ fn budget_coexists_with_set_cache_size() {
     // set_memory_budget should override set_cache_size
     let db = Database::builder()
         .set_cache_size(1024 * 1024 * 1024) // 1 GiB
-        .set_memory_budget(256 * 1024) // 256 KiB — this takes precedence
+        .set_memory_budget(256 * 1024) // 256 KiB -- this takes precedence
         .create(tmpfile.path())
         .unwrap();
 
@@ -267,7 +267,7 @@ fn budget_cross_stripe_eviction() {
     let stats = db.cache_stats();
     assert!(
         stats.used_bytes() <= budget,
-        "used_bytes {} exceeds budget {} — cross-stripe eviction may not be working",
+        "used_bytes {} exceeds budget {} -- cross-stripe eviction may not be working",
         stats.used_bytes(),
         budget
     );
@@ -299,7 +299,7 @@ fn budget_none_default() {
     drop(table);
     drop(read_txn);
 
-    // Without a budget, used_bytes can be anything — just verify it doesn't crash
+    // Without a budget, used_bytes can be anything -- just verify it doesn't crash
     // and that the database works correctly
     let stats = db.cache_stats();
     // Default cache is 1 GiB, so 100 * 4096 bytes should fit easily
@@ -340,7 +340,7 @@ fn budget_mid_transaction_enforcement() {
 
     let value = vec![0xCDu8; 8192];
 
-    // Write many pages in a single transaction — triggers write buffer eviction
+    // Write many pages in a single transaction -- triggers write buffer eviction
     // and mid-transaction cross-stripe read cache eviction
     let write_txn = db.begin_write().unwrap();
     {
