@@ -309,3 +309,78 @@ fn fixed_vec_range_scan() {
 
     assert_eq!(table.len().unwrap(), 10);
 }
+
+#[test]
+fn cosine_distance_basic() {
+    let a = [1.0f32, 0.0, 0.0];
+    let b = [1.0f32, 0.0, 0.0];
+    // Identical vectors: distance = 0
+    assert!(redb::cosine_distance(&a, &b).abs() < 1e-6);
+
+    // Orthogonal vectors: distance = 1
+    let c = [0.0f32, 1.0, 0.0];
+    assert!((redb::cosine_distance(&a, &c) - 1.0).abs() < 1e-6);
+
+    // Opposite vectors: distance = 2
+    let d = [-1.0f32, 0.0, 0.0];
+    assert!((redb::cosine_distance(&a, &d) - 2.0).abs() < 1e-6);
+}
+
+#[test]
+fn l2_norm_and_normalize() {
+    let v = [3.0f32, 4.0];
+    assert!((redb::l2_norm(&v) - 5.0).abs() < 1e-6);
+
+    let mut w = [3.0f32, 4.0];
+    redb::l2_normalize(&mut w);
+    assert!((w[0] - 0.6).abs() < 1e-6);
+    assert!((w[1] - 0.8).abs() < 1e-6);
+    // Normalized vector has unit norm
+    assert!((redb::l2_norm(&w) - 1.0).abs() < 1e-6);
+
+    // Zero vector is unchanged
+    let mut z = [0.0f32, 0.0];
+    redb::l2_normalize(&mut z);
+    assert_eq!(z, [0.0, 0.0]);
+}
+
+#[test]
+fn l2_normalized_returns_copy() {
+    let v = vec![3.0f32, 4.0];
+    let normed = redb::l2_normalized(&v);
+    assert!((normed[0] - 0.6).abs() < 1e-6);
+    assert!((normed[1] - 0.8).abs() < 1e-6);
+    // Original is unchanged
+    assert_eq!(v, vec![3.0, 4.0]);
+}
+
+#[test]
+fn normalized_dot_equals_cosine() {
+    let a = [1.0f32, 2.0, 3.0, 4.0];
+    let b = [5.0f32, 6.0, 7.0, 8.0];
+
+    let cosine = redb::cosine_similarity(&a, &b);
+
+    let na = redb::l2_normalized(&a);
+    let nb = redb::l2_normalized(&b);
+    let dot = redb::dot_product(&na, &nb);
+
+    // After normalization, dot product == cosine similarity
+    assert!((dot - cosine).abs() < 1e-5);
+}
+
+#[test]
+fn hamming_distance_basic() {
+    let a: [u8; 4] = [0b1010_1010, 0b0000_0000, 0b1111_1111, 0b0000_0000];
+    let b: [u8; 4] = [0b1010_1010, 0b1111_1111, 0b1111_1111, 0b0000_0000];
+    // Only second byte differs: 8 bits
+    assert_eq!(redb::hamming_distance(&a, &b), 8);
+
+    // Identical
+    assert_eq!(redb::hamming_distance(&a, &a), 0);
+
+    // All bits differ in one byte
+    let c: [u8; 1] = [0b0000_0000];
+    let d: [u8; 1] = [0b1111_1111];
+    assert_eq!(redb::hamming_distance(&c, &d), 8);
+}
