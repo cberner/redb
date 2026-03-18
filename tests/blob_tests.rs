@@ -779,7 +779,7 @@ fn streaming_blob_large() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    // 4 MB in 64 KB chunks — exercises the streaming hasher's large mode
+    // 4 MB in 64 KB chunks -- exercises the streaming hasher's large mode
     let total = 4 * 1024 * 1024;
     let chunk_size = 64 * 1024;
     let full_data: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
@@ -1653,7 +1653,7 @@ fn blob_tags_with_streaming_writer() {
     assert_eq!(tags.len(), 2);
 }
 
-// ── Partial / Range Blob Read Tests ──────────────────────────────────────────
+// -- Partial / Range Blob Read Tests ------------------------------------------
 
 #[test]
 fn blob_range_read_basic() {
@@ -2063,7 +2063,7 @@ fn blob_reader_read_range_method() {
     assert!(err.is_err());
 }
 
-// ─── Dedup tests ────────────────────────────────────────────────────────────
+// --- Dedup tests ------------------------------------------------------------
 
 fn create_dedup_db(min_size: usize) -> (tempfile::NamedTempFile, Database) {
     let tmpfile = create_tempfile();
@@ -2253,7 +2253,7 @@ fn blob_dedup_min_size() {
 
     {
         let txn = db.begin_write().unwrap();
-        // Small blobs — below min_size, not deduped
+        // Small blobs -- below min_size, not deduped
         txn.store_blob(
             small,
             ContentType::OctetStream,
@@ -2268,7 +2268,7 @@ fn blob_dedup_min_size() {
             StoreOptions::default(),
         )
         .unwrap();
-        // Large blobs — above min_size, deduped
+        // Large blobs -- above min_size, deduped
         txn.store_blob(
             &large,
             ContentType::OctetStream,
@@ -2337,7 +2337,7 @@ fn blob_dedup_streaming_writer() {
         txn.commit().unwrap();
     }
 
-    // Now store the same content via one-shot — should hit dedup
+    // Now store the same content via one-shot -- should hit dedup
     let oneshot_id;
     {
         let txn = db.begin_write().unwrap();
@@ -2451,7 +2451,7 @@ fn blob_dedup_bytes_saved() {
     assert_eq!(stats.bytes_saved, 10_000 * 4); // 4 extra copies saved
 }
 
-// ─── Compaction tests ───────────────────────────────────────────────────────
+// --- Compaction tests -------------------------------------------------------
 
 #[test]
 fn blob_compact_basic() {

@@ -33,7 +33,7 @@ fn read_expiry(data: &[u8]) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// TtlValueOf<V> — internal Value wrapper: [u64 LE expiry][V bytes]
+// TtlValueOf<V> -- internal Value wrapper: [u64 LE expiry][V bytes]
 // ---------------------------------------------------------------------------
 
 pub(crate) struct TtlValueOf<V: Value> {
@@ -161,7 +161,7 @@ impl<K: Key + 'static, V: Value + 'static> std::fmt::Display for TtlTableDefinit
 }
 
 // ---------------------------------------------------------------------------
-// TtlAccessGuard — strips the 8-byte expiry header
+// TtlAccessGuard -- strips the 8-byte expiry header
 // ---------------------------------------------------------------------------
 
 /// Access guard for TTL table values. Transparently strips the expiry header.
@@ -352,7 +352,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTableMetadata for TtlTable<'_
 }
 
 // ---------------------------------------------------------------------------
-// TtlRange — iterator that skips expired entries
+// TtlRange -- iterator that skips expired entries
 // ---------------------------------------------------------------------------
 
 /// Iterator over non-expired entries in a TTL table.

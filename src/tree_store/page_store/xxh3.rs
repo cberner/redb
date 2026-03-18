@@ -830,7 +830,7 @@ pub(crate) struct Xxh3StreamHasher {
     accumulators: [u64; 8],
     stripe_count_in_block: usize,
     /// Unprocessed bytes. In small mode (total_len <= 240), this holds ALL
-    /// data. In large mode, it holds at most STRIPE_LENGTH bytes — we always
+    /// data. In large mode, it holds at most STRIPE_LENGTH bytes -- we always
     /// retain the last incomplete stripe so we can correctly identify the
     /// trailing stripe at finalization.
     buf: Vec<u8>,

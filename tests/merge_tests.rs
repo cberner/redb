@@ -76,7 +76,7 @@ fn merge_max() {
     {
         let mut table = write_txn.open_table(TABLE_U64).unwrap();
         table.insert("score", &30).unwrap();
-        // Try to merge with a smaller value — should keep 30
+        // Try to merge with a smaller value -- should keep 30
         table
             .merge("score", &10u64.to_le_bytes(), &NumericMax)
             .unwrap();
@@ -87,7 +87,7 @@ fn merge_max() {
     let table = read_txn.open_table(TABLE_U64).unwrap();
     assert_eq!(table.get("score").unwrap().unwrap().value(), 30);
 
-    // Now merge with a larger value — should become 50
+    // Now merge with a larger value -- should become 50
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(TABLE_U64).unwrap();
@@ -111,7 +111,7 @@ fn merge_min() {
     {
         let mut table = write_txn.open_table(TABLE_U64).unwrap();
         table.insert("score", &30).unwrap();
-        // Try to merge with a larger value — should keep 30
+        // Try to merge with a larger value -- should keep 30
         table
             .merge("score", &50u64.to_le_bytes(), &NumericMin)
             .unwrap();
@@ -122,7 +122,7 @@ fn merge_min() {
     let table = read_txn.open_table(TABLE_U64).unwrap();
     assert_eq!(table.get("score").unwrap().unwrap().value(), 30);
 
-    // Now merge with a smaller value — should become 10
+    // Now merge with a smaller value -- should become 10
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(TABLE_U64).unwrap();

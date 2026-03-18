@@ -8,8 +8,8 @@ use std::fmt::{self, Debug};
 ///
 /// # Return value
 ///
-/// - `Some(bytes)` — the merged value to store
-/// - `None` — delete the key
+/// - `Some(bytes)` -- the merged value to store
+/// - `None` -- delete the key
 pub trait MergeOperator: Send + Sync {
     /// Merge `operand` into the `existing` value (if present), returning the new value.
     ///

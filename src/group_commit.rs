@@ -43,7 +43,7 @@ type BatchFn =
 ///
 /// Create a batch from a closure that receives a `&WriteTransaction` and performs
 /// mutations (open tables, insert, remove, etc.). The group committer manages the
-/// transaction lifecycle — do not call `commit()` or `abort()` within the closure.
+/// transaction lifecycle -- do not call `commit()` or `abort()` within the closure.
 ///
 /// # Example
 ///
@@ -67,7 +67,7 @@ impl WriteBatch {
     /// Create a batch from a closure that receives a shared `&WriteTransaction`.
     ///
     /// The closure should open tables, insert/remove entries, etc.
-    /// Do not call `commit()` or `abort()` — the group committer manages the lifecycle.
+    /// Do not call `commit()` or `abort()` -- the group committer manages the lifecycle.
     pub fn new<F>(f: F) -> Self
     where
         F: FnOnce(&WriteTransaction) -> std::result::Result<(), Error> + Send + 'static,

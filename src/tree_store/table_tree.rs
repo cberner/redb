@@ -557,7 +557,7 @@ impl TableTreeMut<'_> {
         };
 
         // Open the table and call the provided closure on it
-        // Internal trees must not use value compression — insert_inplace requires
+        // Internal trees must not use value compression -- insert_inplace requires
         // deterministic value sizes, and compression would make them variable.
         let mut tree: BtreeMut<K, V> = BtreeMut::new_uncompressed(
             table_root,
@@ -599,7 +599,7 @@ impl TableTreeMut<'_> {
         )?;
 
         // Create an empty table and call the provided closure on it
-        // Internal trees must not use value compression — insert_inplace requires
+        // Internal trees must not use value compression -- insert_inplace requires
         // deterministic value sizes, and compression would make them variable.
         let mut tree: BtreeMut<K, V> = BtreeMut::new_uncompressed(
             None,

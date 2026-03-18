@@ -177,7 +177,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         value: &V::SelfType<'_>,
     ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMutInPlace<'a, V>)> {
         // Compress value bytes before storing in the B-tree.
-        // Shorter values → more fit per leaf → fewer pages → smaller files.
+        // Shorter values -> more fit per leaf -> fewer pages -> smaller files.
         let raw_value_bytes = V::as_bytes(value);
         let compressed_value = compress_value(raw_value_bytes.as_ref(), self.compression);
         let value_bytes_ref = compressed_value.as_slice();

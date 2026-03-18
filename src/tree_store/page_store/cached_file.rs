@@ -398,7 +398,7 @@ impl PagedCachedFile {
             }
         }
 
-        // Cache miss — read from disk
+        // Cache miss -- read from disk
         let buffer: Arc<[u8]> = self.read_direct(offset, len)?.into();
         let cache_size = self
             .read_cache_bytes

@@ -315,12 +315,12 @@ fn cmd_verify(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             println!("All checksums valid, B-tree structure intact.");
         }
         Ok(false) => {
-            println!("Integrity check FAILED — database was REPAIRED");
+            println!("Integrity check FAILED -- database was REPAIRED");
             println!("Some corruption was detected and automatically repaired.");
             println!("Review your data for completeness.");
         }
         Err(e) => {
-            println!("Integrity check FAILED — UNRECOVERABLE");
+            println!("Integrity check FAILED -- UNRECOVERABLE");
             println!("Error: {e}");
             println!("The database file may be severely corrupted.");
             return Err(e.into());
@@ -357,7 +357,7 @@ fn cmd_compact(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let file_size_after = std::fs::metadata(path)?.len();
 
     if rounds == 0 {
-        println!("No compaction needed — database is already compact.");
+        println!("No compaction needed -- database is already compact.");
     } else {
         let saved = file_size_before.saturating_sub(file_size_after);
         println!(

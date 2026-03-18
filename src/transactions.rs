@@ -1491,7 +1491,7 @@ impl WriteTransaction {
         };
 
         let blob_ref = if let Some(existing) = dedup_hit {
-            // Reuse existing physical data — skip writing to blob region
+            // Reuse existing physical data -- skip writing to blob region
             BlobRef {
                 offset: existing.offset,
                 length: existing.length,
@@ -1587,7 +1587,7 @@ impl WriteTransaction {
                     drop(dedup_table);
                 }
 
-                // Reverse map: BlobId → Sha256Key
+                // Reverse map: BlobId -> Sha256Key
                 let mut dedup_map = system_tables.open_system_table(self, BLOB_DEDUP_MAP)?;
                 dedup_map.insert(&blob_id, &sha_key)?;
                 drop(dedup_map);
@@ -1714,7 +1714,7 @@ impl WriteTransaction {
                 };
 
                 if let Some(existing) = existing {
-                    // Another blob with same content already exists — increment ref_count
+                    // Another blob with same content already exists -- increment ref_count
                     let mut dedup_table =
                         system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
                     let updated = DedupVal {
@@ -1724,7 +1724,7 @@ impl WriteTransaction {
                     dedup_table.insert(&sha_key, &updated)?;
                     drop(dedup_table);
                 } else {
-                    // First occurrence — create new dedup entry
+                    // First occurrence -- create new dedup entry
                     let mut dedup_table =
                         system_tables.open_system_table(self, BLOB_DEDUP_INDEX)?;
                     let entry = DedupVal {
@@ -1794,7 +1794,7 @@ impl WriteTransaction {
         let tag_table = system_tables.open_system_table(self, BLOB_TAG_INDEX)?;
 
         let mut tags = Vec::new();
-        // Scan all tag keys — we need to find entries where blob_id matches.
+        // Scan all tag keys -- we need to find entries where blob_id matches.
         // Since TagKey is ordered (tag, blob_id), we scan the full table.
         // This is acceptable for the write-path read (low frequency).
         let range = tag_table.range::<TagKey>(..)?;
@@ -1963,7 +1963,7 @@ impl WriteTransaction {
             drop(legacy_table);
         }
 
-        // Remove tag index entries — scan for all TagKeys that reference this blob
+        // Remove tag index entries -- scan for all TagKeys that reference this blob
         {
             let mut tag_table = system_tables.open_system_table(self, BLOB_TAG_INDEX)?;
             let mut to_remove = Vec::new();
@@ -2112,8 +2112,8 @@ impl WriteTransaction {
     /// `BLOB_TABLE` and `BLOB_DEDUP_INDEX`, and updates the pending blob state.
     ///
     /// When `write_from_zero` is false (Pass 1), data is appended after the
-    /// current region end — safe even on crash since old data is untouched.
-    /// When `write_from_zero` is true (Pass 2), data is written from offset 0 —
+    /// current region end -- safe even on crash since old data is untouched.
+    /// When `write_from_zero` is true (Pass 2), data is written from offset 0 --
     /// safe because committed offsets point to the appended area from Pass 1.
     ///
     /// Returns `(unique_blobs_relocated, total_live_bytes)`.
@@ -2140,7 +2140,7 @@ impl WriteTransaction {
         }
 
         if live_blobs.is_empty() {
-            // All blobs deleted — reset region
+            // All blobs deleted -- reset region
             blob_state.region_length = 0;
             self.mem.set_pending_blob_state(blob_state);
             self.dirty.store(true, Ordering::Release);
@@ -2260,7 +2260,7 @@ impl WriteTransaction {
         // Early freed page processing: reclaim pages from previous transactions BEFORE
         // this transaction's B-tree mutations, so the buddy allocator can reuse them.
         // Without this, freed pages from transaction N are only returned to the allocator
-        // during transaction N+1's commit — after N+1 has already allocated fresh pages.
+        // during transaction N+1's commit -- after N+1 has already allocated fresh pages.
         //
         // Only done for durable commits. Non-durable commits have complex savepoint
         // interactions that require freed page processing to stay in the commit path.
@@ -3338,7 +3338,7 @@ impl ReadTransaction {
 
     /// Find blobs near a reference blob within a time window.
     ///
-    /// Looks up the reference blob's timestamp, then scans ±`window_ns`/2.
+    /// Looks up the reference blob's timestamp, then scans +/-`window_ns`/2.
     /// Used for sensor fusion queries ("all inputs within 100ms of X").
     pub fn blobs_near(
         &self,
@@ -3389,7 +3389,7 @@ impl ReadTransaction {
             let meta = g.value();
             let parent = meta.causal_parent;
 
-            // Look up the edge from parent → current
+            // Look up the edge from parent -> current
             let edge = if let Some(parent_id) = parent {
                 Self::lookup_causal_edge(&parent_id, edges_btree.as_ref(), legacy_btree.as_ref())?
             } else {
@@ -3454,7 +3454,7 @@ impl ReadTransaction {
         let edges_btree = self.open_system_btree(BLOB_CAUSAL_EDGES)?;
         let legacy_btree = self.open_system_btree(BLOB_CAUSAL_CHILDREN)?;
 
-        // path stores (blob_id, edge from parent→this)
+        // path stores (blob_id, edge from parent->this)
         let mut path: CausalPath = Vec::new();
         let mut current = *to;
         // We'll fill in edges as we walk backward; the `to` node has an edge from its parent
@@ -3467,7 +3467,7 @@ impl ReadTransaction {
                 break;
             };
 
-            // Edge from parent → current
+            // Edge from parent -> current
             let edge =
                 Self::lookup_causal_edge(&parent, edges_btree.as_ref(), legacy_btree.as_ref())?;
             path.push((current, edge));
