@@ -160,6 +160,7 @@ impl TransactionalMemory {
         write_cache_size_bytes: usize,
         read_only: bool,
         compression: CompressionConfig,
+        memory_budget: Option<usize>,
     ) -> Result<Self, DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
@@ -175,6 +176,7 @@ impl TransactionalMemory {
             page_size as u64,
             read_cache_size_bytes,
             write_cache_size_bytes,
+            memory_budget,
         )?;
 
         let initial_storage_len = storage.raw_file_len()?;
@@ -335,7 +337,7 @@ impl TransactionalMemory {
     ) -> std::result::Result<(Self, bool), DatabaseError> {
         let _region_size = region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
         #[allow(clippy::cast_possible_truncation)]
-        let storage = PagedCachedFile::new(storage, page_size as u64, 0, 0)?;
+        let storage = PagedCachedFile::new(storage, page_size as u64, 0, 0, None)?;
 
         let initial_storage_len = storage.raw_file_len()?;
         if initial_storage_len < DB_HEADER_SIZE as u64 {

@@ -262,7 +262,8 @@ pub struct VerifyReport {
 
 /// Information regarding the usage of the in-memory cache
 ///
-/// Note: these metrics are only collected when the "`cache_metrics`" feature is enabled
+/// Note: hit/miss/eviction metrics are only collected when the "`cache_metrics`" feature is enabled.
+/// `used_bytes` and `budget_bytes` are always available.
 #[derive(Debug)]
 pub struct CacheStats {
     pub(crate) evictions: u64,
@@ -271,6 +272,7 @@ pub struct CacheStats {
     pub(crate) write_hits: u64,
     pub(crate) write_misses: u64,
     pub(crate) used_bytes: usize,
+    pub(crate) budget_bytes: Option<usize>,
 }
 
 impl CacheStats {
@@ -304,6 +306,14 @@ impl CacheStats {
     /// Number of bytes in the cache
     pub fn used_bytes(&self) -> usize {
         self.used_bytes
+    }
+
+    /// The configured memory budget, if any.
+    ///
+    /// Returns `None` when no budget is set (default), meaning the cache sizes
+    /// are controlled only by [`Builder::set_cache_size`].
+    pub fn budget_bytes(&self) -> Option<usize> {
+        self.budget_bytes
     }
 }
 
@@ -466,6 +476,7 @@ impl ReadOnlyDatabase {
         region_size: Option<u64>,
         read_cache_size_bytes: usize,
         compression: CompressionConfig,
+        memory_budget: Option<usize>,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -480,6 +491,7 @@ impl ReadOnlyDatabase {
             0,
             true,
             compression,
+            memory_budget,
         )?;
         let mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
@@ -1267,6 +1279,7 @@ impl Database {
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
         compression: CompressionConfig,
         blob_dedup_config: BlobDedupConfig,
+        memory_budget: Option<usize>,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -1281,6 +1294,7 @@ impl Database {
             write_cache_size_bytes,
             false,
             compression,
+            memory_budget,
         )?;
         let mut mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
@@ -1582,6 +1596,7 @@ pub struct Builder {
     compression: CompressionConfig,
     repair_callback: Box<dyn Fn(&mut RepairSession)>,
     blob_dedup_config: BlobDedupConfig,
+    memory_budget: Option<usize>,
 }
 
 impl Builder {
@@ -1605,6 +1620,7 @@ impl Builder {
             compression: CompressionConfig::None,
             repair_callback: Box::new(|_| {}),
             blob_dedup_config: BlobDedupConfig::default(),
+            memory_budget: None,
         };
 
         result.set_cache_size(1024 * 1024 * 1024);
@@ -1645,6 +1661,39 @@ impl Builder {
         // TODO: allow dynamic expansion of the read/write cache
         self.read_cache_size_bytes = bytes / 10 * 9;
         self.write_cache_size_bytes = bytes / 10;
+        self
+    }
+
+    /// Set a hard memory budget (in bytes) for the database.
+    ///
+    /// The budget is partitioned as follows:
+    /// - 70% for the read cache
+    /// - 20% for the write buffer
+    /// - 10% reserved for internal overhead
+    ///
+    /// When the budget is set, the database will:
+    /// - Perform cross-stripe cache eviction when memory pressure is high
+    /// - Auto-flush the write buffer before it exceeds its partition
+    /// - Skip caching read results when total usage exceeds the budget
+    ///
+    /// This overrides any prior call to [`set_cache_size`](Self::set_cache_size).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let db = Database::builder()
+    ///     .set_memory_budget(50 * 1024 * 1024)  // 50 MiB hard cap
+    ///     .create("constrained.redb")?;
+    /// ```
+    pub fn set_memory_budget(&mut self, bytes: usize) -> &mut Self {
+        assert!(
+            bytes >= 16384,
+            "Memory budget must be at least 16 KiB (got {bytes} bytes). \
+             Budgets below 4 page sizes cannot cache any data."
+        );
+        self.memory_budget = Some(bytes);
+        self.read_cache_size_bytes = bytes / 100 * 70;
+        self.write_cache_size_bytes = bytes / 100 * 20;
         self
     }
 
@@ -1707,6 +1756,7 @@ impl Builder {
             &self.repair_callback,
             self.compression,
             self.blob_dedup_config.clone(),
+            self.memory_budget,
         )
     }
 
@@ -1724,6 +1774,7 @@ impl Builder {
             &self.repair_callback,
             self.compression,
             self.blob_dedup_config.clone(),
+            self.memory_budget,
         )
     }
 
@@ -1744,6 +1795,7 @@ impl Builder {
             None,
             self.read_cache_size_bytes,
             self.compression,
+            self.memory_budget,
         )
     }
 
@@ -1761,6 +1813,7 @@ impl Builder {
             &self.repair_callback,
             self.compression,
             self.blob_dedup_config.clone(),
+            self.memory_budget,
         )
     }
 
@@ -1779,6 +1832,7 @@ impl Builder {
             &self.repair_callback,
             self.compression,
             self.blob_dedup_config.clone(),
+            self.memory_budget,
         )
     }
 }
