@@ -249,3 +249,52 @@ impl MergeOperator for BytesAppend {
         Some(result)
     }
 }
+
+/// A merge operator backed by a closure.
+///
+/// Created via [`merge_fn()`].
+pub struct FnMergeOperator<F>
+where
+    F: Fn(&[u8], Option<&[u8]>, &[u8]) -> Option<Vec<u8>> + Send + Sync,
+{
+    f: F,
+}
+
+impl<F> Debug for FnMergeOperator<F>
+where
+    F: Fn(&[u8], Option<&[u8]>, &[u8]) -> Option<Vec<u8>> + Send + Sync,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FnMergeOperator")
+    }
+}
+
+impl<F> MergeOperator for FnMergeOperator<F>
+where
+    F: Fn(&[u8], Option<&[u8]>, &[u8]) -> Option<Vec<u8>> + Send + Sync,
+{
+    fn merge(&self, key: &[u8], existing: Option<&[u8]>, operand: &[u8]) -> Option<Vec<u8>> {
+        (self.f)(key, existing, operand)
+    }
+}
+
+/// Creates a [`MergeOperator`] from a closure.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use redb::merge_fn;
+///
+/// let op = merge_fn(|_key, existing, operand| {
+///     // Custom merge: multiply existing by operand
+///     let a = existing.map_or(1u64, |b| u64::from_le_bytes(b.try_into().unwrap()));
+///     let b = u64::from_le_bytes(operand.try_into().unwrap());
+///     Some((a * b).to_le_bytes().to_vec())
+/// });
+/// ```
+pub fn merge_fn<F>(f: F) -> FnMergeOperator<F>
+where
+    F: Fn(&[u8], Option<&[u8]>, &[u8]) -> Option<Vec<u8>> + Send + Sync,
+{
+    FnMergeOperator { f }
+}
