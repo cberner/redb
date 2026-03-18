@@ -35,6 +35,13 @@ pub enum StorageError {
         /// Requested range length
         requested_length: u64,
     },
+    /// The configured memory budget has been exceeded and the operation cannot proceed
+    MemoryBudgetExceeded {
+        /// The configured memory budget in bytes
+        budget: usize,
+        /// Current memory usage in bytes
+        used: usize,
+    },
     Io(io::Error),
     PreviousIo,
     DatabaseClosed,
@@ -78,6 +85,9 @@ impl From<StorageError> for Error {
                 requested_offset,
                 requested_length,
             },
+            StorageError::MemoryBudgetExceeded { budget, used } => {
+                Error::MemoryBudgetExceeded { budget, used }
+            }
             StorageError::Io(x) => Error::Io(x),
             StorageError::PreviousIo => Error::PreviousIo,
             StorageError::DatabaseClosed => Error::DatabaseClosed,
@@ -126,6 +136,12 @@ impl Display for StorageError {
                 write!(
                     f,
                     "Blob range out of bounds: blob_length={blob_length}, requested offset={requested_offset}, length={requested_length}"
+                )
+            }
+            StorageError::MemoryBudgetExceeded { budget, used } => {
+                write!(
+                    f,
+                    "Memory budget exceeded: budget={budget} bytes, used={used} bytes"
                 )
             }
             StorageError::Io(err) => {
@@ -623,6 +639,13 @@ pub enum Error {
         /// Requested range length
         requested_length: u64,
     },
+    /// The configured memory budget has been exceeded and the operation cannot proceed
+    MemoryBudgetExceeded {
+        /// The configured memory budget in bytes
+        budget: usize,
+        /// Current memory usage in bytes
+        used: usize,
+    },
     Io(io::Error),
     DatabaseClosed,
     /// A previous IO error occurred. The database must be closed and re-opened
@@ -741,6 +764,12 @@ impl Display for Error {
                 write!(
                     f,
                     "Blob range out of bounds: blob_length={blob_length}, requested offset={requested_offset}, length={requested_length}"
+                )
+            }
+            Error::MemoryBudgetExceeded { budget, used } => {
+                write!(
+                    f,
+                    "Memory budget exceeded: budget={budget} bytes, used={used} bytes"
                 )
             }
             Error::Io(err) => {

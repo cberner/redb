@@ -197,6 +197,7 @@ pub(super) struct PagedCachedFile {
     read_cache_bytes: AtomicUsize,
     max_write_buffer_bytes: usize,
     write_buffer_bytes: AtomicUsize,
+    memory_budget: Option<usize>,
     #[cfg(feature = "cache_metrics")]
     reads_total: AtomicU64,
     #[cfg(feature = "cache_metrics")]
@@ -218,6 +219,7 @@ impl PagedCachedFile {
         page_size: u64,
         max_read_cache_bytes: usize,
         max_write_buffer_bytes: usize,
+        memory_budget: Option<usize>,
     ) -> Result<Self, DatabaseError> {
         let read_cache = (0..Self::lock_stripes())
             .map(|_| RwLock::new(LRUCache::new()))
@@ -230,6 +232,7 @@ impl PagedCachedFile {
             read_cache_bytes: AtomicUsize::new(0),
             max_write_buffer_bytes,
             write_buffer_bytes: AtomicUsize::new(0),
+            memory_budget,
             #[cfg(feature = "cache_metrics")]
             reads_total: Default::default(),
             #[cfg(feature = "cache_metrics")]
@@ -245,8 +248,12 @@ impl PagedCachedFile {
         })
     }
 
-    #[allow(clippy::unused_self)]
     pub(crate) fn cache_stats(&self) -> CacheStats {
+        let read_bytes = self.read_cache_bytes.load(Ordering::Acquire);
+        let write_bytes = self.write_buffer_bytes.load(Ordering::Acquire);
+        let used_bytes = read_bytes + write_bytes;
+        let budget_bytes = self.memory_budget;
+
         #[cfg(not(feature = "cache_metrics"))]
         {
             CacheStats {
@@ -255,7 +262,8 @@ impl PagedCachedFile {
                 read_misses: 0,
                 write_hits: 0,
                 write_misses: 0,
-                used_bytes: 0,
+                used_bytes,
+                budget_bytes,
             }
         }
 
@@ -265,17 +273,60 @@ impl PagedCachedFile {
             let read_total = self.reads_total.load(Ordering::Acquire);
             let write_hits = self.writes_hits.load(Ordering::Acquire);
             let write_total = self.writes_total.load(Ordering::Acquire);
-            let read_bytes = self.read_cache_bytes.load(Ordering::Acquire);
-            let write_bytes = self.write_buffer_bytes.load(Ordering::Acquire);
             CacheStats {
                 evictions: self.evictions.load(Ordering::Acquire),
                 read_hits,
                 read_misses: read_total - read_hits,
                 write_hits,
                 write_misses: write_total - write_hits,
-                used_bytes: read_bytes + write_bytes,
+                used_bytes,
+                budget_bytes,
             }
         }
+    }
+
+    /// Returns the total cache memory usage (read cache + write buffer).
+    #[inline]
+    fn total_cache_bytes(&self) -> usize {
+        self.read_cache_bytes.load(Ordering::Acquire)
+            + self.write_buffer_bytes.load(Ordering::Acquire)
+    }
+
+    /// Returns whether a memory budget is configured and currently exceeded.
+    #[inline]
+    fn is_over_budget(&self) -> bool {
+        self.memory_budget
+            .is_some_and(|budget| self.total_cache_bytes() > budget)
+    }
+
+    /// Evicts entries from the read cache across all stripes until `bytes_to_free`
+    /// bytes have been freed or all stripes are exhausted.
+    ///
+    /// Returns the number of bytes actually freed.
+    fn evict_read_cache_global(&self, bytes_to_free: usize) -> usize {
+        let mut freed = 0usize;
+        let num_stripes: usize = Self::lock_stripes().try_into().unwrap();
+        for stripe in 0..num_stripes {
+            if freed >= bytes_to_free {
+                break;
+            }
+            let mut lock = self.read_cache[stripe].write().unwrap();
+            while freed < bytes_to_free {
+                if let Some((_, v)) = lock.pop_lowest_priority() {
+                    freed += v.len();
+                    #[cfg(feature = "cache_metrics")]
+                    {
+                        self.evictions.fetch_add(1, Ordering::Relaxed);
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        if freed > 0 {
+            self.read_cache_bytes.fetch_sub(freed, Ordering::AcqRel);
+        }
+        freed
     }
 
     pub(crate) fn close(&self) -> Result {
@@ -323,6 +374,15 @@ impl PagedCachedFile {
         }
         self.write_buffer_bytes.store(0, Ordering::Release);
         write_buffer.clear();
+
+        // If we have a memory budget and are over it after promoting write buffer
+        // entries to the read cache, perform cross-stripe eviction.
+        if let Some(budget) = self.memory_budget {
+            let total = self.total_cache_bytes();
+            if total > budget {
+                self.evict_read_cache_global(total - budget);
+            }
+        }
 
         Ok(())
     }
@@ -400,6 +460,14 @@ impl PagedCachedFile {
 
         // Cache miss -- read from disk
         let buffer: Arc<[u8]> = self.read_direct(offset, len)?.into();
+
+        // If we have a memory budget and total usage already exceeds it,
+        // skip caching entirely to prevent further memory growth.
+        if self.is_over_budget() {
+            self.evict_read_cache_global(buffer.len());
+            return Ok(buffer);
+        }
+
         let cache_size = self
             .read_cache_bytes
             .fetch_add(buffer.len(), Ordering::AcqRel);
@@ -427,6 +495,16 @@ impl PagedCachedFile {
         }
         if removed > 0 {
             self.read_cache_bytes.fetch_sub(removed, Ordering::AcqRel);
+        }
+
+        // After per-stripe eviction, check if we need cross-stripe eviction
+        // to bring total usage below the memory budget.
+        if let Some(budget) = self.memory_budget {
+            let total = self.total_cache_bytes();
+            if total > budget {
+                drop(write_lock);
+                self.evict_read_cache_global(total - budget);
+            }
         }
 
         Ok(buffer)
@@ -517,6 +595,14 @@ impl PagedCachedFile {
                     }
                 }
             }
+            // Under a memory budget, also evict from the read cache to keep
+            // total usage bounded during write-heavy transactions.
+            if let Some(budget) = self.memory_budget {
+                let total = self.total_cache_bytes();
+                if total > budget {
+                    self.evict_read_cache_global(total - budget);
+                }
+            }
             let result = if let Some(data) = existing {
                 #[cfg(feature = "cache_metrics")]
                 self.writes_hits.fetch_add(1, Ordering::AcqRel);
@@ -554,7 +640,7 @@ mod test {
     fn cache_leak() {
         let backend = InMemoryBackend::new();
         backend.set_len(1024).unwrap();
-        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024, 128).unwrap();
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024, 128, None).unwrap();
         let cached_file = Arc::new(cached_file);
 
         let t1 = {
