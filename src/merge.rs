@@ -75,3 +75,177 @@ impl MergeOperator for NumericAdd {
         Some(result)
     }
 }
+
+/// Keeps the maximum of two little-endian encoded unsigned numeric values.
+///
+/// Supports 1, 2, 4, and 8-byte widths. Comparison is unsigned.
+/// If the key does not exist, the operand is used as the initial value.
+///
+/// # Panics
+///
+/// Panics if byte widths don't match or width is not 1, 2, 4, or 8.
+#[derive(Clone, Copy)]
+pub struct NumericMax;
+
+impl Debug for NumericMax {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("NumericMax")
+    }
+}
+
+impl MergeOperator for NumericMax {
+    fn merge(&self, _key: &[u8], existing: Option<&[u8]>, operand: &[u8]) -> Option<Vec<u8>> {
+        let Some(existing) = existing else {
+            return Some(operand.to_vec());
+        };
+        assert_eq!(
+            existing.len(),
+            operand.len(),
+            "NumericMax: existing ({}) and operand ({}) byte widths must match",
+            existing.len(),
+            operand.len()
+        );
+        let use_operand = match operand.len() {
+            1 => operand[0] > existing[0],
+            2 => {
+                let a = u16::from_le_bytes(existing.try_into().unwrap());
+                let b = u16::from_le_bytes(operand.try_into().unwrap());
+                b > a
+            }
+            4 => {
+                let a = u32::from_le_bytes(existing.try_into().unwrap());
+                let b = u32::from_le_bytes(operand.try_into().unwrap());
+                b > a
+            }
+            8 => {
+                let a = u64::from_le_bytes(existing.try_into().unwrap());
+                let b = u64::from_le_bytes(operand.try_into().unwrap());
+                b > a
+            }
+            n => panic!("NumericMax: unsupported byte width {n} (expected 1, 2, 4, or 8)"),
+        };
+        if use_operand {
+            Some(operand.to_vec())
+        } else {
+            Some(existing.to_vec())
+        }
+    }
+}
+
+/// Keeps the minimum of two little-endian encoded unsigned numeric values.
+///
+/// Supports 1, 2, 4, and 8-byte widths. Comparison is unsigned.
+/// If the key does not exist, the operand is used as the initial value.
+///
+/// # Panics
+///
+/// Panics if byte widths don't match or width is not 1, 2, 4, or 8.
+#[derive(Clone, Copy)]
+pub struct NumericMin;
+
+impl Debug for NumericMin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("NumericMin")
+    }
+}
+
+impl MergeOperator for NumericMin {
+    fn merge(&self, _key: &[u8], existing: Option<&[u8]>, operand: &[u8]) -> Option<Vec<u8>> {
+        let Some(existing) = existing else {
+            return Some(operand.to_vec());
+        };
+        assert_eq!(
+            existing.len(),
+            operand.len(),
+            "NumericMin: existing ({}) and operand ({}) byte widths must match",
+            existing.len(),
+            operand.len()
+        );
+        let use_operand = match operand.len() {
+            1 => operand[0] < existing[0],
+            2 => {
+                let a = u16::from_le_bytes(existing.try_into().unwrap());
+                let b = u16::from_le_bytes(operand.try_into().unwrap());
+                b < a
+            }
+            4 => {
+                let a = u32::from_le_bytes(existing.try_into().unwrap());
+                let b = u32::from_le_bytes(operand.try_into().unwrap());
+                b < a
+            }
+            8 => {
+                let a = u64::from_le_bytes(existing.try_into().unwrap());
+                let b = u64::from_le_bytes(operand.try_into().unwrap());
+                b < a
+            }
+            n => panic!("NumericMin: unsupported byte width {n} (expected 1, 2, 4, or 8)"),
+        };
+        if use_operand {
+            Some(operand.to_vec())
+        } else {
+            Some(existing.to_vec())
+        }
+    }
+}
+
+/// Bitwise OR of fixed-width byte slices.
+///
+/// Both existing and operand must have the same length.
+/// If the key does not exist, the operand is used as the initial value.
+///
+/// # Panics
+///
+/// Panics if existing and operand have different lengths.
+#[derive(Clone, Copy)]
+pub struct BitwiseOr;
+
+impl Debug for BitwiseOr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("BitwiseOr")
+    }
+}
+
+impl MergeOperator for BitwiseOr {
+    fn merge(&self, _key: &[u8], existing: Option<&[u8]>, operand: &[u8]) -> Option<Vec<u8>> {
+        let Some(existing) = existing else {
+            return Some(operand.to_vec());
+        };
+        assert_eq!(
+            existing.len(),
+            operand.len(),
+            "BitwiseOr: existing ({}) and operand ({}) byte lengths must match",
+            existing.len(),
+            operand.len()
+        );
+        let result: Vec<u8> = existing
+            .iter()
+            .zip(operand.iter())
+            .map(|(a, b)| a | b)
+            .collect();
+        Some(result)
+    }
+}
+
+/// Appends operand bytes to the existing value.
+///
+/// If the key does not exist, the operand is used as the initial value.
+#[derive(Clone, Copy)]
+pub struct BytesAppend;
+
+impl Debug for BytesAppend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("BytesAppend")
+    }
+}
+
+impl MergeOperator for BytesAppend {
+    fn merge(&self, _key: &[u8], existing: Option<&[u8]>, operand: &[u8]) -> Option<Vec<u8>> {
+        let Some(existing) = existing else {
+            return Some(operand.to_vec());
+        };
+        let mut result = Vec::with_capacity(existing.len() + operand.len());
+        result.extend_from_slice(existing);
+        result.extend_from_slice(operand);
+        Some(result)
+    }
+}
