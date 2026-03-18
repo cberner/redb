@@ -1,3 +1,4 @@
+use crate::tree_store::page_store::base::MAX_PAGE_INDEX;
 use crate::tree_store::page_store::xxh3_checksum;
 use std::mem::size_of;
 
@@ -129,10 +130,31 @@ impl BtreeBitmap {
             num_pages = num_pages.div_ceil(64);
         }
 
-        // Reverse so that the root as index 0
+        // Pad to the height needed for the maximum supported region count
+        // so that resize() never needs to insert new tree levels. Each
+        // extra level costs ~36 bytes (a single-entry U64GroupedBitmap).
+        // All bits start set (full), so every parent is trivially full too.
+        let max_height = Self::max_height();
+        while heights.len() < max_height {
+            let parent_len = heights.last().unwrap().len().div_ceil(64);
+            heights.push(U64GroupedBitmap::new_full(parent_len, parent_len));
+        }
+
+        // Reverse so that the root is at index 0
         heights.reverse();
 
         Self { heights }
+    }
+
+    // Height needed for the maximum supported region count (MAX_PAGE_INDEX + 1).
+    fn max_height() -> usize {
+        let mut height = 1;
+        let mut cap = MAX_PAGE_INDEX + 1;
+        while cap > 64 {
+            cap = cap.div_ceil(64);
+            height += 1;
+        }
+        height
     }
 
     pub(crate) fn resize(&mut self, mut new_len: u32, full: bool) {
@@ -426,6 +448,42 @@ mod test {
         assert_eq!(allocator.find_first_unset().unwrap(), 8);
         allocator.clear(0);
         assert_eq!(allocator.find_first_unset().unwrap(), 0);
+    }
+
+    #[test]
+    fn resize_beyond_initial_capacity() {
+        let mut bm = BtreeBitmap::new(60, 60);
+        let height = bm.heights.len();
+
+        bm.clear(0);
+        bm.clear(30);
+        bm.clear(59);
+
+        // Resize well beyond initial capacity
+        bm.resize(5000, true);
+
+        // Height is pre-padded at construction, so it stays the same
+        assert_eq!(bm.heights.len(), height);
+
+        // Previously cleared bits survive the resize
+        assert!(!bm.get(0));
+        assert!(!bm.get(30));
+        assert!(!bm.get(59));
+
+        // Newly grown region should be marked full (true)
+        assert!(bm.get(60));
+        assert!(bm.get(4999));
+
+        // Alloc should return the previously cleared entries
+        assert_eq!(bm.alloc(), Some(0));
+        assert_eq!(bm.alloc(), Some(30));
+        assert_eq!(bm.alloc(), Some(59));
+        assert!(bm.alloc().is_none());
+
+        // Clear a bit in the newly grown area, alloc should find it
+        bm.clear(3000);
+        assert_eq!(bm.alloc(), Some(3000));
+        assert!(bm.alloc().is_none());
     }
 
     #[test]

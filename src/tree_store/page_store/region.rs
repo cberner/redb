@@ -1,4 +1,3 @@
-use crate::tree_store::page_store::base::MAX_REGIONS;
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::DatabaseLayout;
@@ -15,8 +14,9 @@ pub(crate) struct RegionTracker {
 impl RegionTracker {
     pub(crate) fn new(regions: u32, orders: u8) -> Self {
         let mut data = vec![];
+        // Capacity matches the actual region count. Bitmaps grow via resize() on demand.
         for _ in 0..orders {
-            data.push(BtreeBitmap::new(regions, MAX_REGIONS));
+            data.push(BtreeBitmap::new(regions, regions));
         }
         Self {
             order_trackers: data,
