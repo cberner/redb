@@ -99,10 +99,12 @@ pub use merge::{
 };
 pub use temporal::HybridLogicalClock;
 pub use ttl_table::{ReadOnlyTtlTable, TtlAccessGuard, TtlRange, TtlTable, TtlTableDefinition};
-pub use vector::{DynVec, FixedVec};
+pub use vector::{BinaryQuantized, DynVec, FixedVec, SQVec, ScalarQuantized};
 pub use vector_ops::{
-    cosine_distance, cosine_similarity, dot_product, euclidean_distance_sq, hamming_distance,
-    l2_norm, l2_normalize, l2_normalized, manhattan_distance, read_f32_le, write_f32_le,
+    DistanceMetric, Neighbor, cosine_distance, cosine_similarity, dequantize_scalar, dot_product,
+    euclidean_distance_sq, hamming_distance, l2_norm, l2_normalize, l2_normalized,
+    manhattan_distance, nearest_k, nearest_k_fixed, quantize_binary, quantize_scalar, read_f32_le,
+    sq_dot_product, sq_euclidean_distance_sq, write_f32_le,
 };
 
 pub type Result<T = (), E = StorageError> = std::result::Result<T, E>;

@@ -1,4 +1,7 @@
-use redb::{Database, DynVec, FixedVec, ReadableDatabase, ReadableTableMetadata, TableDefinition};
+use redb::{
+    BinaryQuantized, Database, DistanceMetric, DynVec, FixedVec, ReadableDatabase, ReadableTable,
+    ReadableTableMetadata, ScalarQuantized, TableDefinition,
+};
 
 const TABLE_VEC4: TableDefinition<u64, FixedVec<4>> = TableDefinition::new("vectors_4d");
 const TABLE_VEC384: TableDefinition<u64, FixedVec<384>> = TableDefinition::new("vectors_384d");
@@ -383,4 +386,267 @@ fn hamming_distance_basic() {
     let c: [u8; 1] = [0b0000_0000];
     let d: [u8; 1] = [0b1111_1111];
     assert_eq!(redb::hamming_distance(&c, &d), 8);
+}
+
+// ---------------------------------------------------------------------------
+// Binary quantization
+// ---------------------------------------------------------------------------
+
+#[test]
+fn quantize_binary_basic() {
+    // 8 dims -> 1 byte
+    let v = [1.0f32, -0.5, 0.3, -0.1, 0.0, 0.7, -0.2, 0.9];
+    let bq = redb::quantize_binary(&v);
+    // positive bits: [1,0,1,0, 0,1,0,1] = 0b10100101 = 0xA5
+    assert_eq!(bq.len(), 1);
+    assert_eq!(bq[0], 0xA5);
+}
+
+#[test]
+fn quantize_binary_non_multiple_of_8() {
+    // 5 dims -> 1 byte, last 3 bits unused (0)
+    let v = [1.0f32, 1.0, 1.0, 1.0, 1.0];
+    let bq = redb::quantize_binary(&v);
+    assert_eq!(bq.len(), 1);
+    // bits: [1,1,1,1,1,0,0,0] = 0b11111000 = 0xF8
+    assert_eq!(bq[0], 0xF8);
+}
+
+#[test]
+fn binary_quantized_store_and_search() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // 8 dimensions -> 1 byte binary
+    const BQ_TABLE: TableDefinition<u64, BinaryQuantized<1>> = TableDefinition::new("bq_vectors");
+
+    let v1 = [1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+    let v2 = [1.0f32, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0];
+    let bq1: [u8; 1] = redb::quantize_binary(&v1).try_into().unwrap();
+    let bq2: [u8; 1] = redb::quantize_binary(&v2).try_into().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(BQ_TABLE).unwrap();
+        table.insert(&1u64, &bq1).unwrap();
+        table.insert(&2u64, &bq2).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(BQ_TABLE).unwrap();
+    let stored1 = table.get(&1u64).unwrap().unwrap().value();
+    let stored2 = table.get(&2u64).unwrap().unwrap().value();
+
+    // Query matches v1 pattern
+    let query = redb::quantize_binary(&v1);
+    let d1 = redb::hamming_distance(&stored1, &query);
+    let d2 = redb::hamming_distance(&stored2, &query);
+    assert_eq!(d1, 0); // exact match
+    assert!(d2 > 0); // different
+}
+
+// ---------------------------------------------------------------------------
+// Scalar quantization
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scalar_quantize_roundtrip() {
+    let v: [f32; 4] = [0.0, 0.5, 1.0, 0.25];
+    let sq = redb::quantize_scalar(&v);
+    assert_eq!(sq.min_val, 0.0);
+    assert_eq!(sq.max_val, 1.0);
+    assert_eq!(sq.codes[0], 0); // min -> 0
+    assert_eq!(sq.codes[2], 255); // max -> 255
+
+    let dq = redb::dequantize_scalar(&sq);
+    for i in 0..4 {
+        assert!(
+            (dq[i] - v[i]).abs() < 0.005,
+            "dim {i}: expected {}, got {}",
+            v[i],
+            dq[i]
+        );
+    }
+}
+
+#[test]
+fn scalar_quantize_constant_vector() {
+    let v: [f32; 4] = [0.5, 0.5, 0.5, 0.5];
+    let sq = redb::quantize_scalar(&v);
+    let dq = sq.dequantize();
+    for val in &dq {
+        assert!((val - 0.5).abs() < f32::EPSILON);
+    }
+}
+
+#[test]
+fn scalar_quantized_store_and_retrieve() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    const SQ_TABLE: TableDefinition<u64, ScalarQuantized<4>> = TableDefinition::new("sq_vectors");
+
+    let original = [0.1f32, 0.5, 0.9, 0.3];
+    let sq = redb::quantize_scalar(&original);
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(SQ_TABLE).unwrap();
+        table.insert(&1u64, &sq).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(SQ_TABLE).unwrap();
+    let stored = table.get(&1u64).unwrap().unwrap().value();
+    let recovered = stored.dequantize();
+    for i in 0..4 {
+        assert!(
+            (recovered[i] - original[i]).abs() < 0.005,
+            "dim {i}: expected {}, got {}",
+            original[i],
+            recovered[i]
+        );
+    }
+}
+
+#[test]
+fn sq_distance_approximation() {
+    let a: [f32; 4] = [0.1, 0.5, 0.9, 0.3];
+    let b: [f32; 4] = [0.2, 0.4, 0.8, 0.6];
+    let sq_b = redb::quantize_scalar(&b);
+
+    let exact_dist = redb::euclidean_distance_sq(&a, &b);
+    let approx_dist = redb::sq_euclidean_distance_sq(&a, &sq_b);
+
+    // Approximate distance should be close to exact (within quantization error)
+    assert!(
+        (exact_dist - approx_dist).abs() < 0.01,
+        "exact={exact_dist}, approx={approx_dist}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DistanceMetric enum
+// ---------------------------------------------------------------------------
+
+#[test]
+fn distance_metric_compute() {
+    let a = [1.0f32, 0.0, 0.0];
+    let b = [0.0f32, 1.0, 0.0];
+
+    // Cosine: orthogonal -> distance = 1.0
+    let d = DistanceMetric::Cosine.compute(&a, &b);
+    assert!((d - 1.0).abs() < 1e-6);
+
+    // EuclideanSq: sqrt(2)^2 = 2.0
+    let d = DistanceMetric::EuclideanSq.compute(&a, &b);
+    assert!((d - 2.0).abs() < 1e-6);
+
+    // DotProduct: -(1*0 + 0*1 + 0*0) = 0
+    let d = DistanceMetric::DotProduct.compute(&a, &b);
+    assert!(d.abs() < 1e-6);
+
+    // Manhattan: |1-0| + |0-1| + |0-0| = 2
+    let d = DistanceMetric::Manhattan.compute(&a, &b);
+    assert!((d - 2.0).abs() < 1e-6);
+}
+
+#[test]
+fn distance_metric_display() {
+    assert_eq!(format!("{}", DistanceMetric::Cosine), "cosine");
+    assert_eq!(format!("{}", DistanceMetric::EuclideanSq), "euclidean_sq");
+    assert_eq!(format!("{}", DistanceMetric::DotProduct), "dot_product");
+    assert_eq!(format!("{}", DistanceMetric::Manhattan), "manhattan");
+}
+
+// ---------------------------------------------------------------------------
+// Top-K nearest neighbor scan
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nearest_k_basic() {
+    let vectors: Vec<(u64, Vec<f32>)> = vec![
+        (1, vec![1.0, 0.0, 0.0]),
+        (2, vec![0.0, 1.0, 0.0]),
+        (3, vec![0.7, 0.7, 0.0]),
+        (4, vec![-1.0, 0.0, 0.0]),
+    ];
+
+    let query = [1.0f32, 0.0, 0.0];
+    let results = redb::nearest_k(vectors.into_iter(), &query, 2, |a, b| {
+        DistanceMetric::Cosine.compute(a, b)
+    });
+
+    assert_eq!(results.len(), 2);
+    // Closest should be key=1 (identical), then key=3 (similar direction)
+    assert_eq!(results[0].key, 1);
+    assert_eq!(results[1].key, 3);
+    assert!(results[0].distance < results[1].distance);
+}
+
+#[test]
+fn nearest_k_fixed_with_stored_vectors() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let vectors: Vec<(u64, [f32; 4])> = vec![
+        (1, [1.0, 0.0, 0.0, 0.0]),
+        (2, [0.0, 1.0, 0.0, 0.0]),
+        (3, [0.9, 0.1, 0.0, 0.0]),
+        (4, [0.5, 0.5, 0.5, 0.5]),
+        (5, [-1.0, 0.0, 0.0, 0.0]),
+    ];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE_VEC4).unwrap();
+        for (k, v) in &vectors {
+            table.insert(k, v).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE_VEC4).unwrap();
+
+    let query = [1.0f32, 0.0, 0.0, 0.0];
+    let results = redb::nearest_k_fixed(
+        table.iter().unwrap().map(|r| {
+            let (k, v) = r.unwrap();
+            (k.value(), v.value())
+        }),
+        &query,
+        3,
+        |a, b| DistanceMetric::Cosine.compute(a, b),
+    );
+
+    assert_eq!(results.len(), 3);
+    // Key 1 is exact match (dist ~0), key 3 is next closest, then key 4
+    assert_eq!(results[0].key, 1);
+    assert!(results[0].distance < 1e-6);
+    assert_eq!(results[1].key, 3);
+    assert!(results[1].distance < results[2].distance);
+}
+
+#[test]
+fn nearest_k_zero_returns_empty() {
+    let vectors: Vec<(u64, Vec<f32>)> = vec![(1, vec![1.0, 0.0])];
+    let query = [1.0f32, 0.0];
+    let results = redb::nearest_k(vectors.into_iter(), &query, 0, |a, b| {
+        redb::euclidean_distance_sq(a, b)
+    });
+    assert!(results.is_empty());
+}
+
+#[test]
+fn nearest_k_more_than_available() {
+    let vectors: Vec<(u64, Vec<f32>)> = vec![(1, vec![1.0, 0.0]), (2, vec![0.0, 1.0])];
+    let query = [1.0f32, 0.0];
+    let results = redb::nearest_k(vectors.into_iter(), &query, 100, |a, b| {
+        redb::euclidean_distance_sq(a, b)
+    });
+    // Should return all available (2), not panic
+    assert_eq!(results.len(), 2);
 }
