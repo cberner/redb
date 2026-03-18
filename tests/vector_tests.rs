@@ -1,6 +1,4 @@
-use redb::{
-    Database, DynVec, FixedVec, ReadableDatabase, ReadableTableMetadata, TableDefinition,
-};
+use redb::{Database, DynVec, FixedVec, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
 const TABLE_VEC4: TableDefinition<u64, FixedVec<4>> = TableDefinition::new("vectors_4d");
 const TABLE_VEC384: TableDefinition<u64, FixedVec<384>> = TableDefinition::new("vectors_384d");
