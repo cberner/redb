@@ -75,7 +75,7 @@ const PADDING: usize = 4;
 const USER_ROOT_OFFSET: usize = _UNUSED_OFFSET + size_of::<u8>() + PADDING;
 const SYSTEM_ROOT_OFFSET: usize = USER_ROOT_OFFSET + BtreeHeader::serialized_size();
 const _UNUSED2_OFFSET: usize = SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size();
-// In V5+, the _UNUSED2 area stores blob region metadata (4 × u64 = 32 bytes).
+// In V5+, the _UNUSED2 area stores blob region metadata (4 x u64 = 32 bytes).
 // In V3/V4, these bytes are zeros (formerly freed table root, unused).
 const BLOB_REGION_OFFSET_OFFSET: usize = _UNUSED2_OFFSET;
 const BLOB_REGION_LENGTH_OFFSET: usize = BLOB_REGION_OFFSET_OFFSET + size_of::<u64>();

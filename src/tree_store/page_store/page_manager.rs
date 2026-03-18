@@ -58,7 +58,7 @@ pub(crate) const FILE_FORMAT_VERSION3: u8 = 3;
 pub(crate) const FILE_FORMAT_VERSION4: u8 = 4;
 // New file format:
 // * Adds blob store with temporal indexing
-// * Blob region metadata stored in commit slot _UNUSED2 area (4 × u64)
+// * Blob region metadata stored in commit slot _UNUSED2 area (4 x u64)
 pub(crate) const FILE_FORMAT_VERSION5: u8 = 5;
 
 #[derive(Copy, Clone)]
@@ -359,7 +359,7 @@ impl TransactionalMemory {
         let needs_recovery =
             header.recovery_required || header.layout().len() != storage.raw_file_len()?;
         if needs_recovery {
-            // Recalculate layout in memory — never write to the file
+            // Recalculate layout in memory -- never write to the file
             let layout = header.layout();
             let region_max_pages = layout.full_region_layout().num_pages();
             let region_header_pages = layout.full_region_layout().get_header_pages();
@@ -433,7 +433,7 @@ impl TransactionalMemory {
 
     /// Get the committed blob state from the header slot.
     ///
-    /// Safe for concurrent readers — only returns durably committed values.
+    /// Safe for concurrent readers -- only returns durably committed values.
     pub(crate) fn get_committed_blob_state(&self) -> BlobCommitState {
         let state = self.state.lock().unwrap();
         let slot = if self.read_from_secondary.load(Ordering::Acquire) {

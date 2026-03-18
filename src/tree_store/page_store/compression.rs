@@ -1,7 +1,7 @@
 //! Compression support for redb.
 //!
 //! Value-level compression compresses individual values BEFORE they enter
-//! the B-tree. Shorter values → fewer pages → smaller files.
+//! the B-tree. Shorter values -> fewer pages -> smaller files.
 //!
 //! # Compressed value envelope
 //!
@@ -57,7 +57,7 @@ impl CompressionConfig {
         }
     }
 
-    /// Reconstruct from header byte. Level is not stored in the header —
+    /// Reconstruct from header byte. Level is not stored in the header --
     /// the reader doesn't need it (decompression is level-independent for both
     /// lz4 and zstd).
     pub(crate) fn from_header_byte(b: u8) -> Result<Self> {
@@ -84,9 +84,9 @@ impl CompressionConfig {
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------------
 // Value-level compression
-// ──────────────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------------
 
 /// Minimum value size worth compressing. Below this the 5-byte envelope
 /// overhead exceeds any realistic savings.
@@ -143,7 +143,7 @@ pub(crate) fn compress_value(data: &[u8], config: CompressionConfig) -> Vec<u8> 
         }
     }
 
-    // Compression not attempted or not beneficial — prepend 0x00 flags byte
+    // Compression not attempted or not beneficial -- prepend 0x00 flags byte
     let mut out = Vec::with_capacity(1 + data.len());
     out.push(0x00);
     out.extend_from_slice(data);
@@ -153,8 +153,8 @@ pub(crate) fn compress_value(data: &[u8], config: CompressionConfig) -> Vec<u8> 
 /// Decompress a value read from a compressed database's B-tree.
 ///
 /// Every value in a compressed database has a flags byte prepended:
-/// - `0x00` = not compressed → returns `Cow::Borrowed(&data[1..])` (zero-copy)
-/// - `0x03` / `0x05` = compressed → returns `Cow::Owned(decompressed)`
+/// - `0x00` = not compressed -> returns `Cow::Borrowed(&data[1..])` (zero-copy)
+/// - `0x03` / `0x05` = compressed -> returns `Cow::Owned(decompressed)`
 ///
 /// **Only call this for values from compressed databases.** Values from
 /// uncompressed databases have no flags byte and must not be passed here.
@@ -164,7 +164,7 @@ pub(crate) fn decompress_value(data: &[u8]) -> Result<Cow<'_, [u8]>> {
         return Ok(Cow::Borrowed(data));
     }
     if data[0] & VALUE_FLAG_COMPRESSED == 0 {
-        // Not compressed — strip the flags byte, return remaining data
+        // Not compressed -- strip the flags byte, return remaining data
         return Ok(Cow::Borrowed(&data[1..]));
     }
 
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn value_uncompressed_decompress_noop() {
-        let data = vec![0x00, 0x41, 0x42, 0x43]; // flags=0x00 → not compressed
+        let data = vec![0x00, 0x41, 0x42, 0x43]; // flags=0x00 -> not compressed
         let result = decompress_value(&data).unwrap();
         assert!(matches!(result, Cow::Borrowed(_)));
         // Flags byte stripped: returns &data[1..]

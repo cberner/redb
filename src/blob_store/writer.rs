@@ -136,7 +136,7 @@ impl<'txn> BlobWriter<'txn> {
         let meta = BlobMeta::new(
             blob_ref,
             wall_clock_ns,
-            0, // HLC placeholder — set by finalize_blob_writer
+            0, // HLC placeholder -- set by finalize_blob_writer
             causal_parent,
             &self.label,
         );

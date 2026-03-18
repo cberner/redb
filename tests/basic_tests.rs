@@ -2279,7 +2279,7 @@ fn verify_backup_corrupt_slot() {
     }
 
     let report = Database::verify_backup(backup_file.path(), VerifyLevel::Pages).unwrap();
-    // Primary slot checksum was corrupted — verification falls back to secondary
+    // Primary slot checksum was corrupted -- verification falls back to secondary
     // but header_valid should be false (primary wasn't valid)
     assert!(!report.header_valid);
     assert!(!report.valid);
@@ -2385,7 +2385,7 @@ fn page_reuse_across_transactions() {
 
     let file_size_after_cycle_1 = tmpfile.as_file().metadata().unwrap().len();
 
-    // Second delete + re-insert cycle — with early freed page processing, the file
+    // Second delete + re-insert cycle -- with early freed page processing, the file
     // should NOT grow because freed pages from cycle 1 are reused
     let txn = db.begin_write().unwrap();
     {
@@ -2436,7 +2436,7 @@ fn page_reuse_with_live_reader() {
     }
     txn.commit().unwrap();
 
-    // Hold a read transaction open — this prevents freed pages from being reclaimed
+    // Hold a read transaction open -- this prevents freed pages from being reclaimed
     let read_txn = db.begin_read().unwrap();
     let _table = read_txn.open_table(table_def).unwrap();
 
@@ -2450,7 +2450,7 @@ fn page_reuse_with_live_reader() {
     }
     txn.commit().unwrap();
 
-    // Re-insert — freed pages should NOT be reused because the reader holds them
+    // Re-insert -- freed pages should NOT be reused because the reader holds them
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(table_def).unwrap();
@@ -2466,7 +2466,7 @@ fn page_reuse_with_live_reader() {
     drop(_table);
     drop(read_txn);
 
-    // Delete and re-insert again — now freed pages SHOULD be reused
+    // Delete and re-insert again -- now freed pages SHOULD be reused
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(table_def).unwrap();
@@ -2596,7 +2596,7 @@ fn database_stats_free_pages() {
     }
     txn.commit().unwrap();
 
-    // Delete data — creates freed pages
+    // Delete data -- creates freed pages
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(table_def).unwrap();
@@ -2606,7 +2606,7 @@ fn database_stats_free_pages() {
     }
     txn.commit().unwrap();
 
-    // Start a new transaction — early freed page processing should have run,
+    // Start a new transaction -- early freed page processing should have run,
     // making free_pages > 0
     let txn = db.begin_write().unwrap();
     let stats = txn.stats().unwrap();

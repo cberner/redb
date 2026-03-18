@@ -487,7 +487,7 @@ fn no_compression_backward_compat() {
         wtx.commit().unwrap();
     }
 
-    // Open with default builder (no compression) — should work
+    // Open with default builder (no compression) -- should work
     {
         let db = Database::open(tmpfile.path()).unwrap();
         let rtx = db.begin_read().unwrap();

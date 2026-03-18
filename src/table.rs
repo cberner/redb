@@ -1,4 +1,5 @@
 use crate::db::TransactionGuard;
+use crate::merge::MergeOperator;
 use crate::sealed::Sealed;
 use crate::tree_store::{
     AccessGuardMutInPlace, Btree, BtreeExtractIf, BtreeHeader, BtreeMut, BtreeRangeIter,
@@ -248,6 +249,58 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         key: impl Borrow<K::SelfType<'a>>,
     ) -> Result<Option<AccessGuard<'_, V>>> {
         self.tree.remove(key.borrow())
+    }
+
+    /// Atomically read-modify-write a value using a [`MergeOperator`].
+    ///
+    /// Reads the current value for `key` (if any), passes the raw bytes to
+    /// `operator.merge()` along with `operand`, and writes the result back.
+    /// If the operator returns `None`, the key is removed.
+    ///
+    /// This is equivalent to a get-then-insert but expressed as a single call.
+    /// The operation is atomic within the current write transaction.
+    pub fn merge<'k>(
+        &mut self,
+        key: impl Borrow<K::SelfType<'k>>,
+        operand: &[u8],
+        operator: &dyn MergeOperator,
+    ) -> Result<()> {
+        let key_ref = key.borrow();
+
+        // Copy key and existing value bytes, then drop the access guard
+        // to release the immutable borrow before calling insert/remove.
+        // This is the same pattern used by pop_first()/pop_last().
+        let key_bytes = K::as_bytes(key_ref).as_ref().to_vec();
+        let existing_bytes: Option<Vec<u8>> = {
+            let guard = self.get(key_ref)?;
+            guard.map(|g| V::as_bytes(&g.value()).as_ref().to_vec())
+        };
+
+        let merged = operator.merge(&key_bytes, existing_bytes.as_deref(), operand);
+
+        let key_ref = K::from_bytes(&key_bytes);
+        match merged {
+            Some(new_bytes) => {
+                let new_value = V::from_bytes(&new_bytes);
+                self.insert(&key_ref, &new_value)?;
+            }
+            None => {
+                self.remove(&key_ref)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Type-safe variant of [`merge()`](Self::merge) that serializes the operand
+    /// via `V::as_bytes()` before passing it to the operator.
+    pub fn merge_in<'k, 'v>(
+        &mut self,
+        key: impl Borrow<K::SelfType<'k>>,
+        operand: impl Borrow<V::SelfType<'v>>,
+        operator: &dyn MergeOperator,
+    ) -> Result<()> {
+        let operand_bytes = V::as_bytes(operand.borrow()).as_ref().to_vec();
+        self.merge(key, &operand_bytes, operator)
     }
 }
 

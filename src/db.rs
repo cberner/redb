@@ -225,7 +225,7 @@ pub enum VerifyLevel {
     Header,
     /// Header + per-page XXH3-128 checksums (medium: walks all B-tree pages)
     Pages,
-    /// Full: checksums + B-tree structural integrity — key ordering, valid child
+    /// Full: checksums + B-tree structural integrity -- key ordering, valid child
     /// pointers, consistent tree depth (slow: walks and decodes entire tree)
     Full,
 }
@@ -664,7 +664,7 @@ impl Database {
     /// Creates a consistent backup of the database at the given path.
     ///
     /// The backup captures a snapshot of the last committed transaction. This method
-    /// can be called while other read or write transactions are active — it will not
+    /// can be called while other read or write transactions are active -- it will not
     /// block writers and will not include uncommitted data.
     ///
     /// The resulting file is a valid redb database. Open it with [`Database::open`]
@@ -992,7 +992,7 @@ impl Database {
 
         let old_region_length = stats.region_bytes;
 
-        // ── Pass 1: Append live blobs after current region end ────────────────
+        // -- Pass 1: Append live blobs after current region end ----------------
         let (blobs_relocated, total_live_size) = {
             let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
             let result = txn.compact_blobs_pass(false);
@@ -1009,7 +1009,7 @@ impl Database {
             }
         };
 
-        // ── Pass 2: Shift data to region start ───────────────────────────────
+        // -- Pass 2: Shift data to region start -------------------------------
         {
             let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
             let result = txn.compact_blobs_pass(true);
@@ -1025,7 +1025,7 @@ impl Database {
             }
         }
 
-        // ── Truncate the file ────────────────────────────────────────────────
+        // -- Truncate the file ------------------------------------------------
         let blob_state = self.mem.get_blob_state();
         let target_len = blob_state.region_offset + blob_state.region_length;
         if target_len > 0 {
@@ -1430,7 +1430,7 @@ impl Database {
     ///
     /// The batch closure receives a `&WriteTransaction` and performs all desired
     /// mutations (open tables, insert, remove, etc.). Do not call `commit()` or
-    /// `abort()` within the closure — the group committer manages the transaction
+    /// `abort()` within the closure -- the group committer manages the transaction
     /// lifecycle.
     ///
     /// If any batch in a group fails, the entire group is rolled back. The failed

@@ -172,7 +172,7 @@ pub struct AccessGuard<'a, V: Value + 'static> {
     offset: usize,
     len: usize,
     on_drop: OnDrop,
-    // Boxed to minimize struct size — AccessGuard is returned from recursive B-tree
+    // Boxed to minimize struct size -- AccessGuard is returned from recursive B-tree
     // operations, and every byte matters for stack depth on Windows (1MB default stack).
     decompressed_value: Option<Box<[u8]>>,
     _value_type: PhantomData<V>,
@@ -199,7 +199,7 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
         let raw = &page.memory()[range.clone()];
         match decompress_value(raw)? {
             Cow::Borrowed(_) => {
-                // Uncompressed passthrough — flags byte stripped, data starts at offset+1
+                // Uncompressed passthrough -- flags byte stripped, data starts at offset+1
                 Ok(Self::with_page(page, (range.start + 1)..range.end))
             }
             Cow::Owned(decompressed) => Ok(Self::with_owned_value(decompressed)),
@@ -223,7 +223,7 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
         let raw = &page[range.clone()];
         match decompress_value(raw)? {
             Cow::Borrowed(_) => {
-                // Uncompressed — flags byte stripped, skip 1 byte
+                // Uncompressed -- flags byte stripped, skip 1 byte
                 Ok(Self::with_arc_page(page, (range.start + 1)..range.end))
             }
             Cow::Owned(decompressed) => Ok(Self::with_owned_value(decompressed)),
@@ -247,7 +247,7 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
     pub(crate) fn with_owned_value_decompress(value: Vec<u8>) -> Result<Self> {
         match decompress_value(&value)? {
             Cow::Borrowed(_) => {
-                // Not compressed envelope — strip flags byte
+                // Not compressed envelope -- strip flags byte
                 Ok(Self::with_owned_value(value[1..].to_vec()))
             }
             Cow::Owned(decompressed) => Ok(Self::with_owned_value(decompressed)),
@@ -289,7 +289,7 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
         let raw = &page.memory()[offset..(offset + len)];
         let decompressed_value = match decompress_value(raw)? {
             Cow::Borrowed(_) => {
-                // Uncompressed — strip flags byte
+                // Uncompressed -- strip flags byte
                 Some(raw[1..].to_vec().into_boxed_slice())
             }
             Cow::Owned(decompressed) => Some(decompressed.into_boxed_slice()),

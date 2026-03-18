@@ -67,7 +67,7 @@ impl fmt::Debug for ContentType {
 }
 
 // ---------------------------------------------------------------------------
-// BlobId — 16-byte unique identifier for a blob
+// BlobId -- 16-byte unique identifier for a blob
 // ---------------------------------------------------------------------------
 
 /// Unique identifier for a blob in the store.
@@ -184,7 +184,7 @@ impl Key for BlobId {
 }
 
 // ---------------------------------------------------------------------------
-// BlobRef — 40-byte on-disk pointer to blob data in the append-only region
+// BlobRef -- 40-byte on-disk pointer to blob data in the append-only region
 // ---------------------------------------------------------------------------
 
 /// On-disk reference to blob data stored in the append-only blob region.
@@ -301,13 +301,13 @@ impl Value for BlobRef {
 }
 
 // ---------------------------------------------------------------------------
-// BlobMeta — full metadata per blob (137 bytes, fixed-width)
+// BlobMeta -- full metadata per blob (137 bytes, fixed-width)
 // ---------------------------------------------------------------------------
 
 /// Complete metadata for a stored blob, combining the on-disk reference
 /// with temporal and causal information.
 ///
-/// Stored as the value in the primary `BLOB_TABLE` system table (`BlobId` → `BlobMeta`).
+/// Stored as the value in the primary `BLOB_TABLE` system table (`BlobId` -> `BlobMeta`).
 #[derive(Clone)]
 pub struct BlobMeta {
     pub blob_ref: BlobRef,
@@ -478,7 +478,7 @@ impl Value for BlobMeta {
 }
 
 // ---------------------------------------------------------------------------
-// RelationType — describes the semantic relationship in a causal edge
+// RelationType -- describes the semantic relationship in a causal edge
 // ---------------------------------------------------------------------------
 
 /// Semantic relationship type for a causal edge between two blobs.
@@ -532,7 +532,7 @@ impl fmt::Debug for RelationType {
 }
 
 // ---------------------------------------------------------------------------
-// CausalEdge — 80-byte fixed-width edge metadata in causal graph
+// CausalEdge -- 80-byte fixed-width edge metadata in causal graph
 // ---------------------------------------------------------------------------
 
 /// Rich metadata for a causal edge between two blobs, stored as the value
@@ -549,7 +549,7 @@ pub struct CausalEdge {
     pub child: BlobId,
     /// Semantic relationship from parent to child.
     pub relation: RelationType,
-    /// Length of the context string (0–62).
+    /// Length of the context string (0-62).
     pub context_len: u8,
     /// UTF-8 context describing the reason for this causal link.
     pub context: [u8; 62],
@@ -660,7 +660,7 @@ impl Value for CausalEdge {
 }
 
 // ---------------------------------------------------------------------------
-// CausalLink — API input for creating causal edges
+// CausalLink -- API input for creating causal edges
 // ---------------------------------------------------------------------------
 
 /// User-facing input for specifying a causal link when storing a blob.
@@ -698,7 +698,7 @@ impl CausalLink {
 pub type CausalPath = Vec<(BlobId, Option<CausalEdge>)>;
 
 // ---------------------------------------------------------------------------
-// TagKey — 49-byte composite key for the blob tag index
+// TagKey -- 49-byte composite key for the blob tag index
 // ---------------------------------------------------------------------------
 
 /// Composite key for the `BLOB_TAG_INDEX` B-tree.
@@ -835,7 +835,7 @@ impl Key for TagKey {
 }
 
 // ---------------------------------------------------------------------------
-// NamespaceKey — 80-byte composite key for the namespace index
+// NamespaceKey -- 80-byte composite key for the namespace index
 // ---------------------------------------------------------------------------
 
 /// Composite key for the `BLOB_NAMESPACE_INDEX` B-tree.
@@ -969,7 +969,7 @@ impl Key for NamespaceKey {
 }
 
 // ---------------------------------------------------------------------------
-// NamespaceVal — 64-byte value storing namespace for a blob
+// NamespaceVal -- 64-byte value storing namespace for a blob
 // ---------------------------------------------------------------------------
 
 /// Namespace value stored per blob in the `BLOB_NAMESPACE` table.
@@ -1057,7 +1057,7 @@ impl Value for NamespaceVal {
 }
 
 // ---------------------------------------------------------------------------
-// StoreOptions — API input for blob storage with tags and namespace
+// StoreOptions -- API input for blob storage with tags and namespace
 // ---------------------------------------------------------------------------
 
 /// Options for storing a blob, grouping causal link, tags, and namespace.
@@ -1110,7 +1110,7 @@ impl StoreOptions {
 pub const MAX_TAGS_PER_BLOB: usize = 8;
 
 // ---------------------------------------------------------------------------
-// BlobInput — convenience struct for batch blob storage
+// BlobInput -- convenience struct for batch blob storage
 // ---------------------------------------------------------------------------
 
 /// Input for `store_blob_batch`. Groups blob data with its metadata.
@@ -1122,7 +1122,7 @@ pub struct BlobInput<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// TemporalKey — 32-byte composite key for temporal blob indexing
+// TemporalKey -- 32-byte composite key for temporal blob indexing
 // ---------------------------------------------------------------------------
 
 /// Composite key for the temporal index B-tree.
@@ -1275,7 +1275,7 @@ const _: () = {
 };
 
 // ---------------------------------------------------------------------------
-// Sha256Key — 32-byte content hash key for the dedup index
+// Sha256Key -- 32-byte content hash key for the dedup index
 // ---------------------------------------------------------------------------
 
 /// SHA-256 content hash used as a key in the blob dedup index.
@@ -1360,7 +1360,7 @@ impl Key for Sha256Key {
 }
 
 // ---------------------------------------------------------------------------
-// DedupVal — 40-byte value in the dedup index
+// DedupVal -- 40-byte value in the dedup index
 // ---------------------------------------------------------------------------
 
 /// Value stored in `BLOB_DEDUP_INDEX`, tracking the physical location and
@@ -1448,7 +1448,7 @@ impl Value for DedupVal {
 }
 
 // ---------------------------------------------------------------------------
-// BlobDedupConfig — database-level dedup configuration
+// BlobDedupConfig -- database-level dedup configuration
 // ---------------------------------------------------------------------------
 
 /// Configuration for content-addressable blob deduplication.
@@ -1472,7 +1472,7 @@ impl Default for BlobDedupConfig {
 }
 
 // ---------------------------------------------------------------------------
-// DedupStats — dedup statistics returned by query methods
+// DedupStats -- dedup statistics returned by query methods
 // ---------------------------------------------------------------------------
 
 /// Statistics about content-addressable blob deduplication.
@@ -1795,7 +1795,7 @@ mod tests {
     }
 }
 
-// ─── Blob Compaction Types ──────────────────────────────────────────────────
+// --- Blob Compaction Types --------------------------------------------------
 
 /// Statistics about blob region space usage.
 ///
@@ -1811,7 +1811,7 @@ pub struct BlobStats {
     pub region_bytes: u64,
     /// Bytes reclaimable by compaction (`region_bytes - live_bytes`).
     pub dead_bytes: u64,
-    /// Ratio of dead bytes to region bytes (0.0–1.0). Higher means more waste.
+    /// Ratio of dead bytes to region bytes (0.0-1.0). Higher means more waste.
     pub fragmentation_ratio: f64,
 }
 

@@ -93,6 +93,10 @@ pub use blob_store::{
     CausalEdge, CausalLink, CausalPath, ContentType, DedupStats, MAX_TAGS_PER_BLOB, NamespaceKey,
     NamespaceVal, RelationType, Sha256Key, StoreOptions, TagKey, TemporalKey,
 };
+pub use merge::{
+    BitwiseOr, BytesAppend, FnMergeOperator, MergeOperator, NumericAdd, NumericMax, NumericMin,
+    merge_fn,
+};
 pub use temporal::HybridLogicalClock;
 pub use ttl_table::{ReadOnlyTtlTable, TtlAccessGuard, TtlRange, TtlTable, TtlTableDefinition};
 
@@ -105,6 +109,7 @@ mod db;
 mod error;
 pub mod group_commit;
 mod legacy_tuple_types;
+pub mod merge;
 mod multimap_table;
 mod sealed;
 mod table;
