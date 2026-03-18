@@ -1,4 +1,4 @@
-use crate::tree_store::page_store::base::MAX_PAGE_INDEX;
+use crate::tree_store::page_store::base::MAX_REGIONS;
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::DatabaseLayout;
@@ -16,11 +16,7 @@ impl RegionTracker {
     pub(crate) fn new(regions: u32, orders: u8) -> Self {
         let mut data = vec![];
         for _ in 0..orders {
-            data.push(BtreeBitmap::new_padded(
-                regions,
-                regions,
-                MAX_PAGE_INDEX + 1,
-            ));
+            data.push(BtreeBitmap::new_padded(regions, regions, MAX_REGIONS));
         }
         Self {
             order_trackers: data,
