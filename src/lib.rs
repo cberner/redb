@@ -99,6 +99,11 @@ pub use merge::{
 };
 pub use temporal::HybridLogicalClock;
 pub use ttl_table::{ReadOnlyTtlTable, TtlAccessGuard, TtlRange, TtlTable, TtlTableDefinition};
+pub use vector::{DynVec, FixedVec};
+pub use vector_ops::{
+    cosine_similarity, dot_product, euclidean_distance_sq, manhattan_distance, read_f32_le,
+    write_f32_le,
+};
 
 pub type Result<T = (), E = StorageError> = std::result::Result<T, E>;
 
@@ -120,6 +125,8 @@ mod tree_store;
 pub mod ttl_table;
 mod tuple_types;
 mod types;
+pub mod vector;
+pub mod vector_ops;
 
 #[cfg(test)]
 fn create_tempfile() -> tempfile::NamedTempFile {
