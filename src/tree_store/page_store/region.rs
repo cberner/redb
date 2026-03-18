@@ -16,7 +16,7 @@ impl RegionTracker {
     pub(crate) fn new(regions: u32, orders: u8) -> Self {
         let mut data = vec![];
         for _ in 0..orders {
-            data.push(BtreeBitmap::new(regions, MAX_REGIONS));
+            data.push(BtreeBitmap::new_padded(regions, regions, MAX_REGIONS));
         }
         Self {
             order_trackers: data,
