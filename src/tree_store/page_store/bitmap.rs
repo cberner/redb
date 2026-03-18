@@ -1,4 +1,3 @@
-use crate::tree_store::page_store::base::MAX_PAGE_INDEX;
 use crate::tree_store::page_store::xxh3_checksum;
 use std::mem::size_of;
 
@@ -130,28 +129,33 @@ impl BtreeBitmap {
             num_pages = num_pages.div_ceil(64);
         }
 
-        // Pad to the height needed for the maximum supported region count
-        // so that resize() never needs to insert new tree levels. Each
-        // extra level costs ~36 bytes (a single-entry U64GroupedBitmap).
-        // All bits start set (full), so every parent is trivially full too.
-        let max_height = Self::max_height();
-        while heights.len() < max_height {
-            let parent_len = heights.last().unwrap().len().div_ceil(64);
-            heights.push(U64GroupedBitmap::new_full(parent_len, parent_len));
-        }
-
         // Reverse so that the root is at index 0
         heights.reverse();
 
         Self { heights }
     }
 
-    // Height needed for the maximum supported region count (MAX_PAGE_INDEX + 1).
-    fn max_height() -> usize {
+    // Like new(), but pads the tree height for max_capacity so resize()
+    // never needs to insert new levels.
+    pub(crate) fn new_padded(num_pages: u32, capacity: u32, max_capacity: u32) -> Self {
+        let mut result = Self::new(num_pages, capacity);
+
+        let max_height = Self::height_for_capacity(max_capacity);
+        while result.heights.len() < max_height {
+            let root_len = result.heights[0].len();
+            let parent_len = root_len.div_ceil(64);
+            result
+                .heights
+                .insert(0, U64GroupedBitmap::new_full(parent_len, parent_len));
+        }
+
+        result
+    }
+
+    fn height_for_capacity(mut capacity: u32) -> usize {
         let mut height = 1;
-        let mut cap = MAX_PAGE_INDEX + 1;
-        while cap > 64 {
-            cap = cap.div_ceil(64);
+        while capacity > 64 {
+            capacity = capacity.div_ceil(64);
             height += 1;
         }
         height
@@ -452,17 +456,16 @@ mod test {
 
     #[test]
     fn resize_beyond_initial_capacity() {
-        let mut bm = BtreeBitmap::new(60, 60);
+        let mut bm = BtreeBitmap::new_padded(60, 60, 1_048_576);
         let height = bm.heights.len();
 
         bm.clear(0);
         bm.clear(30);
         bm.clear(59);
 
-        // Resize well beyond initial capacity
         bm.resize(5000, true);
 
-        // Height is pre-padded at construction, so it stays the same
+        // Height is pre-padded at construction, stays the same
         assert_eq!(bm.heights.len(), height);
 
         // Previously cleared bits survive the resize
