@@ -15,7 +15,8 @@
 //! The flags byte is self-describing: decompression never needs config.
 
 use crate::{Result, StorageError};
-use std::borrow::Cow;
+use alloc::borrow::Cow;
+use alloc::vec::Vec;
 
 /// User-facing compression configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

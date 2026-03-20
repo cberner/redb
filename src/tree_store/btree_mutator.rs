@@ -1,3 +1,4 @@
+use crate::compat::Mutex;
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
     LeafBuilder, LeafMutator,
@@ -13,9 +14,11 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
-use std::cmp::{max, min};
-use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::cmp::{max, min};
+use core::marker::PhantomData;
 
 // TODO: it seems like Checksum can be removed from most/all of these, now that we're using deferred checksums
 #[derive(Debug)]
@@ -116,7 +119,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
     fn conditional_free(&mut self, page_number: PageNumber) {
         if self.modify_uncommitted {
-            let mut allocated = self.allocated.lock().unwrap();
+            let mut allocated = self.allocated.lock();
             if !self.mem.free_if_uncommitted(page_number, &mut allocated) {
                 self.freed.push(page_number);
             }
@@ -366,7 +369,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         if self.modify_uncommitted && self.mem.uncommitted(page_number) {
                             let arc = page.to_arc();
                             drop(page);
-                            let mut allocated = self.allocated.lock().unwrap();
+                            let mut allocated = self.allocated.lock();
                             self.mem.free(page_number, &mut allocated);
                             if self.compression.is_enabled() {
                                 Some(AccessGuard::with_arc_page_decompress(arc, start..end)?)
@@ -409,7 +412,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         if self.modify_uncommitted && self.mem.uncommitted(page_number) {
                             let arc = page.to_arc();
                             drop(page);
-                            let mut allocated = self.allocated.lock().unwrap();
+                            let mut allocated = self.allocated.lock();
                             self.mem.free(page_number, &mut allocated);
                             if self.compression.is_enabled() {
                                 Some(AccessGuard::with_arc_page_decompress(arc, start..end)?)
@@ -701,7 +704,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             let page_number = page.get_page_number();
             let arc = page.to_arc();
             drop(page);
-            let mut allocated = self.allocated.lock().unwrap();
+            let mut allocated = self.allocated.lock();
             self.mem.free(page_number, &mut allocated);
             if self.compression.is_enabled() {
                 Some(AccessGuard::with_arc_page_decompress(arc, start..end)?)

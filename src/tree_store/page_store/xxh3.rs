@@ -22,7 +22,8 @@
 
 // Copied from xxh3 crate, commit hash e91f09d1e930e179c11d5cfda6d14284bfb006f8
 
-use std::mem::size_of;
+use alloc::vec::Vec;
+use core::mem::size_of;
 
 const STRIPE_LENGTH: usize = 64;
 const SECRET_CONSUME_RATE: usize = 8;
@@ -165,9 +166,9 @@ unsafe fn scramble_accumulators_avx2(
 ) {
     unsafe {
         #[cfg(target_arch = "x86")]
-        use std::arch::x86::*;
+        use core::arch::x86::*;
         #[cfg(target_arch = "x86_64")]
-        use std::arch::x86_64::*;
+        use core::arch::x86_64::*;
 
         #[allow(clippy::cast_possible_truncation)]
         let simd_prime = _mm256_set1_epi32(PRIME32[0] as i32);
@@ -198,9 +199,9 @@ unsafe fn scramble_accumulators_neon(
     secret: &[u8],
 ) {
     #[cfg(target_arch = "aarch64")]
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
     #[cfg(target_arch = "arm")]
-    use std::arch::arm::*;
+    use core::arch::arm::*;
 
     unsafe {
         let prime = vdup_n_u32(PRIME32[0].try_into().unwrap());
@@ -293,9 +294,9 @@ fn gen_secret_generic(seed: u64) -> [u8; DEFAULT_SECRET.len()] {
 unsafe fn gen_secret_avx2(seed: u64) -> [u8; DEFAULT_SECRET.len()] {
     unsafe {
         #[cfg(target_arch = "x86")]
-        use std::arch::x86::*;
+        use core::arch::x86::*;
         #[cfg(target_arch = "x86_64")]
-        use std::arch::x86_64::*;
+        use core::arch::x86_64::*;
 
         #[allow(clippy::cast_possible_wrap)]
         let xxh_i64 = 0u64.wrapping_sub(seed) as i64;
@@ -320,9 +321,9 @@ unsafe fn gen_secret_avx2(seed: u64) -> [u8; DEFAULT_SECRET.len()] {
 #[cfg(target_arch = "aarch64")]
 unsafe fn accumulate_stripe_neon(accumulators: &mut [u64; 8], data: &[u8], secret: &[u8]) {
     #[cfg(target_arch = "aarch64")]
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
     #[cfg(target_arch = "arm")]
-    use std::arch::arm::*;
+    use core::arch::arm::*;
 
     unsafe {
         let accum_ptr = accumulators.as_mut_ptr();
@@ -354,9 +355,9 @@ unsafe fn accumulate_stripe_neon(accumulators: &mut [u64; 8], data: &[u8], secre
 unsafe fn accumulate_stripe_avx2(accumulators: &mut [u64; 8], data: &[u8], secret: &[u8]) {
     unsafe {
         #[cfg(target_arch = "x86")]
-        use std::arch::x86::*;
+        use core::arch::x86::*;
         #[cfg(target_arch = "x86_64")]
-        use std::arch::x86_64::*;
+        use core::arch::x86_64::*;
 
         let data_ptr = data.as_ptr();
         let secret_ptr = secret.as_ptr();

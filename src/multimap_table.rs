@@ -1,3 +1,4 @@
+use crate::compat::{HashMap, Mutex};
 use crate::db::{CorruptPageInfo, TransactionGuard};
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
@@ -10,15 +11,17 @@ use crate::tree_store::{
 };
 use crate::types::{Key, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
-use std::borrow::Borrow;
-use std::cmp::max;
-use std::collections::HashMap;
-use std::convert::TryInto;
-use std::marker::PhantomData;
-use std::mem;
-use std::mem::size_of;
-use std::ops::{RangeBounds, RangeFull};
-use std::sync::{Arc, Mutex};
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::cmp::max;
+use core::convert::TryInto;
+use core::marker::PhantomData;
+use core::mem;
+use core::mem::size_of;
+use core::ops::{RangeBounds, RangeFull};
 
 pub(crate) fn multimap_btree_stats(
     root: Option<PageNumber>,
@@ -359,7 +362,7 @@ pub(crate) fn relocate_subtrees(
     // there can't be any savepoints
     let mut ignore = PageTrackerPolicy::Ignore;
     if !mem.free_if_uncommitted(old_page_number, &mut ignore) {
-        freed_pages.lock().unwrap().push(old_page_number);
+        freed_pages.lock().push(old_page_number);
     }
     Ok((new_page_number, DEFERRED))
 }
@@ -421,7 +424,7 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
 
     let root = tree.finalize_dirty_checksums()?;
     // No pages should have been freed by this operation
-    assert!(freed_pages.lock().unwrap().is_empty());
+    assert!(freed_pages.lock().is_empty());
     Ok(root)
 }
 
@@ -625,8 +628,8 @@ struct DynamicCollection<V: Key> {
     data: [u8],
 }
 
-impl<V: Key> std::fmt::Debug for DynamicCollection<V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<V: Key> core::fmt::Debug for DynamicCollection<V> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DynamicCollection")
             .field("data", &&self.data)
             .finish()
@@ -668,7 +671,7 @@ impl<V: Key> Value for &DynamicCollection<V> {
 
 impl<V: Key> DynamicCollection<V> {
     fn new(data: &[u8]) -> &Self {
-        unsafe { &*(std::ptr::from_ref::<[u8]>(data) as *const DynamicCollection<V>) }
+        unsafe { &*(core::ptr::from_ref::<[u8]>(data) as *const DynamicCollection<V>) }
     }
 
     fn collection_type(&self) -> DynamicCollectionType {
@@ -812,7 +815,7 @@ impl UntypedDynamicCollection {
     }
 
     fn new(data: &[u8]) -> &Self {
-        unsafe { &*(std::ptr::from_ref::<[u8]>(data) as *const UntypedDynamicCollection) }
+        unsafe { &*(core::ptr::from_ref::<[u8]>(data) as *const UntypedDynamicCollection) }
     }
 
     fn make_subtree_data(header: BtreeHeader) -> Vec<u8> {
@@ -965,8 +968,8 @@ impl<V: Key + 'static> Drop for MultimapValue<'_, V> {
         // Drop our references to the pages that are about to be freed
         drop(mem::take(&mut self.inner));
         if !self.free_on_drop.is_empty() {
-            let mut freed_pages = self.freed_pages.as_ref().unwrap().lock().unwrap();
-            let mut allocated_pages = self.allocated_pages.lock().unwrap();
+            let mut freed_pages = self.freed_pages.as_ref().unwrap().lock();
+            let mut allocated_pages = self.allocated_pages.lock();
             for page in &self.free_on_drop {
                 if !self
                     .mem
@@ -1190,7 +1193,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                             .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                     } else {
                         // convert into a subtree
-                        let mut allocated = self.allocated_pages.lock().unwrap();
+                        let mut allocated = self.allocated_pages.lock();
                         let mut page = self.mem.allocate(leaf_data.len(), &mut allocated)?;
                         drop(allocated);
                         page.memory_mut()[..leaf_data.len()].copy_from_slice(leaf_data);
@@ -1375,9 +1378,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                                 self.tree
                                     .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                                 drop(page);
-                                let mut allocated_pages = self.allocated_pages.lock().unwrap();
+                                let mut allocated_pages = self.allocated_pages.lock();
                                 if !self.mem.free_if_uncommitted(new_root, &mut allocated_pages) {
-                                    (*self.freed_pages).lock().unwrap().push(new_root);
+                                    (*self.freed_pages).lock().push(new_root);
                                 }
                             } else {
                                 let subtree_data =

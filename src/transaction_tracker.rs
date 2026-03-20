@@ -1,12 +1,15 @@
+use crate::compat::HashMap;
+#[cfg(not(feature = "std"))]
+use crate::compat::Mutex;
 use crate::tree_store::TransactionalMemory;
 use crate::{Key, Result, Savepoint, TypeName, Value};
+use alloc::collections::{BTreeMap, BTreeSet};
+use core::cmp::Ordering;
+use core::mem;
+use core::mem::size_of;
 #[cfg(feature = "logging")]
 use log::debug;
-use std::cmp::Ordering;
-use std::collections::btree_map::BTreeMap;
-use std::collections::{BTreeSet, HashMap};
-use std::mem;
-use std::mem::size_of;
+#[cfg(feature = "std")]
 use std::sync::{Condvar, Mutex};
 
 #[derive(Copy, Clone, Hash, Ord, PartialOrd, Eq, PartialEq, Debug)]
@@ -93,6 +96,7 @@ struct State {
 
 pub(crate) struct TransactionTracker {
     state: Mutex<State>,
+    #[cfg(feature = "std")]
     live_write_transaction_available: Condvar,
 }
 
@@ -108,10 +112,12 @@ impl TransactionTracker {
                 pending_non_durable_commits: Default::default(),
                 unprocessed_freed_non_durable_commits: Default::default(),
             }),
+            #[cfg(feature = "std")]
             live_write_transaction_available: Condvar::new(),
         }
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn start_write_transaction(&self) -> TransactionId {
         let mut state = self.state.lock().unwrap();
         while state.live_write_transaction.is_some() {
@@ -126,6 +132,23 @@ impl TransactionTracker {
         transaction_id
     }
 
+    #[cfg(not(feature = "std"))]
+    pub(crate) fn start_write_transaction(&self) -> TransactionId {
+        loop {
+            let mut state = self.state.lock();
+            if state.live_write_transaction.is_none() {
+                let transaction_id = state.next_transaction_id.increment();
+                #[cfg(feature = "logging")]
+                debug!("Beginning write transaction id={transaction_id:?}");
+                state.live_write_transaction = Some(transaction_id);
+                return transaction_id;
+            }
+            drop(state);
+            core::hint::spin_loop();
+        }
+    }
+
+    #[cfg(feature = "std")]
     pub(crate) fn end_write_transaction(&self, id: TransactionId) {
         let mut state = self.state.lock().unwrap();
         assert_eq!(state.live_write_transaction.unwrap(), id);
@@ -133,8 +156,18 @@ impl TransactionTracker {
         self.live_write_transaction_available.notify_one();
     }
 
+    #[cfg(not(feature = "std"))]
+    pub(crate) fn end_write_transaction(&self, id: TransactionId) {
+        let mut state = self.state.lock();
+        assert_eq!(state.live_write_transaction.unwrap(), id);
+        state.live_write_transaction = None;
+    }
+
     pub(crate) fn clear_pending_non_durable_commits(&self) {
+        #[cfg(feature = "std")]
         let mut state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.lock();
         let ids = mem::take(&mut state.pending_non_durable_commits);
         for (_, durable_ancestor) in ids {
             let ref_count = state
@@ -149,17 +182,26 @@ impl TransactionTracker {
     }
 
     pub(crate) fn is_unprocessed_non_durable_commit(&self, id: TransactionId) -> bool {
+        #[cfg(feature = "std")]
         let state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let state = self.state.lock();
         state.unprocessed_freed_non_durable_commits.contains(&id)
     }
 
     pub(crate) fn mark_unprocessed_non_durable_commit(&self, id: TransactionId) {
+        #[cfg(feature = "std")]
         let mut state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.lock();
         state.unprocessed_freed_non_durable_commits.remove(&id);
     }
 
     pub(crate) fn oldest_unprocessed_non_durable_commit(&self) -> Option<TransactionId> {
+        #[cfg(feature = "std")]
         let state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let state = self.state.lock();
         state
             .unprocessed_freed_non_durable_commits
             .iter()
@@ -172,7 +214,10 @@ impl TransactionTracker {
         id: TransactionId,
         durable_ancestor: TransactionId,
     ) {
+        #[cfg(feature = "std")]
         let mut state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.lock();
         state
             .live_read_transactions
             .entry(durable_ancestor)
@@ -185,13 +230,19 @@ impl TransactionTracker {
     }
 
     pub(crate) fn restore_savepoint_counter_state(&self, next_savepoint: SavepointId) {
+        #[cfg(feature = "std")]
         let mut state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.lock();
         assert!(state.valid_savepoints.is_empty());
         state.next_savepoint_id = next_savepoint;
     }
 
     pub(crate) fn register_persistent_savepoint(&self, savepoint: &Savepoint) {
+        #[cfg(feature = "std")]
         let mut state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.lock();
         state
             .live_read_transactions
             .entry(savepoint.get_transaction_id())
@@ -206,7 +257,10 @@ impl TransactionTracker {
         &self,
         mem: &TransactionalMemory,
     ) -> Result<TransactionId> {
+        #[cfg(feature = "std")]
         let mut state = self.state.lock()?;
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.lock();
         let id = mem.get_last_committed_transaction_id()?;
         state
             .live_read_transactions
@@ -218,7 +272,10 @@ impl TransactionTracker {
     }
 
     pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) {
+        #[cfg(feature = "std")]
         let mut state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.lock();
         let ref_count = state.live_read_transactions.get_mut(&id).unwrap();
         *ref_count -= 1;
         if *ref_count == 0 {
@@ -227,11 +284,18 @@ impl TransactionTracker {
     }
 
     pub(crate) fn any_savepoint_exists(&self) -> bool {
-        !self.state.lock().unwrap().valid_savepoints.is_empty()
+        #[cfg(feature = "std")]
+        let state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let state = self.state.lock();
+        !state.valid_savepoints.is_empty()
     }
 
     pub(crate) fn allocate_savepoint(&self, transaction_id: TransactionId) -> SavepointId {
+        #[cfg(feature = "std")]
         let mut state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.lock();
         let id = state.next_savepoint_id.next();
         state.next_savepoint_id = id;
         state.valid_savepoints.insert(id, transaction_id);
@@ -240,53 +304,58 @@ impl TransactionTracker {
 
     // Deallocates the given savepoint and its matching reference count on the transcation
     pub(crate) fn deallocate_savepoint(&self, savepoint: SavepointId, transaction: TransactionId) {
-        self.state
-            .lock()
-            .unwrap()
-            .valid_savepoints
-            .remove(&savepoint);
+        {
+            #[cfg(feature = "std")]
+            let mut state = self.state.lock().unwrap();
+            #[cfg(not(feature = "std"))]
+            let mut state = self.state.lock();
+            state.valid_savepoints.remove(&savepoint);
+        }
         self.deallocate_read_transaction(transaction);
     }
 
     pub(crate) fn is_valid_savepoint(&self, id: SavepointId) -> bool {
-        self.state
-            .lock()
-            .unwrap()
-            .valid_savepoints
-            .contains_key(&id)
+        #[cfg(feature = "std")]
+        let state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let state = self.state.lock();
+        state.valid_savepoints.contains_key(&id)
     }
 
     pub(crate) fn invalidate_savepoints_after(&self, id: SavepointId) {
-        self.state
-            .lock()
-            .unwrap()
-            .valid_savepoints
-            .retain(|x, _| *x <= id);
+        #[cfg(feature = "std")]
+        let mut state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.lock();
+        state.valid_savepoints.retain(|x, _| *x <= id);
     }
 
     pub(crate) fn oldest_savepoint(&self) -> Option<(SavepointId, TransactionId)> {
-        self.state
-            .lock()
-            .unwrap()
+        #[cfg(feature = "std")]
+        let state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let state = self.state.lock();
+        state
             .valid_savepoints
             .first_key_value()
             .map(|x| (*x.0, *x.1))
     }
 
     pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
-        self.state
-            .lock()
-            .unwrap()
-            .live_read_transactions
-            .keys()
-            .next()
-            .copied()
+        #[cfg(feature = "std")]
+        let state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let state = self.state.lock();
+        state.live_read_transactions.keys().next().copied()
     }
 
     // Returns the transaction id of the oldest non-durable transaction which has not been processed
     // for freeing, which has live read transactions
     pub(crate) fn oldest_live_read_nondurable_transaction(&self) -> Option<TransactionId> {
+        #[cfg(feature = "std")]
         let state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let state = self.state.lock();
         for id in state.live_read_transactions.keys() {
             if state.pending_non_durable_commits.contains_key(id) {
                 return Some(*id);

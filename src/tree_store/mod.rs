@@ -17,7 +17,9 @@ pub(crate) use btree_base::{
 pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeExtractIf, BtreeRangeIter};
 pub use btree_iters::{RawEntryGuard, RawEntryIter};
 pub(crate) use page_store::ReadOnlyBackend;
-pub use page_store::{CompressionConfig, InMemoryBackend, Savepoint, file_backend};
+#[cfg(feature = "std")]
+pub use page_store::file_backend;
+pub use page_store::{CompressionConfig, InMemoryBackend, Savepoint};
 pub(crate) use page_store::{
     FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE, Page, PageHint, PageNumber,
     PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy, TransactionalMemory, Xxh3StreamHasher,

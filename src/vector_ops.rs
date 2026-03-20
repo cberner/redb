@@ -1,5 +1,6 @@
-use std::collections::BinaryHeap;
-use std::fmt::{self, Debug};
+use alloc::collections::BinaryHeap;
+use alloc::vec::Vec;
+use core::fmt::{self, Debug};
 
 use crate::vector::SQVec;
 
@@ -391,18 +392,18 @@ impl<K> PartialEq for Neighbor<K> {
 impl<K> Eq for Neighbor<K> {}
 
 impl<K> PartialOrd for Neighbor<K> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl<K> Ord for Neighbor<K> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         // BinaryHeap is a max-heap; we want the *largest* distance at the top
         // so we can efficiently evict it. This is standard top-k min-heap trick.
         self.distance
             .partial_cmp(&other.distance)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .unwrap_or(core::cmp::Ordering::Equal)
     }
 }
 
@@ -469,7 +470,7 @@ where
     results.sort_by(|a, b| {
         a.distance
             .partial_cmp(&b.distance)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .unwrap_or(core::cmp::Ordering::Equal)
     });
     results
 }
@@ -514,7 +515,7 @@ where
     results.sort_by(|a, b| {
         a.distance
             .partial_cmp(&b.distance)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .unwrap_or(core::cmp::Ordering::Equal)
     });
     results
 }

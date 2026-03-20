@@ -1,4 +1,6 @@
-use std::fmt::{self, Debug};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt::{self, Debug};
 
 /// Trait for atomic read-modify-write merge operations on raw byte values.
 ///

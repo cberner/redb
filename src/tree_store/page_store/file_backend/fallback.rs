@@ -1,6 +1,6 @@
+use crate::error::BackendError;
 use crate::{DatabaseError, Result, StorageBackend};
 use std::fs::File;
-use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
 
@@ -24,28 +24,44 @@ impl FileBackend {
 }
 
 impl StorageBackend for FileBackend {
-    fn len(&self) -> Result<u64, io::Error> {
-        Ok(self.file.lock().unwrap().metadata()?.len())
+    fn len(&self) -> core::result::Result<u64, BackendError> {
+        Ok(self
+            .file
+            .lock()
+            .unwrap()
+            .metadata()
+            .map_err(BackendError::Io)?
+            .len())
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> core::result::Result<(), BackendError> {
         let mut file = self.file.lock().unwrap();
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(out)?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(BackendError::Io)?;
+        file.read_exact(out).map_err(BackendError::Io)?;
         Ok(())
     }
 
-    fn set_len(&self, len: u64) -> Result<(), io::Error> {
-        self.file.lock().unwrap().set_len(len)
+    fn set_len(&self, len: u64) -> core::result::Result<(), BackendError> {
+        self.file
+            .lock()
+            .unwrap()
+            .set_len(len)
+            .map_err(BackendError::Io)
     }
 
-    fn sync_data(&self) -> Result<(), io::Error> {
-        self.file.lock().unwrap().sync_data()
+    fn sync_data(&self) -> core::result::Result<(), BackendError> {
+        self.file
+            .lock()
+            .unwrap()
+            .sync_data()
+            .map_err(BackendError::Io)
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
+    fn write(&self, offset: u64, data: &[u8]) -> core::result::Result<(), BackendError> {
         let mut file = self.file.lock().unwrap();
-        file.seek(SeekFrom::Start(offset))?;
-        file.write_all(data)
+        file.seek(SeekFrom::Start(offset))
+            .map_err(BackendError::Io)?;
+        file.write_all(data).map_err(BackendError::Io)
     }
 }

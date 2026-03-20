@@ -1,3 +1,4 @@
+use crate::error::BackendError;
 use crate::{DatabaseError, Result, StorageBackend};
 use std::fs::{File, TryLockError};
 use std::io;
@@ -54,65 +55,75 @@ impl FileBackend {
 }
 
 impl StorageBackend for FileBackend {
-    fn len(&self) -> Result<u64, io::Error> {
-        Ok(self.file.metadata()?.len())
+    fn len(&self) -> Result<u64, BackendError> {
+        Ok(self.file.metadata().map_err(BackendError::Io)?.len())
     }
 
     #[cfg(unix)]
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
-        self.file.read_exact_at(out, offset)?;
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
+        self.file
+            .read_exact_at(out, offset)
+            .map_err(BackendError::Io)?;
         Ok(())
     }
 
     #[cfg(target_os = "wasi")]
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
-        read_exact_at(&self.file, out, offset)?;
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
+        read_exact_at(&self.file, out, offset).map_err(BackendError::Io)?;
         Ok(())
     }
 
     #[cfg(windows)]
-    fn read(&self, mut offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+    fn read(&self, mut offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         let mut data_offset = 0;
         while data_offset < out.len() {
-            let read = self.file.seek_read(&mut out[data_offset..], offset)?;
+            let read = self
+                .file
+                .seek_read(&mut out[data_offset..], offset)
+                .map_err(BackendError::Io)?;
             offset += read as u64;
             data_offset += read;
         }
         Ok(())
     }
 
-    fn set_len(&self, len: u64) -> Result<(), io::Error> {
-        self.file.set_len(len)
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
+        self.file.set_len(len).map_err(BackendError::Io)
     }
 
-    fn sync_data(&self) -> Result<(), io::Error> {
-        self.file.sync_data()
+    fn sync_data(&self) -> Result<(), BackendError> {
+        self.file.sync_data().map_err(BackendError::Io)
     }
 
     #[cfg(unix)]
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
-        self.file.write_all_at(data, offset)
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
+        self.file
+            .write_all_at(data, offset)
+            .map_err(BackendError::Io)
     }
 
     #[cfg(target_os = "wasi")]
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
-        write_all_at(&self.file, data, offset)
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
+        write_all_at(&self.file, data, offset).map_err(BackendError::Io)
     }
 
     #[cfg(windows)]
-    fn write(&self, mut offset: u64, data: &[u8]) -> Result<(), io::Error> {
+    fn write(&self, mut offset: u64, data: &[u8]) -> Result<(), BackendError> {
         let mut data_offset = 0;
         while data_offset < data.len() {
-            let written = self.file.seek_write(&data[data_offset..], offset)?;
+            let written = self
+                .file
+                .seek_write(&data[data_offset..], offset)
+                .map_err(BackendError::Io)?;
             offset += written as u64;
             data_offset += written;
         }
         Ok(())
     }
 
-    fn close(&self) -> Result<(), io::Error> {
+    fn close(&self) -> Result<(), BackendError> {
         if self.lock_supported {
-            self.file.unlock()?;
+            self.file.unlock().map_err(BackendError::Io)?;
         }
 
         Ok(())
@@ -130,7 +141,7 @@ fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result
             libc::pread(
                 file.as_raw_fd(),
                 buf.as_mut_ptr() as _,
-                std::cmp::min(buf.len(), libc::ssize_t::MAX as _),
+                core::cmp::min(buf.len(), libc::ssize_t::MAX as _),
                 offset as _,
             )
         };
@@ -166,7 +177,7 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> 
             libc::pwrite(
                 file.as_raw_fd(),
                 buf.as_ptr() as _,
-                std::cmp::min(buf.len(), libc::ssize_t::MAX as _),
+                core::cmp::min(buf.len(), libc::ssize_t::MAX as _),
                 offset as _,
             )
         };

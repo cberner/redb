@@ -1,6 +1,7 @@
 use rand::RngExt;
 use rand::prelude::SliceRandom;
 use redb::backends::FileBackend;
+use redb::error::BackendError;
 use redb::{
     AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
     MultimapTableDefinition, MultimapValue, Range, ReadableDatabase, ReadableTable,
@@ -62,27 +63,27 @@ fn previous_io_error() {
     }
 
     impl StorageBackend for FailingBackend {
-        fn len(&self) -> Result<u64, std::io::Error> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), std::io::Error> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             if self.fail_flag.load(Ordering::SeqCst) {
-                Err(std::io::Error::from(ErrorKind::Other))
+                Err(BackendError::from(std::io::Error::from(ErrorKind::Other)))
             } else {
                 self.inner.sync_data()
             }
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             self.inner.write(offset, data)
         }
     }
@@ -1657,8 +1658,8 @@ fn does_not_exist() {
     let tmpfile = create_tempfile();
 
     let result = Database::open(tmpfile.path());
-    if let Err(DatabaseError::Storage(StorageError::Io(e))) = result {
-        assert!(matches!(e.kind(), ErrorKind::InvalidData));
+    if let Err(DatabaseError::Storage(StorageError::Corrupted(_))) = result {
+        // Empty file is detected as corrupted
     } else {
         panic!();
     }
@@ -1669,15 +1670,15 @@ fn invalid_database_file() {
     let mut tmpfile = create_tempfile();
     tmpfile.write_all(b"hi").unwrap();
     let result = Database::open(tmpfile.path());
-    if let Err(DatabaseError::Storage(StorageError::Io(e))) = result {
-        assert!(matches!(e.kind(), ErrorKind::InvalidData));
+    if let Err(DatabaseError::Storage(StorageError::Corrupted(_))) = result {
+        // Invalid magic number is detected as corrupted
     } else {
         panic!();
     }
 
     let result = Database::create(tmpfile.path());
-    if let Err(DatabaseError::Storage(StorageError::Io(e))) = result {
-        assert!(matches!(e.kind(), ErrorKind::InvalidData));
+    if let Err(DatabaseError::Storage(StorageError::Corrupted(_))) = result {
+        // Invalid existing file is detected as corrupted
     } else {
         panic!();
     }

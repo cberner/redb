@@ -1,7 +1,10 @@
 use crate::complex_types::{decode_varint_len, encode_varint_len};
 use crate::types::{Key, TypeName, Value};
-use std::borrow::Borrow;
-use std::cmp::Ordering;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::cmp::Ordering;
 
 fn serialize_tuple_elements_variable<const N: usize>(
     is_fixed_width: [bool; N],

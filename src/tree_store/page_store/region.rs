@@ -3,8 +3,10 @@ use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, MAX_MAX_PAGE_ORDER};
-use std::cmp::{self, max};
-use std::mem::size_of;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::cmp::{self, max};
+use core::mem::size_of;
 
 // Tracks the page orders that MAY BE free in each region. This data structure is optimistic, so
 // a region may not actually have a page free for a given order

@@ -1,5 +1,5 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 #![deny(clippy::all, clippy::pedantic, clippy::disallowed_methods)]
-// TODO: revisit this list and see if we can enable some
 #![allow(
     clippy::default_trait_access,
     clippy::if_not_else,
@@ -15,7 +15,6 @@
     clippy::unnecessary_wraps,
     clippy::unreadable_literal
 )]
-
 //! # redb
 //!
 //! A simple, portable, high-performance, ACID, embedded key-value store.
@@ -62,15 +61,18 @@
 //! [lmdb]: https://www.lmdb.tech/doc/
 //! [design]: https://github.com/cberner/redb/blob/master/docs/design.md
 
+extern crate alloc;
+
 pub use db::{
     Builder, CacheStats, CorruptPageInfo, Database, MultimapTableDefinition, MultimapTableHandle,
     ReadOnlyDatabase, ReadableDatabase, RepairSession, StorageBackend, TableDefinition,
     TableHandle, UntypedMultimapTableHandle, UntypedTableHandle, VerifyLevel, VerifyReport,
 };
 pub use error::{
-    CommitError, CompactionError, DatabaseError, Error, SavepointError, SetDurabilityError,
-    StorageError, TableError, TransactionError,
+    BackendError, CommitError, CompactionError, DatabaseError, Error, SavepointError,
+    SetDurabilityError, StorageError, TableError, TransactionError,
 };
+#[cfg(feature = "std")]
 pub use group_commit::{GroupCommitError, WriteBatch};
 pub use legacy_tuple_types::Legacy;
 pub use multimap_table::{
@@ -98,6 +100,7 @@ pub use merge::{
     merge_fn,
 };
 pub use temporal::HybridLogicalClock;
+#[cfg(feature = "std")]
 pub use ttl_table::{ReadOnlyTtlTable, TtlAccessGuard, TtlRange, TtlTable, TtlTableDefinition};
 pub use vector::{BinaryQuantized, DynVec, FixedVec, SQVec, ScalarQuantized};
 pub use vector_ops::{
@@ -107,13 +110,15 @@ pub use vector_ops::{
     sq_dot_product, sq_euclidean_distance_sq, write_f32_le,
 };
 
-pub type Result<T = (), E = StorageError> = std::result::Result<T, E>;
+pub type Result<T = (), E = StorageError> = core::result::Result<T, E>;
 
 pub mod backends;
 pub mod blob_store;
+mod compat;
 mod complex_types;
 mod db;
-mod error;
+pub mod error;
+#[cfg(feature = "std")]
 pub mod group_commit;
 mod legacy_tuple_types;
 pub mod merge;
@@ -124,6 +129,7 @@ pub mod temporal;
 mod transaction_tracker;
 mod transactions;
 mod tree_store;
+#[cfg(feature = "std")]
 pub mod ttl_table;
 mod tuple_types;
 mod types;
