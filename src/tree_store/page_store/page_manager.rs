@@ -17,6 +17,7 @@ use crate::tree_store::{Page, PageNumber, PageTrackerPolicy};
 use crate::{CacheStats, StorageBackend};
 use crate::{DatabaseError, Result, StorageError};
 use alloc::boxed::Box;
+#[cfg(feature = "std")]
 use alloc::format;
 use alloc::string::ToString;
 #[cfg(debug_assertions)]
@@ -335,6 +336,7 @@ impl TransactionalMemory {
     ///
     /// Returns `(Self, header_valid)` where `header_valid` is `true` when the
     /// primary commit slot checksum was intact (no slot swap needed).
+    #[cfg(feature = "std")]
     pub(crate) fn new_for_verify(
         storage: Box<dyn StorageBackend>,
         page_size: usize,
@@ -506,11 +508,13 @@ impl TransactionalMemory {
         assert!(self.allocated_pages.lock().insert(page));
     }
 
+    #[cfg(feature = "std")]
     #[cfg(debug_assertions)]
     pub(crate) fn all_allocated_pages(&self) -> Vec<PageNumber> {
         self.allocated_pages.lock().iter().copied().collect()
     }
 
+    #[cfg(feature = "std")]
     #[cfg(debug_assertions)]
     pub(crate) fn debug_check_allocator_consistency(&self) {
         let state = self.state.lock();
@@ -1393,11 +1397,13 @@ impl TransactionalMemory {
     }
 
     /// Flush all pending writes to the underlying storage
+    #[cfg(feature = "std")]
     pub(crate) fn flush_data(&self) -> Result {
         self.storage.flush()
     }
 
     /// Read raw bytes from the underlying storage, bypassing the cache
+    #[cfg(feature = "std")]
     pub(crate) fn read_raw(&self, offset: u64, buf: &mut [u8]) -> Result {
         let data = self.storage.read_direct(offset, buf.len())?;
         buf.copy_from_slice(&data);
@@ -1405,6 +1411,7 @@ impl TransactionalMemory {
     }
 
     /// Get the raw file length of the underlying storage
+    #[cfg(feature = "std")]
     pub(crate) fn raw_len(&self) -> Result<u64> {
         self.storage.raw_file_len()
     }

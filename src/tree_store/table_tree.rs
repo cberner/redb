@@ -1,8 +1,13 @@
 use crate::compat::{HashMap, HashSet, Mutex};
-use crate::db::{CorruptPageInfo, TransactionGuard};
+#[cfg(feature = "std")]
+use crate::db::CorruptPageInfo;
+use crate::db::TransactionGuard;
 use crate::error::TableError;
 use crate::multimap_table::{
     finalize_tree_and_subtree_checksums, multimap_btree_stats, verify_tree_and_subtree_checksums,
+};
+#[cfg(feature = "std")]
+use crate::multimap_table::{
     verify_tree_and_subtree_checksums_detailed, verify_tree_and_subtree_structure,
 };
 use crate::tree_store::btree::{UntypedBtreeMut, btree_stats};
@@ -151,6 +156,7 @@ impl TableTree {
 
     /// Verifies checksums for all tables, collecting corruption details.
     /// Returns (`pages_checked`, `corrupt_pages`).
+    #[cfg(feature = "std")]
     pub(crate) fn verify_checksums_detailed(&self) -> Result<(u64, Vec<CorruptPageInfo>)> {
         let mut total_pages = 0u64;
         let mut all_corruptions = Vec::new();
@@ -222,6 +228,7 @@ impl TableTree {
     }
 
     /// Verifies B-tree structural invariants for all tables.
+    #[cfg(feature = "std")]
     pub(crate) fn verify_structure_detailed(&self) -> Result<Vec<CorruptPageInfo>> {
         let mut all_corruptions = Vec::new();
 
@@ -397,6 +404,7 @@ impl TableTreeMut<'_> {
         self.tree.set_root(root);
     }
 
+    #[cfg(feature = "std")]
     #[cfg_attr(not(debug_assertions), expect(dead_code))]
     pub(crate) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
     where

@@ -1,5 +1,6 @@
 #[cfg(test)]
 use crate::compat::HashSet;
+#[cfg(feature = "std")]
 use crate::tree_store::PageNumber;
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
@@ -182,6 +183,7 @@ impl BuddyAllocator {
         free_pages
     }
 
+    #[cfg(feature = "std")]
     #[cfg_attr(not(debug_assertions), expect(dead_code))]
     #[cfg_attr(not(test), expect(clippy::unused_self))]
     #[cfg_attr(not(test), expect(unused_variables))]

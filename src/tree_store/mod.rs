@@ -16,6 +16,7 @@ pub(crate) use btree_base::{
 };
 pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeExtractIf, BtreeRangeIter};
 pub use btree_iters::{RawEntryGuard, RawEntryIter};
+#[cfg(feature = "std")]
 pub(crate) use page_store::ReadOnlyBackend;
 #[cfg(feature = "std")]
 pub use page_store::file_backend;

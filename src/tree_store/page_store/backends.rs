@@ -1,22 +1,26 @@
 use crate::StorageBackend;
 use crate::compat::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::error::BackendError;
+#[cfg(feature = "std")]
 use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
 use alloc::vec::Vec;
 
+#[cfg(feature = "std")]
 #[derive(Debug)]
 pub(crate) struct ReadOnlyBackend {
     inner: Box<dyn StorageBackend>,
 }
 
+#[cfg(feature = "std")]
 impl ReadOnlyBackend {
     pub fn new(inner: Box<dyn StorageBackend>) -> Self {
         Self { inner }
     }
 }
 
+#[cfg(feature = "std")]
 impl StorageBackend for ReadOnlyBackend {
     fn len(&self) -> Result<u64, BackendError> {
         self.inner.len()

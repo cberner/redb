@@ -11,8 +11,10 @@ use crate::transactions::{
 };
 use crate::tree_store::{
     Btree, BtreeHeader, CompressionConfig, InternalTableDefinition, PAGE_SIZE, PageHint,
-    PageNumber, ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    PageNumber, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
 };
+#[cfg(feature = "std")]
+use crate::tree_store::ReadOnlyBackend;
 use crate::types::{Key, Value};
 use crate::{
     CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError, TableError,
@@ -22,7 +24,9 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+#[cfg(feature = "std")]
 use alloc::vec;
+#[cfg(feature = "std")]
 use alloc::vec::Vec;
 use core::fmt::{Debug, Display, Formatter};
 use core::marker::PhantomData;
@@ -481,6 +485,7 @@ impl ReadOnlyDatabase {
         Builder::new().open_read_only(path)
     }
 
+    #[cfg(feature = "std")]
     fn new(
         file: Box<dyn StorageBackend>,
         page_size: usize,
@@ -633,6 +638,7 @@ impl Database {
     }
 
     /// Like `verify_primary_checksums` but collects per-page corruption details.
+    #[cfg(feature = "std")]
     pub(crate) fn verify_primary_checksums_detailed(
         mem: Arc<TransactionalMemory>,
     ) -> Result<(u64, Vec<CorruptPageInfo>)> {
@@ -663,6 +669,7 @@ impl Database {
     }
 
     /// Like `verify_primary_checksums` but verifies B-tree structural invariants.
+    #[cfg(feature = "std")]
     pub(crate) fn verify_primary_structure(
         mem: Arc<TransactionalMemory>,
     ) -> Result<Vec<CorruptPageInfo>> {

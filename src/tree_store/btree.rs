@@ -1,5 +1,7 @@
 use crate::compat::{HashMap, Mutex};
-use crate::db::{CorruptPageInfo, TransactionGuard};
+#[cfg(feature = "std")]
+use crate::db::CorruptPageInfo;
+use crate::db::TransactionGuard;
 use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
     LeafAccessor, branch_checksum, leaf_checksum,
@@ -14,7 +16,9 @@ use crate::tree_store::{
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result};
+#[cfg(feature = "std")]
 use alloc::format;
+#[cfg(feature = "std")]
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -873,6 +877,7 @@ impl RawBtree {
 
     /// Verifies all page checksums, collecting details for every corrupt page found.
     /// Returns a `(pages_checked, corrupt_pages)` tuple.
+    #[cfg(feature = "std")]
     pub(crate) fn verify_checksum_detailed(&self) -> Result<(u64, Vec<CorruptPageInfo>)> {
         let mut pages_checked = 0u64;
         let mut corruptions = Vec::new();
@@ -887,6 +892,7 @@ impl RawBtree {
         Ok((pages_checked, corruptions))
     }
 
+    #[cfg(feature = "std")]
     fn verify_checksum_detailed_helper(
         &self,
         page_number: PageNumber,
@@ -956,6 +962,7 @@ impl RawBtree {
     /// - All paths from root to leaf have the same depth
     ///
     /// Returns corruption details for any violations found.
+    #[cfg(feature = "std")]
     pub(crate) fn verify_structure(&self) -> Result<Vec<CorruptPageInfo>> {
         let mut corruptions = Vec::new();
         if let Some(header) = self.root {
@@ -966,6 +973,7 @@ impl RawBtree {
     }
 
     /// Measures the depth of the leftmost path from root to leaf.
+    #[cfg(feature = "std")]
     fn measure_depth(&self, page_number: PageNumber) -> Result<u32> {
         let page = self.mem.get_page(page_number)?;
         let node_mem = page.memory();
@@ -978,6 +986,7 @@ impl RawBtree {
         Ok(0)
     }
 
+    #[cfg(feature = "std")]
     fn verify_structure_helper(
         &self,
         page_number: PageNumber,
@@ -1150,6 +1159,7 @@ impl<K: Key, V: Value> Btree<K, V> {
         .verify_checksum()
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn verify_checksum_detailed(&self) -> Result<(u64, Vec<CorruptPageInfo>)> {
         RawBtree::new(
             self.get_root(),
@@ -1160,6 +1170,7 @@ impl<K: Key, V: Value> Btree<K, V> {
         .verify_checksum_detailed()
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn verify_structure(&self) -> Result<Vec<CorruptPageInfo>> {
         RawBtree::new(
             self.get_root(),

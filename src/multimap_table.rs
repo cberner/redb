@@ -1,5 +1,7 @@
 use crate::compat::{HashMap, Mutex};
-use crate::db::{CorruptPageInfo, TransactionGuard};
+#[cfg(feature = "std")]
+use crate::db::CorruptPageInfo;
+use crate::db::TransactionGuard;
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
 use crate::table::{ReadableTableMetadata, TableStats};
@@ -195,6 +197,7 @@ pub(crate) fn verify_tree_and_subtree_checksums(
 }
 
 /// Like `verify_tree_and_subtree_checksums` but collects corruption details.
+#[cfg(feature = "std")]
 pub(crate) fn verify_tree_and_subtree_checksums_detailed(
     root: Option<BtreeHeader>,
     key_size: Option<usize>,
@@ -242,6 +245,7 @@ pub(crate) fn verify_tree_and_subtree_checksums_detailed(
 }
 
 /// Like `verify_tree_and_subtree_checksums` but verifies structural integrity.
+#[cfg(feature = "std")]
 pub(crate) fn verify_tree_and_subtree_structure(
     root: Option<BtreeHeader>,
     key_size: Option<usize>,
