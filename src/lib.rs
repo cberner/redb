@@ -17,7 +17,7 @@
 )]
 //! # shodh-redb
 //!
-//! Multi-modal embedded database for Rust — vectors, blobs, TTL, merge operators,
+//! Multi-modal embedded database for Rust - vectors, blobs, TTL, merge operators,
 //! and causal tracking built on ACID B-trees.
 //!
 //! shodh-redb extends [redb](https://github.com/cberner/redb) with capabilities for
@@ -33,20 +33,20 @@
 //!
 //! # Extended Features
 //!
-//! - **Vector types** — [`FixedVec`], [`DynVec`], [`BinaryQuantized`], [`ScalarQuantized`]
+//! - **Vector types** -- [`FixedVec`], [`DynVec`], [`BinaryQuantized`], [`ScalarQuantized`]
 //!   with distance metrics ([`cosine_distance`], [`euclidean_distance_sq`], [`hamming_distance`])
 //!   and top-k search ([`nearest_k`])
-//! - **Blob store** — Streaming writes, content-addressable dedup, seekable reads,
+//! - **Blob store** -- Streaming writes, content-addressable dedup, seekable reads,
 //!   causal lineage tracking, and crash-safe compaction
-//! - **TTL tables** — Per-key expiration with lazy filtering and bulk purge
+//! - **TTL tables** -- Per-key expiration with lazy filtering and bulk purge
 //!   (requires `std` feature)
-//! - **Merge operators** — Atomic read-modify-write via [`MergeOperator`] trait
+//! - **Merge operators** -- Atomic read-modify-write via [`MergeOperator`] trait
 //!   with built-in [`NumericAdd`], [`NumericMax`], [`BitwiseOr`], and more
-//! - **Group commit** — Batch concurrent writes into a single fsync
+//! - **Group commit** -- Batch concurrent writes into a single fsync
 //!   (requires `std` feature)
-//! - **Hybrid Logical Clock** — [`HybridLogicalClock`] for causal ordering
+//! - **Hybrid Logical Clock** -- [`HybridLogicalClock`] for causal ordering
 //!   in distributed systems
-//! - **Memory budget** — Hard RAM cap with adaptive cache sizing
+//! - **Memory budget** -- Hard RAM cap with adaptive cache sizing
 //!
 //! # Example
 //!

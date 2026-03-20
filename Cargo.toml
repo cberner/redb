@@ -1,6 +1,6 @@
 [package]
 name = "shodh-redb"
-description = "Multi-modal embedded database — vectors, blobs, TTL, merge operators, and causal tracking built on ACID B-trees"
+description = "Multi-modal embedded database - vectors, blobs, TTL, merge operators, and causal tracking built on ACID B-trees"
 readme = "README.md"
 version = "0.1.0"
 exclude = ["fuzz/"]
