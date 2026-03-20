@@ -169,6 +169,11 @@ impl IvfPqIndexDefinition {
         self.name
     }
 
+    /// Returns the requested number of IVF clusters.
+    pub const fn num_clusters(&self) -> u32 {
+        self.num_clusters
+    }
+
     /// Convert to a full [`IndexConfig`] (with state=untrained, `num_vectors`=0).
     pub fn to_config(&self) -> IndexConfig {
         IndexConfig {

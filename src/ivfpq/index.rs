@@ -84,6 +84,9 @@ pub struct IvfPqIndex<'txn> {
     txn: &'txn WriteTransaction,
     pub(crate) config: IndexConfig,
     name: String,
+    /// The cluster count from the original definition, before any clamping.
+    /// Used by re-training to restore the user's requested cluster count.
+    requested_num_clusters: u32,
     centroids: Option<Vec<f32>>,
     codebooks: Option<Codebooks>,
     /// Tracks whether config has been modified since last persist.
@@ -135,10 +138,13 @@ impl<'txn> IvfPqIndex<'txn> {
             }
         }
 
+        let requested_num_clusters = definition.num_clusters();
+
         Ok(Self {
             txn,
             config,
             name,
+            requested_num_clusters,
             centroids: None,
             codebooks: None,
             config_dirty: false,
@@ -170,13 +176,19 @@ impl<'txn> IvfPqIndex<'txn> {
     ///
     /// `training_vectors` is an iterator of `(vector_id, vector)` pairs.
     /// For large datasets, pass a representative sample (10x-50x `num_clusters`).
+    ///
+    /// Re-training is supported: calling `train()` again replaces the centroids
+    /// and codebooks, and **clears all existing postings, assignments, and raw
+    /// vectors**. You must re-insert all vectors after re-training.
     pub fn train<I>(&mut self, training_vectors: I, max_iter: usize) -> crate::Result<()>
     where
         I: Iterator<Item = (u64, Vec<f32>)>,
     {
         validate_config(&self.config)?;
         let dim = self.config.dim as usize;
-        let num_clusters = self.config.num_clusters as usize;
+        // Always use the definition's requested cluster count so re-training
+        // doesn't get stuck at a previously clamped value.
+        let num_clusters = self.requested_num_clusters as usize;
         let num_subvectors = self.config.num_subvectors as usize;
 
         let mut flat: Vec<f32> = Vec::new();
@@ -203,15 +215,28 @@ impl<'txn> IvfPqIndex<'txn> {
         // 1. Train IVF centroids.
         let centroid_data = kmeans::kmeans(&flat, dim, num_clusters, max_iter, self.config.metric);
 
+        // kmeans clamps k to min(requested, n). Update config to reflect the
+        // actual number of centroids so that subsequent opens don't try to
+        // read centroids that were never persisted.
+        let actual_k = centroid_data.len() / dim;
+        let old_k = self.config.num_clusters as usize;
+        #[allow(clippy::cast_possible_truncation)]
+        { self.config.num_clusters = actual_k as u32; }
+
         // 2. Train PQ codebooks.
         let codebooks = pq::train_codebooks(&flat, dim, num_subvectors, max_iter, self.config.metric);
 
-        // 3. Persist centroids.
+        // 3. Clear stale data from a previous training cycle.
+        //    Old centroids beyond actual_k, old postings, assignments, and raw
+        //    vectors must be removed — they reference stale cluster IDs from the
+        //    previous centroid set.
+        self.clear_stale_training_data(old_k, actual_k)?;
+
+        // 4. Persist new centroids.
         {
             let tn = centroids_name(&self.name);
             let def = TableDefinition::<u32, &[u8]>::new(&tn);
             let mut table = self.txn.open_table(def).map_err(te)?;
-            let actual_k = centroid_data.len() / dim;
             for c in 0..actual_k {
                 let bytes: Vec<u8> = centroid_data[c * dim..(c + 1) * dim]
                     .iter()
@@ -222,7 +247,7 @@ impl<'txn> IvfPqIndex<'txn> {
             }
         }
 
-        // 4. Persist PQ codebooks.
+        // 5. Persist new PQ codebooks.
         {
             let tn = codebooks_name(&self.name);
             let def = TableDefinition::<u32, &[u8]>::new(&tn);
@@ -234,8 +259,9 @@ impl<'txn> IvfPqIndex<'txn> {
             }
         }
 
-        // 5. Update config — persist immediately since training is a major event.
+        // 6. Update config — persist immediately since training is a major event.
         self.config.state = STATE_TRAINED;
+        self.config.num_vectors = 0;
         self.persist_config_inner()?;
         self.config_dirty = false;
 
@@ -252,6 +278,7 @@ impl<'txn> IvfPqIndex<'txn> {
     /// Insert a vector into the index. Index must be trained first.
     ///
     /// If `vector_id` already exists, the old entry is replaced (upsert semantics).
+    /// Returns an error if the vector contains NaN or Inf values.
     pub fn insert(&mut self, vector_id: u64, vector: &[f32]) -> crate::Result<()> {
         self.ensure_trained()?;
         let dim = self.config.dim as usize;
@@ -260,6 +287,7 @@ impl<'txn> IvfPqIndex<'txn> {
                 "IVF-PQ '{}': vector dim {} != {}", self.name, vector.len(), dim,
             )));
         }
+        Self::validate_finite(vector, &self.name)?;
 
         let vec_owned;
         let vec_ref = if self.config.metric == DistanceMetric::Cosine {
@@ -363,6 +391,7 @@ impl<'txn> IvfPqIndex<'txn> {
                     "IVF-PQ '{}': vector dim {} != {}", self.name, vec.len(), dim,
                 )));
             }
+            Self::validate_finite(&vec, &self.name)?;
             if metric == DistanceMetric::Cosine {
                 l2_normalize(&mut vec);
             }
@@ -389,8 +418,10 @@ impl<'txn> IvfPqIndex<'txn> {
             }
         }
 
-        self.config.num_vectors += count;
-        self.config_dirty = true;
+        if count > 0 {
+            self.config.num_vectors += count;
+            self.config_dirty = true;
+        }
         Ok(count)
     }
 
@@ -492,6 +523,66 @@ impl<'txn> IvfPqIndex<'txn> {
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    /// Validate that a vector contains only finite values.
+    fn validate_finite(vector: &[f32], name: &str) -> crate::Result<()> {
+        for (i, &v) in vector.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(StorageError::Corrupted(alloc::format!(
+                    "IVF-PQ '{name}': vector contains non-finite value ({v}) at index {i}",
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove stale data from a previous training cycle.
+    ///
+    /// Deletes orphaned centroid rows (indices `new_k..old_k`) and clears all
+    /// postings, assignments, and raw vectors — they reference cluster IDs from
+    /// the previous centroid set and are invalid after re-training.
+    fn clear_stale_training_data(
+        &self,
+        old_k: usize,
+        new_k: usize,
+    ) -> crate::Result<()> {
+        // Remove orphaned centroid rows if cluster count shrank.
+        if old_k > new_k {
+            let tn = centroids_name(&self.name);
+            let def = TableDefinition::<u32, &[u8]>::new(&tn);
+            let mut table = self.txn.open_table(def).map_err(te)?;
+            for c in new_k..old_k {
+                #[allow(clippy::cast_possible_truncation)]
+                table.remove(c as u32)?;
+            }
+        }
+
+        // Clear all postings — they reference stale cluster assignments.
+        {
+            let tn = postings_name(&self.name);
+            let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
+            let mut table = self.txn.open_table(def).map_err(te)?;
+            table.drain_all()?;
+        }
+
+        // Clear all assignments.
+        {
+            let tn = assignments_name(&self.name);
+            let def = TableDefinition::<u64, u32>::new(&tn);
+            let mut table = self.txn.open_table(def).map_err(te)?;
+            table.drain_all()?;
+        }
+
+        // Clear raw vectors if stored.
+        if self.config.store_raw_vectors {
+            let tn = vectors_name(&self.name);
+            let def = TableDefinition::<u64, &[u8]>::new(&tn);
+            let mut table = self.txn.open_table(def).map_err(te)?;
+            table.drain_all()?;
+        }
+
+        Ok(())
+    }
 
     fn ensure_trained(&self) -> crate::Result<()> {
         if self.config.state != STATE_TRAINED {

@@ -841,3 +841,143 @@ fn database_reopen_persistence() {
         assert_eq!(results[0].key, 3);
     }
 }
+
+/// Regression test: training with fewer vectors than num_clusters.
+///
+/// kmeans clamps k to min(num_clusters, n). The config must be updated to
+/// reflect the actual number of centroids, otherwise a subsequent open will
+/// fail trying to read centroid rows that don't exist.
+#[test]
+fn train_fewer_vectors_than_clusters() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Index requests 4 clusters, but we only provide 2 training vectors.
+    let vectors: Vec<(u64, Vec<f32>)> = (0..2)
+        .map(|i| (i, random_vector(i + 2000, 8)))
+        .collect();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_ivfpq_index(&INDEX_8D).unwrap();
+        idx.train(vectors.iter().map(|(id, v)| (*id, v.clone())), 25)
+            .unwrap();
+
+        // Config should have been clamped to the actual number of centroids.
+        assert_eq!(idx.config().num_clusters, 2);
+
+        for (id, vec) in &vectors {
+            idx.insert(*id, vec).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Read-only open must succeed (previously would fail reading missing centroids).
+    let read_txn = db.begin_read().unwrap();
+    let idx = read_txn.open_ivfpq_index(&INDEX_8D).unwrap();
+    assert_eq!(idx.config().num_clusters, 2);
+    assert_eq!(idx.config().num_vectors, 2);
+
+    let results = idx
+        .search(&read_txn, &vectors[0].1, &SearchParams::top_k(2))
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].key, 0);
+}
+
+/// Regression test: re-training restores the definition's original cluster count
+/// and clears stale postings/assignments from the prior cycle.
+#[test]
+fn retrain_restores_cluster_count_and_clears_data() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // First train with only 2 vectors → clamped to 2 clusters.
+    let small_set: Vec<(u64, Vec<f32>)> = (0..2)
+        .map(|i| (i, random_vector(i + 3000, 8)))
+        .collect();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_ivfpq_index(&INDEX_8D).unwrap();
+        idx.train(small_set.iter().map(|(id, v)| (*id, v.clone())), 25)
+            .unwrap();
+        assert_eq!(idx.config().num_clusters, 2);
+
+        for (id, vec) in &small_set {
+            idx.insert(*id, vec).unwrap();
+        }
+        assert_eq!(idx.config().num_vectors, 2);
+    }
+    write_txn.commit().unwrap();
+
+    // Re-train with 20 vectors → should use the definition's 4 clusters, not 2.
+    let large_set: Vec<(u64, Vec<f32>)> = (0..20)
+        .map(|i| (i, random_vector(i + 3100, 8)))
+        .collect();
+
+    let write_txn2 = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn2.open_ivfpq_index(&INDEX_8D).unwrap();
+        idx.train(large_set.iter().map(|(id, v)| (*id, v.clone())), 25)
+            .unwrap();
+
+        // Cluster count should be restored to the definition's 4.
+        assert_eq!(idx.config().num_clusters, 4);
+        // Old vectors should be cleared.
+        assert_eq!(idx.config().num_vectors, 0);
+
+        // Re-insert with the new training.
+        for (id, vec) in &large_set {
+            idx.insert(*id, vec).unwrap();
+        }
+        assert_eq!(idx.config().num_vectors, 20);
+    }
+    write_txn2.commit().unwrap();
+
+    // Verify search works correctly after re-training.
+    let read_txn = db.begin_read().unwrap();
+    let idx = read_txn.open_ivfpq_index(&INDEX_8D).unwrap();
+    assert_eq!(idx.config().num_clusters, 4);
+    assert_eq!(idx.config().num_vectors, 20);
+
+    let results = idx
+        .search(&read_txn, &large_set[5].1, &SearchParams::top_k(1))
+        .unwrap();
+    assert_eq!(results[0].key, 5);
+}
+
+/// Regression test: NaN and Inf vectors are rejected on insert.
+#[test]
+fn nan_inf_vectors_rejected() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let training: Vec<(u64, Vec<f32>)> = (0..8)
+        .map(|i| (i, random_vector(i + 4000, 8)))
+        .collect();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_ivfpq_index(&INDEX_8D).unwrap();
+        idx.train(training.iter().map(|(id, v)| (*id, v.clone())), 25)
+            .unwrap();
+
+        // NaN should be rejected.
+        let nan_vec = vec![f32::NAN; 8];
+        assert!(idx.insert(100, &nan_vec).is_err());
+
+        // Inf should be rejected.
+        let inf_vec = vec![f32::INFINITY; 8];
+        assert!(idx.insert(101, &inf_vec).is_err());
+
+        // Negative Inf should be rejected.
+        let neg_inf_vec = vec![f32::NEG_INFINITY; 8];
+        assert!(idx.insert(102, &neg_inf_vec).is_err());
+
+        // Valid vectors should still work.
+        idx.insert(0, &training[0].1).unwrap();
+        assert_eq!(idx.config().num_vectors, 1);
+    }
+    write_txn.commit().unwrap();
+}

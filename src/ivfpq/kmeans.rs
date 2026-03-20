@@ -164,6 +164,9 @@ fn assign_all(
 }
 
 /// Recompute centroids as the mean of assigned vectors.
+///
+/// Uses f64 accumulators to avoid float overflow when summing many large-valued
+/// vectors in a single cluster (BUG 8 fix).
 fn recompute_centroids(
     flat_vectors: &[f32],
     dim: usize,
@@ -173,35 +176,36 @@ fn recompute_centroids(
 ) {
     let n = flat_vectors.len() / dim;
 
-    // Zero out.
-    for v in centroids.iter_mut() {
-        *v = 0.0;
-    }
+    // Accumulate in f64 to prevent overflow with large clusters / extreme values.
+    let mut accum = vec![0.0f64; k * dim];
     let mut counts = vec![0u64; k];
 
     for i in 0..n {
         let c = assignments[i] as usize;
         counts[c] += 1;
         let v = &flat_vectors[i * dim..(i + 1) * dim];
-        let dest = &mut centroids[c * dim..(c + 1) * dim];
+        let dest = &mut accum[c * dim..(c + 1) * dim];
         for (d, &s) in dest.iter_mut().zip(v.iter()) {
-            *d += s;
+            *d += f64::from(s);
         }
     }
 
-    // Divide by count.
+    // Divide by count and convert back to f32.
     for c in 0..k {
         if counts[c] > 0 {
             #[allow(clippy::cast_precision_loss)]
-            let scale = 1.0 / counts[c] as f32;
+            let scale = 1.0 / counts[c] as f64;
+            let src = &accum[c * dim..(c + 1) * dim];
             let dest = &mut centroids[c * dim..(c + 1) * dim];
-            for d in dest.iter_mut() {
-                *d *= scale;
+            #[allow(clippy::cast_possible_truncation)]
+            for (d, &s) in dest.iter_mut().zip(src.iter()) {
+                *d = (s * scale) as f32;
             }
+        } else {
+            // Zero out centroids for empty clusters (will be restored from
+            // old_centroids by the caller).
+            centroids[c * dim..(c + 1) * dim].fill(0.0);
         }
-        // Empty clusters keep their previous centroid (zero in this case,
-        // but in practice they retain whatever centroid they started with
-        // if we reinit from the previous iteration).
     }
 }
 
