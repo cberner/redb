@@ -9,12 +9,12 @@ use crate::transactions::{
     DATA_FREED_TABLE, PageList, SYSTEM_FREED_TABLE, SystemTableDefinition,
     TransactionIdWithPagination,
 };
+#[cfg(feature = "std")]
+use crate::tree_store::ReadOnlyBackend;
 use crate::tree_store::{
     Btree, BtreeHeader, CompressionConfig, InternalTableDefinition, PAGE_SIZE, PageHint,
     PageNumber, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
 };
-#[cfg(feature = "std")]
-use crate::tree_store::ReadOnlyBackend;
 use crate::types::{Key, Value};
 use crate::{
     CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError, TableError,
