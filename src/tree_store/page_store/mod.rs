@@ -5,6 +5,7 @@ mod buddy_allocator;
 mod cached_file;
 pub(crate) mod compression;
 mod fast_hash;
+#[cfg(feature = "std")]
 pub mod file_backend;
 mod header;
 mod layout;

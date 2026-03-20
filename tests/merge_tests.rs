@@ -1,4 +1,4 @@
-use redb::{
+use shodh_redb::{
     BitwiseOr, BytesAppend, Database, NumericAdd, NumericMax, NumericMin, ReadableDatabase,
     ReadableTable, TableDefinition, merge_fn,
 };

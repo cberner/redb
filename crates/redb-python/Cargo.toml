@@ -1,8 +1,8 @@
 [package]
-name = "redb-python"
-description = "Python bindings for redb"
+name = "shodh-redb-python"
+description = "Python bindings for shodh-redb"
 publish = false
-version = "0.5.0"
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,7 +11,7 @@ repository.workspace = true
 authors.workspace = true
 
 [lib]
-name = "redb"
+name = "shodh_redb"
 doc = false
 crate-type = ["cdylib"]
 
@@ -20,7 +20,7 @@ pyo3-build-config = "0.28.1"
 
 [dependencies]
 pyo3 = { version = "0.28.1", features=["extension-module", "abi3-py37"] }
-redb = { path = "../.." }
+shodh-redb = { path = "../.." }
 
 [dev-dependencies]
 tempfile = "3.5.0"

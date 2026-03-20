@@ -1,4 +1,4 @@
-use redb::{
+use shodh_redb::{
     BinaryQuantized, Database, DistanceMetric, DynVec, FixedVec, ReadableDatabase, ReadableTable,
     ReadableTableMetadata, ScalarQuantized, TableDefinition,
 };
@@ -75,7 +75,7 @@ fn fixed_vec_insert_reserve() {
         let mut table = write_txn.open_table(TABLE_VEC4).unwrap();
         let mut guard = table.insert_reserve(&1u64, 4 * 4).unwrap();
         let buf: &mut [u8] = guard.as_mut();
-        redb::write_f32_le(buf, &values);
+        shodh_redb::write_f32_le(buf, &values);
     }
     write_txn.commit().unwrap();
 
@@ -173,7 +173,7 @@ fn dot_product_basic() {
     let a = [1.0f32, 2.0, 3.0];
     let b = [4.0f32, 5.0, 6.0];
     // 1*4 + 2*5 + 3*6 = 4 + 10 + 18 = 32
-    let result = redb::dot_product(&a, &b);
+    let result = shodh_redb::dot_product(&a, &b);
     assert!((result - 32.0).abs() < f32::EPSILON);
 }
 
@@ -181,17 +181,17 @@ fn dot_product_basic() {
 fn cosine_similarity_basic() {
     let a = [1.0f32, 0.0, 0.0];
     let b = [1.0f32, 0.0, 0.0];
-    let result = redb::cosine_similarity(&a, &b);
+    let result = shodh_redb::cosine_similarity(&a, &b);
     assert!((result - 1.0).abs() < 1e-6);
 
     // Orthogonal vectors
     let c = [0.0f32, 1.0, 0.0];
-    let result = redb::cosine_similarity(&a, &c);
+    let result = shodh_redb::cosine_similarity(&a, &c);
     assert!(result.abs() < 1e-6);
 
     // Zero vector
     let zero = [0.0f32, 0.0, 0.0];
-    let result = redb::cosine_similarity(&a, &zero);
+    let result = shodh_redb::cosine_similarity(&a, &zero);
     assert_eq!(result, 0.0);
 }
 
@@ -200,7 +200,7 @@ fn euclidean_distance_basic() {
     let a = [1.0f32, 2.0, 3.0];
     let b = [4.0f32, 6.0, 3.0];
     // (4-1)^2 + (6-2)^2 + (3-3)^2 = 9 + 16 + 0 = 25
-    let result = redb::euclidean_distance_sq(&a, &b);
+    let result = shodh_redb::euclidean_distance_sq(&a, &b);
     assert!((result - 25.0).abs() < f32::EPSILON);
 }
 
@@ -209,7 +209,7 @@ fn manhattan_distance_basic() {
     let a = [1.0f32, 2.0, 3.0];
     let b = [4.0f32, 6.0, 3.0];
     // |4-1| + |6-2| + |3-3| = 3 + 4 + 0 = 7
-    let result = redb::manhattan_distance(&a, &b);
+    let result = shodh_redb::manhattan_distance(&a, &b);
     assert!((result - 7.0).abs() < f32::EPSILON);
 }
 
@@ -239,9 +239,9 @@ fn distance_with_stored_vectors() {
     let stored2 = table.get(&2u64).unwrap().unwrap().value();
     let stored3 = table.get(&3u64).unwrap().unwrap().value();
 
-    let sim1 = redb::cosine_similarity(&query, &stored1);
-    let sim2 = redb::cosine_similarity(&query, &stored2);
-    let sim3 = redb::cosine_similarity(&query, &stored3);
+    let sim1 = shodh_redb::cosine_similarity(&query, &stored1);
+    let sim2 = shodh_redb::cosine_similarity(&query, &stored2);
+    let sim3 = shodh_redb::cosine_similarity(&query, &stored3);
 
     // v1 is identical to query (sim=1.0), v2 is orthogonal (sim=0.0), v3 is in between
     assert!((sim1 - 1.0).abs() < 1e-6);
@@ -318,39 +318,39 @@ fn cosine_distance_basic() {
     let a = [1.0f32, 0.0, 0.0];
     let b = [1.0f32, 0.0, 0.0];
     // Identical vectors: distance = 0
-    assert!(redb::cosine_distance(&a, &b).abs() < 1e-6);
+    assert!(shodh_redb::cosine_distance(&a, &b).abs() < 1e-6);
 
     // Orthogonal vectors: distance = 1
     let c = [0.0f32, 1.0, 0.0];
-    assert!((redb::cosine_distance(&a, &c) - 1.0).abs() < 1e-6);
+    assert!((shodh_redb::cosine_distance(&a, &c) - 1.0).abs() < 1e-6);
 
     // Opposite vectors: distance = 2
     let d = [-1.0f32, 0.0, 0.0];
-    assert!((redb::cosine_distance(&a, &d) - 2.0).abs() < 1e-6);
+    assert!((shodh_redb::cosine_distance(&a, &d) - 2.0).abs() < 1e-6);
 }
 
 #[test]
 fn l2_norm_and_normalize() {
     let v = [3.0f32, 4.0];
-    assert!((redb::l2_norm(&v) - 5.0).abs() < 1e-6);
+    assert!((shodh_redb::l2_norm(&v) - 5.0).abs() < 1e-6);
 
     let mut w = [3.0f32, 4.0];
-    redb::l2_normalize(&mut w);
+    shodh_redb::l2_normalize(&mut w);
     assert!((w[0] - 0.6).abs() < 1e-6);
     assert!((w[1] - 0.8).abs() < 1e-6);
     // Normalized vector has unit norm
-    assert!((redb::l2_norm(&w) - 1.0).abs() < 1e-6);
+    assert!((shodh_redb::l2_norm(&w) - 1.0).abs() < 1e-6);
 
     // Zero vector is unchanged
     let mut z = [0.0f32, 0.0];
-    redb::l2_normalize(&mut z);
+    shodh_redb::l2_normalize(&mut z);
     assert_eq!(z, [0.0, 0.0]);
 }
 
 #[test]
 fn l2_normalized_returns_copy() {
     let v = vec![3.0f32, 4.0];
-    let normed = redb::l2_normalized(&v);
+    let normed = shodh_redb::l2_normalized(&v);
     assert!((normed[0] - 0.6).abs() < 1e-6);
     assert!((normed[1] - 0.8).abs() < 1e-6);
     // Original is unchanged
@@ -362,11 +362,11 @@ fn normalized_dot_equals_cosine() {
     let a = [1.0f32, 2.0, 3.0, 4.0];
     let b = [5.0f32, 6.0, 7.0, 8.0];
 
-    let cosine = redb::cosine_similarity(&a, &b);
+    let cosine = shodh_redb::cosine_similarity(&a, &b);
 
-    let na = redb::l2_normalized(&a);
-    let nb = redb::l2_normalized(&b);
-    let dot = redb::dot_product(&na, &nb);
+    let na = shodh_redb::l2_normalized(&a);
+    let nb = shodh_redb::l2_normalized(&b);
+    let dot = shodh_redb::dot_product(&na, &nb);
 
     // After normalization, dot product == cosine similarity
     assert!((dot - cosine).abs() < 1e-5);
@@ -377,15 +377,15 @@ fn hamming_distance_basic() {
     let a: [u8; 4] = [0b1010_1010, 0b0000_0000, 0b1111_1111, 0b0000_0000];
     let b: [u8; 4] = [0b1010_1010, 0b1111_1111, 0b1111_1111, 0b0000_0000];
     // Only second byte differs: 8 bits
-    assert_eq!(redb::hamming_distance(&a, &b), 8);
+    assert_eq!(shodh_redb::hamming_distance(&a, &b), 8);
 
     // Identical
-    assert_eq!(redb::hamming_distance(&a, &a), 0);
+    assert_eq!(shodh_redb::hamming_distance(&a, &a), 0);
 
     // All bits differ in one byte
     let c: [u8; 1] = [0b0000_0000];
     let d: [u8; 1] = [0b1111_1111];
-    assert_eq!(redb::hamming_distance(&c, &d), 8);
+    assert_eq!(shodh_redb::hamming_distance(&c, &d), 8);
 }
 
 // ---------------------------------------------------------------------------
@@ -396,7 +396,7 @@ fn hamming_distance_basic() {
 fn quantize_binary_basic() {
     // 8 dims -> 1 byte
     let v = [1.0f32, -0.5, 0.3, -0.1, 0.0, 0.7, -0.2, 0.9];
-    let bq = redb::quantize_binary(&v);
+    let bq = shodh_redb::quantize_binary(&v);
     // positive bits: [1,0,1,0, 0,1,0,1] = 0b10100101 = 0xA5
     assert_eq!(bq.len(), 1);
     assert_eq!(bq[0], 0xA5);
@@ -406,7 +406,7 @@ fn quantize_binary_basic() {
 fn quantize_binary_non_multiple_of_8() {
     // 5 dims -> 1 byte, last 3 bits unused (0)
     let v = [1.0f32, 1.0, 1.0, 1.0, 1.0];
-    let bq = redb::quantize_binary(&v);
+    let bq = shodh_redb::quantize_binary(&v);
     assert_eq!(bq.len(), 1);
     // bits: [1,1,1,1,1,0,0,0] = 0b11111000 = 0xF8
     assert_eq!(bq[0], 0xF8);
@@ -422,8 +422,8 @@ fn binary_quantized_store_and_search() {
 
     let v1 = [1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
     let v2 = [1.0f32, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0];
-    let bq1: [u8; 1] = redb::quantize_binary(&v1).try_into().unwrap();
-    let bq2: [u8; 1] = redb::quantize_binary(&v2).try_into().unwrap();
+    let bq1: [u8; 1] = shodh_redb::quantize_binary(&v1).try_into().unwrap();
+    let bq2: [u8; 1] = shodh_redb::quantize_binary(&v2).try_into().unwrap();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -439,9 +439,9 @@ fn binary_quantized_store_and_search() {
     let stored2 = table.get(&2u64).unwrap().unwrap().value();
 
     // Query matches v1 pattern
-    let query = redb::quantize_binary(&v1);
-    let d1 = redb::hamming_distance(&stored1, &query);
-    let d2 = redb::hamming_distance(&stored2, &query);
+    let query = shodh_redb::quantize_binary(&v1);
+    let d1 = shodh_redb::hamming_distance(&stored1, &query);
+    let d2 = shodh_redb::hamming_distance(&stored2, &query);
     assert_eq!(d1, 0); // exact match
     assert!(d2 > 0); // different
 }
@@ -453,13 +453,13 @@ fn binary_quantized_store_and_search() {
 #[test]
 fn scalar_quantize_roundtrip() {
     let v: [f32; 4] = [0.0, 0.5, 1.0, 0.25];
-    let sq = redb::quantize_scalar(&v);
+    let sq = shodh_redb::quantize_scalar(&v);
     assert_eq!(sq.min_val, 0.0);
     assert_eq!(sq.max_val, 1.0);
     assert_eq!(sq.codes[0], 0); // min -> 0
     assert_eq!(sq.codes[2], 255); // max -> 255
 
-    let dq = redb::dequantize_scalar(&sq);
+    let dq = shodh_redb::dequantize_scalar(&sq);
     for i in 0..4 {
         assert!(
             (dq[i] - v[i]).abs() < 0.005,
@@ -473,7 +473,7 @@ fn scalar_quantize_roundtrip() {
 #[test]
 fn scalar_quantize_constant_vector() {
     let v: [f32; 4] = [0.5, 0.5, 0.5, 0.5];
-    let sq = redb::quantize_scalar(&v);
+    let sq = shodh_redb::quantize_scalar(&v);
     let dq = sq.dequantize();
     for val in &dq {
         assert!((val - 0.5).abs() < f32::EPSILON);
@@ -488,7 +488,7 @@ fn scalar_quantized_store_and_retrieve() {
     const SQ_TABLE: TableDefinition<u64, ScalarQuantized<4>> = TableDefinition::new("sq_vectors");
 
     let original = [0.1f32, 0.5, 0.9, 0.3];
-    let sq = redb::quantize_scalar(&original);
+    let sq = shodh_redb::quantize_scalar(&original);
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -515,10 +515,10 @@ fn scalar_quantized_store_and_retrieve() {
 fn sq_distance_approximation() {
     let a: [f32; 4] = [0.1, 0.5, 0.9, 0.3];
     let b: [f32; 4] = [0.2, 0.4, 0.8, 0.6];
-    let sq_b = redb::quantize_scalar(&b);
+    let sq_b = shodh_redb::quantize_scalar(&b);
 
-    let exact_dist = redb::euclidean_distance_sq(&a, &b);
-    let approx_dist = redb::sq_euclidean_distance_sq(&a, &sq_b);
+    let exact_dist = shodh_redb::euclidean_distance_sq(&a, &b);
+    let approx_dist = shodh_redb::sq_euclidean_distance_sq(&a, &sq_b);
 
     // Approximate distance should be close to exact (within quantization error)
     assert!(
@@ -575,7 +575,7 @@ fn nearest_k_basic() {
     ];
 
     let query = [1.0f32, 0.0, 0.0];
-    let results = redb::nearest_k(vectors.into_iter(), &query, 2, |a, b| {
+    let results = shodh_redb::nearest_k(vectors.into_iter(), &query, 2, |a, b| {
         DistanceMetric::Cosine.compute(a, b)
     });
 
@@ -612,7 +612,7 @@ fn nearest_k_fixed_with_stored_vectors() {
     let table = read_txn.open_table(TABLE_VEC4).unwrap();
 
     let query = [1.0f32, 0.0, 0.0, 0.0];
-    let results = redb::nearest_k_fixed(
+    let results = shodh_redb::nearest_k_fixed(
         table.iter().unwrap().map(|r| {
             let (k, v) = r.unwrap();
             (k.value(), v.value())
@@ -634,8 +634,8 @@ fn nearest_k_fixed_with_stored_vectors() {
 fn nearest_k_zero_returns_empty() {
     let vectors: Vec<(u64, Vec<f32>)> = vec![(1, vec![1.0, 0.0])];
     let query = [1.0f32, 0.0];
-    let results = redb::nearest_k(vectors.into_iter(), &query, 0, |a, b| {
-        redb::euclidean_distance_sq(a, b)
+    let results = shodh_redb::nearest_k(vectors.into_iter(), &query, 0, |a, b| {
+        shodh_redb::euclidean_distance_sq(a, b)
     });
     assert!(results.is_empty());
 }
@@ -644,8 +644,8 @@ fn nearest_k_zero_returns_empty() {
 fn nearest_k_more_than_available() {
     let vectors: Vec<(u64, Vec<f32>)> = vec![(1, vec![1.0, 0.0]), (2, vec![0.0, 1.0])];
     let query = [1.0f32, 0.0];
-    let results = redb::nearest_k(vectors.into_iter(), &query, 100, |a, b| {
-        redb::euclidean_distance_sq(a, b)
+    let results = shodh_redb::nearest_k(vectors.into_iter(), &query, 100, |a, b| {
+        shodh_redb::euclidean_distance_sq(a, b)
     });
     // Should return all available (2), not panic
     assert_eq!(results.len(), 2);

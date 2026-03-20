@@ -1,13 +1,14 @@
 use rand::RngExt;
 use rand::prelude::SliceRandom;
-use redb::backends::FileBackend;
-use redb::{
+use shodh_redb::backends::FileBackend;
+use shodh_redb::error::BackendError;
+use shodh_redb::{
     AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
     MultimapTableDefinition, MultimapValue, Range, ReadableDatabase, ReadableTable,
     ReadableTableMetadata, SetDurabilityError, StorageBackend, TableDefinition, TableStats,
     TransactionError, Value,
 };
-use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
+use shodh_redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 use std::borrow::Borrow;
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -62,27 +63,27 @@ fn previous_io_error() {
     }
 
     impl StorageBackend for FailingBackend {
-        fn len(&self) -> Result<u64, std::io::Error> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), std::io::Error> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             if self.fail_flag.load(Ordering::SeqCst) {
-                Err(std::io::Error::from(ErrorKind::Other))
+                Err(BackendError::from(std::io::Error::from(ErrorKind::Other)))
             } else {
                 self.inner.sync_data()
             }
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             self.inner.write(offset, data)
         }
     }
@@ -1657,8 +1658,8 @@ fn does_not_exist() {
     let tmpfile = create_tempfile();
 
     let result = Database::open(tmpfile.path());
-    if let Err(DatabaseError::Storage(StorageError::Io(e))) = result {
-        assert!(matches!(e.kind(), ErrorKind::InvalidData));
+    if let Err(DatabaseError::Storage(StorageError::Corrupted(_))) = result {
+        // Empty file is detected as corrupted
     } else {
         panic!();
     }
@@ -1669,15 +1670,15 @@ fn invalid_database_file() {
     let mut tmpfile = create_tempfile();
     tmpfile.write_all(b"hi").unwrap();
     let result = Database::open(tmpfile.path());
-    if let Err(DatabaseError::Storage(StorageError::Io(e))) = result {
-        assert!(matches!(e.kind(), ErrorKind::InvalidData));
+    if let Err(DatabaseError::Storage(StorageError::Corrupted(_))) = result {
+        // Invalid magic number is detected as corrupted
     } else {
         panic!();
     }
 
     let result = Database::create(tmpfile.path());
-    if let Err(DatabaseError::Storage(StorageError::Io(e))) = result {
-        assert!(matches!(e.kind(), ErrorKind::InvalidData));
+    if let Err(DatabaseError::Storage(StorageError::Corrupted(_))) = result {
+        // Invalid existing file is detected as corrupted
     } else {
         panic!();
     }
@@ -1948,22 +1949,22 @@ impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTable
     fn get<'a>(
         &self,
         key: impl Borrow<K::SelfType<'a>>,
-    ) -> redb::Result<Option<AccessGuard<'_, V>>> {
+    ) -> shodh_redb::Result<Option<AccessGuard<'_, V>>> {
         self.inner.get(key)
     }
 
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> redb::Result<Range<'_, K, V>>
+    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> shodh_redb::Result<Range<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
         self.inner.range(range)
     }
 
-    fn first(&self) -> redb::Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+    fn first(&self) -> shodh_redb::Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.inner.first()
     }
 
-    fn last(&self) -> redb::Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+    fn last(&self) -> shodh_redb::Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.inner.last()
     }
 }
@@ -1971,11 +1972,11 @@ impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTable
 impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTableMetadata
     for DelegatingTable<K, V, T>
 {
-    fn stats(&self) -> redb::Result<TableStats> {
+    fn stats(&self) -> shodh_redb::Result<TableStats> {
         self.inner.stats()
     }
 
-    fn len(&self) -> redb::Result<u64> {
+    fn len(&self) -> shodh_redb::Result<u64> {
         self.inner.len()
     }
 }
@@ -1989,14 +1990,17 @@ struct DelegatingMultimapTable<K: Key + 'static, V: Key + 'static, T: ReadableMu
 impl<K: Key + 'static, V: Key + 'static, T: ReadableMultimapTable<K, V>> ReadableMultimapTable<K, V>
     for DelegatingMultimapTable<K, V, T>
 {
-    fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> redb::Result<MultimapValue<'_, V>> {
+    fn get<'a>(
+        &self,
+        key: impl Borrow<K::SelfType<'a>>,
+    ) -> shodh_redb::Result<MultimapValue<'_, V>> {
         self.inner.get(key)
     }
 
     fn range<'a, KR>(
         &self,
         range: impl RangeBounds<KR> + 'a,
-    ) -> redb::Result<MultimapRange<'_, K, V>>
+    ) -> shodh_redb::Result<MultimapRange<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
@@ -2007,11 +2011,11 @@ impl<K: Key + 'static, V: Key + 'static, T: ReadableMultimapTable<K, V>> Readabl
 impl<K: Key + 'static, V: Key + 'static, T: ReadableMultimapTable<K, V>> ReadableTableMetadata
     for DelegatingMultimapTable<K, V, T>
 {
-    fn stats(&self) -> redb::Result<TableStats> {
+    fn stats(&self) -> shodh_redb::Result<TableStats> {
         self.inner.stats()
     }
 
-    fn len(&self) -> redb::Result<u64> {
+    fn len(&self) -> shodh_redb::Result<u64> {
         self.inner.len()
     }
 }

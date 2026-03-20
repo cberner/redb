@@ -8,7 +8,8 @@ use crate::tree_store::page_store::page_manager::{
     FILE_FORMAT_VERSION5, xxh3_checksum,
 };
 use crate::{DatabaseError, Result, StorageError};
-use std::mem::size_of;
+use alloc::format;
+use core::mem::size_of;
 
 // Database layout:
 //
@@ -473,6 +474,7 @@ impl TransactionHeader {
 mod test {
     use crate::backends::FileBackend;
     use crate::db::TableDefinition;
+    use crate::error::BackendError;
     use crate::tree_store::page_store::header::{
         GOD_BYTE_OFFSET, MAGICNUMBER, PRIMARY_BIT, RECOVERY_REQUIRED, TRANSACTION_0_OFFSET,
         TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT, USER_ROOT_OFFSET,
@@ -480,7 +482,7 @@ mod test {
     use crate::{Database, DatabaseError, ReadableTable, StorageBackend};
     use crate::{ReadableDatabase, StorageError};
     use std::fs::OpenOptions;
-    use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
+    use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
     use std::mem::size_of;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -501,9 +503,9 @@ mod test {
             }
         }
 
-        fn check_fail(&self) -> Result<(), std::io::Error> {
+        fn check_fail(&self) -> Result<(), BackendError> {
             if self.fail.load(Ordering::SeqCst) {
-                return Err(std::io::Error::from(ErrorKind::Other));
+                return Err(BackendError::from(std::io::Error::from(ErrorKind::Other)));
             }
 
             Ok(())
@@ -511,32 +513,32 @@ mod test {
     }
 
     impl StorageBackend for FailingBackend {
-        fn len(&self) -> Result<u64, std::io::Error> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.check_fail()?;
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.check_fail()?;
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.check_fail()?;
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), std::io::Error> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             self.check_fail()?;
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             self.check_fail()?;
             self.inner.write(offset, data)
         }
 
-        fn close(&self) -> Result<(), Error> {
+        fn close(&self) -> Result<(), BackendError> {
             self.inner.close()
         }
     }

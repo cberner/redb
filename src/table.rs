@@ -1,3 +1,4 @@
+use crate::compat::Mutex;
 use crate::db::TransactionGuard;
 use crate::merge::MergeOperator;
 use crate::sealed::Sealed;
@@ -9,11 +10,13 @@ use crate::tree_store::{
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, AccessGuardMut, StorageError, WriteTransaction};
 use crate::{Result, TableHandle};
-use std::borrow::Borrow;
-use std::fmt::{Debug, Formatter};
-use std::marker::PhantomData;
-use std::ops::RangeBounds;
-use std::sync::{Arc, Mutex};
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::fmt::{Debug, Formatter};
+use core::marker::PhantomData;
+use core::ops::RangeBounds;
 
 /// Informational storage stats about a table
 #[derive(Debug)]
@@ -389,7 +392,7 @@ fn debug_helper<K: Key + 'static, V: Value + 'static>(
     len: Result<u64>,
     first: Result<Option<(AccessGuard<K>, AccessGuard<V>)>>,
     last: Result<Option<(AccessGuard<K>, AccessGuard<V>)>>,
-) -> std::fmt::Result {
+) -> core::fmt::Result {
     write!(f, "Table [ name: \"{name}\", ")?;
     if let Ok(len) = len {
         if len == 0 {
@@ -427,7 +430,7 @@ fn debug_helper<K: Key + 'static, V: Value + 'static>(
 }
 
 impl<K: Key + 'static, V: Value + 'static> Debug for Table<'_, K, V> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         debug_helper(f, &self.name, self.len(), self.first(), self.last())
     }
 }
@@ -455,7 +458,7 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     ///
     /// Usage:
     /// ```rust
-    /// use redb::*;
+    /// use shodh_redb::*;
     /// # use tempfile::NamedTempFile;
     /// const TABLE: TableDefinition<&str, u64> = TableDefinition::new("my_data");
     ///
@@ -656,7 +659,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
 impl<K: Key, V: Value> Sealed for ReadOnlyTable<K, V> {}
 
 impl<K: Key + 'static, V: Value + 'static> Debug for ReadOnlyTable<K, V> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         debug_helper(f, &self.name, self.len(), self.first(), self.last())
     }
 }

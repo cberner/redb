@@ -48,7 +48,7 @@ type BatchFn =
 /// # Example
 ///
 /// ```ignore
-/// use redb::{TableDefinition, WriteBatch};
+/// use shodh_redb::{TableDefinition, WriteBatch};
 ///
 /// const TABLE: TableDefinition<&str, u64> = TableDefinition::new("my_data");
 ///

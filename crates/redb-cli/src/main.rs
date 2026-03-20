@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use comfy_table::{Attribute, Cell, Table as PrettyTable};
-use redb::{
+use shodh_redb::{
     Database, MultimapTableHandle, ReadOnlyDatabase, ReadableDatabase, ReadableTableMetadata,
     TableHandle,
 };

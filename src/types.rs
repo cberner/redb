@@ -1,7 +1,11 @@
-use std::cmp::Ordering;
-use std::convert::TryInto;
-use std::fmt::Debug;
-use std::mem::size_of;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::cmp::Ordering;
+use core::convert::TryInto;
+use core::fmt::Debug;
+use core::mem::size_of;
 #[cfg(feature = "chrono_v0_4")]
 mod chrono_v0_4;
 #[cfg(feature = "uuid")]
@@ -74,7 +78,7 @@ impl TypeName {
 
     pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
         let classification = TypeClassification::from_byte(bytes[0]);
-        let name = std::str::from_utf8(&bytes[1..]).unwrap().to_string();
+        let name = core::str::from_utf8(&bytes[1..]).unwrap().to_string();
 
         Self {
             classification,
@@ -491,7 +495,7 @@ impl Value for &str {
     where
         Self: 'a,
     {
-        std::str::from_utf8(data).unwrap()
+        core::str::from_utf8(data).unwrap()
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a str
@@ -532,7 +536,7 @@ impl Value for String {
     where
         Self: 'a,
     {
-        std::str::from_utf8(data).unwrap().to_string()
+        core::str::from_utf8(data).unwrap().to_string()
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a str
@@ -549,8 +553,8 @@ impl Value for String {
 
 impl Key for String {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let str1 = std::str::from_utf8(data1).unwrap();
-        let str2 = std::str::from_utf8(data2).unwrap();
+        let str1 = core::str::from_utf8(data1).unwrap();
+        let str2 = core::str::from_utf8(data2).unwrap();
         str1.cmp(str2)
     }
 }
@@ -597,12 +601,12 @@ macro_rules! le_value {
         impl Value for $t {
             type SelfType<'a> = $t;
             type AsBytes<'a>
-                = [u8; std::mem::size_of::<$t>()]
+                = [u8; core::mem::size_of::<$t>()]
             where
                 Self: 'a;
 
             fn fixed_width() -> Option<usize> {
-                Some(std::mem::size_of::<$t>())
+                Some(core::mem::size_of::<$t>())
             }
 
             fn from_bytes<'a>(data: &'a [u8]) -> $t
@@ -614,7 +618,7 @@ macro_rules! le_value {
 
             fn as_bytes<'a, 'b: 'a>(
                 value: &'a Self::SelfType<'b>,
-            ) -> [u8; std::mem::size_of::<$t>()]
+            ) -> [u8; core::mem::size_of::<$t>()]
             where
                 Self: 'a,
                 Self: 'b,

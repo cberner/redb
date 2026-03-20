@@ -4,7 +4,7 @@ use std::env::current_dir;
 use tempfile::NamedTempFile;
 
 use rand::Rng;
-use redb::{Database, TableDefinition};
+use shodh_redb::{Database, TableDefinition};
 use std::time::{Duration, Instant};
 
 const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");

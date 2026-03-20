@@ -1,5 +1,5 @@
-use redb::{Database, Key, ReadableDatabase, TableDefinition, Value};
-use redb_derive::{Key, Value};
+use shodh_redb::{Database, Key, ReadableDatabase, TableDefinition, Value};
+use shodh_redb_derive::{Key, Value};
 use std::fmt::Debug;
 use tempfile::NamedTempFile;
 

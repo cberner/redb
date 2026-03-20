@@ -102,7 +102,7 @@ impl<V: Value> Value for TtlValueOf<V> {
 /// # Example
 ///
 /// ```ignore
-/// use redb::TtlTableDefinition;
+/// use shodh_redb::TtlTableDefinition;
 ///
 /// const CACHE: TtlTableDefinition<&str, &[u8]> = TtlTableDefinition::new("cache");
 /// ```

@@ -2,9 +2,11 @@ use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker}
 use crate::tree_store::page_store::page_manager::FILE_FORMAT_VERSION3;
 use crate::tree_store::{BtreeHeader, TransactionalMemory};
 use crate::{TypeName, Value};
-use std::fmt::Debug;
-use std::mem::size_of;
-use std::sync::Arc;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt::Debug;
+use core::mem::size_of;
 
 // on-disk format:
 // * 1 byte: version
@@ -66,7 +68,7 @@ impl Savepoint {
     }
 
     pub(crate) fn db_address(&self) -> *const TransactionTracker {
-        std::ptr::from_ref(self.transaction_tracker.as_ref())
+        core::ptr::from_ref(self.transaction_tracker.as_ref())
     }
 
     pub(crate) fn set_persistent(&mut self) {

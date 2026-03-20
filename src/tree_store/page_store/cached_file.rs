@@ -1,12 +1,16 @@
+use crate::compat::{Mutex, RwLock};
 use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::lru_cache::LRUCache;
 use crate::{CacheStats, DatabaseError, Result, StorageBackend, StorageError};
-use std::ops::{Index, IndexMut};
-use std::slice::SliceIndex;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::ops::{Index, IndexMut};
+use core::slice::SliceIndex;
 #[cfg(feature = "cache_metrics")]
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub(super) struct WritablePage {
     buffer: Arc<Mutex<LRUWriteCache>>,
@@ -28,7 +32,6 @@ impl Drop for WritablePage {
     fn drop(&mut self) {
         self.buffer
             .lock()
-            .unwrap()
             .return_value(self.offset, self.data.clone());
     }
 }
@@ -310,7 +313,7 @@ impl PagedCachedFile {
             if freed >= bytes_to_free {
                 break;
             }
-            let mut lock = self.read_cache[stripe].write().unwrap();
+            let mut lock = self.read_cache[stripe].write();
             while freed < bytes_to_free {
                 if let Some((_, v)) = lock.pop_lowest_priority() {
                     freed += v.len();
@@ -346,7 +349,7 @@ impl PagedCachedFile {
     }
 
     fn flush_write_buffer(&self) -> Result {
-        let mut write_buffer = self.write_buffer.lock().unwrap();
+        let mut write_buffer = self.write_buffer.lock();
 
         for (offset, buffer) in write_buffer.cache.iter() {
             let raw = buffer.as_ref().unwrap();
@@ -360,7 +363,7 @@ impl PagedCachedFile {
 
             if cache_size + buffer.len() <= self.max_read_cache_bytes {
                 let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
-                let mut lock = self.read_cache[cache_slot].write().unwrap();
+                let mut lock = self.read_cache[cache_slot].write();
                 if let Some(replaced) = lock.insert(*offset, buffer) {
                     // A race could cause us to replace an existing buffer
                     self.read_cache_bytes
@@ -438,7 +441,7 @@ impl PagedCachedFile {
         self.reads_total.fetch_add(1, Ordering::AcqRel);
 
         if !matches!(hint, PageHint::Clean) {
-            let lock = self.write_buffer.lock().unwrap();
+            let lock = self.write_buffer.lock();
             if let Some(cached) = lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
@@ -449,7 +452,7 @@ impl PagedCachedFile {
 
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         {
-            let read_lock = self.read_cache[cache_slot].read().unwrap();
+            let read_lock = self.read_cache[cache_slot].read();
             if let Some(cached) = read_lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
@@ -471,7 +474,7 @@ impl PagedCachedFile {
         let cache_size = self
             .read_cache_bytes
             .fetch_add(buffer.len(), Ordering::AcqRel);
-        let mut write_lock = self.read_cache[cache_slot].write().unwrap();
+        let mut write_lock = self.read_cache[cache_slot].write();
         let cache_size = if let Some(replaced) = write_lock.insert(offset, buffer.clone()) {
             // A race could cause us to replace an existing buffer
             self.read_cache_bytes
@@ -513,7 +516,7 @@ impl PagedCachedFile {
     // Discard pending writes to the given range
     pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
         assert_eq!(0, offset % self.page_size);
-        if let Some(removed) = self.write_buffer.lock().unwrap().remove(offset) {
+        if let Some(removed) = self.write_buffer.lock().remove(offset) {
             self.write_buffer_bytes
                 .fetch_sub(removed.len(), Ordering::Release);
         }
@@ -524,7 +527,7 @@ impl PagedCachedFile {
     // NOTE: Invalidating a cached region in subsections is permitted, as long as all subsections are invalidated
     pub(super) fn invalidate_cache(&self, offset: u64, len: usize) {
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
-        let mut lock = self.read_cache[cache_slot].write().unwrap();
+        let mut lock = self.read_cache[cache_slot].write();
         if let Some(removed) = lock.remove(offset) {
             assert_eq!(len, removed.len());
             self.read_cache_bytes
@@ -534,7 +537,7 @@ impl PagedCachedFile {
 
     pub(super) fn invalidate_cache_all(&self) {
         for cache_slot in 0..self.read_cache.len() {
-            let mut lock = self.read_cache[cache_slot].write().unwrap();
+            let mut lock = self.read_cache[cache_slot].write();
             while let Some((_, removed)) = lock.pop_lowest_priority() {
                 self.read_cache_bytes
                     .fetch_sub(removed.len(), Ordering::AcqRel);
@@ -546,12 +549,12 @@ impl PagedCachedFile {
     // cache_policy takes the existing data as an argument and returns the priority. The priority should be stable and not change after WritablePage is dropped
     pub(super) fn write(&self, offset: u64, len: usize, overwrite: bool) -> Result<WritablePage> {
         assert_eq!(0, offset % self.page_size);
-        let mut lock = self.write_buffer.lock().unwrap();
+        let mut lock = self.write_buffer.lock();
 
         // TODO: allow hint that page is known to be dirty and will not be in the read cache
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         let existing = {
-            let mut lock = self.read_cache[cache_slot].write().unwrap();
+            let mut lock = self.read_cache[cache_slot].write();
             if let Some(removed) = lock.remove(offset) {
                 assert_eq!(
                     len,
@@ -633,8 +636,9 @@ mod test {
     use crate::backends::InMemoryBackend;
     use crate::tree_store::PageHint;
     use crate::tree_store::page_store::cached_file::PagedCachedFile;
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
+    use alloc::boxed::Box;
+    use alloc::sync::Arc;
+    use core::sync::atomic::Ordering;
 
     #[test]
     fn cache_leak() {

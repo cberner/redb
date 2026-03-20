@@ -1,4 +1,4 @@
-use redb::{
+use shodh_redb::{
     BlobId, Builder, CausalLink, ContentType, Database, ReadableDatabase, RelationType,
     StorageError, StoreOptions,
 };

@@ -1,8 +1,11 @@
 use crate::temporal::HybridLogicalClock;
 use crate::types::{Key, TypeName, Value};
-use std::cmp::Ordering;
-use std::fmt;
-use std::mem::size_of;
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::cmp::Ordering;
+use core::fmt;
+use core::mem::size_of;
 
 // ---------------------------------------------------------------------------
 // ContentType
@@ -348,7 +351,7 @@ impl BlobMeta {
     }
 
     pub fn label_str(&self) -> &str {
-        std::str::from_utf8(&self.label[..self.label_len as usize]).unwrap_or("")
+        core::str::from_utf8(&self.label[..self.label_len as usize]).unwrap_or("")
     }
 
     pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
@@ -578,7 +581,7 @@ impl CausalEdge {
     }
 
     pub fn context_str(&self) -> &str {
-        std::str::from_utf8(&self.context[..self.context_len as usize]).unwrap_or("")
+        core::str::from_utf8(&self.context[..self.context_len as usize]).unwrap_or("")
     }
 
     pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
@@ -744,7 +747,7 @@ impl TagKey {
     }
 
     pub fn tag_str(&self) -> &str {
-        std::str::from_utf8(&self.tag[..self.tag_len as usize]).unwrap_or("")
+        core::str::from_utf8(&self.tag[..self.tag_len as usize]).unwrap_or("")
     }
 
     pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
@@ -878,7 +881,7 @@ impl NamespaceKey {
     }
 
     pub fn namespace_str(&self) -> &str {
-        std::str::from_utf8(&self.namespace[..self.ns_len as usize]).unwrap_or("")
+        core::str::from_utf8(&self.namespace[..self.ns_len as usize]).unwrap_or("")
     }
 
     pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {
@@ -999,7 +1002,7 @@ impl NamespaceVal {
     }
 
     pub fn namespace_str(&self) -> &str {
-        std::str::from_utf8(&self.namespace[..self.ns_len as usize]).unwrap_or("")
+        core::str::from_utf8(&self.namespace[..self.ns_len as usize]).unwrap_or("")
     }
 
     pub fn to_le_bytes(&self) -> [u8; Self::SERIALIZED_SIZE] {

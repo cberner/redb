@@ -1,5 +1,7 @@
 use crate::tree_store::page_store::xxh3_checksum;
-use std::mem::size_of;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::mem::size_of;
 
 const HEIGHT_OFFSET: usize = 0;
 const END_OFFSETS: usize = HEIGHT_OFFSET + size_of::<u32>();
@@ -367,11 +369,11 @@ impl U64GroupedBitmap {
 
 #[cfg(test)]
 mod test {
+    use crate::compat::HashSet;
     use crate::tree_store::page_store::bitmap::BtreeBitmap;
     use rand::prelude::IteratorRandom;
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
-    use std::collections::HashSet;
 
     #[test]
     fn alloc() {

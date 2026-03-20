@@ -1,9 +1,10 @@
 use crate::WriteTransaction;
 use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, ContentType, Sha256Key, StoreOptions};
 use crate::tree_store::{Xxh3StreamHasher, hash64_with_seed};
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::sync::atomic::Ordering;
 use sha2::{Digest, Sha256};
-use std::io;
-use std::sync::atomic::Ordering;
 
 /// Streaming blob writer that writes data in arbitrary-sized chunks with
 /// constant memory overhead, regardless of total blob size.
@@ -12,7 +13,8 @@ use std::sync::atomic::Ordering;
 /// the append-only blob region as each chunk arrives. At [`finish`](Self::finish),
 /// the xxh3 checksums are finalized and the blob is indexed in the system tables.
 ///
-/// Implements [`std::io::Write`] for interoperability with the standard library.
+/// Implements [`std::io::Write`] (when the `std` feature is enabled) for
+/// interoperability with the standard library.
 ///
 /// # Drop behavior
 ///
@@ -125,11 +127,15 @@ impl<'txn> BlobWriter<'txn> {
             compression: 0,
         };
 
+        #[cfg(feature = "std")]
         #[allow(clippy::cast_possible_truncation)]
         let wall_clock_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock before UNIX epoch")
             .as_nanos() as u64;
+
+        #[cfg(not(feature = "std"))]
+        let wall_clock_ns: u64 = 0;
 
         let opts = self.opts.take().unwrap_or_default();
         let causal_parent = opts.causal_link.as_ref().map(|l| l.parent);
@@ -168,13 +174,14 @@ impl Drop for BlobWriter<'_> {
     }
 }
 
-impl io::Write for BlobWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        BlobWriter::write(self, buf).map_err(io::Error::other)?;
+#[cfg(feature = "std")]
+impl std::io::Write for BlobWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        BlobWriter::write(self, buf).map_err(std::io::Error::other)?;
         Ok(buf.len())
     }
 
-    fn flush(&mut self) -> io::Result<()> {
+    fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }

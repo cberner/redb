@@ -1,4 +1,6 @@
-use std::fmt::{self, Debug};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt::{self, Debug};
 
 /// Trait for atomic read-modify-write merge operations on raw byte values.
 ///
@@ -283,7 +285,7 @@ where
 /// # Example
 ///
 /// ```rust,ignore
-/// use redb::merge_fn;
+/// use shodh_redb::merge_fn;
 ///
 /// let op = merge_fn(|_key, existing, operand| {
 ///     // Custom merge: multiply existing by operand

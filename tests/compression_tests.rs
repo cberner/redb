@@ -1,6 +1,6 @@
 #![cfg(feature = "compression")]
 
-use redb::{
+use shodh_redb::{
     Builder, CompressionConfig, Database, ReadableDatabase, ReadableTableMetadata, TableDefinition,
 };
 
@@ -575,7 +575,7 @@ fn range_query_with_compression() {
 #[cfg(feature = "compression_lz4")]
 #[test]
 fn non_durable_commit_with_compression() {
-    use redb::Durability;
+    use shodh_redb::Durability;
 
     let tmpfile = create_tempfile();
     let db = Builder::new()

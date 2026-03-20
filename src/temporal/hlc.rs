@@ -1,7 +1,6 @@
 use crate::types::{Key, TypeName, Value};
-use std::cmp::Ordering;
-use std::fmt;
-use std::time::{SystemTime, UNIX_EPOCH};
+use core::cmp::Ordering;
+use core::fmt;
 
 /// Hybrid Logical Clock per Kulkarni et al. 2014.
 ///
@@ -26,15 +25,22 @@ const LOGICAL_MASK: u64 = (1 << LOGICAL_BITS) - 1; // 0xFFFF
 const PHYSICAL_SHIFT: u32 = LOGICAL_BITS;
 
 /// Get the current wall-clock time in milliseconds since UNIX epoch.
+#[cfg(feature = "std")]
 fn wall_clock_ms() -> u64 {
     // as_millis() returns u128, but we only use 48 bits (covers ~8919 years).
     // Truncation is intentional and safe for any realistic timestamp.
     #[allow(clippy::cast_possible_truncation)]
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
         .as_millis() as u64;
     ms
+}
+
+/// Fallback wall clock for no_std: always returns 0.
+#[cfg(not(feature = "std"))]
+fn wall_clock_ms() -> u64 {
+    0
 }
 
 impl HybridLogicalClock {

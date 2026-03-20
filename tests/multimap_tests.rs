@@ -1,4 +1,4 @@
-use redb::{
+use shodh_redb::{
     Database, MultimapTableDefinition, ReadableDatabase, ReadableMultimapTable,
     ReadableTableMetadata, TableError,
 };

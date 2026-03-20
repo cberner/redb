@@ -1,6 +1,14 @@
 use crate::blob_store::{BlobCompactionReport, BlobDedupConfig};
+use crate::error::{BackendError, TransactionError};
+#[cfg(feature = "std")]
 use crate::group_commit::{GroupCommitError, GroupCommitter, WriteBatch};
+use crate::sealed::Sealed;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
+use crate::transactions::{
+    ALLOCATOR_STATE_TABLE_NAME, AllocatorStateKey, AllocatorStateTree, DATA_ALLOCATED_TABLE,
+    DATA_FREED_TABLE, PageList, SYSTEM_FREED_TABLE, SystemTableDefinition,
+    TransactionIdWithPagination,
+};
 use crate::tree_store::{
     Btree, BtreeHeader, CompressionConfig, InternalTableDefinition, PAGE_SIZE, PageHint,
     PageNumber, ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
@@ -10,22 +18,23 @@ use crate::{
     CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError, TableError,
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
-use std::fmt::{Debug, Display, Formatter};
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt::{Debug, Display, Formatter};
+use core::marker::PhantomData;
 
+#[cfg(feature = "std")]
 use std::fs::{File, OpenOptions};
-use std::marker::PhantomData;
+#[cfg(feature = "std")]
 use std::path::Path;
-use std::sync::Arc;
+#[cfg(feature = "std")]
 use std::time::{Duration, Instant};
-use std::{io, thread};
 
-use crate::error::TransactionError;
-use crate::sealed::Sealed;
-use crate::transactions::{
-    ALLOCATOR_STATE_TABLE_NAME, AllocatorStateKey, AllocatorStateTree, DATA_ALLOCATED_TABLE,
-    DATA_FREED_TABLE, PageList, SYSTEM_FREED_TABLE, SystemTableDefinition,
-    TransactionIdWithPagination,
-};
+#[cfg(feature = "std")]
 use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
 use log::{debug, info, warn};
@@ -34,29 +43,29 @@ use log::{debug, info, warn};
 /// Implements persistent storage for a database.
 pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Gets the current length of the storage.
-    fn len(&self) -> std::result::Result<u64, io::Error>;
+    fn len(&self) -> core::result::Result<u64, BackendError>;
 
     /// Reads the specified array of bytes from the storage.
     ///
     /// If `out.len()` + `offset` exceeds the length of the storage an appropriate `Error` must be returned.
-    fn read(&self, offset: u64, out: &mut [u8]) -> std::result::Result<(), io::Error>;
+    fn read(&self, offset: u64, out: &mut [u8]) -> core::result::Result<(), BackendError>;
 
     /// Sets the length of the storage.
     ///
     /// New positions in the storage must be initialized to zero.
-    fn set_len(&self, len: u64) -> std::result::Result<(), io::Error>;
+    fn set_len(&self, len: u64) -> core::result::Result<(), BackendError>;
 
     /// Syncs all buffered data with the persistent storage.
-    fn sync_data(&self) -> std::result::Result<(), io::Error>;
+    fn sync_data(&self) -> core::result::Result<(), BackendError>;
 
     /// Writes the specified array to the storage.
-    fn write(&self, offset: u64, data: &[u8]) -> std::result::Result<(), io::Error>;
+    fn write(&self, offset: u64, data: &[u8]) -> core::result::Result<(), BackendError>;
 
     /// Release any resources held by the backend
     ///
     /// Note: redb will not access the backend after calling this method and will call it exactly
     /// once when the [`Database`] is dropped
-    fn close(&self) -> std::result::Result<(), io::Error> {
+    fn close(&self) -> core::result::Result<(), BackendError> {
         Ok(())
     }
 }
@@ -413,7 +422,7 @@ pub trait ReadableDatabase {
 /// Basic usage:
 ///
 /// ```rust
-/// use redb::*;
+/// use shodh_redb::*;
 /// # use tempfile::NamedTempFile;
 /// const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
 ///
@@ -537,7 +546,7 @@ impl ReadOnlyDatabase {
 /// Basic usage:
 ///
 /// ```rust
-/// use redb::*;
+/// use shodh_redb::*;
 /// # use tempfile::NamedTempFile;
 /// const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
 ///
@@ -561,6 +570,7 @@ pub struct Database {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
     blob_dedup_config: BlobDedupConfig,
+    #[cfg(feature = "std")]
     group_committer: GroupCommitter,
 }
 
@@ -582,11 +592,13 @@ impl Database {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
+    #[cfg(feature = "std")]
     pub fn create(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().create(path)
     }
 
     /// Opens an existing redb database.
+    #[cfg(feature = "std")]
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
     }
@@ -681,6 +693,7 @@ impl Database {
     ///
     /// The resulting file is a valid redb database. Open it with [`Database::open`]
     /// (recommended, handles any needed repair) or [`Builder::open`].
+    #[cfg(feature = "std")]
     #[allow(clippy::cast_possible_truncation)]
     pub fn backup(&self, path: impl AsRef<Path>) -> Result<(), StorageError> {
         use std::io::Write;
@@ -694,7 +707,8 @@ impl Database {
         self.mem.flush_data()?;
 
         let file_len = self.mem.raw_len()?;
-        let mut dest = File::create(path.as_ref()).map_err(StorageError::Io)?;
+        let mut dest =
+            File::create(path.as_ref()).map_err(|e| StorageError::Io(BackendError::Io(e)))?;
         let mut buf = vec![0u8; CHUNK_SIZE];
         let mut offset = 0u64;
 
@@ -703,11 +717,13 @@ impl Database {
             let to_read = remaining.min(CHUNK_SIZE);
             let chunk = &mut buf[..to_read];
             self.mem.read_raw(offset, chunk)?;
-            dest.write_all(chunk).map_err(StorageError::Io)?;
+            dest.write_all(chunk)
+                .map_err(|e| StorageError::Io(BackendError::Io(e)))?;
             offset += to_read as u64;
         }
 
-        dest.sync_all().map_err(StorageError::Io)?;
+        dest.sync_all()
+            .map_err(|e| StorageError::Io(BackendError::Io(e)))?;
 
         Ok(())
     }
@@ -1331,6 +1347,7 @@ impl Database {
             mem,
             transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
             blob_dedup_config: blob_dedup_config.clone(),
+            #[cfg(feature = "std")]
             group_committer: GroupCommitter::new(),
         };
 
@@ -1450,6 +1467,7 @@ impl Database {
     /// If any batch in a group fails, the entire group is rolled back. The failed
     /// batch receives its specific error; all others receive `GroupCommitError::PeerFailed`
     /// and may retry.
+    #[cfg(feature = "std")]
     pub fn submit_write_batch(&self, batch: WriteBatch) -> Result<(), GroupCommitError> {
         let (should_lead, result_rx) = self.group_committer.enqueue(batch)?;
 
@@ -1460,6 +1478,7 @@ impl Database {
         result_rx.recv().unwrap_or(Err(GroupCommitError::Shutdown))
     }
 
+    #[cfg(feature = "std")]
     fn run_group_commit(&self) {
         loop {
             let batches = self.group_committer.drain_pending();
@@ -1545,9 +1564,21 @@ impl Database {
 
 impl Drop for Database {
     fn drop(&mut self) {
+        #[cfg(feature = "std")]
         self.group_committer.shutdown();
 
-        if !thread::panicking() && self.ensure_allocator_state_table_and_trim().is_err() {
+        let is_panicking = {
+            #[cfg(feature = "std")]
+            {
+                std::thread::panicking()
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                false
+            }
+        };
+
+        if !is_panicking && self.ensure_allocator_state_table_and_trim().is_err() {
             #[cfg(feature = "logging")]
             warn!("Failed to write allocator state table. Repair may be required at restart.");
         }
@@ -1846,6 +1877,7 @@ impl std::fmt::Debug for Database {
 #[cfg(test)]
 mod test {
     use crate::backends::FileBackend;
+    use crate::error::BackendError;
     use crate::{
         CommitError, Database, DatabaseError, Durability, ReadableTable, StorageBackend,
         StorageError, TableDefinition, TransactionError,
@@ -1869,15 +1901,15 @@ mod test {
             }
         }
 
-        fn check_countdown(&self) -> Result<(), std::io::Error> {
+        fn check_countdown(&self) -> Result<(), BackendError> {
             if self.countdown.load(Ordering::SeqCst) == 0 {
-                return Err(std::io::Error::from(ErrorKind::Other));
+                return Err(BackendError::from(std::io::Error::from(ErrorKind::Other)));
             }
 
             Ok(())
         }
 
-        fn decrement_countdown(&self) -> Result<(), std::io::Error> {
+        fn decrement_countdown(&self) -> Result<(), BackendError> {
             if self
                 .countdown
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
@@ -1885,7 +1917,7 @@ mod test {
                 })
                 .is_err()
             {
-                return Err(std::io::Error::from(ErrorKind::Other));
+                return Err(BackendError::from(std::io::Error::from(ErrorKind::Other)));
             }
 
             Ok(())
@@ -1893,25 +1925,25 @@ mod test {
     }
 
     impl StorageBackend for FailingBackend {
-        fn len(&self) -> Result<u64, std::io::Error> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.check_countdown()?;
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), std::io::Error> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             self.check_countdown()?;
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             self.decrement_countdown()?;
             self.inner.write(offset, data)
         }
@@ -2265,8 +2297,7 @@ mod test {
         let err = Database::builder().open(tmpfile.path()).unwrap_err();
 
         match err {
-            DatabaseError::Storage(StorageError::Io(err))
-                if err.kind() == ErrorKind::InvalidData => {}
+            DatabaseError::Storage(StorageError::Corrupted(_)) => {}
             err => panic!("Unexpected error for empty file: {err}"),
         }
     }

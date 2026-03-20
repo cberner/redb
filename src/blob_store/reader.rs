@@ -1,13 +1,13 @@
 use crate::Result;
 use crate::tree_store::TransactionalMemory;
-use std::io::{self, Read, Seek, SeekFrom};
-use std::sync::Arc;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 /// A seekable reader for blob data stored in the database.
 ///
-/// `BlobReader` implements [`std::io::Read`] and [`std::io::Seek`], allowing
-/// partial and streaming reads of blob data without loading the entire blob
-/// into memory.
+/// `BlobReader` implements [`std::io::Read`] and [`std::io::Seek`] (when the
+/// `std` feature is enabled), allowing partial and streaming reads of blob data
+/// without loading the entire blob into memory.
 ///
 /// Range reads bypass checksum verification since the stored checksum covers
 /// the entire blob. Use [`crate::WriteTransaction::get_blob`] or
@@ -84,8 +84,9 @@ impl BlobReader {
     }
 }
 
-impl Read for BlobReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+#[cfg(feature = "std")]
+impl std::io::Read for BlobReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.position >= self.blob_length {
             return Ok(0);
         }
@@ -100,7 +101,7 @@ impl Read for BlobReader {
         let data = self
             .mem
             .blob_read(self.file_offset + self.position, to_read)
-            .map_err(|e| io::Error::other(e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         buf[..to_read].copy_from_slice(&data);
         self.position += to_read as u64;
@@ -108,14 +109,15 @@ impl Read for BlobReader {
     }
 }
 
-impl Seek for BlobReader {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+#[cfg(feature = "std")]
+impl std::io::Seek for BlobReader {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         let new_pos = match pos {
-            SeekFrom::Start(offset) => i64::try_from(offset).ok(),
-            SeekFrom::End(offset) => i64::try_from(self.blob_length)
+            std::io::SeekFrom::Start(offset) => i64::try_from(offset).ok(),
+            std::io::SeekFrom::End(offset) => i64::try_from(self.blob_length)
                 .ok()
                 .and_then(|len| len.checked_add(offset)),
-            SeekFrom::Current(offset) => i64::try_from(self.position)
+            std::io::SeekFrom::Current(offset) => i64::try_from(self.position)
                 .ok()
                 .and_then(|pos| pos.checked_add(offset)),
         };
@@ -127,8 +129,8 @@ impl Seek for BlobReader {
                 self.position = unsigned;
                 Ok(self.position)
             }
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
                 "invalid seek to a negative or overflowing position",
             )),
         }
@@ -136,8 +138,8 @@ impl Seek for BlobReader {
 }
 
 #[allow(clippy::missing_fields_in_debug)]
-impl std::fmt::Debug for BlobReader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for BlobReader {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("BlobReader")
             .field("blob_length", &self.blob_length)
             .field("position", &self.position)

@@ -1,7 +1,10 @@
 use crate::types::{Key, TypeName, Value};
-use std::borrow::Borrow;
-use std::cmp::Ordering;
-use std::mem::size_of;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::cmp::Ordering;
+use core::mem::size_of;
 
 #[repr(transparent)]
 #[derive(Debug)]

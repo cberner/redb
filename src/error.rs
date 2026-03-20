@@ -1,9 +1,58 @@
-use crate::group_commit::GroupCommitError;
 use crate::tree_store::{FILE_FORMAT_VERSION3, MAX_VALUE_LENGTH};
 use crate::{ReadTransaction, TypeName};
-use std::fmt::{Display, Formatter};
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use core::fmt::{Display, Formatter};
+use core::panic;
+
+#[cfg(feature = "std")]
+use crate::group_commit::GroupCommitError;
+#[cfg(feature = "std")]
 use std::sync::PoisonError;
-use std::{io, panic};
+
+/// Error type for storage backend operations.
+///
+/// Under `std`, this wraps `std::io::Error`. Under `no_std`, it provides
+/// a string-based error representation.
+#[derive(Debug)]
+pub enum BackendError {
+    #[cfg(feature = "std")]
+    Io(std::io::Error),
+    #[cfg(not(feature = "std"))]
+    Message(String),
+}
+
+impl Display for BackendError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            #[cfg(feature = "std")]
+            BackendError::Io(err) => write!(f, "{err}"),
+            #[cfg(not(feature = "std"))]
+            BackendError::Message(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for BackendError {}
+
+#[cfg(feature = "std")]
+impl From<std::io::Error> for BackendError {
+    fn from(err: std::io::Error) -> Self {
+        BackendError::Io(err)
+    }
+}
+
+impl BackendError {
+    /// Returns the `ErrorKind` of the underlying I/O error.
+    #[cfg(feature = "std")]
+    pub fn kind(&self) -> std::io::ErrorKind {
+        match self {
+            BackendError::Io(e) => e.kind(),
+        }
+    }
+}
 
 /// General errors directly from the storage layer
 #[derive(Debug)]
@@ -42,21 +91,29 @@ pub enum StorageError {
         /// Current memory usage in bytes
         used: usize,
     },
-    Io(io::Error),
+    Io(BackendError),
     PreviousIo,
     DatabaseClosed,
     LockPoisoned(&'static panic::Location<'static>),
 }
 
+#[cfg(feature = "std")]
 impl<T> From<PoisonError<T>> for StorageError {
     fn from(_: PoisonError<T>) -> StorageError {
         StorageError::LockPoisoned(panic::Location::caller())
     }
 }
 
-impl From<io::Error> for StorageError {
-    fn from(err: io::Error) -> StorageError {
+impl From<BackendError> for StorageError {
+    fn from(err: BackendError) -> StorageError {
         StorageError::Io(err)
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<std::io::Error> for StorageError {
+    fn from(err: std::io::Error) -> StorageError {
+        StorageError::Io(BackendError::Io(err))
     }
 }
 
@@ -97,7 +154,7 @@ impl From<StorageError> for Error {
 }
 
 impl Display for StorageError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             StorageError::Corrupted(msg) => {
                 write!(f, "DB corrupted: {msg}")
@@ -163,6 +220,7 @@ impl Display for StorageError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for StorageError {}
 
 /// Errors related to opening tables
@@ -244,7 +302,7 @@ impl From<StorageError> for TableError {
 }
 
 impl Display for TableError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             TableError::TypeDefinitionChanged {
                 name,
@@ -287,6 +345,7 @@ impl Display for TableError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for TableError {}
 
 /// Errors related to opening a database
@@ -314,9 +373,16 @@ impl From<DatabaseError> for Error {
     }
 }
 
-impl From<io::Error> for DatabaseError {
-    fn from(err: io::Error) -> DatabaseError {
+impl From<BackendError> for DatabaseError {
+    fn from(err: BackendError) -> DatabaseError {
         DatabaseError::Storage(StorageError::Io(err))
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<std::io::Error> for DatabaseError {
+    fn from(err: std::io::Error) -> DatabaseError {
+        DatabaseError::Storage(StorageError::Io(BackendError::Io(err)))
     }
 }
 
@@ -327,7 +393,7 @@ impl From<StorageError> for DatabaseError {
 }
 
 impl Display for DatabaseError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             DatabaseError::UpgradeRequired(actual) => {
                 write!(
@@ -346,6 +412,7 @@ impl Display for DatabaseError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for DatabaseError {}
 
 /// Errors related to savepoints
@@ -377,7 +444,7 @@ impl From<StorageError> for SavepointError {
 }
 
 impl Display for SavepointError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             SavepointError::InvalidSavepoint => {
                 write!(f, "Savepoint is invalid or cannot be created.")
@@ -387,6 +454,7 @@ impl Display for SavepointError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for SavepointError {}
 
 /// Errors related to compaction
@@ -421,7 +489,7 @@ impl From<StorageError> for CompactionError {
 }
 
 impl Display for CompactionError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             CompactionError::PersistentSavepointExists => {
                 write!(
@@ -446,6 +514,7 @@ impl Display for CompactionError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for CompactionError {}
 
 /// Errors related to transactions
@@ -465,7 +534,7 @@ impl From<SetDurabilityError> for Error {
 }
 
 impl Display for SetDurabilityError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             SetDurabilityError::PersistentSavepointModified => {
                 write!(
@@ -477,6 +546,7 @@ impl Display for SetDurabilityError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for SetDurabilityError {}
 
 /// Errors related to transactions
@@ -516,7 +586,7 @@ impl From<StorageError> for TransactionError {
 }
 
 impl Display for TransactionError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             TransactionError::Storage(storage) => storage.fmt(f),
             TransactionError::ReadTransactionStillInUse(_) => {
@@ -526,6 +596,7 @@ impl Display for TransactionError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for TransactionError {}
 
 /// Errors related to committing transactions
@@ -559,13 +630,14 @@ impl From<StorageError> for CommitError {
 }
 
 impl Display for CommitError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             CommitError::Storage(storage) => storage.fmt(f),
         }
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for CommitError {}
 
 /// Superset of all other errors that can occur. Convenience enum so that users can convert all errors into a single type
@@ -646,7 +718,7 @@ pub enum Error {
         /// Current memory usage in bytes
         used: usize,
     },
-    Io(io::Error),
+    Io(BackendError),
     DatabaseClosed,
     /// A previous IO error occurred. The database must be closed and re-opened
     PreviousIo,
@@ -654,11 +726,14 @@ pub enum Error {
     /// The transaction is still referenced by a table or other object
     ReadTransactionStillInUse(Box<ReadTransaction>),
     /// A group commit batch was rolled back because a peer batch failed
+    #[cfg(feature = "std")]
     GroupCommitPeerFailed,
     /// The database group committer is shutting down
+    #[cfg(feature = "std")]
     GroupCommitShutdown,
 }
 
+#[cfg(feature = "std")]
 impl From<GroupCommitError> for Error {
     fn from(err: GroupCommitError) -> Error {
         match err {
@@ -670,20 +745,28 @@ impl From<GroupCommitError> for Error {
     }
 }
 
+#[cfg(feature = "std")]
 impl<T> From<PoisonError<T>> for Error {
     fn from(_: PoisonError<T>) -> Error {
         Error::LockPoisoned(panic::Location::caller())
     }
 }
 
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Error {
+#[cfg(feature = "std")]
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Error {
+        Error::Io(BackendError::Io(err))
+    }
+}
+
+impl From<BackendError> for Error {
+    fn from(err: BackendError) -> Error {
         Error::Io(err)
     }
 }
 
 impl Display for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             Error::Corrupted(msg) => {
                 write!(f, "DB corrupted: {msg}")
@@ -823,12 +906,14 @@ impl Display for Error {
             Error::ReadTransactionStillInUse(_) => {
                 write!(f, "Transaction still in use")
             }
+            #[cfg(feature = "std")]
             Error::GroupCommitPeerFailed => {
                 write!(
                     f,
                     "Group commit batch rolled back: another batch in the group failed"
                 )
             }
+            #[cfg(feature = "std")]
             Error::GroupCommitShutdown => {
                 write!(f, "Group commit failed: database is shutting down")
             }
@@ -836,4 +921,5 @@ impl Display for Error {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for Error {}

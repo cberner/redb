@@ -1,4 +1,6 @@
-use std::fmt::{self, Debug};
+use alloc::format;
+use alloc::vec::Vec;
+use core::fmt::{self, Debug};
 
 use crate::types::{MutInPlaceValue, TypeName, Value};
 
@@ -10,7 +12,7 @@ use crate::types::{MutInPlaceValue, TypeName, Value};
 /// # Usage
 ///
 /// ```rust,ignore
-/// use redb::{Database, TableDefinition, FixedVec, ReadableTable};
+/// use shodh_redb::{Database, TableDefinition, FixedVec, ReadableTable};
 ///
 /// const EMBEDDINGS: TableDefinition<u64, FixedVec<384>> = TableDefinition::new("embeddings");
 ///
@@ -43,7 +45,7 @@ impl<const N: usize> Value for FixedVec<N> {
         Self: 'a;
 
     fn fixed_width() -> Option<usize> {
-        Some(N * std::mem::size_of::<f32>())
+        Some(N * core::mem::size_of::<f32>())
     }
 
     fn from_bytes<'a>(data: &'a [u8]) -> [f32; N]
@@ -52,14 +54,14 @@ impl<const N: usize> Value for FixedVec<N> {
     {
         assert_eq!(
             data.len(),
-            N * std::mem::size_of::<f32>(),
+            N * core::mem::size_of::<f32>(),
             "FixedVec<{N}>: expected {} bytes, got {}",
-            N * std::mem::size_of::<f32>(),
+            N * core::mem::size_of::<f32>(),
             data.len()
         );
         let mut result = [0.0f32; N];
         for (i, val) in result.iter_mut().enumerate() {
-            let start = i * std::mem::size_of::<f32>();
+            let start = i * core::mem::size_of::<f32>();
             let bytes: [u8; 4] = data[start..start + 4].try_into().unwrap();
             *val = f32::from_le_bytes(bytes);
         }
@@ -70,7 +72,7 @@ impl<const N: usize> Value for FixedVec<N> {
     where
         Self: 'b,
     {
-        let mut result = Vec::with_capacity(N * std::mem::size_of::<f32>());
+        let mut result = Vec::with_capacity(N * core::mem::size_of::<f32>());
         for val in value {
             result.extend_from_slice(&val.to_le_bytes());
         }
@@ -103,7 +105,7 @@ impl<const N: usize> MutInPlaceValue for FixedVec<N> {
 /// # Usage
 ///
 /// ```rust,ignore
-/// use redb::{Database, TableDefinition, DynVec, ReadableTable};
+/// use shodh_redb::{Database, TableDefinition, DynVec, ReadableTable};
 ///
 /// const VECTORS: TableDefinition<u64, DynVec> = TableDefinition::new("vectors");
 ///
@@ -144,15 +146,15 @@ impl Value for DynVec {
         Self: 'a,
     {
         assert_eq!(
-            data.len() % std::mem::size_of::<f32>(),
+            data.len() % core::mem::size_of::<f32>(),
             0,
             "DynVec: byte length {} is not a multiple of 4",
             data.len()
         );
-        let dim = data.len() / std::mem::size_of::<f32>();
+        let dim = data.len() / core::mem::size_of::<f32>();
         let mut result = Vec::with_capacity(dim);
         for i in 0..dim {
-            let start = i * std::mem::size_of::<f32>();
+            let start = i * core::mem::size_of::<f32>();
             let bytes: [u8; 4] = data[start..start + 4].try_into().unwrap();
             result.push(f32::from_le_bytes(bytes));
         }
@@ -163,7 +165,7 @@ impl Value for DynVec {
     where
         Self: 'b,
     {
-        let mut result = Vec::with_capacity(value.len() * std::mem::size_of::<f32>());
+        let mut result = Vec::with_capacity(value.len() * core::mem::size_of::<f32>());
         for val in value {
             result.extend_from_slice(&val.to_le_bytes());
         }
@@ -191,8 +193,8 @@ impl Value for DynVec {
 /// # Usage
 ///
 /// ```rust,ignore
-/// use redb::{Database, TableDefinition, BinaryQuantized};
-/// use redb::vector_ops::quantize_binary;
+/// use shodh_redb::{Database, TableDefinition, BinaryQuantized};
+/// use shodh_redb::vector_ops::quantize_binary;
 ///
 /// // 384 f32 dims -> 48 bytes (384/8)
 /// const BQ_TABLE: TableDefinition<u64, BinaryQuantized<48>> = TableDefinition::new("bq_emb");

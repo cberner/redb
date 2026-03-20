@@ -1,11 +1,14 @@
+use crate::compat::{HashMap, Mutex};
 use crate::multimap_table::{UntypedMultiBtree, relocate_subtrees};
 use crate::tree_store::{
     BtreeHeader, PageNumber, PagePath, TransactionalMemory, UntypedBtree, UntypedBtreeMut,
 };
 use crate::{Key, Result, TableError, TypeName, Value};
-use std::collections::HashMap;
-use std::mem::size_of;
-use std::sync::{Arc, Mutex};
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::mem::size_of;
 
 // Forward compatibility feature in case alignment can be supported in the future
 // See https://github.com/cberner/redb/issues/360

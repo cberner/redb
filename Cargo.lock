@@ -23,6 +23,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -827,6 +833,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -1750,77 +1758,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "redb"
-version = "3.1.1"
-dependencies = [
- "bincode 2.0.1",
- "chrono",
- "libc",
- "log",
- "lz4_flex",
- "rand 0.10.0",
- "redb 2.6.0",
- "redb-derive",
- "sha2",
- "tempfile",
- "uuid",
- "zstd",
-]
-
-[[package]]
-name = "redb-bench"
-version = "0.0.0"
-dependencies = [
- "byte-unit",
- "comfy-table",
- "ctrlc",
- "env_logger",
- "fastrand",
- "fjall",
- "heed",
- "io-uring",
- "libc",
- "rand 0.9.2",
- "redb 3.1.1",
- "rocksdb",
- "rusqlite",
- "sled",
- "tempfile",
- "walkdir",
-]
-
-[[package]]
-name = "redb-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "comfy-table",
- "redb 3.1.1",
- "xxhash-rust",
-]
-
-[[package]]
-name = "redb-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "redb 3.1.1",
- "syn 2.0.117",
- "tempfile",
-]
-
-[[package]]
-name = "redb-python"
-version = "0.5.0"
-dependencies = [
- "pyo3",
- "pyo3-build-config",
- "redb 3.1.1",
- "tempfile",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2113,6 +2050,79 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
+name = "shodh-redb"
+version = "0.1.0"
+dependencies = [
+ "bincode 2.0.1",
+ "chrono",
+ "hashbrown 0.15.5",
+ "libc",
+ "log",
+ "lz4_flex",
+ "rand 0.10.0",
+ "redb",
+ "sha2",
+ "shodh-redb-derive",
+ "spin",
+ "tempfile",
+ "uuid",
+ "zstd",
+]
+
+[[package]]
+name = "shodh-redb-bench"
+version = "0.0.0"
+dependencies = [
+ "byte-unit",
+ "comfy-table",
+ "ctrlc",
+ "env_logger",
+ "fastrand",
+ "fjall",
+ "heed",
+ "io-uring",
+ "libc",
+ "rand 0.9.2",
+ "rocksdb",
+ "rusqlite",
+ "shodh-redb",
+ "sled",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
+name = "shodh-redb-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "comfy-table",
+ "shodh-redb",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "shodh-redb-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "shodh-redb",
+ "syn 2.0.117",
+ "tempfile",
+]
+
+[[package]]
+name = "shodh-redb-python"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "pyo3-build-config",
+ "shodh-redb",
+ "tempfile",
+]
+
+[[package]]
 name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2145,6 +2155,12 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "spin"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 
 [[package]]
 name = "sqlite-wasm-rs"
