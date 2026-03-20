@@ -1,8 +1,42 @@
 use alloc::collections::BinaryHeap;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug};
 
 use crate::vector::SQVec;
+
+/// Portable `f32::sqrt` that works in `no_std` on wasm32.
+///
+/// On targets with `std`, delegates to the hardware/libm-backed `f32::sqrt()`.
+/// On `no_std` (e.g. wasm32 without wasi), uses a bit-level Newton's method
+/// implementation that converges in a fixed number of iterations.
+#[inline]
+fn sqrt_f32(x: f32) -> f32 {
+    #[cfg(feature = "std")]
+    {
+        x.sqrt()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        if x < 0.0 || x.is_nan() {
+            return f32::NAN;
+        }
+        if x == 0.0 || x.is_infinite() {
+            return x;
+        }
+        // Initial estimate via bit manipulation (fast inverse sqrt trick variant)
+        let bits = x.to_bits();
+        let guess_bits = (bits >> 1) + 0x1FC0_0000;
+        let mut guess = f32::from_bits(guess_bits);
+        // Newton-Raphson iterations (5 iterations for full f32 precision)
+        guess = 0.5 * (guess + x / guess);
+        guess = 0.5 * (guess + x / guess);
+        guess = 0.5 * (guess + x / guess);
+        guess = 0.5 * (guess + x / guess);
+        guess = 0.5 * (guess + x / guess);
+        guess
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Distance metric enum
@@ -136,7 +170,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         norm_a += x * x;
         norm_b += y * y;
     }
-    let denom = norm_a.sqrt() * norm_b.sqrt();
+    let denom = sqrt_f32(norm_a) * sqrt_f32(norm_b);
     if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
@@ -207,7 +241,7 @@ pub fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
 /// Returns `sqrt(sum(x_i^2))`.
 #[inline]
 pub fn l2_norm(v: &[f32]) -> f32 {
-    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+    sqrt_f32(v.iter().map(|x| x * x).sum::<f32>())
 }
 
 /// Normalizes a vector to unit length (L2 norm = 1.0) in place.

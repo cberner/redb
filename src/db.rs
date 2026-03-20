@@ -163,7 +163,7 @@ impl<K: Key + 'static, V: Value + 'static> Clone for TableDefinition<'_, K, V> {
 impl<K: Key + 'static, V: Value + 'static> Copy for TableDefinition<'_, K, V> {}
 
 impl<K: Key + 'static, V: Value + 'static> Display for TableDefinition<'_, K, V> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "{}<{}, {}>",
@@ -216,7 +216,7 @@ impl<K: Key + 'static, V: Key + 'static> Clone for MultimapTableDefinition<'_, K
 impl<K: Key + 'static, V: Key + 'static> Copy for MultimapTableDefinition<'_, K, V> {}
 
 impl<K: Key + 'static, V: Key + 'static> Display for MultimapTableDefinition<'_, K, V> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "{}<{}, {}>",
@@ -251,6 +251,7 @@ pub struct CorruptPageInfo {
 }
 
 /// Results of a database integrity verification.
+#[cfg(feature = "std")]
 #[derive(Debug)]
 pub struct VerifyReport {
     /// Overall pass/fail
@@ -475,6 +476,7 @@ impl ReadableDatabase for ReadOnlyDatabase {
 
 impl ReadOnlyDatabase {
     /// Opens an existing redb database.
+    #[cfg(feature = "std")]
     pub fn open(path: impl AsRef<Path>) -> Result<ReadOnlyDatabase, DatabaseError> {
         Builder::new().open_read_only(path)
     }
@@ -739,10 +741,11 @@ impl Database {
     /// - [`VerifyLevel::Pages`]: Header + walks all B-tree pages verifying XXH3-128 checksums
     /// - [`VerifyLevel::Full`]: Pages + verifies B-tree structural invariants (key ordering,
     ///   valid child pointers, consistent tree depth)
+    #[cfg(feature = "std")]
     pub fn verify_backup(
         path: impl AsRef<Path>,
         level: VerifyLevel,
-    ) -> std::result::Result<VerifyReport, DatabaseError> {
+    ) -> core::result::Result<VerifyReport, DatabaseError> {
         let start = Instant::now();
         let file = OpenOptions::new().read(true).open(path.as_ref())?;
         let backend: Box<dyn StorageBackend> = Box::new(
@@ -804,6 +807,7 @@ impl Database {
     /// - [`VerifyLevel::Header`]: Verifies commit slot checksums (~instant)
     /// - [`VerifyLevel::Pages`]: Header + walks all B-tree pages verifying XXH3-128 checksums
     /// - [`VerifyLevel::Full`]: Pages + verifies B-tree structural invariants
+    #[cfg(feature = "std")]
     pub fn verify_integrity(&self, level: VerifyLevel) -> Result<VerifyReport> {
         let start = Instant::now();
 
@@ -978,7 +982,7 @@ impl Database {
     ///
     /// Same constraints as [`compact()`](Self::compact): no active read transactions
     /// or persistent/ephemeral savepoints.
-    pub fn compact_blobs(&mut self) -> std::result::Result<BlobCompactionReport, CompactionError> {
+    pub fn compact_blobs(&mut self) -> core::result::Result<BlobCompactionReport, CompactionError> {
         if self
             .transaction_tracker
             .oldest_live_read_transaction()
@@ -1769,6 +1773,7 @@ impl Builder {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
+    #[cfg(feature = "std")]
     pub fn create(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new()
             .read(true)
@@ -1792,6 +1797,7 @@ impl Builder {
     }
 
     /// Opens an existing redb database.
+    #[cfg(feature = "std")]
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
@@ -1814,6 +1820,7 @@ impl Builder {
     /// If the file has been opened for writing (i.e. as a [`Database`]) [`DatabaseError::DatabaseAlreadyOpen`]
     /// will be returned on platforms which support file locks (macOS, Windows, Linux). On other platforms,
     /// the caller MUST avoid calling this method when the database is open for writing.
+    #[cfg(feature = "std")]
     pub fn open_read_only(
         &self,
         path: impl AsRef<Path>,
@@ -1833,6 +1840,7 @@ impl Builder {
     /// Open an existing or create a new database in the given `file`.
     ///
     /// The file must be empty or contain a valid database.
+    #[cfg(feature = "std")]
     pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
         Database::new(
             Box::new(FileBackend::new(file)?),
@@ -1868,8 +1876,8 @@ impl Builder {
     }
 }
 
-impl std::fmt::Debug for Database {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl Debug for Database {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Database").finish()
     }
 }

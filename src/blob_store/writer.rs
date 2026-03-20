@@ -1,7 +1,7 @@
 use crate::WriteTransaction;
 use crate::blob_store::types::{BlobId, BlobMeta, BlobRef, ContentType, Sha256Key, StoreOptions};
 use crate::tree_store::{Xxh3StreamHasher, hash64_with_seed};
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 use sha2::{Digest, Sha256};

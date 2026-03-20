@@ -16,6 +16,8 @@
 
 use crate::{Result, StorageError};
 use alloc::borrow::Cow;
+use alloc::format;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 /// User-facing compression configuration.

@@ -16,6 +16,7 @@ use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
 use crate::tree_store::{Page, PageNumber, PageTrackerPolicy};
 use crate::{CacheStats, StorageBackend};
 use crate::{DatabaseError, Result, StorageError};
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::ToString;
 #[cfg(debug_assertions)]
@@ -339,7 +340,7 @@ impl TransactionalMemory {
         page_size: usize,
         region_size: Option<u64>,
         compression: CompressionConfig,
-    ) -> std::result::Result<(Self, bool), DatabaseError> {
+    ) -> core::result::Result<(Self, bool), DatabaseError> {
         let _region_size = region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
         #[allow(clippy::cast_possible_truncation)]
         let storage = PagedCachedFile::new(storage, page_size as u64, 0, 0, None)?;

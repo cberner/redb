@@ -15,6 +15,7 @@ use crate::tree_store::{
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result};
 use alloc::format;
+use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -516,6 +517,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     }
 
     #[allow(dead_code)]
+    #[cfg(feature = "std")]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.read_tree()?.print_debug(include_values)
     }
@@ -1319,6 +1321,7 @@ impl<K: Key, V: Value> Btree<K, V> {
     }
 
     #[allow(dead_code)]
+    #[cfg(feature = "std")]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         if let Some(p) = self.root.map(|x| x.root) {
             let mut pages = vec![self.mem.get_page(p)?];

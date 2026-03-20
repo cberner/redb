@@ -10,7 +10,7 @@ use crate::tree_store::{
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, AccessGuardMut, StorageError, WriteTransaction};
 use crate::{Result, TableHandle};
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
@@ -98,6 +98,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     }
 
     #[allow(dead_code)]
+    #[cfg(feature = "std")]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.tree.print_debug(include_values)
     }

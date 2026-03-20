@@ -9,6 +9,7 @@ use crate::tree_store::page_store::page_manager::{
 };
 use crate::{DatabaseError, Result, StorageError};
 use alloc::format;
+use alloc::string::ToString;
 use core::mem::size_of;
 
 // Database layout:

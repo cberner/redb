@@ -26,8 +26,9 @@ use crate::{
     TableError, TableHandle, TransactionError, TypeName, UntypedMultimapTableHandle,
     UntypedTableHandle,
 };
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -887,7 +888,7 @@ impl WriteTransaction {
         Ok(false)
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "std"))]
     pub fn print_allocated_page_debug(&self) {
         let mut all_allocated: HashSet<PageNumber> =
             HashSet::from_iter(self.mem.all_allocated_pages());
@@ -1310,6 +1311,7 @@ impl WriteTransaction {
     ///
     /// The table will be created if it does not exist. Values are stored with an
     /// 8-byte expiry header; use `insert_with_ttl()` to set per-key lifetimes.
+    #[cfg(feature = "std")]
     #[track_caller]
     pub fn open_ttl_table<K: Key + 'static, V: Value + 'static>(
         &self,
@@ -1503,10 +1505,20 @@ impl WriteTransaction {
         // as_nanos() returns u128, but u64 nanoseconds covers ~584 years from epoch.
         // Truncation is intentional and safe for any realistic timestamp.
         #[allow(clippy::cast_possible_truncation)]
-        let wall_clock_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_nanos() as u64;
+        let wall_clock_ns = {
+            #[cfg(feature = "std")]
+            {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock before UNIX epoch")
+                    .as_nanos() as u64
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                // no_std: wall clock unavailable; HLC provides causal ordering
+                0u64
+            }
+        };
 
         // 7. Build BlobMeta
         let causal_parent = opts.causal_link.as_ref().map(|l| l.parent);
@@ -2811,6 +2823,7 @@ impl WriteTransaction {
     }
 
     #[allow(dead_code)]
+    #[cfg(feature = "std")]
     pub(crate) fn print_debug(&self) -> Result {
         // Flush any pending updates to make sure we get the latest root
         let mut tables = self.tables.lock();
@@ -2925,6 +2938,7 @@ impl ReadTransaction {
     /// Open a TTL-enabled table for reading.
     ///
     /// Returns an error if the table does not exist.
+    #[cfg(feature = "std")]
     pub fn open_ttl_table<K: Key + 'static, V: Value + 'static>(
         &self,
         definition: crate::ttl_table::TtlTableDefinition<K, V>,

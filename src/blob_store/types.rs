@@ -2,6 +2,7 @@ use crate::temporal::HybridLogicalClock;
 use crate::types::{Key, TypeName, Value};
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt;

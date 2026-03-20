@@ -161,7 +161,7 @@ impl PageNumber {
 }
 
 impl Debug for PageNumber {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "r{}.{}/{}",
@@ -190,7 +190,7 @@ impl PageImpl {
 }
 
 impl Debug for PageImpl {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.write_fmt(format_args!("PageImpl: page_number={:?}", self.page_number))
     }
 }

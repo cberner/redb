@@ -25,3 +25,4 @@ flamegraph.svg
 .vscode/settings.json
 
 **/*.redb
+.claude/

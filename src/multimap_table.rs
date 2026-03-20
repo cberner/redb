@@ -11,7 +11,7 @@ use crate::tree_store::{
 };
 use crate::types::{Key, TypeName, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -1111,6 +1111,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
     }
 
     #[allow(dead_code)]
+    #[cfg(feature = "std")]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.tree.print_debug(include_values)
     }
