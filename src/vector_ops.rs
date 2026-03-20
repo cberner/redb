@@ -372,10 +372,14 @@ pub fn dequantize_scalar<const N: usize>(sq: &SQVec<N>) -> [f32; N] {
 pub fn sq_euclidean_distance_sq<const N: usize>(query: &[f32; N], sq: &SQVec<N>) -> f32 {
     let range = sq.max_val - sq.min_val;
     if range == 0.0 {
-        // All codes map to min_val
-        let d = query[0] - sq.min_val;
-        #[allow(clippy::cast_precision_loss)]
-        return d * d * (N as f32);
+        // All codes dequantize to min_val — compute exact per-dimension distances.
+        return query
+            .iter()
+            .map(|&q| {
+                let d = q - sq.min_val;
+                d * d
+            })
+            .sum();
     }
     let scale = range / 255.0;
     let mut sum = 0.0f32;

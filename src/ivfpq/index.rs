@@ -43,6 +43,32 @@ fn assignments_name(name: &str) -> String {
     alloc::format!("__ivfpq:{name}:assignments")
 }
 
+/// Validate that an index configuration is internally consistent.
+fn validate_config(config: &IndexConfig) -> crate::Result<()> {
+    if config.num_subvectors == 0 {
+        return Err(StorageError::Corrupted(
+            "IVF-PQ: num_subvectors must be > 0".to_string(),
+        ));
+    }
+    if config.dim == 0 {
+        return Err(StorageError::Corrupted(
+            "IVF-PQ: dim must be > 0".to_string(),
+        ));
+    }
+    if config.dim as usize % config.num_subvectors as usize != 0 {
+        return Err(StorageError::Corrupted(alloc::format!(
+            "IVF-PQ: dim ({}) must be divisible by num_subvectors ({})",
+            config.dim, config.num_subvectors,
+        )));
+    }
+    if config.num_clusters == 0 {
+        return Err(StorageError::Corrupted(
+            "IVF-PQ: num_clusters must be > 0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // IvfPqIndex — writable index handle
 // ---------------------------------------------------------------------------
@@ -50,12 +76,18 @@ fn assignments_name(name: &str) -> String {
 /// A writable IVF-PQ index bound to a [`WriteTransaction`].
 ///
 /// Obtained via [`WriteTransaction::open_ivfpq_index`].
+///
+/// The index configuration (including `num_vectors` count) is persisted
+/// automatically when the index handle is dropped. You can also call
+/// [`flush`](Self::flush) to persist explicitly at any point.
 pub struct IvfPqIndex<'txn> {
     txn: &'txn WriteTransaction,
     pub(crate) config: IndexConfig,
     name: String,
     centroids: Option<Vec<f32>>,
     codebooks: Option<Codebooks>,
+    /// Tracks whether config has been modified since last persist.
+    config_dirty: bool,
 }
 
 impl<'txn> IvfPqIndex<'txn> {
@@ -76,6 +108,11 @@ impl<'txn> IvfPqIndex<'txn> {
             decode_index_config(guard.value())
         } else {
             let config = definition.to_config();
+            // Validate before persisting a new config.
+            validate_config(&config).map_err(|e| match e {
+                StorageError::Corrupted(msg) => TableError::Storage(StorageError::Corrupted(msg)),
+                other => TableError::Storage(other),
+            })?;
             let bytes = encode_index_config(&config);
             drop(existing); // release borrow
             meta_table.insert("config", bytes.as_slice())?;
@@ -104,12 +141,25 @@ impl<'txn> IvfPqIndex<'txn> {
             name,
             centroids: None,
             codebooks: None,
+            config_dirty: false,
         })
     }
 
     /// Returns the current index configuration.
     pub fn config(&self) -> &IndexConfig {
         &self.config
+    }
+
+    /// Persist any pending configuration changes to the meta table.
+    ///
+    /// This is called automatically on drop, but you can call it explicitly
+    /// if you need to guarantee the config is written at a specific point.
+    pub fn flush(&mut self) -> crate::Result<()> {
+        if self.config_dirty {
+            self.persist_config_inner()?;
+            self.config_dirty = false;
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -119,11 +169,12 @@ impl<'txn> IvfPqIndex<'txn> {
     /// Train the IVF-PQ index from training vectors.
     ///
     /// `training_vectors` is an iterator of `(vector_id, vector)` pairs.
-    /// For large datasets, pass a representative sample (10x–50x `num_clusters`).
+    /// For large datasets, pass a representative sample (10x-50x `num_clusters`).
     pub fn train<I>(&mut self, training_vectors: I, max_iter: usize) -> crate::Result<()>
     where
         I: Iterator<Item = (u64, Vec<f32>)>,
     {
+        validate_config(&self.config)?;
         let dim = self.config.dim as usize;
         let num_clusters = self.config.num_clusters as usize;
         let num_subvectors = self.config.num_subvectors as usize;
@@ -183,9 +234,10 @@ impl<'txn> IvfPqIndex<'txn> {
             }
         }
 
-        // 5. Update config.
+        // 5. Update config — persist immediately since training is a major event.
         self.config.state = STATE_TRAINED;
-        self.persist_config()?;
+        self.persist_config_inner()?;
+        self.config_dirty = false;
 
         self.centroids = Some(centroid_data);
         self.codebooks = Some(codebooks);
@@ -198,6 +250,8 @@ impl<'txn> IvfPqIndex<'txn> {
     // -----------------------------------------------------------------------
 
     /// Insert a vector into the index. Index must be trained first.
+    ///
+    /// If `vector_id` already exists, the old entry is replaced (upsert semantics).
     pub fn insert(&mut self, vector_id: u64, vector: &[f32]) -> crate::Result<()> {
         self.ensure_trained()?;
         let dim = self.config.dim as usize;
@@ -223,6 +277,23 @@ impl<'txn> IvfPqIndex<'txn> {
         );
         let pq_codes = codebooks.encode(vec_ref);
 
+        // Check if this vector_id already exists (H5/H6: handle duplicates).
+        let old_cluster = {
+            let tn = assignments_name(&self.name);
+            let def = TableDefinition::<u64, u32>::new(&tn);
+            let table = self.txn.open_table(def).map_err(te)?;
+            table.get(vector_id)?.map(|g| g.value())
+        };
+
+        // Remove old posting entry if the vector existed in a different (or same) cluster.
+        if let Some(old_cid) = old_cluster {
+            let tn = postings_name(&self.name);
+            let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
+            let mut table = self.txn.open_table(def).map_err(te)?;
+            table.remove(PostingKey::new(old_cid, vector_id))?;
+        }
+
+        // Insert the new posting entry.
         {
             let tn = postings_name(&self.name);
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
@@ -243,12 +314,17 @@ impl<'txn> IvfPqIndex<'txn> {
             table.insert(vector_id, bytes.as_slice())?;
         }
 
-        self.config.num_vectors += 1;
-        self.persist_config()?;
+        // Only increment count for genuinely new vectors.
+        if old_cluster.is_none() {
+            self.config.num_vectors += 1;
+            self.config_dirty = true;
+        }
         Ok(())
     }
 
     /// Bulk insert vectors.
+    ///
+    /// If a `vector_id` already exists, the old entry is replaced (upsert semantics).
     pub fn insert_batch<I>(&mut self, vectors: I) -> crate::Result<u64>
     where
         I: Iterator<Item = (u64, Vec<f32>)>,
@@ -269,6 +345,16 @@ impl<'txn> IvfPqIndex<'txn> {
         let ad = TableDefinition::<u64, u32>::new(&an);
         let mut at = self.txn.open_table(ad).map_err(te)?;
 
+        // Open vectors table once outside loop (M2 fix).
+        let vn;
+        let mut vt_opt = if store_raw {
+            vn = vectors_name(&self.name);
+            let vd = TableDefinition::<u64, &[u8]>::new(&vn);
+            Some(self.txn.open_table(vd).map_err(te)?)
+        } else {
+            None
+        };
+
         let mut count = 0u64;
 
         for (vector_id, mut vec) in vectors {
@@ -284,22 +370,27 @@ impl<'txn> IvfPqIndex<'txn> {
             let (cluster_id, _) = kmeans::assign_nearest(&vec, &centroids, dim, num_clusters, metric);
             let pq_codes = codebooks.encode(&vec);
 
+            // Check for existing assignment (handle duplicates).
+            let old_cluster = at.get(vector_id)?.map(|g| g.value());
+            if let Some(old_cid) = old_cluster {
+                pt.remove(PostingKey::new(old_cid, vector_id))?;
+            }
+
             pt.insert(PostingKey::new(cluster_id, vector_id), pq_codes.as_slice())?;
             at.insert(vector_id, cluster_id)?;
 
-            if store_raw {
-                let vn = vectors_name(&self.name);
-                let vd = TableDefinition::<u64, &[u8]>::new(&vn);
-                let mut vt = self.txn.open_table(vd).map_err(te)?;
+            if let Some(ref mut vt) = vt_opt {
                 let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_le_bytes()).collect();
                 vt.insert(vector_id, bytes.as_slice())?;
             }
 
-            count += 1;
+            if old_cluster.is_none() {
+                count += 1;
+            }
         }
 
         self.config.num_vectors += count;
-        self.persist_config()?;
+        self.config_dirty = true;
         Ok(count)
     }
 
@@ -330,17 +421,19 @@ impl<'txn> IvfPqIndex<'txn> {
         }
 
         self.config.num_vectors = self.config.num_vectors.saturating_sub(1);
-        self.persist_config()?;
+        self.config_dirty = true;
         Ok(true)
     }
 
     /// Search within a write transaction.
     pub fn search(
-        &self,
+        &mut self,
         query: &[f32],
         params: &SearchParams,
     ) -> crate::Result<Vec<Neighbor<u64>>> {
         self.ensure_trained()?;
+        // Flush pending config before search so reads are consistent.
+        self.flush()?;
         let dim = self.config.dim as usize;
         if query.len() != dim {
             return Err(StorageError::Corrupted(alloc::format!(
@@ -348,8 +441,9 @@ impl<'txn> IvfPqIndex<'txn> {
             )));
         }
 
-        let centroids = self.get_centroids()?;
-        let codebooks = self.get_codebooks()?;
+        // Lazy-load centroids and codebooks from disk if not cached (C1 fix).
+        let centroids = self.load_centroids()?;
+        let codebooks = self.load_codebooks()?;
 
         let query_owned;
         let q = if self.config.metric == DistanceMetric::Cosine {
@@ -359,12 +453,12 @@ impl<'txn> IvfPqIndex<'txn> {
             query
         };
 
-        let nprobe = (params.nprobe).min(self.config.num_clusters) as usize;
+        let nprobe = (params.nprobe).max(1).min(self.config.num_clusters) as usize;
         let probes = kmeans::nearest_clusters(
-            q, centroids, dim, self.config.num_clusters as usize, nprobe, self.config.metric,
+            q, &centroids, dim, self.config.num_clusters as usize, nprobe, self.config.metric,
         );
 
-        let adc = AdcTable::build(q, codebooks, self.config.metric);
+        let adc = AdcTable::build(q, &codebooks, self.config.metric);
 
         let cap = if params.rerank && self.config.store_raw_vectors {
             params.candidates.max(params.k)
@@ -402,13 +496,13 @@ impl<'txn> IvfPqIndex<'txn> {
     fn ensure_trained(&self) -> crate::Result<()> {
         if self.config.state != STATE_TRAINED {
             return Err(StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}' not trained — call train() first", self.name,
+                "IVF-PQ '{}' not trained -- call train() first", self.name,
             )));
         }
         Ok(())
     }
 
-    fn persist_config(&self) -> crate::Result<()> {
+    fn persist_config_inner(&self) -> crate::Result<()> {
         let tn = meta_name(&self.name);
         let def = TableDefinition::<&str, &[u8]>::new(&tn);
         let mut table = self.txn.open_table(def).map_err(te)?;
@@ -478,22 +572,6 @@ impl<'txn> IvfPqIndex<'txn> {
         Ok(Codebooks { data, num_subvectors: m, sub_dim: sd })
     }
 
-    fn get_centroids(&self) -> crate::Result<&[f32]> {
-        self.centroids.as_deref().ok_or_else(|| {
-            StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}': centroids not loaded", self.name,
-            ))
-        })
-    }
-
-    fn get_codebooks(&self) -> crate::Result<&Codebooks> {
-        self.codebooks.as_ref().ok_or_else(|| {
-            StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}': codebooks not loaded", self.name,
-            ))
-        })
-    }
-
     fn rerank_write(
         &self,
         query: &[f32],
@@ -515,6 +593,17 @@ impl<'txn> IvfPqIndex<'txn> {
         results.sort_unstable_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(CmpOrdering::Equal));
         results.truncate(k);
         Ok(results)
+    }
+}
+
+impl Drop for IvfPqIndex<'_> {
+    fn drop(&mut self) {
+        if self.config_dirty {
+            // Best-effort persist on drop. Errors are silently ignored since
+            // the transaction will either commit (persisting everything) or
+            // abort (discarding everything) regardless.
+            let _ = self.persist_config_inner();
+        }
     }
 }
 
@@ -558,10 +647,13 @@ impl ReadOnlyIvfPqIndex {
             let mut flat = Vec::with_capacity(num_clusters * dim);
             for c in 0..num_clusters {
                 #[allow(clippy::cast_possible_truncation)]
-                if let Some(guard) = table.get(c as u32)? {
-                    for chunk in guard.value().chunks_exact(4) {
-                        flat.push(f32::from_le_bytes(chunk.try_into().unwrap()));
-                    }
+                let guard = table.get(c as u32)?.ok_or_else(|| {
+                    TableError::Storage(StorageError::Corrupted(alloc::format!(
+                        "IVF-PQ '{name}': missing centroid {c}",
+                    )))
+                })?;
+                for chunk in guard.value().chunks_exact(4) {
+                    flat.push(f32::from_le_bytes(chunk.try_into().unwrap()));
                 }
             }
             flat
@@ -576,9 +668,12 @@ impl ReadOnlyIvfPqIndex {
             let mut data = Vec::with_capacity(num_subvectors * 256 * sub_dim);
             for m in 0..num_subvectors {
                 #[allow(clippy::cast_possible_truncation)]
-                if let Some(guard) = table.get(m as u32)? {
-                    data.extend_from_slice(&Codebooks::deserialize_codebook(guard.value(), sub_dim));
-                }
+                let guard = table.get(m as u32)?.ok_or_else(|| {
+                    TableError::Storage(StorageError::Corrupted(alloc::format!(
+                        "IVF-PQ '{name}': missing codebook {m}",
+                    )))
+                })?;
+                data.extend_from_slice(&Codebooks::deserialize_codebook(guard.value(), sub_dim));
             }
             Codebooks { data, num_subvectors, sub_dim }
         };
@@ -619,7 +714,7 @@ impl ReadOnlyIvfPqIndex {
             query
         };
 
-        let nprobe = (params.nprobe).min(self.config.num_clusters) as usize;
+        let nprobe = (params.nprobe).max(1).min(self.config.num_clusters) as usize;
         let probes = kmeans::nearest_clusters(
             q, &self.centroids, dim, self.config.num_clusters as usize, nprobe, self.config.metric,
         );

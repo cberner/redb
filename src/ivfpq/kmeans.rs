@@ -312,8 +312,8 @@ pub fn nearest_clusters(
         .collect();
 
     // Partial sort: we only need the top `nprobe` closest.
-    let nprobe = nprobe.min(num_clusters);
-    dists.select_nth_unstable_by(nprobe.saturating_sub(1), |a, b| {
+    let nprobe = nprobe.min(num_clusters).max(1);
+    dists.select_nth_unstable_by(nprobe - 1, |a, b| {
         a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal)
     });
     dists.truncate(nprobe);

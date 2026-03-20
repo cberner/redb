@@ -460,6 +460,68 @@ fn wrong_dimension_errors() {
 }
 
 #[test]
+fn duplicate_insert_upsert_semantics() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let vectors: Vec<(u64, Vec<f32>)> = (0..10)
+        .map(|i| (i, random_vector(i + 1700, 8)))
+        .collect();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_ivfpq_index(&INDEX_8D).unwrap();
+        idx.train(vectors.iter().map(|(id, v)| (*id, v.clone())), 25)
+            .unwrap();
+        for (id, vec) in &vectors {
+            idx.insert(*id, vec).unwrap();
+        }
+        assert_eq!(idx.config().num_vectors, 10);
+
+        // Re-insert vector 3 with a different vector -- should not increase count
+        let new_vec = random_vector(9999, 8);
+        idx.insert(3, &new_vec).unwrap();
+        assert_eq!(idx.config().num_vectors, 10, "duplicate insert should not increase count");
+
+        // Search should find the updated vector
+        let results = idx.search(&new_vec, &SearchParams::top_k(1)).unwrap();
+        assert_eq!(results[0].key, 3);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn write_txn_search_without_insert() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let vectors: Vec<(u64, Vec<f32>)> = (0..10)
+        .map(|i| (i, random_vector(i + 1800, 8)))
+        .collect();
+
+    // Train and insert in first txn
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn.open_ivfpq_index(&INDEX_8D).unwrap();
+        idx.train(vectors.iter().map(|(id, v)| (*id, v.clone())), 25)
+            .unwrap();
+        for (id, vec) in &vectors {
+            idx.insert(*id, vec).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Open a new write txn and search WITHOUT inserting first (C1 regression test)
+    let write_txn2 = db.begin_write().unwrap();
+    {
+        let mut idx = write_txn2.open_ivfpq_index(&INDEX_8D).unwrap();
+        let results = idx.search(&vectors[0].1, &SearchParams::top_k(1)).unwrap();
+        assert_eq!(results[0].key, 0);
+    }
+    write_txn2.commit().unwrap();
+}
+
+#[test]
 fn search_k_larger_than_index_size() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
@@ -711,9 +773,13 @@ fn config_persists_correctly() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
+    let training: Vec<(u64, Vec<f32>)> = (0..8)
+        .map(|i| (i, random_vector(i + 1900, 8)))
+        .collect();
+
     let write_txn = db.begin_write().unwrap();
     {
-        let idx = write_txn.open_ivfpq_index(&INDEX_8D).unwrap();
+        let mut idx = write_txn.open_ivfpq_index(&INDEX_8D).unwrap();
         let cfg = idx.config();
         assert_eq!(cfg.dim, 8);
         assert_eq!(cfg.num_clusters, 4);
@@ -723,10 +789,14 @@ fn config_persists_correctly() {
         assert!(cfg.store_raw_vectors);
         assert_eq!(cfg.default_nprobe, 4);
         assert_eq!(cfg.num_vectors, 0);
+
+        // Train so centroids/codebooks exist for read-only open
+        idx.train(training.iter().map(|(id, v)| (*id, v.clone())), 25)
+            .unwrap();
     }
     write_txn.commit().unwrap();
 
-    // Re-open and verify config persists
+    // Re-open read-only and verify config persists
     let read_txn = db.begin_read().unwrap();
     let idx = read_txn.open_ivfpq_index(&INDEX_8D).unwrap();
     let cfg = idx.config();
