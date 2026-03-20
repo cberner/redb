@@ -1,13 +1,13 @@
-use redb::{Legacy, ReadableDatabase, ReadableTableMetadata, TableError};
+use shodh_redb::{Legacy, ReadableDatabase, ReadableTableMetadata, TableError};
 
 const ELEMENTS: usize = 3;
 
-trait TestData: redb::Value + redb2_6::Value {
+trait TestData: shodh_redb::Value + redb2_6::Value {
     fn make_data_v2_6<'a>() -> [<Self as redb2_6::Value>::SelfType<'a>; ELEMENTS]
     where
         Self: 'a;
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS]
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS]
     where
         Self: 'a;
 }
@@ -17,7 +17,7 @@ impl TestData for u8 {
         [0, 1, 2]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [0, 1, 2]
     }
 }
@@ -27,7 +27,7 @@ impl TestData for u16 {
         [0, 1, 2]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [0, 1, 2]
     }
 }
@@ -37,7 +37,7 @@ impl TestData for u32 {
         [0, 1, 2]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [0, 1, 2]
     }
 }
@@ -47,7 +47,7 @@ impl TestData for u64 {
         [0, 1, 2]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [0, 1, 2]
     }
 }
@@ -57,7 +57,7 @@ impl TestData for u128 {
         [0, 1, 2]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [0, 1, 2]
     }
 }
@@ -67,7 +67,7 @@ impl TestData for i8 {
         [-1, 1, 2]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [-1, 1, 2]
     }
 }
@@ -77,7 +77,7 @@ impl TestData for i16 {
         [-1, 1, 2]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [-1, 1, 2]
     }
 }
@@ -87,7 +87,7 @@ impl TestData for i32 {
         [-1, 1, 2]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [-1, 1, 2]
     }
 }
@@ -97,7 +97,7 @@ impl TestData for i64 {
         [-1, 1, 2]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [-1, 1, 2]
     }
 }
@@ -107,7 +107,7 @@ impl TestData for i128 {
         [-1, 1, 2]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [-1, 1, 2]
     }
 }
@@ -117,7 +117,7 @@ impl TestData for f32 {
         [f32::NAN, f32::INFINITY, f32::MIN_POSITIVE]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [f32::NAN, f32::INFINITY, f32::MIN_POSITIVE]
     }
 }
@@ -127,7 +127,7 @@ impl TestData for f64 {
         [f64::MIN, f64::NEG_INFINITY, f64::MAX]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [f64::MIN, f64::NEG_INFINITY, f64::MAX]
     }
 }
@@ -137,7 +137,7 @@ impl TestData for () {
         [(), (), ()]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [(), (), ()]
     }
 }
@@ -147,7 +147,7 @@ impl TestData for &'static str {
         ["hello", "world1", "hi"]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         ["hello", "world1", "hi"]
     }
 }
@@ -157,7 +157,7 @@ impl TestData for &'static [u8] {
         [b"test", b"bytes", b"now"]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [b"test", b"bytes", b"now"]
     }
 }
@@ -167,7 +167,7 @@ impl TestData for &'static [u8; 5] {
         [b"test1", b"bytes", b"now12"]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [b"test1", b"bytes", b"now12"]
     }
 }
@@ -184,7 +184,7 @@ impl TestData for [&str; 3] {
         ]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS]
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS]
     where
         Self: 'a,
     {
@@ -201,7 +201,7 @@ impl TestData for [u128; 3] {
         [[1, 2, 3], [3, 2, 1], [300, 200, 100]]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [[1, 2, 3], [3, 2, 1], [300, 200, 100]]
     }
 }
@@ -218,7 +218,7 @@ impl TestData for Vec<&str> {
         ]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS]
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS]
     where
         Self: 'a,
     {
@@ -235,7 +235,7 @@ impl TestData for Option<u64> {
         [None, Some(0), Some(7)]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [None, Some(0), Some(7)]
     }
 }
@@ -245,7 +245,7 @@ impl TestData for (u64, &'static str) {
         [(0, "hi"), (1, "bye"), (2, "byte")]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [(0, "hi"), (1, "bye"), (2, "byte")]
     }
 }
@@ -255,7 +255,7 @@ impl TestData for (u64, u32) {
         [(0, 3), (1, 4), (2, 5)]
     }
 
-    fn make_data<'a>() -> [<Self as redb::Value>::SelfType<'a>; ELEMENTS] {
+    fn make_data<'a>() -> [<Self as shodh_redb::Value>::SelfType<'a>; ELEMENTS] {
         [(0, 3), (1, 4), (2, 5)]
     }
 }
@@ -268,7 +268,7 @@ fn create_tempfile() -> tempfile::NamedTempFile {
     }
 }
 
-fn test_helper<K: TestData + redb::Key + redb2_6::Key + 'static, V: TestData + 'static>() {
+fn test_helper<K: TestData + shodh_redb::Key + redb2_6::Key + 'static, V: TestData + 'static>() {
     {
         let tmpfile = create_tempfile();
         let db = redb2_6::Database::builder()
@@ -288,17 +288,18 @@ fn test_helper<K: TestData + redb::Key + redb2_6::Key + 'static, V: TestData + '
         write_txn.commit().unwrap();
         drop(db);
 
-        let db = redb::Database::open(tmpfile.path()).unwrap();
+        let db = shodh_redb::Database::open(tmpfile.path()).unwrap();
         let read_txn = db.begin_read().unwrap();
-        let table_def: redb::TableDefinition<K, V> = redb::TableDefinition::new("table");
+        let table_def: shodh_redb::TableDefinition<K, V> =
+            shodh_redb::TableDefinition::new("table");
         let table = read_txn.open_table(table_def).unwrap();
         assert_eq!(table.len().unwrap(), ELEMENTS as u64);
         for i in 0..ELEMENTS {
             let result = table.get(&K::make_data()[i]).unwrap().unwrap();
             let value = result.value();
-            let bytes = <V as redb::Value>::as_bytes(&value);
+            let bytes = <V as shodh_redb::Value>::as_bytes(&value);
             let expected = &V::make_data()[i];
-            let expected_bytes = <V as redb::Value>::as_bytes(expected);
+            let expected_bytes = <V as shodh_redb::Value>::as_bytes(expected);
             assert_eq!(bytes.as_ref(), expected_bytes.as_ref());
         }
     }
@@ -362,24 +363,24 @@ fn tuple_types() {
     write_txn.commit().unwrap();
     drop(db);
 
-    let db = redb::Database::open(tmpfile.path()).unwrap();
+    let db = shodh_redb::Database::open(tmpfile.path()).unwrap();
     let read_txn = db.begin_read().unwrap();
-    let bad_table_def: redb::TableDefinition<(u64, &str), &str> =
-        redb::TableDefinition::new("table");
+    let bad_table_def: shodh_redb::TableDefinition<(u64, &str), &str> =
+        shodh_redb::TableDefinition::new("table");
     assert!(matches!(
         read_txn.open_table(bad_table_def).unwrap_err(),
         TableError::TableTypeMismatch { .. }
     ));
-    let table_def: redb::TableDefinition<Legacy<(u64, &str)>, &str> =
-        redb::TableDefinition::new("table");
+    let table_def: shodh_redb::TableDefinition<Legacy<(u64, &str)>, &str> =
+        shodh_redb::TableDefinition::new("table");
     let table = read_txn.open_table(table_def).unwrap();
     assert_eq!(table.len().unwrap(), ELEMENTS as u64);
     for i in 0..ELEMENTS {
         let result = table.get(&<(u64, &str)>::make_data()[i]).unwrap().unwrap();
         let value = result.value();
-        let bytes = <&str as redb::Value>::as_bytes(&value);
+        let bytes = <&str as shodh_redb::Value>::as_bytes(&value);
         let expected = &<&str>::make_data()[i];
-        let expected_bytes = <&str as redb::Value>::as_bytes(expected);
+        let expected_bytes = <&str as shodh_redb::Value>::as_bytes(expected);
         assert_eq!(bytes, expected_bytes);
     }
 }

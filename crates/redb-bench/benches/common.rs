@@ -1,9 +1,11 @@
 use heed::{CompactionOption, EnvFlags, EnvInfo, FlagSetMode};
-use redb::{AccessGuard, Durability, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 use rocksdb::{
     Direction, IteratorMode, OptimisticTransactionDB, OptimisticTransactionOptions, WriteOptions,
 };
 use rusqlite::{Connection, Transaction};
+use shodh_redb::{
+    AccessGuard, Durability, ReadableDatabase, ReadableTableMetadata, TableDefinition,
+};
 use std::fs::File;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};

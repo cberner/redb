@@ -1,4 +1,4 @@
-use redb::{Database, ReadableDatabase, ReadableTableMetadata, TtlTableDefinition};
+use shodh_redb::{Database, ReadableDatabase, ReadableTableMetadata, TtlTableDefinition};
 use std::thread;
 use std::time::Duration;
 

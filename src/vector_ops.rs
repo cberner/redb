@@ -15,7 +15,7 @@ use crate::vector::SQVec;
 /// # Usage
 ///
 /// ```rust,ignore
-/// use redb::{DistanceMetric, FixedVec, TableDefinition, ReadableTable};
+/// use shodh_redb::{DistanceMetric, FixedVec, TableDefinition, ReadableTable};
 ///
 /// let query = [1.0f32, 0.0, 0.0];
 /// let metric = DistanceMetric::Cosine;
@@ -254,7 +254,7 @@ pub fn l2_normalized(v: &[f32]) -> Vec<f32> {
 ///
 /// ```rust,ignore
 /// let v = [1.0f32, -0.5, 0.3, -0.1, 0.0, 0.7, -0.2, 0.9];
-/// let bq = redb::quantize_binary(&v);
+/// let bq = shodh_redb::quantize_binary(&v);
 /// // bit pattern: [1,0,1,0, 0,1,0,1] = 0b10100101 = 0xA5
 /// assert_eq!(bq, vec![0xA5]);
 /// ```
@@ -283,7 +283,7 @@ pub fn quantize_binary(v: &[f32]) -> Vec<u8> {
 ///
 /// ```rust,ignore
 /// let v = [0.0f32, 0.5, 1.0, 0.25];
-/// let sq: SQVec<4> = redb::quantize_scalar(&v);
+/// let sq: SQVec<4> = shodh_redb::quantize_scalar(&v);
 /// assert_eq!(sq.min_val, 0.0);
 /// assert_eq!(sq.max_val, 1.0);
 /// assert_eq!(sq.codes[2], 255); // max maps to 255
@@ -418,7 +418,7 @@ impl<K> Ord for Neighbor<K> {
 /// # Example
 ///
 /// ```rust,ignore
-/// use redb::{nearest_k, DistanceMetric, FixedVec, ReadableTable};
+/// use shodh_redb::{nearest_k, DistanceMetric, FixedVec, ReadableTable};
 ///
 /// let query = [1.0f32, 0.0, 0.0, 0.0];
 /// let metric = DistanceMetric::Cosine;

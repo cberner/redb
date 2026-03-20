@@ -1,23 +1,23 @@
 [package]
-name = "redb-cli"
+name = "shodh-redb-cli"
 version = "0.1.0"
-description = "Command-line tool for inspecting, verifying, and managing redb databases"
+description = "Command-line tool for inspecting, verifying, and managing shodh-redb databases"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "redb"
+name = "shodh-redb"
 path = "src/main.rs"
 
 [dependencies]
-redb = { path = "../.." }
+shodh-redb = { path = "../.." }
 clap = { version = "4.5", features = ["derive"] }
 comfy-table = "7.1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [features]
 default = ["compression"]
-compression_lz4 = ["redb/compression_lz4"]
-compression_zstd = ["redb/compression_zstd"]
+compression_lz4 = ["shodh-redb/compression_lz4"]
+compression_zstd = ["shodh-redb/compression_zstd"]
 compression = ["compression_lz4", "compression_zstd"]

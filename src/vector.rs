@@ -12,7 +12,7 @@ use crate::types::{MutInPlaceValue, TypeName, Value};
 /// # Usage
 ///
 /// ```rust,ignore
-/// use redb::{Database, TableDefinition, FixedVec, ReadableTable};
+/// use shodh_redb::{Database, TableDefinition, FixedVec, ReadableTable};
 ///
 /// const EMBEDDINGS: TableDefinition<u64, FixedVec<384>> = TableDefinition::new("embeddings");
 ///
@@ -105,7 +105,7 @@ impl<const N: usize> MutInPlaceValue for FixedVec<N> {
 /// # Usage
 ///
 /// ```rust,ignore
-/// use redb::{Database, TableDefinition, DynVec, ReadableTable};
+/// use shodh_redb::{Database, TableDefinition, DynVec, ReadableTable};
 ///
 /// const VECTORS: TableDefinition<u64, DynVec> = TableDefinition::new("vectors");
 ///
@@ -193,8 +193,8 @@ impl Value for DynVec {
 /// # Usage
 ///
 /// ```rust,ignore
-/// use redb::{Database, TableDefinition, BinaryQuantized};
-/// use redb::vector_ops::quantize_binary;
+/// use shodh_redb::{Database, TableDefinition, BinaryQuantized};
+/// use shodh_redb::vector_ops::quantize_binary;
 ///
 /// // 384 f32 dims -> 48 bytes (384/8)
 /// const BQ_TABLE: TableDefinition<u64, BinaryQuantized<48>> = TableDefinition::new("bq_emb");

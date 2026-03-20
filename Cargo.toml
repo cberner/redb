@@ -1,8 +1,8 @@
 [package]
-name = "redb"
-description = "Rust Embedded DataBase"
+name = "shodh-redb"
+description = "Multi-modal embedded database — vectors, blobs, TTL, merge operators, and causal tracking built on ACID B-trees"
 readme = "README.md"
-version = "3.1.1"
+version = "0.1.0"
 exclude = ["fuzz/"]
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,8 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 authors.workspace = true
+keywords = ["database", "embedded", "vector", "blob", "no_std"]
+categories = ["database-implementations", "data-structures", "no-std"]
 
 [workspace]
 members = [".", "crates/redb-bench", "crates/redb-cli", "crates/redb-derive", "crates/redb-python"]
@@ -19,9 +21,9 @@ default-members = [".", "crates/redb-cli", "crates/redb-derive", "crates/redb-py
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
-homepage = "https://www.redb.org"
-repository = "https://github.com/cberner/redb"
-authors = ["Christopher Berner <me@cberner.com>"]
+homepage = "https://github.com/varun29ankuS/shodh-redb"
+repository = "https://github.com/varun29ankuS/shodh-redb"
+authors = ["Varun Sharma"]
 
 [dependencies]
 log = { version = "0.4.17", optional = true }
@@ -44,7 +46,7 @@ tempfile = "3.5.0"
 redb2_6 = { version = "=2.6.0", package = "redb" }
 bincode = "2.0.1"
 uuid = { version= "1.17.0", features = ["v4"] }
-redb-derive = { path = "./crates/redb-derive" }
+shodh-redb-derive = { version = "0.1.0", path = "./crates/redb-derive" }
 
 [features]
 default = ["std"]

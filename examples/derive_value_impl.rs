@@ -1,6 +1,6 @@
-use redb::{Database, Error, ReadableDatabase, TableDefinition, Value};
+use shodh_redb::{Database, Error, ReadableDatabase, TableDefinition, Value};
 
-use redb_derive::{Key, Value};
+use shodh_redb_derive::{Key, Value};
 
 #[derive(Debug, Key, Value, PartialEq, Eq, PartialOrd, Ord, Clone)]
 struct SomeKey {

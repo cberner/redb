@@ -1,4 +1,4 @@
-use redb::{Database, MultimapTableDefinition, TableDefinition};
+use shodh_redb::{Database, MultimapTableDefinition, TableDefinition};
 
 const USERS: TableDefinition<&str, &str> = TableDefinition::new("users");
 const EMBEDDINGS: TableDefinition<u64, &[u8]> = TableDefinition::new("embeddings");

@@ -1,4 +1,4 @@
-use redb::{
+use shodh_redb::{
     Database, Error, Key, ReadableTable, Table, TableDefinition, TableHandle, Value,
     WriteTransaction,
 };

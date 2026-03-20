@@ -1,4 +1,4 @@
-use redb::{
+use shodh_redb::{
     Database, Error, GroupCommitError, ReadableDatabase, ReadableTableMetadata, TableDefinition,
     WriteBatch,
 };

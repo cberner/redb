@@ -1,5 +1,5 @@
 [package]
-name = "redb-bench"
+name = "shodh-redb-bench"
 version = "0.0.0"
 publish = false
 edition.workspace = true
@@ -11,7 +11,7 @@ authors.workspace = true
 
 # Common test/bench dependencies
 [dev-dependencies]
-redb = { path = "../.." }
+shodh-redb = { path = "../.." }
 rand = "0.9"
 tempfile = "3.5.0"
 walkdir = "2.5.0"

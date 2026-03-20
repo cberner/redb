@@ -1,4 +1,4 @@
-use redb::{Database, ReadableDatabase, TableDefinition};
+use shodh_redb::{Database, ReadableDatabase, TableDefinition};
 
 const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("budget_test");
 

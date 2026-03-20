@@ -15,25 +15,43 @@
     clippy::unnecessary_wraps,
     clippy::unreadable_literal
 )]
-//! # redb
+//! # shodh-redb
 //!
-//! A simple, portable, high-performance, ACID, embedded key-value store.
+//! Multi-modal embedded database for Rust — vectors, blobs, TTL, merge operators,
+//! and causal tracking built on ACID B-trees.
 //!
-//! redb is written in pure Rust and is loosely inspired by [lmdb][lmdb]. Data is stored in a collection
-//! of copy-on-write B-trees. For more details, see the [design doc][design].
+//! shodh-redb extends [redb](https://github.com/cberner/redb) with capabilities for
+//! AI/ML workloads, edge computing, and multi-modal data. Data is stored in a collection
+//! of copy-on-write B-trees with full ACID guarantees.
 //!
-//! # Features
+//! # Core Features
 //!
 //! - Zero-copy, thread-safe, `BTreeMap` based API
-//! - Fully ACID-compliant transactions
-//! - MVCC support for concurrent readers & writer, without blocking
-//! - Crash-safe by default
-//! - Savepoints and rollbacks
+//! - Fully ACID-compliant transactions with MVCC
+//! - Crash-safe by default with savepoints and rollbacks
+//! - `no_std` compatible (with `std` feature flag, enabled by default)
+//!
+//! # Extended Features
+//!
+//! - **Vector types** — [`FixedVec`], [`DynVec`], [`BinaryQuantized`], [`ScalarQuantized`]
+//!   with distance metrics ([`cosine_distance`], [`euclidean_distance_sq`], [`hamming_distance`])
+//!   and top-k search ([`nearest_k`])
+//! - **Blob store** — Streaming writes, content-addressable dedup, seekable reads,
+//!   causal lineage tracking, and crash-safe compaction
+//! - **TTL tables** — Per-key expiration with lazy filtering and bulk purge
+//!   (requires `std` feature)
+//! - **Merge operators** — Atomic read-modify-write via [`MergeOperator`] trait
+//!   with built-in [`NumericAdd`], [`NumericMax`], [`BitwiseOr`], and more
+//! - **Group commit** — Batch concurrent writes into a single fsync
+//!   (requires `std` feature)
+//! - **Hybrid Logical Clock** — [`HybridLogicalClock`] for causal ordering
+//!   in distributed systems
+//! - **Memory budget** — Hard RAM cap with adaptive cache sizing
 //!
 //! # Example
 //!
 //! ```
-//! use redb::{Database, Error, ReadableDatabase, ReadableTable, TableDefinition};
+//! use shodh_redb::{Database, Error, ReadableDatabase, ReadableTable, TableDefinition};
 //!
 //! const TABLE: TableDefinition<&str, u64> = TableDefinition::new("my_data");
 //!
@@ -57,9 +75,6 @@
 //!     Ok(())
 //! }
 //! ```
-//!
-//! [lmdb]: https://www.lmdb.tech/doc/
-//! [design]: https://github.com/cberner/redb/blob/master/docs/design.md
 
 extern crate alloc;
 
