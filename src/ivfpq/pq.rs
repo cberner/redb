@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::vector_ops::{euclidean_distance_sq, DistanceMetric};
+use crate::vector_ops::{DistanceMetric, euclidean_distance_sq};
 
 use super::kmeans;
 
@@ -53,7 +53,9 @@ impl Codebooks {
                 if d < best_dist {
                     best_dist = d;
                     #[allow(clippy::cast_possible_truncation)]
-                    { best_k = k as u8; }
+                    {
+                        best_k = k as u8;
+                    }
                 }
             }
             codes.push(best_k);
@@ -157,7 +159,8 @@ pub fn train_codebooks(
         // standard practice as PQ codes represent distortion in Euclidean
         // space, and the ADC table maps this to the requested metric at
         // query time.
-        let centroids = kmeans::kmeans(&sub_flat, sub_dim, k, max_iter, DistanceMetric::EuclideanSq);
+        let centroids =
+            kmeans::kmeans(&sub_flat, sub_dim, k, max_iter, DistanceMetric::EuclideanSq);
 
         // If k < 256, pad remaining codewords with zeros.
         all_data.extend_from_slice(&centroids);

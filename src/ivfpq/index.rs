@@ -1,16 +1,16 @@
 use alloc::collections::BinaryHeap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cmp::Ordering as CmpOrdering;
 
+use crate::TableDefinition;
 use crate::error::{StorageError, TableError};
 use crate::table::ReadableTable;
 use crate::transactions::{ReadTransaction, WriteTransaction};
-use crate::vector_ops::{l2_normalize, DistanceMetric, Neighbor};
-use crate::TableDefinition;
+use crate::vector_ops::{DistanceMetric, Neighbor, l2_normalize};
 
 use super::adc::AdcTable;
-use super::config::{IndexConfig, IvfPqIndexDefinition, SearchParams, STATE_TRAINED};
+use super::config::{IndexConfig, IvfPqIndexDefinition, STATE_TRAINED, SearchParams};
 use super::kmeans;
 use super::pq::{self, Codebooks};
 use super::types::{PostingKey, decode_index_config, encode_index_config};
@@ -58,7 +58,8 @@ fn validate_config(config: &IndexConfig) -> crate::Result<()> {
     if config.dim as usize % config.num_subvectors as usize != 0 {
         return Err(StorageError::Corrupted(alloc::format!(
             "IVF-PQ: dim ({}) must be divisible by num_subvectors ({})",
-            config.dim, config.num_subvectors,
+            config.dim,
+            config.num_subvectors,
         )));
     }
     if config.num_clusters == 0 {
@@ -196,7 +197,9 @@ impl<'txn> IvfPqIndex<'txn> {
             if vec.len() != dim {
                 return Err(StorageError::Corrupted(alloc::format!(
                     "IVF-PQ '{}': training vector dim {} != {}",
-                    self.name, vec.len(), dim,
+                    self.name,
+                    vec.len(),
+                    dim,
                 )));
             }
             if self.config.metric == DistanceMetric::Cosine {
@@ -208,7 +211,8 @@ impl<'txn> IvfPqIndex<'txn> {
         let n = flat.len() / dim;
         if n == 0 {
             return Err(StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}': no training vectors provided", self.name,
+                "IVF-PQ '{}': no training vectors provided",
+                self.name,
             )));
         }
 
@@ -221,10 +225,13 @@ impl<'txn> IvfPqIndex<'txn> {
         let actual_k = centroid_data.len() / dim;
         let old_k = self.config.num_clusters as usize;
         #[allow(clippy::cast_possible_truncation)]
-        { self.config.num_clusters = actual_k as u32; }
+        {
+            self.config.num_clusters = actual_k as u32;
+        }
 
         // 2. Train PQ codebooks.
-        let codebooks = pq::train_codebooks(&flat, dim, num_subvectors, max_iter, self.config.metric);
+        let codebooks =
+            pq::train_codebooks(&flat, dim, num_subvectors, max_iter, self.config.metric);
 
         // 3. Clear stale data from a previous training cycle.
         //    Old centroids beyond actual_k, old postings, assignments, and raw
@@ -284,7 +291,10 @@ impl<'txn> IvfPqIndex<'txn> {
         let dim = self.config.dim as usize;
         if vector.len() != dim {
             return Err(StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}': vector dim {} != {}", self.name, vector.len(), dim,
+                "IVF-PQ '{}': vector dim {} != {}",
+                self.name,
+                vector.len(),
+                dim,
             )));
         }
         Self::validate_finite(vector, &self.name)?;
@@ -301,7 +311,11 @@ impl<'txn> IvfPqIndex<'txn> {
         let codebooks = self.load_codebooks()?;
 
         let (cluster_id, _) = kmeans::assign_nearest(
-            vec_ref, &centroids, dim, self.config.num_clusters as usize, self.config.metric,
+            vec_ref,
+            &centroids,
+            dim,
+            self.config.num_clusters as usize,
+            self.config.metric,
         );
         let pq_codes = codebooks.encode(vec_ref);
 
@@ -388,7 +402,10 @@ impl<'txn> IvfPqIndex<'txn> {
         for (vector_id, mut vec) in vectors {
             if vec.len() != dim {
                 return Err(StorageError::Corrupted(alloc::format!(
-                    "IVF-PQ '{}': vector dim {} != {}", self.name, vec.len(), dim,
+                    "IVF-PQ '{}': vector dim {} != {}",
+                    self.name,
+                    vec.len(),
+                    dim,
                 )));
             }
             Self::validate_finite(&vec, &self.name)?;
@@ -396,7 +413,8 @@ impl<'txn> IvfPqIndex<'txn> {
                 l2_normalize(&mut vec);
             }
 
-            let (cluster_id, _) = kmeans::assign_nearest(&vec, &centroids, dim, num_clusters, metric);
+            let (cluster_id, _) =
+                kmeans::assign_nearest(&vec, &centroids, dim, num_clusters, metric);
             let pq_codes = codebooks.encode(&vec);
 
             // Check for existing assignment (handle duplicates).
@@ -468,7 +486,10 @@ impl<'txn> IvfPqIndex<'txn> {
         let dim = self.config.dim as usize;
         if query.len() != dim {
             return Err(StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}': query dim {} != {}", self.name, query.len(), dim,
+                "IVF-PQ '{}': query dim {} != {}",
+                self.name,
+                query.len(),
+                dim,
             )));
         }
 
@@ -486,7 +507,12 @@ impl<'txn> IvfPqIndex<'txn> {
 
         let nprobe = (params.nprobe).max(1).min(self.config.num_clusters) as usize;
         let probes = kmeans::nearest_clusters(
-            q, &centroids, dim, self.config.num_clusters as usize, nprobe, self.config.metric,
+            q,
+            &centroids,
+            dim,
+            self.config.num_clusters as usize,
+            nprobe,
+            self.config.metric,
         );
 
         let adc = AdcTable::build(q, &codebooks, self.config.metric);
@@ -503,9 +529,8 @@ impl<'txn> IvfPqIndex<'txn> {
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
             let table = self.txn.open_table(def).map_err(te)?;
             for &(cid, _) in &probes {
-                let range = table.range(
-                    PostingKey::cluster_start(cid)..=PostingKey::cluster_end(cid),
-                )?;
+                let range =
+                    table.range(PostingKey::cluster_start(cid)..=PostingKey::cluster_end(cid))?;
                 for entry in range {
                     let (kg, vg) = entry?;
                     heap.push(kg.value().vector_id, adc.approximate_distance(vg.value()));
@@ -541,11 +566,7 @@ impl<'txn> IvfPqIndex<'txn> {
     /// Deletes orphaned centroid rows (indices `new_k..old_k`) and clears all
     /// postings, assignments, and raw vectors — they reference cluster IDs from
     /// the previous centroid set and are invalid after re-training.
-    fn clear_stale_training_data(
-        &self,
-        old_k: usize,
-        new_k: usize,
-    ) -> crate::Result<()> {
+    fn clear_stale_training_data(&self, old_k: usize, new_k: usize) -> crate::Result<()> {
         // Remove orphaned centroid rows if cluster count shrank.
         if old_k > new_k {
             let tn = centroids_name(&self.name);
@@ -587,7 +608,8 @@ impl<'txn> IvfPqIndex<'txn> {
     fn ensure_trained(&self) -> crate::Result<()> {
         if self.config.state != STATE_TRAINED {
             return Err(StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}' not trained -- call train() first", self.name,
+                "IVF-PQ '{}' not trained -- call train() first",
+                self.name,
             )));
         }
         Ok(())
@@ -623,7 +645,8 @@ impl<'txn> IvfPqIndex<'txn> {
             #[allow(clippy::cast_possible_truncation)]
             let guard = table.get(c as u32)?.ok_or_else(|| {
                 StorageError::Corrupted(alloc::format!(
-                    "IVF-PQ '{}': missing centroid {c}", self.name,
+                    "IVF-PQ '{}': missing centroid {c}",
+                    self.name,
                 ))
             })?;
             for chunk in guard.value().chunks_exact(4) {
@@ -654,13 +677,18 @@ impl<'txn> IvfPqIndex<'txn> {
             #[allow(clippy::cast_possible_truncation)]
             let guard = table.get(i as u32)?.ok_or_else(|| {
                 StorageError::Corrupted(alloc::format!(
-                    "IVF-PQ '{}': missing codebook {i}", self.name,
+                    "IVF-PQ '{}': missing codebook {i}",
+                    self.name,
                 ))
             })?;
             data.extend_from_slice(&Codebooks::deserialize_codebook(guard.value(), sd));
         }
 
-        Ok(Codebooks { data, num_subvectors: m, sub_dim: sd })
+        Ok(Codebooks {
+            data,
+            num_subvectors: m,
+            sub_dim: sd,
+        })
     }
 
     fn rerank_write(
@@ -678,10 +706,17 @@ impl<'txn> IvfPqIndex<'txn> {
         for cand in candidates {
             if let Some(guard) = table.get(cand.key)? {
                 let vec = bytes_to_f32_vec(guard.value());
-                results.push(Neighbor { key: cand.key, distance: metric.compute(query, &vec) });
+                results.push(Neighbor {
+                    key: cand.key,
+                    distance: metric.compute(query, &vec),
+                });
             }
         }
-        results.sort_unstable_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(CmpOrdering::Equal));
+        results.sort_unstable_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(CmpOrdering::Equal)
+        });
         results.truncate(k);
         Ok(results)
     }
@@ -766,10 +801,19 @@ impl ReadOnlyIvfPqIndex {
                 })?;
                 data.extend_from_slice(&Codebooks::deserialize_codebook(guard.value(), sub_dim));
             }
-            Codebooks { data, num_subvectors, sub_dim }
+            Codebooks {
+                data,
+                num_subvectors,
+                sub_dim,
+            }
         };
 
-        Ok(Self { config, name, centroids, codebooks })
+        Ok(Self {
+            config,
+            name,
+            centroids,
+            codebooks,
+        })
     }
 
     /// Returns the index configuration.
@@ -786,14 +830,18 @@ impl ReadOnlyIvfPqIndex {
     ) -> crate::Result<Vec<Neighbor<u64>>> {
         if self.config.state != STATE_TRAINED {
             return Err(StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}' not trained", self.name,
+                "IVF-PQ '{}' not trained",
+                self.name,
             )));
         }
 
         let dim = self.config.dim as usize;
         if query.len() != dim {
             return Err(StorageError::Corrupted(alloc::format!(
-                "IVF-PQ '{}': query dim {} != {}", self.name, query.len(), dim,
+                "IVF-PQ '{}': query dim {} != {}",
+                self.name,
+                query.len(),
+                dim,
             )));
         }
 
@@ -807,7 +855,12 @@ impl ReadOnlyIvfPqIndex {
 
         let nprobe = (params.nprobe).max(1).min(self.config.num_clusters) as usize;
         let probes = kmeans::nearest_clusters(
-            q, &self.centroids, dim, self.config.num_clusters as usize, nprobe, self.config.metric,
+            q,
+            &self.centroids,
+            dim,
+            self.config.num_clusters as usize,
+            nprobe,
+            self.config.metric,
         );
 
         let adc = AdcTable::build(q, &self.codebooks, self.config.metric);
@@ -824,9 +877,8 @@ impl ReadOnlyIvfPqIndex {
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
             let table = txn.open_table(def).map_err(te)?;
             for &(cid, _) in &probes {
-                let range = table.range(
-                    PostingKey::cluster_start(cid)..=PostingKey::cluster_end(cid),
-                )?;
+                let range =
+                    table.range(PostingKey::cluster_start(cid)..=PostingKey::cluster_end(cid))?;
                 for entry in range {
                     let (kg, vg) = entry?;
                     heap.push(kg.value().vector_id, adc.approximate_distance(vg.value()));
@@ -845,10 +897,17 @@ impl ReadOnlyIvfPqIndex {
             for cand in &sorted {
                 if let Some(guard) = table.get(cand.key)? {
                     let vec = bytes_to_f32_vec(guard.value());
-                    results.push(Neighbor { key: cand.key, distance: metric.compute(q, &vec) });
+                    results.push(Neighbor {
+                        key: cand.key,
+                        distance: metric.compute(q, &vec),
+                    });
                 }
             }
-            results.sort_unstable_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(CmpOrdering::Equal));
+            results.sort_unstable_by(|a, b| {
+                a.distance
+                    .partial_cmp(&b.distance)
+                    .unwrap_or(CmpOrdering::Equal)
+            });
             results.truncate(params.k);
             Ok(results)
         } else {
@@ -882,23 +941,34 @@ impl PartialOrd for CandidateEntry {
 
 impl Ord for CandidateEntry {
     fn cmp(&self, other: &Self) -> CmpOrdering {
-        self.distance.partial_cmp(&other.distance).unwrap_or(CmpOrdering::Equal)
+        self.distance
+            .partial_cmp(&other.distance)
+            .unwrap_or(CmpOrdering::Equal)
     }
 }
 
 impl CandidateHeap {
     fn new(capacity: usize) -> Self {
-        Self { capacity, heap: BinaryHeap::with_capacity(capacity + 1) }
+        Self {
+            capacity,
+            heap: BinaryHeap::with_capacity(capacity + 1),
+        }
     }
 
     fn push(&mut self, vector_id: u64, distance: f32) {
         if self.heap.len() < self.capacity {
-            self.heap.push(CandidateEntry { vector_id, distance });
+            self.heap.push(CandidateEntry {
+                vector_id,
+                distance,
+            });
         } else if let Some(worst) = self.heap.peek()
             && distance < worst.distance
         {
             self.heap.pop();
-            self.heap.push(CandidateEntry { vector_id, distance });
+            self.heap.push(CandidateEntry {
+                vector_id,
+                distance,
+            });
         }
     }
 
@@ -906,9 +976,16 @@ impl CandidateHeap {
         let mut items: Vec<Neighbor<u64>> = self
             .heap
             .into_iter()
-            .map(|e| Neighbor { key: e.vector_id, distance: e.distance })
+            .map(|e| Neighbor {
+                key: e.vector_id,
+                distance: e.distance,
+            })
             .collect();
-        items.sort_unstable_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(CmpOrdering::Equal));
+        items.sort_unstable_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(CmpOrdering::Equal)
+        });
         items
     }
 }
@@ -918,5 +995,8 @@ impl CandidateHeap {
 // ---------------------------------------------------------------------------
 
 fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
-    bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
 }

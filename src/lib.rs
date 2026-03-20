@@ -112,13 +112,13 @@ pub use blob_store::{
     CausalEdge, CausalLink, CausalPath, ContentType, DedupStats, MAX_TAGS_PER_BLOB, NamespaceKey,
     NamespaceVal, RelationType, Sha256Key, StoreOptions, TagKey, TemporalKey,
 };
+pub use ivfpq::{
+    Codebooks, IndexConfig, IvfPqIndex, IvfPqIndexDefinition, PostingKey, ReadOnlyIvfPqIndex,
+    SearchParams,
+};
 pub use merge::{
     BitwiseOr, BytesAppend, FnMergeOperator, MergeOperator, NumericAdd, NumericMax, NumericMin,
     merge_fn,
-};
-pub use ivfpq::{
-    Codebooks, IvfPqIndex, IvfPqIndexDefinition, IndexConfig, PostingKey, ReadOnlyIvfPqIndex,
-    SearchParams,
 };
 pub use temporal::HybridLogicalClock;
 #[cfg(feature = "std")]
@@ -139,9 +139,9 @@ mod compat;
 mod complex_types;
 mod db;
 pub mod error;
-pub mod ivfpq;
 #[cfg(feature = "std")]
 pub mod group_commit;
+pub mod ivfpq;
 mod legacy_tuple_types;
 pub mod merge;
 mod multimap_table;

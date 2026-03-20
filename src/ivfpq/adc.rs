@@ -1,8 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::vector_ops::{
-    dot_product, euclidean_distance_sq, manhattan_distance, DistanceMetric,
-};
+use crate::vector_ops::{DistanceMetric, dot_product, euclidean_distance_sq, manhattan_distance};
 
 use super::pq::Codebooks;
 

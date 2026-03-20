@@ -50,7 +50,7 @@ pub mod kmeans;
 pub mod pq;
 pub mod types;
 
-pub use config::{IvfPqIndexDefinition, IndexConfig, SearchParams};
+pub use config::{IndexConfig, IvfPqIndexDefinition, SearchParams};
 pub use index::{IvfPqIndex, ReadOnlyIvfPqIndex};
 pub use pq::Codebooks;
 pub use types::PostingKey;

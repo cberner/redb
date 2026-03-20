@@ -1,6 +1,4 @@
-use shodh_redb::{
-    Database, DistanceMetric, IvfPqIndexDefinition, ReadableDatabase, SearchParams,
-};
+use shodh_redb::{Database, DistanceMetric, IvfPqIndexDefinition, ReadableDatabase, SearchParams};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -49,9 +47,9 @@ fn brute_force_knn(
 
 const INDEX_8D: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
     "test_8d",
-    8,   // dim
-    4,   // clusters
-    2,   // subvectors (sub_dim = 4)
+    8, // dim
+    4, // clusters
+    2, // subvectors (sub_dim = 4)
     DistanceMetric::EuclideanSq,
 )
 .with_raw_vectors()
@@ -59,9 +57,9 @@ const INDEX_8D: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
 
 const INDEX_128D: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
     "test_128d",
-    128,  // dim
-    16,   // clusters
-    16,   // subvectors (sub_dim = 8)
+    128, // dim
+    16,  // clusters
+    16,  // subvectors (sub_dim = 8)
     DistanceMetric::EuclideanSq,
 )
 .with_raw_vectors()
@@ -77,9 +75,7 @@ fn train_insert_search_basic() {
     let db = Database::create(tmpfile.path()).unwrap();
 
     // Training vectors: 8 vectors of dim 8
-    let training: Vec<(u64, Vec<f32>)> = (0..8)
-        .map(|i| (i, random_vector(i + 100, 8)))
-        .collect();
+    let training: Vec<(u64, Vec<f32>)> = (0..8).map(|i| (i, random_vector(i + 100, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -99,11 +95,7 @@ fn train_insert_search_basic() {
     let idx = read_txn.open_ivfpq_index(&INDEX_8D).unwrap();
 
     let results = idx
-        .search(
-            &read_txn,
-            &training[0].1,
-            &SearchParams::top_k(3),
-        )
+        .search(&read_txn, &training[0].1, &SearchParams::top_k(3))
         .unwrap();
 
     assert!(!results.is_empty());
@@ -117,9 +109,7 @@ fn search_within_write_transaction() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..20)
-        .map(|i| (i, random_vector(i + 200, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..20).map(|i| (i, random_vector(i + 200, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -131,9 +121,7 @@ fn search_within_write_transaction() {
         }
 
         // Search within the same write transaction
-        let results = idx
-            .search(&vectors[5].1, &SearchParams::top_k(5))
-            .unwrap();
+        let results = idx.search(&vectors[5].1, &SearchParams::top_k(5)).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].key, vectors[5].0);
     }
@@ -145,9 +133,7 @@ fn persistence_across_transactions() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..16)
-        .map(|i| (i, random_vector(i + 300, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..16).map(|i| (i, random_vector(i + 300, 8))).collect();
 
     // Train and insert in one transaction
     let write_txn = db.begin_write().unwrap();
@@ -162,9 +148,7 @@ fn persistence_across_transactions() {
     write_txn.commit().unwrap();
 
     // Insert more in a second transaction
-    let extra: Vec<(u64, Vec<f32>)> = (100..108)
-        .map(|i| (i, random_vector(i + 400, 8)))
-        .collect();
+    let extra: Vec<(u64, Vec<f32>)> = (100..108).map(|i| (i, random_vector(i + 400, 8))).collect();
 
     let write_txn2 = db.begin_write().unwrap();
     {
@@ -193,9 +177,7 @@ fn insert_batch() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..32)
-        .map(|i| (i, random_vector(i + 500, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..32).map(|i| (i, random_vector(i + 500, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -224,9 +206,7 @@ fn remove_vector() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..12)
-        .map(|i| (i, random_vector(i + 600, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..12).map(|i| (i, random_vector(i + 600, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -268,9 +248,7 @@ fn reranking_improves_accuracy() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..50)
-        .map(|i| (i, random_vector(i + 700, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..50).map(|i| (i, random_vector(i + 700, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -324,9 +302,7 @@ fn abort_transaction_leaves_index_unchanged() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..10)
-        .map(|i| (i, random_vector(i + 800, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..10).map(|i| (i, random_vector(i + 800, 8))).collect();
 
     // Train and insert, then commit
     let write_txn = db.begin_write().unwrap();
@@ -360,25 +336,17 @@ fn multiple_indices_same_database() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    const INDEX_A: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
-        "index_a",
-        8, 4, 2,
-        DistanceMetric::EuclideanSq,
-    )
-    .with_raw_vectors()
-    .with_nprobe(4);
+    const INDEX_A: IvfPqIndexDefinition =
+        IvfPqIndexDefinition::new("index_a", 8, 4, 2, DistanceMetric::EuclideanSq)
+            .with_raw_vectors()
+            .with_nprobe(4);
 
-    const INDEX_B: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
-        "index_b",
-        8, 4, 2,
-        DistanceMetric::EuclideanSq,
-    )
-    .with_raw_vectors()
-    .with_nprobe(4);
+    const INDEX_B: IvfPqIndexDefinition =
+        IvfPqIndexDefinition::new("index_b", 8, 4, 2, DistanceMetric::EuclideanSq)
+            .with_raw_vectors()
+            .with_nprobe(4);
 
-    let vecs_a: Vec<(u64, Vec<f32>)> = (0..10)
-        .map(|i| (i, random_vector(i + 1000, 8)))
-        .collect();
+    let vecs_a: Vec<(u64, Vec<f32>)> = (0..10).map(|i| (i, random_vector(i + 1000, 8))).collect();
     let vecs_b: Vec<(u64, Vec<f32>)> = (0..10)
         .map(|i| (i + 100, random_vector(i + 2000, 8)))
         .collect();
@@ -441,9 +409,7 @@ fn wrong_dimension_errors() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let training: Vec<(u64, Vec<f32>)> = (0..8)
-        .map(|i| (i, random_vector(i + 900, 8)))
-        .collect();
+    let training: Vec<(u64, Vec<f32>)> = (0..8).map(|i| (i, random_vector(i + 900, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     let mut idx = write_txn.open_ivfpq_index(&INDEX_8D).unwrap();
@@ -464,9 +430,7 @@ fn duplicate_insert_upsert_semantics() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..10)
-        .map(|i| (i, random_vector(i + 1700, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..10).map(|i| (i, random_vector(i + 1700, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -481,7 +445,11 @@ fn duplicate_insert_upsert_semantics() {
         // Re-insert vector 3 with a different vector -- should not increase count
         let new_vec = random_vector(9999, 8);
         idx.insert(3, &new_vec).unwrap();
-        assert_eq!(idx.config().num_vectors, 10, "duplicate insert should not increase count");
+        assert_eq!(
+            idx.config().num_vectors,
+            10,
+            "duplicate insert should not increase count"
+        );
 
         // Search should find the updated vector
         let results = idx.search(&new_vec, &SearchParams::top_k(1)).unwrap();
@@ -495,9 +463,7 @@ fn write_txn_search_without_insert() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..10)
-        .map(|i| (i, random_vector(i + 1800, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..10).map(|i| (i, random_vector(i + 1800, 8))).collect();
 
     // Train and insert in first txn
     let write_txn = db.begin_write().unwrap();
@@ -526,9 +492,7 @@ fn search_k_larger_than_index_size() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..5)
-        .map(|i| (i, random_vector(i + 1100, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..5).map(|i| (i, random_vector(i + 1100, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -556,17 +520,12 @@ fn cosine_metric() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    const COSINE_INDEX: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
-        "cosine_test",
-        8, 4, 2,
-        DistanceMetric::Cosine,
-    )
-    .with_raw_vectors()
-    .with_nprobe(4);
+    const COSINE_INDEX: IvfPqIndexDefinition =
+        IvfPqIndexDefinition::new("cosine_test", 8, 4, 2, DistanceMetric::Cosine)
+            .with_raw_vectors()
+            .with_nprobe(4);
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..20)
-        .map(|i| (i, random_vector(i + 1200, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..20).map(|i| (i, random_vector(i + 1200, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -595,17 +554,12 @@ fn dotproduct_metric() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    const DP_INDEX: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
-        "dp_test",
-        8, 4, 2,
-        DistanceMetric::DotProduct,
-    )
-    .with_raw_vectors()
-    .with_nprobe(4);
+    const DP_INDEX: IvfPqIndexDefinition =
+        IvfPqIndexDefinition::new("dp_test", 8, 4, 2, DistanceMetric::DotProduct)
+            .with_raw_vectors()
+            .with_nprobe(4);
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..20)
-        .map(|i| (i, random_vector(i + 1300, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..20).map(|i| (i, random_vector(i + 1300, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -633,17 +587,12 @@ fn manhattan_metric() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    const MANH_INDEX: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
-        "manhattan_test",
-        8, 4, 2,
-        DistanceMetric::Manhattan,
-    )
-    .with_raw_vectors()
-    .with_nprobe(4);
+    const MANH_INDEX: IvfPqIndexDefinition =
+        IvfPqIndexDefinition::new("manhattan_test", 8, 4, 2, DistanceMetric::Manhattan)
+            .with_raw_vectors()
+            .with_nprobe(4);
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..20)
-        .map(|i| (i, random_vector(i + 1400, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..20).map(|i| (i, random_vector(i + 1400, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -728,16 +677,10 @@ fn index_without_raw_vectors() {
     let db = Database::create(tmpfile.path()).unwrap();
 
     // No .with_raw_vectors() — PQ-only distance
-    const NO_RAW_INDEX: IvfPqIndexDefinition = IvfPqIndexDefinition::new(
-        "no_raw",
-        8, 4, 2,
-        DistanceMetric::EuclideanSq,
-    )
-    .with_nprobe(4);
+    const NO_RAW_INDEX: IvfPqIndexDefinition =
+        IvfPqIndexDefinition::new("no_raw", 8, 4, 2, DistanceMetric::EuclideanSq).with_nprobe(4);
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..20)
-        .map(|i| (i, random_vector(i + 1500, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..20).map(|i| (i, random_vector(i + 1500, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -773,9 +716,7 @@ fn config_persists_correctly() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let training: Vec<(u64, Vec<f32>)> = (0..8)
-        .map(|i| (i, random_vector(i + 1900, 8)))
-        .collect();
+    let training: Vec<(u64, Vec<f32>)> = (0..8).map(|i| (i, random_vector(i + 1900, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -809,9 +750,7 @@ fn config_persists_correctly() {
 fn database_reopen_persistence() {
     let tmpfile = create_tempfile();
 
-    let vectors: Vec<(u64, Vec<f32>)> = (0..10)
-        .map(|i| (i, random_vector(i + 1600, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..10).map(|i| (i, random_vector(i + 1600, 8))).collect();
 
     // Create, train, insert, close
     {
@@ -853,9 +792,7 @@ fn train_fewer_vectors_than_clusters() {
     let db = Database::create(tmpfile.path()).unwrap();
 
     // Index requests 4 clusters, but we only provide 2 training vectors.
-    let vectors: Vec<(u64, Vec<f32>)> = (0..2)
-        .map(|i| (i, random_vector(i + 2000, 8)))
-        .collect();
+    let vectors: Vec<(u64, Vec<f32>)> = (0..2).map(|i| (i, random_vector(i + 2000, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -893,9 +830,7 @@ fn retrain_restores_cluster_count_and_clears_data() {
     let db = Database::create(tmpfile.path()).unwrap();
 
     // First train with only 2 vectors → clamped to 2 clusters.
-    let small_set: Vec<(u64, Vec<f32>)> = (0..2)
-        .map(|i| (i, random_vector(i + 3000, 8)))
-        .collect();
+    let small_set: Vec<(u64, Vec<f32>)> = (0..2).map(|i| (i, random_vector(i + 3000, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -912,9 +847,8 @@ fn retrain_restores_cluster_count_and_clears_data() {
     write_txn.commit().unwrap();
 
     // Re-train with 20 vectors → should use the definition's 4 clusters, not 2.
-    let large_set: Vec<(u64, Vec<f32>)> = (0..20)
-        .map(|i| (i, random_vector(i + 3100, 8)))
-        .collect();
+    let large_set: Vec<(u64, Vec<f32>)> =
+        (0..20).map(|i| (i, random_vector(i + 3100, 8))).collect();
 
     let write_txn2 = db.begin_write().unwrap();
     {
@@ -953,9 +887,7 @@ fn nan_inf_vectors_rejected() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    let training: Vec<(u64, Vec<f32>)> = (0..8)
-        .map(|i| (i, random_vector(i + 4000, 8)))
-        .collect();
+    let training: Vec<(u64, Vec<f32>)> = (0..8).map(|i| (i, random_vector(i + 4000, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
     {

@@ -1,7 +1,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::vector_ops::{euclidean_distance_sq, DistanceMetric};
+use crate::vector_ops::{DistanceMetric, euclidean_distance_sq};
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG — no_std compatible
@@ -14,7 +14,11 @@ pub(crate) struct Xorshift64(u64);
 impl Xorshift64 {
     pub fn new(seed: u64) -> Self {
         // Ensure non-zero state.
-        Self(if seed == 0 { 0x5EED_DEAD_BEEF_CAFE } else { seed })
+        Self(if seed == 0 {
+            0x5EED_DEAD_BEEF_CAFE
+        } else {
+            seed
+        })
     }
 
     /// Seed from a slice of f32 data (hashes the bytes via a simple mix).
@@ -62,12 +66,7 @@ impl Xorshift64 {
 ///
 /// Each vector is `dim` contiguous f32 values. The total number of vectors is
 /// `vectors.len() / dim`.
-fn kmeans_pp_init(
-    flat_vectors: &[f32],
-    dim: usize,
-    k: usize,
-    rng: &mut Xorshift64,
-) -> Vec<f32> {
+fn kmeans_pp_init(flat_vectors: &[f32], dim: usize, k: usize, rng: &mut Xorshift64) -> Vec<f32> {
     let n = flat_vectors.len() / dim;
     debug_assert!(k > 0 && k <= n);
 
@@ -99,9 +98,7 @@ fn kmeans_pp_init(
         if total <= 0.0 {
             // Degenerate: all remaining points coincide with existing centroids.
             // Pick any unassigned point.
-            centroids.extend_from_slice(
-                &flat_vectors[rng.next_usize(n) * dim..][..dim],
-            );
+            centroids.extend_from_slice(&flat_vectors[rng.next_usize(n) * dim..][..dim]);
             continue;
         }
 
@@ -153,7 +150,9 @@ fn assign_all(
             if d < best_d {
                 best_d = d;
                 #[allow(clippy::cast_possible_truncation)]
-                { best_c = c as u32; }
+                {
+                    best_c = c as u32;
+                }
             }
         }
         assignments.push(best_c);
@@ -290,7 +289,9 @@ pub fn assign_nearest(
         if d < best_d {
             best_d = d;
             #[allow(clippy::cast_possible_truncation)]
-            { best_c = c as u32; }
+            {
+                best_c = c as u32;
+            }
         }
     }
     (best_c, best_d)
@@ -321,9 +322,7 @@ pub fn nearest_clusters(
         a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal)
     });
     dists.truncate(nprobe);
-    dists.sort_unstable_by(|a, b| {
-        a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal)
-    });
+    dists.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
     dists
 }
 
@@ -389,13 +388,7 @@ mod tests {
     #[test]
     fn assign_nearest_basic() {
         let centroids = vec![0.0, 0.0, 10.0, 10.0];
-        let (c, _d) = assign_nearest(
-            &[9.0, 9.0],
-            &centroids,
-            2,
-            2,
-            DistanceMetric::EuclideanSq,
-        );
+        let (c, _d) = assign_nearest(&[9.0, 9.0], &centroids, 2, 2, DistanceMetric::EuclideanSq);
         assert_eq!(c, 1);
     }
 
