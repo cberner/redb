@@ -116,6 +116,10 @@ pub use merge::{
     BitwiseOr, BytesAppend, FnMergeOperator, MergeOperator, NumericAdd, NumericMax, NumericMin,
     merge_fn,
 };
+pub use ivfpq::{
+    Codebooks, IvfPqIndex, IvfPqIndexDefinition, IndexConfig, PostingKey, ReadOnlyIvfPqIndex,
+    SearchParams,
+};
 pub use temporal::HybridLogicalClock;
 #[cfg(feature = "std")]
 pub use ttl_table::{ReadOnlyTtlTable, TtlAccessGuard, TtlRange, TtlTable, TtlTableDefinition};
@@ -135,6 +139,7 @@ mod compat;
 mod complex_types;
 mod db;
 pub mod error;
+pub mod ivfpq;
 #[cfg(feature = "std")]
 pub mod group_commit;
 mod legacy_tuple_types;

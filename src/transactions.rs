@@ -1321,6 +1321,17 @@ impl WriteTransaction {
         Ok(crate::ttl_table::TtlTable::new(inner))
     }
 
+    /// Open or create an IVF-PQ vector index for writing.
+    ///
+    /// The index tables will be created if they do not exist.
+    #[track_caller]
+    pub fn open_ivfpq_index(
+        &self,
+        definition: &crate::ivfpq::config::IvfPqIndexDefinition,
+    ) -> Result<crate::ivfpq::index::IvfPqIndex<'_>, TableError> {
+        crate::ivfpq::index::IvfPqIndex::open(self, definition)
+    }
+
     /// Open the given table
     ///
     /// The table will be created if it does not exist
@@ -2945,6 +2956,16 @@ impl ReadTransaction {
     ) -> Result<crate::ttl_table::ReadOnlyTtlTable<K, V>, TableError> {
         let inner = self.open_table(definition.inner_def())?;
         Ok(crate::ttl_table::ReadOnlyTtlTable::new(inner))
+    }
+
+    /// Open an IVF-PQ vector index for reading.
+    ///
+    /// Returns an error if the index does not exist.
+    pub fn open_ivfpq_index(
+        &self,
+        definition: &crate::ivfpq::config::IvfPqIndexDefinition,
+    ) -> Result<crate::ivfpq::index::ReadOnlyIvfPqIndex, TableError> {
+        crate::ivfpq::index::ReadOnlyIvfPqIndex::open(self, definition)
     }
 
     /// Open the given table without a type
