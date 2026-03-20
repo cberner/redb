@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/shodh-redb/badge.svg)](https://docs.rs/shodh-redb)
 [![License](https://img.shields.io/crates/l/shodh-redb)](https://crates.io/crates/shodh-redb)
 
-Multi-modal embedded database for Rust — vectors, blobs, TTL, merge operators, and causal tracking built on ACID B-trees.
+Multi-modal embedded database for Rust -- vectors, blobs, TTL, merge operators, and causal tracking built on ACID B-trees.
 
 shodh-redb extends [redb](https://github.com/cberner/redb) with capabilities for AI/ML workloads, edge computing, and multi-modal data storage. Written in pure Rust with `no_std` support.
 
@@ -84,7 +84,7 @@ const SESSIONS: TtlTableDefinition<&str, &[u8]> = TtlTableDefinition::new("sessi
 ```rust
 use shodh_redb::{NumericAdd, MergeOperator};
 
-// Atomic counter increment — no read-modify-write boilerplate
+// Atomic counter increment -- no read-modify-write boilerplate
 // table.merge(&"page_views", &1u64, &NumericAdd)?;
 ```
 
