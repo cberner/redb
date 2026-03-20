@@ -479,12 +479,12 @@ pub trait BenchIterator {
 }
 
 pub struct RedbBenchDatabase<'a> {
-    db: &'a mut redb::Database,
+    db: &'a mut shodh_redb::Database,
 }
 
 impl<'a> RedbBenchDatabase<'a> {
     #[allow(dead_code)]
-    pub fn new(db: &'a mut redb::Database) -> Self {
+    pub fn new(db: &'a mut shodh_redb::Database) -> Self {
         RedbBenchDatabase { db }
     }
 }
@@ -513,7 +513,7 @@ impl BenchDatabase for RedbBenchDatabase<'_> {
 }
 
 pub struct RedbBenchDatabaseConnection<'a> {
-    db: &'a redb::Database,
+    db: &'a shodh_redb::Database,
     sync: bool,
 }
 
@@ -547,7 +547,7 @@ impl BenchDatabaseConnection for RedbBenchDatabaseConnection<'_> {
 }
 
 pub struct RedbBenchReadTransaction {
-    txn: redb::ReadTransaction,
+    txn: shodh_redb::ReadTransaction,
 }
 
 impl BenchReadTransaction for RedbBenchReadTransaction {
@@ -563,7 +563,7 @@ impl BenchReadTransaction for RedbBenchReadTransaction {
 }
 
 pub struct RedbBenchReader {
-    table: redb::ReadOnlyTable<&'static [u8], &'static [u8]>,
+    table: shodh_redb::ReadOnlyTable<&'static [u8], &'static [u8]>,
 }
 
 impl BenchReader for RedbBenchReader {
@@ -591,7 +591,7 @@ impl BenchReader for RedbBenchReader {
 }
 
 pub struct RedbBenchIterator<'a> {
-    iter: redb::Range<'a, &'static [u8], &'static [u8]>,
+    iter: shodh_redb::Range<'a, &'static [u8], &'static [u8]>,
 }
 
 impl BenchIterator for RedbBenchIterator<'_> {
@@ -625,7 +625,7 @@ impl AsRef<[u8]> for RedbAccessGuard<'_> {
 }
 
 pub struct RedbBenchWriteTransaction {
-    txn: redb::WriteTransaction,
+    txn: shodh_redb::WriteTransaction,
 }
 
 impl BenchWriteTransaction for RedbBenchWriteTransaction {
@@ -645,7 +645,7 @@ impl BenchWriteTransaction for RedbBenchWriteTransaction {
 }
 
 pub struct RedbBenchInserter<'txn> {
-    table: redb::Table<'txn, &'static [u8], &'static [u8]>,
+    table: shodh_redb::Table<'txn, &'static [u8], &'static [u8]>,
 }
 
 impl BenchInserter for RedbBenchInserter<'_> {

@@ -19,7 +19,7 @@ fn main() {
 
     let redb_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(&tmpdir).unwrap();
-        let mut db = redb::Database::builder()
+        let mut db = shodh_redb::Database::builder()
             .set_cache_size(CACHE_SIZE)
             .create(tmpfile.path())
             .unwrap();

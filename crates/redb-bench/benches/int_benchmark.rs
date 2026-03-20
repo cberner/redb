@@ -62,7 +62,7 @@ fn main() {
 
     let redb_results = {
         let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-        let mut db = redb::Database::create(tmpfile.path()).unwrap();
+        let mut db = shodh_redb::Database::create(tmpfile.path()).unwrap();
         let table = RedbBenchDatabase::new(&mut db);
         benchmark(table)
     };

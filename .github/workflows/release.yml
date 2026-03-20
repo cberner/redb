@@ -48,14 +48,14 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release --target ${{ matrix.target }} -p redb-cli
+          cargo build --release --target ${{ matrix.target }} -p shodh-redb-cli
 
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
-          STAGING="redb-${{ github.ref_name }}-${{ matrix.target }}"
+          STAGING="shodh-redb-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$STAGING"
-          cp "target/${{ matrix.target }}/release/redb" "$STAGING/"
+          cp "target/${{ matrix.target }}/release/shodh-redb" "$STAGING/"
           cp LICENSE* README.md "$STAGING/" 2>/dev/null || true
           tar czf "$STAGING.tar.gz" "$STAGING"
           echo "ASSET=$STAGING.tar.gz" >> $GITHUB_ENV
@@ -64,9 +64,9 @@ jobs:
         if: matrix.archive == 'zip'
         shell: bash
         run: |
-          STAGING="redb-${{ github.ref_name }}-${{ matrix.target }}"
+          STAGING="shodh-redb-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$STAGING"
-          cp "target/${{ matrix.target }}/release/redb.exe" "$STAGING/"
+          cp "target/${{ matrix.target }}/release/shodh-redb.exe" "$STAGING/"
           cp LICENSE* README.md "$STAGING/" 2>/dev/null || true
           7z a "$STAGING.zip" "$STAGING"
           echo "ASSET=$STAGING.zip" >> $GITHUB_ENV
