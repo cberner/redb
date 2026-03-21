@@ -25,7 +25,7 @@ pub struct IndexConfig {
     /// Default number of clusters to probe at search time.
     pub default_nprobe: u32,
     /// Training state: 0 = untrained, 1 = trained.
-    pub state: u8,
+    pub(crate) state: u8,
     /// Total number of vectors currently in the index.
     pub num_vectors: u64,
 }
@@ -36,6 +36,11 @@ pub const STATE_UNTRAINED: u8 = 0;
 pub const STATE_TRAINED: u8 = 1;
 
 impl IndexConfig {
+    /// Returns the training state (0 = untrained, 1 = trained).
+    pub fn state(&self) -> u8 {
+        self.state
+    }
+
     /// Returns the dimensionality of each PQ sub-vector.
     pub fn sub_dim(&self) -> usize {
         self.dim as usize / self.num_subvectors as usize

@@ -43,14 +43,13 @@
 //! let results = idx.search(&read_txn, &query, &SearchParams::top_k(10))?;
 //! ```
 
-pub mod adc;
+pub(crate) mod adc;
 pub mod config;
-pub mod index;
-pub mod kmeans;
-pub mod pq;
-pub mod types;
+pub(crate) mod index;
+pub(crate) mod kmeans;
+pub(crate) mod pq;
+pub(crate) mod types;
 
 pub use config::{IndexConfig, IvfPqIndexDefinition, SearchParams};
 pub use index::{IvfPqIndex, ReadOnlyIvfPqIndex};
 pub use pq::Codebooks;
-pub use types::PostingKey;
