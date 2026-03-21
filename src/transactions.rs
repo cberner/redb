@@ -252,12 +252,12 @@ impl Value for AllocatorStateKey {
         Self: 'a,
     {
         match data[0] {
-            // 0, 1, 2 were used in redb 2.x and have a different format
-            0..=2 => Self::Deprecated,
             3 => Self::Region(u32::from_le_bytes(data[1..].try_into().unwrap())),
             4 => Self::RegionTracker,
             5 => Self::TransactionId,
-            _ => unreachable!(),
+            // 0, 1, 2 were used in redb 2.x; unknown discriminants are also
+            // treated as deprecated to avoid panicking on corrupt data.
+            _ => Self::Deprecated,
         }
     }
 
@@ -1321,6 +1321,17 @@ impl WriteTransaction {
         Ok(crate::ttl_table::TtlTable::new(inner))
     }
 
+    /// Open or create an IVF-PQ vector index for writing.
+    ///
+    /// The index tables will be created if they do not exist.
+    #[track_caller]
+    pub fn open_ivfpq_index(
+        &self,
+        definition: &crate::ivfpq::config::IvfPqIndexDefinition,
+    ) -> Result<crate::ivfpq::index::IvfPqIndex<'_>, TableError> {
+        crate::ivfpq::index::IvfPqIndex::open(self, definition)
+    }
+
     /// Open the given table
     ///
     /// The table will be created if it does not exist
@@ -1942,15 +1953,27 @@ impl WriteTransaction {
         temporal_table.remove(&temporal_key)?;
         drop(temporal_table);
 
-        // Remove from causal edges index (new table) and legacy causal children
+        // Remove from causal edges index only if the edge points to this blob.
+        // The table is keyed by parent, so we must verify the child matches before
+        // removing to avoid destroying a sibling's edge.
         if let Some(parent) = meta.causal_parent {
             let mut edges_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
-            edges_table.remove(&parent)?;
+            let should_remove = edges_table
+                .get(&parent)?
+                .is_some_and(|g| g.value().child == *blob_id);
+            if should_remove {
+                edges_table.remove(&parent)?;
+            }
             drop(edges_table);
 
-            // Also remove from legacy table if it exists
+            // Also remove from legacy table only if it points to this blob
             let mut legacy_table = system_tables.open_system_table(self, BLOB_CAUSAL_CHILDREN)?;
-            legacy_table.remove(&parent)?;
+            let should_remove_legacy = legacy_table
+                .get(&parent)?
+                .is_some_and(|g| g.value() == *blob_id);
+            if should_remove_legacy {
+                legacy_table.remove(&parent)?;
+            }
             drop(legacy_table);
         }
 
@@ -2945,6 +2968,16 @@ impl ReadTransaction {
     ) -> Result<crate::ttl_table::ReadOnlyTtlTable<K, V>, TableError> {
         let inner = self.open_table(definition.inner_def())?;
         Ok(crate::ttl_table::ReadOnlyTtlTable::new(inner))
+    }
+
+    /// Open an IVF-PQ vector index for reading.
+    ///
+    /// Returns an error if the index does not exist.
+    pub fn open_ivfpq_index(
+        &self,
+        definition: &crate::ivfpq::config::IvfPqIndexDefinition,
+    ) -> Result<crate::ivfpq::index::ReadOnlyIvfPqIndex, TableError> {
+        crate::ivfpq::index::ReadOnlyIvfPqIndex::open(self, definition)
     }
 
     /// Open the given table without a type
