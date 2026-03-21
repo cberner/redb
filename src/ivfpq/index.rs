@@ -71,7 +71,7 @@ fn validate_config(config: &IndexConfig) -> crate::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// IvfPqIndex — writable index handle
+// IvfPqIndex -- writable index handle
 // ---------------------------------------------------------------------------
 
 /// A writable IVF-PQ index bound to a [`WriteTransaction`].
@@ -235,7 +235,7 @@ impl<'txn> IvfPqIndex<'txn> {
 
         // 3. Clear stale data from a previous training cycle.
         //    Old centroids beyond actual_k, old postings, assignments, and raw
-        //    vectors must be removed — they reference stale cluster IDs from the
+        //    vectors must be removed -- they reference stale cluster IDs from the
         //    previous centroid set.
         self.clear_stale_training_data(old_k, actual_k)?;
 
@@ -266,7 +266,7 @@ impl<'txn> IvfPqIndex<'txn> {
             }
         }
 
-        // 6. Update config — persist immediately since training is a major event.
+        // 6. Update config -- persist immediately since training is a major event.
         self.config.state = STATE_TRAINED;
         self.config.num_vectors = 0;
         self.persist_config_inner()?;
@@ -564,7 +564,7 @@ impl<'txn> IvfPqIndex<'txn> {
     /// Remove stale data from a previous training cycle.
     ///
     /// Deletes orphaned centroid rows (indices `new_k..old_k`) and clears all
-    /// postings, assignments, and raw vectors — they reference cluster IDs from
+    /// postings, assignments, and raw vectors -- they reference cluster IDs from
     /// the previous centroid set and are invalid after re-training.
     fn clear_stale_training_data(&self, old_k: usize, new_k: usize) -> crate::Result<()> {
         // Remove orphaned centroid rows if cluster count shrank.
@@ -578,7 +578,7 @@ impl<'txn> IvfPqIndex<'txn> {
             }
         }
 
-        // Clear all postings — they reference stale cluster assignments.
+        // Clear all postings -- they reference stale cluster assignments.
         {
             let tn = postings_name(&self.name);
             let def = TableDefinition::<PostingKey, &[u8]>::new(&tn);
@@ -734,7 +734,7 @@ impl Drop for IvfPqIndex<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// ReadOnlyIvfPqIndex — read-only index handle
+// ReadOnlyIvfPqIndex -- read-only index handle
 // ---------------------------------------------------------------------------
 
 /// A read-only IVF-PQ index bound to a [`ReadTransaction`].
@@ -917,7 +917,7 @@ impl ReadOnlyIvfPqIndex {
 }
 
 // ---------------------------------------------------------------------------
-// CandidateHeap — fixed-size max-heap for top-k tracking
+// CandidateHeap -- fixed-size max-heap for top-k tracking
 // ---------------------------------------------------------------------------
 
 struct CandidateHeap {

@@ -5,17 +5,17 @@ use crate::vector_ops::{DistanceMetric, dot_product, euclidean_distance_sq, manh
 use super::pq::Codebooks;
 
 // ---------------------------------------------------------------------------
-// ADC — Asymmetric Distance Computation
+// ADC -- Asymmetric Distance Computation
 // ---------------------------------------------------------------------------
 
 /// Precomputed lookup table for fast approximate distance computation.
 ///
 /// For each sub-quantizer `m` (`0..num_subvectors`) and each codeword `k`
 /// (0..256), stores the distance from the query sub-vector to that codeword's
-/// centroid. Total storage: `num_subvectors × 256` f32 values.
+/// centroid. Total storage: `num_subvectors x 256` f32 values.
 ///
 /// At scan time the approximate distance to a PQ-encoded vector is the sum
-/// of `num_subvectors` table lookups — extremely fast.
+/// of `num_subvectors` table lookups -- extremely fast.
 pub struct AdcTable {
     /// Flat array: `distances[m * 256 + k]`.
     distances: Vec<f32>,
@@ -94,7 +94,7 @@ impl core::fmt::Debug for AdcTable {
 /// Compute the distance between a query sub-vector and a codebook centroid.
 ///
 /// The distance function used depends on the metric:
-/// - `EuclideanSq`: squared Euclidean (sums of squared diffs — additive over
+/// - `EuclideanSq`: squared Euclidean (sums of squared diffs -- additive over
 ///   sub-vectors, so the total PQ distance is the sum of sub-vector distances).
 /// - `DotProduct`: negative dot product (additive: total = sum of sub-products).
 /// - `Cosine`: same as `DotProduct` (query is L2-normalised at index level,

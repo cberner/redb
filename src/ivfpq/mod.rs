@@ -1,4 +1,4 @@
-//! IVF-PQ vector index — disk-first approximate nearest neighbor search.
+//! IVF-PQ vector index -- disk-first approximate nearest neighbor search.
 //!
 //! This module implements an Inverted File Index with Product Quantization
 //! (IVF-PQ) built on shodh-redb's B-tree storage. It replaces brute-force

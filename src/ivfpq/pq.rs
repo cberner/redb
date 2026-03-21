@@ -5,7 +5,7 @@ use crate::vector_ops::{DistanceMetric, euclidean_distance_sq};
 use super::kmeans;
 
 // ---------------------------------------------------------------------------
-// Codebooks — PQ codebook storage and encode/decode
+// Codebooks -- PQ codebook storage and encode/decode
 // ---------------------------------------------------------------------------
 
 /// Product Quantization codebooks.
@@ -199,7 +199,7 @@ mod tests {
         assert_eq!(codebooks.num_subvectors, 2);
         assert_eq!(codebooks.sub_dim, 4);
 
-        // Encode one of the training vectors — should reconstruct closely.
+        // Encode one of the training vectors -- should reconstruct closely.
         let original = &training[0..8];
         let codes = codebooks.encode(original);
         assert_eq!(codes.len(), 2);

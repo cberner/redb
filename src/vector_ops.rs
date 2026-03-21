@@ -372,7 +372,7 @@ pub fn dequantize_scalar<const N: usize>(sq: &SQVec<N>) -> [f32; N] {
 pub fn sq_euclidean_distance_sq<const N: usize>(query: &[f32; N], sq: &SQVec<N>) -> f32 {
     let range = sq.max_val - sq.min_val;
     if range == 0.0 {
-        // All codes dequantize to min_val — compute exact per-dimension distances.
+        // All codes dequantize to min_val -- compute exact per-dimension distances.
         return query
             .iter()
             .map(|&q| {

@@ -2,7 +2,7 @@ use crate::vector_ops::DistanceMetric;
 use core::fmt;
 
 // ---------------------------------------------------------------------------
-// IndexConfig — persisted index configuration
+// IndexConfig -- persisted index configuration
 // ---------------------------------------------------------------------------
 
 /// Persisted configuration for an IVF-PQ index. Stored as a single row in the
@@ -11,7 +11,7 @@ use core::fmt;
 pub struct IndexConfig {
     /// Vector dimensionality (e.g. 384, 768, 1536).
     pub dim: u32,
-    /// Number of IVF clusters (centroids). Typical: 256–4096.
+    /// Number of IVF clusters (centroids). Typical: 256-4096.
     pub num_clusters: u32,
     /// Number of PQ sub-vectors. `dim` must be divisible by this.
     /// Each sub-vector is `dim / num_subvectors` floats.
@@ -69,14 +69,14 @@ impl fmt::Debug for IndexConfig {
 }
 
 // ---------------------------------------------------------------------------
-// SearchParams — per-query search configuration
+// SearchParams -- per-query search configuration
 // ---------------------------------------------------------------------------
 
 /// Parameters for a single IVF-PQ approximate nearest neighbor query.
 #[derive(Debug, Clone)]
 pub struct SearchParams {
     /// Number of IVF clusters to probe. Higher = more accurate, slower.
-    /// Must be ≥ 1. Clamped to `num_clusters` at search time.
+    /// Must be >= 1. Clamped to `num_clusters` at search time.
     pub nprobe: u32,
     /// Number of PQ-distance candidates to shortlist before re-ranking.
     /// Only meaningful when `rerank` is true. Defaults to `k * 10`.
@@ -101,12 +101,12 @@ impl SearchParams {
 }
 
 // ---------------------------------------------------------------------------
-// IvfPqIndexDefinition — user-facing index declaration
+// IvfPqIndexDefinition -- user-facing index declaration
 // ---------------------------------------------------------------------------
 
 /// Definition for an IVF-PQ vector index.
 ///
-/// Analogous to [`crate::TableDefinition`] — a compile-time description of an
+/// Analogous to [`crate::TableDefinition`] -- a compile-time description of an
 /// index that is passed to `open_ivfpq_index()` to create or open it.
 ///
 /// # Example

@@ -3,7 +3,7 @@ use core::cmp::Ordering;
 use core::fmt;
 
 // ---------------------------------------------------------------------------
-// PostingKey — composite key for the IVF posting list table
+// PostingKey -- composite key for the IVF posting list table
 // ---------------------------------------------------------------------------
 
 /// Composite key `(cluster_id, vector_id)` for the IVF posting list.
@@ -129,7 +129,7 @@ impl Key for PostingKey {
 }
 
 // ---------------------------------------------------------------------------
-// AssignmentValue — u32 cluster_id stored as a value in the assignments table
+// AssignmentValue -- u32 cluster_id stored as a value in the assignments table
 // ---------------------------------------------------------------------------
 
 /// Thin wrapper so we can use `u32` cluster IDs as values in the assignments
@@ -177,7 +177,7 @@ impl Value for AssignmentValue {
 }
 
 // ---------------------------------------------------------------------------
-// IndexConfigValue — fixed-width serialisation of IndexConfig for the meta table
+// IndexConfigValue -- fixed-width serialisation of IndexConfig for the meta table
 // ---------------------------------------------------------------------------
 
 /// Serialised index configuration stored in the metadata table.

@@ -322,7 +322,7 @@ fn abort_transaction_leaves_index_unchanged() {
         let mut idx = write_txn2.open_ivfpq_index(&INDEX_8D).unwrap();
         idx.insert(999, &random_vector(999, 8)).unwrap();
         assert_eq!(idx.config().num_vectors, 11);
-        // Drop without commit — transaction aborts
+        // Drop without commit -- transaction aborts
     }
 
     // Verify the aborted insert is not visible
@@ -667,7 +667,7 @@ fn recall_benchmark_128d() {
     let avg_recall = total_recall / num_queries as f64;
     assert!(
         avg_recall > 0.85,
-        "recall@{k} = {avg_recall:.3} — expected > 0.85 with nprobe=14 and reranking"
+        "recall@{k} = {avg_recall:.3} -- expected > 0.85 with nprobe=14 and reranking"
     );
 }
 
@@ -676,7 +676,7 @@ fn index_without_raw_vectors() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    // No .with_raw_vectors() — PQ-only distance
+    // No .with_raw_vectors() -- PQ-only distance
     const NO_RAW_INDEX: IvfPqIndexDefinition =
         IvfPqIndexDefinition::new("no_raw", 8, 4, 2, DistanceMetric::EuclideanSq).with_nprobe(4);
 
@@ -698,7 +698,7 @@ fn index_without_raw_vectors() {
     let read_txn = db.begin_read().unwrap();
     let idx = read_txn.open_ivfpq_index(&NO_RAW_INDEX).unwrap();
 
-    // Search with rerank=true but no raw vectors — should fall back to PQ distances
+    // Search with rerank=true but no raw vectors -- should fall back to PQ distances
     let params = SearchParams {
         nprobe: 4,
         candidates: 20,
@@ -829,7 +829,7 @@ fn retrain_restores_cluster_count_and_clears_data() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
-    // First train with only 2 vectors → clamped to 2 clusters.
+    // First train with only 2 vectors -> clamped to 2 clusters.
     let small_set: Vec<(u64, Vec<f32>)> = (0..2).map(|i| (i, random_vector(i + 3000, 8))).collect();
 
     let write_txn = db.begin_write().unwrap();
@@ -846,7 +846,7 @@ fn retrain_restores_cluster_count_and_clears_data() {
     }
     write_txn.commit().unwrap();
 
-    // Re-train with 20 vectors → should use the definition's 4 clusters, not 2.
+    // Re-train with 20 vectors -> should use the definition's 4 clusters, not 2.
     let large_set: Vec<(u64, Vec<f32>)> =
         (0..20).map(|i| (i, random_vector(i + 3100, 8))).collect();
 

@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use crate::vector_ops::{DistanceMetric, euclidean_distance_sq};
 
 // ---------------------------------------------------------------------------
-// Deterministic PRNG — no_std compatible
+// Deterministic PRNG -- no_std compatible
 // ---------------------------------------------------------------------------
 
 /// Xorshift64 PRNG. Deterministic, fast, `no_std`.
@@ -70,7 +70,7 @@ fn kmeans_pp_init(flat_vectors: &[f32], dim: usize, k: usize, rng: &mut Xorshift
     let n = flat_vectors.len() / dim;
     debug_assert!(k > 0 && k <= n);
 
-    // Output: k centroids × dim floats, stored flat.
+    // Output: k centroids x dim floats, stored flat.
     let mut centroids = Vec::with_capacity(k * dim);
 
     // Pick the first centroid uniformly at random.
@@ -370,7 +370,7 @@ mod tests {
         ];
 
         let centroids = kmeans(&data, 2, 2, 25, DistanceMetric::EuclideanSq);
-        assert_eq!(centroids.len(), 4); // 2 centroids × 2 dims
+        assert_eq!(centroids.len(), 4); // 2 centroids x 2 dims
 
         let c0 = &centroids[0..2];
         let c1 = &centroids[2..4];
