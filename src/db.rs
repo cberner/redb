@@ -18,7 +18,8 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{
-    CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError, TableError,
+    CommitError, CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError,
+    StorageError, TableError,
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
 use alloc::boxed::Box;
@@ -574,11 +575,23 @@ impl ReadOnlyDatabase {
 /// # Ok(())
 /// # }
 /// ```
+/// Metadata about a retained transaction snapshot, returned by
+/// [`Database::transaction_history()`].
+#[derive(Debug, Clone)]
+pub struct TransactionInfo {
+    /// The unique transaction ID.
+    pub transaction_id: u64,
+    /// Wall-clock timestamp in milliseconds since UNIX epoch.
+    /// Always `0` under `no_std`.
+    pub timestamp_ms: u64,
+}
+
 pub struct Database {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
     blob_dedup_config: BlobDedupConfig,
     cdc_config: CdcConfig,
+    history_retention: u64,
     #[cfg(feature = "std")]
     group_committer: GroupCommitter,
 }
@@ -1310,6 +1323,7 @@ impl Database {
         blob_dedup_config: BlobDedupConfig,
         memory_budget: Option<usize>,
         cdc_config: CdcConfig,
+        history_retention: u64,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -1362,6 +1376,7 @@ impl Database {
             transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
             blob_dedup_config: blob_dedup_config.clone(),
             cdc_config,
+            history_retention,
             #[cfg(feature = "std")]
             group_committer: GroupCommitter::new(),
         };
@@ -1385,7 +1400,25 @@ impl Database {
             db.transaction_tracker
                 .register_persistent_savepoint(&savepoint);
         }
+        // Restore history holds for retained snapshots
+        let history_ids = txn.list_history_snapshot_ids()?;
+        if history_retention > 0 {
+            for id in &history_ids {
+                db.transaction_tracker
+                    .register_history_hold(TransactionId::new(*id));
+            }
+        }
         txn.abort()?;
+
+        // If retention is disabled but leftover history entries exist, purge them
+        // in a committed transaction so the pages can be freed.
+        if history_retention == 0 && !history_ids.is_empty() {
+            let txn = db.begin_write().map_err(|e| e.into_storage_error())?;
+            txn.purge_all_history_snapshots()?;
+            txn.commit().map_err(|e| match e {
+                CommitError::Storage(s) => DatabaseError::Storage(s),
+            })?;
+        }
 
         Ok(db)
     }
@@ -1465,8 +1498,79 @@ impl Database {
             self.mem.clone(),
             self.blob_dedup_config.clone(),
             self.cdc_config.clone(),
+            self.history_retention,
         )
         .map_err(|e| e.into())
+    }
+
+    /// Begin a read transaction at a specific historical transaction ID.
+    ///
+    /// The database must have been opened with `set_history_retention()` > 0 and the
+    /// requested transaction must still be within the retention window.
+    ///
+    /// Returns a [`ReadTransaction`] that sees the user-table state as of the
+    /// requested commit.
+    pub fn begin_read_at(&self, transaction_id: u64) -> Result<ReadTransaction, TransactionError> {
+        let guard = self.allocate_read_transaction()?;
+        let snapshot = {
+            let txn = self.begin_write()?;
+            let snap = txn.get_history_snapshot(transaction_id)?;
+            txn.abort()?;
+            snap
+        };
+        let snapshot = snapshot.ok_or(TransactionError::Storage(
+            StorageError::HistorySnapshotNotFound(transaction_id),
+        ))?;
+        ReadTransaction::new_historical(self.mem.clone(), guard, snapshot.user_root())
+    }
+
+    /// Begin a read transaction at the latest snapshot whose timestamp is <= the given
+    /// epoch-millisecond value.
+    ///
+    /// Requires the `std` feature (timestamps are only recorded with `std`).
+    #[cfg(feature = "std")]
+    pub fn begin_read_at_time(
+        &self,
+        timestamp_ms: u64,
+    ) -> Result<ReadTransaction, TransactionError> {
+        let (best_id, best_root) = {
+            let txn = self.begin_write()?;
+            let ids = txn.list_history_snapshot_ids()?;
+            let mut best: Option<(u64, Option<BtreeHeader>)> = None;
+            for id in ids {
+                if let Some(snap) = txn.get_history_snapshot(id)?
+                    && snap.timestamp_ms() <= timestamp_ms
+                {
+                    best = Some((id, snap.user_root()));
+                }
+            }
+            txn.abort()?;
+            best.ok_or(TransactionError::Storage(
+                StorageError::HistorySnapshotNotFound(timestamp_ms),
+            ))?
+        };
+        let guard = self.allocate_read_transaction()?;
+        let _ = best_id;
+        ReadTransaction::new_historical(self.mem.clone(), guard, best_root)
+    }
+
+    /// List all retained transaction snapshots.
+    ///
+    /// Returns entries ordered by transaction ID (ascending).
+    pub fn transaction_history(&self) -> Result<Vec<TransactionInfo>, TransactionError> {
+        let txn = self.begin_write()?;
+        let ids = txn.list_history_snapshot_ids()?;
+        let mut result = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(snap) = txn.get_history_snapshot(id)? {
+                result.push(TransactionInfo {
+                    transaction_id: id,
+                    timestamp_ms: snap.timestamp_ms(),
+                });
+            }
+        }
+        txn.abort()?;
+        Ok(result)
     }
 
     /// Submit a write batch to the group commit pipeline.
@@ -1645,6 +1749,7 @@ pub struct Builder {
     blob_dedup_config: BlobDedupConfig,
     memory_budget: Option<usize>,
     cdc_config: CdcConfig,
+    history_retention: u64,
 }
 
 impl Builder {
@@ -1670,6 +1775,7 @@ impl Builder {
             blob_dedup_config: BlobDedupConfig::default(),
             memory_budget: None,
             cdc_config: CdcConfig::default(),
+            history_retention: 0,
         };
 
         result.set_cache_size(1024 * 1024 * 1024);
@@ -1794,6 +1900,19 @@ impl Builder {
         self
     }
 
+    /// Set the number of committed transactions to retain for time-travel reads.
+    ///
+    /// When greater than zero, each durable commit saves a snapshot of the user-table
+    /// root so that past states can be read via
+    /// [`Database::begin_read_at()`] or [`Database::begin_read_at_time()`].
+    /// Old snapshots beyond this limit are pruned automatically.
+    ///
+    /// The default is `0` (disabled, zero overhead).
+    pub fn set_history_retention(&mut self, max_snapshots: u64) -> &mut Self {
+        self.history_retention = max_snapshots;
+        self
+    }
+
     /// Opens the specified file as a redb database.
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
@@ -1819,6 +1938,7 @@ impl Builder {
             self.blob_dedup_config.clone(),
             self.memory_budget,
             self.cdc_config.clone(),
+            self.history_retention,
         )
     }
 
@@ -1839,6 +1959,7 @@ impl Builder {
             self.blob_dedup_config.clone(),
             self.memory_budget,
             self.cdc_config.clone(),
+            self.history_retention,
         )
     }
 
@@ -1881,6 +2002,7 @@ impl Builder {
             self.blob_dedup_config.clone(),
             self.memory_budget,
             self.cdc_config.clone(),
+            self.history_retention,
         )
     }
 
@@ -1901,6 +2023,7 @@ impl Builder {
             self.blob_dedup_config.clone(),
             self.memory_budget,
             self.cdc_config.clone(),
+            self.history_retention,
         )
     }
 }

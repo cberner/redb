@@ -83,7 +83,7 @@ pub use db::VerifyReport;
 pub use db::{
     Builder, CacheStats, CorruptPageInfo, Database, MultimapTableDefinition, MultimapTableHandle,
     ReadOnlyDatabase, ReadableDatabase, RepairSession, StorageBackend, TableDefinition,
-    TableHandle, UntypedMultimapTableHandle, UntypedTableHandle, VerifyLevel,
+    TableHandle, TransactionInfo, UntypedMultimapTableHandle, UntypedTableHandle, VerifyLevel,
 };
 pub use error::{
     BackendError, CommitError, CompactionError, DatabaseError, Error, SavepointError,

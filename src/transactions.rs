@@ -96,6 +96,123 @@ const CDC_LOG_TABLE: SystemTableDefinition<CdcKey, CdcRecord> =
     SystemTableDefinition::new("cdc_log");
 const CDC_CURSOR_TABLE: SystemTableDefinition<&str, u64> =
     SystemTableDefinition::new("cdc_cursors");
+const HISTORY_TABLE: SystemTableDefinition<u64, HistorySnapshot> =
+    SystemTableDefinition::new("transaction_history");
+// ---------------------------------------------------------------------------
+// HistorySnapshot -- fixed-width Value for time-travel history table
+// ---------------------------------------------------------------------------
+
+/// Fixed-width snapshot of a committed transaction's state, stored in the
+/// `transaction_history` system table for time-travel reads.
+///
+/// Binary layout (73 bytes):
+/// ```text
+/// [user_root_non_null: u8]           offset 0
+/// [user_root: 32 bytes BtreeHeader]  offset 1   (PageNumber[8] + Checksum[16] + length[8])
+/// [timestamp_ms: u64 LE]             offset 33
+/// [blob_region_offset: u64 LE]       offset 41
+/// [blob_region_length: u64 LE]       offset 49
+/// [blob_next_sequence: u64 LE]       offset 57
+/// [blob_hlc_state: u64 LE]           offset 65
+/// ```
+#[derive(Debug, Clone)]
+pub(crate) struct HistorySnapshot {
+    data: [u8; Self::SIZE],
+}
+
+impl HistorySnapshot {
+    const SIZE: usize = 1 + BtreeHeader::serialized_size() + 5 * size_of::<u64>();
+
+    const USER_ROOT_FLAG: usize = 0;
+    const USER_ROOT: usize = 1;
+    const TIMESTAMP: usize = 1 + BtreeHeader::serialized_size();
+    const BLOB_OFFSET: usize = Self::TIMESTAMP + size_of::<u64>();
+    const BLOB_LENGTH: usize = Self::BLOB_OFFSET + size_of::<u64>();
+    const BLOB_SEQUENCE: usize = Self::BLOB_LENGTH + size_of::<u64>();
+    const BLOB_HLC: usize = Self::BLOB_SEQUENCE + size_of::<u64>();
+
+    const USER_ROOT_END: usize = Self::USER_ROOT + BtreeHeader::serialized_size();
+
+    pub(crate) fn new(
+        user_root: Option<BtreeHeader>,
+        timestamp_ms: u64,
+        blob_region_offset: u64,
+        blob_region_length: u64,
+        blob_next_sequence: u64,
+        blob_hlc_state: u64,
+    ) -> Self {
+        let mut data = [0u8; Self::SIZE];
+        if let Some(root) = user_root {
+            data[Self::USER_ROOT_FLAG] = 1;
+            data[Self::USER_ROOT..Self::USER_ROOT_END].copy_from_slice(&root.to_le_bytes());
+        }
+        data[Self::TIMESTAMP..Self::TIMESTAMP + 8].copy_from_slice(&timestamp_ms.to_le_bytes());
+        data[Self::BLOB_OFFSET..Self::BLOB_OFFSET + 8]
+            .copy_from_slice(&blob_region_offset.to_le_bytes());
+        data[Self::BLOB_LENGTH..Self::BLOB_LENGTH + 8]
+            .copy_from_slice(&blob_region_length.to_le_bytes());
+        data[Self::BLOB_SEQUENCE..Self::BLOB_SEQUENCE + 8]
+            .copy_from_slice(&blob_next_sequence.to_le_bytes());
+        data[Self::BLOB_HLC..Self::BLOB_HLC + 8].copy_from_slice(&blob_hlc_state.to_le_bytes());
+        Self { data }
+    }
+
+    pub(crate) fn user_root(&self) -> Option<BtreeHeader> {
+        if self.data[Self::USER_ROOT_FLAG] != 0 {
+            Some(BtreeHeader::from_le_bytes(
+                self.data[Self::USER_ROOT..Self::USER_ROOT_END]
+                    .try_into()
+                    .unwrap(),
+            ))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn timestamp_ms(&self) -> u64 {
+        u64::from_le_bytes(
+            self.data[Self::TIMESTAMP..Self::TIMESTAMP + 8]
+                .try_into()
+                .unwrap(),
+        )
+    }
+}
+
+impl Value for HistorySnapshot {
+    type SelfType<'a>
+        = HistorySnapshot
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = [u8; HistorySnapshot::SIZE]
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(Self::SIZE)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        let mut buf = [0u8; Self::SIZE];
+        buf.copy_from_slice(&data[..Self::SIZE]);
+        Self { data: buf }
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        value.data
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("redb::HistorySnapshot")
+    }
+}
+
 // The allocator state table is stored in the system table tree, but it's accessed using
 // raw btree operations rather than open_system_table(), so there's no SystemTableDefinition
 pub(crate) const ALLOCATOR_STATE_TABLE_NAME: &str = "allocator_state";
@@ -833,6 +950,7 @@ pub struct WriteTransaction {
     // CDC: in-memory change log, Some when CDC enabled
     pub(crate) cdc_log: Option<Mutex<Vec<CdcEvent>>>,
     cdc_config: CdcConfig,
+    history_retention: u64,
 }
 
 impl WriteTransaction {
@@ -842,6 +960,7 @@ impl WriteTransaction {
         mem: Arc<TransactionalMemory>,
         blob_dedup_config: BlobDedupConfig,
         cdc_config: CdcConfig,
+        history_retention: u64,
     ) -> Result<Self> {
         let transaction_id = guard.id();
         let guard = Arc::new(guard);
@@ -875,6 +994,7 @@ impl WriteTransaction {
                 None
             },
             cdc_config,
+            history_retention,
         })
     }
 
@@ -2469,6 +2589,40 @@ impl WriteTransaction {
         Ok(())
     }
 
+    pub(crate) fn list_history_snapshot_ids(&self) -> Result<Vec<u64>> {
+        let mut system_tables = self.system_tables.lock();
+        let history_table = system_tables.open_system_table(self, HISTORY_TABLE)?;
+        let mut ids = Vec::new();
+        for entry in history_table.range::<u64>(..)? {
+            let (key_guard, _) = entry?;
+            ids.push(key_guard.value());
+        }
+        Ok(ids)
+    }
+
+    pub(crate) fn get_history_snapshot(
+        &self,
+        transaction_id: u64,
+    ) -> Result<Option<HistorySnapshot>> {
+        let mut system_tables = self.system_tables.lock();
+        let history_table = system_tables.open_system_table(self, HISTORY_TABLE)?;
+        let result = history_table.get(&transaction_id)?;
+        Ok(result.map(|guard| guard.value()))
+    }
+
+    pub(crate) fn purge_all_history_snapshots(&self) -> Result {
+        let mut system_tables = self.system_tables.lock();
+        let mut history_table = system_tables.open_system_table(self, HISTORY_TABLE)?;
+        let keys: Vec<u64> = history_table
+            .range::<u64>(..)?
+            .map(|entry| entry.map(|(k, _)| k.value()))
+            .collect::<Result<Vec<_>>>()?;
+        for key in &keys {
+            history_table.remove(key)?;
+        }
+        Ok(())
+    }
+
     /// Abort the transaction
     ///
     /// All writes performed in this transaction will be rolled back
@@ -2506,6 +2660,51 @@ impl WriteTransaction {
         // so previously freed pages are already returned to the buddy allocator.
 
         let mut system_tables = self.system_tables.lock();
+
+        // Save history snapshot for time-travel reads.
+        // Must happen before flush_table_root_updates() so the history table
+        // changes are included in the system root.
+        if self.history_retention > 0 && !self.quick_repair {
+            #[cfg(feature = "std")]
+            #[allow(clippy::cast_possible_truncation)]
+            let timestamp_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or(std::time::Duration::ZERO)
+                .as_millis() as u64;
+            #[cfg(not(feature = "std"))]
+            let timestamp_ms = 0u64;
+
+            let blob_state = self.mem.get_blob_state();
+            let snapshot = HistorySnapshot::new(
+                user_root,
+                timestamp_ms,
+                blob_state.region_offset,
+                blob_state.region_length,
+                blob_state.next_sequence,
+                blob_state.hlc_state,
+            );
+            let mut history_table = system_tables.open_system_table(self, HISTORY_TABLE)?;
+            history_table.insert(&self.transaction_id.raw_id(), &snapshot)?;
+            self.transaction_tracker
+                .register_history_hold(self.transaction_id);
+
+            // Prune old snapshots beyond retention limit.
+            let mut all_keys = Vec::new();
+            for entry in history_table.range::<u64>(..)? {
+                let (key_guard, _) = entry?;
+                all_keys.push(key_guard.value());
+            }
+            let retention = usize::try_from(self.history_retention).unwrap_or(usize::MAX);
+            if all_keys.len() > retention {
+                let to_remove = all_keys.len() - retention;
+                for key in &all_keys[..to_remove] {
+                    history_table.remove(key)?;
+                    self.transaction_tracker
+                        .deallocate_history_hold(TransactionId::new(*key));
+                }
+            }
+        }
+
         let system_freed_pages = system_tables.system_freed_pages();
         let system_tree = system_tables.table_tree.flush_table_root_updates()?;
         system_tree
@@ -2989,6 +3188,20 @@ impl ReadTransaction {
         Ok(Self {
             mem: mem.clone(),
             tree: TableTree::new(root_page, PageHint::Clean, guard, mem)
+                .map_err(TransactionError::Storage)?,
+        })
+    }
+
+    /// Create a read transaction that reads from a historical `user_root` snapshot.
+    pub(crate) fn new_historical(
+        mem: Arc<TransactionalMemory>,
+        guard: TransactionGuard,
+        user_root: Option<BtreeHeader>,
+    ) -> Result<Self, TransactionError> {
+        let guard = Arc::new(guard);
+        Ok(Self {
+            mem: mem.clone(),
+            tree: TableTree::new(user_root, PageHint::Clean, guard, mem)
                 .map_err(TransactionError::Storage)?,
         })
     }

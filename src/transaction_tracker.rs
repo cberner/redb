@@ -349,6 +349,33 @@ impl TransactionTracker {
         state.live_read_transactions.keys().next().copied()
     }
 
+    pub(crate) fn register_history_hold(&self, transaction_id: TransactionId) {
+        #[cfg(feature = "std")]
+        let mut state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.lock();
+        state
+            .live_read_transactions
+            .entry(transaction_id)
+            .and_modify(|x| *x += 1)
+            .or_insert(1);
+    }
+
+    pub(crate) fn deallocate_history_hold(&self, transaction_id: TransactionId) {
+        #[cfg(feature = "std")]
+        let mut state = self.state.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.lock();
+        let ref_count = state
+            .live_read_transactions
+            .get_mut(&transaction_id)
+            .unwrap();
+        *ref_count -= 1;
+        if *ref_count == 0 {
+            state.live_read_transactions.remove(&transaction_id);
+        }
+    }
+
     // Returns the transaction id of the oldest non-durable transaction which has not been processed
     // for freeing, which has live read transactions
     pub(crate) fn oldest_live_read_nondurable_transaction(&self) -> Option<TransactionId> {

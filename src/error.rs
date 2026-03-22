@@ -91,6 +91,8 @@ pub enum StorageError {
         /// Current memory usage in bytes
         used: usize,
     },
+    /// The requested history snapshot was not found for the given transaction ID
+    HistorySnapshotNotFound(u64),
     Io(BackendError),
     PreviousIo,
     DatabaseClosed,
@@ -145,6 +147,7 @@ impl From<StorageError> for Error {
             StorageError::MemoryBudgetExceeded { budget, used } => {
                 Error::MemoryBudgetExceeded { budget, used }
             }
+            StorageError::HistorySnapshotNotFound(id) => Error::HistorySnapshotNotFound(id),
             StorageError::Io(x) => Error::Io(x),
             StorageError::PreviousIo => Error::PreviousIo,
             StorageError::DatabaseClosed => Error::DatabaseClosed,
@@ -200,6 +203,9 @@ impl Display for StorageError {
                     f,
                     "Memory budget exceeded: budget={budget} bytes, used={used} bytes"
                 )
+            }
+            StorageError::HistorySnapshotNotFound(id) => {
+                write!(f, "History snapshot not found for transaction id={id}")
             }
             StorageError::Io(err) => {
                 write!(f, "I/O error: {err}")
@@ -718,6 +724,8 @@ pub enum Error {
         /// Current memory usage in bytes
         used: usize,
     },
+    /// The requested history snapshot was not found for the given transaction ID
+    HistorySnapshotNotFound(u64),
     Io(BackendError),
     DatabaseClosed,
     /// A previous IO error occurred. The database must be closed and re-opened
@@ -854,6 +862,9 @@ impl Display for Error {
                     f,
                     "Memory budget exceeded: budget={budget} bytes, used={used} bytes"
                 )
+            }
+            Error::HistorySnapshotNotFound(id) => {
+                write!(f, "History snapshot not found for transaction id={id}")
             }
             Error::Io(err) => {
                 write!(f, "I/O error: {err}")
