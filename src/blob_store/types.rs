@@ -70,6 +70,12 @@ impl fmt::Debug for ContentType {
     }
 }
 
+impl fmt::Display for ContentType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.mime_str())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BlobId -- 16-byte unique identifier for a blob
 // ---------------------------------------------------------------------------
@@ -146,6 +152,12 @@ impl fmt::Debug for BlobId {
     }
 }
 
+impl fmt::Display for BlobId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "blob:{}", self.sequence)
+    }
+}
+
 impl Value for BlobId {
     type SelfType<'a>
         = BlobId
@@ -193,7 +205,7 @@ impl Key for BlobId {
 
 /// On-disk reference to blob data stored in the append-only blob region.
 /// This is stored as the inner component of `BlobMeta` in the B-tree.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlobRef {
     /// Byte offset from the start of the blob region
     pub offset: u64,
@@ -630,6 +642,27 @@ impl fmt::Debug for CausalEdge {
     }
 }
 
+impl PartialEq for CausalEdge {
+    fn eq(&self, other: &Self) -> bool {
+        self.child == other.child
+            && self.relation == other.relation
+            && self.context_len == other.context_len
+            && self.context[..self.context_len as usize]
+                == other.context[..other.context_len as usize]
+    }
+}
+
+impl Eq for CausalEdge {}
+
+impl core::hash::Hash for CausalEdge {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.child.hash(state);
+        self.relation.hash(state);
+        self.context_len.hash(state);
+        self.context[..self.context_len as usize].hash(state);
+    }
+}
+
 impl Value for CausalEdge {
     type SelfType<'a>
         = CausalEdge
@@ -660,6 +693,101 @@ impl Value for CausalEdge {
 
     fn type_name() -> TypeName {
         TypeName::internal("redb::blob::CausalEdge")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CausalEdgeKey -- composite key (parent, child) for the causal edges table
+// ---------------------------------------------------------------------------
+
+/// Composite key for the `blob_causal_edges` system table.
+/// Encodes `(parent: BlobId, child: BlobId)` so range scans by parent prefix
+/// yield all children of a given blob.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CausalEdgeKey {
+    pub parent: BlobId,
+    pub child: BlobId,
+}
+
+impl CausalEdgeKey {
+    pub const SERIALIZED_SIZE: usize = BlobId::SERIALIZED_SIZE * 2; // 32
+
+    pub fn new(parent: BlobId, child: BlobId) -> Self {
+        Self { parent, child }
+    }
+
+    pub fn to_le_bytes(self) -> [u8; Self::SERIALIZED_SIZE] {
+        let mut buf = [0u8; Self::SERIALIZED_SIZE];
+        buf[..BlobId::SERIALIZED_SIZE].copy_from_slice(&self.parent.to_le_bytes());
+        buf[BlobId::SERIALIZED_SIZE..].copy_from_slice(&self.child.to_le_bytes());
+        buf
+    }
+
+    pub fn from_le_bytes(data: [u8; Self::SERIALIZED_SIZE]) -> Self {
+        let parent = BlobId::from_le_bytes(data[..BlobId::SERIALIZED_SIZE].try_into().unwrap());
+        let child = BlobId::from_le_bytes(data[BlobId::SERIALIZED_SIZE..].try_into().unwrap());
+        Self { parent, child }
+    }
+}
+
+impl PartialOrd for CausalEdgeKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CausalEdgeKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.parent
+            .cmp(&other.parent)
+            .then(self.child.cmp(&other.child))
+    }
+}
+
+impl fmt::Debug for CausalEdgeKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CausalEdgeKey({:?} -> {:?})", self.parent, self.child)
+    }
+}
+
+impl Value for CausalEdgeKey {
+    type SelfType<'a>
+        = CausalEdgeKey
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = [u8; CausalEdgeKey::SERIALIZED_SIZE]
+    where
+        Self: 'a;
+
+    fn fixed_width() -> Option<usize> {
+        Some(Self::SERIALIZED_SIZE)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        Self::from_le_bytes(data[..Self::SERIALIZED_SIZE].try_into().unwrap())
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        value.to_le_bytes()
+    }
+
+    fn type_name() -> TypeName {
+        TypeName::internal("redb::blob::CausalEdgeKey")
+    }
+}
+
+impl Key for CausalEdgeKey {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        let a = Self::from_bytes(data1);
+        let b = Self::from_bytes(data2);
+        a.cmp(&b)
     }
 }
 
@@ -1139,7 +1267,7 @@ pub struct BlobInput<'a> {
 /// The B-tree ordering is `(wall_clock_ns, hlc, blob_id)` which means
 /// temporal range scans ("everything between T1 and T2") are a single
 /// sequential B-tree scan with no post-filtering.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TemporalKey {
     pub wall_clock_ns: u64,
     pub hlc: HybridLogicalClock,

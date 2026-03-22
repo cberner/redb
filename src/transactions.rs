@@ -1,8 +1,8 @@
 use crate::blob_store::reader::BlobReader;
 use crate::blob_store::types::{
-    BlobDedupConfig, BlobId, BlobMeta, BlobRef, BlobStats, CausalEdge, CausalPath, ContentType,
-    DedupStats, DedupVal, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal, Sha256Key, StoreOptions,
-    TagKey, TemporalKey,
+    BlobDedupConfig, BlobId, BlobMeta, BlobRef, BlobStats, CausalEdge, CausalEdgeKey, CausalPath,
+    ContentType, DedupStats, DedupVal, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal, Sha256Key,
+    StoreOptions, TagKey, TemporalKey,
 };
 use crate::blob_store::writer::BlobWriter;
 use crate::compat::{HashMap, HashSet, Mutex};
@@ -78,8 +78,8 @@ const BLOB_TEMPORAL_INDEX: SystemTableDefinition<TemporalKey, ()> =
     SystemTableDefinition::new("blob_temporal_idx");
 const BLOB_CAUSAL_CHILDREN: SystemTableDefinition<BlobId, BlobId> =
     SystemTableDefinition::new("blob_causal_children");
-const BLOB_CAUSAL_EDGES: SystemTableDefinition<BlobId, CausalEdge> =
-    SystemTableDefinition::new("blob_causal_edges");
+const BLOB_CAUSAL_EDGES: SystemTableDefinition<CausalEdgeKey, CausalEdge> =
+    SystemTableDefinition::new("blob_causal_edges_v2");
 const BLOB_TAG_INDEX: SystemTableDefinition<TagKey, ()> =
     SystemTableDefinition::new("blob_tag_idx");
 const BLOB_NAMESPACE: SystemTableDefinition<BlobId, NamespaceVal> =
@@ -343,7 +343,7 @@ impl<K: Key + 'static, V: Value + 'static> Display for SystemTableDefinition<'_,
 }
 
 /// Informational storage stats about the database
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct DatabaseStats {
     pub(crate) tree_height: u32,
     pub(crate) allocated_pages: u64,
@@ -1089,7 +1089,6 @@ impl WriteTransaction {
         Ok(savepoints.into_iter())
     }
 
-    // TODO: deduplicate this with the one in Database
     fn allocate_read_transaction(&self) -> Result<TransactionGuard> {
         let id = self
             .transaction_tracker
@@ -1550,8 +1549,9 @@ impl WriteTransaction {
 
             if let Some(link) = &opts.causal_link {
                 let edge = CausalEdge::new(blob_id, link.relation, &link.context);
+                let edge_key = CausalEdgeKey::new(link.parent, blob_id);
                 let mut causal_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
-                causal_table.insert(&link.parent, &edge)?;
+                causal_table.insert(&edge_key, &edge)?;
                 drop(causal_table);
             }
 
@@ -1695,8 +1695,9 @@ impl WriteTransaction {
 
             if let Some(link) = &opts.causal_link {
                 let edge = CausalEdge::new(blob_id, link.relation, &link.context);
+                let edge_key = CausalEdgeKey::new(link.parent, blob_id);
                 let mut causal_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
-                causal_table.insert(&link.parent, &edge)?;
+                causal_table.insert(&edge_key, &edge)?;
                 drop(causal_table);
             }
 
@@ -1953,17 +1954,10 @@ impl WriteTransaction {
         temporal_table.remove(&temporal_key)?;
         drop(temporal_table);
 
-        // Remove from causal edges index only if the edge points to this blob.
-        // The table is keyed by parent, so we must verify the child matches before
-        // removing to avoid destroying a sibling's edge.
+        // Remove from causal edges index using composite key (parent, child).
         if let Some(parent) = meta.causal_parent {
             let mut edges_table = system_tables.open_system_table(self, BLOB_CAUSAL_EDGES)?;
-            let should_remove = edges_table
-                .get(&parent)?
-                .is_some_and(|g| g.value().child == *blob_id);
-            if should_remove {
-                edges_table.remove(&parent)?;
-            }
+            edges_table.remove(&CausalEdgeKey::new(parent, *blob_id))?;
             drop(edges_table);
 
             // Also remove from legacy table only if it points to this blob
@@ -2515,13 +2509,6 @@ impl WriteTransaction {
             .transaction_tracker
             .oldest_live_read_nondurable_transaction()
             .map_or(self.transaction_id, |x| x.next());
-        // TODO: refactor the non-durable free'ed processing to remove this
-        // The reason it is needed is that non-durable commits edit previous non-durable commits,
-        // but they only edit the freed tree of unpersisted pages.
-        // The allocated tree, which savepoints rely, is not edited for performance reasons
-        // Therefore, we must not edit anything after a savepoint
-        // It would be better for non-durable transaction's unpersisted pages to be kept in-memory
-        // in a data structure where the allocated list can be efficiently edited
         if let Some((_, oldest_savepoint)) = self.transaction_tracker.oldest_savepoint() {
             free_until_transaction = TransactionId::min(free_until_transaction, oldest_savepoint);
         }
@@ -3404,7 +3391,12 @@ impl ReadTransaction {
 
             // Look up the edge from parent -> current
             let edge = if let Some(parent_id) = parent {
-                Self::lookup_causal_edge(&parent_id, edges_btree.as_ref(), legacy_btree.as_ref())?
+                Self::lookup_causal_edge(
+                    &parent_id,
+                    &current,
+                    edges_btree.as_ref(),
+                    legacy_btree.as_ref(),
+                )?
             } else {
                 None
             };
@@ -3419,18 +3411,24 @@ impl ReadTransaction {
         Ok(chain)
     }
 
-    /// Get the direct causal child of a blob (if any), with edge metadata.
+    /// Get all direct causal children of a blob, with edge metadata.
     ///
-    /// The current causal edges index maps each parent to at most one child.
-    /// If a parent has multiple children, only the most recently inserted child
-    /// is retained. Full multi-child support requires a multimap table (tracked
-    /// in issue #28).
+    /// The v2 causal edges index uses a composite `(parent, child)` key,
+    /// supporting multiple children per parent (branching causal graphs).
     pub fn causal_children(&self, blob_id: &BlobId) -> Result<Vec<CausalEdge>> {
-        // Try new edges table first
-        if let Some(edges_btree) = self.open_system_btree(BLOB_CAUSAL_EDGES)?
-            && let Some(g) = edges_btree.get(blob_id)?
-        {
-            return Ok(vec![g.value()]);
+        // Try v2 edges table (supports multiple children per parent)
+        if let Some(edges_btree) = self.open_system_btree(BLOB_CAUSAL_EDGES)? {
+            let start_key = CausalEdgeKey::new(*blob_id, BlobId::MIN);
+            let end_key = CausalEdgeKey::new(*blob_id, BlobId::MAX);
+            let mut children = Vec::new();
+            let range = edges_btree.range(&(start_key..=end_key))?;
+            for entry in range {
+                let entry = entry?;
+                children.push(entry.value());
+            }
+            if !children.is_empty() {
+                return Ok(children);
+            }
         }
 
         // Fall back to legacy table
@@ -3481,8 +3479,12 @@ impl ReadTransaction {
             };
 
             // Edge from parent -> current
-            let edge =
-                Self::lookup_causal_edge(&parent, edges_btree.as_ref(), legacy_btree.as_ref())?;
+            let edge = Self::lookup_causal_edge(
+                &parent,
+                &current,
+                edges_btree.as_ref(),
+                legacy_btree.as_ref(),
+            )?;
             path.push((current, edge));
 
             if parent == *from {
@@ -3496,16 +3498,18 @@ impl ReadTransaction {
         Ok(None)
     }
 
-    /// Look up a causal edge by parent key, checking new table then legacy.
+    /// Look up a causal edge by (parent, child) composite key, checking v2 table then legacy.
     fn lookup_causal_edge(
         parent: &BlobId,
-        edges_btree: Option<&Btree<BlobId, CausalEdge>>,
+        child: &BlobId,
+        edges_btree: Option<&Btree<CausalEdgeKey, CausalEdge>>,
         legacy_btree: Option<&Btree<BlobId, BlobId>>,
     ) -> Result<Option<CausalEdge>> {
-        if let Some(bt) = edges_btree
-            && let Some(g) = bt.get(parent)?
-        {
-            return Ok(Some(g.value()));
+        if let Some(bt) = edges_btree {
+            let key = CausalEdgeKey::new(*parent, *child);
+            if let Some(g) = bt.get(&key)? {
+                return Ok(Some(g.value()));
+            }
         }
         if let Some(bt) = legacy_btree
             && let Some(g) = bt.get(parent)?

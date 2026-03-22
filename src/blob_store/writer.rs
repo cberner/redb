@@ -131,7 +131,7 @@ impl<'txn> BlobWriter<'txn> {
         #[allow(clippy::cast_possible_truncation)]
         let wall_clock_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
+            .unwrap_or(std::time::Duration::ZERO)
             .as_nanos() as u64;
 
         #[cfg(not(feature = "std"))]

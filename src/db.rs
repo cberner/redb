@@ -256,7 +256,7 @@ pub struct CorruptPageInfo {
 
 /// Results of a database integrity verification.
 #[cfg(feature = "std")]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VerifyReport {
     /// Overall pass/fail
     pub valid: bool,
@@ -278,7 +278,7 @@ pub struct VerifyReport {
 ///
 /// Note: hit/miss/eviction metrics are only collected when the "`cache_metrics`" feature is enabled.
 /// `used_bytes` and `budget_bytes` are always available.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct CacheStats {
     pub(crate) evictions: u64,
     pub(crate) read_hits: u64,

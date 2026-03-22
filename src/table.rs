@@ -19,7 +19,7 @@ use core::marker::PhantomData;
 use core::ops::RangeBounds;
 
 /// Informational storage stats about a table
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct TableStats {
     pub(crate) tree_height: u32,
     pub(crate) leaf_pages: u64,

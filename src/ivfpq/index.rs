@@ -358,7 +358,7 @@ impl<'txn> IvfPqIndex<'txn> {
 
         // Only increment count for genuinely new vectors.
         if old_cluster.is_none() {
-            self.config.num_vectors += 1;
+            self.config.num_vectors = self.config.num_vectors.saturating_add(1);
             self.config_dirty = true;
         }
         Ok(())
@@ -437,7 +437,7 @@ impl<'txn> IvfPqIndex<'txn> {
         }
 
         if count > 0 {
-            self.config.num_vectors += count;
+            self.config.num_vectors = self.config.num_vectors.saturating_add(count);
             self.config_dirty = true;
         }
         Ok(count)

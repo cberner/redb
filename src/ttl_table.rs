@@ -16,7 +16,7 @@ fn now_millis() -> u64 {
     #[allow(clippy::cast_possible_truncation)]
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
+        .unwrap_or(Duration::ZERO)
         .as_millis() as u64;
     ms
 }
@@ -26,9 +26,10 @@ fn is_expired(expires_at_ms: u64) -> bool {
 }
 
 fn read_expiry(data: &[u8]) -> u64 {
-    let bytes: [u8; 8] = data[..EXPIRY_HEADER_SIZE]
-        .try_into()
-        .expect("TTL value too short");
+    let bytes: [u8; 8] = data
+        .get(..EXPIRY_HEADER_SIZE)
+        .and_then(|s| s.try_into().ok())
+        .unwrap_or([0u8; 8]);
     u64::from_le_bytes(bytes)
 }
 

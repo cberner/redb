@@ -54,24 +54,9 @@ impl AdcTable {
     /// index. The result is the sum of precomputed sub-vector distances.
     #[inline]
     pub fn approximate_distance(&self, pq_codes: &[u8]) -> f32 {
-        debug_assert_eq!(pq_codes.len(), self.num_subvectors);
-
+        let len = pq_codes.len().min(self.num_subvectors);
         let mut dist = 0.0f32;
-        for (m, &code) in pq_codes.iter().enumerate() {
-            // SAFETY: m < num_subvectors and code < 256, so index is always
-            // within bounds of the distances array allocated in `build()`.
-            unsafe {
-                dist += *self.distances.get_unchecked(m * 256 + code as usize);
-            }
-        }
-        dist
-    }
-
-    /// Same as `approximate_distance` but with bounds checking (for tests).
-    pub fn approximate_distance_checked(&self, pq_codes: &[u8]) -> f32 {
-        assert_eq!(pq_codes.len(), self.num_subvectors);
-        let mut dist = 0.0f32;
-        for (m, &code) in pq_codes.iter().enumerate() {
+        for (m, &code) in pq_codes[..len].iter().enumerate() {
             dist += self.distances[m * 256 + code as usize];
         }
         dist
@@ -135,7 +120,7 @@ mod tests {
 
         // Encode the first training vector (same as query).
         let codes = codebooks.encode(&training[0..8]);
-        let approx_dist = adc.approximate_distance_checked(&codes);
+        let approx_dist = adc.approximate_distance(&codes);
 
         // Exact distance to self should be 0 or near-zero via PQ approximation.
         assert!(
@@ -161,8 +146,8 @@ mod tests {
         let codes_near = codebooks.encode(&[1.0, 1.0, 1.0, 1.0]);
         let codes_far = codebooks.encode(&[10.0, 10.0, 10.0, 10.0]);
 
-        let d_near = adc.approximate_distance_checked(&codes_near);
-        let d_far = adc.approximate_distance_checked(&codes_far);
+        let d_near = adc.approximate_distance(&codes_near);
+        let d_far = adc.approximate_distance(&codes_far);
 
         assert!(
             d_near < d_far,

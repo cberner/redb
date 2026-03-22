@@ -72,7 +72,7 @@ impl MergeOperator for NumericAdd {
                 let b = u64::from_le_bytes(operand.try_into().unwrap());
                 a.wrapping_add(b).to_le_bytes().to_vec()
             }
-            n => panic!("NumericAdd: unsupported byte width {n} (expected 1, 2, 4, or 8)"),
+            _ => return Some(existing.to_vec()),
         };
         Some(result)
     }
@@ -124,7 +124,7 @@ impl MergeOperator for NumericMax {
                 let b = u64::from_le_bytes(operand.try_into().unwrap());
                 b > a
             }
-            n => panic!("NumericMax: unsupported byte width {n} (expected 1, 2, 4, or 8)"),
+            _ => return Some(existing.to_vec()),
         };
         if use_operand {
             Some(operand.to_vec())
@@ -180,7 +180,7 @@ impl MergeOperator for NumericMin {
                 let b = u64::from_le_bytes(operand.try_into().unwrap());
                 b < a
             }
-            n => panic!("NumericMin: unsupported byte width {n} (expected 1, 2, 4, or 8)"),
+            _ => return Some(existing.to_vec()),
         };
         if use_operand {
             Some(operand.to_vec())
