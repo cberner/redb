@@ -112,6 +112,7 @@ pub use blob_store::{
     CausalEdge, CausalLink, CausalPath, ContentType, DedupStats, MAX_TAGS_PER_BLOB, RelationType,
     StoreOptions,
 };
+pub use cdc::{CdcConfig, ChangeOp, ChangeStream};
 pub use composite::{CompositeQuery, ScoredBlob, SignalScores, SignalWeights};
 pub use ivfpq::{
     Codebooks, IndexConfig, IvfPqIndex, IvfPqIndexDefinition, ReadOnlyIvfPqIndex, SearchParams,
@@ -135,6 +136,7 @@ pub type Result<T = (), E = StorageError> = core::result::Result<T, E>;
 
 pub mod backends;
 pub mod blob_store;
+pub mod cdc;
 mod compat;
 mod complex_types;
 pub mod composite;

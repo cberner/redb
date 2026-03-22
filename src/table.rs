@@ -1,3 +1,4 @@
+use crate::cdc::types::{CdcEvent, ChangeOp};
 use crate::compat::Mutex;
 use crate::db::TransactionGuard;
 use crate::merge::MergeOperator;
@@ -170,9 +171,16 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree
-            .extract_from_if(&range, predicate)
-            .map(ExtractIf::new)
+        let inner = self.tree.extract_from_if(&range, predicate)?;
+        if self.transaction.cdc_log.is_some() {
+            Ok(ExtractIf::with_cdc(
+                inner,
+                self.transaction,
+                self.name.clone(),
+            ))
+        } else {
+            Ok(ExtractIf::new(inner))
+        }
     }
 
     /// Applies `predicate` to all key-value pairs. All entries for which
@@ -182,7 +190,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         &mut self,
         predicate: F,
     ) -> Result {
-        self.tree.retain_in::<K::SelfType<'_>, F>(predicate, ..)
+        self.retain_in::<K::SelfType<'_>, F>(.., predicate)
     }
 
     /// Applies `predicate` to all key-value pairs in the range `start..end`. All entries for which
@@ -191,12 +199,20 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     pub fn retain_in<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         range: impl RangeBounds<KR> + 'a,
-        predicate: F,
+        mut predicate: F,
     ) -> Result
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree.retain_in(predicate, range)
+        if self.transaction.cdc_log.is_some() {
+            // Route through extract_from_if so CDC events are recorded for each removal
+            for result in self.extract_from_if(range, move |k, v| !predicate(k, v))? {
+                result?;
+            }
+            Ok(())
+        } else {
+            self.tree.retain_in(predicate, range)
+        }
     }
 
     /// Removes all key-value pairs in the given range
@@ -242,7 +258,24 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         if value_len + key_len > MAX_PAIR_LENGTH {
             return Err(StorageError::ValueTooLarge(value_len + key_len));
         }
-        self.tree.insert(key.borrow(), value.borrow())
+        let result = self.tree.insert(key.borrow(), value.borrow())?;
+        if self.transaction.cdc_log.is_some() {
+            let old_value = result
+                .as_ref()
+                .map(|g| V::as_bytes(&g.value()).as_ref().to_vec());
+            self.transaction.record_cdc(CdcEvent {
+                table_name: self.name.clone(),
+                op: if old_value.is_some() {
+                    ChangeOp::Update
+                } else {
+                    ChangeOp::Insert
+                },
+                key: K::as_bytes(key.borrow()).as_ref().to_vec(),
+                new_value: Some(V::as_bytes(value.borrow()).as_ref().to_vec()),
+                old_value,
+            });
+        }
+        Ok(result)
     }
 
     /// Removes the given key
@@ -252,7 +285,20 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
     ) -> Result<Option<AccessGuard<'_, V>>> {
-        self.tree.remove(key.borrow())
+        let result = self.tree.remove(key.borrow())?;
+        if self.transaction.cdc_log.is_some() && result.is_some() {
+            let old_value = result
+                .as_ref()
+                .map(|g| V::as_bytes(&g.value()).as_ref().to_vec());
+            self.transaction.record_cdc(CdcEvent {
+                table_name: self.name.clone(),
+                op: ChangeOp::Delete,
+                key: K::as_bytes(key.borrow()).as_ref().to_vec(),
+                new_value: None,
+                old_value,
+            });
+        }
+        Ok(result)
     }
 
     /// Atomically read-modify-write a value using a [`MergeOperator`].
@@ -672,6 +718,7 @@ pub struct ExtractIf<
     F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
 > {
     inner: BtreeExtractIf<'a, K, V, F>,
+    cdc: Option<(&'a WriteTransaction, String)>,
 }
 
 impl<
@@ -682,7 +729,18 @@ impl<
 > ExtractIf<'a, K, V, F>
 {
     pub(crate) fn new(inner: BtreeExtractIf<'a, K, V, F>) -> Self {
-        Self { inner }
+        Self { inner, cdc: None }
+    }
+
+    pub(crate) fn with_cdc(
+        inner: BtreeExtractIf<'a, K, V, F>,
+        transaction: &'a WriteTransaction,
+        table_name: String,
+    ) -> Self {
+        Self {
+            inner,
+            cdc: Some((transaction, table_name)),
+        }
     }
 }
 
@@ -705,6 +763,15 @@ impl<
             } else {
                 AccessGuard::with_page(page, value_range)
             };
+            if let Some((txn, table_name)) = &self.cdc {
+                txn.record_cdc(CdcEvent {
+                    table_name: table_name.clone(),
+                    op: ChangeOp::Delete,
+                    key: K::as_bytes(&key.value()).as_ref().to_vec(),
+                    new_value: None,
+                    old_value: Some(V::as_bytes(&value.value()).as_ref().to_vec()),
+                });
+            }
             (key, value)
         }))
     }
@@ -726,6 +793,15 @@ impl<
             } else {
                 AccessGuard::with_page(page, value_range)
             };
+            if let Some((txn, table_name)) = &self.cdc {
+                txn.record_cdc(CdcEvent {
+                    table_name: table_name.clone(),
+                    op: ChangeOp::Delete,
+                    key: K::as_bytes(&key.value()).as_ref().to_vec(),
+                    new_value: None,
+                    old_value: Some(V::as_bytes(&value.value()).as_ref().to_vec()),
+                });
+            }
             (key, value)
         }))
     }
