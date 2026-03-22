@@ -3137,6 +3137,40 @@ impl ReadTransaction {
         Ok(btree.get(blob_id)?.map(|g| g.value()))
     }
 
+    /// Look up a blob by its sequence number.
+    ///
+    /// IVF-PQ indexes store vector IDs as `u64` sequence numbers. This method
+    /// resolves a sequence number back to the full `(BlobId, BlobMeta)` pair by
+    /// performing a range scan on the blob table from `BlobId::new(seq, 0)` to
+    /// `BlobId::new(seq, u64::MAX)`.
+    ///
+    /// Returns the first matching blob, or `None` if no blob has that sequence.
+    pub fn blob_by_sequence(&self, seq: u64) -> Result<Option<(BlobId, BlobMeta)>> {
+        let Some(btree) = self.open_system_btree(BLOB_TABLE)? else {
+            return Ok(None);
+        };
+
+        let start = BlobId::new(seq, 0);
+        let end = BlobId::new(seq, u64::MAX);
+        let mut range = btree.range::<core::ops::RangeInclusive<BlobId>, BlobId>(&(start..=end))?;
+        match range.next() {
+            Some(entry) => {
+                let entry = entry?;
+                Ok(Some((entry.key(), entry.value())))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Start building a composite multi-signal query.
+    ///
+    /// Fuses vector similarity, temporal recency, and causal proximity into
+    /// a single ranked result set. See [`CompositeQuery`](crate::composite::CompositeQuery)
+    /// for the full builder API.
+    pub fn composite_query(&self) -> crate::composite::CompositeQuery<'_> {
+        crate::composite::CompositeQuery::new(self)
+    }
+
     /// Read a byte range from a blob without checksum verification.
     ///
     /// Returns `None` if the blob does not exist. Returns

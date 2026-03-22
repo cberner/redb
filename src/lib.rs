@@ -112,6 +112,7 @@ pub use blob_store::{
     CausalEdge, CausalLink, CausalPath, ContentType, DedupStats, MAX_TAGS_PER_BLOB, RelationType,
     StoreOptions,
 };
+pub use composite::{CompositeQuery, ScoredBlob, SignalScores, SignalWeights};
 pub use ivfpq::{
     Codebooks, IndexConfig, IvfPqIndex, IvfPqIndexDefinition, ReadOnlyIvfPqIndex, SearchParams,
 };
@@ -136,6 +137,7 @@ pub mod backends;
 pub mod blob_store;
 mod compat;
 mod complex_types;
+pub mod composite;
 mod db;
 pub mod error;
 #[cfg(feature = "std")]
