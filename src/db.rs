@@ -1,4 +1,5 @@
 use crate::blob_store::{BlobCompactionReport, BlobDedupConfig};
+use crate::cdc::CdcConfig;
 use crate::error::{BackendError, TransactionError};
 #[cfg(feature = "std")]
 use crate::group_commit::{GroupCommitError, GroupCommitter, WriteBatch};
@@ -577,6 +578,7 @@ pub struct Database {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
     blob_dedup_config: BlobDedupConfig,
+    cdc_config: CdcConfig,
     #[cfg(feature = "std")]
     group_committer: GroupCommitter,
 }
@@ -1307,6 +1309,7 @@ impl Database {
         compression: CompressionConfig,
         blob_dedup_config: BlobDedupConfig,
         memory_budget: Option<usize>,
+        cdc_config: CdcConfig,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -1358,6 +1361,7 @@ impl Database {
             mem,
             transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
             blob_dedup_config: blob_dedup_config.clone(),
+            cdc_config,
             #[cfg(feature = "std")]
             group_committer: GroupCommitter::new(),
         };
@@ -1460,6 +1464,7 @@ impl Database {
             self.transaction_tracker.clone(),
             self.mem.clone(),
             self.blob_dedup_config.clone(),
+            self.cdc_config.clone(),
         )
         .map_err(|e| e.into())
     }
@@ -1639,6 +1644,7 @@ pub struct Builder {
     repair_callback: Box<dyn Fn(&mut RepairSession)>,
     blob_dedup_config: BlobDedupConfig,
     memory_budget: Option<usize>,
+    cdc_config: CdcConfig,
 }
 
 impl Builder {
@@ -1663,6 +1669,7 @@ impl Builder {
             repair_callback: Box::new(|_| {}),
             blob_dedup_config: BlobDedupConfig::default(),
             memory_budget: None,
+            cdc_config: CdcConfig::default(),
         };
 
         result.set_cache_size(1024 * 1024 * 1024);
@@ -1776,6 +1783,17 @@ impl Builder {
         self
     }
 
+    /// Enable Change Data Capture (CDC) with the given configuration.
+    ///
+    /// When enabled, all table mutations (insert, update, delete) are recorded
+    /// in an internal log that can be polled via
+    /// [`ReadTransaction::read_cdc_since()`](crate::ReadTransaction::read_cdc_since).
+    /// When disabled (the default), CDC has zero overhead.
+    pub fn set_cdc(&mut self, config: CdcConfig) -> &mut Self {
+        self.cdc_config = config;
+        self
+    }
+
     /// Opens the specified file as a redb database.
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
@@ -1800,6 +1818,7 @@ impl Builder {
             self.compression,
             self.blob_dedup_config.clone(),
             self.memory_budget,
+            self.cdc_config.clone(),
         )
     }
 
@@ -1819,6 +1838,7 @@ impl Builder {
             self.compression,
             self.blob_dedup_config.clone(),
             self.memory_budget,
+            self.cdc_config.clone(),
         )
     }
 
@@ -1860,6 +1880,7 @@ impl Builder {
             self.compression,
             self.blob_dedup_config.clone(),
             self.memory_budget,
+            self.cdc_config.clone(),
         )
     }
 
@@ -1879,6 +1900,7 @@ impl Builder {
             self.compression,
             self.blob_dedup_config.clone(),
             self.memory_budget,
+            self.cdc_config.clone(),
         )
     }
 }

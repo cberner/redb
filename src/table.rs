@@ -1,3 +1,4 @@
+use crate::cdc::types::{CdcEvent, ChangeOp};
 use crate::compat::Mutex;
 use crate::db::TransactionGuard;
 use crate::merge::MergeOperator;
@@ -206,10 +207,29 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
+        let cdc_enabled = self.transaction.cdc_log.is_some();
+        let mut cdc_events: Vec<CdcEvent> = Vec::new();
+        let table_name = if cdc_enabled {
+            Some(self.name.clone())
+        } else {
+            None
+        };
         let mut count = 0u64;
         for result in self.extract_from_if(range, |_, _| true)? {
-            result?;
+            let (key_guard, val_guard) = result?;
+            if cdc_enabled {
+                cdc_events.push(CdcEvent {
+                    table_name: table_name.clone().unwrap(),
+                    op: ChangeOp::Delete,
+                    key: K::as_bytes(&key_guard.value()).as_ref().to_vec(),
+                    new_value: None,
+                    old_value: Some(V::as_bytes(&val_guard.value()).as_ref().to_vec()),
+                });
+            }
             count += 1;
+        }
+        for event in cdc_events {
+            self.transaction.record_cdc(event);
         }
         Ok(count)
     }
@@ -242,7 +262,24 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         if value_len + key_len > MAX_PAIR_LENGTH {
             return Err(StorageError::ValueTooLarge(value_len + key_len));
         }
-        self.tree.insert(key.borrow(), value.borrow())
+        let result = self.tree.insert(key.borrow(), value.borrow())?;
+        if self.transaction.cdc_log.is_some() {
+            let old_value = result
+                .as_ref()
+                .map(|g| V::as_bytes(&g.value()).as_ref().to_vec());
+            self.transaction.record_cdc(CdcEvent {
+                table_name: self.name.clone(),
+                op: if old_value.is_some() {
+                    ChangeOp::Update
+                } else {
+                    ChangeOp::Insert
+                },
+                key: K::as_bytes(key.borrow()).as_ref().to_vec(),
+                new_value: Some(V::as_bytes(value.borrow()).as_ref().to_vec()),
+                old_value,
+            });
+        }
+        Ok(result)
     }
 
     /// Removes the given key
@@ -252,7 +289,20 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
     ) -> Result<Option<AccessGuard<'_, V>>> {
-        self.tree.remove(key.borrow())
+        let result = self.tree.remove(key.borrow())?;
+        if self.transaction.cdc_log.is_some() && result.is_some() {
+            let old_value = result
+                .as_ref()
+                .map(|g| V::as_bytes(&g.value()).as_ref().to_vec());
+            self.transaction.record_cdc(CdcEvent {
+                table_name: self.name.clone(),
+                op: ChangeOp::Delete,
+                key: K::as_bytes(key.borrow()).as_ref().to_vec(),
+                new_value: None,
+                old_value,
+            });
+        }
+        Ok(result)
     }
 
     /// Atomically read-modify-write a value using a [`MergeOperator`].

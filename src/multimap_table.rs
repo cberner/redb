@@ -1,3 +1,4 @@
+use crate::cdc::types::{CdcEvent, ChangeOp};
 use crate::compat::{HashMap, Mutex};
 #[cfg(feature = "std")]
 use crate::db::CorruptPageInfo;
@@ -1283,6 +1284,15 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
 
         if !existed {
             self.num_values += 1;
+            if self.transaction.cdc_log.is_some() {
+                self.transaction.record_cdc(CdcEvent {
+                    table_name: self.name.clone(),
+                    op: ChangeOp::Insert,
+                    key: K::as_bytes(key.borrow()).as_ref().to_vec(),
+                    new_value: Some(V::as_bytes(value.borrow()).as_ref().to_vec()),
+                    old_value: None,
+                });
+            }
         }
 
         Ok(existed)
@@ -1417,6 +1427,15 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
 
         if existed {
             self.num_values -= 1;
+            if self.transaction.cdc_log.is_some() {
+                self.transaction.record_cdc(CdcEvent {
+                    table_name: self.name.clone(),
+                    op: ChangeOp::Delete,
+                    key: K::as_bytes(key.borrow()).as_ref().to_vec(),
+                    new_value: None,
+                    old_value: Some(V::as_bytes(value.borrow()).as_ref().to_vec()),
+                });
+            }
         }
 
         Ok(existed)

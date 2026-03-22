@@ -107,6 +107,7 @@ pub use tree_store::{
 };
 pub use types::{Key, MutInPlaceValue, TypeName, Value};
 
+pub use cdc::{CdcConfig, ChangeOp, ChangeStream};
 pub use blob_store::{
     BlobCompactionReport, BlobId, BlobInput, BlobMeta, BlobReader, BlobRef, BlobStats, BlobWriter,
     CausalEdge, CausalLink, CausalPath, ContentType, DedupStats, MAX_TAGS_PER_BLOB, RelationType,
@@ -135,6 +136,7 @@ pub type Result<T = (), E = StorageError> = core::result::Result<T, E>;
 
 pub mod backends;
 pub mod blob_store;
+pub mod cdc;
 mod compat;
 mod complex_types;
 pub mod composite;

@@ -1,4 +1,6 @@
 use crate::blob_store::reader::BlobReader;
+use crate::cdc::types::{CdcEvent, CdcKey, CdcRecord, ChangeStream};
+use crate::cdc::CdcConfig;
 use crate::blob_store::types::{
     BlobDedupConfig, BlobId, BlobMeta, BlobRef, BlobStats, CausalEdge, CausalEdgeKey, CausalPath,
     ContentType, DedupStats, DedupVal, MAX_TAGS_PER_BLOB, NamespaceKey, NamespaceVal, Sha256Key,
@@ -90,6 +92,10 @@ const BLOB_DEDUP_INDEX: SystemTableDefinition<Sha256Key, DedupVal> =
     SystemTableDefinition::new("blob_dedup_idx");
 const BLOB_DEDUP_MAP: SystemTableDefinition<BlobId, Sha256Key> =
     SystemTableDefinition::new("blob_dedup_map");
+const CDC_LOG_TABLE: SystemTableDefinition<CdcKey, CdcRecord> =
+    SystemTableDefinition::new("cdc_log");
+const CDC_CURSOR_TABLE: SystemTableDefinition<&str, u64> =
+    SystemTableDefinition::new("cdc_cursors");
 // The allocator state table is stored in the system table tree, but it's accessed using
 // raw btree operations rather than open_system_table(), so there's no SystemTableDefinition
 pub(crate) const ALLOCATOR_STATE_TABLE_NAME: &str = "allocator_state";
@@ -824,6 +830,9 @@ pub struct WriteTransaction {
     blob_writer_active: AtomicBool,
     // Content-addressable blob dedup configuration
     blob_dedup_config: BlobDedupConfig,
+    // CDC: in-memory change log, Some when CDC enabled
+    pub(crate) cdc_log: Option<Mutex<Vec<CdcEvent>>>,
+    cdc_config: CdcConfig,
 }
 
 impl WriteTransaction {
@@ -832,6 +841,7 @@ impl WriteTransaction {
         transaction_tracker: Arc<TransactionTracker>,
         mem: Arc<TransactionalMemory>,
         blob_dedup_config: BlobDedupConfig,
+        cdc_config: CdcConfig,
     ) -> Result<Self> {
         let transaction_id = guard.id();
         let guard = Arc::new(guard);
@@ -859,7 +869,20 @@ impl WriteTransaction {
             deleted_persistent_savepoints: Mutex::new(vec![]),
             blob_writer_active: AtomicBool::new(false),
             blob_dedup_config,
+            cdc_log: if cdc_config.enabled {
+                Some(Mutex::new(Vec::new()))
+            } else {
+                None
+            },
+            cdc_config,
         })
+    }
+
+    /// Record a CDC event. No-op when CDC is disabled.
+    pub(crate) fn record_cdc(&self, event: CdcEvent) {
+        if let Some(ref log) = self.cdc_log {
+            log.lock().push(event);
+        }
     }
 
     pub(crate) fn set_shrink_policy(&mut self, shrink_policy: ShrinkPolicy) {
@@ -2288,6 +2311,7 @@ impl WriteTransaction {
 
         self.store_data_freed_pages(data_freed)?;
         self.store_allocated_pages(allocated_pages.into_iter().collect())?;
+        self.flush_cdc_log()?;
 
         #[cfg(feature = "logging")]
         debug!(
@@ -2396,6 +2420,52 @@ impl WriteTransaction {
             entry?;
         }
 
+        Ok(())
+    }
+
+    fn flush_cdc_log(&self) -> Result {
+        let events = match self.cdc_log {
+            Some(ref log) => {
+                let mut guard = log.lock();
+                if guard.is_empty() {
+                    return Ok(());
+                }
+                core::mem::take(&mut *guard)
+            }
+            None => return Ok(()),
+        };
+
+        let txn_id = self.transaction_id.raw_id();
+        let mut system_tables = self.system_tables.lock();
+        let mut cdc_table = system_tables.open_system_table(self, CDC_LOG_TABLE)?;
+
+        for (seq, event) in events.iter().enumerate() {
+            let key = CdcKey::new(txn_id, u32::try_from(seq).unwrap_or(u32::MAX));
+            let record = CdcRecord::from_event(event);
+            cdc_table.insert(&key, &record)?;
+        }
+
+        // Retention pruning
+        if self.cdc_config.retention_max_txns > 0 && txn_id > self.cdc_config.retention_max_txns {
+            let cutoff_txn = txn_id - self.cdc_config.retention_max_txns;
+            let end_key = CdcKey::new(cutoff_txn, u32::MAX);
+            for entry in cdc_table.extract_from_if(..=end_key, |_, _| true)? {
+                entry?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Advance a named CDC cursor to the given transaction ID.
+    ///
+    /// Cursors persist across transactions and allow consumers to track
+    /// their position in the CDC log. Only the named consumer should
+    /// advance its own cursor.
+    pub fn advance_cdc_cursor(&self, name: &str, up_to_txn: u64) -> Result {
+        let mut system_tables = self.system_tables.lock();
+        let mut cursor_table = system_tables.open_system_table(self, CDC_CURSOR_TABLE)?;
+        cursor_table.insert(name, &up_to_txn)?;
         Ok(())
     }
 
@@ -3665,6 +3735,81 @@ impl ReadTransaction {
 
         match ns_btree.get(blob_id)? {
             Some(g) => Ok(Some(g.value().namespace_str().to_string())),
+            None => Ok(None),
+        }
+    }
+
+    /// Read CDC changes committed after the given transaction ID.
+    ///
+    /// Returns all change records with `transaction_id > after_txn_id`,
+    /// ordered by `(transaction_id, sequence)`. Returns an empty vec if
+    /// CDC has never been used or if there are no newer changes.
+    pub fn read_cdc_since(&self, after_txn_id: u64) -> Result<Vec<ChangeStream>> {
+        let Some(btree) = self.open_system_btree(CDC_LOG_TABLE)? else {
+            return Ok(Vec::new());
+        };
+
+        let start = CdcKey::new(after_txn_id.saturating_add(1), 0);
+        let end = CdcKey::new(u64::MAX, u32::MAX);
+        let range = btree.range::<core::ops::RangeInclusive<CdcKey>, CdcKey>(&(start..=end))?;
+
+        let mut results = Vec::new();
+        for entry in range {
+            let entry = entry?;
+            results.push(ChangeStream::from_key_record(entry.key(), entry.value()));
+        }
+        Ok(results)
+    }
+
+    /// Read CDC changes within a transaction ID range (inclusive on both ends).
+    ///
+    /// Returns all change records where `start_txn <= transaction_id <= end_txn`,
+    /// ordered by `(transaction_id, sequence)`.
+    pub fn read_cdc_range(&self, start_txn: u64, end_txn: u64) -> Result<Vec<ChangeStream>> {
+        if start_txn > end_txn {
+            return Ok(Vec::new());
+        }
+        let Some(btree) = self.open_system_btree(CDC_LOG_TABLE)? else {
+            return Ok(Vec::new());
+        };
+
+        let start = CdcKey::new(start_txn, 0);
+        let end = CdcKey::new(end_txn, u32::MAX);
+        let range = btree.range::<core::ops::RangeInclusive<CdcKey>, CdcKey>(&(start..=end))?;
+
+        let mut results = Vec::new();
+        for entry in range {
+            let entry = entry?;
+            results.push(ChangeStream::from_key_record(entry.key(), entry.value()));
+        }
+        Ok(results)
+    }
+
+    /// Read the position of a named CDC cursor.
+    ///
+    /// Returns the transaction ID that the named consumer has processed up to,
+    /// or `None` if the cursor has never been set.
+    pub fn cdc_cursor(&self, name: &str) -> Result<Option<u64>> {
+        let Some(btree) = self.open_system_btree(CDC_CURSOR_TABLE)? else {
+            return Ok(None);
+        };
+        match btree.get(&name)? {
+            Some(guard) => Ok(Some(guard.value())),
+            None => Ok(None),
+        }
+    }
+
+    /// Returns the transaction ID of the latest CDC log entry, or `None` if empty.
+    pub fn latest_cdc_transaction_id(&self) -> Result<Option<u64>> {
+        let Some(btree) = self.open_system_btree(CDC_LOG_TABLE)? else {
+            return Ok(None);
+        };
+        let mut range = btree.range::<core::ops::RangeFull, CdcKey>(&(..))?;
+        match range.next_back() {
+            Some(entry) => {
+                let entry = entry?;
+                Ok(Some(entry.key().transaction_id))
+            }
             None => Ok(None),
         }
     }
