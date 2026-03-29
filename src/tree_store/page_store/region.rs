@@ -1,10 +1,11 @@
+use crate::tree_store::page_store::allocator::{PageAllocator, PageAllocatorFactory};
 use crate::tree_store::page_store::base::MAX_REGIONS;
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
-use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, MAX_MAX_PAGE_ORDER};
 use std::cmp::{self, max};
 use std::mem::size_of;
+use std::sync::Arc;
 
 // Tracks the page orders that MAY BE free in each region. This data structure is optimistic, so
 // a region may not actually have a page free for a given order
@@ -99,19 +100,24 @@ impl RegionTracker {
     }
 }
 
+#[allow(clippy::struct_field_names)]
 pub(super) struct Allocators {
     pub(super) region_tracker: RegionTracker,
-    pub(super) region_allocators: Vec<BuddyAllocator>,
+    pub(super) region_allocators: Vec<Box<dyn PageAllocator>>,
+    pub(super) allocator_factory: Arc<dyn PageAllocatorFactory>,
 }
 
 impl Allocators {
-    pub(super) fn new(layout: DatabaseLayout) -> Self {
-        let mut region_allocators = vec![];
+    pub(super) fn new(
+        layout: DatabaseLayout,
+        allocator_factory: Arc<dyn PageAllocatorFactory>,
+    ) -> Self {
+        let mut region_allocators: Vec<Box<dyn PageAllocator>> = vec![];
         let initial_regions = max(INITIAL_REGIONS, layout.num_regions());
         let mut region_tracker = RegionTracker::new(initial_regions, MAX_MAX_PAGE_ORDER + 1);
         for i in 0..layout.num_regions() {
             let region_layout = layout.region_layout(i);
-            let allocator = BuddyAllocator::new(
+            let allocator = allocator_factory.create(
                 region_layout.num_pages(),
                 layout.full_region_layout().num_pages(),
             );
@@ -123,6 +129,7 @@ impl Allocators {
         Self {
             region_tracker,
             region_allocators,
+            allocator_factory,
         }
     }
 
@@ -186,7 +193,7 @@ impl Allocators {
                     }
                 } else {
                     // brand new region
-                    let allocator = BuddyAllocator::new(
+                    let allocator = self.allocator_factory.create(
                         new_region.num_pages(),
                         new_layout.full_region_layout().num_pages(),
                     );

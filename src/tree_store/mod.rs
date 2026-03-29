@@ -20,6 +20,9 @@ pub(crate) use page_store::{
     FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE, Page, PageHint, PageNumber,
     PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy, TransactionalMemory,
 };
-pub use page_store::{InMemoryBackend, Savepoint, file_backend};
+pub use page_store::{
+    BuddyAllocatorFactory, InMemoryBackend, PageAllocator, PageAllocatorFactory, Savepoint,
+    file_backend,
+};
 pub(crate) use table_tree::{PageListMut, TableTree, TableTreeMut};
 pub(crate) use table_tree_base::{InternalTableDefinition, TableType};

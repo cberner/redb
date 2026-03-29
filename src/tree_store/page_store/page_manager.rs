@@ -2,7 +2,8 @@ use crate::transaction_tracker::TransactionId;
 use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateTreeMut};
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
 use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, PageHint};
-use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
+use crate::tree_store::page_store::allocator::{PageAllocator, PageAllocatorFactory};
+use crate::tree_store::page_store::buddy_allocator::BuddyAllocatorFactory;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
 use crate::tree_store::page_store::header::{DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER};
@@ -19,7 +20,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::io::ErrorKind;
-#[cfg(debug_assertions)]
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,17 +81,17 @@ struct InMemoryState {
 }
 
 impl InMemoryState {
-    fn new(header: DatabaseHeader) -> Self {
-        let allocators = Allocators::new(header.layout());
+    fn new(header: DatabaseHeader, allocator_factory: Arc<dyn PageAllocatorFactory>) -> Self {
+        let allocators = Allocators::new(header.layout(), allocator_factory);
         Self { header, allocators }
     }
 
-    fn get_region(&self, region: u32) -> &BuddyAllocator {
-        &self.allocators.region_allocators[region as usize]
+    fn get_region(&self, region: u32) -> &dyn PageAllocator {
+        self.allocators.region_allocators[region as usize].as_ref()
     }
 
-    fn get_region_mut(&mut self, region: u32) -> &mut BuddyAllocator {
-        &mut self.allocators.region_allocators[region as usize]
+    fn get_region_mut(&mut self, region: u32) -> &mut dyn PageAllocator {
+        self.allocators.region_allocators[region as usize].as_mut()
     }
 
     fn get_region_tracker_mut(&mut self) -> &mut RegionTracker {
@@ -125,6 +125,8 @@ pub(crate) struct TransactionalMemory {
     // code path where there is no locking
     region_size: u64,
     region_header_with_padding_size: u64,
+    // Factory for creating page allocators (defaults to BuddyAllocatorFactory)
+    allocator_factory: Arc<dyn PageAllocatorFactory>,
 }
 
 impl TransactionalMemory {
@@ -138,7 +140,10 @@ impl TransactionalMemory {
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
         read_only: bool,
+        allocator_factory: Option<Arc<dyn PageAllocatorFactory>>,
     ) -> Result<Self, DatabaseError> {
+        let allocator_factory =
+            allocator_factory.unwrap_or_else(|| Arc::new(BuddyAllocatorFactory));
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
         let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
@@ -263,7 +268,7 @@ impl TransactionalMemory {
         assert_eq!(layout.len(), storage.raw_file_len()?);
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
-        let state = InMemoryState::new(header);
+        let state = InMemoryState::new(header, allocator_factory.clone());
 
         assert!(page_size >= DB_HEADER_SIZE);
 
@@ -283,6 +288,7 @@ impl TransactionalMemory {
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,
+            allocator_factory,
         })
     }
 
@@ -385,7 +391,8 @@ impl TransactionalMemory {
 
     pub(crate) fn begin_repair(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
-        state.allocators = Allocators::new(state.header.layout());
+        state.allocators =
+            Allocators::new(state.header.layout(), self.allocator_factory.clone());
         #[cfg(debug_assertions)]
         self.allocated_pages.lock().unwrap().clear();
 
@@ -526,11 +533,11 @@ impl TransactionalMemory {
         assert!(self.is_valid_allocator_state(tree)?);
 
         // Load the allocator state
-        let mut region_allocators = vec![];
+        let mut region_allocators: Vec<Box<dyn PageAllocator>> = vec![];
         for region in
             tree.range(&(AllocatorStateKey::Region(0)..=AllocatorStateKey::Region(u32::MAX)))?
         {
-            region_allocators.push(BuddyAllocator::from_bytes(region?.value()));
+            region_allocators.push(self.allocator_factory.deserialize(region?.value()));
         }
 
         let region_tracker = RegionTracker::from_bytes(
@@ -543,6 +550,7 @@ impl TransactionalMemory {
         state.allocators = Allocators {
             region_tracker,
             region_allocators,
+            allocator_factory: self.allocator_factory.clone(),
         };
 
         // Resize the allocators to match the current file size

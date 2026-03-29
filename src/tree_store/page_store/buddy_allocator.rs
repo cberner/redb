@@ -1,4 +1,5 @@
 use crate::tree_store::PageNumber;
+use crate::tree_store::page_store::allocator::{PageAllocator, PageAllocatorFactory};
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 use std::cmp::min;
@@ -437,6 +438,77 @@ impl BuddyAllocator {
 
     fn get_order_free(&self, order: u8) -> &BtreeBitmap {
         &self.free[order as usize]
+    }
+}
+
+impl PageAllocator for BuddyAllocator {
+    fn xxh3_hash(&self) -> u128 {
+        self.xxh3_hash()
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        self.to_vec()
+    }
+
+    fn highest_free_order(&self) -> Option<u8> {
+        self.highest_free_order()
+    }
+
+    fn count_allocated_pages(&self) -> u32 {
+        self.count_allocated_pages()
+    }
+
+    fn count_free_pages(&self) -> u32 {
+        self.count_free_pages()
+    }
+
+    fn get_max_order(&self) -> u8 {
+        self.get_max_order()
+    }
+
+    fn trailing_free_pages(&self) -> u32 {
+        self.trailing_free_pages()
+    }
+
+    fn check_allocated_pages(&self, region: u32, allocated_pages: &[PageNumber]) {
+        self.check_allocated_pages(region, allocated_pages);
+    }
+
+    fn len(&self) -> u32 {
+        self.len()
+    }
+
+    fn resize(&mut self, new_size: u32) {
+        self.resize(new_size);
+    }
+
+    fn alloc_lowest(&mut self, order: u8) -> Option<u32> {
+        self.alloc_lowest(order)
+    }
+
+    fn alloc(&mut self, order: u8) -> Option<u32> {
+        self.alloc(order)
+    }
+
+    fn record_alloc(&mut self, page_number: u32, order: u8) {
+        self.record_alloc(page_number, order);
+    }
+
+    fn free(&mut self, page_number: u32, order: u8) {
+        self.free(page_number, order);
+    }
+}
+
+/// Default factory that creates [`BuddyAllocator`] instances.
+pub struct BuddyAllocatorFactory;
+
+impl PageAllocatorFactory for BuddyAllocatorFactory {
+    fn create(&self, num_pages: u32, max_page_capacity: u32) -> Box<dyn PageAllocator> {
+        Box::new(BuddyAllocator::new(num_pages, max_page_capacity))
+    }
+
+    fn deserialize(&self, data: &[u8]) -> Box<dyn PageAllocator> {
+        Box::new(BuddyAllocator::from_bytes(data))
     }
 }
 

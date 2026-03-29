@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
-    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, ReadOnlyBackend,
-    ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageAllocatorFactory, PageHint, PageNumber,
+    ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -420,6 +420,7 @@ impl ReadOnlyDatabase {
         page_size: usize,
         region_size: Option<u64>,
         read_cache_size_bytes: usize,
+        allocator_factory: Option<Arc<dyn PageAllocatorFactory>>,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -433,6 +434,7 @@ impl ReadOnlyDatabase {
             read_cache_size_bytes,
             0,
             true,
+            allocator_factory,
         )?;
         let mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
@@ -890,6 +892,7 @@ impl Database {
         read_cache_size_bytes: usize,
         write_cache_size_bytes: usize,
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
+        allocator_factory: Option<Arc<dyn PageAllocatorFactory>>,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -903,6 +906,7 @@ impl Database {
             read_cache_size_bytes,
             write_cache_size_bytes,
             false,
+            allocator_factory,
         )?;
         let mut mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
@@ -1099,6 +1103,7 @@ pub struct Builder {
     read_cache_size_bytes: usize,
     write_cache_size_bytes: usize,
     repair_callback: Box<dyn Fn(&mut RepairSession)>,
+    allocator_factory: Option<Arc<dyn PageAllocatorFactory>>,
 }
 
 impl Builder {
@@ -1120,6 +1125,7 @@ impl Builder {
             // TODO: Default should probably take into account the total system memory
             write_cache_size_bytes: 0,
             repair_callback: Box::new(|_| {}),
+            allocator_factory: None,
         };
 
         result.set_cache_size(1024 * 1024 * 1024);
@@ -1170,6 +1176,45 @@ impl Builder {
         self
     }
 
+    /// Sets a custom page allocator factory for the database.
+    ///
+    /// The factory is used to create page allocators for each region in the database.
+    /// By default, [`BuddyAllocatorFactory`] is used, which provides a buddy-system allocator
+    /// with power-of-two page orders.
+    ///
+    /// # When to use
+    ///
+    /// Most users should use the default allocator. This is an **advanced feature** intended for
+    /// workloads where the buddy allocator's power-of-two rounding wastes too much space. For
+    /// example, a slab allocator with non-power-of-two size classes can reduce internal
+    /// fragmentation for workloads with values near power-of-two page boundaries.
+    ///
+    /// # Consistency requirement
+    ///
+    /// A database **must** be opened with the same allocator factory it was created with.
+    /// Opening an existing database with a different allocator factory will result in errors
+    /// or data corruption, because the on-disk allocator state is serialized in the factory's
+    /// own format.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    /// use redb::{Builder, BuddyAllocatorFactory, Database};
+    ///
+    /// let db = Builder::new()
+    ///     .set_allocator_factory(Arc::new(BuddyAllocatorFactory))
+    ///     .create("my_database.redb")
+    ///     .unwrap();
+    /// ```
+    pub fn set_allocator_factory(
+        &mut self,
+        factory: Arc<dyn PageAllocatorFactory>,
+    ) -> &mut Self {
+        self.allocator_factory = Some(factory);
+        self
+    }
+
     /// Opens the specified file as a redb database.
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
@@ -1190,6 +1235,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+            self.allocator_factory.clone(),
         )
     }
 
@@ -1205,6 +1251,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+            self.allocator_factory.clone(),
         )
     }
 
@@ -1224,6 +1271,7 @@ impl Builder {
             self.page_size,
             None,
             self.read_cache_size_bytes,
+            self.allocator_factory.clone(),
         )
     }
 
@@ -1239,6 +1287,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+            self.allocator_factory.clone(),
         )
     }
 
@@ -1255,6 +1304,7 @@ impl Builder {
             self.read_cache_size_bytes,
             self.write_cache_size_bytes,
             &self.repair_callback,
+            self.allocator_factory.clone(),
         )
     }
 }

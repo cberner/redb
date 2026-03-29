@@ -1,7 +1,8 @@
+pub mod allocator;
 mod backends;
 mod base;
 mod bitmap;
-mod buddy_allocator;
+pub(crate) mod buddy_allocator;
 mod cached_file;
 mod fast_hash;
 pub mod file_backend;
@@ -14,11 +15,13 @@ mod savepoint;
 #[allow(clippy::pedantic, dead_code)]
 mod xxh3;
 
+pub use allocator::{PageAllocator, PageAllocatorFactory};
 pub use backends::InMemoryBackend;
 pub(crate) use backends::ReadOnlyBackend;
 pub(crate) use base::{
     MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PageTrackerPolicy,
 };
+pub use buddy_allocator::BuddyAllocatorFactory;
 pub(crate) use header::PAGE_SIZE;
 pub(crate) use page_manager::{
     FILE_FORMAT_VERSION3, ShrinkPolicy, TransactionalMemory, xxh3_checksum,
