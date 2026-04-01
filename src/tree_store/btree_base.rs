@@ -409,6 +409,13 @@ impl<V: MutInPlaceValue + 'static> AsMut<V::BaseRefType> for AccessGuardMutInPla
     }
 }
 
+impl<V: Value + 'static> Drop for AccessGuardMutInPlace<'_, V> {
+    fn drop(&mut self) {
+        // no-op. This Drop impl is only here to ensure that self is dropped before the transaction
+        // is committed. (i.e. that the lifetime 'a is shorter than the transaction)
+    }
+}
+
 // Provides a simple zero-copy way to access entries
 pub struct EntryAccessor<'a> {
     key: &'a [u8],

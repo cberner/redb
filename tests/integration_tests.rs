@@ -1342,6 +1342,30 @@ fn regression26() {
 }
 
 #[test]
+fn regression27() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let def: TableDefinition<&str, &[u8]> = TableDefinition::new("x");
+    let value = "world";
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(def).unwrap();
+        let mut reserved = table.insert_reserve("hello", value.len()).unwrap();
+        reserved.as_mut().copy_from_slice(value.as_bytes());
+        drop(reserved);
+        drop(table);
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(def).unwrap();
+    assert_eq!(
+        value.as_bytes(),
+        table.get("hello").unwrap().unwrap().value()
+    );
+}
+
+#[test]
 fn check_integrity_clean() {
     let tmpfile = create_tempfile();
 
