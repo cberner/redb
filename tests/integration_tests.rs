@@ -1336,6 +1336,7 @@ fn regression26() {
         let name = access.value().0.to_string();
         let large_value = vec![1u8; 8192];
         access.insert((&name[..], large_value.as_slice())).unwrap();
+        drop(access);
         drop(table);
         txn.commit().unwrap();
     }
