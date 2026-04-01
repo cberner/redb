@@ -1316,6 +1316,32 @@ fn regression25() {
 }
 
 #[test]
+fn regression26() {
+    let tmpfile = create_tempfile();
+    let table_def: TableDefinition<u64, (&str, &[u8])> = TableDefinition::new("issue_1117");
+
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        table.insert(0, ("name", &[0u8][..])).unwrap();
+    }
+    txn.commit().unwrap();
+
+    {
+        let txn = db.begin_write().unwrap();
+        let mut table = txn.open_table(table_def).unwrap();
+        let mut access = table.get_mut(&0).unwrap().unwrap();
+        let name = access.value().0.to_string();
+        let large_value = vec![1u8; 8192];
+        access.insert((&name[..], large_value.as_slice())).unwrap();
+        drop(table);
+        txn.commit().unwrap();
+    }
+}
+
+#[test]
 fn check_integrity_clean() {
     let tmpfile = create_tempfile();
 
