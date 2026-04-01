@@ -255,12 +255,11 @@ impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
 }
 
 pub struct AccessGuardMut<'a, V: Value + 'static> {
-    value: Vec<u8>,
-    page: PageNumber,
+    page: PageMut,
     offset: usize,
     len: usize,
     entry_index: usize,
-    parent: Option<(PageNumber, usize)>,
+    parent: Option<(PageMut, usize)>,
     mem: Arc<TransactionalMemory>,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
     root_ref: &'a mut BtreeHeader,
@@ -285,14 +284,12 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
         if let Some((ref parent_page, _)) = parent {
             assert!(mem.uncommitted(parent_page.get_page_number()));
         }
-        let value = page.memory()[offset..(offset + len)].to_vec();
         AccessGuardMut {
-            value,
-            page: page.get_page_number(),
+            page,
             offset,
             len,
             entry_index,
-            parent: parent.map(|(p, i)| (p.get_page_number(), i)),
+            parent,
             mem,
             allocated,
             root_ref,
@@ -303,24 +300,21 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
 
     /// Access the stored value
     pub fn value(&self) -> V::SelfType<'_> {
-        V::from_bytes(&self.value)
+        V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
     }
 
     /// Replace the stored value
     pub fn insert<'v>(&mut self, value: impl Borrow<V::SelfType<'v>>) -> Result<()> {
         let value_bytes = V::as_bytes(value.borrow());
-        self.value = value_bytes.as_ref().to_vec();
-
-        let mut page = self.mem.get_page_mut(self.page)?;
 
         // TODO: optimize this to avoid copying the key
         let key_bytes = {
-            let accessor = LeafAccessor::new(page.memory(), self.key_width, V::fixed_width());
+            let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
             accessor.key_unchecked(self.entry_index).to_vec()
         };
 
         if LeafMutator::sufficient_insert_inplace_space(
-            &page,
+            &self.page,
             self.entry_index,
             true,
             self.key_width,
@@ -328,10 +322,11 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             key_bytes.as_slice(),
             value_bytes.as_ref(),
         ) {
-            let mut mutator = LeafMutator::new(page.memory_mut(), self.key_width, V::fixed_width());
+            let mut mutator =
+                LeafMutator::new(self.page.memory_mut(), self.key_width, V::fixed_width());
             mutator.insert(self.entry_index, true, &key_bytes, value_bytes.as_ref());
         } else {
-            let accessor = LeafAccessor::new(page.memory(), self.key_width, V::fixed_width());
+            let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
             let mut builder = LeafBuilder::new(
                 &self.mem,
                 &self.allocated,
@@ -352,8 +347,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             let new_page = builder.build()?;
 
             // Update parent branch page if it exists, otherwise update root
-            if let Some((ref mut parent_page_number, parent_entry_index)) = self.parent {
-                let mut parent_page = self.mem.get_page_mut(*parent_page_number)?;
+            if let Some((ref mut parent_page, parent_entry_index)) = self.parent {
                 let mut mutator = BranchMutator::new(parent_page.memory_mut());
                 mutator.write_child_page(parent_entry_index, new_page.get_page_number(), DEFERRED);
             } else {
@@ -361,9 +355,8 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
                 self.root_ref.checksum = DEFERRED;
             }
 
-            let old_page_number = page.get_page_number();
-            self.page = new_page.get_page_number();
-            page = new_page;
+            let old_page_number = self.page.get_page_number();
+            self.page = new_page;
             let mut allocated = self.allocated.lock().unwrap();
             assert!(
                 self.mem
@@ -372,13 +365,20 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
         }
 
         // Update our page reference to the new page and recalculate offset/length
-        let new_accessor = LeafAccessor::new(page.memory(), self.key_width, V::fixed_width());
+        let new_accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
         let (new_start, new_end) = new_accessor.value_range(self.entry_index).unwrap();
 
         self.offset = new_start;
         self.len = new_end - new_start;
 
         Ok(())
+    }
+}
+
+impl<V: Value + 'static> Drop for AccessGuardMut<'_, V> {
+    fn drop(&mut self) {
+        // no-op. This Drop impl is only here to ensure that self is dropped before the transaction
+        // is committed. (i.e. that the lifetime 'a is shorter than the transaction)
     }
 }
 
