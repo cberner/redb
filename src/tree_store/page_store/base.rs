@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
@@ -239,20 +240,23 @@ impl Clone for PageImpl {
     }
 }
 
-pub(crate) struct PageMut {
+// The lifetime should be bound to the lifetime of the transaction in which this page was opened.
+// It is used in the Drop impl to ensure that the page is dropped before the transaction is committed.
+pub(crate) struct PageMut<'txn> {
     pub(super) mem: WritablePage,
     pub(super) page_number: PageNumber,
+    pub(super) _lifetime: PhantomData<&'txn ()>,
     #[cfg(debug_assertions)]
     pub(super) open_pages: Arc<Mutex<HashSet<PageNumber>>>,
 }
 
-impl PageMut {
+impl PageMut<'_> {
     pub(crate) fn memory_mut(&mut self) -> &mut [u8] {
         self.mem.mem_mut()
     }
 }
 
-impl Page for PageMut {
+impl Page for PageMut<'_> {
     fn memory(&self) -> &[u8] {
         self.mem.mem()
     }
@@ -262,9 +266,9 @@ impl Page for PageMut {
     }
 }
 
-#[cfg(debug_assertions)]
-impl Drop for PageMut {
+impl Drop for PageMut<'_> {
     fn drop(&mut self) {
+        #[cfg(debug_assertions)]
         assert!(self.open_pages.lock().unwrap().remove(&self.page_number));
     }
 }

@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::io::ErrorKind;
+use std::marker::PhantomData;
 #[cfg(debug_assertions)]
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -792,7 +793,7 @@ impl TransactionalMemory {
     }
 
     // NOTE: the caller must ensure that the read cache has been invalidated or stale reads my occur
-    pub(crate) fn get_page_mut(&self, page_number: PageNumber) -> Result<PageMut> {
+    pub(crate) fn get_page_mut<'txn>(&self, page_number: PageNumber) -> Result<PageMut<'txn>> {
         #[cfg(debug_assertions)]
         {
             assert!(
@@ -824,6 +825,7 @@ impl TransactionalMemory {
         Ok(PageMut {
             mem,
             page_number,
+            _lifetime: PhantomData,
             #[cfg(debug_assertions)]
             open_pages: self.open_dirty_pages.clone(),
         })
@@ -950,12 +952,12 @@ impl TransactionalMemory {
         self.unpersisted.lock().unwrap().contains(&page)
     }
 
-    pub(crate) fn allocate_helper(
+    pub(crate) fn allocate_helper<'txn>(
         &self,
         allocation_size: usize,
         lowest: bool,
         transactional: bool,
-    ) -> Result<PageMut> {
+    ) -> Result<PageMut<'txn>> {
         let required_pages = allocation_size.div_ceil(self.get_page_size());
         let required_order = ceil_log2(required_pages);
 
@@ -1016,6 +1018,7 @@ impl TransactionalMemory {
         Ok(PageMut {
             mem,
             page_number,
+            _lifetime: PhantomData,
             #[cfg(debug_assertions)]
             open_pages: self.open_dirty_pages.clone(),
         })
@@ -1131,11 +1134,11 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn allocate(
+    pub(crate) fn allocate<'txn>(
         &self,
         allocation_size: usize,
         allocated: &mut PageTrackerPolicy,
-    ) -> Result<PageMut> {
+    ) -> Result<PageMut<'txn>> {
         let result = self.allocate_helper(allocation_size, false, true);
         if let Ok(ref page) = result {
             allocated.insert(page.get_page_number());
@@ -1143,7 +1146,7 @@ impl TransactionalMemory {
         result
     }
 
-    pub(crate) fn allocate_lowest(&self, allocation_size: usize) -> Result<PageMut> {
+    pub(crate) fn allocate_lowest<'txn>(&self, allocation_size: usize) -> Result<PageMut<'txn>> {
         self.allocate_helper(allocation_size, true, true)
     }
 
