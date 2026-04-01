@@ -1,5 +1,8 @@
 # redb - Changelog
 
+## 3.1.2 - 2026-04-01
+* Reduce memory usage of open databases
+
 ## 3.1.1 - 2026-03-08
 * Fix panic which could occur when inserting into a table with fixed size keys when `debug_assertions` are enabled
 * Add additional information to the stats returned by `cache_stats()`
