@@ -539,7 +539,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         Ok(())
     }
 
-    fn insert_inplace_helper(&mut self, mut page: PageMut, key: &[u8], value: &[u8]) -> Result<()> {
+    fn insert_inplace_helper(
+        &mut self,
+        mut page: PageMut<'static>,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<()> {
         assert!(self.mem.uncommitted(page.get_page_number()));
 
         let node_mem = page.memory();

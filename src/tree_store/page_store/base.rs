@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
@@ -239,20 +240,21 @@ impl Clone for PageImpl {
     }
 }
 
-pub(crate) struct PageMut {
+pub(crate) struct PageMut<'a> {
     pub(super) mem: WritablePage,
     pub(super) page_number: PageNumber,
+    pub(super) _lifetime: PhantomData<&'a ()>,
     #[cfg(debug_assertions)]
     pub(super) open_pages: Arc<Mutex<HashSet<PageNumber>>>,
 }
 
-impl PageMut {
+impl PageMut<'_> {
     pub(crate) fn memory_mut(&mut self) -> &mut [u8] {
         self.mem.mem_mut()
     }
 }
 
-impl Page for PageMut {
+impl Page for PageMut<'_> {
     fn memory(&self) -> &[u8] {
         self.mem.mem()
     }
@@ -263,7 +265,7 @@ impl Page for PageMut {
 }
 
 #[cfg(debug_assertions)]
-impl Drop for PageMut {
+impl Drop for PageMut<'_> {
     fn drop(&mut self) {
         assert!(self.open_pages.lock().unwrap().remove(&self.page_number));
     }

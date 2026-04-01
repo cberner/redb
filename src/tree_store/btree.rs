@@ -208,7 +208,7 @@ impl UntypedBtreeMut {
     // Applies visitor to all dirty leaf pages in the tree
     pub(crate) fn dirty_leaf_visitor<F>(&mut self, visitor: F) -> Result
     where
-        F: Fn(PageMut) -> Result,
+        F: Fn(PageMut<'static>) -> Result,
     {
         if let Some(page_number) = self.root.map(|x| x.root) {
             if !self.mem.uncommitted(page_number) {
@@ -234,7 +234,7 @@ impl UntypedBtreeMut {
 
     fn dirty_leaf_visitor_helper<F>(&mut self, page_number: PageNumber, visitor: &F) -> Result
     where
-        F: Fn(PageMut) -> Result,
+        F: Fn(PageMut<'static>) -> Result,
     {
         assert!(self.mem.uncommitted(page_number));
         let page = self.mem.get_page_mut(page_number)?;
@@ -530,8 +530,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
 
     fn get_mut_helper(
         &mut self,
-        parent: Option<(PageMut, usize)>,
-        mut page: PageMut,
+        parent: Option<(PageMut<'static>, usize)>,
+        mut page: PageMut<'static>,
         query: &[u8],
     ) -> Result<Option<AccessGuardMut<'_, V>>> {
         let node_mem = page.memory();

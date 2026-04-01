@@ -142,14 +142,14 @@ enum OnDrop {
     },
 }
 
-enum EitherPage {
+enum EitherPage<'a> {
     Immutable(PageImpl),
-    Mutable(PageMut),
+    Mutable(PageMut<'a>),
     OwnedMemory(Vec<u8>),
     ArcMemory(Arc<[u8]>),
 }
 
-impl EitherPage {
+impl EitherPage<'_> {
     fn memory(&self) -> &[u8] {
         match self {
             EitherPage::Immutable(page) => page.memory(),
@@ -164,16 +164,14 @@ impl EitherPage {
 ///
 /// When this structure is dropped (goes out of scope), the data is released
 pub struct AccessGuard<'a, V: Value + 'static> {
-    page: EitherPage,
+    page: EitherPage<'a>,
     offset: usize,
     len: usize,
     on_drop: OnDrop,
     _value_type: PhantomData<V>,
-    // Used so that logical references into a Table respect the appropriate lifetime
-    _lifetime: PhantomData<&'a ()>,
 }
 
-impl<V: Value + 'static> AccessGuard<'_, V> {
+impl<'a, V: Value + 'static> AccessGuard<'a, V> {
     pub(crate) fn with_page(page: PageImpl, range: Range<usize>) -> Self {
         Self {
             page: EitherPage::Immutable(page),
@@ -181,7 +179,6 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
             len: range.len(),
             on_drop: OnDrop::None,
             _value_type: Default::default(),
-            _lifetime: Default::default(),
         }
     }
 
@@ -192,7 +189,6 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
             len: range.len(),
             on_drop: OnDrop::None,
             _value_type: Default::default(),
-            _lifetime: Default::default(),
         }
     }
 
@@ -204,12 +200,11 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
             len,
             on_drop: OnDrop::None,
             _value_type: Default::default(),
-            _lifetime: Default::default(),
         }
     }
 
     pub(super) fn remove_on_drop(
-        page: PageMut,
+        page: PageMut<'a>,
         offset: usize,
         len: usize,
         position: usize,
@@ -224,7 +219,6 @@ impl<V: Value + 'static> AccessGuard<'_, V> {
                 fixed_key_size,
             },
             _value_type: Default::default(),
-            _lifetime: Default::default(),
         }
     }
 
@@ -255,11 +249,11 @@ impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
 }
 
 pub struct AccessGuardMut<'a, V: Value + 'static> {
-    page: PageMut,
+    page: PageMut<'a>,
     offset: usize,
     len: usize,
     entry_index: usize,
-    parent: Option<(PageMut, usize)>,
+    parent: Option<(PageMut<'a>, usize)>,
     mem: Arc<TransactionalMemory>,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
     root_ref: &'a mut BtreeHeader,
@@ -270,11 +264,11 @@ pub struct AccessGuardMut<'a, V: Value + 'static> {
 impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        page: PageMut,
+        page: PageMut<'a>,
         offset: usize,
         len: usize,
         entry_index: usize,
-        parent: Option<(PageMut, usize)>,
+        parent: Option<(PageMut<'a>, usize)>,
         mem: Arc<TransactionalMemory>,
         allocated: Arc<Mutex<PageTrackerPolicy>>,
         root_ref: &'a mut BtreeHeader,
@@ -376,22 +370,19 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
 }
 
 pub struct AccessGuardMutInPlace<'a, V: Value + 'static> {
-    page: PageMut,
+    page: PageMut<'a>,
     offset: usize,
     len: usize,
     _value_type: PhantomData<V>,
-    // Used so that logical references into a Table respect the appropriate lifetime
-    _lifetime: PhantomData<&'a ()>,
 }
 
-impl<V: Value + 'static> AccessGuardMutInPlace<'_, V> {
-    pub(crate) fn new(page: PageMut, offset: usize, len: usize) -> Self {
+impl<'a, V: Value + 'static> AccessGuardMutInPlace<'a, V> {
+    pub(crate) fn new(page: PageMut<'a>, offset: usize, len: usize) -> Self {
         AccessGuardMutInPlace {
             page,
             offset,
             len,
             _value_type: Default::default(),
-            _lifetime: Default::default(),
         }
     }
 }
@@ -689,7 +680,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         required_size > self.mem.get_page_size() && self.pairs.len() > 1
     }
 
-    pub(super) fn build_split(self) -> Result<(PageMut, &'a [u8], PageMut)> {
+    pub(super) fn build_split(self) -> Result<(PageMut<'static>, &'a [u8], PageMut<'static>)> {
         let total_size = self.total_key_bytes + self.total_value_bytes;
         let mut division = 0;
         let mut first_split_key_bytes = 0;
@@ -741,7 +732,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         Ok((page1, self.pairs[division - 1].0, page2))
     }
 
-    pub(super) fn build(self) -> Result<PageMut> {
+    pub(super) fn build(self) -> Result<PageMut<'static>> {
         let required_size = self.required_bytes(
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
@@ -1437,7 +1428,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         }
     }
 
-    pub(super) fn build(self) -> Result<PageMut> {
+    pub(super) fn build(self) -> Result<PageMut<'static>> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
         let size = RawBranchBuilder::required_bytes(
             self.keys.len(),
@@ -1467,7 +1458,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         size > self.mem.get_page_size() && self.keys.len() >= 3
     }
 
-    pub(super) fn build_split(self) -> Result<(PageMut, &'a [u8], PageMut)> {
+    pub(super) fn build_split(self) -> Result<(PageMut<'static>, &'a [u8], PageMut<'static>)> {
         let mut allocated_pages = self.allocated_pages.lock().unwrap();
         assert_eq!(self.children.len(), self.keys.len() + 1);
         assert!(self.keys.len() >= 3);
