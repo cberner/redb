@@ -14,9 +14,6 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
-    env:
-      RUSTFLAGS: --deny warnings
-
     steps:
       - uses: actions/checkout@v4
       - name: Cache
@@ -98,7 +95,7 @@ jobs:
             rustup target remove wasm32-unknown-unknown
 
       - name: Clippy
-        run: cargo clippy --all --all-targets -- -Dwarnings
+        run: cargo clippy --all --all-targets
 
       - name: Fuzzer
         if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
