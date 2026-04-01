@@ -71,7 +71,6 @@ pub use error::{
     CommitError, CompactionError, DatabaseError, Error, SavepointError, SetDurabilityError,
     StorageError, TableError, TransactionError,
 };
-pub use legacy_tuple_types::Legacy;
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, ReadOnlyMultimapTable,
     ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
@@ -90,7 +89,6 @@ pub mod backends;
 mod complex_types;
 mod db;
 mod error;
-mod legacy_tuple_types;
 mod multimap_table;
 mod sealed;
 mod table;

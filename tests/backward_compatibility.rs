@@ -1,4 +1,4 @@
-use redb::{Legacy, ReadableDatabase, ReadableTableMetadata, TableError};
+use redb::{ReadableDatabase, ReadableTableMetadata};
 
 const ELEMENTS: usize = 3;
 
@@ -336,50 +336,4 @@ fn container_types() {
 fn mixed_width() {
     test_helper::<u8, &[u8]>();
     test_helper::<&[u8; 5], &str>();
-}
-
-#[test]
-fn tuple_types() {
-    let tmpfile = create_tempfile();
-    let db = redb2_6::Database::builder()
-        .create_with_file_format_v3(true)
-        .create(tmpfile.path())
-        .unwrap();
-    let table_def: redb2_6::TableDefinition<(u64, &str), &str> =
-        redb2_6::TableDefinition::new("table");
-    let write_txn = db.begin_write().unwrap();
-    {
-        let mut table = write_txn.open_table(table_def).unwrap();
-        for i in 0..ELEMENTS {
-            table
-                .insert(
-                    &<(u64, &str)>::make_data_v2_6()[i],
-                    &<&str>::make_data_v2_6()[i],
-                )
-                .unwrap();
-        }
-    }
-    write_txn.commit().unwrap();
-    drop(db);
-
-    let db = redb::Database::open(tmpfile.path()).unwrap();
-    let read_txn = db.begin_read().unwrap();
-    let bad_table_def: redb::TableDefinition<(u64, &str), &str> =
-        redb::TableDefinition::new("table");
-    assert!(matches!(
-        read_txn.open_table(bad_table_def).unwrap_err(),
-        TableError::TableTypeMismatch { .. }
-    ));
-    let table_def: redb::TableDefinition<Legacy<(u64, &str)>, &str> =
-        redb::TableDefinition::new("table");
-    let table = read_txn.open_table(table_def).unwrap();
-    assert_eq!(table.len().unwrap(), ELEMENTS as u64);
-    for i in 0..ELEMENTS {
-        let result = table.get(&<(u64, &str)>::make_data()[i]).unwrap().unwrap();
-        let value = result.value();
-        let bytes = <&str as redb::Value>::as_bytes(&value);
-        let expected = &<&str>::make_data()[i];
-        let expected_bytes = <&str as redb::Value>::as_bytes(expected);
-        assert_eq!(bytes, expected_bytes);
-    }
 }

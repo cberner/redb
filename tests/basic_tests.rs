@@ -3,7 +3,7 @@ use rand::random;
 use redb::DatabaseError;
 use redb::backends::InMemoryBackend;
 use redb::{
-    Database, Key, Legacy, MultimapTableDefinition, MultimapTableHandle, Range, ReadOnlyDatabase,
+    Database, Key, MultimapTableDefinition, MultimapTableHandle, Range, ReadOnlyDatabase,
     ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableError,
     TableHandle, TypeName, Value,
 };
@@ -779,61 +779,6 @@ fn tuple12_type() {
     assert_eq!(
         table
             .get(&("hello", 5, 6, 7, 8, 9, "mid", -2, -3, -4, -5, "end"))
-            .unwrap()
-            .unwrap()
-            .value(),
-        (0, 123)
-    );
-}
-
-#[test]
-fn legacy_tuple2_type() {
-    let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
-    #[expect(clippy::type_complexity)]
-    let table_def: TableDefinition<Legacy<(&str, u8)>, Legacy<(u16, u32)>> =
-        TableDefinition::new("table");
-
-    let write_txn = db.begin_write().unwrap();
-    {
-        let mut table = write_txn.open_table(table_def).unwrap();
-        table.insert(&("hello", 5), &(0, 123)).unwrap();
-    }
-    write_txn.commit().unwrap();
-
-    let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(table_def).unwrap();
-    assert_eq!(table.get(&("hello", 5)).unwrap().unwrap().value(), (0, 123));
-}
-
-#[test]
-#[allow(clippy::type_complexity)]
-fn legacy_tuple12_type() {
-    let tmpfile = create_tempfile();
-    let db = Database::create(tmpfile.path()).unwrap();
-
-    let table_def: TableDefinition<
-        Legacy<(&str, u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, &str)>,
-        Legacy<(u16, u32)>,
-    > = TableDefinition::new("table");
-
-    let write_txn = db.begin_write().unwrap();
-    {
-        let mut table = write_txn.open_table(table_def).unwrap();
-        table
-            .insert(
-                &("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4, -5, "end"),
-                &(0, 123),
-            )
-            .unwrap();
-    }
-    write_txn.commit().unwrap();
-
-    let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(table_def).unwrap();
-    assert_eq!(
-        table
-            .get(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4, -5, "end"))
             .unwrap()
             .unwrap()
             .value(),
