@@ -1,5 +1,11 @@
 # redb - Changelog
 
+## 3.1.3 - 2026-04-02
+* Fix a data loss bug which can occur when the guard returned from `Table::get_mut()` is dropped
+  after the transaction has been committed.
+* Add a warning to `Table::insert_reserve()` indicating that it can cause data loss and recommending
+  to upgrade to the 4.0.0 release.
+
 ## 3.1.2 - 2026-04-01
 * Reduce memory usage of open databases
 
