@@ -9,6 +9,12 @@
 * Remove `Legacy` type. To migrate off the `Legacy` type, use the `Legacy` type in the 3.x release
   and copy the data to a table with plain tuples, before upgrading to the 4.x release.
 
+## 3.1.3 - 2026-04-02
+* Fix a data loss bug which can occur when the guard returned from `Table::get_mut()` is dropped
+  after the transaction has been committed.
+* Add a warning to `Table::insert_reserve()` indicating that it can cause data loss and recommending
+  to upgrade to the 4.0.0 release.
+
 ## 3.1.2 - 2026-04-01
 * Reduce memory usage of open databases
 
