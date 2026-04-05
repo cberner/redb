@@ -959,7 +959,12 @@ impl<K: Key, V: Value> Btree<K, V> {
         &self,
         range: &'_ T,
     ) -> Result<BtreeRangeIter<K, V>> {
-        BtreeRangeIter::new(range, self.root.map(|x| x.root), self.mem.clone())
+        BtreeRangeIter::new(
+            range,
+            self.root.map(|x| x.root),
+            self.mem.clone(),
+            self.hint,
+        )
     }
 
     pub(crate) fn len(&self) -> Result<u64> {
