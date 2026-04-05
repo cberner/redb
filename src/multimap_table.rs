@@ -652,7 +652,12 @@ impl<V: Key> DynamicCollection<V> {
             SubtreeV2 => {
                 let root = collection.value().as_subtree().root;
                 MultimapValue::new_subtree(
-                    BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), Some(root), mem)?,
+                    BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                        &(..),
+                        Some(root),
+                        mem,
+                        PageHint::None,
+                    )?,
                     collection.value().get_num_values(),
                     guard,
                 )
@@ -681,6 +686,7 @@ impl<V: Key> DynamicCollection<V> {
                     &(..),
                     Some(root),
                     mem.clone(),
+                    PageHint::None,
                 )?;
                 MultimapValue::new_subtree_free_on_drop(
                     inner,
@@ -1338,7 +1344,12 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
             )?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    &(..),
+                    None,
+                    self.mem.clone(),
+                    PageHint::None,
+                )?,
                 0,
                 self.transaction.transaction_guard(),
             )
@@ -1380,7 +1391,12 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
             DynamicCollection::iter(collection, guard, self.mem.clone())?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    &(..),
+                    None,
+                    self.mem.clone(),
+                    PageHint::None,
+                )?,
                 0,
                 guard,
             )
@@ -1519,7 +1535,12 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
             DynamicCollection::iter(collection, self.transaction_guard.clone(), self.mem.clone())?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    &(..),
+                    None,
+                    self.mem.clone(),
+                    PageHint::None,
+                )?,
                 0,
                 self.transaction_guard.clone(),
             )
@@ -1576,7 +1597,12 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
             DynamicCollection::iter(collection, self.transaction_guard.clone(), self.mem.clone())?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(&(..), None, self.mem.clone())?,
+                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    &(..),
+                    None,
+                    self.mem.clone(),
+                    PageHint::None,
+                )?,
                 0,
                 self.transaction_guard.clone(),
             )
