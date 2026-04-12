@@ -331,6 +331,20 @@ impl PageTrackerPolicy {
             }
         }
     }
+
+    pub(crate) fn reset(&mut self) -> HashSet<PageNumber> {
+        if matches!(self, PageTrackerPolicy::Ignore) {
+            return HashSet::new();
+        }
+        let old = mem::replace(self, PageTrackerPolicy::Track(HashSet::new()));
+        match old {
+            PageTrackerPolicy::Ignore => HashSet::new(),
+            PageTrackerPolicy::Track(x) => x,
+            PageTrackerPolicy::Closed => {
+                panic!("Page tracker is closed");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
