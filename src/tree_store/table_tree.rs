@@ -211,8 +211,9 @@ pub(crate) struct TableTreeMut<'txn> {
     tree: BtreeMut<'txn, &'static str, InternalTableDefinition>,
     guard: Arc<TransactionGuard>,
     mem: Arc<TransactionalMemory>,
-    // Cached updates from tables that have been closed. These must be flushed to the btree
-    pending_table_updates: HashMap<String, (Option<BtreeHeader>, u64)>,
+    // Cached updates from tables that have been closed. These must be flushed to the btree.
+    // The bool indicates whether the root has dirty (DEFERRED) checksums that need finalization.
+    pending_table_updates: HashMap<String, (Option<BtreeHeader>, u64, bool)>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
 }
@@ -280,8 +281,11 @@ impl TableTreeMut<'_> {
         table_root: Option<BtreeHeader>,
         length: u64,
     ) {
+        let dirty = table_root
+            .as_ref()
+            .is_some_and(|header| self.mem.uncommitted(header.root));
         self.pending_table_updates
-            .insert(name.to_string(), (table_root, length));
+            .insert(name.to_string(), (table_root, length, dirty));
     }
 
     pub(crate) fn clear_root_updates_and_close(&mut self) {
@@ -314,15 +318,17 @@ impl TableTreeMut<'_> {
     }
 
     pub(crate) fn flush_table_root_updates(&mut self) -> Result<&mut Self> {
-        for (name, (new_root, new_length)) in self.pending_table_updates.drain() {
+        for (name, (new_root, new_length, dirty)) in self.pending_table_updates.drain() {
             // Bypass .get_table() since the table types are dynamic
             let mut definition = self.tree.get(&name.as_str())?.unwrap().value();
-            // No-op if the root has not changed
-            match definition {
-                InternalTableDefinition::Normal { table_root, .. }
-                | InternalTableDefinition::Multimap { table_root, .. } => {
-                    if table_root == new_root {
-                        continue;
+            // No-op if the root has not changed and checksums are already finalized
+            if !dirty {
+                match definition {
+                    InternalTableDefinition::Normal { table_root, .. }
+                    | InternalTableDefinition::Multimap { table_root, .. } => {
+                        if table_root == new_root {
+                            continue;
+                        }
                     }
                 }
             }
@@ -488,7 +494,7 @@ impl TableTreeMut<'_> {
         let mut result = tree.get_table_untyped(name, table_type);
 
         if let Ok(Some(definition)) = result.as_mut()
-            && let Some((updated_root, updated_length)) = self.pending_table_updates.get(name)
+            && let Some((updated_root, updated_length, _)) = self.pending_table_updates.get(name)
         {
             definition.set_header(*updated_root, *updated_length);
         }
@@ -511,7 +517,7 @@ impl TableTreeMut<'_> {
         let mut result = tree.get_table::<K, V>(name, table_type);
 
         if let Ok(Some(definition)) = result.as_mut()
-            && let Some((updated_root, updated_length)) = self.pending_table_updates.get(name)
+            && let Some((updated_root, updated_length, _)) = self.pending_table_updates.get(name)
         {
             definition.set_header(*updated_root, *updated_length);
         }
@@ -601,7 +607,7 @@ impl TableTreeMut<'_> {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let mut definition = entry.value();
-            if let Some((updated_root, updated_length)) =
+            if let Some((updated_root, updated_length, _)) =
                 self.pending_table_updates.get(entry.key())
             {
                 definition.set_header(*updated_root, *updated_length);
@@ -634,7 +640,7 @@ impl TableTreeMut<'_> {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let mut definition = entry.value();
-            if let Some((updated_root, updated_length)) =
+            if let Some((updated_root, updated_length, _)) =
                 self.pending_table_updates.get(entry.key())
             {
                 definition.set_header(*updated_root, *updated_length);
@@ -645,9 +651,10 @@ impl TableTreeMut<'_> {
                 self.freed_pages.clone(),
                 relocation_map,
             )? {
+                // Relocated roots have already-finalized checksums
                 self.pending_table_updates.insert(
                     entry.key().to_string(),
-                    (Some(new_root), definition.get_length()),
+                    (Some(new_root), definition.get_length(), false),
                 );
             }
         }
@@ -672,7 +679,7 @@ impl TableTreeMut<'_> {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let mut definition = entry.value();
-            if let Some((updated_root, length)) = self.pending_table_updates.get(entry.key()) {
+            if let Some((updated_root, length, _)) = self.pending_table_updates.get(entry.key()) {
                 definition.set_header(*updated_root, *length);
             }
             match definition {
