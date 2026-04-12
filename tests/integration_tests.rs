@@ -2258,3 +2258,131 @@ fn rename_table_with_modifications_data_loss() {
         assert!(db.check_integrity().unwrap());
     }
 }
+
+// Regression test: restore_savepoint() does not clear the freed_pages list in the
+// TableNamespace. When a table is modified (triggering copy-on-write B-tree operations)
+// and then the savepoint is restored, the old pages that were replaced during the
+// modification remain in freed_pages even though the restored tree root still references
+// them. On commit, these stale entries are stored in DATA_FREED_TABLE. In a subsequent
+// transaction, process_freed_pages() frees these pages from the allocator, even though
+// the committed tree still points to them. When those freed pages are reallocated and
+// overwritten by new data, the original table's B-tree becomes corrupted, causing data
+// loss.
+#[test]
+fn savepoint_restore_data_loss_stale_freed_pages() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_a: TableDefinition<u64, &[u8]> = TableDefinition::new("table_a");
+    let table_b: TableDefinition<u64, &[u8]> = TableDefinition::new("table_b");
+
+    // Step 1: Insert initial data into table_a and commit durably.
+    // This creates committed B-tree pages (leaves + branches) for table_a.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_a).unwrap();
+        for i in 0..100u64 {
+            let value = vec![0u8; 200];
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Verify initial data is correct
+    {
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(table_a).unwrap();
+        for i in 0..100u64 {
+            let val = table.get(&i).unwrap().unwrap();
+            assert!(val.value().iter().all(|x| *x == 0));
+        }
+    }
+
+    // Step 2: In a new write transaction, create a savepoint, then modify all of
+    // table_a's data (triggering copy-on-write which adds old pages to freed_pages),
+    // then restore the savepoint and commit.
+    //
+    // BUG: restore_savepoint() resets the tree root but does NOT clear freed_pages.
+    // The old pages (which the restored root still references) remain in freed_pages.
+    // commit() stores them in DATA_FREED_TABLE, marking live pages for future freeing.
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+
+    {
+        let mut table = txn.open_table(table_a).unwrap();
+        // Modify every entry to force copy-on-write on all leaf pages.
+        // The old leaf pages go into freed_pages; new pages are allocated.
+        for i in 0..100u64 {
+            let overwrite = vec![0xFFu8; 200];
+            table.insert(&i, overwrite.as_slice()).unwrap();
+        }
+    }
+
+    // Restore the savepoint: resets the tree root to its pre-modification state,
+    // frees the newly allocated pages, but leaves freed_pages untouched.
+    let mut txn = txn;
+    txn.restore_savepoint(&savepoint).unwrap();
+    drop(savepoint);
+
+    // Commit: flush_and_close() drains freed_pages (which still contains the stale old
+    // pages) and stores them in DATA_FREED_TABLE[current_txn]. The committed user root
+    // still references those pages.
+    txn.commit().unwrap();
+
+    // Step 3: Commit an empty transaction. During durable_commit(),
+    // process_freed_pages() processes DATA_FREED_TABLE entries from Step 2 and frees the
+    // stale pages from the allocator. The committed tree root still points to them.
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    // Step 4: Insert data into a DIFFERENT table (table_b) so that the allocator reuses
+    // the freed pages. This overwrites the old B-tree nodes of table_a with table_b data.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_b).unwrap();
+        for i in 0..300u64 {
+            let filler = vec![0xBBu8; 200];
+            table.insert(&i, filler.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Step 5: Read table_a. If the bug is present, the original pages have been freed
+    // and overwritten by table_b's data. Reading table_a's B-tree will encounter
+    // corrupted nodes, leading to wrong values, missing keys, or read errors.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_a).unwrap();
+
+    let mut data_loss_detected = false;
+    for i in 0..100u64 {
+        match table.get(&i) {
+            Ok(Some(val)) => {
+                let v = val.value();
+                if v.len() != 200 || v.iter().any(|x| *x != 0) {
+                    // Value is present but corrupted
+                    data_loss_detected = true;
+                    break;
+                }
+            }
+            Ok(None) => {
+                // Key is missing entirely
+                data_loss_detected = true;
+                break;
+            }
+            Err(_) => {
+                // Storage error due to corrupted B-tree pages
+                data_loss_detected = true;
+                break;
+            }
+        }
+    }
+
+    assert!(
+        !data_loss_detected,
+        "DATA LOSS: table_a data is corrupted after savepoint restore. \
+         restore_savepoint() did not clear freed_pages, causing the old pages \
+         (still referenced by the committed tree root) to be stored in DATA_FREED_TABLE \
+         and later freed by process_freed_pages(). When those pages were reused by table_b, \
+         table_a's B-tree became corrupted."
+    );
+}
