@@ -1150,6 +1150,7 @@ impl WriteTransaction {
                 self.mem.free(page, &mut PageTrackerPolicy::Ignore);
             }
             let mut data_freed_pages = tables.freed_pages.lock().unwrap();
+            data_freed_pages.clear();
             let mut system_tables = self.system_tables.lock().unwrap();
             let data_allocated = system_tables.open_system_table(self, DATA_ALLOCATED_TABLE)?;
             let lower = TransactionIdWithPagination {
