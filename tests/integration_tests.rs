@@ -2118,3 +2118,69 @@ fn custom_table_type() {
         table.get(1).unwrap().next().unwrap().unwrap().value()
     );
 }
+
+// Regression test for a bug where renaming a table with pending (dirty) modifications
+// caused database corruption due to unfinalized checksums.
+//
+// Previously, `rename_table` wrote the table definition (with a DEFERRED placeholder
+// checksum) into the master btree AND kept the identical root in `pending_table_updates`.
+// During commit, `flush_table_root_updates()` compared the btree entry's root with the
+// pending update's root, found them equal, and skipped checksum finalization. The fix
+// adds an explicit dirty flag to pending updates so that checksum finalization is never
+// skipped for tables with uncommitted pages.
+#[test]
+fn rename_table_with_modifications_data_loss() {
+    let tmpfile = create_tempfile();
+
+    const ORIGINAL_TABLE: TableDefinition<u64, &str> = TableDefinition::new("original");
+    const RENAMED_TABLE: TableDefinition<u64, &str> = TableDefinition::new("renamed");
+
+    // Step 1: Create initial data in the "original" table and commit.
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(ORIGINAL_TABLE).unwrap();
+            table.insert(0, "initial_value_0").unwrap();
+            table.insert(1, "initial_value_1").unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    // Step 2: Modify the table and rename it in the same transaction.
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(ORIGINAL_TABLE).unwrap();
+            table.insert(2, "new_value_2").unwrap();
+            table.insert(3, "new_value_3").unwrap();
+            txn.rename_table(table, RENAMED_TABLE).unwrap();
+        }
+        txn.commit().unwrap();
+
+        // Verify data is accessible within the same session.
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(RENAMED_TABLE).unwrap();
+        assert_eq!(table.get(0).unwrap().unwrap().value(), "initial_value_0");
+        assert_eq!(table.get(1).unwrap().unwrap().value(), "initial_value_1");
+        assert_eq!(table.get(2).unwrap().unwrap().value(), "new_value_2");
+        assert_eq!(table.get(3).unwrap().unwrap().value(), "new_value_3");
+        assert_eq!(table.len().unwrap(), 4);
+    }
+
+    // Step 3: Reopen and verify data survives and integrity check passes.
+    {
+        let mut db = Database::builder().create(tmpfile.path()).unwrap();
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(RENAMED_TABLE).unwrap();
+        assert_eq!(table.get(0).unwrap().unwrap().value(), "initial_value_0");
+        assert_eq!(table.get(1).unwrap().unwrap().value(), "initial_value_1");
+        assert_eq!(table.get(2).unwrap().unwrap().value(), "new_value_2");
+        assert_eq!(table.get(3).unwrap().unwrap().value(), "new_value_3");
+        assert_eq!(table.len().unwrap(), 4);
+        drop(table);
+        drop(read_txn);
+        assert!(db.check_integrity().unwrap());
+    }
+}
