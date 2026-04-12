@@ -244,6 +244,8 @@ impl TableTreeMut<'_> {
 
     pub(crate) fn set_root(&mut self, root: Option<BtreeHeader>) {
         self.tree.set_root(root);
+        // Pending updates were staged for the old root and are invalid for the new one
+        self.pending_table_updates.clear();
     }
 
     #[cfg_attr(not(debug_assertions), expect(dead_code))]

@@ -1144,6 +1144,11 @@ impl WriteTransaction {
         // 2) queue all pages that became unreachable
         {
             let tables = self.tables.lock().unwrap();
+            for page in tables.allocated_pages.lock().unwrap().reset() {
+                debug_assert!(self.mem.uncommitted(page));
+                debug_assert!(self.mem.is_allocated(page));
+                self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+            }
             let mut data_freed_pages = tables.freed_pages.lock().unwrap();
             let mut system_tables = self.system_tables.lock().unwrap();
             let data_allocated = system_tables.open_system_table(self, DATA_ALLOCATED_TABLE)?;

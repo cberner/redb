@@ -1921,6 +1921,80 @@ fn savepoint() {
     txn.commit().unwrap();
 }
 
+// Regression test: restore_savepoint() does not clear pending_table_updates in the
+// TableTreeMut. When a table is opened, modified, and closed (dropped) before
+// restore_savepoint(), the modification is staged in pending_table_updates. On commit,
+// flush_table_root_updates() re-applies these stale updates, effectively undoing the
+// savepoint restore and causing data loss.
+#[test]
+fn savepoint_restore_data_loss_pending_table_updates() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let definition: TableDefinition<u64, &str> = TableDefinition::new("data_loss_test");
+
+    // Step 1: Insert initial data and commit durably
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        table.insert(&1, "original").unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Step 2: In a new write transaction, create a savepoint BEFORE any modifications
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+
+    // Step 3: Open table, insert new data, then close (drop) the table handle.
+    // Dropping the table handle calls close_table() which stages the modified root
+    // into pending_table_updates via stage_update_table_root().
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        table.insert(&2, "should_be_rolled_back").unwrap();
+        table.insert(&3, "also_should_be_rolled_back").unwrap();
+    }
+
+    // Step 4: Restore the savepoint. This restores the table tree root to the
+    // pre-modification state, BUT does not clear pending_table_updates.
+    let mut txn = txn;
+    txn.restore_savepoint(&savepoint).unwrap();
+
+    // Step 5: Commit. During commit, flush_table_root_updates() drains
+    // pending_table_updates and re-applies the stale modification from Step 3,
+    // effectively undoing the savepoint restore.
+    txn.commit().unwrap();
+
+    // Step 6: Verify. After restoring the savepoint, keys 2 and 3 should NOT exist.
+    // Only key 1 ("original") should be present.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+
+    // Key 1 should still exist (it was committed before the savepoint)
+    assert_eq!(table.get(&1).unwrap().unwrap().value(), "original");
+
+    // BUG: Keys 2 and 3 should NOT exist after savepoint restore, but they do
+    // because pending_table_updates re-applied the stale modification during commit.
+    // When the bug is fixed, these assertions will hold:
+    assert!(
+        table.get(&2).unwrap().is_none(),
+        "DATA LOSS BUG: key 2 should not exist after savepoint restore, \
+         but pending_table_updates re-applied stale modifications"
+    );
+    assert!(
+        table.get(&3).unwrap().is_none(),
+        "DATA LOSS BUG: key 3 should not exist after savepoint restore, \
+         but pending_table_updates re-applied stale modifications"
+    );
+
+    // Also verify the table length: should be 1, not 3
+    assert_eq!(
+        table.len().unwrap(),
+        1,
+        "DATA LOSS BUG: table should have 1 entry after savepoint restore, \
+         but has {} due to stale pending_table_updates",
+        table.len().unwrap()
+    );
+}
+
 #[test]
 fn compaction() {
     let tmpfile = create_tempfile();

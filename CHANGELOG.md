@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 4.0.1 - UNRELEASED
+* Fix bug in `restore_savepoint()` where modifications made earlier in the transaction might
+  not be reverted
+
 ## 4.0.0 - 2026-04-02
 * Implement `Drop` on `AccessGuardMut` and `AccessGuardMutInPlace`, which requires that these be dropped
   before the `Table` they borrow from.
