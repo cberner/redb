@@ -588,10 +588,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         );
         let uncommitted = self.mem.uncommitted(page.get_page_number());
 
-        // Fast-path for dirty pages
+        // Fast-path for dirty pages: perform in-place removal without allocating a new page.
+        // The threshold matches the merge threshold (page_size/3) so that we use in-place
+        // removal for all cases where the page won't need merging with a sibling.
         if uncommitted
             && self.modify_uncommitted
-            && new_required_bytes >= self.mem.get_page_size() / 2
+            && new_required_bytes >= self.mem.get_page_size() / 3
             && accessor.num_pairs() > 1
         {
             let (start, end) = accessor.value_range(position).unwrap();
