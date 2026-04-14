@@ -3,7 +3,7 @@ use std::{fs, process, thread};
 use tempfile::NamedTempFile;
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 use std::time::Instant;
 

@@ -1,6 +1,6 @@
 use tempfile::{NamedTempFile, TempDir};
 
-use rand::Rng;
+use rand::RngExt;
 use rand::prelude::SliceRandom;
 use std::env::current_dir;
 use std::fs::OpenOptions;

@@ -7,7 +7,7 @@ mod common;
 use common::*;
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::time::{Duration, Instant};
 
 const ELEMENTS: usize = 1_000_000;

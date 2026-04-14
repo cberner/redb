@@ -3,7 +3,7 @@
 use std::env::current_dir;
 use tempfile::NamedTempFile;
 
-use rand::Rng;
+use rand::RngExt;
 use redb::{Database, TableDefinition};
 use std::time::{Duration, Instant};
 
