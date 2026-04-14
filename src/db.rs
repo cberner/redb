@@ -419,7 +419,7 @@ impl ReadOnlyDatabase {
         file: Box<dyn StorageBackend>,
         page_size: usize,
         region_size: Option<u64>,
-        read_cache_size_bytes: usize,
+        cache_size: usize,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -430,8 +430,7 @@ impl ReadOnlyDatabase {
             false,
             page_size,
             region_size,
-            read_cache_size_bytes,
-            0,
+            cache_size,
             true,
         )?;
         let mem = Arc::new(mem);
@@ -881,14 +880,12 @@ impl Database {
         Ok([data_root, system_root])
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn new(
         file: Box<dyn StorageBackend>,
         allow_initialize: bool,
         page_size: usize,
         region_size: Option<u64>,
-        read_cache_size_bytes: usize,
-        write_cache_size_bytes: usize,
+        cache_size: usize,
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
@@ -900,8 +897,7 @@ impl Database {
             allow_initialize,
             page_size,
             region_size,
-            read_cache_size_bytes,
-            write_cache_size_bytes,
+            cache_size,
             false,
         )?;
         let mut mem = Arc::new(mem);
@@ -1096,8 +1092,7 @@ impl RepairSession {
 pub struct Builder {
     page_size: usize,
     region_size: Option<u64>,
-    read_cache_size_bytes: usize,
-    write_cache_size_bytes: usize,
+    cache_size: usize,
     repair_callback: Box<dyn Fn(&mut RepairSession)>,
 }
 
@@ -1109,21 +1104,16 @@ impl Builder {
     /// - `cache_size_bytes`: 1GiB
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        let mut result = Self {
+        Self {
             // Default to 4k pages. Benchmarking showed that this was a good default on all platforms,
             // including MacOS with 16k pages. Therefore, users are not allowed to configure it at the moment.
             // It is part of the file format, so can be enabled in the future.
             page_size: PAGE_SIZE,
             region_size: None,
             // TODO: Default should probably take into account the total system memory
-            read_cache_size_bytes: 0,
-            // TODO: Default should probably take into account the total system memory
-            write_cache_size_bytes: 0,
+            cache_size: 1024 * 1024 * 1024,
             repair_callback: Box::new(|_| {}),
-        };
-
-        result.set_cache_size(1024 * 1024 * 1024);
-        result
+        }
     }
 
     /// Set a callback which will be invoked periodically in the event that the database file needs
@@ -1157,9 +1147,7 @@ impl Builder {
 
     /// Set the amount of memory (in bytes) used for caching data
     pub fn set_cache_size(&mut self, bytes: usize) -> &mut Self {
-        // TODO: allow dynamic expansion of the read/write cache
-        self.read_cache_size_bytes = bytes / 10 * 9;
-        self.write_cache_size_bytes = bytes / 10;
+        self.cache_size = bytes;
         self
     }
 
@@ -1187,8 +1175,7 @@ impl Builder {
             true,
             self.page_size,
             self.region_size,
-            self.read_cache_size_bytes,
-            self.write_cache_size_bytes,
+            self.cache_size,
             &self.repair_callback,
         )
     }
@@ -1202,8 +1189,7 @@ impl Builder {
             false,
             self.page_size,
             None,
-            self.read_cache_size_bytes,
-            self.write_cache_size_bytes,
+            self.cache_size,
             &self.repair_callback,
         )
     }
@@ -1223,7 +1209,7 @@ impl Builder {
             Box::new(FileBackend::new_internal(file, true)?),
             self.page_size,
             None,
-            self.read_cache_size_bytes,
+            self.cache_size,
         )
     }
 
@@ -1236,8 +1222,7 @@ impl Builder {
             true,
             self.page_size,
             self.region_size,
-            self.read_cache_size_bytes,
-            self.write_cache_size_bytes,
+            self.cache_size,
             &self.repair_callback,
         )
     }
@@ -1252,8 +1237,7 @@ impl Builder {
             true,
             self.page_size,
             self.region_size,
-            self.read_cache_size_bytes,
-            self.write_cache_size_bytes,
+            self.cache_size,
             &self.repair_callback,
         )
     }
