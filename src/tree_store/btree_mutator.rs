@@ -424,6 +424,23 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 let sub_result =
                     self.insert_helper(self.mem.get_page(child_page)?, child_checksum, key, value)?;
 
+                // Skip-path: if child page number and checksum haven't changed,
+                // no branch update is needed. This avoids redundant get_page_mut +
+                // write_child_page calls on repeat visits to the same subtree
+                // within a transaction.
+                if sub_result.additional_sibling.is_none()
+                    && sub_result.new_root == child_page
+                    && sub_result.root_checksum == child_checksum
+                {
+                    return Ok(InsertionResult {
+                        new_root: page.get_page_number(),
+                        root_checksum: page_checksum,
+                        additional_sibling: None,
+                        inserted_value: sub_result.inserted_value,
+                        old_value: sub_result.old_value,
+                    });
+                }
+
                 if sub_result.additional_sibling.is_none()
                     && self.modify_uncommitted
                     && self.mem.uncommitted(page.get_page_number())
@@ -693,6 +710,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             return Ok((Subtree(original_page_number, checksum), None));
         }
         if let Subtree(new_child, new_child_checksum) = result {
+            // Skip-path: if child page number and checksum haven't changed,
+            // no branch update is needed.
+            if new_child == child_page_number && new_child_checksum == child_checksum {
+                return Ok((Subtree(original_page_number, checksum), found));
+            }
+
             let result_page =
                 if self.mem.uncommitted(original_page_number) && self.modify_uncommitted {
                     drop(page);
