@@ -5,7 +5,7 @@ use tempfile::NamedTempFile;
 
 #[cfg(target_os = "linux")]
 mod unix {
-    use rand::Rng;
+    use rand::RngExt;
     use rand::prelude::SliceRandom;
     use std::collections::BTreeMap;
     use std::fs::{File, OpenOptions};

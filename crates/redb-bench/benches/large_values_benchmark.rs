@@ -6,7 +6,7 @@ use tempfile::{NamedTempFile, TempDir};
 mod common;
 use common::*;
 
-use rand::RngCore;
+use rand::Rng;
 use std::time::{Duration, Instant};
 
 const ELEMENTS: usize = 1_000_000;
