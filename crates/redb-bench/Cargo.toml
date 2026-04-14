@@ -12,7 +12,7 @@ authors.workspace = true
 # Common test/bench dependencies
 [dev-dependencies]
 redb = { path = "../.." }
-rand = "0.9"
+rand = "0.10.1"
 tempfile = "3.5.0"
 walkdir = "2.5.0"
 byte-unit = "5.1.6"
