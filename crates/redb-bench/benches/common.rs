@@ -500,7 +500,7 @@ impl BenchDatabase for RedbBenchDatabase<'_> {
     fn connect(&self) -> Self::C<'_> {
         RedbBenchDatabaseConnection {
             db: self.db,
-            sync: false,
+            sync: true,
         }
     }
 
