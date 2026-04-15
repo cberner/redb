@@ -2386,3 +2386,111 @@ fn savepoint_restore_data_loss_stale_freed_pages() {
          table_a's B-tree became corrupted."
     );
 }
+
+// Regression test: restore_savepoint() frees uncommitted pages from the buddy
+// allocator via self.mem.free(), but does NOT remove them from allocated_since_commit.
+// When the transaction is subsequently dropped without committing, the Drop handler
+// calls abort_inner() -> rollback_uncommitted_writes(), which iterates
+// allocated_since_commit and tries to free the same pages again. This double-free
+// corrupts the buddy allocator's merge state: a page freed twice can appear free at
+// multiple orders simultaneously, causing the allocator to hand out overlapping
+// allocations. When two different B-tree nodes share the same physical page, writing
+// one corrupts the other, leading to data loss.
+//
+// In debug mode, the double-free triggers a panic in free_helper's debug assertion
+// (allocated_pages.remove() fails for the already-removed page). In release mode, the
+// corruption is silent and manifests later as data loss.
+#[test]
+fn savepoint_restore_abort_double_free_data_loss() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("data");
+    let filler_def: TableDefinition<u64, &[u8]> = TableDefinition::new("filler");
+
+    // Step 1: Insert initial data into table "data" and commit durably.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..100u64 {
+            let value = vec![0xAAu8; 300];
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Step 2: In a new transaction, create a savepoint, modify data (allocating
+    // uncommitted pages via COW), then restore the savepoint and DROP the transaction
+    // without committing.
+    //
+    // restore_savepoint() -> allocated_pages.reset() -> self.mem.free(page):
+    //   - Frees the uncommitted pages from the buddy allocator
+    //   - Removes them from the debug allocated_pages set
+    //   - Does NOT remove them from allocated_since_commit
+    //
+    // Drop -> abort_inner() -> rollback_uncommitted_writes():
+    //   - Iterates allocated_since_commit (which still contains the freed pages)
+    //   - Calls buddy_allocator.free() on already-free pages -> DOUBLE-FREE
+    //   - In debug mode: assertion panic. In release mode: allocator corruption.
+    {
+        let txn = db.begin_write().unwrap();
+        let savepoint = txn.ephemeral_savepoint().unwrap();
+        {
+            let mut table = txn.open_table(table_def).unwrap();
+            for i in 0..100u64 {
+                let value = vec![0xBBu8; 300];
+                table.insert(&i, value.as_slice()).unwrap();
+            }
+        }
+        let mut txn = txn;
+        txn.restore_savepoint(&savepoint).unwrap();
+        drop(savepoint);
+        // Transaction dropped without commit -> abort_inner() -> double-free
+    }
+
+    // Step 3: If allocator is corrupted (release mode), allocating new pages may
+    // overlap with existing committed pages. Insert lots of data to trigger reuse.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(filler_def).unwrap();
+        for i in 0..500u64 {
+            let value = vec![0xFFu8; 300];
+            table.insert(&i, value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Step 4: Verify that the original data is still intact.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+
+    let mut data_loss_detected = false;
+    for i in 0..100u64 {
+        match table.get(&i) {
+            Ok(Some(val)) => {
+                let v = val.value();
+                if v.len() != 300 || v.iter().any(|&x| x != 0xAA) {
+                    data_loss_detected = true;
+                    break;
+                }
+            }
+            Ok(None) => {
+                data_loss_detected = true;
+                break;
+            }
+            Err(_) => {
+                data_loss_detected = true;
+                break;
+            }
+        }
+    }
+
+    assert!(
+        !data_loss_detected,
+        "DATA LOSS: table data corrupted after savepoint restore + abort. \
+         restore_savepoint() freed pages from the buddy allocator without removing them \
+         from allocated_since_commit. When the transaction was aborted, \
+         rollback_uncommitted_writes() double-freed these pages, corrupting the allocator. \
+         Subsequent allocations overlapped with committed pages, causing data corruption."
+    );
+}
