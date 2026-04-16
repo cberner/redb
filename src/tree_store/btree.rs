@@ -1,7 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
-    LeafAccessor, branch_checksum, leaf_checksum,
+    LeafAccessor, SlicePage, branch_checksum, leaf_checksum,
 };
 use crate::tree_store::btree_iters::BtreeExtractIf;
 use crate::tree_store::btree_mutator::MutateHelper;
@@ -860,33 +860,66 @@ impl<K: Key, V: Value> Btree<K, V> {
     }
 
     pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'static, V>>> {
-        if let Some(ref root_page) = self.cached_root {
-            self.get_helper(root_page.clone(), K::as_bytes(key).as_ref())
-        } else {
-            Ok(None)
+        let root_page = match self.cached_root {
+            Some(ref p) => p,
+            None => return Ok(None),
+        };
+        let query = K::as_bytes(key);
+        let query = query.as_ref();
+
+        // Fast path: borrow the cached root (no Arc::clone) and walk
+        // branch nodes using borrowed cache guards (no Arc::clone).
+        // Only the final leaf page needs an owned PageImpl for AccessGuard.
+        let mut child_page_number = match root_page.memory()[0] {
+            LEAF => {
+                return self.get_from_leaf(root_page.clone(), query);
+            }
+            BRANCH => {
+                let accessor = BranchAccessor::new(root_page, K::fixed_width());
+                accessor.child_for_key::<K>(query).1
+            }
+            _ => unreachable!(),
+        };
+
+        // Iterative descent through branch nodes using borrowed pages.
+        // Each borrowed page holds a cache read-lock instead of cloning the Arc,
+        // eliminating 2 atomic RMW ops per level on shared refcount cache lines.
+        loop {
+            let borrowed = self.mem.get_page_borrowed(child_page_number, self.hint)?;
+            let data = borrowed.data();
+            match data[0] {
+                LEAF => {
+                    // Need an owned page for the AccessGuard.  Drop the
+                    // borrow first, then fetch via the owning path.
+                    drop(borrowed);
+                    let page = self.mem.get_page_extended(child_page_number, self.hint)?;
+                    return self.get_from_leaf(page, query);
+                }
+                BRANCH => {
+                    let slice_page = SlicePage(data);
+                    let accessor = BranchAccessor::new(&slice_page, K::fixed_width());
+                    child_page_number = accessor.child_for_key::<K>(query).1;
+                    // `borrowed` is dropped here, releasing the cache read-lock
+                    // before we fetch the next child.
+                }
+                _ => unreachable!(),
+            }
         }
     }
 
-    // Returns the value for the queried key, if present
-    fn get_helper(&self, page: PageImpl, query: &[u8]) -> Result<Option<AccessGuard<'static, V>>> {
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-                if let Some(entry_index) = accessor.find_key::<K>(query) {
-                    let (start, end) = accessor.value_range(entry_index).unwrap();
-                    let guard = AccessGuard::with_page(page, start..end);
-                    Ok(Some(guard))
-                } else {
-                    Ok(None)
-                }
-            }
-            BRANCH => {
-                let accessor = BranchAccessor::new(&page, K::fixed_width());
-                let (_, child_page) = accessor.child_for_key::<K>(query);
-                self.get_helper(self.mem.get_page_extended(child_page, self.hint)?, query)
-            }
-            _ => unreachable!(),
+    #[inline]
+    fn get_from_leaf(
+        &self,
+        page: PageImpl,
+        query: &[u8],
+    ) -> Result<Option<AccessGuard<'static, V>>> {
+        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+        if let Some(entry_index) = accessor.find_key::<K>(query) {
+            let (start, end) = accessor.value_range(entry_index).unwrap();
+            let guard = AccessGuard::with_page(page, start..end);
+            Ok(Some(guard))
+        } else {
+            Ok(None)
         }
     }
 

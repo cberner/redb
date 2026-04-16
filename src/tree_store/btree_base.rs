@@ -1251,6 +1251,20 @@ pub(crate) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
     _page_lifetime: PhantomData<&'a ()>,
 }
 
+/// Lightweight page wrapper over a borrowed byte slice, used for
+/// zero-copy branch traversal via borrowed cache guards.
+pub(crate) struct SlicePage<'a>(pub(crate) &'a [u8]);
+
+impl Page for SlicePage<'_> {
+    fn memory(&self) -> &[u8] {
+        self.0
+    }
+
+    fn get_page_number(&self) -> PageNumber {
+        PageNumber::new(0, 0, 0)
+    }
+}
+
 impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
     pub(crate) fn new(page: &'b T, fixed_key_size: Option<usize>) -> Self {
         debug_assert_eq!(page.memory()[0], BRANCH);

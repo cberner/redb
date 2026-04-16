@@ -3,6 +3,7 @@ use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateT
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
 use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, PageHint};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
+pub(crate) use crate::tree_store::page_store::cached_file::BorrowedPage;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
 use crate::tree_store::page_store::header::{DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER};
@@ -783,6 +784,25 @@ impl TransactionalMemory {
             #[cfg(debug_assertions)]
             open_pages: self.read_page_ref_counts.clone(),
         })
+    }
+
+    /// Borrow a page from the cache without cloning the `Arc`.  Returns a
+    /// `BorrowedPage` that holds the cache slot's read-lock.  Cheaper than
+    /// `get_page_extended` for short-lived reads (branch page traversal).
+    #[inline]
+    pub(crate) fn get_page_borrowed(
+        &self,
+        page_number: PageNumber,
+        hint: PageHint,
+    ) -> Result<BorrowedPage<'_>> {
+        let range = page_number.address_range(
+            self.page_size.into(),
+            self.region_size,
+            self.region_header_with_padding_size,
+            self.page_size,
+        );
+        let len: usize = (range.end - range.start).try_into().unwrap();
+        self.storage.read_borrowed(range.start, len, hint)
     }
 
     // NOTE: the caller must ensure that the read cache has been invalidated or stale reads my occur
