@@ -17,6 +17,15 @@ pub(crate) type Checksum = u128;
 // Dummy value. Final value will be computed during commit
 pub(crate) const DEFERRED: Checksum = 999;
 
+pub(crate) fn read_aux_checksum(aux_memory: &[u8], n: usize) -> Checksum {
+    let offset = n * size_of::<Checksum>();
+    Checksum::from_le_bytes(
+        aux_memory[offset..(offset + size_of::<Checksum>())]
+            .try_into()
+            .unwrap(),
+    )
+}
+
 pub(super) fn leaf_checksum<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
@@ -1425,11 +1434,15 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
     }
 
     pub(super) fn push_all<T: Page>(&mut self, accessor: &'a BranchAccessor<'_, '_, T>) {
+        // Read real checksums from the aux page
+        let aux_page = self.mem.get_page(accessor.aux_page_number()).unwrap();
+        let aux_mem = aux_page.memory();
         for i in 0..accessor.count_children() {
             let child = accessor.child_page(i).unwrap();
-            let checksum = accessor.child_checksum(i).unwrap();
+            let checksum = read_aux_checksum(aux_mem, i);
             self.push_child(child, checksum);
         }
+        drop(aux_page);
         for i in 0..(accessor.count_children() - 1) {
             self.push_key(accessor.key(i).unwrap());
         }
