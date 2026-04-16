@@ -774,7 +774,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     }
                     builder.push_key(accessor.key(i).unwrap());
                 }
-                Self::finalize_branch_builder(builder, self.mem.get_page_size())?
+                Self::finalize_branch_builder(builder, self.mem.get_page_size() * 2)?
             }
             PartialLeaf {
                 page: partial_child_page,
@@ -808,7 +808,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     builder.push_all(&accessor);
                     builder.replace_child(child_index, new_page.get_page_number(), DEFERRED);
 
-                    let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
+                    let result = Self::finalize_branch_builder(builder, self.mem.get_page_size() * 2)?;
 
                     drop(page);
                     self.conditional_free(original_page_number);
@@ -864,7 +864,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     }
                 }
 
-                let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
+                let result = Self::finalize_branch_builder(builder, self.mem.get_page_size() * 2)?;
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
@@ -925,7 +925,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         }
                     }
                 }
-                let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
+                let result = Self::finalize_branch_builder(builder, self.mem.get_page_size() * 2)?;
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
@@ -988,7 +988,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         }
                     }
                 }
-                let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
+                let result = Self::finalize_branch_builder(builder, self.mem.get_page_size() * 2)?;
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);

@@ -1469,7 +1469,8 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
             self.total_key_bytes,
             self.fixed_key_size,
         );
-        size > self.mem.get_page_size() && self.keys.len() >= 3
+        // Use 2x page size for branch pages to reduce tree height
+        size > self.mem.get_page_size() * 2 && self.keys.len() >= 3
     }
 
     pub(super) fn build_split<'txn>(self) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
