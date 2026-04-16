@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
-    LeafBuilder, LeafMutator, read_aux_checksum,
+    LeafBuilder, LeafMutator,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,
@@ -465,9 +465,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     });
                 }
 
-                // Rebuild path: load aux page for real checksums
-                let aux_pn = accessor.aux_page_number();
-                let aux_page = self.mem.get_page(aux_pn)?;
+                // Rebuild path: read checksums directly from the branch page
                 let mut builder = BranchBuilder::new(
                     &self.mem,
                     &self.allocated,
@@ -485,7 +483,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 } else {
                     builder.push_child(
                         accessor.child_page(0).unwrap(),
-                        read_aux_checksum(aux_page.memory(), 0),
+                        accessor.child_checksum(0).unwrap(),
                     );
                 }
                 for i in 1..accessor.count_children() {
@@ -502,7 +500,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         } else {
                             builder.push_child(
                                 accessor.child_page(i).unwrap(),
-                                read_aux_checksum(aux_page.memory(), i),
+                                accessor.child_checksum(i).unwrap(),
                             );
                         }
                     } else {
@@ -533,13 +531,10 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         old_value: sub_result.old_value,
                     }
                 };
-                // Free the original branch page and its aux page
                 let page_number = page.get_page_number();
                 drop(accessor);
-                drop(aux_page);
                 drop(page);
                 self.conditional_free(page_number);
-                self.conditional_free(aux_pn);
 
                 result
             }
@@ -731,7 +726,6 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     mutator.write_child_page(child_index, new_child, new_child_checksum);
                     original_page_number
                 } else {
-                    let aux_pn = accessor.aux_page_number();
                     let mut builder = BranchBuilder::new(
                         &self.mem,
                         &self.allocated,
@@ -742,16 +736,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     builder.replace_child(child_index, new_child, new_child_checksum);
                     let new_page = builder.build()?;
                     self.conditional_free(original_page_number);
-                    self.conditional_free(aux_pn);
                     new_page.get_page_number()
                 };
             return Ok((Subtree(result_page, DEFERRED), found));
         }
 
-        // Child is requesting to be merged with a sibling.
-        // Load aux page now - needed for real checksums during rebuild.
-        let original_aux_pn = accessor.aux_page_number();
-        let original_aux_page = self.mem.get_page(original_aux_pn)?;
+        // Child is requesting to be merged with a sibling
         let mut builder = BranchBuilder::new(
             &self.mem,
             &self.allocated,
@@ -771,7 +761,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     }
                     builder.push_child(
                         accessor.child_page(i).unwrap(),
-                        read_aux_checksum(original_aux_page.memory(), i),
+                        accessor.child_checksum(i).unwrap(),
                     );
                 }
                 let end = if child_index == accessor.count_children() - 1 {
@@ -822,10 +812,8 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                     let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
 
-                    drop(original_aux_page);
                     drop(page);
                     self.conditional_free(original_page_number);
-                    self.conditional_free(original_aux_pn);
                     // child_page_number does not need to be freed, because it's a leaf and the
                     // MutAccessGuard will free it
 
@@ -837,7 +825,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         continue;
                     }
                     let page_number = accessor.child_page(i).unwrap();
-                    let page_checksum = read_aux_checksum(original_aux_page.memory(), i);
+                    let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
                         let mut child_builder = LeafBuilder::new(
                             &self.mem,
@@ -900,7 +888,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         continue;
                     }
                     let page_number = accessor.child_page(i).unwrap();
-                    let page_checksum = read_aux_checksum(original_aux_page.memory(), i);
+                    let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
                         let mut child_builder = BranchBuilder::new(
                             &self.mem,
@@ -941,11 +929,9 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 }
                 let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
 
-                let merge_with_aux_pn = merge_with_accessor.aux_page_number();
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
                 self.conditional_free(page_number);
-                self.conditional_free(merge_with_aux_pn);
 
                 result
             }
@@ -964,7 +950,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         continue;
                     }
                     let page_number = accessor.child_page(i).unwrap();
-                    let page_checksum = read_aux_checksum(original_aux_page.memory(), i);
+                    let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
                         let mut child_builder = BranchBuilder::new(
                             &self.mem,
@@ -1006,24 +992,18 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 }
                 let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
 
-                let merge_with_aux_pn = merge_with_accessor.aux_page_number();
-                let partial_child_aux_pn = partial_child_accessor.aux_page_number();
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
                 self.conditional_free(page_number);
-                self.conditional_free(merge_with_aux_pn);
                 drop(partial_child_page);
                 self.conditional_free(partial_child);
-                self.conditional_free(partial_child_aux_pn);
 
                 result
             }
         };
 
-        drop(original_aux_page);
         drop(page);
         self.conditional_free(original_page_number);
-        self.conditional_free(original_aux_pn);
 
         Ok((final_result, found))
     }

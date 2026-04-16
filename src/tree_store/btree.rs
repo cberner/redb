@@ -110,9 +110,6 @@ impl UntypedBtree {
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, self.key_width);
-                // Visit aux page (stores checksums separately)
-                let aux_path = path.with_child(accessor.aux_page_number());
-                visitor(&aux_path)?;
                 for i in 0..accessor.count_children() {
                     let child_page = accessor.child_page(i).unwrap();
                     let child_path = path.with_child(child_page);
@@ -178,44 +175,40 @@ impl UntypedBtreeMut {
 
     fn finalize_dirty_checksums_helper(&mut self, page_number: PageNumber) -> Result<Checksum> {
         assert!(self.mem.uncommitted(page_number));
-        let page = self.mem.get_page_mut(page_number)?;
+        let mut page = self.mem.get_page_mut(page_number)?;
 
         match page.memory()[0] {
             LEAF => leaf_checksum(&page, self.key_width, self.value_width),
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, self.key_width);
-                let aux_pn = accessor.aux_page_number();
-                let mut dirty_children = vec![];
+                let checksums_start = accessor.total_length();
+                let mut new_children = vec![];
                 for i in 0..accessor.count_children() {
                     let child_page = accessor.child_page(i).unwrap();
                     if self.mem.uncommitted(child_page) {
-                        dirty_children.push(Some((i, child_page)));
+                        new_children.push(Some((i, child_page)));
                     } else {
-                        dirty_children.push(None);
+                        new_children.push(None);
                     }
                 }
                 drop(accessor);
                 drop(page);
 
-                // Only finalize dirty children and update their checksums in the aux page
                 let mut updates = vec![];
-                for entry in dirty_children.into_iter().flatten() {
-                    let (child_index, _child_page) = entry;
-                    let new_checksum = self.finalize_dirty_checksums_helper(_child_page)?;
+                for entry in new_children.into_iter().flatten() {
+                    let (child_index, child_page) = entry;
+                    let new_checksum = self.finalize_dirty_checksums_helper(child_page)?;
                     updates.push((child_index, new_checksum));
                 }
 
-                if !updates.is_empty() {
-                    let mut aux_page = self.mem.get_page_mut(aux_pn)?;
-                    for (child_index, child_checksum) in updates {
-                        let offset = child_index * std::mem::size_of::<Checksum>();
-                        aux_page.memory_mut()[offset..(offset + std::mem::size_of::<Checksum>())]
-                            .copy_from_slice(&child_checksum.to_le_bytes());
-                    }
-                    drop(aux_page);
+                // Write checksums directly to the branch page (at the end, after key data)
+                let mut page = self.mem.get_page_mut(page_number)?;
+                for (child_index, child_checksum) in updates {
+                    let offset = checksums_start + child_index * std::mem::size_of::<Checksum>();
+                    page.memory_mut()[offset..(offset + std::mem::size_of::<Checksum>())]
+                        .copy_from_slice(&child_checksum.to_le_bytes());
                 }
 
-                let page = self.mem.get_page_mut(page_number)?;
                 branch_checksum(&page, self.key_width)
             }
             _ => unreachable!(),
@@ -310,24 +303,6 @@ impl UntypedBtreeMut {
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&old_page, self.key_width);
-
-                // Relocate aux page if needed
-                let old_aux_pn = accessor.aux_page_number();
-                if let Some(new_aux_pn) = relocation_map.get(&old_aux_pn) {
-                    let old_aux = self.mem.get_page(old_aux_pn)?;
-                    let mut new_aux = self.mem.get_page_mut(*new_aux_pn)?;
-                    new_aux.memory_mut()[..old_aux.memory().len()]
-                        .copy_from_slice(old_aux.memory());
-                    drop(new_aux);
-                    drop(old_aux);
-                    // Update the branch page's aux pointer
-                    new_page.memory_mut()[8..16].copy_from_slice(&new_aux_pn.to_le_bytes());
-
-                    let mut freed_pages = self.freed_pages.lock().unwrap();
-                    freed_pages.push(old_aux_pn);
-                    drop(freed_pages);
-                }
-
                 let mut mutator = BranchMutator::new(new_page.memory_mut());
                 for i in 0..accessor.count_children() {
                     let child = accessor.child_page(i).unwrap();
@@ -338,9 +313,7 @@ impl UntypedBtreeMut {
                     }
                 }
             }
-            _ => {
-                // Aux page or other non-tree page - content already copied above, nothing else to do
-            }
+            _ => unreachable!(),
         }
 
         let mut freed_pages = self.freed_pages.lock().unwrap();
@@ -816,23 +789,11 @@ impl RawBtree {
                     return Ok(false);
                 }
                 let accessor = BranchAccessor::new(&page, self.fixed_key_size);
-                let aux_pn = accessor.aux_page_number();
-                let num_children = accessor.count_children();
-                let children: Vec<PageNumber> = (0..num_children)
-                    .map(|i| accessor.child_page(i).unwrap())
-                    .collect();
-                drop(accessor);
-                drop(page);
-
-                let aux_page = self.mem.get_page(aux_pn)?;
-                for i in 0..num_children {
-                    let offset = i * std::mem::size_of::<Checksum>();
-                    let child_checksum = Checksum::from_le_bytes(
-                        aux_page.memory()[offset..(offset + std::mem::size_of::<Checksum>())]
-                            .try_into()
-                            .unwrap(),
-                    );
-                    if !self.verify_checksum_helper(children[i], child_checksum)? {
+                for i in 0..accessor.count_children() {
+                    if !self.verify_checksum_helper(
+                        accessor.child_page(i).unwrap(),
+                        accessor.child_checksum(i).unwrap(),
+                    )? {
                         return Ok(false);
                     }
                 }

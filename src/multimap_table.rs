@@ -245,25 +245,10 @@ pub(crate) fn relocate_subtrees(
         }
         BRANCH => {
             let accessor = BranchAccessor::new(&old_page, key_size);
-            let old_aux_pn = accessor.aux_page_number();
-
-            // Relocate aux page: copy content and update pointer.
-            // Checksums don't change during relocation (they're content-based).
-            if let Some(new_aux_pn) = relocation_map.get(&old_aux_pn) {
-                let old_aux = mem.get_page(old_aux_pn)?;
-                let mut new_aux = mem.get_page_mut(*new_aux_pn)?;
-                new_aux.memory_mut()[..old_aux.memory().len()]
-                    .copy_from_slice(old_aux.memory());
-                drop(new_aux);
-                drop(old_aux);
-                // Update the branch page's aux pointer to the new location
-                new_page.memory_mut()[8..16].copy_from_slice(&new_aux_pn.to_le_bytes());
-            }
-
             let mut mutator = BranchMutator::new(new_page.memory_mut());
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
-                    let child_checksum = DEFERRED;
+                    let child_checksum = accessor.child_checksum(i).unwrap();
                     let (new_child, new_checksum) = relocate_subtrees(
                         (child, child_checksum),
                         key_size,
