@@ -532,9 +532,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     }
                 };
                 let page_number = page.get_page_number();
+                let aux_pn = accessor.aux_page_number();
                 drop(accessor);
                 drop(page);
                 self.conditional_free(page_number);
+                self.conditional_free(aux_pn);
 
                 result
             }
@@ -734,8 +736,10 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     );
                     builder.push_all(&accessor);
                     builder.replace_child(child_index, new_child, new_child_checksum);
+                    let aux_pn = accessor.aux_page_number();
                     let new_page = builder.build()?;
                     self.conditional_free(original_page_number);
+                    self.conditional_free(aux_pn);
                     new_page.get_page_number()
                 };
             return Ok((Subtree(result_page, DEFERRED), found));
@@ -812,10 +816,10 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                     let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
 
+                    let orig_aux_pn = accessor.aux_page_number();
                     drop(page);
                     self.conditional_free(original_page_number);
-                    // child_page_number does not need to be freed, because it's a leaf and the
-                    // MutAccessGuard will free it
+                    self.conditional_free(orig_aux_pn);
 
                     return Ok((result, found));
                 }
@@ -929,9 +933,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 }
                 let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
 
+                let mw_aux_pn = merge_with_accessor.aux_page_number();
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
                 self.conditional_free(page_number);
+                self.conditional_free(mw_aux_pn);
 
                 result
             }
@@ -992,18 +998,24 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 }
                 let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
 
+                let mw_aux_pn = merge_with_accessor.aux_page_number();
+                let pc_aux_pn = partial_child_accessor.aux_page_number();
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
                 self.conditional_free(page_number);
+                self.conditional_free(mw_aux_pn);
                 drop(partial_child_page);
                 self.conditional_free(partial_child);
+                self.conditional_free(pc_aux_pn);
 
                 result
             }
         };
 
+        let orig_aux_pn = accessor.aux_page_number();
         drop(page);
         self.conditional_free(original_page_number);
+        self.conditional_free(orig_aux_pn);
 
         Ok((final_result, found))
     }
