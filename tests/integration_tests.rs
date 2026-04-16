@@ -2386,3 +2386,75 @@ fn savepoint_restore_data_loss_stale_freed_pages() {
          table_a's B-tree became corrupted."
     );
 }
+
+// Regression test: delete_table() pushes uncommitted pages into the data freed_pages list,
+// corrupting DATA_FREED_TABLE.
+//
+// When a table is modified earlier in the same transaction (which copy-on-writes some leaf and
+// branch pages, allocating new uncommitted pages) and then deleted, delete_table() walks the
+// table's tree via visit_all_pages and pushes EVERY page reached into freed_pages -- including
+// the uncommitted pages allocated by this transaction. Pages allocated during the current
+// transaction must instead be released via free_if_uncommitted(): freed_pages is the list of
+// committed-but-orphaned pages that get persisted into DATA_FREED_TABLE for future cleanup.
+//
+// On commit, store_data_freed_pages() walks freed_pages and writes them into DATA_FREED_TABLE.
+// Its debug_assert!(!self.mem.uncommitted(page)) catches the violation and panics. The
+// transaction is aborted by the panic, so the user's intended deletion of the table -- and the
+// modifications that preceded it -- are silently lost: neither reaches disk and the database
+// reverts to the state before the transaction.
+//
+// The fix is for delete_table() to call free_if_uncommitted() on each page (mirroring how
+// retain_in() and BtreeExtractIf's Drop impl handle this), so that uncommitted pages are
+// returned to the allocator immediately and only committed pages go into freed_pages.
+#[test]
+fn delete_table_after_modification_data_loss() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let table_a: TableDefinition<u64, &[u8]> = TableDefinition::new("table_a");
+
+    // Step 1: Insert several pages worth of committed data into table_a.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_a).unwrap();
+        for i in 0..100u64 {
+            table.insert(&i, &vec![0u8; 200][..]).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Verify the data is present and durable before we attempt the destructive operation.
+    {
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(table_a).unwrap();
+        assert_eq!(table.len().unwrap(), 100);
+    }
+
+    // Step 2: In a single transaction, create an ephemeral savepoint (which enables allocation
+    // tracking via DATA_ALLOCATED_TABLE), modify entries in table_a to force copy-on-write
+    // (allocating new uncommitted pages), and then delete the table.
+    let txn = db.begin_write().unwrap();
+    let _savepoint = txn.ephemeral_savepoint().unwrap();
+    {
+        let mut table = txn.open_table(table_a).unwrap();
+        for i in 0..100u64 {
+            table.insert(&i, &vec![0xFFu8; 200][..]).unwrap();
+        }
+    }
+    let deleted = txn.delete_table(table_a).unwrap();
+    assert!(deleted);
+
+    // For the user, the intended outcome is: table_a is gone after this commit. With the bug
+    // present, commit() panics inside store_data_freed_pages because delete_table() left
+    // uncommitted pages in freed_pages, so neither the prior modifications nor the deletion
+    // are ever written -- a clear data loss of the user's pending operations.
+    let commit_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| txn.commit()));
+    assert!(
+        commit_result.is_ok() && commit_result.as_ref().unwrap().is_ok(),
+        "DATA LOSS: commit panicked or failed because delete_table() left uncommitted pages \
+         in freed_pages, which violates the invariant that DATA_FREED_TABLE only contains \
+         committed pages. The user's intended deletion of table_a (and all modifications \
+         preceding it) were silently lost when the transaction was aborted by the panic."
+    );
+}
+
+
