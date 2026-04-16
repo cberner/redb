@@ -2427,3 +2427,235 @@ fn delete_table_panic_after_modification() {
     let commit_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| txn.commit()));
     assert!(commit_result.is_ok() && commit_result.as_ref().unwrap().is_ok());
 }
+
+// Regression test: restore_savepoint() must revive a table that was deleted in
+// the same transaction, without leaking or corrupting any pages.
+#[test]
+fn restore_after_delete_table_regression() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let t_a: TableDefinition<u64, Vec<u8>> = TableDefinition::new("ta");
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut a = txn.open_table(t_a).unwrap();
+        for i in 0..100u64 {
+            a.insert(&i, &vec![i as u8; 200]).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    let sp = txn.ephemeral_savepoint().unwrap();
+    txn.delete_table(t_a).unwrap();
+    txn.restore_savepoint(&sp).unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    drop(db);
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    assert!(db.check_integrity().unwrap());
+    drop(db);
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_read().unwrap();
+    let a = txn.open_table(t_a).unwrap();
+    assert_eq!(a.len().unwrap(), 100);
+    for i in 0..100u64 {
+        let v = a.get(&i).unwrap().unwrap();
+        assert!(v.value().iter().all(|&b| b == i as u8), "missing/corrupt {}", i);
+    }
+}
+
+// Regression test: restore_savepoint() must revive a table that was renamed in
+// the same transaction.
+#[test]
+fn restore_after_rename_table_regression() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let t_a: TableDefinition<u64, Vec<u8>> = TableDefinition::new("ta");
+    let t_b: TableDefinition<u64, Vec<u8>> = TableDefinition::new("tb");
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut a = txn.open_table(t_a).unwrap();
+        for i in 0..100u64 {
+            a.insert(&i, &vec![i as u8; 200]).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    let sp = txn.ephemeral_savepoint().unwrap();
+    txn.rename_table(t_a, t_b).unwrap();
+    txn.restore_savepoint(&sp).unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    drop(db);
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    assert!(db.check_integrity().unwrap());
+    drop(db);
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_read().unwrap();
+    assert!(txn.open_table(t_b).is_err(), "t_b should not exist");
+    let a = txn.open_table(t_a).unwrap();
+    assert_eq!(a.len().unwrap(), 100);
+    for i in 0..100u64 {
+        let v = a.get(&i).unwrap().unwrap();
+        assert!(v.value().iter().all(|&b| b == i as u8), "missing/corrupt {}", i);
+    }
+}
+
+// Stress test: Multiple savepoint/modify/restore cycles followed by integrity check.
+#[test]
+fn savepoint_cycles_integrity() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let t: TableDefinition<u64, Vec<u8>> = TableDefinition::new("t");
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut a = txn.open_table(t).unwrap();
+        for i in 0..200u64 {
+            a.insert(&i, &vec![i as u8; 200]).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    for _ in 0..5 {
+        let mut txn = db.begin_write().unwrap();
+        let sp = txn.ephemeral_savepoint().unwrap();
+        {
+            let mut a = txn.open_table(t).unwrap();
+            for i in 0..200u64 {
+                a.insert(&i, &vec![0xFF; 200]).unwrap();
+            }
+            for i in 200..400u64 {
+                a.insert(&i, &vec![0xFF; 200]).unwrap();
+            }
+        }
+        txn.restore_savepoint(&sp).unwrap();
+        txn.commit().unwrap();
+
+        let txn = db.begin_write().unwrap();
+        txn.commit().unwrap();
+    }
+
+    drop(db);
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    assert!(db.check_integrity().unwrap());
+    drop(db);
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_read().unwrap();
+    let a = txn.open_table(t).unwrap();
+    for i in 0..200u64 {
+        let v = a.get(&i).unwrap().unwrap();
+        assert!(v.value().iter().all(|&b| b == i as u8), "corrupt at {}", i);
+    }
+    assert_eq!(a.len().unwrap(), 200);
+}
+
+// Regression test: 3-way rename swap with modifications.
+#[test]
+fn rename_swap_three_tables() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let t_a: TableDefinition<u64, Vec<u8>> = TableDefinition::new("a");
+    let t_b: TableDefinition<u64, Vec<u8>> = TableDefinition::new("b");
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut a = txn.open_table(t_a).unwrap();
+        for i in 0..200u64 {
+            a.insert(&i, &vec![1u8; 200]).unwrap();
+        }
+        let mut b = txn.open_table(t_b).unwrap();
+        for i in 0..200u64 {
+            b.insert(&i, &vec![2u8; 200]).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut a = txn.open_table(t_a).unwrap();
+        for i in 0..200u64 {
+            a.insert(&i, &vec![3u8; 200]).unwrap();
+        }
+        let mut b = txn.open_table(t_b).unwrap();
+        for i in 0..200u64 {
+            b.insert(&i, &vec![4u8; 200]).unwrap();
+        }
+    }
+    txn.rename_table(t_a, TableDefinition::<u64, Vec<u8>>::new("c")).unwrap();
+    txn.rename_table(t_b, t_a).unwrap();
+    txn.rename_table(TableDefinition::<u64, Vec<u8>>::new("c"), t_b).unwrap();
+    txn.commit().unwrap();
+
+    drop(db);
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    assert!(db.check_integrity().unwrap());
+    drop(db);
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_read().unwrap();
+    let a = txn.open_table(t_a).unwrap();
+    for i in 0..200u64 {
+        let v = a.get(&i).unwrap().unwrap();
+        assert!(v.value().iter().all(|&b| b == 4), "t_a corrupt at {}", i);
+    }
+    let b = txn.open_table(t_b).unwrap();
+    for i in 0..200u64 {
+        let v = b.get(&i).unwrap().unwrap();
+        assert!(v.value().iter().all(|&b| b == 3), "t_b corrupt at {}", i);
+    }
+}
+
+// Regression test: restore_savepoint after deleting a multimap table must
+// revive the multimap with all its values intact.
+#[test]
+fn restore_after_delete_multimap_regression() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let mm: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("mm");
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut m = txn.open_multimap_table(mm).unwrap();
+        for i in 0..10u64 {
+            for j in 0..100u64 {
+                m.insert(&i, &j).unwrap();
+            }
+        }
+    }
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    let sp = txn.ephemeral_savepoint().unwrap();
+    txn.delete_multimap_table(mm).unwrap();
+    txn.restore_savepoint(&sp).unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    drop(db);
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    assert!(db.check_integrity().unwrap());
+    drop(db);
+
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_read().unwrap();
+    let m = txn.open_multimap_table(mm).unwrap();
+    for i in 0..10u64 {
+        let values: Vec<u64> = m.get(&i).unwrap().filter_map(|r| r.ok()).map(|v| v.value()).collect();
+        assert_eq!(values.len(), 100, "missing values at {}", i);
+    }
+}
