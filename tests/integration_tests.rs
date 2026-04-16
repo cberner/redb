@@ -2386,3 +2386,46 @@ fn savepoint_restore_data_loss_stale_freed_pages() {
          table_a's B-tree became corrupted."
     );
 }
+
+#[test]
+fn delete_table_panic_after_modification() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let table_a: TableDefinition<u64, &[u8]> = TableDefinition::new("table_a");
+
+    // Step 1: Insert several pages worth of committed data into table_a.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_a).unwrap();
+        for i in 0..100u64 {
+            table.insert(&i, &vec![0u8; 200][..]).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Verify the data is present and durable before we attempt the destructive operation.
+    {
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(table_a).unwrap();
+        assert_eq!(table.len().unwrap(), 100);
+    }
+
+    // Step 2: In a single transaction, create an ephemeral savepoint (which enables allocation
+    // tracking via DATA_ALLOCATED_TABLE), modify entries in table_a to force copy-on-write
+    // (allocating new uncommitted pages), and then delete the table.
+    let txn = db.begin_write().unwrap();
+    let _savepoint = txn.ephemeral_savepoint().unwrap();
+    {
+        let mut table = txn.open_table(table_a).unwrap();
+        for i in 0..100u64 {
+            table.insert(&i, &vec![0xFFu8; 200][..]).unwrap();
+        }
+    }
+    let deleted = txn.delete_table(table_a).unwrap();
+    assert!(deleted);
+
+    let commit_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| txn.commit()));
+    assert!(commit_result.is_ok() && commit_result.as_ref().unwrap().is_ok());
+}
+
+
