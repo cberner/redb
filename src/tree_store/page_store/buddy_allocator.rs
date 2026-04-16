@@ -41,7 +41,14 @@ impl BuddyAllocator {
         let mut pages_for_order = num_pages;
         let mut free = vec![];
         for _ in 0..=max_order {
-            free.push(BtreeBitmap::new(pages_for_order, capacity_for_order));
+            // Lazily size each bitmap for the actual current pages, but pad the tree
+            // height so resize() can grow to the full region capacity without needing
+            // to insert new tree levels.
+            free.push(BtreeBitmap::new_padded(
+                pages_for_order,
+                pages_for_order,
+                capacity_for_order,
+            ));
 
             pages_for_order = next_higher_order(pages_for_order);
             capacity_for_order = next_higher_order(capacity_for_order);
