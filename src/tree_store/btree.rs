@@ -175,28 +175,30 @@ impl UntypedBtreeMut {
 
     fn finalize_dirty_checksums_helper(&mut self, page_number: PageNumber) -> Result<Checksum> {
         assert!(self.mem.uncommitted(page_number));
-        let page = self.mem.get_page_mut(page_number)?;
+        let mut page = self.mem.get_page_mut(page_number)?;
 
         match page.memory()[0] {
             LEAF => leaf_checksum(&page, self.key_width, self.value_width),
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, self.key_width);
-                let mut dirty_children = vec![];
+                let mut new_children = vec![];
                 for i in 0..accessor.count_children() {
                     let child_page = accessor.child_page(i).unwrap();
                     if self.mem.uncommitted(child_page) {
-                        dirty_children.push(child_page);
+                        let new_checksum = self.finalize_dirty_checksums_helper(child_page)?;
+                        new_children.push(Some((i, child_page, new_checksum)));
+                    } else {
+                        // Child is clean, skip it
+                        new_children.push(None);
                     }
                 }
-                drop(accessor);
-                drop(page);
 
-                // Recursively finalize children (no checksums written into branch page)
-                for child_page in dirty_children {
-                    self.finalize_dirty_checksums_helper(child_page)?;
+                let mut mutator = BranchMutator::new(page.memory_mut());
+                for (child_index, child_page, child_checksum) in new_children.into_iter().flatten()
+                {
+                    mutator.write_child_page(child_index, child_page, child_checksum);
                 }
 
-                let page = self.mem.get_page_mut(page_number)?;
                 branch_checksum(&page, self.key_width)
             }
             _ => unreachable!(),
@@ -776,7 +778,15 @@ impl RawBtree {
                 } else {
                     return Ok(false);
                 }
-                // Child checksums no longer stored in branch pages; skip recursive verification
+                let accessor = BranchAccessor::new(&page, self.fixed_key_size);
+                for i in 0..accessor.count_children() {
+                    if !self.verify_checksum_helper(
+                        accessor.child_page(i).unwrap(),
+                        accessor.child_checksum(i).unwrap(),
+                    )? {
+                        return Ok(false);
+                    }
+                }
                 true
             }
             _ => false,
