@@ -7,6 +7,11 @@
   the database to become corrupted
 * Fix a bug where calling `restore_savepoint()` after modifying a table in the same
   transaction could cause the table to become corrupted in a future transaction.
+* Fix a panic when `delete_table()` was called on a table that had been modified in the same
+  transaction.
+* Improve read scaling to multiple threads. Around 15% speedup on some benchmarks.
+* Optimize cache usage, and general write performance. Around 1.5x speedup on some benchmarks.
+* Optimize memory usage
 
 ## 4.0.0 - 2026-04-02
 * Implement `Drop` on `AccessGuardMut` and `AccessGuardMutInPlace`, which requires that these be dropped
