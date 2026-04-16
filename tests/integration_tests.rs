@@ -2427,5 +2427,3 @@ fn delete_table_panic_after_modification() {
     let commit_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| txn.commit()));
     assert!(commit_result.is_ok() && commit_result.as_ref().unwrap().is_ok());
 }
-
-
