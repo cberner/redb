@@ -861,30 +861,31 @@ impl<K: Key, V: Value> Btree<K, V> {
 
     pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'static, V>>> {
         if let Some(ref root_page) = self.cached_root {
-            self.get_helper(root_page.clone(), K::as_bytes(key).as_ref())
+            self.get_helper(root_page, K::as_bytes(key).as_ref())
         } else {
             Ok(None)
         }
     }
 
     // Returns the value for the queried key, if present
-    fn get_helper(&self, page: PageImpl, query: &[u8]) -> Result<Option<AccessGuard<'static, V>>> {
+    fn get_helper(&self, page: &PageImpl, query: &[u8]) -> Result<Option<AccessGuard<'static, V>>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
                     let (start, end) = accessor.value_range(entry_index).unwrap();
-                    let guard = AccessGuard::with_page(page, start..end);
+                    let guard = AccessGuard::with_page(page.clone(), start..end);
                     Ok(Some(guard))
                 } else {
                     Ok(None)
                 }
             }
             BRANCH => {
-                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let accessor = BranchAccessor::new(page, K::fixed_width());
                 let (_, child_page) = accessor.child_for_key::<K>(query);
-                self.get_helper(self.mem.get_page_extended(child_page, self.hint)?, query)
+                let child_page = self.mem.get_page_extended(child_page, self.hint)?;
+                self.get_helper(&child_page, query)
             }
             _ => unreachable!(),
         }
