@@ -258,19 +258,20 @@ impl U64GroupedBitmap {
     // 4 bytes: number of elements
     // n bytes: serialized groups
     pub fn to_vec(&self) -> Vec<u8> {
-        let mut result = vec![];
-        result.extend(self.len.to_le_bytes());
-        for x in &self.data[..Self::required_words(self.len)] {
-            result.extend(x.to_le_bytes());
+        let words = Self::required_words(self.len);
+        let mut result = Vec::with_capacity(size_of::<u32>() + words * size_of::<u64>());
+        result.extend_from_slice(&self.len.to_le_bytes());
+        for x in &self.data[..words] {
+            result.extend_from_slice(&x.to_le_bytes());
         }
         result
     }
 
     pub fn from_bytes(serialized: &[u8]) -> Self {
         assert_eq!(0, (serialized.len() - size_of::<u32>()) % size_of::<u64>());
-        let mut data = vec![];
         let len = u32::from_le_bytes(serialized[..size_of::<u32>()].try_into().unwrap());
         let words = (serialized.len() - size_of::<u32>()) / size_of::<u64>();
+        let mut data = Vec::with_capacity(words);
         for i in 0..words {
             let start = size_of::<u32>() + i * size_of::<u64>();
             let value = u64::from_le_bytes(

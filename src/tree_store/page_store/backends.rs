@@ -86,16 +86,7 @@ impl StorageBackend for InMemoryBackend {
     fn set_len(&self, len: u64) -> Result<(), io::Error> {
         let mut guard = self.write();
         let len = usize::try_from(len).map_err(|_| Self::out_of_range())?;
-        if guard.len() < len {
-            let additional = len - guard.len();
-            guard.reserve(additional);
-            for _ in 0..additional {
-                guard.push(0);
-            }
-        } else {
-            guard.truncate(len);
-        }
-
+        guard.resize(len, 0);
         Ok(())
     }
 
