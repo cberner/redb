@@ -556,11 +556,25 @@ impl TableTreeMut<'_> {
         table_type: TableType,
     ) -> Result<bool, TableError> {
         if let Some(definition) = self.get_table_untyped(name, table_type)? {
-            let mut freed_pages = self.freed_pages.lock().unwrap();
+            // Collect all pages first, then free them. The walk reads each page to discover
+            // its children, so we must not invalidate any page before the walk completes.
+            let mut pages = vec![];
             definition.visit_all_pages(self.mem.clone(), |path| {
-                freed_pages.push(path.page_number());
+                pages.push(path.page_number());
                 Ok(())
             })?;
+            let mut freed_pages = self.freed_pages.lock().unwrap();
+            let mut allocated_pages = self.allocated_pages.lock().unwrap();
+            for page in pages {
+                // Pages allocated in this transaction must be released to the allocator
+                // immediately. freed_pages is persisted into DATA_FREED_TABLE on commit, which
+                // requires every entry to be a committed page (uncommitted pages are also
+                // tracked in DATA_ALLOCATED_TABLE for savepoint restoration).
+                if !self.mem.free_if_uncommitted(page, &mut allocated_pages) {
+                    freed_pages.push(page);
+                }
+            }
+            drop(allocated_pages);
             drop(freed_pages);
 
             self.pending_table_updates.remove(name);
