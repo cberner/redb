@@ -175,30 +175,50 @@ impl UntypedBtreeMut {
 
     fn finalize_dirty_checksums_helper(&mut self, page_number: PageNumber) -> Result<Checksum> {
         assert!(self.mem.uncommitted(page_number));
-        let mut page = self.mem.get_page_mut(page_number)?;
+        let page = self.mem.get_page_mut(page_number)?;
 
         match page.memory()[0] {
             LEAF => leaf_checksum(&page, self.key_width, self.value_width),
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, self.key_width);
-                let mut new_children = vec![];
-                for i in 0..accessor.count_children() {
-                    let child_page = accessor.child_page(i).unwrap();
-                    if self.mem.uncommitted(child_page) {
-                        let new_checksum = self.finalize_dirty_checksums_helper(child_page)?;
-                        new_children.push(Some((i, child_page, new_checksum)));
+                let aux_pn = accessor.aux_page_number();
+                let children: Vec<(PageNumber, bool)> = (0..accessor.count_children())
+                    .map(|i| {
+                        let cp = accessor.child_page(i).unwrap();
+                        let dirty = self.mem.uncommitted(cp);
+                        (cp, dirty)
+                    })
+                    .collect();
+                drop(accessor);
+                drop(page);
+
+                // Compute checksums for all children.
+                // Dirty children are finalized recursively; clean children are computed from data.
+                let mut checksums = Vec::with_capacity(children.len());
+                for (child_page, is_dirty) in &children {
+                    if *is_dirty {
+                        checksums.push(self.finalize_dirty_checksums_helper(*child_page)?);
                     } else {
-                        // Child is clean, skip it
-                        new_children.push(None);
+                        let child = self.mem.get_page(*child_page)?;
+                        let cs = match child.memory()[0] {
+                            LEAF => leaf_checksum(&child, self.key_width, self.value_width)?,
+                            BRANCH => branch_checksum(&child, self.key_width)?,
+                            _ => unreachable!(),
+                        };
+                        checksums.push(cs);
                     }
                 }
 
-                let mut mutator = BranchMutator::new(page.memory_mut());
-                for (child_index, child_page, child_checksum) in new_children.into_iter().flatten()
-                {
-                    mutator.write_child_page(child_index, child_page, child_checksum);
+                // Write all checksums to the aux page
+                let mut aux_page = self.mem.get_page_mut(aux_pn)?;
+                for (i, checksum) in checksums.iter().enumerate() {
+                    let offset = i * std::mem::size_of::<Checksum>();
+                    aux_page.memory_mut()[offset..(offset + std::mem::size_of::<Checksum>())]
+                        .copy_from_slice(&checksum.to_le_bytes());
                 }
+                drop(aux_page);
 
+                let page = self.mem.get_page_mut(page_number)?;
                 branch_checksum(&page, self.key_width)
             }
             _ => unreachable!(),
@@ -779,11 +799,23 @@ impl RawBtree {
                     return Ok(false);
                 }
                 let accessor = BranchAccessor::new(&page, self.fixed_key_size);
-                for i in 0..accessor.count_children() {
-                    if !self.verify_checksum_helper(
-                        accessor.child_page(i).unwrap(),
-                        accessor.child_checksum(i).unwrap(),
-                    )? {
+                let aux_pn = accessor.aux_page_number();
+                let num_children = accessor.count_children();
+                let children: Vec<PageNumber> = (0..num_children)
+                    .map(|i| accessor.child_page(i).unwrap())
+                    .collect();
+                drop(accessor);
+                drop(page);
+
+                let aux_page = self.mem.get_page(aux_pn)?;
+                for i in 0..num_children {
+                    let offset = i * std::mem::size_of::<Checksum>();
+                    let child_checksum = Checksum::from_le_bytes(
+                        aux_page.memory()[offset..(offset + std::mem::size_of::<Checksum>())]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    if !self.verify_checksum_helper(children[i], child_checksum)? {
                         return Ok(false);
                     }
                 }

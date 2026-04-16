@@ -1308,10 +1308,10 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
 
     fn key_section_start(&self) -> usize {
         if self.fixed_key_size.is_none() {
-            8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
+            16 + PageNumber::serialized_size() * self.count_children()
                 + size_of::<u32>() * self.num_keys()
         } else {
-            8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
+            16 + PageNumber::serialized_size() * self.count_children()
         }
     }
 
@@ -1327,8 +1327,8 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         if let Some(fixed) = self.fixed_key_size {
             return Some(self.key_section_start() + fixed * (n + 1));
         }
-        let offset = 8
-            + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
+        let offset = 16
+            + PageNumber::serialized_size() * self.count_children()
             + size_of::<u32>() * n;
         Some(u32::from_le_bytes(
             self.page
@@ -1352,17 +1352,19 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         self.num_keys() + 1
     }
 
+    pub(crate) fn aux_page_number(&self) -> PageNumber {
+        PageNumber::from_le_bytes(
+            self.page.memory()[8..16].try_into().unwrap(),
+        )
+    }
+
     pub(crate) fn child_checksum(&self, n: usize) -> Option<Checksum> {
         if n >= self.count_children() {
             return None;
         }
-
-        let offset = 8 + size_of::<Checksum>() * n;
-        Some(Checksum::from_le_bytes(
-            self.page.memory()[offset..(offset + size_of::<Checksum>())]
-                .try_into()
-                .unwrap(),
-        ))
+        // Checksums are stored in the aux page, not inline.
+        // Return DEFERRED; callers needing real checksums read the aux page.
+        Some(DEFERRED)
     }
 
     pub(crate) fn child_page(&self, n: usize) -> Option<PageNumber> {
@@ -1370,8 +1372,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
             return None;
         }
 
-        let offset =
-            8 + size_of::<Checksum>() * self.count_children() + PageNumber::serialized_size() * n;
+        let offset = 16 + PageNumber::serialized_size() * n;
         Some(PageNumber::from_le_bytes(
             self.page.memory()[offset..(offset + PageNumber::serialized_size())]
                 .try_into()
@@ -1451,8 +1452,21 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         );
         let mut allocated_pages = self.allocated_pages.lock().unwrap();
         let mut page = self.mem.allocate(size, &mut allocated_pages)?;
+
+        // Allocate aux page for checksums
+        let aux_size = self.children.len() * size_of::<Checksum>();
+        let mut aux_page = self.mem.allocate(aux_size, &mut allocated_pages)?;
+        for i in 0..self.children.len() {
+            let offset = i * size_of::<Checksum>();
+            aux_page.memory_mut()[offset..(offset + size_of::<Checksum>())]
+                .copy_from_slice(&self.children[i].1.to_le_bytes());
+        }
+        let aux_page_number = aux_page.get_page_number();
+        drop(aux_page);
+
         let mut builder =
             RawBranchBuilder::new(page.memory_mut(), self.keys.len(), self.fixed_key_size);
+        builder.write_aux_page(aux_page_number);
         builder.write_first_page(self.children[0].0, self.children[0].1);
         for i in 1..self.children.len() {
             let key = &self.keys[i - 1];
@@ -1469,8 +1483,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
             self.total_key_bytes,
             self.fixed_key_size,
         );
-        // Use 2x page size for branch pages to reduce tree height
-        size > self.mem.get_page_size() * 2 && self.keys.len() >= 3
+        size > self.mem.get_page_size() && self.keys.len() >= 3
     }
 
     pub(super) fn build_split<'txn>(self) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
@@ -1482,10 +1495,24 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         let division_key = self.keys[division];
         let second_split_key_len = self.total_key_bytes - first_split_key_len - division_key.len();
 
+        // Page 1: children[0..=division]
+        let num_children_1 = division + 1;
         let size =
             RawBranchBuilder::required_bytes(division, first_split_key_len, self.fixed_key_size);
         let mut page1 = self.mem.allocate(size, &mut allocated_pages)?;
+
+        let aux_size_1 = num_children_1 * size_of::<Checksum>();
+        let mut aux1 = self.mem.allocate(aux_size_1, &mut allocated_pages)?;
+        for i in 0..num_children_1 {
+            let offset = i * size_of::<Checksum>();
+            aux1.memory_mut()[offset..(offset + size_of::<Checksum>())]
+                .copy_from_slice(&self.children[i].1.to_le_bytes());
+        }
+        let aux1_pn = aux1.get_page_number();
+        drop(aux1);
+
         let mut builder = RawBranchBuilder::new(page1.memory_mut(), division, self.fixed_key_size);
+        builder.write_aux_page(aux1_pn);
         builder.write_first_page(self.children[0].0, self.children[0].1);
         for i in 0..division {
             let key = &self.keys[i];
@@ -1498,17 +1525,31 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         }
         drop(builder);
 
+        // Page 2: children[division+1..]
+        let num_children_2 = self.children.len() - division - 1;
         let size = RawBranchBuilder::required_bytes(
             self.keys.len() - division - 1,
             second_split_key_len,
             self.fixed_key_size,
         );
         let mut page2 = self.mem.allocate(size, &mut allocated_pages)?;
+
+        let aux_size_2 = num_children_2 * size_of::<Checksum>();
+        let mut aux2 = self.mem.allocate(aux_size_2, &mut allocated_pages)?;
+        for i in 0..num_children_2 {
+            let offset = i * size_of::<Checksum>();
+            aux2.memory_mut()[offset..(offset + size_of::<Checksum>())]
+                .copy_from_slice(&self.children[division + 1 + i].1.to_le_bytes());
+        }
+        let aux2_pn = aux2.get_page_number();
+        drop(aux2);
+
         let mut builder = RawBranchBuilder::new(
             page2.memory_mut(),
             self.keys.len() - division - 1,
             self.fixed_key_size,
         );
+        builder.write_aux_page(aux2_pn);
         builder.write_first_page(self.children[division + 1].0, self.children[division + 1].1);
         for i in (division + 1)..self.keys.len() {
             let key = &self.keys[i];
@@ -1532,8 +1573,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
 // 1 byte: padding (padding to 16bits aligned)
 // 2 bytes: num_keys (number of keys)
 // 4 byte: padding (padding to 64bits aligned)
-// repeating (num_keys + 1 times):
-// 16 bytes: child page checksum
+// 8 bytes: aux page number (page storing child checksums)
 // repeating (num_keys + 1 times):
 // 8 bytes: page number
 // (optional) repeating (num_keys times):
@@ -1553,14 +1593,15 @@ impl<'b> RawBranchBuilder<'b> {
         size_of_keys: usize,
         fixed_key_size: Option<usize>,
     ) -> usize {
+        // 16 = 8 byte header + 8 byte aux page pointer
         if fixed_key_size.is_none() {
-            let fixed_size = 8
-                + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1)
+            let fixed_size = 16
+                + PageNumber::serialized_size() * (num_keys + 1)
                 + size_of::<u32>() * num_keys;
             size_of_keys + fixed_size
         } else {
             let fixed_size =
-                8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1);
+                16 + PageNumber::serialized_size() * (num_keys + 1);
             size_of_keys + fixed_size
         }
     }
@@ -1573,9 +1614,9 @@ impl<'b> RawBranchBuilder<'b> {
         #[cfg(debug_assertions)]
         {
             // Poison all the child pointers & key offsets, in case the caller forgets to write them
-            let start = 8 + size_of::<Checksum>() * (num_keys + 1);
+            let start = 16;
             let mut last =
-                8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1);
+                16 + PageNumber::serialized_size() * (num_keys + 1);
             if fixed_key_size.is_none() {
                 last += size_of::<u32>() * num_keys;
             }
@@ -1591,18 +1632,19 @@ impl<'b> RawBranchBuilder<'b> {
         }
     }
 
-    pub(super) fn write_first_page(&mut self, page_number: PageNumber, checksum: Checksum) {
-        let offset = 8;
-        self.page[offset..(offset + size_of::<Checksum>())]
-            .copy_from_slice(&checksum.to_le_bytes());
-        let offset = 8 + size_of::<Checksum>() * (self.num_keys + 1);
+    pub(super) fn write_first_page(&mut self, page_number: PageNumber, _checksum: Checksum) {
+        let offset = 16;
         self.page[offset..(offset + PageNumber::serialized_size())]
             .copy_from_slice(&page_number.to_le_bytes());
     }
 
+    pub(super) fn write_aux_page(&mut self, aux_page_number: PageNumber) {
+        self.page[8..16].copy_from_slice(&aux_page_number.to_le_bytes());
+    }
+
     fn key_section_start(&self) -> usize {
         let mut offset =
-            8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (self.num_keys + 1);
+            16 + PageNumber::serialized_size() * (self.num_keys + 1);
         if self.fixed_key_size.is_none() {
             offset += size_of::<u32>() * self.num_keys;
         }
@@ -1614,8 +1656,8 @@ impl<'b> RawBranchBuilder<'b> {
         if let Some(fixed) = self.fixed_key_size {
             return self.key_section_start() + fixed * (n + 1);
         }
-        let offset = 8
-            + (PageNumber::serialized_size() + size_of::<Checksum>()) * (self.num_keys + 1)
+        let offset = 16
+            + PageNumber::serialized_size() * (self.num_keys + 1)
             + size_of::<u32>() * n;
         u32::from_le_bytes(
             self.page[offset..(offset + size_of::<u32>())]
@@ -1630,18 +1672,13 @@ impl<'b> RawBranchBuilder<'b> {
         &mut self,
         key: &[u8],
         page_number: PageNumber,
-        checksum: Checksum,
+        _checksum: Checksum,
         n: usize,
     ) {
         assert!(n < self.num_keys);
         assert_eq!(n, self.keys_written);
         self.keys_written += 1;
-        let offset = 8 + size_of::<Checksum>() * (n + 1);
-        self.page[offset..(offset + size_of::<Checksum>())]
-            .copy_from_slice(&checksum.to_le_bytes());
-        let offset = 8
-            + size_of::<Checksum>() * (self.num_keys + 1)
-            + PageNumber::serialized_size() * (n + 1);
+        let offset = 16 + PageNumber::serialized_size() * (n + 1);
         self.page[offset..(offset + PageNumber::serialized_size())]
             .copy_from_slice(&page_number.to_le_bytes());
 
@@ -1651,8 +1688,8 @@ impl<'b> RawBranchBuilder<'b> {
             self.key_section_start()
         };
         if self.fixed_key_size.is_none() {
-            let offset = 8
-                + (PageNumber::serialized_size() + size_of::<Checksum>()) * (self.num_keys + 1)
+            let offset = 16
+                + PageNumber::serialized_size() * (self.num_keys + 1)
                 + size_of::<u32>() * n;
             self.page[offset..(offset + size_of::<u32>())].copy_from_slice(
                 &u32::try_from(data_offset + key.len())
@@ -1692,14 +1729,11 @@ impl<'b> BranchMutator<'b> {
         &mut self,
         i: usize,
         page_number: PageNumber,
-        checksum: Checksum,
+        _checksum: Checksum,
     ) {
         debug_assert!(i <= self.num_keys());
-        let offset = 8 + size_of::<Checksum>() * i;
-        self.page[offset..(offset + size_of::<Checksum>())]
-            .copy_from_slice(&checksum.to_le_bytes());
-        let offset =
-            8 + size_of::<Checksum>() * (self.num_keys() + 1) + PageNumber::serialized_size() * i;
+        // Checksums are stored in the aux page, not inline
+        let offset = 16 + PageNumber::serialized_size() * i;
         self.page[offset..(offset + PageNumber::serialized_size())]
             .copy_from_slice(&page_number.to_le_bytes());
     }
