@@ -419,12 +419,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
-                let aux_pn = accessor.aux_page_number();
-                let aux_page = self.mem.get_page(aux_pn)?;
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
-                let child_checksum = read_aux_checksum(aux_page.memory(), child_index);
+                // Use DEFERRED to avoid reading aux page on the hot path.
+                // Real checksums are only needed in the rebuild path below.
                 let sub_result =
-                    self.insert_helper(self.mem.get_page(child_page)?, child_checksum, key, value)?;
+                    self.insert_helper(self.mem.get_page(child_page)?, DEFERRED, key, value)?;
 
                 // Skip-path: if child page number and checksum haven't changed,
                 // no branch update is needed. This avoids redundant get_page_mut +
@@ -432,7 +431,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 // within a transaction.
                 if sub_result.additional_sibling.is_none()
                     && sub_result.new_root == child_page
-                    && sub_result.root_checksum == child_checksum
+                    && sub_result.root_checksum == DEFERRED
                 {
                     return Ok(InsertionResult {
                         new_root: page.get_page_number(),
@@ -449,7 +448,6 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 {
                     let page_number = page.get_page_number();
                     drop(accessor);
-                    drop(aux_page);
                     drop(page);
                     let mut mutpage = self.mem.get_page_mut(page_number)?;
                     let mut mutator = BranchMutator::new(mutpage.memory_mut());
@@ -467,7 +465,9 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     });
                 }
 
-                // A child was added, or we couldn't use the fast-path above
+                // Rebuild path: load aux page for real checksums
+                let aux_pn = accessor.aux_page_number();
+                let aux_page = self.mem.get_page(aux_pn)?;
                 let mut builder = BranchBuilder::new(
                     &self.mem,
                     &self.allocated,
@@ -708,20 +708,18 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         key: &[u8],
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
         let accessor = BranchAccessor::new(&page, K::fixed_width());
-        let original_aux_pn = accessor.aux_page_number();
-        let original_aux_page = self.mem.get_page(original_aux_pn)?;
         let original_page_number = page.get_page_number();
         let (child_index, child_page_number) = accessor.child_for_key::<K>(key);
-        let child_checksum = read_aux_checksum(original_aux_page.memory(), child_index);
+        // Use DEFERRED to avoid reading aux page on the hot path
         let (result, found) =
-            self.delete_helper(self.mem.get_page(child_page_number)?, child_checksum, key)?;
+            self.delete_helper(self.mem.get_page(child_page_number)?, DEFERRED, key)?;
         if found.is_none() {
             return Ok((Subtree(original_page_number, checksum), None));
         }
         if let Subtree(new_child, new_child_checksum) = result {
             // Skip-path: if child page number and checksum haven't changed,
             // no branch update is needed.
-            if new_child == child_page_number && new_child_checksum == child_checksum {
+            if new_child == child_page_number && new_child_checksum == DEFERRED {
                 return Ok((Subtree(original_page_number, checksum), found));
             }
 
@@ -733,6 +731,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     mutator.write_child_page(child_index, new_child, new_child_checksum);
                     original_page_number
                 } else {
+                    let aux_pn = accessor.aux_page_number();
                     let mut builder = BranchBuilder::new(
                         &self.mem,
                         &self.allocated,
@@ -743,13 +742,16 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     builder.replace_child(child_index, new_child, new_child_checksum);
                     let new_page = builder.build()?;
                     self.conditional_free(original_page_number);
-                    self.conditional_free(original_aux_pn);
+                    self.conditional_free(aux_pn);
                     new_page.get_page_number()
                 };
             return Ok((Subtree(result_page, DEFERRED), found));
         }
 
-        // Child is requesting to be merged with a sibling
+        // Child is requesting to be merged with a sibling.
+        // Load aux page now - needed for real checksums during rebuild.
+        let original_aux_pn = accessor.aux_page_number();
+        let original_aux_page = self.mem.get_page(original_aux_pn)?;
         let mut builder = BranchBuilder::new(
             &self.mem,
             &self.allocated,
