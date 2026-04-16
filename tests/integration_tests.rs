@@ -2386,3 +2386,136 @@ fn savepoint_restore_data_loss_stale_freed_pages() {
          table_a's B-tree became corrupted."
     );
 }
+
+// Regression test: restore_savepoint() after delete_table() must clear the in-memory
+// freed_pages list.
+//
+// When `delete_table()` is called, `TableTreeMut::delete_table()` walks the table's
+// B-tree and pushes every page number into `freed_pages`. If `restore_savepoint()` is
+// then called, it:
+//   1) resets the data tree root to the savepoint's root (which still references the
+//      pages we just pushed to `freed_pages`);
+//   2) clears the current transaction's `allocated_pages` tracker and frees those
+//      pages (in memory);
+//   3) repopulates `freed_pages` from `DATA_ALLOCATED_TABLE` for transactions after
+//      the savepoint.
+//
+// If step 3 simply extends `freed_pages` without first clearing the stale entries
+// pushed by `delete_table()`, those stale entries persist. On commit,
+// `store_data_freed_pages()` writes them to `DATA_FREED_TABLE`. A subsequent
+// `durable_commit()` calls `process_freed_pages()`, which frees the pages from the
+// allocator -- even though the committed tree root still references them. When those
+// freed pages are later reallocated (e.g. by another write transaction inserting into
+// a different table), they get overwritten, corrupting the restored table's B-tree
+// and silently losing data.
+//
+// This test triggers exactly that sequence (delete -> restore -> commit -> reuse) and
+// reads back the restored table to detect the corruption.
+#[test]
+fn savepoint_restore_after_delete_table_data_loss() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_a: TableDefinition<u64, &[u8]> = TableDefinition::new("table_a");
+    let table_b: TableDefinition<u64, &[u8]> = TableDefinition::new("table_b");
+
+    // Step 1: Populate table_a with committed data. These committed pages will be
+    // the ones that end up incorrectly freed by the bug.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut a = txn.open_table(table_a).unwrap();
+        for i in 0..200u64 {
+            let v = vec![0u8; 200];
+            a.insert(&i, v.as_slice()).unwrap();
+        }
+        // Also create table_b so it exists and we can easily reallocate pages into it
+        // later without creating-on-the-fly.
+        let mut b = txn.open_table(table_b).unwrap();
+        for i in 0..10u64 {
+            b.insert(&i, [0u8; 8].as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Step 2: In a new transaction, take a savepoint, delete table_a, then restore
+    // the savepoint. The deletion enqueues all of table_a's pages into
+    // `freed_pages`. The restore reverts the tree root but (buggy version) leaves
+    // those page numbers in `freed_pages`.
+    let mut txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+    txn.delete_table(table_a).unwrap();
+    txn.restore_savepoint(&savepoint).unwrap();
+    drop(savepoint);
+
+    // Commit: `store_data_freed_pages()` drains `freed_pages` into
+    // `DATA_FREED_TABLE[current_txn]`. The committed user root still references
+    // those pages -- they are now live AND queued for future freeing.
+    txn.commit().unwrap();
+
+    // Step 3: Empty durable commit. `durable_commit()` calls `process_freed_pages()`
+    // which actually frees the stale entries from the allocator.
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
+
+    // Step 4 + 5: Force the allocator to hand out the freed pages (step 4) and then
+    // read table_a back and verify every entry (step 5). With the bug present, any of
+    // these calls can fail with a storage error because the allocator is handing out
+    // pages that are still live in the restored tree; as soon as those pages are
+    // overwritten by new writes the restored tree is corrupted.
+    //
+    // Capture the whole sequence so we can surface a single "DATA LOSS" message no
+    // matter which step detects the corruption first.
+    let corruption = (|| -> Option<String> {
+        let txn = match db.begin_write() {
+            Ok(t) => t,
+            Err(e) => return Some(format!("begin_write failed: {e:?}")),
+        };
+        {
+            let mut b = match txn.open_table(table_b) {
+                Ok(b) => b,
+                Err(e) => return Some(format!("open_table(table_b) failed: {e:?}")),
+            };
+            for i in 0..1000u64 {
+                let v = vec![0xAAu8; 200];
+                if let Err(e) = b.insert(&i, v.as_slice()) {
+                    return Some(format!("insert({i}) into table_b failed: {e:?}"));
+                }
+            }
+        }
+        if let Err(e) = txn.commit() {
+            return Some(format!("commit after table_b inserts failed: {e:?}"));
+        }
+
+        let read_txn = match db.begin_read() {
+            Ok(t) => t,
+            Err(e) => return Some(format!("begin_read failed: {e:?}")),
+        };
+        let a = match read_txn.open_table(table_a) {
+            Ok(a) => a,
+            Err(e) => return Some(format!("open_table(table_a) failed: {e:?}")),
+        };
+        for i in 0..200u64 {
+            match a.get(&i) {
+                Ok(Some(v)) => {
+                    let v = v.value();
+                    if v.len() != 200 || v.iter().any(|x| *x != 0) {
+                        return Some(format!(
+                            "key {i}: value corrupted, prefix = {:x?}",
+                            &v[..20.min(v.len())]
+                        ));
+                    }
+                }
+                Ok(None) => return Some(format!("key {i}: missing")),
+                Err(e) => return Some(format!("key {i}: storage error {e:?}")),
+            }
+        }
+        None
+    })();
+    assert!(
+        corruption.is_none(),
+        "DATA LOSS detected after delete_table + restore_savepoint: {}. \
+         restore_savepoint() must clear the in-memory freed_pages list to avoid \
+         freeing pages that are still live in the restored tree.",
+        corruption.unwrap()
+    );
+}
