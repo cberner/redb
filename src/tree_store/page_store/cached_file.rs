@@ -1,12 +1,22 @@
 use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::lru_cache::LRUCache;
 use crate::{CacheStats, DatabaseError, Result, StorageBackend, StorageError};
+use std::mem::MaybeUninit;
 use std::ops::{Index, IndexMut};
 use std::slice::SliceIndex;
 #[cfg(feature = "cache_metrics")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+
+// Allocates an `Arc<[u8]>` in one step. `Arc::<[u8]>::from(vec![0; len])` would
+// allocate the Vec and then allocate a new Arc and memcpy into it.
+fn zero_filled_arc(len: usize) -> Arc<[u8]> {
+    let mut uninit: Arc<[MaybeUninit<u8>]> = Arc::new_uninit_slice(len);
+    Arc::get_mut(&mut uninit).unwrap().fill(MaybeUninit::new(0));
+    // SAFETY: every slot was just written to 0.
+    unsafe { uninit.assume_init() }
+}
 
 pub(super) struct WritablePage {
     buffer: Arc<Mutex<LRUWriteCache>>,
@@ -409,6 +419,15 @@ impl PagedCachedFile {
         Ok(buffer)
     }
 
+    // Like `read_direct`, but writes directly into an `Arc<[u8]>` instead of a
+    // `Vec<u8>` that is then copied into an `Arc`. The buffer is zero-filled
+    // because `StorageBackend::read` takes `&mut [u8]`.
+    fn read_direct_into_arc(&self, offset: u64, len: usize) -> Result<Arc<[u8]>> {
+        let mut arc = zero_filled_arc(len);
+        self.file.read(offset, Arc::get_mut(&mut arc).unwrap())?;
+        Ok(arc)
+    }
+
     // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
     // Doing so will not cause UB, but is a logic error.
     pub(super) fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<Arc<[u8]>> {
@@ -437,7 +456,7 @@ impl PagedCachedFile {
             }
         }
 
-        let buffer: Arc<[u8]> = self.read_direct(offset, len)?.into();
+        let buffer = self.read_direct_into_arc(offset, len)?;
         let cache_size = self.read_cache_bytes.fetch_add(len, Ordering::AcqRel);
         let mut write_lock = self.read_cache[cache_slot].write().unwrap();
         let cache_size = if let Some(replaced) = write_lock.insert(offset, buffer.clone()) {
@@ -580,9 +599,9 @@ impl PagedCachedFile {
             } else if overwrite {
                 #[cfg(feature = "cache_metrics")]
                 self.writes_hits.fetch_add(1, Ordering::AcqRel);
-                vec![0; len].into()
+                zero_filled_arc(len)
             } else {
-                self.read_direct(offset, len)?.into()
+                self.read_direct_into_arc(offset, len)?
             };
             lock.insert(offset, result);
             lock.take_value(offset).unwrap()
@@ -636,5 +655,18 @@ mod test {
         t2.join().unwrap();
         cached_file.invalidate_cache(0, 128);
         assert_eq!(cached_file.read_cache_bytes.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn zero_filled_arc_is_zero() {
+        let a = super::zero_filled_arc(128);
+        assert_eq!(a.len(), 128);
+        assert!(a.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn zero_filled_arc_empty() {
+        let a = super::zero_filled_arc(0);
+        assert!(a.is_empty());
     }
 }
