@@ -2836,3 +2836,34 @@ fn restore_savepoint_abort_after_ephemeral_drop() {
             .is_some()
     );
 }
+
+#[test]
+fn extract_if_next_then_next_back_panic() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let table_def: TableDefinition<u64, u64> = TableDefinition::new("t");
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        table.insert(&1u64, &10u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        let mut iter = table.extract_if(|_, _| true).unwrap();
+
+        let first = iter.next();
+        assert!(first.is_some());
+        let first = first.unwrap();
+        assert!(first.is_ok());
+
+        assert!(iter.next().is_none());
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| iter.next_back()));
+        assert!(result.is_ok());
+    }
+    txn.abort().unwrap();
+}
