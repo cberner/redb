@@ -2649,3 +2649,88 @@ fn restore_savepoint_partial_revert_commits_as_data_loss() {
     assert_eq!(k2, Some(2));
     assert_eq!(k3, Some(3));
 }
+
+// Regression test: restore_savepoint() calls
+// TransactionTracker::invalidate_savepoints_after(), which removes every
+// newer Savepoint id from the shared tracker's valid_savepoints map. That
+// mutation lives on the Database-wide TransactionTracker, not on the
+// WriteTransaction, so abort_inner() never rolls it back. If the user
+// aborts the transaction after a restore_savepoint() call, any Savepoint
+// they were holding that was created after the one they tried to restore is
+// permanently invalidated even though the database state is unchanged. A
+// subsequent attempt to restore that Savepoint (the documented way to
+// recover the snapshot's data) returns SavepointError::InvalidSavepoint,
+// and the snapshotted data is unreachable.
+#[test]
+fn restore_savepoint_aborted_invalidates_newer_savepoint_data_loss() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let tab: TableDefinition<u64, u64> = TableDefinition::new("t");
+
+    // sp1: empty snapshot (SavepointId = 1).
+    let txn = db.begin_write().unwrap();
+    let sp1 = txn.ephemeral_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    // Insert k1 durably.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut t = txn.open_table(tab).unwrap();
+        t.insert(1u64, 100u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // sp2: snapshot of {k1 = 100} (SavepointId = 2). The user is holding
+    // this as their rollback point.
+    let txn = db.begin_write().unwrap();
+    let sp2 = txn.ephemeral_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    // Exploratory restore to sp1 that the user decides to throw away. The
+    // abort is expected to leave the database and every Savepoint object
+    // exactly as they were before begin_write().
+    let mut txn = db.begin_write().unwrap();
+    txn.restore_savepoint(&sp1).unwrap();
+    txn.abort().unwrap();
+
+    // After the abort the committed state is unchanged: k1 is still there.
+    {
+        let rt = db.begin_read().unwrap();
+        let t = rt.open_table(tab).unwrap();
+        assert_eq!(t.get(1u64).unwrap().map(|v| v.value()), Some(100));
+    }
+
+    // The user deletes k1 durably and now wants to recover it by restoring
+    // sp2, exactly the use case ephemeral savepoints are designed for.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut t = txn.open_table(tab).unwrap();
+        t.remove(&1u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    let restore_result = txn.restore_savepoint(&sp2);
+    txn.abort().unwrap();
+
+    assert!(
+        restore_result.is_ok(),
+        "DATA LOSS: sp2 should still be a valid rollback point because the \
+         earlier restore_savepoint(sp1) was aborted, but it returned \
+         {restore_result:?}. invalidate_savepoints_after() removed sp2 from \
+         the shared TransactionTracker and abort_inner() does not restore \
+         it, so the data snapshotted by sp2 is now unreachable."
+    );
+
+    // If sp2 were still usable, k1 would be recoverable.
+    let mut txn = db.begin_write().unwrap();
+    txn.restore_savepoint(&sp2).unwrap();
+    txn.commit().unwrap();
+    let rt = db.begin_read().unwrap();
+    let t = rt.open_table(tab).unwrap();
+    assert_eq!(
+        t.get(1u64).unwrap().map(|v| v.value()),
+        Some(100),
+        "After restoring sp2, k1 should be recovered."
+    );
+}
