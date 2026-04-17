@@ -1505,9 +1505,14 @@ mod test {
 
         let mut tx = db.begin_write().unwrap();
         tx.set_two_phase_commit(true);
-        let savepoint5 = tx.ephemeral_savepoint().unwrap();
+        let _savepoint5 = tx.ephemeral_savepoint().unwrap();
         drop(savepoint3);
-        assert!(tx.restore_savepoint(&savepoint4).is_err());
+        // savepoint4 was invalidated by the restore_savepoint(savepoint3) call
+        // above, but that transaction was aborted, so the invalidation is
+        // reversed and savepoint4 is valid again. Restoring it here invalidates
+        // savepoint5 (which is newer), so the next transaction restores
+        // savepoint4 again rather than savepoint5.
+        tx.restore_savepoint(&savepoint4).unwrap();
         {
             tx.open_table(table_def).unwrap();
         }
@@ -1515,7 +1520,7 @@ mod test {
 
         let mut tx = db.begin_write().unwrap();
         tx.set_two_phase_commit(true);
-        tx.restore_savepoint(&savepoint5).unwrap();
+        tx.restore_savepoint(&savepoint4).unwrap();
         tx.set_durability(Durability::None).unwrap();
         {
             tx.open_table(table_def).unwrap();

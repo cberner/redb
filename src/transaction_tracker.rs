@@ -256,12 +256,31 @@ impl TransactionTracker {
             .contains_key(&id)
     }
 
-    pub(crate) fn invalidate_savepoints_after(&self, id: SavepointId) {
+    pub(crate) fn list_savepoints_after(&self, id: SavepointId) -> Vec<SavepointId> {
         self.state
             .lock()
             .unwrap()
             .valid_savepoints
-            .retain(|x, _| *x <= id);
+            .range((
+                std::ops::Bound::Excluded(id),
+                std::ops::Bound::Unbounded::<SavepointId>,
+            ))
+            .map(|(x, _)| *x)
+            .collect()
+    }
+
+    // Removes the given savepoints from the in-memory `valid_savepoints` map without touching
+    // live_read_transactions refs. The caller is responsible for making sure those refs are
+    // released by some other means: ephemeral `Savepoint::drop` or `deallocate_savepoint`
+    // (called via `delete_persistent_savepoint`) do that for their respective savepoint kinds.
+    //
+    // Savepoints that have already been removed (for example, by `deallocate_savepoint` earlier
+    // in the same transaction) are silently skipped.
+    pub(crate) fn invalidate_savepoints(&self, savepoints: impl IntoIterator<Item = SavepointId>) {
+        let mut state = self.state.lock().unwrap();
+        for id in savepoints {
+            state.valid_savepoints.remove(&id);
+        }
     }
 
     pub(crate) fn oldest_savepoint(&self) -> Option<(SavepointId, TransactionId)> {
