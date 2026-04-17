@@ -2565,3 +2565,37 @@ fn check_integrity_with_live_read_transaction() {
     drop(read_txn);
     assert!(db.check_integrity().unwrap());
 }
+
+// `WriteTransaction::restore_savepoint` resets the table tree via `TableNamespace::set_root`,
+// which asserts that `open_tables` is empty (src/transactions.rs:606). When a `Table` is
+// leaked with `std::mem::forget`, its borrow on the transaction ends but the `Drop` impl
+// that calls `close_table()` never runs, so `open_tables` keeps the table's name. The
+// next `restore_savepoint` call then hits the assertion and panics.
+//
+// `mem::forget` is safe Rust, so the library should not abort on it.
+#[test]
+#[should_panic(expected = "self.open_tables.is_empty()")]
+fn restore_savepoint_panics_when_table_leaked_with_mem_forget() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let def: TableDefinition<u64, u64> = TableDefinition::new("t");
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(def).unwrap();
+        table.insert(&1u64, &1u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    let sp = txn.ephemeral_savepoint().unwrap();
+
+    // Leaking the `Table` via safe-Rust `mem::forget` skips `Drop`, so the
+    // transaction's `open_tables` stays populated, yet the borrow on `txn`
+    // ends so we can call `&mut self` methods again.
+    let table = txn.open_table(def).unwrap();
+    std::mem::forget(table);
+
+    // Panics at src/transactions.rs:606 inside `TableNamespace::set_root`.
+    let _ = txn.restore_savepoint(&sp);
+}
