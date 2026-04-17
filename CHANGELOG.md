@@ -11,6 +11,8 @@
   transaction.
 * Fix a panic in `restore_savepoint()` when passed a `Savepoint` from a different `Database`.
   `SavepointError::InvalidSavepoint` is now returned instead.
+* Fix a bug where a transaction that created a persistent savepoint and was then
+  aborted could cause the database file to grow excessively, until the `Database` was dropped.
 * Improve read scaling to multiple threads. Around 15% speedup on some benchmarks.
 * Optimize cache usage, and general write performance. Around 1.5x speedup on some benchmarks.
 * Optimize memory usage
