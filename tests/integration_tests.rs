@@ -2565,3 +2565,83 @@ fn check_integrity_with_live_read_transaction() {
     drop(read_txn);
     assert!(db.check_integrity().unwrap());
 }
+
+// Regression test: restore_savepoint() must not partially revert in-memory state
+// when it cannot complete.
+#[test]
+fn restore_savepoint_partial_revert_commits_as_data_loss() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let tab: TableDefinition<u64, u64> = TableDefinition::new("t");
+
+    // k1 at the state we will restore to later.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut t = txn.open_table(tab).unwrap();
+        t.insert(1u64, 1u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Persistent savepoint PS1 captures the {k1} state.
+    let txn = db.begin_write().unwrap();
+    let ps1 = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    // k2 (durably committed).
+    let txn = db.begin_write().unwrap();
+    {
+        let mut t = txn.open_table(tab).unwrap();
+        t.insert(2u64, 2u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Persistent savepoint PS2 with id > PS1. Its existence is what makes the
+    // failed-restore path trigger.
+    let txn = db.begin_write().unwrap();
+    let _ps2 = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    // k3 (durably committed).
+    let txn = db.begin_write().unwrap();
+    {
+        let mut t = txn.open_table(tab).unwrap();
+        t.insert(3u64, 3u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Sanity: all three keys are durable before we start.
+    {
+        let rt = db.begin_read().unwrap();
+        let t = rt.open_table(tab).unwrap();
+        assert_eq!(t.get(1u64).unwrap().unwrap().value(), 1);
+        assert_eq!(t.get(2u64).unwrap().unwrap().value(), 2);
+        assert_eq!(t.get(3u64).unwrap().unwrap().value(), 3);
+    }
+
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None).unwrap();
+    let sp = txn.get_persistent_savepoint(ps1).unwrap();
+
+    let restore_result = txn.restore_savepoint(&sp);
+    assert!(
+        restore_result.is_err(),
+        "restore_savepoint() should fail because durability=None prevents deleting PS2"
+    );
+
+    // A caller that ignores the restore error and commits anyway durably
+    // persists the partially-reverted state.
+    txn.commit().unwrap();
+
+    // If restore_savepoint() were transactional on failure, k2 and k3 would
+    // still be present. With the bug, the in-memory tree root was reverted by
+    // the failing restore_savepoint() call and then durably committed, so k2
+    // and k3 are gone.
+    let rt = db.begin_read().unwrap();
+    let t = rt.open_table(tab).unwrap();
+    let k1 = t.get(1u64).unwrap().map(|v| v.value());
+    let k2 = t.get(2u64).unwrap().map(|v| v.value());
+    let k3 = t.get(3u64).unwrap().map(|v| v.value());
+    assert_eq!(k1, Some(1));
+    assert_eq!(k2, Some(2));
+    assert_eq!(k3, Some(3));
+}

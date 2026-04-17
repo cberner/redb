@@ -1100,6 +1100,14 @@ impl WriteTransaction {
         {
             return Err(SavepointError::InvalidSavepoint);
         }
+
+        if self.durability != InternalDurability::Immediate
+            && self
+                .list_persistent_savepoints()?
+                .any(|id| id > savepoint.get_id().0)
+        {
+            return Err(SavepointError::InvalidSavepoint);
+        }
         #[cfg(feature = "logging")]
         debug!(
             "Beginning savepoint restore (id={:?}) in transaction id={:?}",

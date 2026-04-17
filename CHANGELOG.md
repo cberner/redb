@@ -1,6 +1,10 @@
 # redb - Changelog
 
-## 4.0.1 - UNRELEASED
+## 4.1.0 - UNRELEASED
+* Fix bug where `restore_savepoint()` could fail with `SavepointError::InvalidSavepoint`, but
+  the savepoint would actually be partially applied, when called with a non-`Immediate` durability and
+  there are persistent savepoints newer than the restored one. The call now fails up front with
+  `SavepointError::ImmediateDurabilityRequired`.
 * Fix bug in `restore_savepoint()` where modifications made earlier in the transaction might
   not be reverted
 * Fix a bug where renaming a table that was already modified in the same transaction could cause
