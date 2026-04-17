@@ -529,12 +529,17 @@ impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
             && (left_entry > right_entry
                 || (left_entry == right_entry && (!self.include_left || !self.include_right)))
         {
+            self.close();
             return None;
         }
 
         loop {
             if !self.include_left {
-                match self.left.take()?.next(false, &self.manager, self.hint) {
+                let Some(current) = self.left.take() else {
+                    self.close();
+                    return None;
+                };
+                match current.next(false, &self.manager, self.hint) {
                     Ok(left) => {
                         self.left = left;
                     }
@@ -544,7 +549,10 @@ impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
                 }
             }
             // Return None if the next state is None
-            self.left.as_ref()?;
+            if self.left.is_none() {
+                self.close();
+                return None;
+            }
 
             if let (
                 Some(Leaf {
@@ -561,6 +569,7 @@ impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
                 && left_page.get_page_number() == right_page.get_page_number()
                 && (left_entry > right_entry || (left_entry == right_entry && !self.include_right))
             {
+                self.close();
                 return None;
             }
 
@@ -601,12 +610,17 @@ impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
             && (left_entry > right_entry
                 || (left_entry == right_entry && (!self.include_left || !self.include_right)))
         {
+            self.close();
             return None;
         }
 
         loop {
             if !self.include_right {
-                match self.right.take()?.next(true, &self.manager, self.hint) {
+                let Some(current) = self.right.take() else {
+                    self.close();
+                    return None;
+                };
+                match current.next(true, &self.manager, self.hint) {
                     Ok(right) => {
                         self.right = right;
                     }
@@ -616,7 +630,10 @@ impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
                 }
             }
             // Return None if the next state is None
-            self.right.as_ref()?;
+            if self.right.is_none() {
+                self.close();
+                return None;
+            }
 
             if let (
                 Some(Leaf {
@@ -633,6 +650,7 @@ impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
                 && left_page.get_page_number() == right_page.get_page_number()
                 && (left_entry > right_entry || (left_entry == right_entry && !self.include_left))
             {
+                self.close();
                 return None;
             }
 
