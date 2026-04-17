@@ -2649,3 +2649,190 @@ fn restore_savepoint_partial_revert_commits_as_data_loss() {
     assert_eq!(k2, Some(2));
     assert_eq!(k3, Some(3));
 }
+
+// Regression test for a page leak when a transaction that attempts to
+// restore_savepoint() an older savepoint is aborted instead of committed.
+#[test]
+fn restore_savepoint_abort_unbounded_leak() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let table: TableDefinition<u64, u64> = TableDefinition::new("data");
+
+    // Warm up the persistent-savepoint system tables so the baseline is stable.
+    {
+        let txn = db.begin_write().unwrap();
+        let id = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        txn.delete_persistent_savepoint(id).unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Populate some data so that later writes have something to copy-on-write.
+    {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(table).unwrap();
+            for i in 0..50u64 {
+                t.insert(i, i).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    // Drain pending freed pages so the baseline is stable.
+    for _ in 0..3 {
+        db.begin_write().unwrap().commit().unwrap();
+    }
+    let txn = db.begin_write().unwrap();
+    let baseline = txn.stats().unwrap().allocated_pages();
+    txn.abort().unwrap();
+
+    // Create an older persistent savepoint that will be restored (then aborted).
+    let older = {
+        let txn = db.begin_write().unwrap();
+        let id = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+        id
+    };
+
+    // One modifying write between the two savepoints, so the newer savepoint
+    // references a different tree root than the older one.
+    {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(table).unwrap();
+            t.insert(0, u64::MAX).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    // The newer persistent savepoint: restore_savepoint(older) tries to
+    // invalidate this one, and the abort leaves it as a ghost.
+    let newer = {
+        let txn = db.begin_write().unwrap();
+        let id = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+        id
+    };
+
+    {
+        let mut txn = db.begin_write().unwrap();
+        let sp = txn.get_persistent_savepoint(older).unwrap();
+        txn.restore_savepoint(&sp).unwrap();
+        drop(sp);
+        txn.abort().unwrap();
+    }
+
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_persistent_savepoint(older).unwrap();
+        txn.commit().unwrap();
+    }
+
+    const ITERATIONS: u64 = 100;
+    for round in 0..ITERATIONS {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(table).unwrap();
+            t.insert(0, round).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    drop(db);
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    {
+        let mut txn = db.begin_write().unwrap();
+        let sp = txn.get_persistent_savepoint(newer).unwrap();
+        txn.restore_savepoint(&sp).unwrap();
+        drop(sp);
+        txn.commit().unwrap();
+    }
+    {
+        let txn = db.begin_write().unwrap();
+        txn.delete_persistent_savepoint(newer).unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Drain pending freed pages so the final measurement is stable.
+    for _ in 0..3 {
+        db.begin_write().unwrap().commit().unwrap();
+    }
+    let txn = db.begin_write().unwrap();
+    let after = txn.stats().unwrap().allocated_pages();
+    txn.abort().unwrap();
+
+    assert_eq!(
+        baseline,
+        after,
+        "After {} iterations of insert+commit between an aborted \
+         restore_savepoint and the next restore_savepoint, page usage grew \
+         from {} to {} ({} pages leaked). The leak per iteration is independent \
+         of N, so running N iterations leaks O(N) pages.",
+        ITERATIONS,
+        baseline,
+        after,
+        after.saturating_sub(baseline),
+    );
+}
+
+#[test]
+fn restore_savepoint_abort_after_ephemeral_drop() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let table: TableDefinition<u64, u64> = TableDefinition::new("data");
+
+    {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(table).unwrap();
+            for i in 0..20u64 {
+                t.insert(i, i).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    let older = {
+        let txn = db.begin_write().unwrap();
+        let sp = txn.ephemeral_savepoint().unwrap();
+        txn.commit().unwrap();
+        sp
+    };
+
+    let newer = {
+        let txn = db.begin_write().unwrap();
+        let sp = txn.ephemeral_savepoint().unwrap();
+        txn.commit().unwrap();
+        sp
+    };
+
+    {
+        let mut txn = db.begin_write().unwrap();
+        txn.restore_savepoint(&older).unwrap();
+        drop(newer);
+        txn.abort().unwrap();
+    }
+
+    {
+        let mut txn = db.begin_write().unwrap();
+        txn.restore_savepoint(&older).unwrap();
+        txn.commit().unwrap();
+    }
+    drop(older);
+    for _ in 0..3 {
+        db.begin_write().unwrap().commit().unwrap();
+    }
+
+    assert!(
+        db.begin_read()
+            .unwrap()
+            .open_table(table)
+            .unwrap()
+            .get(&0u64)
+            .unwrap()
+            .is_some()
+    );
+}

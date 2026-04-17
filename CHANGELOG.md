@@ -19,6 +19,11 @@
   aborted could cause the database file to grow excessively, until the `Database` was dropped.
 * Fix a panic in `check_integrity()` when called while another transaction is still alive.
   The new `DatabaseError::TransactionInProgress` variant is now returned instead.
+* Fix a bug where aborting a transaction that called `restore_savepoint()` with a savepoint
+  when a newer savepoint existed could cause database space to be leaked.
+* Fix a bug where aborting a transaction that called `restore_savepoint()` would leave more
+  recent savepoints invalid.
+  when a newer savepoint existed could cause database space to be leaked.
 * Improve read scaling to multiple threads. Around 15% speedup on some benchmarks.
 * Optimize cache usage, and general write performance. Around 1.5x speedup on some benchmarks.
 * Optimize memory usage

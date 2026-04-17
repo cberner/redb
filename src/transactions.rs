@@ -21,7 +21,7 @@ use crate::{
 use log::{debug, warn};
 use std::borrow::Borrow;
 use std::cmp::min;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::mem::size_of;
@@ -775,6 +775,8 @@ pub struct WriteTransaction {
     // it needs to release the savepoint's TransactionTracker state.
     created_persistent_savepoints: Mutex<HashSet<(SavepointId, TransactionId)>>,
     deleted_persistent_savepoints: Mutex<Vec<(SavepointId, TransactionId)>>,
+    // Savepoints that restore_savepoint() has marked as invalidated within this transaction.
+    invalidated_savepoints: Mutex<BTreeSet<SavepointId>>,
 }
 
 impl WriteTransaction {
@@ -807,6 +809,7 @@ impl WriteTransaction {
             shrink_policy: ShrinkPolicy::Default,
             created_persistent_savepoints: Mutex::new(Default::default()),
             deleted_persistent_savepoints: Mutex::new(vec![]),
+            invalidated_savepoints: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -1099,6 +1102,11 @@ impl WriteTransaction {
         if !self
             .transaction_tracker
             .is_valid_savepoint(savepoint.get_id())
+            || self
+                .invalidated_savepoints
+                .lock()
+                .unwrap()
+                .contains(&savepoint.get_id())
         {
             return Err(SavepointError::InvalidSavepoint);
         }
@@ -1176,10 +1184,18 @@ impl WriteTransaction {
             }
         }
 
-        // 3) Invalidate all savepoints that are newer than the one being applied to prevent the user
-        // from later trying to restore a savepoint "on another timeline"
-        self.transaction_tracker
-            .invalidate_savepoints_after(savepoint.get_id());
+        // 3) Mark all savepoints newer than the restored one as invalidated for this
+        // transaction, to prevent the user from later trying to restore a savepoint
+        // "on another timeline". The invalidation is purely per-transaction state -
+        // the shared `valid_savepoints` map is only updated if/when commit_inner()
+        // runs, so an abort implicitly reverts the invalidation by dropping this set.
+        let invalidated = self
+            .transaction_tracker
+            .list_savepoints_after(savepoint.get_id());
+        self.invalidated_savepoints
+            .lock()
+            .unwrap()
+            .extend(invalidated);
         for persistent_savepoint in self.list_persistent_savepoints()? {
             if persistent_savepoint > savepoint.get_id().0 {
                 self.delete_persistent_savepoint(persistent_savepoint)?;
@@ -1422,6 +1438,16 @@ impl WriteTransaction {
             self.transaction_tracker
                 .deallocate_savepoint(*savepoint, *transaction);
         }
+        // Apply any savepoint invalidation that restore_savepoint() deferred to commit
+        // time. For persistent savepoints, deallocate_savepoint above has already
+        // removed them from valid_savepoints and decremented live_read_transactions.
+        // For ephemeral savepoints, only the valid_savepoints entry is removed here;
+        // the live_read_transactions ref stays owned by the user's Savepoint handle
+        // until it is dropped.
+        self.transaction_tracker
+            .invalidate_savepoints(std::mem::take(
+                &mut *self.invalidated_savepoints.lock().unwrap(),
+            ));
 
         assert!(
             self.system_tables
@@ -1554,6 +1580,12 @@ impl WriteTransaction {
             self.transaction_tracker
                 .deallocate_savepoint(*savepoint_id, *transaction_id);
         }
+        // restore_savepoint() only recorded the invalidated savepoints in the
+        // per-transaction `invalidated_savepoints` set without touching the shared
+        // `valid_savepoints` map, so dropping the set is sufficient to undo that
+        // invalidation. The SAVEPOINT_TABLE changes are reverted below by
+        // rollback_uncommitted_writes().
+        self.invalidated_savepoints.lock().unwrap().clear();
         self.mem.rollback_uncommitted_writes()?;
         #[cfg(feature = "logging")]
         debug!("Finished abort of transaction id={:?}", self.transaction_id);
