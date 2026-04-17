@@ -211,6 +211,8 @@ pub enum DatabaseError {
     RepairAborted,
     /// The database file is in an old file format and must be manually upgraded
     UpgradeRequired(u8),
+    /// A transaction is still in-progress
+    TransactionInProgress,
     /// Error from underlying storage
     Storage(StorageError),
 }
@@ -221,6 +223,7 @@ impl From<DatabaseError> for Error {
             DatabaseError::DatabaseAlreadyOpen => Error::DatabaseAlreadyOpen,
             DatabaseError::RepairAborted => Error::RepairAborted,
             DatabaseError::UpgradeRequired(x) => Error::UpgradeRequired(x),
+            DatabaseError::TransactionInProgress => Error::TransactionInProgress,
             DatabaseError::Storage(storage) => storage.into(),
         }
     }
@@ -252,6 +255,12 @@ impl Display for DatabaseError {
             }
             DatabaseError::DatabaseAlreadyOpen => {
                 write!(f, "Database already open. Cannot acquire lock.")
+            }
+            DatabaseError::TransactionInProgress => {
+                write!(
+                    f,
+                    "A transaction is still in progress. Operation cannot be performed."
+                )
             }
             DatabaseError::Storage(storage) => storage.fmt(f),
         }
