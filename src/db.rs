@@ -557,12 +557,14 @@ impl Database {
     /// externally to redb, or that a redb bug may have left the database in a corrupted state.
     ///
     /// Returns `Ok(true)` if the database passed integrity checks; `Ok(false)` if it failed but was repaired,
-    /// and `Err(Corrupted)` if the check failed and the file could not be repaired
+    /// and `Err(Corrupted)` if the check failed and the file could not be repaired.
+    ///
+    /// Returns [`DatabaseError::TransactionInProgress`] if any read or write transaction is still
+    /// alive when this method is called.
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
         let allocator_hash = self.mem.allocator_hash();
-        let mut was_clean = Arc::get_mut(&mut self.mem)
-            .unwrap()
-            .clear_cache_and_reload()?;
+        let mem = Arc::get_mut(&mut self.mem).ok_or(DatabaseError::TransactionInProgress)?;
+        let mut was_clean = mem.clear_cache_and_reload()?;
 
         let old_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
 

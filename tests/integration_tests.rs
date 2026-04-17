@@ -2534,3 +2534,34 @@ fn persistent_savepoint_abort_unbounded_leak() {
         after.saturating_sub(baseline),
     );
 }
+
+#[test]
+fn check_integrity_with_live_read_transaction() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10u64 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Hold a ReadTransaction, which keeps an Arc<TransactionalMemory> alive.
+    // Note: ReadTransaction does not borrow the Database, so we can still call
+    // `&mut self` methods on `db` while `read_txn` is alive.
+    let read_txn = db.begin_read().unwrap();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| db.check_integrity()));
+    assert!(result.is_ok(), "check_integrity() should not panic");
+    assert!(matches!(
+        result.unwrap(),
+        Err(DatabaseError::TransactionInProgress)
+    ));
+
+    // After the transaction is dropped, check_integrity() should succeed.
+    drop(read_txn);
+    assert!(db.check_integrity().unwrap());
+}
