@@ -278,6 +278,12 @@ pub enum SavepointError {
     /// Savepoints become invalid when an older savepoint is restored after it was created,
     /// and savepoints cannot be created if the transaction is "dirty" (any tables have been opened)
     InvalidSavepoint,
+    /// The operation requires the transaction's durability to be [`crate::Durability::Immediate`].
+    ///
+    /// Returned by operations that must be able to modify persistent savepoints, such as
+    /// creating or deleting a persistent savepoint, or restoring an older savepoint while
+    /// newer persistent savepoints exist that would need to be deleted.
+    ImmediateDurabilityRequired,
     /// Error from underlying storage
     Storage(StorageError),
 }
@@ -286,6 +292,7 @@ impl From<SavepointError> for Error {
     fn from(err: SavepointError) -> Error {
         match err {
             SavepointError::InvalidSavepoint => Error::InvalidSavepoint,
+            SavepointError::ImmediateDurabilityRequired => Error::ImmediateDurabilityRequired,
             SavepointError::Storage(storage) => storage.into(),
         }
     }
@@ -302,6 +309,12 @@ impl Display for SavepointError {
         match self {
             SavepointError::InvalidSavepoint => {
                 write!(f, "Savepoint is invalid or cannot be created.")
+            }
+            SavepointError::ImmediateDurabilityRequired => {
+                write!(
+                    f,
+                    "Operation requires Durability::Immediate for the current transaction."
+                )
             }
             SavepointError::Storage(storage) => storage.fmt(f),
         }
@@ -500,6 +513,8 @@ pub enum Error {
     /// Savepoints become invalid when an older savepoint is restored after it was created,
     /// and savepoints cannot be created if the transaction is "dirty" (any tables have been opened)
     InvalidSavepoint,
+    /// A savepoint operation requires [`crate::Durability::Immediate`] for the transaction.
+    ImmediateDurabilityRequired,
     /// [`crate::RepairSession::abort`] was called.
     RepairAborted,
     /// A persistent savepoint was modified
@@ -661,6 +676,12 @@ impl Display for Error {
             }
             Error::InvalidSavepoint => {
                 write!(f, "Savepoint is invalid or cannot be created.")
+            }
+            Error::ImmediateDurabilityRequired => {
+                write!(
+                    f,
+                    "Operation requires Durability::Immediate for the current transaction."
+                )
             }
             Error::ReadTransactionStillInUse(_) => {
                 write!(f, "Transaction still in use")

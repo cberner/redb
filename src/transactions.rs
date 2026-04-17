@@ -946,11 +946,12 @@ impl WriteTransaction {
     /// Note that while a savepoint exists, pages that become unused after it was created are not freed.
     /// Therefore, the lifetime of a savepoint should be minimized.
     ///
-    /// Returns `[SavepointError::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened)
-    /// or if the transaction's durability is less than `[Durability::Immediate]`
+    /// Returns `[SavepointError::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened),
+    /// or `[SavepointError::ImmediateDurabilityRequired]` if the transaction's durability is less than
+    /// `[Durability::Immediate]`
     pub fn persistent_savepoint(&self) -> Result<u64, SavepointError> {
         if self.durability != InternalDurability::Immediate {
-            return Err(SavepointError::InvalidSavepoint);
+            return Err(SavepointError::ImmediateDurabilityRequired);
         }
 
         let mut savepoint = self.ephemeral_savepoint()?;
@@ -1008,10 +1009,11 @@ impl WriteTransaction {
     /// Note that if the transaction is `abort()`'ed this deletion will be rolled back.
     ///
     /// Returns `true` if the savepoint existed
-    /// Returns `[SavepointError::InvalidSavepoint`] if the transaction's durability is less than `[Durability::Immediate]`
+    /// Returns `[SavepointError::ImmediateDurabilityRequired]` if the transaction's durability
+    /// is less than `[Durability::Immediate]`
     pub fn delete_persistent_savepoint(&self, id: u64) -> Result<bool, SavepointError> {
         if self.durability != InternalDurability::Immediate {
-            return Err(SavepointError::InvalidSavepoint);
+            return Err(SavepointError::ImmediateDurabilityRequired);
         }
         let mut system_tables = self.system_tables.lock().unwrap();
         let mut table = system_tables.open_system_table(self, SAVEPOINT_TABLE)?;
@@ -1106,7 +1108,7 @@ impl WriteTransaction {
                 .list_persistent_savepoints()?
                 .any(|id| id > savepoint.get_id().0)
         {
-            return Err(SavepointError::InvalidSavepoint);
+            return Err(SavepointError::ImmediateDurabilityRequired);
         }
         #[cfg(feature = "logging")]
         debug!(

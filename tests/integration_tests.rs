@@ -2624,8 +2624,12 @@ fn restore_savepoint_partial_revert_commits_as_data_loss() {
 
     let restore_result = txn.restore_savepoint(&sp);
     assert!(
-        restore_result.is_err(),
-        "restore_savepoint() should fail because durability=None prevents deleting PS2"
+        matches!(
+            restore_result,
+            Err(SavepointError::ImmediateDurabilityRequired)
+        ),
+        "restore_savepoint() should fail with ImmediateDurabilityRequired when \
+         durability != Immediate and newer persistent savepoints exist, got: {restore_result:?}"
     );
 
     // A caller that ignores the restore error and commits anyway durably
