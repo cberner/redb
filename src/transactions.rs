@@ -770,8 +770,10 @@ pub struct WriteTransaction {
     two_phase_commit: bool,
     shrink_policy: ShrinkPolicy,
     quick_repair: bool,
-    // Persistent savepoints created during this transaction
-    created_persistent_savepoints: Mutex<HashSet<SavepointId>>,
+    // Persistent savepoints created during this transaction. The tuple is
+    // (savepoint id, read-transaction id) so that abort_inner() has everything
+    // it needs to release the savepoint's TransactionTracker state.
+    created_persistent_savepoints: Mutex<HashSet<(SavepointId, TransactionId)>>,
     deleted_persistent_savepoints: Mutex<Vec<(SavepointId, TransactionId)>>,
 }
 
@@ -970,7 +972,7 @@ impl WriteTransaction {
         self.created_persistent_savepoints
             .lock()
             .unwrap()
-            .insert(savepoint.get_id());
+            .insert((savepoint.get_id(), savepoint.get_transaction_id()));
 
         Ok(savepoint.get_id().0)
     }
@@ -1533,18 +1535,14 @@ impl WriteTransaction {
             .unwrap()
             .table_tree
             .clear_root_updates_and_close();
-        for savepoint in self.created_persistent_savepoints.lock().unwrap().iter() {
-            match self.delete_persistent_savepoint(savepoint.0) {
-                Ok(_) => {}
-                Err(err) => match err {
-                    SavepointError::InvalidSavepoint => {
-                        unreachable!();
-                    }
-                    SavepointError::Storage(storage_err) => {
-                        return Err(storage_err);
-                    }
-                },
-            }
+        // Release any persistent savepoints that were created during this transaction.
+        // The corresponding SAVEPOINT_TABLE / NEXT_SAVEPOINT_TABLE writes are rolled
+        // back below by rollback_uncommitted_writes()
+        for (savepoint_id, transaction_id) in
+            self.created_persistent_savepoints.lock().unwrap().iter()
+        {
+            self.transaction_tracker
+                .deallocate_savepoint(*savepoint_id, *transaction_id);
         }
         self.mem.rollback_uncommitted_writes()?;
         #[cfg(feature = "logging")]

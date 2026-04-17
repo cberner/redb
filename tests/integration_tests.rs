@@ -2449,3 +2449,88 @@ fn delete_table_panic_after_modification() {
     let commit_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| txn.commit()));
     assert!(commit_result.is_ok() && commit_result.as_ref().unwrap().is_ok());
 }
+
+// Regression test for an unbounded page leak when a persistent savepoint is created in
+// a write transaction and then the transaction is aborted.
+#[test]
+fn persistent_savepoint_abort_unbounded_leak() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let table: TableDefinition<u64, u64> = TableDefinition::new("data");
+
+    // Warm up the persistent-savepoint system tables so that later measurements
+    // reflect only the effect of the aborted savepoint, not one-time initialization.
+    {
+        let txn = db.begin_write().unwrap();
+        let id = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        txn.delete_persistent_savepoint(id).unwrap();
+        txn.commit().unwrap();
+    }
+
+    // Populate some data so that subsequent updates have something to copy-on-write.
+    {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(table).unwrap();
+            for i in 0..20u64 {
+                t.insert(i, i).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    // Drain any pending freed pages so the baseline is stable.
+    for _ in 0..3 {
+        db.begin_write().unwrap().commit().unwrap();
+    }
+    let txn = db.begin_write().unwrap();
+    let baseline = txn.stats().unwrap().allocated_pages();
+    txn.abort().unwrap();
+
+    // Repeat: create persistent savepoint, abort, do one modifying write, drain.
+    // Each iteration permanently leaks pages because the aborted savepoint's
+    // TransactionTracker state is never cleaned up.
+    const ITERATIONS: u64 = 20;
+    for round in 0..ITERATIONS {
+        // Create a persistent savepoint and abort the transaction.
+        {
+            let txn = db.begin_write().unwrap();
+            let _id = txn.persistent_savepoint().unwrap();
+            txn.abort().unwrap();
+        }
+
+        // Perform a modification. Its freed pages cannot be reclaimed because the
+        // ghost savepoint from the aborted transaction still pins an old
+        // oldest_live_read_transaction value.
+        {
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(table).unwrap();
+                t.insert(0, round).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        for _ in 0..3 {
+            db.begin_write().unwrap().commit().unwrap();
+        }
+    }
+
+    let txn = db.begin_write().unwrap();
+    let after = txn.stats().unwrap().allocated_pages();
+    txn.abort().unwrap();
+
+    assert_eq!(
+        baseline,
+        after,
+        "After {} iterations of persistent_savepoint+abort+modify, page usage grew \
+         from {} to {} ({} pages leaked). Because the leak per iteration is \
+         independent of N, running N iterations leaks O(N) pages.",
+        ITERATIONS,
+        baseline,
+        after,
+        after.saturating_sub(baseline),
+    );
+}
