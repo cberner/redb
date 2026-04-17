@@ -948,7 +948,8 @@ impl Database {
             let savepoint = match txn.get_persistent_savepoint(id) {
                 Ok(savepoint) => savepoint,
                 Err(err) => match err {
-                    SavepointError::InvalidSavepoint => unreachable!(),
+                    SavepointError::InvalidSavepoint
+                    | SavepointError::ImmediateDurabilityRequired => unreachable!(),
                     SavepointError::Storage(storage) => {
                         return Err(storage.into());
                     }
