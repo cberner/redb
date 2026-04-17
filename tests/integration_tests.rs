@@ -2388,6 +2388,28 @@ fn savepoint_restore_data_loss_stale_freed_pages() {
 }
 
 #[test]
+fn restore_savepoint_from_foreign_database_panics() {
+    let tmpfile1 = create_tempfile();
+    let tmpfile2 = create_tempfile();
+    let db1 = Database::create(tmpfile1.path()).unwrap();
+    let db2 = Database::create(tmpfile2.path()).unwrap();
+
+    let txn1 = db1.begin_write().unwrap();
+    let foreign_savepoint = txn1.ephemeral_savepoint().unwrap();
+    txn1.commit().unwrap();
+
+    let mut txn2 = db2.begin_write().unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        txn2.restore_savepoint(&foreign_savepoint)
+    }));
+    assert!(result.is_ok());
+    assert!(matches!(
+        result.unwrap(),
+        Err(SavepointError::InvalidSavepoint)
+    ));
+}
+
+#[test]
 fn delete_table_panic_after_modification() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();

@@ -1087,11 +1087,10 @@ impl WriteTransaction {
     ///
     /// Calling this method invalidates all [`Savepoint`]s created after savepoint
     pub fn restore_savepoint(&mut self, savepoint: &Savepoint) -> Result<(), SavepointError> {
-        // Ensure that user does not try to restore a Savepoint that is from a different Database
-        assert_eq!(
-            std::ptr::from_ref(self.transaction_tracker.as_ref()),
-            savepoint.db_address()
-        );
+        // Reject a Savepoint that is from a different Database
+        if std::ptr::from_ref(self.transaction_tracker.as_ref()) != savepoint.db_address() {
+            return Err(SavepointError::InvalidSavepoint);
+        }
 
         if !self
             .transaction_tracker

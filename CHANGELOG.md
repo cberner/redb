@@ -9,6 +9,8 @@
   transaction could cause the table to become corrupted in a future transaction.
 * Fix a panic when `delete_table()` was called on a table that had been modified in the same
   transaction.
+* Fix a panic in `restore_savepoint()` when passed a `Savepoint` from a different `Database`.
+  `SavepointError::InvalidSavepoint` is now returned instead.
 * Improve read scaling to multiple threads. Around 15% speedup on some benchmarks.
 * Optimize cache usage, and general write performance. Around 1.5x speedup on some benchmarks.
 * Optimize memory usage
