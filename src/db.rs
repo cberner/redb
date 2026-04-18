@@ -121,9 +121,11 @@ pub struct TableDefinition<'a, K: Key + 'static, V: Value + 'static> {
 impl<'a, K: Key + 'static, V: Value + 'static> TableDefinition<'a, K, V> {
     /// Construct a new table with given `name`
     ///
-    /// ## Invariant
+    /// # Panics
     ///
-    /// `name` must not be empty.
+    /// Panics if `name` is empty. When `name` is a non-empty string literal
+    /// this is checked at compile time, but callers that build the name at
+    /// runtime are responsible for ensuring it is non-empty.
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
         Self {
@@ -177,6 +179,13 @@ pub struct MultimapTableDefinition<'a, K: Key + 'static, V: Key + 'static> {
 }
 
 impl<'a, K: Key + 'static, V: Key + 'static> MultimapTableDefinition<'a, K, V> {
+    /// Construct a new multimap table with given `name`
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` is empty. When `name` is a non-empty string literal
+    /// this is checked at compile time, but callers that build the name at
+    /// runtime are responsible for ensuring it is non-empty.
     pub const fn new(name: &'a str) -> Self {
         assert!(!name.is_empty());
         Self {
