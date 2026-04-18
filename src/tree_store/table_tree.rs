@@ -243,9 +243,24 @@ impl TableTreeMut<'_> {
     }
 
     pub(crate) fn set_root(&mut self, root: Option<BtreeHeader>) {
-        self.tree.set_root(root);
+        // Exhaustive destructure: any new field added to `TableTreeMut` must be
+        // explicitly considered here and categorized as either timeline-dependent
+        // (needs reset alongside the root) or not. Missing a timeline-dependent
+        // field has caused data-corruption bugs in the past (see 4550d5a,
+        // 19f77ab). Timeline-dependent shared state (freed_pages, allocated_pages)
+        // is owned by the enclosing namespace and reset there; see
+        // `TableNamespace::reset_to_savepoint_root`.
+        let Self {
+            tree,
+            guard: _,
+            mem: _,
+            pending_table_updates,
+            freed_pages: _,
+            allocated_pages: _,
+        } = self;
+        tree.set_root(root);
         // Pending updates were staged for the old root and are invalid for the new one
-        self.pending_table_updates.clear();
+        pending_table_updates.clear();
     }
 
     #[cfg_attr(not(debug_assertions), expect(dead_code))]

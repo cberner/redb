@@ -602,9 +602,39 @@ impl TableNamespace<'_> {
         }
     }
 
-    fn set_root(&mut self, root: Option<BtreeHeader>) {
-        assert!(self.open_tables.is_empty());
-        self.table_tree.set_root(root);
+    /// Reset all transaction-local state that tracks the "current timeline" back
+    /// to an earlier root, for use by `WriteTransaction::restore_savepoint`.
+    /// Returns the set of pages that were allocated by operations on the newer
+    /// timeline; the caller is responsible for freeing them.
+    ///
+    /// Every previously-"restore_savepoint() forgot to clear X" bug (e.g. 19f77ab
+    /// for `freed_pages`, 4550d5a for `pending_table_updates`) traced back to the
+    /// author reaching into individual fields piecemeal and missing one. The
+    /// explicit `Self { .. }` destructure below turns that class of bug into a
+    /// compile-time error: adding a new field to `TableNamespace` forces the
+    /// developer to decide, right here, whether it is timeline-dependent.
+    fn reset_to_savepoint_root(&mut self, root: Option<BtreeHeader>) -> HashSet<PageNumber> {
+        let Self {
+            open_tables,
+            allocated_pages,
+            freed_pages,
+            table_tree,
+        } = self;
+        // Table handles must be closed before a savepoint can be restored; the
+        // caller already enforces this by taking `&mut WriteTransaction`, which
+        // prevents any outstanding `Table` borrow, but we re-assert here so the
+        // invariant is local to this function.
+        assert!(open_tables.is_empty());
+        // `TableTreeMut::set_root` also resets its own timeline-dependent state
+        // (`pending_table_updates`); see the matching destructure there.
+        table_tree.set_root(root);
+        // The staged data-freed list reflected copy-on-write activity on the
+        // newer timeline; those entries refer to the old root and would cause
+        // pages still reachable from the restored root to be freed on commit.
+        freed_pages.lock().unwrap().clear();
+        // Take the newer-timeline allocations out of the tracker and hand them
+        // back so the caller can return them to the allocator.
+        allocated_pages.lock().unwrap().reset()
     }
 
     #[track_caller]
@@ -1193,13 +1223,14 @@ impl WriteTransaction {
         //    and new roots
         // 3) update the system tree to remove invalid persistent savepoints.
 
-        // 1) restore the table tree
-        {
-            self.tables
-                .lock()
-                .unwrap()
-                .set_root(savepoint.get_user_root());
-        }
+        // 1) restore the table tree to the savepoint root, and reset every
+        // piece of transaction-local timeline-dependent state in lockstep.
+        // Returns pages that were allocated on the newer timeline (now unreachable).
+        let newer_timeline_allocated = self
+            .tables
+            .lock()
+            .unwrap()
+            .reset_to_savepoint_root(savepoint.get_user_root());
 
         // 1a) purge all transactions that happened after the savepoint from the data freed tree
         let txn_id = savepoint.get_transaction_id().next().raw_id();
@@ -1216,16 +1247,16 @@ impl WriteTransaction {
             // No need to process the system freed table, because it only rolls forward
         }
 
-        // 2) queue all pages that became unreachable
+        // 2) return the newer-timeline allocations to the allocator, then rebuild
+        // the data-freed list from the savepoint's historical allocation records.
         {
-            let tables = self.tables.lock().unwrap();
-            for page in tables.allocated_pages.lock().unwrap().reset() {
+            for page in newer_timeline_allocated {
                 debug_assert!(self.mem.uncommitted(page));
                 debug_assert!(self.mem.is_allocated(page));
                 self.mem.free(page, &mut PageTrackerPolicy::Ignore);
             }
+            let tables = self.tables.lock().unwrap();
             let mut data_freed_pages = tables.freed_pages.lock().unwrap();
-            data_freed_pages.clear();
             let mut system_tables = self.system_tables.lock().unwrap();
             let data_allocated = system_tables.open_system_table(self, DATA_ALLOCATED_TABLE)?;
             let lower = TransactionIdWithPagination {
