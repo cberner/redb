@@ -2867,3 +2867,36 @@ fn extract_if_next_then_next_back_panic() {
     }
     txn.abort().unwrap();
 }
+
+#[test]
+fn multimap_value_next_back_does_not_update_len() {
+    const TABLE: MultimapTableDefinition<u32, u32> = MultimapTableDefinition::new("m");
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_multimap_table(TABLE).unwrap();
+        for i in 0..5u32 {
+            table.insert(&1u32, &i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_multimap_table(TABLE).unwrap();
+    let mut iter = table.get(&1u32).unwrap();
+    assert_eq!(iter.len(), 5);
+    assert!(!iter.is_empty());
+
+    let _ = iter.next_back().unwrap().unwrap();
+    assert_eq!(iter.len(), 4);
+
+    for expected_remaining in (0..4).rev() {
+        iter.next_back().unwrap().unwrap();
+        assert_eq!(iter.len(), expected_remaining as u64);
+    }
+    assert!(iter.is_empty());
+    assert!(iter.next_back().is_none());
+}
