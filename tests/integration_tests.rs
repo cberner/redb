@@ -1823,7 +1823,7 @@ fn tree_balance() {
     assert!(height <= expected, "height={height} expected={expected}",);
 }
 
-#[cfg(not(target_os = "wasi"))] // TODO remove this line once WASI gets flock
+#[cfg(not(target_os = "wasi"))]
 #[test]
 fn database_lock() {
     let tmpfile = create_tempfile();
