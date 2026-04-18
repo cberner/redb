@@ -2868,33 +2868,25 @@ fn extract_if_next_then_next_back_panic() {
     txn.abort().unwrap();
 }
 
-// Data loss bug: the persistent-savepoint id counter is persisted with semantics
-// that are inconsistent with how it is consumed in memory, which causes the id
-// counter to skip one value on every database reopen.
+// Regression test for the persistent-savepoint id counter skipping one value on
+// every database reopen.
 //
 // persistent_savepoint() stores `savepoint.get_id().next()` in NEXT_SAVEPOINT_TABLE,
 // i.e. the next id that should be allocated. On reopen, Database::open() reads that
-// value and calls TransactionTracker::restore_savepoint_counter_state(), which stores
-// it directly in State::next_savepoint_id. But the in-memory convention used by
-// TransactionTracker::allocate_savepoint() is the opposite: it reads next_savepoint_id
-// and returns `next_savepoint_id.next()`, treating next_savepoint_id as the LAST
-// allocated id. The disk value is the NEXT id to allocate, so the subsequent
-// allocation after a reopen returns `stored_next.next()` instead of `stored_next`,
-// skipping exactly one id.
+// value and calls TransactionTracker::restore_savepoint_counter_state(). Previously
+// that function stored the value directly in State::next_savepoint_id, but the
+// in-memory convention used by allocate_savepoint() is that next_savepoint_id tracks
+// the LAST allocated id: allocate_savepoint() returns `next_savepoint_id.next()` and
+// then writes that value back as the new next_savepoint_id. Because the disk value
+// is the NEXT id to allocate, the first allocation after a reopen returned
+// `stored_next.next()` instead of `stored_next`, skipping exactly one id.
 //
-// Concretely: if the only persistent savepoint has id=1, reopening the database
-// and then creating a new persistent savepoint allocates id=3 (skipping id=2).
-//
-// The data-loss consequence is that the user's saved snapshot that is reachable by
-// id=2 from the pre-reopen session is silently not reachable by the same-numbered
-// slot after reopen: the next persistent_savepoint() call after the reopen receives
-// id=3, meaning the application's expectation of "the id I just received is one
-// more than the previous id" is violated, and code that stores these ids externally
-// to address snapshots loses the ability to address a slot that appeared to be
-// monotonically assigned. The issue becomes more severe with repeated reopens,
-// where ids get skipped each time, and interacting with `get_persistent_savepoint`
-// using a skipped id returns SavepointError::InvalidSavepoint even though the
-// application has no way of knowing that id was never assigned.
+// Concretely: with the bug, if the only persistent savepoint had id=1, reopening the
+// database and then creating a new persistent savepoint allocated id=3, skipping id=2.
+// Code that stored savepoint ids externally would observe `persistent_savepoint()`
+// returning strictly monotonic 1, 2 in one session and then jumping to 4 after a
+// reopen, with `get_persistent_savepoint(3)` returning InvalidSavepoint for a slot
+// the user would reasonably expect to exist next.
 #[test]
 fn persistent_savepoint_id_counter_skip_after_reopen() {
     let tmpfile = create_tempfile();

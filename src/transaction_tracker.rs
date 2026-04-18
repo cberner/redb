@@ -187,7 +187,16 @@ impl TransactionTracker {
     pub(crate) fn restore_savepoint_counter_state(&self, next_savepoint: SavepointId) {
         let mut state = self.state.lock().unwrap();
         assert!(state.valid_savepoints.is_empty());
-        state.next_savepoint_id = next_savepoint;
+        // NEXT_SAVEPOINT_TABLE persists the next id to allocate (i.e.
+        // `savepoint.get_id().next()` from the most recent persistent_savepoint call),
+        // but the in-memory `next_savepoint_id` tracks the last id that was allocated
+        // (allocate_savepoint() returns `next_savepoint_id.next()` and writes that
+        // value back as the new next_savepoint_id). Convert the persisted "next"
+        // back to "last allocated" so that the first allocation after reopen returns
+        // the persisted value itself rather than its successor. Without this
+        // conversion every database reopen silently skips one savepoint id.
+        assert!(next_savepoint.0 > 0);
+        state.next_savepoint_id = SavepointId(next_savepoint.0 - 1);
     }
 
     pub(crate) fn register_persistent_savepoint(&self, savepoint: &Savepoint) {

@@ -1,6 +1,9 @@
 # redb - Changelog
 
 ## 4.1.0 - UNRELEASED
+* Fix a bug where the persistent savepoint id counter would skip one value on every
+  database reopen, causing `persistent_savepoint()` to return non-contiguous ids
+  across close/reopen cycles.
 * Fix bug where `restore_savepoint()` could fail with `SavepointError::InvalidSavepoint`, but
   the savepoint would actually be partially applied, when called with a non-`Immediate` durability and
   there are persistent savepoints newer than the restored one. The call now fails up front with
