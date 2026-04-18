@@ -1,6 +1,9 @@
 # redb - Changelog
 
 ## 4.1.0 - UNRELEASED
+* Fix bug where `MultimapValue::len()` and `is_empty()` returned stale counts after
+  consuming entries via `next_back()`. `next_back()` now decrements the remaining
+  counter, matching the behavior of `next()`.
 * Fix bug where `restore_savepoint()` could fail with `SavepointError::InvalidSavepoint`, but
   the savepoint would actually be partially applied, when called with a non-`Immediate` durability and
   there are persistent savepoints newer than the restored one. The call now fails up front with

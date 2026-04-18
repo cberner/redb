@@ -857,6 +857,7 @@ impl<V: Key + 'static> DoubleEndedIterator for MultimapValue<'_, V> {
             },
             ValueIterState::InlineLeaf(iter) => iter.next_key_back()?.to_vec(),
         };
+        self.remaining -= 1;
         Some(Ok(AccessGuard::with_owned_value(bytes)))
     }
 }
