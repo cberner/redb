@@ -985,7 +985,7 @@ impl<'b> LeafMutator<'b> {
         //
         // Note: this check is also required to avoid inserting an unbounded number of small values
         // into a large page, which could result in overflowing a u16 which is the maximum number of entries per leaf
-        if page.get_page_number().page_order > 0 && position < accessor.num_pairs() {
+        if page.get_page_number().page_order() > 0 && position < accessor.num_pairs() {
             return false;
         }
         let remaining = page.memory().len() - accessor.total_length();

@@ -308,7 +308,7 @@ impl TransactionalMemory {
         let state = self.state.lock().unwrap();
         let mut region_pages = vec![vec![]; state.allocators.region_allocators.len()];
         for p in self.allocated_pages.lock().unwrap().iter() {
-            region_pages[p.region as usize].push(*p);
+            region_pages[p.region() as usize].push(*p);
         }
         for (i, allocator) in state.allocators.region_allocators.iter().enumerate() {
             allocator.check_allocated_pages(i.try_into().unwrap(), &region_pages[i]);
@@ -388,9 +388,9 @@ impl TransactionalMemory {
 
     pub(crate) fn mark_page_allocated(&self, page_number: PageNumber) {
         let mut state = self.state.lock().unwrap();
-        let region_index = page_number.region;
+        let region_index = page_number.region();
         let allocator = state.get_region_mut(region_index);
-        allocator.record_alloc(page_number.page_index, page_number.page_order);
+        allocator.record_alloc(page_number.page_index(), page_number.page_order());
         #[cfg(debug_assertions)]
         assert!(self.allocated_pages.lock().unwrap().insert(page_number));
     }
@@ -718,13 +718,13 @@ impl TransactionalMemory {
         let mut state = self.state.lock().unwrap();
         let mut guard = self.allocated_since_commit.lock().unwrap();
         for page_number in guard.iter() {
-            let region_index = page_number.region;
+            let region_index = page_number.region();
             state
                 .get_region_tracker_mut()
-                .mark_free(page_number.page_order, region_index);
+                .mark_free(page_number.page_order(), region_index);
             state
                 .get_region_mut(region_index)
-                .free(page_number.page_index, page_number.page_order);
+                .free(page_number.page_index(), page_number.page_order());
             #[cfg(debug_assertions)]
             assert!(self.allocated_pages.lock().unwrap().remove(page_number));
 
@@ -885,15 +885,15 @@ impl TransactionalMemory {
         }
         allocated.remove(page);
         let mut state = self.state.lock().unwrap();
-        let region_index = page.region;
+        let region_index = page.region();
         // Free in the regional allocator
         state
             .get_region_mut(region_index)
-            .free(page.page_index, page.page_order);
+            .free(page.page_index(), page.page_order());
         // Ensure that the region is marked as having free space
         state
             .get_region_tracker_mut()
-            .mark_free(page.page_order, region_index);
+            .mark_free(page.page_order(), region_index);
 
         let address_range = page.address_range(
             self.page_size.into(),

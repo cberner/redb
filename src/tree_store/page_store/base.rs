@@ -29,34 +29,35 @@ pub(crate) const MAX_REGIONS: u32 = 0x0010_0000;
 // highest 5bits: page order exponent
 //
 // Assuming a reasonable page size, like 4kiB, this allows for 4kiB * 2^20 * 2^20 = 4PiB of usable space
+//
+// Internally PageNumber stores these fields packed into a single u64, using the same layout as the
+// on-disk format (with reserved bits always zeroed so Eq/Hash work directly on the packed value).
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub(crate) struct PageNumber {
-    pub(crate) region: u32,
-    pub(crate) page_index: u32,
-    pub(crate) page_order: u8,
+    // Layout matches `to_le_bytes`:
+    //   bits  0..20: page_index (only the lowest `20 - page_order` bits are meaningful)
+    //   bits 20..40: region
+    //   bits 40..59: reserved (always 0)
+    //   bits 59..64: page_order
+    packed: u64,
 }
 
 impl Hash for PageNumber {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // TODO: maybe we should store these fields as a single u64 in PageNumber. The field access
-        // will be a little more expensive, but I think it's less frequent than these hashes
-        let mut temp = 0x000F_FFFF & u64::from(self.page_index);
-        temp |= (0x000F_FFFF & u64::from(self.region)) << 20;
-        temp |= (0b0001_1111 & u64::from(self.page_order)) << 59;
-        state.write_u64(temp);
+        state.write_u64(self.packed);
     }
 }
 
 // PageNumbers are ordered as determined by their starting address in the database file
 impl Ord for PageNumber {
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.region.cmp(&other.region) {
+        match self.region().cmp(&other.region()) {
             Ordering::Less => Ordering::Less,
             Ordering::Equal => {
-                let self_order0 = self.page_index * 2u32.pow(self.page_order.into());
-                let other_order0 = other.page_index * 2u32.pow(other.page_order.into());
+                let self_order0 = self.page_index() * 2u32.pow(self.page_order().into());
+                let other_order0 = other.page_index() * 2u32.pow(other.page_order().into());
                 assert!(
-                    self_order0 != other_order0 || self.page_order == other.page_order,
+                    self_order0 != other_order0 || self.page_order() == other.page_order(),
                     "{self:?} overlaps {other:?}, but is not equal"
                 );
                 self_order0.cmp(&other_order0)
@@ -81,31 +82,46 @@ impl PageNumber {
         debug_assert!(region <= 0x000F_FFFF);
         debug_assert!(page_index <= MAX_PAGE_INDEX);
         debug_assert!(page_order <= MAX_MAX_PAGE_ORDER);
-        Self {
-            region,
-            page_index,
-            page_order,
-        }
+        let mut packed = 0x000F_FFFF & u64::from(page_index);
+        packed |= (0x000F_FFFF & u64::from(region)) << 20;
+        packed |= (0b0001_1111 & u64::from(page_order)) << 59;
+        Self { packed }
+    }
+
+    #[inline]
+    pub(crate) fn region(self) -> u32 {
+        ((self.packed >> 20) & 0x000F_FFFF) as u32
+    }
+
+    #[inline]
+    pub(crate) fn page_index(self) -> u32 {
+        let mask: u32 = 0x000F_FFFF_u32 >> self.page_order();
+        // The low 20 bits of `packed` are always masked to zero for bits above
+        // `20 - page_order`, so truncating to u32 and masking is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        let low = self.packed as u32;
+        low & mask
+    }
+
+    #[inline]
+    pub(crate) fn page_order(self) -> u8 {
+        (self.packed >> 59) as u8
     }
 
     pub(crate) fn to_le_bytes(self) -> [u8; 8] {
-        let mut temp = 0x000F_FFFF & u64::from(self.page_index);
-        temp |= (0x000F_FFFF & u64::from(self.region)) << 20;
-        temp |= (0b0001_1111 & u64::from(self.page_order)) << 59;
-        temp.to_le_bytes()
+        self.packed.to_le_bytes()
     }
 
     pub(crate) fn from_le_bytes(bytes: [u8; 8]) -> Self {
         let temp = u64::from_le_bytes(bytes);
+        // Mask the reserved bits to zero so that two PageNumbers with the same logical value
+        // (but differing reserved bits) compare equal and hash the same.
         let order = (temp >> 59) as u8;
-        let index = u32::try_from(temp & (0x000F_FFFF >> order)).unwrap();
-        let region = ((temp >> 20) & 0x000F_FFFF) as u32;
-
-        Self {
-            region,
-            page_index: index,
-            page_order: order,
-        }
+        let index_mask = 0x000F_FFFF >> order;
+        let packed = (temp & index_mask)
+            | (((temp >> 20) & 0x000F_FFFF) << 20)
+            | ((u64::from(order) & 0b0001_1111) << 59);
+        Self { packed }
     }
 
     #[cfg(test)]
@@ -115,19 +131,19 @@ impl PageNumber {
             let mut progress = false;
             let mut new_pages = vec![];
             for page in pages {
-                if page.page_order == 0 {
+                if page.page_order() == 0 {
                     new_pages.push(page);
                 } else {
                     progress = true;
                     new_pages.push(PageNumber::new(
-                        page.region,
-                        page.page_index * 2,
-                        page.page_order - 1,
+                        page.region(),
+                        page.page_index() * 2,
+                        page.page_order() - 1,
                     ));
                     new_pages.push(PageNumber::new(
-                        page.region,
-                        page.page_index * 2 + 1,
-                        page.page_order - 1,
+                        page.region(),
+                        page.page_index() * 2 + 1,
+                        page.page_order() - 1,
                     ));
                 }
             }
@@ -141,24 +157,28 @@ impl PageNumber {
     }
 
     pub(crate) fn address_range(
-        &self,
+        self,
         data_section_offset: u64,
         region_size: u64,
         region_pages_start: u64,
         page_size: u32,
     ) -> Range<u64> {
-        let regional_start =
-            region_pages_start + u64::from(self.page_index) * self.page_size_bytes(page_size);
+        // Decompose the packed representation once so the compiler doesn't need
+        // to re-derive the same subfields at each call site below.
+        let page_order = self.page_order();
+        let page_size_bytes = u64::from(page_size) << page_order;
+        let page_index = self.packed & (0x000F_FFFF_u64 >> page_order);
+        let region = (self.packed >> 20) & 0x000F_FFFF;
+        let regional_start = region_pages_start + page_index * page_size_bytes;
         debug_assert!(regional_start < region_size);
-        let region_base = u64::from(self.region) * region_size;
+        let region_base = region * region_size;
         let start = data_section_offset + region_base + regional_start;
-        let end = start + self.page_size_bytes(page_size);
+        let end = start + page_size_bytes;
         start..end
     }
 
-    pub(crate) fn page_size_bytes(&self, page_size: u32) -> u64 {
-        let pages = 1u64 << self.page_order;
-        pages * u64::from(page_size)
+    pub(crate) fn page_size_bytes(self, page_size: u32) -> u64 {
+        u64::from(page_size) << self.page_order()
     }
 }
 
@@ -167,7 +187,9 @@ impl Debug for PageNumber {
         write!(
             f,
             "r{}.{}/{}",
-            self.region, self.page_index, self.page_order
+            self.region(),
+            self.page_index(),
+            self.page_order()
         )
     }
 }
