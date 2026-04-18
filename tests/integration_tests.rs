@@ -2867,3 +2867,91 @@ fn extract_if_next_then_next_back_panic() {
     }
     txn.abort().unwrap();
 }
+
+// Data loss bug: the persistent-savepoint id counter is persisted with semantics
+// that are inconsistent with how it is consumed in memory, which causes the id
+// counter to skip one value on every database reopen.
+//
+// persistent_savepoint() stores `savepoint.get_id().next()` in NEXT_SAVEPOINT_TABLE,
+// i.e. the next id that should be allocated. On reopen, Database::open() reads that
+// value and calls TransactionTracker::restore_savepoint_counter_state(), which stores
+// it directly in State::next_savepoint_id. But the in-memory convention used by
+// TransactionTracker::allocate_savepoint() is the opposite: it reads next_savepoint_id
+// and returns `next_savepoint_id.next()`, treating next_savepoint_id as the LAST
+// allocated id. The disk value is the NEXT id to allocate, so the subsequent
+// allocation after a reopen returns `stored_next.next()` instead of `stored_next`,
+// skipping exactly one id.
+//
+// Concretely: if the only persistent savepoint has id=1, reopening the database
+// and then creating a new persistent savepoint allocates id=3 (skipping id=2).
+//
+// The data-loss consequence is that the user's saved snapshot that is reachable by
+// id=2 from the pre-reopen session is silently not reachable by the same-numbered
+// slot after reopen: the next persistent_savepoint() call after the reopen receives
+// id=3, meaning the application's expectation of "the id I just received is one
+// more than the previous id" is violated, and code that stores these ids externally
+// to address snapshots loses the ability to address a slot that appeared to be
+// monotonically assigned. The issue becomes more severe with repeated reopens,
+// where ids get skipped each time, and interacting with `get_persistent_savepoint`
+// using a skipped id returns SavepointError::InvalidSavepoint even though the
+// application has no way of knowing that id was never assigned.
+#[test]
+fn persistent_savepoint_id_counter_skip_after_reopen() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Create a persistent savepoint on a fresh database. It should have id=1.
+    let txn = db.begin_write().unwrap();
+    let id1 = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+    assert_eq!(id1, 1);
+
+    // In the same session (no reopen), create a second persistent savepoint. With
+    // correct counter semantics the next id is id1+1.
+    let txn = db.begin_write().unwrap();
+    let id2 = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+    assert_eq!(
+        id2,
+        id1 + 1,
+        "in-session persistent savepoint ids should be contiguous"
+    );
+
+    // Close and reopen the database. Recovery calls
+    // restore_savepoint_counter_state() with the value stored in
+    // NEXT_SAVEPOINT_TABLE, which is the NEXT id to allocate.
+    drop(db);
+    let db = Database::open(tmpfile.path()).unwrap();
+
+    // Create another persistent savepoint after the reopen. With correct counter
+    // semantics this should be id2+1. With the bug it ends up being id2+2, because
+    // allocate_savepoint() calls .next() on the stored "next id to allocate",
+    // advancing it one slot too far and skipping id2+1 entirely.
+    let txn = db.begin_write().unwrap();
+    let id3 = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    assert_eq!(
+        id3,
+        id2 + 1,
+        "DATA LOSS BUG: reopening the database skipped a persistent savepoint id. \
+         Expected id3 == id2 + 1 = {}, got id3 = {}. The slot at id {} is forever \
+         unreachable, and any external bookkeeping that assumed contiguous ids is now \
+         out of sync with what persistent_savepoint() actually returned.",
+        id2 + 1,
+        id3,
+        id2 + 1
+    );
+
+    // Demonstrate the observable effect: the user has no savepoint with id == id2+1,
+    // because the bug caused allocate_savepoint to return id2+2 instead.
+    let txn = db.begin_write().unwrap();
+    let missing = txn.get_persistent_savepoint(id2 + 1);
+    txn.abort().unwrap();
+    assert!(
+        missing.is_ok(),
+        "persistent savepoint slot id={} is missing after reopen+create, \
+         but the application received monotonic ids 1, 2 and would expect 3 next",
+        id2 + 1
+    );
+}
