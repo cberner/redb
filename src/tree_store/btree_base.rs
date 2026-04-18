@@ -301,24 +301,16 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
     pub fn insert<'v>(&mut self, value: impl Borrow<V::SelfType<'v>>) -> Result<()> {
         let value_bytes = V::as_bytes(value.borrow());
 
-        // TODO: optimize this to avoid copying the key
-        let key_bytes = {
-            let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
-            accessor.key_unchecked(self.entry_index).to_vec()
-        };
-
-        if LeafMutator::sufficient_insert_inplace_space(
+        if LeafMutator::sufficient_replace_inplace_space(
             &self.page,
             self.entry_index,
-            true,
             self.key_width,
             V::fixed_width(),
-            key_bytes.as_slice(),
             value_bytes.as_ref(),
         ) {
             let mut mutator =
                 LeafMutator::new(self.page.memory_mut(), self.key_width, V::fixed_width());
-            mutator.insert(self.entry_index, true, &key_bytes, value_bytes.as_ref());
+            mutator.replace(self.entry_index, value_bytes.as_ref());
         } else {
             let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
             let mut builder = LeafBuilder::new(
@@ -330,10 +322,10 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             );
 
             for i in 0..accessor.num_pairs() {
+                let entry = accessor.entry(i).unwrap();
                 if i == self.entry_index {
-                    builder.push(&key_bytes, value_bytes.as_ref());
+                    builder.push(entry.key(), value_bytes.as_ref());
                 } else {
-                    let entry = accessor.entry(i).unwrap();
                     builder.push(entry.key(), entry.value());
                 }
             }
@@ -960,48 +952,92 @@ impl<'b> LeafMutator<'b> {
         }
     }
 
+    // Returns true if there is enough space to replace the value at `position` in-place.
+    // The key at `position` is left unchanged.
+    pub(super) fn sufficient_replace_inplace_space(
+        page: &'_ impl Page,
+        position: usize,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+        new_value: &[u8],
+    ) -> bool {
+        let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+        let remaining = page.memory().len() - accessor.total_length();
+        let existing_value_len = accessor
+            .value_range(position)
+            .map(|(s, e)| e - s)
+            .unwrap_or_default();
+        let required_delta = isize::try_from(new_value.len()).unwrap()
+            - isize::try_from(existing_value_len).unwrap();
+        required_delta <= isize::try_from(remaining).unwrap()
+    }
+
     pub(super) fn sufficient_insert_inplace_space(
         page: &'_ impl Page,
         position: usize,
-        overwrite: bool,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
         new_key: &[u8],
         new_value: &[u8],
     ) -> bool {
         let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
-        if overwrite {
-            let remaining = page.memory().len() - accessor.total_length();
-            let required_delta = isize::try_from(new_key.len() + new_value.len()).unwrap()
-                - isize::try_from(accessor.length_of_pairs(position, position + 1)).unwrap();
-            required_delta <= isize::try_from(remaining).unwrap()
-        } else {
-            // If this is a large page, only allow in-place appending to avoid write amplification
-            //
-            // Note: this check is also required to avoid inserting an unbounded number of small values
-            // into a large page, which could result in overflowing a u16 which is the maximum number of entries per leaf
-            if page.get_page_number().page_order > 0 && position < accessor.num_pairs() {
-                return false;
-            }
-            let remaining = page.memory().len() - accessor.total_length();
-            let mut required_delta = new_key.len() + new_value.len();
-            if fixed_key_size.is_none() {
-                required_delta += size_of::<u32>();
-            }
-            if fixed_value_size.is_none() {
-                required_delta += size_of::<u32>();
-            }
-            required_delta <= remaining
+        // If this is a large page, only allow in-place appending to avoid write amplification
+        //
+        // Note: this check is also required to avoid inserting an unbounded number of small values
+        // into a large page, which could result in overflowing a u16 which is the maximum number of entries per leaf
+        if page.get_page_number().page_order > 0 && position < accessor.num_pairs() {
+            return false;
         }
+        let remaining = page.memory().len() - accessor.total_length();
+        let mut required_delta = new_key.len() + new_value.len();
+        if fixed_key_size.is_none() {
+            required_delta += size_of::<u32>();
+        }
+        if fixed_value_size.is_none() {
+            required_delta += size_of::<u32>();
+        }
+        required_delta <= remaining
+    }
+
+    // Replace the value at index `i` with `value`, leaving the key unchanged.
+    pub(crate) fn replace(&mut self, i: usize, value: &[u8]) {
+        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
+        let num_pairs = accessor.num_pairs();
+        let last_value_end = accessor.value_end(num_pairs - 1).unwrap();
+        let shift_value_start = accessor.value_start(i + 1).unwrap_or(last_value_end);
+        let existing_value_len = accessor
+            .value_range(i)
+            .map(|(start, end)| end - start)
+            .unwrap_or_default();
+
+        let value_delta =
+            isize::try_from(value.len()).unwrap() - isize::try_from(existing_value_len).unwrap();
+        assert!(
+            isize::try_from(accessor.total_length()).unwrap() + value_delta
+                <= isize::try_from(self.page.len()).unwrap()
+        );
+
+        // Update value end pointers for i..num_pairs
+        for j in i..num_pairs {
+            self.update_value_end(j, value_delta);
+        }
+
+        // Shift trailing values to accommodate the new value size
+        let mut dest: usize = (isize::try_from(shift_value_start).unwrap() + value_delta)
+            .try_into()
+            .unwrap();
+        self.page
+            .copy_within(shift_value_start..last_value_end, dest);
+
+        // Write the new value
+        dest -= value.len();
+        self.page[dest..(dest + value.len())].copy_from_slice(value);
     }
 
     // Insert the given key, value pair at index i and shift all following pairs to the right
-    pub(crate) fn insert(&mut self, i: usize, overwrite: bool, key: &[u8], value: &[u8]) {
+    pub(crate) fn insert(&mut self, i: usize, key: &[u8], value: &[u8]) {
         let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
-        let required_delta = if overwrite {
-            isize::try_from(key.len() + value.len()).unwrap()
-                - isize::try_from(accessor.length_of_pairs(i, i + 1)).unwrap()
-        } else {
+        let required_delta = {
             let mut delta = key.len() + value.len();
             if self.fixed_key_size.is_none() {
                 delta += size_of::<u32>();
@@ -1009,7 +1045,7 @@ impl<'b> LeafMutator<'b> {
             if self.fixed_value_size.is_none() {
                 delta += size_of::<u32>();
             }
-            delta.try_into().unwrap()
+            isize::try_from(delta).unwrap()
         };
         assert!(
             isize::try_from(accessor.total_length()).unwrap() + required_delta
@@ -1019,19 +1055,8 @@ impl<'b> LeafMutator<'b> {
         let num_pairs = accessor.num_pairs();
         let last_key_end = accessor.key_end(accessor.num_pairs() - 1).unwrap();
         let last_value_end = accessor.value_end(accessor.num_pairs() - 1).unwrap();
-        let shift_index = if overwrite { i + 1 } else { i };
-        let shift_key_start = accessor.key_start(shift_index).unwrap_or(last_key_end);
-        let shift_value_start = accessor.value_start(shift_index).unwrap_or(last_value_end);
-        let existing_value_len = accessor
-            .value_range(i)
-            .map(|(start, end)| end - start)
-            .unwrap_or_default();
-
-        let value_delta = if overwrite {
-            isize::try_from(value.len()).unwrap() - isize::try_from(existing_value_len).unwrap()
-        } else {
-            value.len().try_into().unwrap()
-        };
+        let shift_key_start = accessor.key_start(i).unwrap_or(last_key_end);
+        let shift_value_start = accessor.value_start(i).unwrap_or(last_value_end);
 
         // Update all the pointers
         let key_ptr_size: usize = if self.fixed_key_size.is_none() { 4 } else { 0 };
@@ -1040,39 +1065,27 @@ impl<'b> LeafMutator<'b> {
         } else {
             0
         };
-        if !overwrite {
-            for j in 0..i {
-                self.update_key_end(j, (key_ptr_size + value_ptr_size).try_into().unwrap());
-                let value_delta: isize = (key_ptr_size + value_ptr_size + key.len())
-                    .try_into()
-                    .unwrap();
-                self.update_value_end(j, value_delta);
-            }
+        for j in 0..i {
+            self.update_key_end(j, (key_ptr_size + value_ptr_size).try_into().unwrap());
+            let value_delta: isize = (key_ptr_size + value_ptr_size + key.len())
+                .try_into()
+                .unwrap();
+            self.update_value_end(j, value_delta);
         }
         for j in i..num_pairs {
-            if overwrite {
-                self.update_value_end(j, value_delta);
-            } else {
-                let key_delta: isize = (key_ptr_size + value_ptr_size + key.len())
-                    .try_into()
-                    .unwrap();
-                self.update_key_end(j, key_delta);
-                let value_delta = key_delta + isize::try_from(value.len()).unwrap();
-                self.update_value_end(j, value_delta);
-            }
+            let key_delta: isize = (key_ptr_size + value_ptr_size + key.len())
+                .try_into()
+                .unwrap();
+            self.update_key_end(j, key_delta);
+            let value_delta = key_delta + isize::try_from(value.len()).unwrap();
+            self.update_value_end(j, value_delta);
         }
 
-        let new_num_pairs = if overwrite { num_pairs } else { num_pairs + 1 };
+        let new_num_pairs = num_pairs + 1;
         self.page[2..4].copy_from_slice(&u16::try_from(new_num_pairs).unwrap().to_le_bytes());
 
         // Right shift the trailing values
-        let mut dest = if overwrite {
-            (isize::try_from(shift_value_start).unwrap() + value_delta)
-                .try_into()
-                .unwrap()
-        } else {
-            shift_value_start + key_ptr_size + value_ptr_size + key.len() + value.len()
-        };
+        let mut dest = shift_value_start + key_ptr_size + value_ptr_size + key.len() + value.len();
         let start = shift_value_start;
         let end = last_value_end;
         self.page.copy_within(start..end, dest);
@@ -1082,50 +1095,48 @@ impl<'b> LeafMutator<'b> {
         dest -= value.len();
         self.page[dest..(dest + value.len())].copy_from_slice(value);
 
-        if !overwrite {
-            // Right shift the trailing key data & preceding value data
-            let start = shift_key_start;
-            let end = shift_value_start;
-            dest -= end - start;
-            self.page.copy_within(start..end, dest);
+        // Right shift the trailing key data & preceding value data
+        let start = shift_key_start;
+        let end = shift_value_start;
+        dest -= end - start;
+        self.page.copy_within(start..end, dest);
 
-            // Insert the key
-            let inserted_key_end: u32 = dest.try_into().unwrap();
-            dest -= key.len();
-            self.page[dest..(dest + key.len())].copy_from_slice(key);
+        // Insert the key
+        let inserted_key_end: u32 = dest.try_into().unwrap();
+        dest -= key.len();
+        self.page[dest..(dest + key.len())].copy_from_slice(key);
 
-            // Right shift the trailing value pointers & preceding key data
-            let start = 4 + key_ptr_size * num_pairs + value_ptr_size * i;
-            let end = shift_key_start;
-            dest -= end - start;
-            debug_assert_eq!(
-                dest,
-                4 + key_ptr_size * new_num_pairs + value_ptr_size * (i + 1)
-            );
-            self.page.copy_within(start..end, dest);
+        // Right shift the trailing value pointers & preceding key data
+        let start = 4 + key_ptr_size * num_pairs + value_ptr_size * i;
+        let end = shift_key_start;
+        dest -= end - start;
+        debug_assert_eq!(
+            dest,
+            4 + key_ptr_size * new_num_pairs + value_ptr_size * (i + 1)
+        );
+        self.page.copy_within(start..end, dest);
 
-            // Insert the value pointer
-            if self.fixed_value_size.is_none() {
-                dest -= size_of::<u32>();
-                self.page[dest..(dest + size_of::<u32>())]
-                    .copy_from_slice(&inserted_value_end.to_le_bytes());
-            }
-
-            // Right shift the trailing key pointers & preceding value pointers
-            let start = 4 + key_ptr_size * i;
-            let end = 4 + key_ptr_size * num_pairs + value_ptr_size * i;
-            dest -= end - start;
-            debug_assert_eq!(dest, 4 + key_ptr_size * (i + 1));
-            self.page.copy_within(start..end, dest);
-
-            // Insert the key pointer
-            if self.fixed_key_size.is_none() {
-                dest -= size_of::<u32>();
-                self.page[dest..(dest + size_of::<u32>())]
-                    .copy_from_slice(&inserted_key_end.to_le_bytes());
-            }
-            debug_assert_eq!(dest, 4 + key_ptr_size * i);
+        // Insert the value pointer
+        if self.fixed_value_size.is_none() {
+            dest -= size_of::<u32>();
+            self.page[dest..(dest + size_of::<u32>())]
+                .copy_from_slice(&inserted_value_end.to_le_bytes());
         }
+
+        // Right shift the trailing key pointers & preceding value pointers
+        let start = 4 + key_ptr_size * i;
+        let end = 4 + key_ptr_size * num_pairs + value_ptr_size * i;
+        dest -= end - start;
+        debug_assert_eq!(dest, 4 + key_ptr_size * (i + 1));
+        self.page.copy_within(start..end, dest);
+
+        // Insert the key pointer
+        if self.fixed_key_size.is_none() {
+            dest -= size_of::<u32>();
+            self.page[dest..(dest + size_of::<u32>())]
+                .copy_from_slice(&inserted_key_end.to_le_bytes());
+        }
+        debug_assert_eq!(dest, 4 + key_ptr_size * i);
     }
 
     pub(super) fn remove(&mut self, i: usize) {

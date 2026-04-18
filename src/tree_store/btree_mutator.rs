@@ -272,17 +272,29 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 }
 
                 // Fast-path for uncommitted pages, that can be modified in-place
+                let has_inplace_space = || -> bool {
+                    if found {
+                        LeafMutator::sufficient_replace_inplace_space(
+                            &page,
+                            position,
+                            K::fixed_width(),
+                            V::fixed_width(),
+                            value,
+                        )
+                    } else {
+                        LeafMutator::sufficient_insert_inplace_space(
+                            &page,
+                            position,
+                            K::fixed_width(),
+                            V::fixed_width(),
+                            key,
+                            value,
+                        )
+                    }
+                };
                 if self.mem.uncommitted(page.get_page_number())
                     && self.modify_uncommitted
-                    && LeafMutator::sufficient_insert_inplace_space(
-                        &page,
-                        position,
-                        found,
-                        K::fixed_width(),
-                        V::fixed_width(),
-                        key,
-                        value,
-                    )
+                    && has_inplace_space()
                 {
                     let page_number = page.get_page_number();
                     let existing_value = if found {
@@ -295,7 +307,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                     let mut page_mut = self.mem.get_page_mut(page_number)?;
                     let mut mutator =
                         LeafMutator::new(page_mut.memory_mut(), K::fixed_width(), V::fixed_width());
-                    mutator.insert(position, found, key, value);
+                    if found {
+                        mutator.replace(position, value);
+                    } else {
+                        mutator.insert(position, key, value);
+                    }
                     let new_page_accessor =
                         LeafAccessor::new(page_mut.memory(), K::fixed_width(), V::fixed_width());
                     let offset = new_page_accessor.offset_of_value(position).unwrap();
@@ -569,7 +585,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 assert!(value.len() <= old_len);
                 let mut mutator =
                     LeafMutator::new(page.memory_mut(), K::fixed_width(), V::fixed_width());
-                mutator.insert(position, true, key, value);
+                mutator.replace(position, value);
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
