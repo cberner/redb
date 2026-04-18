@@ -28,8 +28,13 @@ enum DeletionResult {
         page: Arc<[u8]>,
         deleted_pair: usize,
     },
-    // A branch page subtree with fewer children than desired
-    PartialBranch(PageNumber, Checksum),
+    // A branch page subtree with fewer children than desired.
+    // Held in unbuilt form: the caller will merge it with a sibling and build a new page,
+    // so allocating a page here just to free it again would be wasteful.
+    PartialBranch {
+        children: Vec<(PageNumber, Checksum)>,
+        keys: Vec<Vec<u8>>,
+    },
     // Indicates that the branch node was deleted, and includes the only remaining child
     DeletedBranch(PageNumber, Checksum),
 }
@@ -139,8 +144,25 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         new_length,
                     ))
                 }
-                PartialBranch(page_number, checksum) => {
-                    Some(BtreeHeader::new(page_number, checksum, new_length))
+                PartialBranch { children, keys } => {
+                    let mut builder = BranchBuilder::new(
+                        &self.mem,
+                        &self.allocated,
+                        children.len(),
+                        K::fixed_width(),
+                    );
+                    for (child, child_checksum) in children {
+                        builder.push_child(child, child_checksum);
+                    }
+                    for key in &keys {
+                        builder.push_key(key);
+                    }
+                    let page = builder.build()?;
+                    Some(BtreeHeader::new(
+                        page.get_page_number(),
+                        DEFERRED,
+                        new_length,
+                    ))
                 }
                 DeletedBranch(remaining_child, checksum) => {
                     Some(BtreeHeader::new(remaining_child, checksum, new_length))
@@ -694,18 +716,15 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
     ) -> Result<DeletionResult> {
         let result = if let Some((only_child, checksum)) = builder.to_single_child() {
             DeletedBranch(only_child, checksum)
-        } else {
-            // TODO: can we optimize away this page allocation?
-            // The PartialInternal gets returned, and then the caller has to merge it immediately
-            let new_page = builder.build()?;
-            let accessor = BranchAccessor::new(&new_page, K::fixed_width());
+        } else if builder.required_bytes() < page_size / 3 {
             // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
-            // full pages, so we use 33% instead of 50% to avoid oscillating
-            if accessor.total_length() < page_size / 3 {
-                PartialBranch(new_page.get_page_number(), DEFERRED)
-            } else {
-                Subtree(new_page.get_page_number(), DEFERRED)
-            }
+            // full pages, so we use 33% instead of 50% to avoid oscillating.
+            // Skip the page allocation: the caller will immediately merge this with a sibling.
+            let (children, keys) = builder.into_parts();
+            PartialBranch { children, keys }
+        } else {
+            let new_page = builder.build()?;
+            Subtree(new_page.get_page_number(), DEFERRED)
         };
         Ok(result)
     }
@@ -949,10 +968,10 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
 
                 result
             }
-            PartialBranch(partial_child, ..) => {
-                let partial_child_page = self.mem.get_page(partial_child)?;
-                let partial_child_accessor =
-                    BranchAccessor::new(&partial_child_page, K::fixed_width());
+            PartialBranch {
+                children: partial_children,
+                keys: partial_keys,
+            } => {
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 let merge_with_page = self
                     .mem
@@ -969,19 +988,28 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                         let mut child_builder = BranchBuilder::new(
                             &self.mem,
                             &self.allocated,
-                            merge_with_accessor.count_children()
-                                + partial_child_accessor.count_children(),
+                            merge_with_accessor.count_children() + partial_children.len(),
                             K::fixed_width(),
                         );
                         let separator_key = accessor.key(min(child_index, merge_with)).unwrap();
                         if child_index < merge_with {
-                            child_builder.push_all(&partial_child_accessor);
+                            for &(child, child_checksum) in &partial_children {
+                                child_builder.push_child(child, child_checksum);
+                            }
+                            for key in &partial_keys {
+                                child_builder.push_key(key);
+                            }
                             child_builder.push_key(separator_key);
                         }
                         child_builder.push_all(&merge_with_accessor);
                         if child_index > merge_with {
                             child_builder.push_key(separator_key);
-                            child_builder.push_all(&partial_child_accessor);
+                            for &(child, child_checksum) in &partial_children {
+                                child_builder.push_child(child, child_checksum);
+                            }
+                            for key in &partial_keys {
+                                child_builder.push_key(key);
+                            }
                         }
                         if child_builder.should_split() {
                             let (new_page1, separator, new_page2) = child_builder.build_split()?;
@@ -1009,8 +1037,6 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
                 self.conditional_free(page_number);
-                drop(partial_child_page);
-                self.conditional_free(partial_child);
 
                 result
             }
