@@ -1453,6 +1453,15 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         }
     }
 
+    pub(super) fn required_bytes(&self) -> usize {
+        RawBranchBuilder::required_bytes(self.keys.len(), self.total_key_bytes, self.fixed_key_size)
+    }
+
+    pub(super) fn into_parts(self) -> (Vec<(PageNumber, Checksum)>, Vec<Vec<u8>>) {
+        let owned_keys = self.keys.into_iter().map(<[u8]>::to_vec).collect();
+        (self.children, owned_keys)
+    }
+
     pub(super) fn build<'txn>(self) -> Result<PageMut<'txn>> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
         let size = RawBranchBuilder::required_bytes(
