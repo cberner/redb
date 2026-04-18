@@ -103,11 +103,17 @@ pub trait Value: Debug {
 
     /// Deserializes data
     /// Implementations may return a view over data, or an owned type
+    ///
+    /// Note: Implementations may assume that `data` is the return value of `as_bytes(&v)` for some `v` of type `Self`.
     fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
     where
         Self: 'a;
 
     /// Serialize the value to a slice
+    ///
+    /// Note: Implementations must ensure that `as_bytes()` and `from_bytes()` are inverses.
+    /// Specifically, for any value `v` and `data` returned from `as_bytes(&v)`,
+    /// `as_bytes(from_bytes(data))` must equal `data`.
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'b;
@@ -122,8 +128,10 @@ pub trait MutInPlaceValue: Value {
     /// The base type such that &mut [u8] can be safely transmuted to `&mut BaseRefType`
     type BaseRefType: Debug + ?Sized;
 
-    // Initialize `data` to a valid value. This method will be called (at some point, not necessarily immediately)
-    // before from_bytes_mut() is called on a slice.
+    /// Initialize `data` to a valid value. This method will be called (at some point, not necessarily immediately)
+    /// before `from_bytes_mut()` is called on a slice.
+    ///
+    /// Note: There must exist a value `v` of type `Self` such that `as_bytes(&v)` equals `data`.
     fn initialize(data: &mut [u8]);
 
     fn from_bytes_mut(data: &mut [u8]) -> &mut Self::BaseRefType;
@@ -143,7 +151,9 @@ impl MutInPlaceValue for &[u8] {
 
 /// Trait which allows the type to be used as a key in a redb table
 pub trait Key: Value {
-    /// Compare data1 with data2
+    /// Compare data1 with data2.
+    ///
+    /// The implementation must ensure there is a total order
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering;
 }
 
