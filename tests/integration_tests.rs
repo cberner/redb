@@ -2900,3 +2900,17 @@ fn multimap_value_next_back_does_not_update_len() {
     assert!(iter.is_empty());
     assert!(iter.next_back().is_none());
 }
+
+#[test]
+#[should_panic(expected = "assertion failed: !name.is_empty()")]
+fn table_definition_new_panics_on_empty_name() {
+    let name = String::new();
+    let _def: TableDefinition<u64, u64> = TableDefinition::new(&name);
+}
+
+#[test]
+#[should_panic(expected = "assertion failed: !name.is_empty()")]
+fn multimap_table_definition_new_panics_on_empty_name() {
+    let name = String::new();
+    let _def: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new(&name);
+}
