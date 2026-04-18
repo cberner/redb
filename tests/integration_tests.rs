@@ -2867,3 +2867,56 @@ fn extract_if_next_then_next_back_panic() {
     }
     txn.abort().unwrap();
 }
+
+// Bug: MultimapValue::next_back() does not decrement self.remaining,
+// while MultimapValue::next() does. After fully exhausting the iterator
+// via next_back(), len() returns the original count rather than 0,
+// breaking the standard iterator len contract documented as "Returns the
+// number of times this iterator will return Some(Ok(_))".
+//
+// Reasonable usage: a caller iterates a multimap value collection in
+// reverse to find the most recent entry, and then calls len() on the
+// remaining iterator to size a buffer or decide whether to continue.
+// They get a stale count and proceed under the wrong assumption. The
+// fix is to add `self.remaining -= 1;` to MultimapValue::next_back()
+// matching the existing logic in MultimapValue::next().
+//
+// This test panics on the final assertion because len() returns 3
+// instead of the expected 0 after consuming all three entries via
+// next_back().
+#[test]
+fn multimap_value_len_wrong_after_next_back() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let def: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("t");
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut t = txn.open_multimap_table(def).unwrap();
+        t.insert(&1u64, &10u64).unwrap();
+        t.insert(&1u64, &20u64).unwrap();
+        t.insert(&1u64, &30u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(def).unwrap();
+    let mut iter = table.get(&1u64).unwrap();
+    assert_eq!(iter.len(), 3);
+
+    // Consume all three items in reverse.
+    assert!(iter.next_back().is_some());
+    assert!(iter.next_back().is_some());
+    assert!(iter.next_back().is_some());
+    // Iterator is exhausted in both directions.
+    assert!(iter.next_back().is_none());
+    assert!(iter.next().is_none());
+
+    // len() should now report zero remaining items, but it returns 3.
+    assert_eq!(
+        iter.len(),
+        0,
+        "MultimapValue::len() should be 0 after exhausting via next_back, but is {}",
+        iter.len()
+    );
+}
