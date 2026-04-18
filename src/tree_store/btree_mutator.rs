@@ -34,6 +34,17 @@ enum DeletionResult {
     DeletedBranch(PageNumber, Checksum),
 }
 
+// Which entry a single-pass tree traversal should locate and delete.
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum DeleteTarget<'a> {
+    // Descend by comparing against the given serialized key.
+    Key(&'a [u8]),
+    // Always descend to the leftmost leaf / pair.
+    First,
+    // Always descend to the rightmost leaf / pair.
+    Last,
+}
+
 struct InsertionResult<'a, V: Value + 'static> {
     // the new root page
     new_root: PageNumber,
@@ -109,6 +120,27 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
     }
 
     pub(crate) fn delete(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
+        let key_bytes = K::as_bytes(key);
+        let result = self.delete_target(DeleteTarget::Key(key_bytes.as_ref()))?;
+        Ok(result.map(|(_, guard)| guard))
+    }
+
+    // Single-pass pop of the leftmost (Target::First) or rightmost (Target::Last)
+    // entry. Returns the raw stored key bytes alongside the value guard, so the
+    // caller never needs to round-trip the key through `K::from_bytes`/
+    // `K::as_bytes` to find the entry a second time.
+    pub(crate) fn pop_endpoint(
+        &mut self,
+        target: DeleteTarget<'_>,
+    ) -> Result<Option<(Vec<u8>, AccessGuard<'a, V>)>> {
+        debug_assert!(matches!(target, DeleteTarget::First | DeleteTarget::Last));
+        self.delete_target(target)
+    }
+
+    fn delete_target(
+        &mut self,
+        target: DeleteTarget<'_>,
+    ) -> Result<Option<(Vec<u8>, AccessGuard<'a, V>)>> {
         if let Some(BtreeHeader {
             root: p,
             checksum,
@@ -116,7 +148,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         }) = *self.root
         {
             let (deletion_result, found) =
-                self.delete_helper(self.mem.get_page(p)?, checksum, K::as_bytes(key).as_ref())?;
+                self.delete_helper(self.mem.get_page(p)?, checksum, target)?;
             let new_length = if found.is_some() { length - 1 } else { length };
             let new_root = match deletion_result {
                 Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum, new_length)),
@@ -588,13 +620,28 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         &mut self,
         page: PageImpl,
         checksum: Checksum,
-        key: &[u8],
-    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+        target: DeleteTarget<'_>,
+    ) -> Result<(DeletionResult, Option<(Vec<u8>, AccessGuard<'a, V>)>)> {
         let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-        let (position, found) = accessor.position::<K>(key);
+        let (position, found) = match target {
+            DeleteTarget::Key(key) => accessor.position::<K>(key),
+            DeleteTarget::First => (0, accessor.num_pairs() > 0),
+            DeleteTarget::Last => {
+                let n = accessor.num_pairs();
+                if n == 0 {
+                    (0, false)
+                } else {
+                    (n - 1, true)
+                }
+            }
+        };
         if !found {
             return Ok((Subtree(page.get_page_number(), checksum), None));
         }
+        // Capture the raw stored key bytes before we potentially free the page
+        // underneath us. These are returned so callers (e.g. `pop_first`) can
+        // report the exact on-disk key without re-serialising it.
+        let deleted_key_bytes = accessor.entry(position).unwrap().key().to_vec();
         let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
             - accessor.length_of_pairs(position, position + 1);
         let new_required_bytes = RawLeafBuilder::required_bytes(
@@ -625,7 +672,10 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 position,
                 K::fixed_width(),
             );
-            return Ok((Subtree(page_number, DEFERRED), Some(guard)));
+            return Ok((
+                Subtree(page_number, DEFERRED),
+                Some((deleted_key_bytes, guard)),
+            ));
         }
 
         let result = if accessor.num_pairs() == 1 {
@@ -662,14 +712,14 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             drop(page);
             let mut allocated = self.allocated.lock().unwrap();
             self.mem.free(page_number, &mut allocated);
-            Some(AccessGuard::with_arc_page(arc, start..end))
+            AccessGuard::with_arc_page(arc, start..end)
         } else {
             // Won't be freed until the end of the transaction, so returning the page
             // in the AccessGuard below is still safe
             self.freed.push(page.get_page_number());
-            Some(AccessGuard::with_page(page, start..end))
+            AccessGuard::with_page(page, start..end)
         };
-        Ok((result, guard))
+        Ok((result, Some((deleted_key_bytes, guard))))
     }
 
     fn finalize_branch_builder(
@@ -698,14 +748,21 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         &mut self,
         page: PageImpl,
         checksum: Checksum,
-        key: &[u8],
-    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+        target: DeleteTarget<'_>,
+    ) -> Result<(DeletionResult, Option<(Vec<u8>, AccessGuard<'a, V>)>)> {
         let accessor = BranchAccessor::new(&page, K::fixed_width());
         let original_page_number = page.get_page_number();
-        let (child_index, child_page_number) = accessor.child_for_key::<K>(key);
+        let (child_index, child_page_number) = match target {
+            DeleteTarget::Key(key) => accessor.child_for_key::<K>(key),
+            DeleteTarget::First => (0, accessor.child_page(0).unwrap()),
+            DeleteTarget::Last => {
+                let last = accessor.count_children() - 1;
+                (last, accessor.child_page(last).unwrap())
+            }
+        };
         let child_checksum = accessor.child_checksum(child_index).unwrap();
         let (result, found) =
-            self.delete_helper(self.mem.get_page(child_page_number)?, child_checksum, key)?;
+            self.delete_helper(self.mem.get_page(child_page_number)?, child_checksum, target)?;
         if found.is_none() {
             return Ok((Subtree(original_page_number, checksum), None));
         }
@@ -1006,18 +1063,21 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         Ok((final_result, found))
     }
 
-    // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
-    // If key is not found, guaranteed not to modify the tree
+    // Returns the page number of the sub-tree with the target entry deleted, or
+    // None if the sub-tree is empty. If the target is `Key` and the key is not
+    // found, this is guaranteed not to modify the tree. The returned `Option`
+    // carries the raw bytes of the stored key that was removed, alongside the
+    // value guard.
     fn delete_helper(
         &mut self,
         page: PageImpl,
         checksum: Checksum,
-        key: &[u8],
-    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+        target: DeleteTarget<'_>,
+    ) -> Result<(DeletionResult, Option<(Vec<u8>, AccessGuard<'a, V>)>)> {
         let node_mem = page.memory();
         match node_mem[0] {
-            LEAF => self.delete_leaf_helper(page, checksum, key),
-            BRANCH => self.delete_branch_helper(page, checksum, key),
+            LEAF => self.delete_leaf_helper(page, checksum, target),
+            BRANCH => self.delete_branch_helper(page, checksum, target),
             _ => unreachable!(),
         }
     }

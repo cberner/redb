@@ -108,38 +108,16 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
 
     /// Removes and returns the first key-value pair in the table
     pub fn pop_first(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
-        // TODO: optimize this
-        let first = self
-            .iter()?
-            .next()
-            .map(|x| x.map(|(key, _)| K::as_bytes(&key.value()).as_ref().to_vec()));
-        if let Some(owned_key) = first {
-            let owned_key = owned_key?;
-            let key = K::from_bytes(&owned_key);
-            let value = self.remove(&key)?.unwrap();
-            drop(key);
-            Ok(Some((AccessGuard::with_owned_value(owned_key), value)))
-        } else {
-            Ok(None)
-        }
+        Ok(self.tree.pop_endpoint(true)?.map(|(key_bytes, value)| {
+            (AccessGuard::with_owned_value(key_bytes), value)
+        }))
     }
 
     /// Removes and returns the last key-value pair in the table
     pub fn pop_last(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
-        // TODO: optimize this
-        let last = self
-            .iter()?
-            .next_back()
-            .map(|x| x.map(|(key, _)| K::as_bytes(&key.value()).as_ref().to_vec()));
-        if let Some(owned_key) = last {
-            let owned_key = owned_key?;
-            let key = K::from_bytes(&owned_key);
-            let value = self.remove(&key)?.unwrap();
-            drop(key);
-            Ok(Some((AccessGuard::with_owned_value(owned_key), value)))
-        } else {
-            Ok(None)
-        }
+        Ok(self.tree.pop_endpoint(false)?.map(|(key_bytes, value)| {
+            (AccessGuard::with_owned_value(key_bytes), value)
+        }))
     }
 
     /// Applies `predicate` to all key-value pairs. All entries for which

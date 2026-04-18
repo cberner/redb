@@ -4,7 +4,7 @@ use crate::tree_store::btree_base::{
     LeafAccessor, branch_checksum, leaf_checksum,
 };
 use crate::tree_store::btree_iters::BtreeExtractIf;
-use crate::tree_store::btree_mutator::MutateHelper;
+use crate::tree_store::btree_mutator::{DeleteTarget, MutateHelper};
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::{
     AccessGuardMutInPlace, AllPageNumbersBtreeIter, BtreeRangeIter, PageHint, PageNumber,
@@ -466,6 +466,30 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         );
         let result = operation.delete(key)?;
         Ok(result)
+    }
+
+    // Single-pass removal of the leftmost (`first=true`) or rightmost
+    // (`first=false`) entry. Returns the raw stored key bytes alongside the
+    // value guard, avoiding a separate iterator pass and the `K::from_bytes` /
+    // `K::as_bytes` round-trip that a naive "find then remove" implementation
+    // would need.
+    pub(crate) fn pop_endpoint(
+        &mut self,
+        first: bool,
+    ) -> Result<Option<(Vec<u8>, AccessGuard<'_, V>)>> {
+        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
+            &mut self.root,
+            self.mem.clone(),
+            freed_pages.as_mut(),
+            self.allocated_pages.clone(),
+        );
+        let target = if first {
+            DeleteTarget::First
+        } else {
+            DeleteTarget::Last
+        };
+        operation.pop_endpoint(target)
     }
 
     #[allow(dead_code)]
