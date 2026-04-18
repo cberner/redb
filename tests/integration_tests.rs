@@ -2836,3 +2836,148 @@ fn restore_savepoint_abort_after_ephemeral_drop() {
             .is_some()
     );
 }
+
+// Regression test: restore_savepoint() and delete_persistent_savepoint() targeting
+// the same persistent savepoint within the same transaction must not leak pages.
+//
+// restore_savepoint() reads DATA_ALLOCATED_TABLE entries with key strictly greater
+// than the restored savepoint's transaction id and queues their pages for freeing.
+// delete_persistent_savepoint() then removes the savepoint and queues a deallocation
+// for commit time. After many repetitions the page count must return to baseline.
+#[test]
+fn restore_and_delete_persistent_savepoint_same_txn() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let table: TableDefinition<u64, u64> = TableDefinition::new("data");
+
+    // Warm up the persistent savepoint system tables so the baseline is stable.
+    {
+        let txn = db.begin_write().unwrap();
+        let id = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        txn.delete_persistent_savepoint(id).unwrap();
+        txn.commit().unwrap();
+    }
+    {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(table).unwrap();
+            for i in 0..50u64 {
+                t.insert(i, i).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    for _ in 0..3 {
+        db.begin_write().unwrap().commit().unwrap();
+    }
+    let txn = db.begin_write().unwrap();
+    let baseline = txn.stats().unwrap().allocated_pages();
+    txn.abort().unwrap();
+
+    const ITERATIONS: u64 = 30;
+    for round in 0..ITERATIONS {
+        let id = {
+            let txn = db.begin_write().unwrap();
+            let id = txn.persistent_savepoint().unwrap();
+            txn.commit().unwrap();
+            id
+        };
+
+        {
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(table).unwrap();
+                t.insert(0, round).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        {
+            let mut txn = db.begin_write().unwrap();
+            let sp = txn.get_persistent_savepoint(id).unwrap();
+            txn.restore_savepoint(&sp).unwrap();
+            drop(sp);
+            txn.delete_persistent_savepoint(id).unwrap();
+            txn.commit().unwrap();
+        }
+
+        for _ in 0..3 {
+            db.begin_write().unwrap().commit().unwrap();
+        }
+    }
+
+    let txn = db.begin_write().unwrap();
+    let after = txn.stats().unwrap().allocated_pages();
+    txn.abort().unwrap();
+
+    assert_eq!(
+        baseline, after,
+        "After {ITERATIONS} iterations of persistent_savepoint+modify+restore+delete \
+         in the same transaction, page usage grew from {baseline} to {after} \
+         ({} pages leaked).",
+        after.saturating_sub(baseline),
+    );
+}
+
+// Regression test: repeatedly opening and closing a `Database` without doing any
+// user-visible work must not grow the file unbounded.
+//
+// `Database::drop` calls `ensure_allocator_state_table_and_trim()` which begins a
+// quick-repair commit with `ShrinkPolicy::Maximum`. Quick-repair deletes and
+// recreates `ALLOCATOR_STATE_TABLE` on every commit, so this exercises the
+// system-tree COW machinery on each cycle. Without proper cleanup of the freed
+// pages this would accumulate orphaned system-tree pages over many cycles.
+#[test]
+fn drop_and_reopen_cycles_no_leak() {
+    let tmpfile = create_tempfile();
+    let table: TableDefinition<u64, u64> = TableDefinition::new("data");
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(table).unwrap();
+            for i in 0..50u64 {
+                t.insert(i, i).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    let baseline = {
+        let db = Database::open(tmpfile.path()).unwrap();
+        for _ in 0..5 {
+            db.begin_write().unwrap().commit().unwrap();
+        }
+        let txn = db.begin_write().unwrap();
+        let n = txn.stats().unwrap().allocated_pages();
+        txn.abort().unwrap();
+        n
+    };
+
+    const ITERATIONS: u64 = 30;
+    for _ in 0..ITERATIONS {
+        let db = Database::open(tmpfile.path()).unwrap();
+        let _ = db;
+    }
+
+    let after = {
+        let db = Database::open(tmpfile.path()).unwrap();
+        for _ in 0..5 {
+            db.begin_write().unwrap().commit().unwrap();
+        }
+        let txn = db.begin_write().unwrap();
+        let n = txn.stats().unwrap().allocated_pages();
+        txn.abort().unwrap();
+        n
+    };
+
+    assert_eq!(
+        baseline, after,
+        "After {ITERATIONS} drop+reopen cycles, page usage grew from {baseline} to \
+         {after} ({} pages leaked).",
+        after.saturating_sub(baseline),
+    );
+}
