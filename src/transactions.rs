@@ -754,6 +754,68 @@ impl TableNamespace<'_> {
     }
 }
 
+// Transaction-local savepoint lifecycle state.
+#[derive(Default)]
+struct SavepointTransactionState {
+    created_persistent: HashSet<(SavepointId, TransactionId)>,
+    deleted_persistent: Vec<(SavepointId, TransactionId)>,
+    invalidated: BTreeSet<SavepointId>,
+}
+
+impl SavepointTransactionState {
+    fn record_created(&mut self, id: SavepointId, transaction_id: TransactionId) {
+        self.created_persistent.insert((id, transaction_id));
+    }
+
+    fn record_deleted(&mut self, id: SavepointId, transaction_id: TransactionId) {
+        self.deleted_persistent.push((id, transaction_id));
+    }
+
+    fn record_invalidated(&mut self, ids: impl IntoIterator<Item = SavepointId>) {
+        self.invalidated.extend(ids);
+    }
+
+    fn is_invalidated(&self, id: SavepointId) -> bool {
+        self.invalidated.contains(&id)
+    }
+
+    fn has_created_or_deleted(&self) -> bool {
+        !self.created_persistent.is_empty() || !self.deleted_persistent.is_empty()
+    }
+
+    fn apply_on_commit(&mut self, tracker: &TransactionTracker) {
+        // Persistent savepoints whose on-disk entry was deleted: release their
+        // tracker refcount now that the deletion is durable.
+        for (savepoint, transaction) in self.deleted_persistent.drain(..) {
+            tracker.deallocate_savepoint(savepoint, transaction);
+        }
+        // Savepoints that restore_savepoint() invalidated: remove them from the
+        // shared valid_savepoints map. For persistent savepoints,
+        // deallocate_savepoint above has already removed them; for ephemeral,
+        // the user's Savepoint handle still owns the live_read_transactions
+        // refcount and will release it on drop.
+        tracker.invalidate_savepoints(std::mem::take(&mut self.invalidated));
+        // Persistent savepoints created during this transaction stay live:
+        // drop them from our bookkeeping without releasing tracker state.
+        self.created_persistent.clear();
+    }
+
+    fn apply_on_abort(&mut self, tracker: &TransactionTracker) {
+        // Persistent savepoints created during this transaction: their
+        // on-disk entries will be rolled back by rollback_uncommitted_writes(),
+        // but the shared tracker registration must be released explicitly.
+        for (savepoint, transaction) in self.created_persistent.drain() {
+            tracker.deallocate_savepoint(savepoint, transaction);
+        }
+        // Deleted-persistent entries will be rolled back on disk, so the
+        // tracker state must NOT be released (it is still valid).
+        self.deleted_persistent.clear();
+        // Invalidations were only staged in this struct and never touched the
+        // shared tracker, so dropping them is sufficient.
+        self.invalidated.clear();
+    }
+}
+
 /// A read/write transaction
 ///
 /// Only a single [`WriteTransaction`] may exist at a time
@@ -770,13 +832,9 @@ pub struct WriteTransaction {
     two_phase_commit: bool,
     shrink_policy: ShrinkPolicy,
     quick_repair: bool,
-    // Persistent savepoints created during this transaction. The tuple is
-    // (savepoint id, read-transaction id) so that abort_inner() has everything
-    // it needs to release the savepoint's TransactionTracker state.
-    created_persistent_savepoints: Mutex<HashSet<(SavepointId, TransactionId)>>,
-    deleted_persistent_savepoints: Mutex<Vec<(SavepointId, TransactionId)>>,
-    // Savepoints that restore_savepoint() has marked as invalidated within this transaction.
-    invalidated_savepoints: Mutex<BTreeSet<SavepointId>>,
+    // All transaction-local savepoint lifecycle state. See
+    // `SavepointTransactionState` for the commit/abort contract.
+    savepoint_state: Mutex<SavepointTransactionState>,
 }
 
 impl WriteTransaction {
@@ -807,9 +865,7 @@ impl WriteTransaction {
             two_phase_commit: false,
             quick_repair: false,
             shrink_policy: ShrinkPolicy::Default,
-            created_persistent_savepoints: Mutex::new(Default::default()),
-            deleted_persistent_savepoints: Mutex::new(vec![]),
-            invalidated_savepoints: Mutex::new(BTreeSet::new()),
+            savepoint_state: Mutex::new(SavepointTransactionState::default()),
         })
     }
 
@@ -973,10 +1029,10 @@ impl WriteTransaction {
 
         savepoint.set_persistent();
 
-        self.created_persistent_savepoints
+        self.savepoint_state
             .lock()
             .unwrap()
-            .insert((savepoint.get_id(), savepoint.get_transaction_id()));
+            .record_created(savepoint.get_id(), savepoint.get_transaction_id());
 
         Ok(savepoint.get_id().0)
     }
@@ -1025,10 +1081,10 @@ impl WriteTransaction {
             let savepoint = serialized
                 .value()
                 .to_savepoint(self.transaction_tracker.clone());
-            self.deleted_persistent_savepoints
+            self.savepoint_state
                 .lock()
                 .unwrap()
-                .push((savepoint.get_id(), savepoint.get_transaction_id()));
+                .record_deleted(savepoint.get_id(), savepoint.get_transaction_id());
             Ok(true)
         } else {
             Ok(false)
@@ -1103,10 +1159,10 @@ impl WriteTransaction {
             .transaction_tracker
             .is_valid_savepoint(savepoint.get_id())
             || self
-                .invalidated_savepoints
+                .savepoint_state
                 .lock()
                 .unwrap()
-                .contains(&savepoint.get_id())
+                .is_invalidated(savepoint.get_id())
         {
             return Err(SavepointError::InvalidSavepoint);
         }
@@ -1192,10 +1248,10 @@ impl WriteTransaction {
         let invalidated = self
             .transaction_tracker
             .list_savepoints_after(savepoint.get_id());
-        self.invalidated_savepoints
+        self.savepoint_state
             .lock()
             .unwrap()
-            .extend(invalidated);
+            .record_invalidated(invalidated);
         for persistent_savepoint in self.list_persistent_savepoints()? {
             if persistent_savepoint > savepoint.get_id().0 {
                 self.delete_persistent_savepoint(persistent_savepoint)?;
@@ -1211,17 +1267,12 @@ impl WriteTransaction {
     /// If a persistent savepoint has been created or deleted, in this transaction, the durability may not
     /// be reduced below [`Durability::Immediate`]
     pub fn set_durability(&mut self, durability: Durability) -> Result<(), SetDurabilityError> {
-        let created = !self
-            .created_persistent_savepoints
+        let persistent_modified = self
+            .savepoint_state
             .lock()
             .unwrap()
-            .is_empty();
-        let deleted = !self
-            .deleted_persistent_savepoints
-            .lock()
-            .unwrap()
-            .is_empty();
-        if (created || deleted) && !matches!(durability, Durability::Immediate) {
+            .has_created_or_deleted();
+        if persistent_modified && !matches!(durability, Durability::Immediate) {
             return Err(SetDurabilityError::PersistentSavepointModified);
         }
 
@@ -1434,20 +1485,10 @@ impl WriteTransaction {
             InternalDurability::Immediate => self.durable_commit(user_root)?,
         }
 
-        for (savepoint, transaction) in self.deleted_persistent_savepoints.lock().unwrap().iter() {
-            self.transaction_tracker
-                .deallocate_savepoint(*savepoint, *transaction);
-        }
-        // Apply any savepoint invalidation that restore_savepoint() deferred to commit
-        // time. For persistent savepoints, deallocate_savepoint above has already
-        // removed them from valid_savepoints and decremented live_read_transactions.
-        // For ephemeral savepoints, only the valid_savepoints entry is removed here;
-        // the live_read_transactions ref stays owned by the user's Savepoint handle
-        // until it is dropped.
-        self.transaction_tracker
-            .invalidate_savepoints(std::mem::take(
-                &mut *self.invalidated_savepoints.lock().unwrap(),
-            ));
+        self.savepoint_state
+            .lock()
+            .unwrap()
+            .apply_on_commit(&self.transaction_tracker);
 
         assert!(
             self.system_tables
@@ -1571,21 +1612,14 @@ impl WriteTransaction {
             .unwrap()
             .table_tree
             .clear_root_updates_and_close();
-        // Release any persistent savepoints that were created during this transaction.
-        // The corresponding SAVEPOINT_TABLE / NEXT_SAVEPOINT_TABLE writes are rolled
-        // back below by rollback_uncommitted_writes()
-        for (savepoint_id, transaction_id) in
-            self.created_persistent_savepoints.lock().unwrap().iter()
-        {
-            self.transaction_tracker
-                .deallocate_savepoint(*savepoint_id, *transaction_id);
-        }
-        // restore_savepoint() only recorded the invalidated savepoints in the
-        // per-transaction `invalidated_savepoints` set without touching the shared
-        // `valid_savepoints` map, so dropping the set is sufficient to undo that
-        // invalidation. The SAVEPOINT_TABLE changes are reverted below by
-        // rollback_uncommitted_writes().
-        self.invalidated_savepoints.lock().unwrap().clear();
+        // Release all transaction-local savepoint state. The on-disk mutations
+        // (SAVEPOINT_TABLE / NEXT_SAVEPOINT_TABLE) are reverted by
+        // rollback_uncommitted_writes() below; apply_on_abort handles the
+        // in-memory TransactionTracker state that rollback cannot see.
+        self.savepoint_state
+            .lock()
+            .unwrap()
+            .apply_on_abort(&self.transaction_tracker);
         self.mem.rollback_uncommitted_writes()?;
         #[cfg(feature = "logging")]
         debug!("Finished abort of transaction id={:?}", self.transaction_id);
