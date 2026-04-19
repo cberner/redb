@@ -73,7 +73,9 @@ impl<T: Value> Value for Vec<T> {
         let mut result = if let Some(width) = T::fixed_width() {
             Vec::with_capacity(value.len() * width + 5)
         } else {
-            Vec::with_capacity(value.len() * 2 + 5)
+            // For variable-width elements, estimate 8 bytes per element on average
+            // plus varint length prefix (up to 5 bytes each)
+            Vec::with_capacity(value.len() * 8 + 5)
         };
         encode_varint_len(value.len(), &mut result);
 

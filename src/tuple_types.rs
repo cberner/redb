@@ -302,7 +302,11 @@ impl<T: Value> Value for (T,) {
     }
 
     fn type_name() -> TypeName {
-        TypeName::internal(&format!("({},)", T::type_name().name()))
+        if Self::fixed_width().is_some() {
+            TypeName::internal(&format!("({},)", T::type_name().name()))
+        } else {
+            TypeName::internal2(&format!("({},)", T::type_name().name()))
+        }
     }
 }
 
