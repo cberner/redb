@@ -226,6 +226,26 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
     pub fn value(&self) -> V::SelfType<'_> {
         V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
     }
+
+    /// Consumes this guard and returns a cheap shared handle to the underlying
+    /// page memory along with the absolute `offset` and `len` of this value
+    /// within it. Panics if the guard wraps a mutable page, which would require
+    /// a deep copy.
+    pub(crate) fn into_shared_parts(mut self) -> (Arc<[u8]>, usize, usize) {
+        debug_assert!(matches!(self.on_drop, OnDrop::None));
+        let offset = self.offset;
+        let len = self.len;
+        let page = std::mem::replace(&mut self.page, EitherPage::OwnedMemory(Vec::new()));
+        let arc = match page {
+            EitherPage::Immutable(page) => page.to_arc(),
+            EitherPage::ArcMemory(arc) => arc,
+            EitherPage::OwnedMemory(vec) => Arc::from(vec.into_boxed_slice()),
+            EitherPage::Mutable(_) => {
+                unreachable!("into_shared_parts does not support mutable pages")
+            }
+        };
+        (arc, offset, len)
+    }
 }
 
 impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
