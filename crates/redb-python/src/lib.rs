@@ -1,7 +1,5 @@
 #![deny(clippy::all, clippy::pedantic, clippy::disallowed_methods)]
-// TODO: revisit this list and see if we can enable some
 #![allow(
-    clippy::default_trait_access,
     clippy::if_not_else,
     clippy::iter_not_returning_iterator,
     clippy::missing_errors_doc,
