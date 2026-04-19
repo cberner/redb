@@ -7,7 +7,7 @@ use crate::tree_store::btree_mutator::DeletionResult::{
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
-    AccessGuardMutInPlace, BtreeHeader, PageNumber, PageTrackerPolicy, RawLeafBuilder,
+    AccessGuardMutInPlace, BtreeHeader, PageHint, PageNumber, PageTrackerPolicy, RawLeafBuilder,
     TransactionalMemory,
 };
 use crate::types::{Key, Value};
@@ -120,8 +120,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
             length,
         }) = *self.root
         {
-            let (deletion_result, found) =
-                self.delete_helper(self.mem.get_page(p)?, checksum, K::as_bytes(key).as_ref())?;
+            let (deletion_result, found) = self.delete_helper(
+                self.mem.get_page(p, PageHint::None)?,
+                checksum,
+                K::as_bytes(key).as_ref(),
+            )?;
             let new_length = if found.is_some() { length - 1 } else { length };
             let new_root = match deletion_result {
                 Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum, new_length)),
@@ -188,7 +191,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         }) = *self.root
         {
             let result = self.insert_helper(
-                self.mem.get_page(p)?,
+                self.mem.get_page(p, PageHint::None)?,
                 checksum,
                 K::as_bytes(key).as_ref(),
                 V::as_bytes(value).as_ref(),
@@ -459,8 +462,12 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
                 let child_checksum = accessor.child_checksum(child_index).unwrap();
-                let sub_result =
-                    self.insert_helper(self.mem.get_page(child_page)?, child_checksum, key, value)?;
+                let sub_result = self.insert_helper(
+                    self.mem.get_page(child_page, PageHint::None)?,
+                    child_checksum,
+                    key,
+                    value,
+                )?;
 
                 // Skip-path: if child page number and checksum haven't changed,
                 // no branch update is needed. This avoids redundant get_page_mut +
@@ -739,8 +746,11 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
         let original_page_number = page.get_page_number();
         let (child_index, child_page_number) = accessor.child_for_key::<K>(key);
         let child_checksum = accessor.child_checksum(child_index).unwrap();
-        let (result, found) =
-            self.delete_helper(self.mem.get_page(child_page_number)?, child_checksum, key)?;
+        let (result, found) = self.delete_helper(
+            self.mem.get_page(child_page_number, PageHint::None)?,
+            child_checksum,
+            key,
+        )?;
         if found.is_none() {
             return Ok((Subtree(original_page_number, checksum), None));
         }
@@ -823,7 +833,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 debug_assert!(merge_with < accessor.count_children());
                 let merge_with_page = self
                     .mem
-                    .get_page(accessor.child_page(merge_with).unwrap())?;
+                    .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
                 let merge_with_accessor =
                     LeafAccessor::new(merge_with_page.memory(), K::fixed_width(), V::fixed_width());
 
@@ -913,7 +923,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 let merge_with_page = self
                     .mem
-                    .get_page(accessor.child_page(merge_with).unwrap())?;
+                    .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
                 debug_assert!(merge_with < accessor.count_children());
                 for i in 0..accessor.count_children() {
@@ -975,7 +985,7 @@ impl<'a, 'b, K: Key, V: Value> MutateHelper<'a, 'b, K, V> {
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 let merge_with_page = self
                     .mem
-                    .get_page(accessor.child_page(merge_with).unwrap())?;
+                    .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
                 debug_assert!(merge_with < accessor.count_children());
                 for i in 0..accessor.count_children() {

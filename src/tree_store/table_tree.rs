@@ -107,6 +107,7 @@ impl TableTree {
                             fixed_key_size,
                             fixed_value_size,
                             self.mem.clone(),
+                            self.tree.hint(),
                         )
                         .verify_checksum()?
                     {
@@ -124,6 +125,7 @@ impl TableTree {
                         fixed_key_size,
                         fixed_value_size,
                         self.mem.clone(),
+                        self.tree.hint(),
                     )? {
                         return Ok(false);
                     }
@@ -192,7 +194,7 @@ impl TableTree {
                 .get_table_untyped(&entry, TableType::Normal)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
                 .unwrap();
-            definition.visit_all_pages(self.mem.clone(), |path| visitor(path))?;
+            definition.visit_all_pages(self.mem.clone(), self.tree.hint(), |path| visitor(path))?;
         }
 
         for entry in self.list_tables(TableType::Multimap)? {
@@ -200,7 +202,7 @@ impl TableTree {
                 .get_table_untyped(&entry, TableType::Multimap)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
                 .unwrap();
-            definition.visit_all_pages(self.mem.clone(), |path| visitor(path))?;
+            definition.visit_all_pages(self.mem.clone(), self.tree.hint(), |path| visitor(path))?;
         }
 
         Ok(())
@@ -262,7 +264,7 @@ impl TableTreeMut<'_> {
                 .get_table_untyped(&entry, TableType::Normal)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
                 .unwrap();
-            definition.visit_all_pages(self.mem.clone(), |path| visitor(path))?;
+            definition.visit_all_pages(self.mem.clone(), PageHint::None, |path| visitor(path))?;
         }
 
         for entry in self.list_tables(TableType::Multimap)? {
@@ -270,7 +272,7 @@ impl TableTreeMut<'_> {
                 .get_table_untyped(&entry, TableType::Multimap)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
                 .unwrap();
-            definition.visit_all_pages(self.mem.clone(), |path| visitor(path))?;
+            definition.visit_all_pages(self.mem.clone(), PageHint::None, |path| visitor(path))?;
         }
 
         Ok(())
@@ -559,7 +561,7 @@ impl TableTreeMut<'_> {
             // Collect all pages first, then free them. The walk reads each page to discover
             // its children, so we must not invalidate any page before the walk completes.
             let mut pages = vec![];
-            definition.visit_all_pages(self.mem.clone(), |path| {
+            definition.visit_all_pages(self.mem.clone(), PageHint::None, |path| {
                 pages.push(path.page_number());
                 Ok(())
             })?;
@@ -625,7 +627,7 @@ impl TableTreeMut<'_> {
                 definition.set_header(*updated_root, *updated_length);
             }
 
-            definition.visit_all_pages(self.mem.clone(), |path| {
+            definition.visit_all_pages(self.mem.clone(), PageHint::None, |path| {
                 output.insert(path.page_number(), path.clone());
                 while output.len() > n {
                     output.pop_first();
@@ -706,6 +708,7 @@ impl TableTreeMut<'_> {
                         &self.mem,
                         fixed_key_size,
                         fixed_value_size,
+                        PageHint::None,
                     )?;
                     max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
                     total_stored_bytes += subtree_stats.stored_leaf_bytes;
@@ -725,6 +728,7 @@ impl TableTreeMut<'_> {
                         &self.mem,
                         fixed_key_size,
                         fixed_value_size,
+                        PageHint::None,
                     )?;
                     max_subtree_height = max(max_subtree_height, subtree_stats.tree_height);
                     total_stored_bytes += subtree_stats.stored_leaf_bytes;

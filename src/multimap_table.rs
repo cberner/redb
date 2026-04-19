@@ -25,9 +25,10 @@ pub(crate) fn multimap_btree_stats(
     mem: &TransactionalMemory,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
+    hint: PageHint,
 ) -> Result<BtreeStats> {
     if let Some(root) = root {
-        multimap_stats_helper(root, mem, fixed_key_size, fixed_value_size)
+        multimap_stats_helper(root, mem, fixed_key_size, fixed_value_size, hint)
     } else {
         Ok(BtreeStats {
             tree_height: 0,
@@ -45,8 +46,9 @@ fn multimap_stats_helper(
     mem: &TransactionalMemory,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
+    hint: PageHint,
 ) -> Result<BtreeStats> {
-    let page = mem.get_page(page_number)?;
+    let page = mem.get_page(page_number, hint)?;
     let node_mem = page.memory();
     match node_mem[0] {
         LEAF => {
@@ -96,6 +98,7 @@ fn multimap_stats_helper(
                             mem,
                             fixed_value_size,
                             <() as Value>::fixed_width(),
+                            hint,
                         )?;
                         max_child_height = max(max_child_height, stats.tree_height);
                         branch_pages += stats.branch_pages;
@@ -127,7 +130,7 @@ fn multimap_stats_helper(
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
                     let stats =
-                        multimap_stats_helper(child, mem, fixed_key_size, fixed_value_size)?;
+                        multimap_stats_helper(child, mem, fixed_key_size, fixed_value_size, hint)?;
                     max_child_height = max(max_child_height, stats.tree_height);
                     leaf_pages += stats.leaf_pages;
                     branch_pages += stats.branch_pages;
@@ -156,6 +159,7 @@ pub(crate) fn verify_tree_and_subtree_checksums(
     key_size: Option<usize>,
     value_size: Option<usize>,
     mem: Arc<TransactionalMemory>,
+    hint: PageHint,
 ) -> Result<bool> {
     if let Some(header) = root {
         if !RawBtree::new(
@@ -163,6 +167,7 @@ pub(crate) fn verify_tree_and_subtree_checksums(
             key_size,
             DynamicCollection::<()>::fixed_width_with(value_size),
             mem.clone(),
+            hint,
         )
         .verify_checksum()?
         {
@@ -174,13 +179,20 @@ pub(crate) fn verify_tree_and_subtree_checksums(
             key_size,
             DynamicCollection::<()>::fixed_width_with(value_size),
             mem.clone(),
+            hint,
         )?;
         for table_page in table_pages_iter {
-            let page = mem.get_page(table_page?)?;
+            let page = mem.get_page(table_page?, hint)?;
             let subtree_roots = parse_subtree_roots(&page, key_size, value_size);
             for header in subtree_roots {
-                if !RawBtree::new(Some(header), value_size, <()>::fixed_width(), mem.clone())
-                    .verify_checksum()?
+                if !RawBtree::new(
+                    Some(header),
+                    value_size,
+                    <()>::fixed_width(),
+                    mem.clone(),
+                    hint,
+                )
+                .verify_checksum()?
                 {
                     return Ok(false);
                 }
@@ -200,7 +212,7 @@ pub(crate) fn relocate_subtrees(
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     relocation_map: &HashMap<PageNumber, PageNumber>,
 ) -> Result<(PageNumber, Checksum)> {
-    let old_page = mem.get_page(root.0)?;
+    let old_page = mem.get_page(root.0, PageHint::None)?;
     let mut new_page = if let Some(new_page_number) = relocation_map.get(&root.0) {
         mem.get_page_mut(*new_page_number)?
     } else {
@@ -369,6 +381,7 @@ fn parse_subtree_roots<T: Page>(
 pub(crate) struct UntypedMultiBtree {
     mem: Arc<TransactionalMemory>,
     root: Option<BtreeHeader>,
+    hint: PageHint,
     key_width: Option<usize>,
     value_width: Option<usize>,
 }
@@ -377,12 +390,14 @@ impl UntypedMultiBtree {
     pub(crate) fn new(
         root: Option<BtreeHeader>,
         mem: Arc<TransactionalMemory>,
+        hint: PageHint,
         key_width: Option<usize>,
         value_width: Option<usize>,
     ) -> Self {
         Self {
             mem,
             root,
+            hint,
             key_width,
             value_width,
         }
@@ -396,18 +411,20 @@ impl UntypedMultiBtree {
         let tree = UntypedBtree::new(
             self.root,
             self.mem.clone(),
+            self.hint,
             self.key_width,
             UntypedDynamicCollection::fixed_width_with(self.value_width),
         );
         tree.visit_all_pages(|path| {
             visitor(path)?;
-            let page = self.mem.get_page(path.page_number())?;
+            let page = self.mem.get_page(path.page_number(), self.hint)?;
             match page.memory()[0] {
                 LEAF => {
                     for header in parse_subtree_roots(&page, self.key_width, self.value_width) {
                         let subtree = UntypedBtree::new(
                             Some(header),
                             self.mem.clone(),
+                            self.hint,
                             self.value_width,
                             <() as Value>::fixed_width(),
                         );
@@ -1254,7 +1271,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     length: new_length,
                 }) = subtree.get_root()
                 {
-                    let page = self.mem.get_page(new_root)?;
+                    let page = self.mem.get_page(new_root, PageHint::None)?;
                     match page.memory()[0] {
                         LEAF => {
                             let accessor = LeafAccessor::new(
@@ -1327,6 +1344,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     V::fixed_width(),
                     <() as Value>::fixed_width(),
                     self.mem.clone(),
+                    PageHint::None,
                 )?;
                 for page in all_pages {
                     pages.push(page?);
@@ -1367,6 +1385,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableTableMetadata for MultimapTable
             &self.mem,
             K::fixed_width(),
             V::fixed_width(),
+            PageHint::None,
         )?;
 
         Ok(TableStats {
@@ -1448,6 +1467,7 @@ pub trait ReadableMultimapTable<K: Key + 'static, V: Key + 'static>: ReadableTab
 pub struct ReadOnlyUntypedMultimapTable {
     num_values: u64,
     tree: RawBtree,
+    hint: PageHint,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
     mem: Arc<TransactionalMemory>,
@@ -1463,6 +1483,7 @@ impl ReadableTableMetadata for ReadOnlyUntypedMultimapTable {
             &self.mem,
             self.fixed_key_size,
             self.fixed_value_size,
+            self.hint,
         )?;
 
         Ok(TableStats {
@@ -1484,6 +1505,7 @@ impl ReadOnlyUntypedMultimapTable {
     pub(crate) fn new(
         root: Option<BtreeHeader>,
         num_values: u64,
+        hint: PageHint,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
         mem: Arc<TransactionalMemory>,
@@ -1495,7 +1517,9 @@ impl ReadOnlyUntypedMultimapTable {
                 fixed_key_size,
                 DynamicCollection::<()>::fixed_width_with(fixed_value_size),
                 mem.clone(),
+                hint,
             ),
+            hint,
             fixed_key_size,
             fixed_value_size,
             mem,
@@ -1572,6 +1596,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableTableMetadata for ReadOnlyMulti
             &self.mem,
             K::fixed_width(),
             V::fixed_width(),
+            self.tree.hint(),
         )?;
 
         Ok(TableStats {
