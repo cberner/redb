@@ -1119,7 +1119,6 @@ impl Builder {
             // It is part of the file format, so can be enabled in the future.
             page_size: PAGE_SIZE,
             region_size: None,
-            // TODO: Default should probably take into account the total system memory
             cache_size: 1024 * 1024 * 1024,
             repair_callback: Box::new(|_| {}),
         }
