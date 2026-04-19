@@ -1228,6 +1228,16 @@ impl WriteTransaction {
                     data_freed_pages.push(value.value().get(i));
                 }
             }
+            // Also queue unpersisted allocations from non-durable commits after the savepoint.
+            // These are tracked in memory rather than in DATA_ALLOCATED_TABLE. We don't remove
+            // them from the map here: if this transaction aborts, the in-memory map must still
+            // reflect the full history. durable_commit() will empty the map.
+            for page in self
+                .mem
+                .unpersisted_allocations_after(savepoint.get_transaction_id())
+            {
+                data_freed_pages.push(page);
+            }
         }
 
         // 3) Mark all savepoints newer than the restored one as invalidated for this
@@ -1539,7 +1549,11 @@ impl WriteTransaction {
         Ok(())
     }
 
-    fn store_allocated_pages(&self, data_allocated_pages: Vec<PageNumber>) -> Result {
+    // Flushes this transaction's data-tree allocations to DATA_ALLOCATED_TABLE, along with any
+    // previously unpersisted allocations that are now becoming durable. Must be called AFTER
+    // `process_freed_pages` so that pages reclaimed during this commit are already dropped from
+    // the in-memory `unpersisted_allocations` map and not written to disk as stale records.
+    fn flush_data_allocated_pages(&self, data_allocated_pages: Vec<PageNumber>) -> Result {
         // Catch scenarios like a page getting allocated and then deallocated within the same
         // transaction, but errantly left in the allocated pages list.
         #[cfg(debug_assertions)]
@@ -1551,8 +1565,16 @@ impl WriteTransaction {
             debug_assert!(self.mem.uncommitted(*page), "Page is committed: {page:?}");
         }
 
+        let unpersisted = self.mem.take_unpersisted_allocations();
         let mut system_tables = self.system_tables.lock().unwrap();
         let mut allocated_table = system_tables.open_system_table(self, DATA_ALLOCATED_TABLE)?;
+        for (txn_id, pages) in unpersisted {
+            Self::write_allocated_pages_entry(
+                &mut allocated_table,
+                txn_id,
+                pages.into_iter().collect(),
+            )?;
+        }
         Self::write_allocated_pages_entry(
             &mut allocated_table,
             self.transaction_id,
@@ -1637,13 +1659,15 @@ impl WriteTransaction {
         user_root: Option<BtreeHeader>,
         allocated_pages: Vec<PageNumber>,
     ) -> Result {
-        self.store_allocated_pages(allocated_pages)?;
-
         let free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_transaction()
             .map_or(self.transaction_id, |x| x.next());
         self.process_freed_pages(free_until_transaction)?;
+        // Flush allocated pages (including previously unpersisted allocations that are now
+        // becoming durable) AFTER process_freed_pages, so that any pages reclaimed here have
+        // already been dropped from the in-memory `unpersisted_allocations` map.
+        self.flush_data_allocated_pages(allocated_pages)?;
 
         let mut system_tables = self.system_tables.lock().unwrap();
         let system_freed_pages = system_tables.system_freed_pages();
@@ -1719,22 +1743,10 @@ impl WriteTransaction {
         user_root: Option<BtreeHeader>,
         allocated_pages: Vec<PageNumber>,
     ) -> Result {
-        self.store_allocated_pages(allocated_pages)?;
-
-        let mut free_until_transaction = self
+        let free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_nondurable_transaction()
             .map_or(self.transaction_id, |x| x.next());
-        // TODO: refactor the non-durable free'ed processing to remove this
-        // The reason it is needed is that non-durable commits edit previous non-durable commits,
-        // but they only edit the freed tree of unpersisted pages.
-        // The allocated tree, which savepoints rely, is not edited for performance reasons
-        // Therefore, we must not edit anything after a savepoint
-        // It would be better for non-durable transaction's unpersisted pages to be kept in-memory
-        // in a data structure where the allocated list can be efficiently edited
-        if let Some((_, oldest_savepoint)) = self.transaction_tracker.oldest_savepoint() {
-            free_until_transaction = TransactionId::min(free_until_transaction, oldest_savepoint);
-        }
         self.process_freed_pages_nondurable(free_until_transaction)?;
 
         let mut post_commit_frees = vec![];
@@ -1767,6 +1779,9 @@ impl WriteTransaction {
 
         self.mem
             .non_durable_commit(user_root, system_root, self.transaction_id)?;
+        // Record the data-tree pages allocated in this transaction in the in-memory map.
+        self.mem
+            .record_unpersisted_allocations(self.transaction_id, allocated_pages);
         // Register this as a non-durable transaction to ensure that the freed pages we just pushed
         // are only processed after this has been persisted
         self.transaction_tracker.register_non_durable_commit(

@@ -6,6 +6,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 const K: u64 = 0xf135_7aea_2e62_a9c5;
 
 pub(crate) type FastHashMapU64<V> = HashMap<u64, V, BuildHasherDefault<FastHasher64>>;
+pub(crate) type PageNumberHashMap<V> = HashMap<PageNumber, V, BuildHasherDefault<FastHasher64>>;
 pub(crate) type PageNumberHashSet = HashSet<PageNumber, BuildHasherDefault<FastHasher64>>;
 
 #[derive(Copy, Clone, Default, Eq, PartialEq)]
