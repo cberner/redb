@@ -289,6 +289,14 @@ impl TransactionGuard {
         }
     }
 
+    pub(crate) fn allocate_read(
+        tracker: Arc<TransactionTracker>,
+        mem: &TransactionalMemory,
+    ) -> Result<Self> {
+        let id = tracker.register_read_transaction(mem)?;
+        Ok(Self::new_read(id, tracker))
+    }
+
     pub(crate) fn new_write(
         transaction_id: TransactionId,
         tracker: Arc<TransactionTracker>,
@@ -506,7 +514,7 @@ pub struct Database {
 
 impl ReadableDatabase for Database {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
-        let guard = self.allocate_read_transaction()?;
+        let guard = TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
         #[cfg(feature = "logging")]
         debug!("Beginning read transaction id={:?}", guard.id());
         ReadTransaction::new(self.get_memory(), guard)
@@ -1011,17 +1019,6 @@ impl Database {
         }
 
         Ok(Some(tree))
-    }
-
-    fn allocate_read_transaction(&self) -> Result<TransactionGuard> {
-        let id = self
-            .transaction_tracker
-            .register_read_transaction(&self.mem)?;
-
-        Ok(TransactionGuard::new_read(
-            id,
-            self.transaction_tracker.clone(),
-        ))
     }
 
     /// Convenience method for [`Builder::new`]
