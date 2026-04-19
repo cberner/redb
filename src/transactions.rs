@@ -1102,20 +1102,9 @@ impl WriteTransaction {
         Ok(savepoints.into_iter())
     }
 
-    // TODO: deduplicate this with the one in Database
-    fn allocate_read_transaction(&self) -> Result<TransactionGuard> {
-        let id = self
-            .transaction_tracker
-            .register_read_transaction(&self.mem)?;
-
-        Ok(TransactionGuard::new_read(
-            id,
-            self.transaction_tracker.clone(),
-        ))
-    }
-
     fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionId)> {
-        let transaction_id = self.allocate_read_transaction()?.leak();
+        let transaction_id =
+            TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?.leak();
         let id = self.transaction_tracker.allocate_savepoint(transaction_id);
         Ok((id, transaction_id))
     }
