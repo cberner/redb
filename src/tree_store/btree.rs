@@ -472,6 +472,30 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         Ok(result)
     }
 
+    // Removes and returns the leftmost entry in the tree, if any, in a single tree descent.
+    pub(crate) fn pop_first(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
+            &mut self.root,
+            self.mem.clone(),
+            freed_pages.as_mut(),
+            self.allocated_pages.clone(),
+        );
+        operation.pop_first()
+    }
+
+    // Removes and returns the rightmost entry in the tree, if any, in a single tree descent.
+    pub(crate) fn pop_last(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
+            &mut self.root,
+            self.mem.clone(),
+            freed_pages.as_mut(),
+            self.allocated_pages.clone(),
+        );
+        operation.pop_last()
+    }
+
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.read_tree()?.print_debug(include_values)
