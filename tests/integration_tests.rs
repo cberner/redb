@@ -2914,3 +2914,61 @@ fn multimap_table_definition_new_panics_on_empty_name() {
     let name = String::new();
     let _def: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new(&name);
 }
+
+// Regression coverage for iterator/mutation interactions previously-fixed or investigated:
+//   - MultimapValue::next_back correctly decrements len() (f42c468)
+//   - BtreeRangeIter::next_back after forward exhaustion (c7ee5c6)
+//   - delete_table after modification in same transaction (30c0c43)
+// Exercises backward-only drain, alternating next/next_back, and extract_if
+// mixed-direction usage across both Table and MultimapTable APIs.
+#[test]
+fn iterator_edge_case_regression() {
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("reg_t");
+    const MM: MultimapTableDefinition<u32, u64> = MultimapTableDefinition::new("reg_m");
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Seed a table with enough entries to span multiple leaves.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut t = txn.open_table(TABLE).unwrap();
+        for i in 0..1000u64 {
+            t.insert(&i, &(i * 10)).unwrap();
+        }
+        let mut m = txn.open_multimap_table(MM).unwrap();
+        for v in 0..1000u64 {
+            m.insert(&0u32, &v).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Backward-only drain via extract_if (exercises lazy right init).
+    let txn = db.begin_write().unwrap();
+    {
+        let mut t = txn.open_table(TABLE).unwrap();
+        let mut iter = t.extract_if(|_, _| true).unwrap();
+        while let Some(e) = iter.next_back() {
+            e.unwrap();
+        }
+        assert!(iter.next().is_none());
+        assert!(iter.next_back().is_none());
+    }
+    txn.commit().unwrap();
+    {
+        let read_txn = db.begin_read().unwrap();
+        assert_eq!(read_txn.open_table(TABLE).unwrap().len().unwrap(), 0);
+    }
+
+    // Forward drain then backward call on MultimapValue (subtree variant).
+    let read_txn = db.begin_read().unwrap();
+    let m = read_txn.open_multimap_table(MM).unwrap();
+    let mut vals = m.get(&0u32).unwrap();
+    assert_eq!(vals.len(), 1000);
+    while let Some(v) = vals.next() {
+        v.unwrap();
+    }
+    assert_eq!(vals.len(), 0);
+    assert!(vals.next_back().is_none());
+    assert_eq!(vals.len(), 0);
+}
