@@ -586,7 +586,7 @@ impl TableNamespace<'_> {
             allocated.clone(),
         );
         Self {
-            open_tables: Default::default(),
+            open_tables: HashMap::default(),
             table_tree,
             freed_pages,
             allocated_pages: allocated,

@@ -636,7 +636,7 @@ impl<K: Key + 'static, V: Value + 'static> Range<'_, K, V> {
         Self {
             inner,
             _transaction_guard: guard,
-            _lifetime: Default::default(),
+            _lifetime: PhantomData,
         }
     }
 }

@@ -12,8 +12,8 @@ pub struct LRUCache<T> {
 impl<T> LRUCache<T> {
     pub(crate) fn new() -> Self {
         Self {
-            cache: Default::default(),
-            lru_queue: Default::default(),
+            cache: FastHashMapU64::default(),
+            lru_queue: VecDeque::default(),
         }
     }
 
