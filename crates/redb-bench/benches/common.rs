@@ -1591,7 +1591,7 @@ impl BenchReader for SqliteBenchReader<'_> {
     where
         Self: 'out;
     type Iterator<'out>
-        = SqliteBenchIterator
+        = SqliteBenchIterator<'out>
     where
         Self: 'out;
 
@@ -1604,31 +1604,11 @@ impl BenchReader for SqliteBenchReader<'_> {
     }
 
     fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
-        let mut stmt = self
+        let stmt = self
             .conn
             .prepare("SELECT key, value FROM kv WHERE key >= ? ORDER BY key")
             .unwrap();
-        let rows = stmt
-            .query_map([key], |row| {
-                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .unwrap();
-
-        let mut results = Vec::new();
-        for row in rows {
-            if let Ok(kv) = row {
-                results.push(kv);
-            }
-            // TODO: this is kind of cheating, but I don't feel like refactoring the benchmark
-            // to handle rusqlite's Statement & MappedRows lifetimes
-            if results.len() > SCAN_LEN {
-                break;
-            }
-        }
-
-        SqliteBenchIterator {
-            results: results.into_iter(),
-        }
+        SqliteBenchIterator::new(stmt, key)
     }
 
     fn len(&self) -> u64 {
@@ -1637,17 +1617,41 @@ impl BenchReader for SqliteBenchReader<'_> {
     }
 }
 
-pub struct SqliteBenchIterator {
-    results: std::vec::IntoIter<(Vec<u8>, Vec<u8>)>,
+// Self-referential wrapper: `rows` borrows from `*_stmt`. `_stmt` is heap-
+// allocated so the `Statement` address is stable across moves of this struct,
+// and `rows` is declared first so it is dropped before `_stmt` is finalized.
+pub struct SqliteBenchIterator<'conn> {
+    rows: rusqlite::Rows<'conn>,
+    _stmt: Box<rusqlite::Statement<'conn>>,
 }
 
-impl BenchIterator for SqliteBenchIterator {
+impl<'conn> SqliteBenchIterator<'conn> {
+    fn new(stmt: rusqlite::Statement<'conn>, key: &[u8]) -> Self {
+        let mut boxed = Box::new(stmt);
+        // SAFETY: `boxed` is heap-allocated, so the `Statement` it owns does
+        // not move when `SqliteBenchIterator` is moved. We extend the borrow
+        // on `*boxed` to the struct's lifetime via a raw pointer. The returned
+        // `Rows` is stored alongside the `Box` and dropped first (field
+        // declaration order), releasing the borrow before the `Statement` is
+        // finalized. `boxed` is never accessed directly while `rows` is alive.
+        let rows = unsafe {
+            let ptr: *mut rusqlite::Statement<'conn> = &mut *boxed;
+            (*ptr).query([key]).unwrap()
+        };
+        Self { rows, _stmt: boxed }
+    }
+}
+
+impl BenchIterator for SqliteBenchIterator<'_> {
     type Output<'out>
         = Vec<u8>
     where
         Self: 'out;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
-        self.results.next()
+        let row = self.rows.next().ok()??;
+        let key: Vec<u8> = row.get(0).ok()?;
+        let value: Vec<u8> = row.get(1).ok()?;
+        Some((key, value))
     }
 }
