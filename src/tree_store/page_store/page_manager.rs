@@ -4,7 +4,7 @@ use crate::tree_store::btree_base::{BtreeHeader, Checksum};
 use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, PageHint};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
-use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
+use crate::tree_store::page_store::fast_hash::{PageNumberHashMap, PageNumberHashSet};
 use crate::tree_store::page_store::header::{
     DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER, UnrepairedDatabaseHeader,
 };
@@ -15,6 +15,7 @@ use crate::tree_store::{Page, PageNumber, PageTrackerPolicy};
 use crate::{CacheStats, StorageBackend};
 use crate::{DatabaseError, Result, StorageError};
 use std::cmp::{max, min};
+use std::collections::BTreeMap;
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
 #[cfg(debug_assertions)]
@@ -106,7 +107,21 @@ pub(crate) struct TransactionalMemory {
     // Pages allocated since the last commit
     // TODO: maybe this should be moved to WriteTransaction?
     allocated_since_commit: Mutex<PageNumberHashSet>,
+    // TODO: Maybe we should move all this unpersisted stuff to another transaction layer.
+    // There are durable commits which support persistent and ephemeral savepoints.
+    // And then non-durable commits which support only ephemeral savepoints, and basically
+    // accumulate in unpersisted memory/file space until a durable commit is made.
+    // Maybe the non-durable commit layer should be separate, and build on top of the durable commit layer.
     unpersisted: Mutex<PageNumberHashSet>,
+    // Data-tree pages allocated by non-durable commits that have not yet been durably persisted.
+    // This is the in-memory replacement for entries
+    // in DATA_ALLOCATED_TABLE for non-durable transactions: by keeping the list in-memory we can
+    // efficiently remove entries when `free_if_unpersisted` reclaims pages.
+    // Flushed to DATA_ALLOCATED_TABLE during durable_commit, and cleared (along with
+    // `unpersisted`) once the commit succeeds.
+    unpersisted_allocations: Mutex<BTreeMap<TransactionId, PageNumberHashSet>>,
+    // Reverse index into `unpersisted_allocations`
+    unpersisted_allocation_txn: Mutex<PageNumberHashMap<TransactionId>>,
     // True if the allocator state was corrupted when the file was opened
     // TODO: maybe we can remove this flag now that CheckedBackend exists?
     needs_recovery: AtomicBool,
@@ -267,6 +282,8 @@ impl TransactionalMemory {
         Ok(Self {
             allocated_since_commit: Mutex::new(PageNumberHashSet::default()),
             unpersisted: Mutex::new(PageNumberHashSet::default()),
+            unpersisted_allocations: Mutex::new(BTreeMap::new()),
+            unpersisted_allocation_txn: Mutex::new(PageNumberHashMap::default()),
             needs_recovery: AtomicBool::new(needs_recovery),
             storage,
             state: Mutex::new(state),
@@ -652,6 +669,10 @@ impl TransactionalMemory {
         let mut unpersisted = self.unpersisted.lock().unwrap();
         unpersisted.clear();
         unpersisted.shrink_to_fit();
+        // Any remaining unpersisted allocations are now durable. Their records have already been
+        // flushed to DATA_ALLOCATED_TABLE (see WriteTransaction::durable_commit).
+        self.unpersisted_allocations.lock().unwrap().clear();
+        self.unpersisted_allocation_txn.lock().unwrap().clear();
 
         let mut state = self.state.lock().unwrap();
         assert_eq!(
@@ -863,6 +884,29 @@ impl TransactionalMemory {
         self.free_helper(page, allocated);
     }
 
+    fn remove_unpersisted_allocation(&self, page: PageNumber) {
+        let Some(txn) = self
+            .unpersisted_allocation_txn
+            .lock()
+            .unwrap()
+            .remove(&page)
+        else {
+            return;
+        };
+        let mut allocations = self.unpersisted_allocations.lock().unwrap();
+        let empty = {
+            let pages = allocations
+                .get_mut(&txn)
+                .expect("unpersisted_allocation_txn points to a missing entry");
+            let removed = pages.remove(&page);
+            debug_assert!(removed);
+            pages.is_empty()
+        };
+        if empty {
+            allocations.remove(&txn);
+        }
+    }
+
     fn free_helper(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
         #[cfg(debug_assertions)]
         {
@@ -908,11 +952,56 @@ impl TransactionalMemory {
         allocated: &mut PageTrackerPolicy,
     ) -> bool {
         if self.unpersisted.lock().unwrap().remove(&page) {
+            self.remove_unpersisted_allocation(page);
             self.free_helper(page, allocated);
             true
         } else {
             false
         }
+    }
+
+    // Record pages allocated in the data tree by a non-durable transaction. These are tracked in
+    // memory instead of being written to DATA_ALLOCATED_TABLE so that `free_if_unpersisted` can
+    // efficiently update the allocation list when it reclaims pages.
+    pub(crate) fn record_unpersisted_allocations(
+        &self,
+        transaction_id: TransactionId,
+        pages: impl IntoIterator<Item = PageNumber>,
+    ) {
+        let mut iter = pages.into_iter().peekable();
+        if iter.peek().is_none() {
+            return;
+        }
+        let mut allocations = self.unpersisted_allocations.lock().unwrap();
+        let mut reverse = self.unpersisted_allocation_txn.lock().unwrap();
+        let entry = allocations.entry(transaction_id).or_default();
+        for page in iter {
+            if entry.insert(page) {
+                let prev = reverse.insert(page, transaction_id);
+                debug_assert!(prev.is_none(), "page {page:?} already tracked");
+            }
+        }
+    }
+
+    pub(crate) fn take_unpersisted_allocations(
+        &self,
+    ) -> BTreeMap<TransactionId, PageNumberHashSet> {
+        self.unpersisted_allocation_txn.lock().unwrap().clear();
+        std::mem::take(&mut *self.unpersisted_allocations.lock().unwrap())
+    }
+
+    // Returns all unpersisted data-tree pages allocated strictly after `transaction_id`. Used
+    // during savepoint restore to queue pages that need to be freed.
+    pub(crate) fn unpersisted_allocations_after(
+        &self,
+        transaction_id: TransactionId,
+    ) -> Vec<PageNumber> {
+        let allocations = self.unpersisted_allocations.lock().unwrap();
+        let mut result = vec![];
+        for pages in allocations.range(transaction_id.next()..).map(|(_, v)| v) {
+            result.extend(pages.iter().copied());
+        }
+        result
     }
 
     // Frees the page if it was allocated since the last commit. Returns true, if the page was freed
