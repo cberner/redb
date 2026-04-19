@@ -744,16 +744,7 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    // TODO: make all callers explicitly provide a hint
-    pub(crate) fn get_page(&self, page_number: PageNumber) -> Result<PageImpl> {
-        self.get_page_extended(page_number, PageHint::None)
-    }
-
-    pub(crate) fn get_page_extended(
-        &self,
-        page_number: PageNumber,
-        hint: PageHint,
-    ) -> Result<PageImpl> {
+    pub(crate) fn get_page(&self, page_number: PageNumber, hint: PageHint) -> Result<PageImpl> {
         let range = page_number.address_range(
             self.page_size.into(),
             self.region_size,

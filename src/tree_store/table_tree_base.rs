@@ -1,6 +1,6 @@
 use crate::multimap_table::{UntypedMultiBtree, relocate_subtrees};
 use crate::tree_store::{
-    BtreeHeader, PageNumber, PagePath, TransactionalMemory, UntypedBtree, UntypedBtreeMut,
+    BtreeHeader, PageHint, PageNumber, PagePath, TransactionalMemory, UntypedBtree, UntypedBtreeMut,
 };
 use crate::{Key, Result, TableError, TypeName, Value};
 use std::collections::HashMap;
@@ -181,7 +181,12 @@ impl InternalTableDefinition {
         Ok(())
     }
 
-    pub(crate) fn visit_all_pages<'a, F>(&self, mem: Arc<TransactionalMemory>, visitor: F) -> Result
+    pub(crate) fn visit_all_pages<'a, F>(
+        &self,
+        mem: Arc<TransactionalMemory>,
+        hint: PageHint,
+        visitor: F,
+    ) -> Result
     where
         F: FnMut(&PagePath) -> Result + 'a,
     {
@@ -192,7 +197,8 @@ impl InternalTableDefinition {
                 fixed_value_size,
                 ..
             } => {
-                let tree = UntypedBtree::new(*table_root, mem, *fixed_key_size, *fixed_value_size);
+                let tree =
+                    UntypedBtree::new(*table_root, mem, hint, *fixed_key_size, *fixed_value_size);
                 tree.visit_all_pages(visitor)?;
             }
             InternalTableDefinition::Multimap {
@@ -201,8 +207,13 @@ impl InternalTableDefinition {
                 fixed_value_size,
                 ..
             } => {
-                let tree =
-                    UntypedMultiBtree::new(*table_root, mem, *fixed_key_size, *fixed_value_size);
+                let tree = UntypedMultiBtree::new(
+                    *table_root,
+                    mem,
+                    hint,
+                    *fixed_key_size,
+                    *fixed_value_size,
+                );
                 tree.visit_all_pages(visitor)?;
             }
         }

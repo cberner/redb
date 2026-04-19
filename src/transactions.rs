@@ -1783,7 +1783,7 @@ impl WriteTransaction {
             if relocation_map.contains_key(&path.page_number()) {
                 continue;
             }
-            let old_page = self.mem.get_page(path.page_number())?;
+            let old_page = self.mem.get_page(path.page_number(), PageHint::None)?;
             let mut new_page = self.mem.allocate_lowest(old_page.memory().len())?;
             let new_page_number = new_page.get_page_number();
             // We have to copy at least the page type into the new page.
@@ -1797,7 +1797,7 @@ impl WriteTransaction {
                     if relocation_map.contains_key(parent) {
                         continue;
                     }
-                    let old_parent = self.mem.get_page(*parent)?;
+                    let old_parent = self.mem.get_page(*parent, PageHint::None)?;
                     let mut new_page = self.mem.allocate_lowest(old_parent.memory().len())?;
                     let new_page_number = new_page.get_page_number();
                     // We have to copy at least the page type into the new page.
@@ -2161,6 +2161,7 @@ impl ReadTransaction {
                 ..
             } => Ok(ReadOnlyUntypedTable::new(
                 table_root,
+                PageHint::Clean,
                 fixed_key_size,
                 fixed_value_size,
                 self.mem.clone(),
@@ -2216,6 +2217,7 @@ impl ReadTransaction {
             } => Ok(ReadOnlyUntypedMultimapTable::new(
                 table_root,
                 table_length,
+                PageHint::Clean,
                 fixed_key_size,
                 fixed_value_size,
                 self.mem.clone(),

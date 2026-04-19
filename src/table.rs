@@ -455,12 +455,13 @@ impl ReadableTableMetadata for ReadOnlyUntypedTable {
 impl ReadOnlyUntypedTable {
     pub(crate) fn new(
         root_page: Option<BtreeHeader>,
+        hint: PageHint,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
         mem: Arc<TransactionalMemory>,
     ) -> Self {
         Self {
-            tree: RawBtree::new(root_page, fixed_key_size, fixed_value_size, mem),
+            tree: RawBtree::new(root_page, fixed_key_size, fixed_value_size, mem, hint),
         }
     }
 }

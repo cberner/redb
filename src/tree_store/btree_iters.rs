@@ -76,7 +76,7 @@ impl RangeIterState {
             } => {
                 let accessor = BranchAccessor::new(&page, fixed_key_size);
                 let child_page = accessor.child_page(child).unwrap();
-                let child_page = manager.get_page_extended(child_page, hint)?;
+                let child_page = manager.get_page(child_page, hint)?;
                 let direction = if reverse { -1 } else { 1 };
                 let next_child = isize::try_from(child).unwrap() + direction;
                 if 0 <= next_child && next_child < accessor.count_children().try_into().unwrap() {
@@ -187,6 +187,7 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
 pub(crate) struct AllPageNumbersBtreeIter {
     next: Option<RangeIterState>,
     manager: Arc<TransactionalMemory>,
+    hint: PageHint,
 }
 
 impl AllPageNumbersBtreeIter {
@@ -195,8 +196,9 @@ impl AllPageNumbersBtreeIter {
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
         manager: Arc<TransactionalMemory>,
+        hint: PageHint,
     ) -> Result<Self> {
-        let root_page = manager.get_page(root)?;
+        let root_page = manager.get_page(root, hint)?;
         let node_mem = root_page.memory();
         let start = match node_mem[0] {
             LEAF => Leaf {
@@ -218,6 +220,7 @@ impl AllPageNumbersBtreeIter {
         Ok(Self {
             next: Some(start),
             manager,
+            hint,
         })
     }
 }
@@ -234,7 +237,7 @@ impl Iterator for AllPageNumbersBtreeIter {
                 Leaf { entry, .. } => entry == 0,
                 Internal { child, .. } => child == 0,
             };
-            match state.next(false, &self.manager, PageHint::None) {
+            match state.next(false, &self.manager, self.hint) {
                 Ok(next) => {
                     self.next = next;
                 }
@@ -422,7 +425,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
         if let Some(root) = table_root {
             let (include_left, left) = match query_range.start_bound() {
                 Included(k) => find_iter_left::<K, V>(
-                    manager.get_page_extended(root, hint)?,
+                    manager.get_page(root, hint)?,
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     true,
@@ -430,7 +433,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                     hint,
                 )?,
                 Excluded(k) => find_iter_left::<K, V>(
-                    manager.get_page_extended(root, hint)?,
+                    manager.get_page(root, hint)?,
                     None,
                     K::as_bytes(k.borrow()).as_ref(),
                     false,
@@ -439,7 +442,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                 )?,
                 Unbounded => {
                     let state = find_iter_unbounded::<K, V>(
-                        manager.get_page_extended(root, hint)?,
+                        manager.get_page(root, hint)?,
                         None,
                         false,
                         &manager,
@@ -454,7 +457,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
             let (include_right, right, uninit_right_root) = match query_range.end_bound() {
                 Included(k) => {
                     let (inc, state) = find_iter_right::<K, V>(
-                        manager.get_page_extended(root, hint)?,
+                        manager.get_page(root, hint)?,
                         None,
                         K::as_bytes(k.borrow()).as_ref(),
                         true,
@@ -465,7 +468,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                 }
                 Excluded(k) => {
                     let (inc, state) = find_iter_right::<K, V>(
-                        manager.get_page_extended(root, hint)?,
+                        manager.get_page(root, hint)?,
                         None,
                         K::as_bytes(k.borrow()).as_ref(),
                         false,
@@ -585,7 +588,7 @@ impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
         // Lazily initialize the unbounded right boundary on first next_back() call.
         if let Some(root) = self.uninit_right_root.take() {
-            let page = match self.manager.get_page_extended(root, self.hint) {
+            let page = match self.manager.get_page(root, self.hint) {
                 Ok(p) => p,
                 Err(e) => return Some(Err(e)),
             };
@@ -690,7 +693,7 @@ fn find_iter_unbounded<K: Key, V: Value>(
                 0
             };
             let child_page_number = accessor.child_page(child_index).unwrap();
-            let child_page = manager.get_page_extended(child_page_number, hint)?;
+            let child_page = manager.get_page(child_page_number, hint)?;
             let direction = if reverse { -1isize } else { 1 };
             parent = Some(Box::new(Internal {
                 page,
@@ -742,7 +745,7 @@ fn find_iter_left<K: Key, V: Value>(
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
-            let child_page = manager.get_page_extended(child_page_number, hint)?;
+            let child_page = manager.get_page(child_page_number, hint)?;
             if child_index < accessor.count_children() - 1 {
                 parent = Some(Box::new(Internal {
                     page,
@@ -791,7 +794,7 @@ fn find_iter_right<K: Key, V: Value>(
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
-            let child_page = manager.get_page_extended(child_page_number, hint)?;
+            let child_page = manager.get_page(child_page_number, hint)?;
             if child_index > 0 && accessor.child_page(child_index - 1).is_some() {
                 parent = Some(Box::new(Internal {
                     page,
