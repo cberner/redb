@@ -2914,3 +2914,125 @@ fn multimap_table_definition_new_panics_on_empty_name() {
     let name = String::new();
     let _def: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new(&name);
 }
+
+// Regression test: after a sequence of modifying transactions that should all
+// be fully reclaimable, the database should fit in a very small number of pages
+// once emptied and compacted. This exercises:
+//
+//   * persistent savepoint create + delete cycles
+//   * non-durable commits interleaved with durable commits
+//   * modifications that trigger copy-on-write on both the user and system trees
+//
+// After the entire sequence the table is dropped and the database is compacted.
+// The final page count must be small and independent of how many iterations
+// the preceding loop ran for. If any of the above paths leaves a page allocated
+// that is no longer reachable from the committed tree roots (and not in any of
+// the pending-free tables), compact() cannot reclaim it and the final page
+// count will grow with the number of iterations.
+#[test]
+fn mixed_savepoint_and_non_durable_commits_no_leak() {
+    let tmpfile = create_tempfile();
+    let table: TableDefinition<u64, &[u8]> = TableDefinition::new("data");
+
+    // Warm up the persistent-savepoint system tables so later measurements
+    // aren't affected by first-time initialization.
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        let id = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        txn.delete_persistent_savepoint(id).unwrap();
+        txn.commit().unwrap();
+        drop(db);
+    }
+
+    const ITERATIONS: u64 = 50;
+
+    {
+        let db = Database::open(tmpfile.path()).unwrap();
+        for round in 0..ITERATIONS {
+            // Create a persistent savepoint so the data-allocated tracking is active.
+            let id = {
+                let txn = db.begin_write().unwrap();
+                let id = txn.persistent_savepoint().unwrap();
+                txn.commit().unwrap();
+                id
+            };
+
+            // A durable commit that modifies the user tree.
+            {
+                let txn = db.begin_write().unwrap();
+                {
+                    let mut t = txn.open_table(table).unwrap();
+                    for i in 0..20u64 {
+                        t.insert(&(round * 20 + i), &vec![0u8; 300][..]).unwrap();
+                    }
+                }
+                txn.commit().unwrap();
+            }
+
+            // A non-durable commit that also modifies the user tree.
+            {
+                let mut txn = db.begin_write().unwrap();
+                txn.set_durability(Durability::None).unwrap();
+                {
+                    let mut t = txn.open_table(table).unwrap();
+                    t.insert(&(round * 20), &vec![1u8; 500][..]).unwrap();
+                }
+                txn.commit().unwrap();
+            }
+
+            // Delete the savepoint. This allows any pages that the savepoint was
+            // holding to be reclaimed by subsequent commits.
+            {
+                let txn = db.begin_write().unwrap();
+                txn.delete_persistent_savepoint(id).unwrap();
+                txn.commit().unwrap();
+            }
+        }
+
+        // Final durable commit to flush any pending non-durable state.
+        db.begin_write().unwrap().commit().unwrap();
+
+        // Delete the table so no user data remains.
+        {
+            let txn = db.begin_write().unwrap();
+            txn.delete_table(table).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Drain any pending freed pages.
+        for _ in 0..5 {
+            db.begin_write().unwrap().commit().unwrap();
+        }
+    }
+
+    // Compact. After an empty database plus compaction the footprint must be
+    // independent of how many iterations we ran.
+    {
+        let mut db = Database::open(tmpfile.path()).unwrap();
+        db.compact().unwrap();
+    }
+
+    let final_count = {
+        let db = Database::open(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        let v = txn.stats().unwrap().allocated_pages();
+        txn.abort().unwrap();
+        v
+    };
+
+    // An empty, compacted database should use only a handful of pages (the
+    // system tree plus minimal overhead). It must not scale with ITERATIONS.
+    assert!(
+        final_count < 50,
+        "After {} iterations of the mixed savepoint/non-durable workload, \
+         empty + compact left {} pages allocated. The count should be small \
+         and independent of the iteration count; a value that grows with \
+         ITERATIONS indicates a page leak.",
+        ITERATIONS,
+        final_count,
+    );
+}
+
