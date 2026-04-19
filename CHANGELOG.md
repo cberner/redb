@@ -1,17 +1,18 @@
 # redb - Changelog
 
-## 4.1.0 - UNRELEASED
-* Fix bug where `MultimapValue::len()` and `is_empty()` returned stale counts after
-  consuming entries via `next_back()`. `next_back()` now decrements the remaining
-  counter, matching the behavior of `next()`.
-* Fix bug where `restore_savepoint()` could fail with `SavepointError::InvalidSavepoint`, but
-  the savepoint would actually be partially applied, when called with a non-`Immediate` durability and
-  there are persistent savepoints newer than the restored one. The call now fails up front with
-  `SavepointError::ImmediateDurabilityRequired`.
-* Fix bug in `restore_savepoint()` where modifications made earlier in the transaction might
-  not be reverted
+## 4.1.0 - 2026-04-19
+**This release contains a large number of bug fixes discovered by AI coding agents**
+
+* Fix a bug where `MultimapValue::len()` and `is_empty()` returned stale counts after
+  consuming entries via `next_back()`.
+* Fix a bug where `restore_savepoint()` used in a non-`Immediate` durability transaction and when
+  there are persistent savepoints newer than the one being restored, could fail
+  with `SavepointError::InvalidSavepoint`, but the savepoint would actually be partially applied.
+  The call now fails up front with `SavepointError::ImmediateDurabilityRequired`.
+* Fix a bug in `restore_savepoint()` where modifications made earlier in the transaction might
+  not be reverted.
 * Fix a bug where renaming a table that was already modified in the same transaction could cause
-  the database to become corrupted
+  the database to become corrupted.
 * Fix a bug where calling `restore_savepoint()` after modifying a table in the same
   transaction could cause the table to become corrupted in a future transaction.
 * Fix a panic when `delete_table()` was called on a table that had been modified in the same
@@ -21,15 +22,15 @@
 * Fix a bug where a transaction that created a persistent savepoint and was then
   aborted could cause the database file to grow excessively, until the `Database` was dropped.
 * Fix a panic in `check_integrity()` when called while another transaction is still alive.
-  The new `DatabaseError::TransactionInProgress` variant is now returned instead.
+  `DatabaseError::TransactionInProgress` is now returned instead.
 * Fix a bug where aborting a transaction that called `restore_savepoint()` with a savepoint
   when a newer savepoint existed could cause database space to be leaked.
 * Fix a bug where aborting a transaction that called `restore_savepoint()` would leave more
   recent savepoints invalid.
-  when a newer savepoint existed could cause database space to be leaked.
-* Improve read scaling to multiple threads. Around 15% speedup on some benchmarks.
+* Improve performance when reading concurrently from multiple threads. Around 15% speedup on some benchmarks.
 * Optimize cache usage, and general write performance. Around 1.5x speedup on some benchmarks.
-* Optimize memory usage
+* Optimize memory usage.
+* Other performance optimizations.
 
 ## 4.0.0 - 2026-04-02
 * Implement `Drop` on `AccessGuardMut` and `AccessGuardMutInPlace`, which requires that these be dropped
