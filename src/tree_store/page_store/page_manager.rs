@@ -262,8 +262,8 @@ impl TransactionalMemory {
         assert!(page_size >= DB_HEADER_SIZE);
 
         Ok(Self {
-            allocated_since_commit: Mutex::new(Default::default()),
-            unpersisted: Mutex::new(Default::default()),
+            allocated_since_commit: Mutex::new(PageNumberHashSet::default()),
+            unpersisted: Mutex::new(PageNumberHashSet::default()),
             needs_recovery: AtomicBool::new(needs_recovery),
             storage,
             state: Mutex::new(state),
@@ -272,7 +272,7 @@ impl TransactionalMemory {
             #[cfg(debug_assertions)]
             read_page_ref_counts: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(debug_assertions)]
-            allocated_pages: Arc::new(Mutex::new(Default::default())),
+            allocated_pages: Arc::new(Mutex::new(PageNumberHashSet::default())),
             read_from_secondary: AtomicBool::new(false),
             page_size: page_size.try_into().unwrap(),
             region_size,

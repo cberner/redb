@@ -62,7 +62,7 @@ struct LRUWriteCache {
 impl LRUWriteCache {
     fn new() -> Self {
         Self {
-            cache: Default::default(),
+            cache: LRUCache::default(),
         }
     }
 
@@ -256,15 +256,15 @@ impl PagedCachedFile {
             max_cache_size,
             next_eviction_stripe: AtomicUsize::new(0),
             #[cfg(feature = "cache_metrics")]
-            reads_total: Default::default(),
+            reads_total: AtomicU64::default(),
             #[cfg(feature = "cache_metrics")]
-            reads_hits: Default::default(),
+            reads_hits: AtomicU64::default(),
             #[cfg(feature = "cache_metrics")]
-            writes_total: Default::default(),
+            writes_total: AtomicU64::default(),
             #[cfg(feature = "cache_metrics")]
-            writes_hits: Default::default(),
+            writes_hits: AtomicU64::default(),
             #[cfg(feature = "cache_metrics")]
-            evictions: Default::default(),
+            evictions: AtomicU64::default(),
             read_cache,
             write_buffer: Arc::new(Mutex::new(LRUWriteCache::new())),
         })

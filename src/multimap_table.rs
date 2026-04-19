@@ -792,7 +792,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
             free_on_drop: vec![],
             _transaction_guard: guard,
             mem: None,
-            _value_type: Default::default(),
+            _value_type: PhantomData,
         }
     }
 
@@ -813,7 +813,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
             allocated_pages,
             _transaction_guard: guard,
             mem: Some(mem),
-            _value_type: Default::default(),
+            _value_type: PhantomData,
         }
     }
 
@@ -827,7 +827,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
             free_on_drop: vec![],
             _transaction_guard: guard,
             mem: None,
-            _value_type: Default::default(),
+            _value_type: PhantomData,
         }
     }
 
@@ -919,9 +919,9 @@ impl<K: Key + 'static, V: Key + 'static> MultimapRange<'_, K, V> {
             inner,
             mem,
             transaction_guard: guard,
-            _key_type: Default::default(),
-            _value_type: Default::default(),
-            _lifetime: Default::default(),
+            _key_type: PhantomData,
+            _value_type: PhantomData,
+            _lifetime: PhantomData,
         }
     }
 }
@@ -1014,7 +1014,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 allocated_pages,
             ),
             mem,
-            _value_type: Default::default(),
+            _value_type: PhantomData,
         }
     }
 
@@ -1549,7 +1549,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
             num_values,
             mem,
             transaction_guard: guard,
-            _value_type: Default::default(),
+            _value_type: PhantomData,
         })
     }
 

@@ -162,8 +162,8 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
             page,
             key_range,
             value_range,
-            _key_type: Default::default(),
-            _value_type: Default::default(),
+            _key_type: PhantomData,
+            _value_type: PhantomData,
         }
     }
 
@@ -418,8 +418,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                 manager,
                 hint,
                 uninit_right_root: None,
-                _key_type: Default::default(),
-                _value_type: Default::default(),
+                _key_type: PhantomData,
+                _value_type: PhantomData,
             });
         }
         if let Some(root) = table_root {
@@ -487,8 +487,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                 manager,
                 hint,
                 uninit_right_root,
-                _key_type: Default::default(),
-                _value_type: Default::default(),
+                _key_type: PhantomData,
+                _value_type: PhantomData,
             })
         } else {
             Ok(Self {
@@ -499,8 +499,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                 manager,
                 hint,
                 uninit_right_root: None,
-                _key_type: Default::default(),
-                _value_type: Default::default(),
+                _key_type: PhantomData,
+                _value_type: PhantomData,
             })
         }
     }

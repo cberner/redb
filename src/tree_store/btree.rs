@@ -346,9 +346,9 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             root,
             freed_pages,
             allocated_pages,
-            _key_type: Default::default(),
-            _value_type: Default::default(),
-            _lifetime: Default::default(),
+            _key_type: PhantomData,
+            _value_type: PhantomData,
+            _lifetime: PhantomData,
         }
     }
 
@@ -832,8 +832,8 @@ impl<K: Key, V: Value> Btree<K, V> {
             cached_root,
             root,
             hint,
-            _key_type: Default::default(),
-            _value_type: Default::default(),
+            _key_type: PhantomData,
+            _value_type: PhantomData,
         })
     }
 

@@ -178,7 +178,7 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
             offset: range.start,
             len: range.len(),
             on_drop: OnDrop::None,
-            _value_type: Default::default(),
+            _value_type: PhantomData,
         }
     }
 
@@ -188,7 +188,7 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
             offset: range.start,
             len: range.len(),
             on_drop: OnDrop::None,
-            _value_type: Default::default(),
+            _value_type: PhantomData,
         }
     }
 
@@ -199,7 +199,7 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
             offset: 0,
             len,
             on_drop: OnDrop::None,
-            _value_type: Default::default(),
+            _value_type: PhantomData,
         }
     }
 
@@ -218,7 +218,7 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
                 position,
                 fixed_key_size,
             },
-            _value_type: Default::default(),
+            _value_type: PhantomData,
         }
     }
 
@@ -288,7 +288,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             allocated,
             root_ref,
             key_width,
-            _value_type: Default::default(),
+            _value_type: PhantomData,
         }
     }
 
@@ -381,7 +381,7 @@ impl<'a, V: Value + 'static> AccessGuardMutInPlace<'a, V> {
             page,
             offset,
             len,
-            _value_type: Default::default(),
+            _value_type: PhantomData,
         }
     }
 }
@@ -1270,7 +1270,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
             page,
             num_keys,
             fixed_key_size,
-            _page_lifetime: Default::default(),
+            _page_lifetime: PhantomData,
         }
     }
 

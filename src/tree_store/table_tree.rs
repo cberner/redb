@@ -238,7 +238,7 @@ impl TableTreeMut<'_> {
             ),
             guard,
             mem,
-            pending_table_updates: Default::default(),
+            pending_table_updates: HashMap::default(),
             freed_pages,
             allocated_pages,
         }

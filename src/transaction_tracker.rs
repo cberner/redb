@@ -101,12 +101,12 @@ impl TransactionTracker {
         Self {
             state: Mutex::new(State {
                 next_savepoint_id: SavepointId(0),
-                live_read_transactions: Default::default(),
+                live_read_transactions: BTreeMap::default(),
                 next_transaction_id,
                 live_write_transaction: None,
-                valid_savepoints: Default::default(),
-                pending_non_durable_commits: Default::default(),
-                unprocessed_freed_non_durable_commits: Default::default(),
+                valid_savepoints: BTreeMap::default(),
+                pending_non_durable_commits: HashMap::default(),
+                unprocessed_freed_non_durable_commits: BTreeSet::default(),
             }),
             live_write_transaction_available: Condvar::new(),
         }
