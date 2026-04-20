@@ -1,6 +1,5 @@
 use crate::transaction_tracker::TransactionId;
-use crate::tree_store::Checksum;
-use crate::tree_store::btree_base::BtreeHeader;
+use crate::tree_store::btree_base::{BtreeHeader, Checksum};
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::page_manager::{
     FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, xxh3_checksum,

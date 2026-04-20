@@ -4,7 +4,7 @@ use std::mem::size_of;
 const HEIGHT_OFFSET: usize = 0;
 const END_OFFSETS: usize = HEIGHT_OFFSET + size_of::<u32>();
 
-pub(crate) struct BtreeBitmap {
+pub(super) struct BtreeBitmap {
     heights: Vec<U64GroupedBitmap>,
 }
 

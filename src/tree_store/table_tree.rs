@@ -1,13 +1,13 @@
 use crate::db::TransactionGuard;
 use crate::error::TableError;
-use crate::multimap_table::{
-    finalize_tree_and_subtree_checksums, multimap_btree_stats, verify_tree_and_subtree_checksums,
-};
-use crate::tree_store::btree::{UntypedBtreeMut, btree_stats};
+use crate::tree_store::btree::{PagePath, UntypedBtreeMut, btree_stats};
 use crate::tree_store::btree_base::BtreeHeader;
+use crate::tree_store::multimap_btree::{
+    finalize_tree_and_subtree_checksums, verify_tree_and_subtree_checksums,
+};
 use crate::tree_store::{
-    Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageHint, PageNumber, PagePath,
-    PageTrackerPolicy, RawBtree, TableType, TransactionalMemory,
+    Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageHint, PageNumber,
+    PageTrackerPolicy, RawBtree, TableType, TransactionalMemory, multimap_btree_stats,
 };
 use crate::types::{Key, Value};
 use crate::{DatabaseStats, Result};
