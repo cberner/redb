@@ -12,7 +12,7 @@ pub(crate) use btree::{
 pub use btree_base::{AccessGuard, AccessGuardMut, AccessGuardMutInPlace};
 pub(crate) use btree_base::{
     BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF, LeafAccessor,
-    LeafMutator, RawLeafBuilder,
+    LeafPageMut, RawLeafBuilder,
 };
 pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeExtractIf, BtreeRangeIter};
 pub(crate) use page_store::ReadOnlyBackend;

@@ -4,7 +4,7 @@ use crate::sealed::Sealed;
 use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BRANCH, BranchAccessor, BranchMutator, Btree, BtreeHeader, BtreeMut,
-    BtreeRangeIter, BtreeStats, Checksum, DEFERRED, LEAF, LeafAccessor, LeafMutator,
+    BtreeRangeIter, BtreeStats, Checksum, DEFERRED, LEAF, LeafAccessor, LeafPageMut,
     MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PagePath, PageTrackerPolicy,
     RawBtree, RawLeafBuilder, TransactionalMemory, UntypedBtree, UntypedBtreeMut, btree_stats,
 };
@@ -223,14 +223,13 @@ pub(crate) fn relocate_subtrees(
 
     match old_page.memory()[0] {
         LEAF => {
-            let accessor = LeafAccessor::new(
-                old_page.memory(),
+            let mut leaf_page = LeafPageMut::new(
+                new_page,
                 key_size,
                 UntypedDynamicCollection::fixed_width_with(value_size),
             );
-            // TODO: maybe there's a better abstraction, so that we don't need to call into this low-level method?
-            let mut mutator = LeafMutator::new(
-                new_page.memory_mut(),
+            let accessor = LeafAccessor::new(
+                old_page.memory(),
                 key_size,
                 UntypedDynamicCollection::fixed_width_with(value_size),
             );
@@ -250,7 +249,7 @@ pub(crate) fn relocate_subtrees(
                     if sub_root != tree.get_root().unwrap() {
                         let new_collection =
                             UntypedDynamicCollection::make_subtree_data(tree.get_root().unwrap());
-                        mutator.replace(i, &new_collection);
+                        leaf_page.replace_value(i, &new_collection);
                     }
                 }
             }
@@ -305,11 +304,7 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
     );
     tree.dirty_leaf_visitor(|mut leaf_page| {
         let mut sub_root_updates = vec![];
-        let accessor = LeafAccessor::new(
-            leaf_page.memory(),
-            key_size,
-            DynamicCollection::<()>::fixed_width_with(value_size),
-        );
+        let accessor = leaf_page.accessor();
         for i in 0..accessor.num_pairs() {
             let entry = accessor.entry(i).unwrap();
             let collection = <&DynamicCollection<()>>::from_bytes(entry.value());
@@ -328,15 +323,9 @@ pub(crate) fn finalize_tree_and_subtree_checksums(
                 }
             }
         }
-        // TODO: maybe there's a better abstraction, so that we don't need to call into this low-level method?
-        let mut mutator = LeafMutator::new(
-            leaf_page.memory_mut(),
-            key_size,
-            DynamicCollection::<()>::fixed_width_with(value_size),
-        );
         for (i, sub_root) in sub_root_updates {
             let collection = DynamicCollection::<()>::make_subtree_data(sub_root);
-            mutator.replace(i, &collection);
+            leaf_page.replace_value(i, &collection);
         }
 
         Ok(())
