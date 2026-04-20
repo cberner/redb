@@ -13,9 +13,9 @@ use std::thread;
 pub(crate) const LEAF: u8 = 1;
 pub(crate) const BRANCH: u8 = 2;
 
-pub(crate) type Checksum = u128;
+pub(super) type Checksum = u128;
 // Dummy value. Final value will be computed during commit
-pub(crate) const DEFERRED: Checksum = 999;
+pub(super) const DEFERRED: Checksum = 999;
 
 pub(super) fn leaf_checksum<T: Page>(
     page: &T,
@@ -1258,7 +1258,7 @@ impl<'b> LeafMutator<'b> {
 // outside this module need (read access via `accessor`, in-place value replacement via
 // `replace_value`). This keeps the `LeafMutator` construction details from leaking into
 // callers that operate on dynamic-collection leaf pages (e.g., multimap maintenance).
-pub(crate) struct LeafPageMut<'a> {
+pub(super) struct LeafPageMut<'a> {
     page: PageMut<'a>,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
@@ -1298,8 +1298,7 @@ impl<'a> LeafPageMut<'a> {
 }
 
 // Provides a simple zero-copy way to access a branch page
-// TODO: this should be pub(super) and the multimap btree stuff should be moved into this package
-pub(crate) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
+pub(super) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
     page: &'b T,
     num_keys: usize,
     fixed_key_size: Option<usize>,
@@ -1737,7 +1736,7 @@ impl Drop for RawBranchBuilder<'_> {
     }
 }
 
-pub(crate) struct BranchMutator<'b> {
+pub(super) struct BranchMutator<'b> {
     page: &'b mut [u8],
 }
 

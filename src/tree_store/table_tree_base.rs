@@ -1,7 +1,6 @@
-use crate::multimap_table::{UntypedMultiBtree, relocate_subtrees};
-use crate::tree_store::{
-    BtreeHeader, PageHint, PageNumber, PagePath, TransactionalMemory, UntypedBtree, UntypedBtreeMut,
-};
+use crate::tree_store::btree::{PagePath, UntypedBtree, UntypedBtreeMut};
+use crate::tree_store::multimap_btree::{UntypedMultiBtree, relocate_subtrees};
+use crate::tree_store::{BtreeHeader, PageHint, PageNumber, TransactionalMemory};
 use crate::{Key, Result, TableError, TypeName, Value};
 use std::collections::HashMap;
 use std::mem::size_of;

@@ -63,7 +63,7 @@ impl PagePath {
     }
 }
 
-pub(crate) struct UntypedBtree {
+pub(super) struct UntypedBtree {
     mem: Arc<TransactionalMemory>,
     root: Option<BtreeHeader>,
     hint: PageHint,
@@ -72,7 +72,7 @@ pub(crate) struct UntypedBtree {
 }
 
 impl UntypedBtree {
-    pub(crate) fn new(
+    pub(super) fn new(
         root: Option<BtreeHeader>,
         mem: Arc<TransactionalMemory>,
         hint: PageHint,
@@ -89,7 +89,7 @@ impl UntypedBtree {
     }
 
     // Applies visitor to pages in the tree
-    pub(crate) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
+    pub(super) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
     where
         F: FnMut(&PagePath) -> Result,
     {
@@ -126,7 +126,7 @@ impl UntypedBtree {
     }
 }
 
-pub(crate) struct UntypedBtreeMut {
+pub(super) struct UntypedBtreeMut {
     mem: Arc<TransactionalMemory>,
     root: Option<BtreeHeader>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
@@ -135,7 +135,7 @@ pub(crate) struct UntypedBtreeMut {
 }
 
 impl UntypedBtreeMut {
-    pub(crate) fn new(
+    pub(super) fn new(
         root: Option<BtreeHeader>,
         mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
@@ -151,12 +151,12 @@ impl UntypedBtreeMut {
         }
     }
 
-    pub(crate) fn get_root(&self) -> Option<BtreeHeader> {
+    pub(super) fn get_root(&self) -> Option<BtreeHeader> {
         self.root
     }
 
     // Recomputes the checksum for all pages that are uncommitted
-    pub(crate) fn finalize_dirty_checksums(&mut self) -> Result<Option<BtreeHeader>> {
+    pub(super) fn finalize_dirty_checksums(&mut self) -> Result<Option<BtreeHeader>> {
         let mut root = self.root;
         if let Some(BtreeHeader {
             root: ref p,
@@ -209,7 +209,7 @@ impl UntypedBtreeMut {
     }
 
     // Applies visitor to all dirty leaf pages in the tree
-    pub(crate) fn dirty_leaf_visitor<F>(&mut self, visitor: F) -> Result
+    pub(super) fn dirty_leaf_visitor<F>(&mut self, visitor: F) -> Result
     where
         F: for<'a> Fn(LeafPageMut<'a>) -> Result,
     {
@@ -1065,7 +1065,7 @@ impl<K: Key, V: Value> Drop for Btree<K, V> {
     }
 }
 
-pub(crate) fn btree_stats(
+pub(super) fn btree_stats(
     root: Option<PageNumber>,
     mem: &TransactionalMemory,
     fixed_key_size: Option<usize>,
