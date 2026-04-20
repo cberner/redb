@@ -932,14 +932,14 @@ impl Drop for RawLeafBuilder<'_> {
     }
 }
 
-pub(crate) struct LeafMutator<'b> {
+pub(super) struct LeafMutator<'b> {
     page: &'b mut [u8],
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
 }
 
 impl<'b> LeafMutator<'b> {
-    pub(crate) fn new(
+    pub(super) fn new(
         page: &'b mut [u8],
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
@@ -1000,7 +1000,7 @@ impl<'b> LeafMutator<'b> {
     }
 
     // Replace the value at index `i` with `value`, leaving the key unchanged.
-    pub(crate) fn replace(&mut self, i: usize, value: &[u8]) {
+    pub(super) fn replace(&mut self, i: usize, value: &[u8]) {
         let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
         let num_pairs = accessor.num_pairs();
         let last_value_end = accessor.value_end(num_pairs - 1).unwrap();
@@ -1035,7 +1035,7 @@ impl<'b> LeafMutator<'b> {
     }
 
     // Insert the given key, value pair at index i and shift all following pairs to the right
-    pub(crate) fn insert(&mut self, i: usize, key: &[u8], value: &[u8]) {
+    pub(super) fn insert(&mut self, i: usize, key: &[u8], value: &[u8]) {
         let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
         let required_delta = {
             let mut delta = key.len() + value.len();
@@ -1250,6 +1250,50 @@ impl<'b> LeafMutator<'b> {
         );
         ptr = (isize::try_from(ptr).unwrap() + delta).try_into().unwrap();
         self.page[offset..(offset + size_of::<u32>())].copy_from_slice(&ptr.to_le_bytes());
+    }
+}
+
+// Encapsulates mutation of a leaf page: owns the PageMut along with the key/value
+// widths needed to interpret it, and exposes only the safe operations that callers
+// outside this module need (read access via `accessor`, in-place value replacement via
+// `replace_value`). This keeps the `LeafMutator` construction details from leaking into
+// callers that operate on dynamic-collection leaf pages (e.g., multimap maintenance).
+pub(crate) struct LeafPageMut<'a> {
+    page: PageMut<'a>,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+}
+
+impl<'a> LeafPageMut<'a> {
+    pub(crate) fn new(
+        page: PageMut<'a>,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+    ) -> Self {
+        debug_assert_eq!(page.memory()[0], LEAF);
+        Self {
+            page,
+            fixed_key_size,
+            fixed_value_size,
+        }
+    }
+
+    pub(crate) fn accessor(&self) -> LeafAccessor<'_> {
+        LeafAccessor::new(
+            self.page.memory(),
+            self.fixed_key_size,
+            self.fixed_value_size,
+        )
+    }
+
+    // Replace the value at index `i` in-place, leaving the key unchanged.
+    pub(crate) fn replace_value(&mut self, i: usize, value: &[u8]) {
+        let mut mutator = LeafMutator::new(
+            self.page.memory_mut(),
+            self.fixed_key_size,
+            self.fixed_value_size,
+        );
+        mutator.replace(i, value);
     }
 }
 

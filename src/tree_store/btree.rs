@@ -1,7 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
-    LeafAccessor, branch_checksum, leaf_checksum,
+    LeafAccessor, LeafPageMut, branch_checksum, leaf_checksum,
 };
 use crate::tree_store::btree_iters::BtreeExtractIf;
 use crate::tree_store::btree_mutator::MutateHelper;
@@ -211,7 +211,7 @@ impl UntypedBtreeMut {
     // Applies visitor to all dirty leaf pages in the tree
     pub(crate) fn dirty_leaf_visitor<F>(&mut self, visitor: F) -> Result
     where
-        F: for<'a> Fn(PageMut<'a>) -> Result,
+        F: for<'a> Fn(LeafPageMut<'a>) -> Result,
     {
         if let Some(page_number) = self.root.map(|x| x.root) {
             if !self.mem.uncommitted(page_number) {
@@ -222,7 +222,7 @@ impl UntypedBtreeMut {
             let page = self.mem.get_page_mut(page_number)?;
             match page.memory()[0] {
                 LEAF => {
-                    visitor(page)?;
+                    visitor(LeafPageMut::new(page, self.key_width, self.value_width))?;
                 }
                 BRANCH => {
                     drop(page);
@@ -237,14 +237,14 @@ impl UntypedBtreeMut {
 
     fn dirty_leaf_visitor_helper<F>(&mut self, page_number: PageNumber, visitor: &F) -> Result
     where
-        F: for<'a> Fn(PageMut<'a>) -> Result,
+        F: for<'a> Fn(LeafPageMut<'a>) -> Result,
     {
         assert!(self.mem.uncommitted(page_number));
         let page = self.mem.get_page_mut(page_number)?;
 
         match page.memory()[0] {
             LEAF => {
-                visitor(page)?;
+                visitor(LeafPageMut::new(page, self.key_width, self.value_width))?;
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, self.key_width);
