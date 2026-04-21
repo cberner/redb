@@ -386,20 +386,15 @@ impl TableTreeMut<'_> {
     ) -> Result {
         assert!(self.pending_table_updates.is_empty());
 
-        // Reserve space in the table tree
-        // TODO: maybe we should have a more explicit method, like "force_uncommitted()"
-        let existing = self
-            .tree
-            .insert(
-                &name,
-                &InternalTableDefinition::new::<K, V>(TableType::Normal, None, 0),
-            )?
-            .map(|x| x.value());
-        if let Some(existing) = existing {
-            self.tree.insert(&name, &existing)?;
-        }
+        // Reserve space in the table tree, and make sure the path to the entry is
+        // uncommitted, so that the final insert_inplace() below won't allocate or
+        // free any pages.
+        let bytes = self.tree.force_uncommitted(
+            &name,
+            &InternalTableDefinition::new::<K, V>(TableType::Normal, None, 0),
+        )?;
 
-        let table_root = match self.tree.get(&name)?.unwrap().value() {
+        let table_root = match InternalTableDefinition::from_bytes(&bytes) {
             InternalTableDefinition::Normal { table_root, .. } => table_root,
             InternalTableDefinition::Multimap { .. } => {
                 unreachable!()

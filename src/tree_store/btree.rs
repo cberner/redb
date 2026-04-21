@@ -458,6 +458,26 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         Ok(())
     }
 
+    // Reserves `key` (inserting `placeholder` if absent, preserving its value otherwise)
+    // and CoWs the path to it, so a subsequent insert_inplace() with a value of
+    // equal-or-smaller serialized size won't allocate or free pages. Returns the
+    // serialized bytes currently stored at `key`.
+    pub(crate) fn force_uncommitted(
+        &mut self,
+        key: &K::SelfType<'_>,
+        placeholder: &V::SelfType<'_>,
+    ) -> Result<Vec<u8>> {
+        let existing_bytes = self
+            .get(key)?
+            .map(|guard| V::as_bytes(&guard.value()).as_ref().to_vec());
+        let bytes = existing_bytes.unwrap_or_else(|| V::as_bytes(placeholder).as_ref().to_vec());
+        {
+            let value = V::from_bytes(&bytes);
+            self.insert(key, &value)?;
+        }
+        Ok(bytes)
+    }
+
     pub(crate) fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'_, V>>> {
         #[cfg(feature = "logging")]
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
