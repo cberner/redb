@@ -27,11 +27,10 @@ enum DeleteTarget<'a> {
     Last,
 }
 
-// TODO: it seems like Checksum can be removed from most/all of these, now that we're using deferred checksums
 #[derive(Debug)]
 enum DeletionResult {
     // A proper subtree
-    Subtree(PageNumber, Checksum),
+    Subtree(PageNumber),
     // A leaf with zero children
     DeletedLeaf,
     // A leaf with fewer entries than desired
@@ -42,11 +41,14 @@ enum DeletionResult {
     // A branch page subtree with fewer children than desired.
     // Held in unbuilt form: the caller will merge it with a sibling and build a new page,
     // so allocating a page here just to free it again would be wasteful.
+    // Checksums are retained because preserved children may be clean pages whose real
+    // checksums must be propagated (finalize only recomputes uncommitted pages).
     PartialBranch {
         children: Vec<(PageNumber, Checksum)>,
         keys: Vec<Vec<u8>>,
     },
-    // Indicates that the branch node was deleted, and includes the only remaining child
+    // Indicates that the branch node was deleted, and includes the only remaining child.
+    // Checksum is retained for the same reason as `PartialBranch`.
     DeletedBranch(PageNumber, Checksum),
 }
 
@@ -149,20 +151,19 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         found_key: &mut Option<AccessGuard<'a, K>>,
     ) -> Result<Option<AccessGuard<'a, V>>> {
         if let Some(BtreeHeader {
-            root: p,
-            checksum,
-            length,
+            root: p, length, ..
         }) = *self.root
         {
-            let (deletion_result, found) = self.delete_helper(
-                self.mem.get_page(p, PageHint::None)?,
-                checksum,
-                target,
-                found_key,
-            )?;
-            let new_length = if found.is_some() { length - 1 } else { length };
+            let (deletion_result, found) =
+                self.delete_helper(self.mem.get_page(p, PageHint::None)?, target, found_key)?;
+            if found.is_none() {
+                // The tree was not modified; leave *self.root untouched so that any clean
+                // root page keeps its already-valid checksum.
+                return Ok(None);
+            }
+            let new_length = length - 1;
             let new_root = match deletion_result {
-                Subtree(page, checksum) => Some(BtreeHeader::new(page, checksum, new_length)),
+                Subtree(page) => Some(BtreeHeader::new(page, DEFERRED, new_length)),
                 DeletedLeaf => None,
                 PartialLeaf { page, deleted_pair } => {
                     let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
@@ -667,7 +668,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     fn delete_leaf_helper(
         &mut self,
         page: PageImpl,
-        checksum: Checksum,
         target: DeleteTarget<'_>,
         found_key: &mut Option<AccessGuard<'a, K>>,
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
@@ -678,7 +678,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             DeleteTarget::Last => (accessor.num_pairs() - 1, true),
         };
         if !found {
-            return Ok((Subtree(page.get_page_number(), checksum), None));
+            // Leaf is unchanged; caller short-circuits via `found.is_none()`.
+            return Ok((Subtree(page.get_page_number()), None));
         }
         let want_key = matches!(target, DeleteTarget::First | DeleteTarget::Last);
         let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
@@ -718,7 +719,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 position,
                 K::fixed_width(),
             );
-            return Ok((Subtree(page_number, DEFERRED), Some(guard)));
+            return Ok((Subtree(page_number), Some(guard)));
         }
 
         let result = if accessor.num_pairs() == 1 {
@@ -746,7 +747,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 builder.push(entry.key(), entry.value());
             }
             let new_page = builder.build()?;
-            Subtree(new_page.get_page_number(), DEFERRED)
+            Subtree(new_page.get_page_number())
         };
         let (key_range, value_range) = accessor.entry_ranges(position).unwrap();
         let guard = if uncommitted && self.modify_uncommitted {
@@ -785,7 +786,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             PartialBranch { children, keys }
         } else {
             let new_page = builder.build()?;
-            Subtree(new_page.get_page_number(), DEFERRED)
+            Subtree(new_page.get_page_number())
         };
         Ok(result)
     }
@@ -793,7 +794,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     fn delete_branch_helper(
         &mut self,
         page: PageImpl,
-        checksum: Checksum,
         target: DeleteTarget<'_>,
         found_key: &mut Option<AccessGuard<'a, K>>,
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
@@ -810,18 +810,20 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         let child_checksum = accessor.child_checksum(child_index).unwrap();
         let (result, found) = self.delete_helper(
             self.mem.get_page(child_page_number, PageHint::None)?,
-            child_checksum,
             target,
             found_key,
         )?;
         if found.is_none() {
-            return Ok((Subtree(original_page_number, checksum), None));
+            // Subtree unchanged; caller identifies this via `found.is_none()`.
+            return Ok((Subtree(original_page_number), None));
         }
-        if let Subtree(new_child, new_child_checksum) = result {
-            // Skip-path: if child page number and checksum haven't changed,
-            // no branch update is needed.
-            if new_child == child_page_number && new_child_checksum == child_checksum {
-                return Ok((Subtree(original_page_number, checksum), found));
+        if let Subtree(new_child) = result {
+            // Skip-path: the child's in-parent entry is already (child_page_number, DEFERRED)
+            // and the mutated child kept its page number, so no write to this branch is needed.
+            // This preserves the optimization from f8ccc39 without carrying a checksum on
+            // `Subtree` (a modified `Subtree` always has checksum DEFERRED).
+            if new_child == child_page_number && child_checksum == DEFERRED {
+                return Ok((Subtree(original_page_number), found));
             }
 
             let result_page =
@@ -829,7 +831,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     drop(page);
                     let mut mutpage = self.mem.get_page_mut(original_page_number)?;
                     let mut mutator = BranchMutator::new(mutpage.memory_mut());
-                    mutator.write_child_page(child_index, new_child, new_child_checksum);
+                    mutator.write_child_page(child_index, new_child, DEFERRED);
                     original_page_number
                 } else {
                     let mut builder = BranchBuilder::new(
@@ -839,12 +841,12 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         K::fixed_width(),
                     );
                     builder.push_all(&accessor);
-                    builder.replace_child(child_index, new_child, new_child_checksum);
+                    builder.replace_child(child_index, new_child, DEFERRED);
                     let new_page = builder.build()?;
                     self.conditional_free(original_page_number);
                     new_page.get_page_number()
                 };
-            return Ok((Subtree(result_page, DEFERRED), found));
+            return Ok((Subtree(result_page), found));
         }
 
         // Child is requesting to be merged with a sibling
@@ -856,7 +858,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         );
 
         let final_result = match result {
-            Subtree(_, _) => {
+            Subtree(_) => {
                 // Handled in the if above
                 unreachable!();
             }
@@ -1128,14 +1130,13 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     fn delete_helper(
         &mut self,
         page: PageImpl,
-        checksum: Checksum,
         target: DeleteTarget<'_>,
         found_key: &mut Option<AccessGuard<'a, K>>,
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
         let node_mem = page.memory();
         match node_mem[0] {
-            LEAF => self.delete_leaf_helper(page, checksum, target, found_key),
-            BRANCH => self.delete_branch_helper(page, checksum, target, found_key),
+            LEAF => self.delete_leaf_helper(page, target, found_key),
+            BRANCH => self.delete_branch_helper(page, target, found_key),
             _ => unreachable!(),
         }
     }
