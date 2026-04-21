@@ -271,10 +271,18 @@ impl CacheStats {
     }
 }
 
-pub(crate) struct TransactionGuard {
-    transaction_tracker: Option<Arc<TransactionTracker>>,
-    transaction_id: Option<TransactionId>,
-    write_transaction: bool,
+pub(crate) enum TransactionGuard {
+    Read {
+        tracker: Arc<TransactionTracker>,
+        transaction_id: TransactionId,
+    },
+    Write {
+        tracker: Arc<TransactionTracker>,
+        transaction_id: TransactionId,
+    },
+    // Used for internal accesses that happen outside of any tracked transaction,
+    // such as opening the database, repairing it, and running integrity checks.
+    Untracked,
 }
 
 impl TransactionGuard {
@@ -282,10 +290,9 @@ impl TransactionGuard {
         transaction_id: TransactionId,
         tracker: Arc<TransactionTracker>,
     ) -> Self {
-        Self {
-            transaction_tracker: Some(tracker),
-            transaction_id: Some(transaction_id),
-            write_transaction: false,
+        Self::Read {
+            tracker,
+            transaction_id,
         }
     }
 
@@ -301,48 +308,40 @@ impl TransactionGuard {
         transaction_id: TransactionId,
         tracker: Arc<TransactionTracker>,
     ) -> Self {
-        Self {
-            transaction_tracker: Some(tracker),
-            transaction_id: Some(transaction_id),
-            write_transaction: true,
+        Self::Write {
+            tracker,
+            transaction_id,
         }
     }
 
-    // TODO: remove this hack
-    pub(crate) fn fake() -> Self {
-        Self {
-            transaction_tracker: None,
-            transaction_id: None,
-            write_transaction: false,
-        }
+    pub(crate) fn untracked() -> Self {
+        Self::Untracked
     }
 
     pub(crate) fn id(&self) -> TransactionId {
-        self.transaction_id.unwrap()
-    }
-
-    pub(crate) fn leak(mut self) -> TransactionId {
-        self.transaction_id.take().unwrap()
+        match self {
+            Self::Read { transaction_id, .. } | Self::Write { transaction_id, .. } => {
+                *transaction_id
+            }
+            Self::Untracked => {
+                panic!("TransactionGuard::id() called on an untracked guard")
+            }
+        }
     }
 }
 
 impl Drop for TransactionGuard {
     fn drop(&mut self) {
-        if self.transaction_tracker.is_none() {
-            return;
-        }
-        if let Some(transaction_id) = self.transaction_id {
-            if self.write_transaction {
-                self.transaction_tracker
-                    .as_ref()
-                    .unwrap()
-                    .end_write_transaction(transaction_id);
-            } else {
-                self.transaction_tracker
-                    .as_ref()
-                    .unwrap()
-                    .deallocate_read_transaction(transaction_id);
-            }
+        match self {
+            Self::Read {
+                tracker,
+                transaction_id,
+            } => tracker.deallocate_read_transaction(*transaction_id),
+            Self::Write {
+                tracker,
+                transaction_id,
+            } => tracker.end_write_transaction(*transaction_id),
+            Self::Untracked => {}
         }
     }
 }
@@ -547,7 +546,7 @@ impl Database {
         let table_tree = TableTree::new(
             mem.get_data_root(),
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::untracked()),
             mem.clone(),
         )?;
         if !table_tree.verify_checksums()? {
@@ -556,7 +555,7 @@ impl Database {
         let system_table_tree = TableTree::new(
             mem.get_system_root(),
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::untracked()),
             mem.clone(),
         )?;
         if !system_table_tree.verify_checksums()? {
@@ -694,7 +693,7 @@ impl Database {
         let table_tree = TableTree::new(
             system_root,
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::untracked()),
             mem.clone(),
         )?;
         if let Some(table_def) = table_tree
@@ -711,7 +710,7 @@ impl Database {
                 DATA_ALLOCATED_TABLE.name().to_string(),
                 table_root,
                 PageHint::None,
-                Arc::new(TransactionGuard::fake()),
+                Arc::new(TransactionGuard::untracked()),
                 mem.clone(),
             )?;
             for result in table.range::<TransactionIdWithPagination>(..)? {
@@ -734,8 +733,9 @@ impl Database {
     where
         F: FnMut(PageNumber) -> Result,
     {
-        let fake_guard = Arc::new(TransactionGuard::fake());
-        let system_tree = TableTree::new(system_root, PageHint::None, fake_guard, mem.clone())?;
+        let untracked_guard = Arc::new(TransactionGuard::untracked());
+        let system_tree =
+            TableTree::new(system_root, PageHint::None, untracked_guard, mem.clone())?;
         let table_name = table_def.name();
         let result = match system_tree.get_table::<K, V>(table_name, TableType::Normal) {
             Ok(result) => result,
@@ -762,7 +762,7 @@ impl Database {
                     table_name.to_string(),
                     table_root,
                     PageHint::None,
-                    Arc::new(TransactionGuard::fake()),
+                    Arc::new(TransactionGuard::untracked()),
                     mem.clone(),
                 )?;
             for result in table.range::<TransactionIdWithPagination>(..)? {
@@ -782,8 +782,8 @@ impl Database {
     ) -> Result {
         let data_root = mem.get_data_root();
         {
-            let fake = Arc::new(TransactionGuard::fake());
-            let tables = TableTree::new(data_root, PageHint::None, fake, mem.clone())?;
+            let untracked = Arc::new(TransactionGuard::untracked());
+            let tables = TableTree::new(data_root, PageHint::None, untracked, mem.clone())?;
             tables.visit_all_pages(|path| {
                 mem.mark_debug_allocated_page(path.page_number());
                 Ok(())
@@ -792,8 +792,9 @@ impl Database {
 
         let system_root = mem.get_system_root();
         {
-            let fake = Arc::new(TransactionGuard::fake());
-            let system_tables = TableTree::new(system_root, PageHint::None, fake, mem.clone())?;
+            let untracked = Arc::new(TransactionGuard::untracked());
+            let system_tables =
+                TableTree::new(system_root, PageHint::None, untracked, mem.clone())?;
             system_tables.visit_all_pages(|path| {
                 mem.mark_debug_allocated_page(path.page_number());
                 Ok(())
@@ -852,8 +853,8 @@ impl Database {
 
         let data_root = mem.get_data_root();
         {
-            let fake = Arc::new(TransactionGuard::fake());
-            let tables = TableTree::new(data_root, PageHint::None, fake, mem.clone())?;
+            let untracked = Arc::new(TransactionGuard::untracked());
+            let tables = TableTree::new(data_root, PageHint::None, untracked, mem.clone())?;
             tables.visit_all_pages(|path| {
                 mem.mark_page_allocated(path.page_number());
                 Ok(())
@@ -869,8 +870,9 @@ impl Database {
 
         let system_root = mem.get_system_root();
         {
-            let fake = Arc::new(TransactionGuard::fake());
-            let system_tables = TableTree::new(system_root, PageHint::None, fake, mem.clone())?;
+            let untracked = Arc::new(TransactionGuard::untracked());
+            let system_tables =
+                TableTree::new(system_root, PageHint::None, untracked, mem.clone())?;
             system_tables.visit_all_pages(|path| {
                 mem.mark_page_allocated(path.page_number());
                 Ok(())
@@ -992,7 +994,7 @@ impl Database {
         let system_table_tree = TableTree::new(
             mem.get_system_root(),
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::untracked()),
             mem.clone(),
         )?;
         let Some(allocator_state_table) = system_table_tree
@@ -1009,7 +1011,7 @@ impl Database {
         let tree = AllocatorStateTree::new(
             table_root,
             PageHint::None,
-            Arc::new(TransactionGuard::fake()),
+            Arc::new(TransactionGuard::untracked()),
             mem.clone(),
         )?;
 
