@@ -84,11 +84,11 @@ fn get_u64(data: &[u8]) -> u64 {
     u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap())
 }
 
-#[derive(Copy, Clone)]
-pub(super) struct HeaderRepairInfo {
-    pub(super) invalid_magic_number: bool,
-    pub(super) primary_corrupted: bool,
-    pub(super) secondary_corrupted: bool,
+// A header parsed from disk that has not yet committed to a primary slot.
+pub(super) struct UnrepairedDatabaseHeader {
+    inner: DatabaseHeader,
+    primary_corrupted: bool,
+    secondary_corrupted: bool,
 }
 
 #[derive(Clone)]
@@ -102,6 +102,107 @@ pub(super) struct DatabaseHeader {
     full_regions: u32,
     trailing_partial_region_pages: u32,
     transaction_slots: [TransactionHeader; 2],
+}
+
+impl UnrepairedDatabaseHeader {
+    pub(super) fn from_bytes(data: &[u8]) -> Result<Self, DatabaseError> {
+        if data[..MAGICNUMBER.len()] != MAGICNUMBER {
+            return Err(StorageError::Corrupted("Invalid magic number".to_string()).into());
+        }
+
+        let primary_slot = usize::from(data[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
+        let recovery_required = (data[GOD_BYTE_OFFSET] & RECOVERY_REQUIRED) != 0;
+        let two_phase_commit = (data[GOD_BYTE_OFFSET] & TWO_PHASE_COMMIT) != 0;
+        let page_size = get_u32(&data[PAGE_SIZE_OFFSET..]);
+        let region_header_pages = get_u32(&data[REGION_HEADER_PAGES_OFFSET..]);
+        let region_max_data_pages = get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..]);
+        let full_regions = get_u32(&data[NUM_FULL_REGIONS_OFFSET..]);
+        let trailing_data_pages = get_u32(&data[TRAILING_REGION_DATA_PAGES_OFFSET..]);
+        let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(
+            &data[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + TRANSACTION_SIZE)],
+        )?;
+        let (slot1, slot1_corrupted) = TransactionHeader::from_bytes(
+            &data[TRANSACTION_1_OFFSET..(TRANSACTION_1_OFFSET + TRANSACTION_SIZE)],
+        )?;
+        let (primary_corrupted, secondary_corrupted) = if primary_slot == 0 {
+            (slot0_corrupted, slot1_corrupted)
+        } else {
+            (slot1_corrupted, slot0_corrupted)
+        };
+
+        Ok(Self {
+            inner: DatabaseHeader {
+                primary_slot,
+                recovery_required,
+                two_phase_commit,
+                page_size,
+                region_header_pages,
+                region_max_data_pages,
+                full_regions,
+                trailing_partial_region_pages: trailing_data_pages,
+                transaction_slots: [slot0, slot1],
+            },
+            primary_corrupted,
+            secondary_corrupted,
+        })
+    }
+
+    pub(super) fn page_size(&self) -> u32 {
+        self.inner.page_size
+    }
+
+    pub(super) fn layout(&self) -> DatabaseLayout {
+        self.inner.layout()
+    }
+
+    pub(super) fn recovery_required(&self) -> bool {
+        self.inner.recovery_required
+    }
+
+    pub(super) fn set_layout(&mut self, layout: DatabaseLayout) {
+        self.inner.set_layout(layout);
+    }
+
+    // Consume self, select a primary slot (repairing if necessary), and return the
+    // usable DatabaseHeader.
+    // The bool is true if the original primary was kept, or false if it was swapped with the
+    // secondary.
+    pub(super) fn finalize(mut self) -> Result<(DatabaseHeader, bool)> {
+        // If the primary was written using 2-phase commit, it's guaranteed to be valid. Don't look
+        // at the secondary; even if it happens to have a valid checksum, Durability::Paranoid means
+        // we can't trust it
+        if self.inner.two_phase_commit {
+            if self.primary_corrupted {
+                return Err(StorageError::Corrupted(
+                    "Primary is corrupted despite 2-phase commit".to_string(),
+                ));
+            }
+            return Ok((self.inner, true));
+        }
+
+        // Pick whichever slot is newer, assuming it has a valid checksum. This handles an edge case
+        // where we crash during fsync(), and the only data that got written to disk was the god byte
+        // update swapping the primary -- in that case, the primary contains a valid but out-of-date
+        // transaction, so we need to load from the secondary instead
+        if self.primary_corrupted {
+            if self.secondary_corrupted {
+                return Err(StorageError::Corrupted(
+                    "Both commit slots are corrupted".to_string(),
+                ));
+            }
+            self.inner.swap_primary_slot();
+            return Ok((self.inner, false));
+        }
+
+        let secondary_newer =
+            self.inner.secondary_slot().transaction_id > self.inner.primary_slot().transaction_id;
+        if secondary_newer && !self.secondary_corrupted {
+            self.inner.swap_primary_slot();
+            return Ok((self.inner, false));
+        }
+
+        Ok((self.inner, true))
+    }
 }
 
 impl DatabaseHeader {
@@ -179,93 +280,6 @@ impl DatabaseHeader {
 
     pub(super) fn swap_primary_slot(&mut self) {
         self.primary_slot ^= 1;
-    }
-
-    // Figure out which slot to use as the primary when starting a repair. The repair process might
-    // still switch to the other slot later, if the tree checksums turn out to be invalid.
-    //
-    // Returns true if we picked the original primary, or false if we swapped
-    pub(super) fn pick_primary_for_repair(
-        &mut self,
-        repair_info: HeaderRepairInfo,
-    ) -> Result<bool> {
-        // If the primary was written using 2-phase commit, it's guaranteed to be valid. Don't look
-        // at the secondary; even if it happens to have a valid checksum, Durability::Paranoid means
-        // we can't trust it
-        if self.two_phase_commit {
-            if repair_info.primary_corrupted {
-                return Err(StorageError::Corrupted(
-                    "Primary is corrupted despite 2-phase commit".to_string(),
-                ));
-            }
-            return Ok(true);
-        }
-
-        // Pick whichever slot is newer, assuming it has a valid checksum. This handles an edge case
-        // where we crash during fsync(), and the only data that got written to disk was the god byte
-        // update swapping the primary -- in that case, the primary contains a valid but out-of-date
-        // transaction, so we need to load from the secondary instead
-        if repair_info.primary_corrupted {
-            if repair_info.secondary_corrupted {
-                return Err(StorageError::Corrupted(
-                    "Both commit slots are corrupted".to_string(),
-                ));
-            }
-            self.swap_primary_slot();
-            return Ok(false);
-        }
-
-        let secondary_newer =
-            self.secondary_slot().transaction_id > self.primary_slot().transaction_id;
-        if secondary_newer && !repair_info.secondary_corrupted {
-            self.swap_primary_slot();
-            return Ok(false);
-        }
-
-        Ok(true)
-    }
-
-    // TODO: consider returning an Err with the repair info
-    pub(super) fn from_bytes(data: &[u8]) -> Result<(Self, HeaderRepairInfo), DatabaseError> {
-        let invalid_magic_number = data[..MAGICNUMBER.len()] != MAGICNUMBER;
-
-        let primary_slot = usize::from(data[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
-        let recovery_required = (data[GOD_BYTE_OFFSET] & RECOVERY_REQUIRED) != 0;
-        let two_phase_commit = (data[GOD_BYTE_OFFSET] & TWO_PHASE_COMMIT) != 0;
-        let page_size = get_u32(&data[PAGE_SIZE_OFFSET..]);
-        let region_header_pages = get_u32(&data[REGION_HEADER_PAGES_OFFSET..]);
-        let region_max_data_pages = get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..]);
-        let full_regions = get_u32(&data[NUM_FULL_REGIONS_OFFSET..]);
-        let trailing_data_pages = get_u32(&data[TRAILING_REGION_DATA_PAGES_OFFSET..]);
-        let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(
-            &data[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + TRANSACTION_SIZE)],
-        )?;
-        let (slot1, slot1_corrupted) = TransactionHeader::from_bytes(
-            &data[TRANSACTION_1_OFFSET..(TRANSACTION_1_OFFSET + TRANSACTION_SIZE)],
-        )?;
-        let (primary_corrupted, secondary_corrupted) = if primary_slot == 0 {
-            (slot0_corrupted, slot1_corrupted)
-        } else {
-            (slot1_corrupted, slot0_corrupted)
-        };
-
-        let result = Self {
-            primary_slot,
-            recovery_required,
-            two_phase_commit,
-            page_size,
-            region_header_pages,
-            region_max_data_pages,
-            full_regions,
-            trailing_partial_region_pages: trailing_data_pages,
-            transaction_slots: [slot0, slot1],
-        };
-        let repair = HeaderRepairInfo {
-            invalid_magic_number,
-            primary_corrupted,
-            secondary_corrupted,
-        };
-        Ok((result, repair))
     }
 
     pub(super) fn to_bytes(&self, include_magic_number: bool) -> [u8; DB_HEADER_SIZE] {
