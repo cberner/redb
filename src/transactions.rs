@@ -1463,16 +1463,16 @@ impl WriteTransaction {
             self.tables.lock().unwrap().table_tree.flush_and_close()?;
 
         self.store_data_freed_pages(data_freed)?;
-        self.store_allocated_pages(allocated_pages.into_iter().collect())?;
 
         #[cfg(feature = "logging")]
         debug!(
             "Committing transaction id={:?} with durability={:?} two_phase={} quick_repair={}",
             self.transaction_id, self.durability, self.two_phase_commit, self.quick_repair
         );
+        let allocated_pages: Vec<PageNumber> = allocated_pages.into_iter().collect();
         match self.durability {
-            InternalDurability::None => self.non_durable_commit(user_root)?,
-            InternalDurability::Immediate => self.durable_commit(user_root)?,
+            InternalDurability::None => self.non_durable_commit(user_root, allocated_pages)?,
+            InternalDurability::Immediate => self.durable_commit(user_root, allocated_pages)?,
         }
 
         self.savepoint_state
@@ -1539,35 +1539,25 @@ impl WriteTransaction {
         Ok(())
     }
 
-    fn store_allocated_pages(&self, mut data_allocated_pages: Vec<PageNumber>) -> Result {
+    fn store_allocated_pages(&self, data_allocated_pages: Vec<PageNumber>) -> Result {
+        // Catch scenarios like a page getting allocated and then deallocated within the same
+        // transaction, but errantly left in the allocated pages list.
+        #[cfg(debug_assertions)]
+        for page in &data_allocated_pages {
+            debug_assert!(
+                self.mem.is_allocated(*page),
+                "Page is not allocated: {page:?}"
+            );
+            debug_assert!(self.mem.uncommitted(*page), "Page is committed: {page:?}");
+        }
+
         let mut system_tables = self.system_tables.lock().unwrap();
         let mut allocated_table = system_tables.open_system_table(self, DATA_ALLOCATED_TABLE)?;
-        let mut pagination_counter = 0;
-        while !data_allocated_pages.is_empty() {
-            let chunk_size = 400;
-            let buffer_size = PageList::required_bytes(chunk_size);
-            let key = TransactionIdWithPagination {
-                transaction_id: self.transaction_id.raw_id(),
-                pagination_id: pagination_counter,
-            };
-            let mut access_guard = allocated_table.insert_reserve(&key, buffer_size)?;
-
-            let len = data_allocated_pages.len();
-            access_guard.as_mut().clear();
-            for page in data_allocated_pages.drain(len - min(len, chunk_size)..) {
-                // Make sure that the page is currently allocated. This is to catch scenarios like
-                // a page getting allocated, and then deallocated within the same transaction,
-                // but errantly being left in the allocated pages list
-                debug_assert!(
-                    self.mem.is_allocated(page),
-                    "Page is not allocated: {page:?}"
-                );
-                debug_assert!(self.mem.uncommitted(page), "Page is committed: {page:?}");
-                access_guard.as_mut().push_back(page);
-            }
-
-            pagination_counter += 1;
-        }
+        Self::write_allocated_pages_entry(
+            &mut allocated_table,
+            self.transaction_id,
+            data_allocated_pages,
+        )?;
 
         // Purge any transactions that are no longer referenced
         let oldest = self
@@ -1582,6 +1572,32 @@ impl WriteTransaction {
             entry?;
         }
 
+        Ok(())
+    }
+
+    fn write_allocated_pages_entry(
+        allocated_table: &mut SystemTable<'_, '_, TransactionIdWithPagination, PageList<'static>>,
+        transaction_id: TransactionId,
+        mut pages: Vec<PageNumber>,
+    ) -> Result {
+        let mut pagination_counter = 0;
+        while !pages.is_empty() {
+            let chunk_size = 400;
+            let buffer_size = PageList::required_bytes(chunk_size);
+            let key = TransactionIdWithPagination {
+                transaction_id: transaction_id.raw_id(),
+                pagination_id: pagination_counter,
+            };
+            let mut access_guard = allocated_table.insert_reserve(&key, buffer_size)?;
+
+            let len = pages.len();
+            access_guard.as_mut().clear();
+            for page in pages.drain(len - min(len, chunk_size)..) {
+                access_guard.as_mut().push_back(page);
+            }
+
+            pagination_counter += 1;
+        }
         Ok(())
     }
 
@@ -1616,7 +1632,13 @@ impl WriteTransaction {
         Ok(())
     }
 
-    pub(crate) fn durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
+    pub(crate) fn durable_commit(
+        &mut self,
+        user_root: Option<BtreeHeader>,
+        allocated_pages: Vec<PageNumber>,
+    ) -> Result {
+        self.store_allocated_pages(allocated_pages)?;
+
         let free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_transaction()
@@ -1692,7 +1714,13 @@ impl WriteTransaction {
     }
 
     // Commit without a durability guarantee
-    pub(crate) fn non_durable_commit(&mut self, user_root: Option<BtreeHeader>) -> Result {
+    pub(crate) fn non_durable_commit(
+        &mut self,
+        user_root: Option<BtreeHeader>,
+        allocated_pages: Vec<PageNumber>,
+    ) -> Result {
+        self.store_allocated_pages(allocated_pages)?;
+
         let mut free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_nondurable_transaction()
@@ -1747,7 +1775,10 @@ impl WriteTransaction {
         );
 
         for page in post_commit_frees {
-            self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+            let removed = self
+                .mem
+                .free_if_unpersisted(page, &mut PageTrackerPolicy::Ignore);
+            assert!(removed);
         }
 
         Ok(())
@@ -1830,8 +1861,14 @@ impl WriteTransaction {
             for entry in data_freed.extract_from_if(..key, |_, _| true)? {
                 let (_, page_list) = entry?;
                 for i in 0..page_list.value().len() {
-                    self.mem
-                        .free(page_list.value().get(i), &mut PageTrackerPolicy::Ignore);
+                    let page = page_list.value().get(i);
+                    // These pages cannot be unpersisted: free_until is bounded by
+                    // oldest_live_read_transaction, which pins back to the durable_ancestor of
+                    // every pending non-durable commit (see register_non_durable_commit). As a
+                    // result, no entry whose pages are still unpersisted is eligible for
+                    // processing here.
+                    debug_assert!(!self.mem.unpersisted(page));
+                    self.mem.free(page, &mut PageTrackerPolicy::Ignore);
                 }
             }
         }
@@ -1846,8 +1883,9 @@ impl WriteTransaction {
             for entry in system_freed.extract_from_if(..key, |_, _| true)? {
                 let (_, page_list) = entry?;
                 for i in 0..page_list.value().len() {
-                    self.mem
-                        .free(page_list.value().get(i), &mut PageTrackerPolicy::Ignore);
+                    let page = page_list.value().get(i);
+                    debug_assert!(!self.mem.unpersisted(page));
+                    self.mem.free(page, &mut PageTrackerPolicy::Ignore);
                 }
             }
         }
