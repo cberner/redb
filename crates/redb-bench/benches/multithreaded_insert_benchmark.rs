@@ -9,78 +9,56 @@ use std::time::Instant;
 
 const ELEMENTS: u64 = 1_000_000;
 const RNG_SEED: u64 = 3;
-
-const TABLE1: TableDefinition<u128, u128> = TableDefinition::new("x");
-const TABLE2: TableDefinition<u128, u128> = TableDefinition::new("y");
+const THREAD_COUNTS: &[usize] = &[1, 2, 4, 8, 16, 32];
 
 #[inline(never)]
-fn single_threaded(values: &[u128]) {
+fn benchmark(values: &[u128], num_threads: usize) {
+    assert_eq!(values.len() as u64, ELEMENTS);
+    assert_eq!(ELEMENTS % num_threads as u64, 0);
+    let elements_per_thread = (ELEMENTS / num_threads as u64) as usize;
+
     let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
     let db = Database::builder().create(tmpfile.path()).unwrap();
+
+    let table_names: Vec<String> = (0..num_threads).map(|i| format!("table_{i}")).collect();
+    let table_defs: Vec<TableDefinition<u128, u128>> = table_names
+        .iter()
+        .map(|n| TableDefinition::new(n.as_str()))
+        .collect();
 
     let start = Instant::now();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table1 = write_txn.open_table(TABLE1).unwrap();
-        let mut table2 = write_txn.open_table(TABLE2).unwrap();
-
-        for value in values.iter() {
-            table1.insert(value, value).unwrap();
-            table2.insert(value, value).unwrap();
-        }
-    }
-    write_txn.commit().unwrap();
-    let end = Instant::now();
-    let duration = end - start;
-    println!(
-        "single threaded load:  {} pairs in {}ms",
-        2 * ELEMENTS,
-        duration.as_millis()
-    );
-    let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(TABLE1).unwrap();
-    assert_eq!(table.len().unwrap(), ELEMENTS);
-    let table = read_txn.open_table(TABLE2).unwrap();
-    assert_eq!(table.len().unwrap(), ELEMENTS);
-}
-
-#[inline(never)]
-fn multi_threaded(values: &[u128]) {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
-    let db = Database::builder().create(tmpfile.path()).unwrap();
-
-    let start = Instant::now();
-    let write_txn = db.begin_write().unwrap();
-    {
-        let mut table1 = write_txn.open_table(TABLE1).unwrap();
-        let mut table2 = write_txn.open_table(TABLE2).unwrap();
+        let mut tables: Vec<_> = table_defs
+            .iter()
+            .map(|def| write_txn.open_table(*def).unwrap())
+            .collect();
 
         thread::scope(|s| {
-            s.spawn(|| {
-                for value in values.iter() {
-                    table1.insert(value, value).unwrap();
-                }
-            });
-            s.spawn(|| {
-                for value in values.iter() {
-                    table2.insert(value, value).unwrap();
-                }
-            });
+            for (i, table) in tables.iter_mut().enumerate() {
+                let chunk = &values[i * elements_per_thread..(i + 1) * elements_per_thread];
+                s.spawn(move || {
+                    for value in chunk.iter() {
+                        table.insert(value, value).unwrap();
+                    }
+                });
+            }
         });
     }
     write_txn.commit().unwrap();
-    let end = Instant::now();
-    let duration = end - start;
+    let duration = start.elapsed();
     println!(
-        "2 threaded load:  {} pairs in {}ms",
-        2 * ELEMENTS,
+        "{} threaded load: {} pairs in {}ms",
+        num_threads,
+        ELEMENTS,
         duration.as_millis()
     );
+
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(TABLE1).unwrap();
-    assert_eq!(table.len().unwrap(), ELEMENTS);
-    let table = read_txn.open_table(TABLE2).unwrap();
-    assert_eq!(table.len().unwrap(), ELEMENTS);
+    for def in &table_defs {
+        let table = read_txn.open_table(*def).unwrap();
+        assert_eq!(table.len().unwrap(), elements_per_thread as u64);
+    }
 }
 
 // TODO: multi-threaded inserts are slower. Probably due to lock contention checking dirty pages
@@ -101,9 +79,9 @@ fn main() {
     })
     .unwrap();
 
-    single_threaded(&values);
-
-    multi_threaded(&values);
+    for &num_threads in THREAD_COUNTS {
+        benchmark(&values, num_threads);
+    }
 
     fs::remove_dir_all(&tmpdir).unwrap();
 }
