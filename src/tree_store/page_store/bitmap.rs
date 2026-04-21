@@ -217,6 +217,15 @@ impl BtreeBitmap {
     }
 }
 
+// Returns a u64 with bits `lo..hi` set, where `0 <= lo < hi <= 64`.
+fn bits_in_range(lo: u32, hi: u32) -> u64 {
+    debug_assert!(lo < hi && hi <= 64);
+    // Both shifts are well-defined: `lo < 64` and `64 - hi < 64`.
+    let bits_at_or_above_lo = u64::MAX << lo;
+    let bits_below_hi = u64::MAX >> (64 - hi);
+    bits_at_or_above_lo & bits_below_hi
+}
+
 // A bitmap which groups consecutive groups of 64bits together
 pub(crate) struct U64GroupedBitmap {
     len: u32,
@@ -329,14 +338,24 @@ impl U64GroupedBitmap {
         }
         let old_len = self.len;
         self.len = new_len;
-        if old_len < new_len {
-            // TODO: optimize this loop to set whole words at a time
-            for i in old_len..new_len {
-                if full {
-                    self.set(i);
-                } else {
-                    self.clear(i);
-                }
+        if old_len >= new_len {
+            return;
+        }
+        // Apply `full` to bits [old_len, new_len) one word at a time. For each
+        // word, build a mask of just the bits in that range that fall within
+        // the word, then OR it in (full=true) or AND its complement (full=false).
+        let start_word = old_len / 64;
+        let end_word = (new_len - 1) / 64;
+        for word in start_word..=end_word {
+            let word_first_bit = word * 64;
+            let lo = old_len.saturating_sub(word_first_bit);
+            let hi = (new_len - word_first_bit).min(64);
+            let mask = bits_in_range(lo, hi);
+            let slot = &mut self.data[word as usize];
+            if full {
+                *slot |= mask;
+            } else {
+                *slot &= !mask;
             }
         }
     }
