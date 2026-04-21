@@ -5,7 +5,9 @@ use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, PageHint};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
-use crate::tree_store::page_store::header::{DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER};
+use crate::tree_store::page_store::header::{
+    DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER, UnrepairedDatabaseHeader,
+};
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
 use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
@@ -225,27 +227,28 @@ impl TransactionalMemory {
             storage.flush()?;
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
-        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
+        let mut unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes)?;
 
-        assert_eq!(header.page_size() as usize, page_size);
-        assert!(storage.raw_file_len()? >= header.layout().len());
-        let needs_recovery =
-            header.recovery_required || header.layout().len() != storage.raw_file_len()?;
+        assert_eq!(unrepaired.page_size() as usize, page_size);
+        assert!(storage.raw_file_len()? >= unrepaired.layout().len());
+        let needs_recovery = unrepaired.recovery_required()
+            || unrepaired.layout().len() != storage.raw_file_len()?;
         if needs_recovery {
             if read_only {
                 return Err(DatabaseError::RepairAborted);
             }
-            let layout = header.layout();
+            let layout = unrepaired.layout();
             let region_max_pages = layout.full_region_layout().num_pages();
             let region_header_pages = layout.full_region_layout().get_header_pages();
-            header.set_layout(DatabaseLayout::recalculate(
+            unrepaired.set_layout(DatabaseLayout::recalculate(
                 storage.raw_file_len()?,
                 region_header_pages,
                 region_max_pages,
                 page_size.try_into().unwrap(),
             ));
-            header.pick_primary_for_repair(repair_info)?;
-            assert!(!repair_info.invalid_magic_number);
+        }
+        let (header, _) = unrepaired.finalize()?;
+        if needs_recovery {
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
@@ -326,16 +329,15 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
-        let (mut header, repair_info) = DatabaseHeader::from_bytes(&header_bytes)?;
+        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes)?;
         // TODO: This ends up always being true because this is called from check_integrity() once the db is already open
         // TODO: Also we should recheck the layout
+        let was_recovery_required = unrepaired.recovery_required();
+        let (header, kept_primary) = unrepaired.finalize()?;
         let mut was_clean = true;
-        if header.recovery_required {
-            if !header.pick_primary_for_repair(repair_info)? {
+        if was_recovery_required {
+            if !kept_primary {
                 was_clean = false;
-            }
-            if repair_info.invalid_magic_number {
-                return Err(StorageError::Corrupted("Invalid magic number".to_string()).into());
             }
             self.storage
                 .write(0, DB_HEADER_SIZE, true)?
