@@ -2158,13 +2158,13 @@ impl WriteTransaction {
 
 impl Drop for WriteTransaction {
     fn drop(&mut self) {
-        if !self.completed && !thread::panicking() && !self.mem.storage_failure() {
+        if !self.completed && !thread::panicking() && !self.mem.needs_recovery() {
             #[allow(unused_variables)]
             if let Err(error) = self.abort_inner() {
                 #[cfg(feature = "logging")]
                 warn!("Failure automatically aborting transaction: {error}");
             }
-        } else if !self.completed && self.mem.storage_failure() {
+        } else if !self.completed && self.mem.needs_recovery() {
             self.tables
                 .lock()
                 .unwrap()

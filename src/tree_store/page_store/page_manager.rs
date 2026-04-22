@@ -431,8 +431,16 @@ impl TransactionalMemory {
         self.state.lock().unwrap().allocators.xxh3_hash()
     }
 
-    // TODO: need a clearer distinction between this and needs_repair()
-    pub(crate) fn storage_failure(&self) -> bool {
+    // Returns the in-memory `needs_recovery` flag, which is set when an I/O error aborts a
+    // write path (see `mark_recovery_on_err`). When true, the in-memory allocator/header
+    // state may disagree with what is on disk, so further mutating operations must not run
+    // until the database is reopened and repaired.
+    //
+    // This is distinct from the on-disk `DatabaseHeader::recovery_required` flag: that flag
+    // is persisted in the god byte and marks the window between `begin_writable` and a clean
+    // commit/close, so it is normally true for the duration of any write transaction. The
+    // in-memory flag reported here only becomes true when a write actually fails.
+    pub(crate) fn needs_recovery(&self) -> bool {
         self.needs_recovery.load(Ordering::Acquire)
     }
 
