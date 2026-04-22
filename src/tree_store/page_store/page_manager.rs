@@ -26,7 +26,6 @@ use std::marker::PhantomData;
 #[cfg(debug_assertions)]
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 // The region header is optional in the v3 file format
@@ -175,9 +174,6 @@ pub(crate) struct TransactionalMemory {
     unpersisted_allocations: Mutex<BTreeMap<TransactionId, PageNumberHashSet>>,
     // Reverse index into `unpersisted_allocations`
     unpersisted_allocation_txn: Mutex<PageNumberHashMap<TransactionId>>,
-    // True if the allocator state was corrupted when the file was opened
-    // TODO: maybe we can remove this flag now that CheckedBackend exists?
-    needs_recovery: AtomicBool,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
     // The number of PageMut which are outstanding
@@ -335,7 +331,6 @@ impl TransactionalMemory {
             unpersisted: Mutex::new(PageNumberHashSet::default()),
             unpersisted_allocations: Mutex::new(BTreeMap::new()),
             unpersisted_allocation_txn: Mutex::new(PageNumberHashMap::default()),
-            needs_recovery: AtomicBool::new(needs_recovery),
             storage,
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
@@ -413,32 +408,17 @@ impl TransactionalMemory {
             self.storage.flush()?;
         }
 
-        self.needs_recovery
-            .store(header.recovery_required, Ordering::Release);
         self.state.lock().unwrap().header = header;
 
         Ok(was_clean)
     }
 
     pub(crate) fn begin_writable(&self) -> Result {
-        self.mark_recovery_on_err(|| {
-            let mut state = self.state.lock().unwrap();
-            assert!(!state.header.recovery_required);
-            state.header.recovery_required = true;
-            self.write_header(&state.header)?;
-            self.storage.flush()
-        })
-    }
-
-    // If `f` returns an error, set `needs_recovery` so that any partial on-disk
-    // state is repaired on the next open, and so that in-memory state (which may
-    // now be out of sync with disk) is not trusted by later operations.
-    fn mark_recovery_on_err<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        let result = f();
-        if result.is_err() {
-            self.needs_recovery.store(true, Ordering::Release);
-        }
-        result
+        let mut state = self.state.lock().unwrap();
+        assert!(!state.header.recovery_required);
+        state.header.recovery_required = true;
+        self.write_header(&state.header)?;
+        self.storage.flush()
     }
 
     pub(crate) fn used_two_phase_commit(&self) -> bool {
@@ -449,9 +429,11 @@ impl TransactionalMemory {
         self.state.lock().unwrap().allocators.xxh3_hash()
     }
 
-    // TODO: need a clearer distinction between this and needs_repair()
+    // Reports whether the backend has seen an I/O failure in this process.
+    // Callers use this to skip cleanup that would do further I/O after a
+    // previous storage error (e.g. WriteTransaction::drop).
     pub(crate) fn storage_failure(&self) -> bool {
-        self.needs_recovery.load(Ordering::Acquire)
+        self.storage.check_io_errors().is_err()
     }
 
     pub(crate) fn repair_primary_corrupted(&self) {
@@ -487,14 +469,11 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn end_repair(&self) -> Result<()> {
-        self.mark_recovery_on_err(|| {
-            let mut state = self.state.lock().unwrap();
-            state.header.recovery_required = false;
-            self.write_header(&state.header)?;
-            self.storage.flush()?;
-            self.needs_recovery.store(false, Ordering::Release);
-            Ok(())
-        })
+        let mut state = self.state.lock().unwrap();
+        state.header.recovery_required = false;
+        self.write_header(&state.header)?;
+        self.storage.flush()?;
+        Ok(())
     }
 
     pub(crate) fn reserve_allocator_state(
@@ -628,7 +607,6 @@ impl TransactionalMemory {
         drop(state);
 
         self.state.lock().unwrap().header.recovery_required = false;
-        self.needs_recovery.store(false, Ordering::Release);
 
         Ok(())
     }
@@ -656,32 +634,12 @@ impl TransactionalMemory {
         two_phase: bool,
         shrink_policy: ShrinkPolicy,
     ) -> Result {
-        self.mark_recovery_on_err(|| {
-            self.commit_inner(
-                data_root,
-                system_root,
-                transaction_id,
-                two_phase,
-                shrink_policy,
-            )
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn commit_inner(
-        &self,
-        data_root: Option<BtreeHeader>,
-        system_root: Option<BtreeHeader>,
-        transaction_id: TransactionId,
-        two_phase: bool,
-        shrink_policy: ShrinkPolicy,
-    ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
         #[cfg(debug_assertions)]
         debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
-        assert!(!self.needs_recovery.load(Ordering::Acquire));
+        self.storage.check_io_errors()?;
 
         let mut state = self.state.lock().unwrap();
         // Trim surplus file space, before finalizing the commit
@@ -749,36 +707,30 @@ impl TransactionalMemory {
         system_root: Option<BtreeHeader>,
         transaction_id: TransactionId,
     ) -> Result {
-        self.mark_recovery_on_err(|| {
-            // All mutable pages must be dropped, this ensures that when a transaction completes
-            // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
-            // to future read transactions
-            #[cfg(debug_assertions)]
-            debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
-            assert!(!self.needs_recovery.load(Ordering::Acquire));
+        // All mutable pages must be dropped, this ensures that when a transaction completes
+        // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
+        // to future read transactions
+        #[cfg(debug_assertions)]
+        debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
+        self.storage.check_io_errors()?;
 
-            let mut unpersisted = self.unpersisted.lock().unwrap();
-            let mut allocated_since_commit = self.allocated_since_commit.lock().unwrap();
-            unpersisted.extend(allocated_since_commit.drain());
-            allocated_since_commit.shrink_to_fit();
-            self.storage.write_barrier()?;
+        let mut unpersisted = self.unpersisted.lock().unwrap();
+        let mut allocated_since_commit = self.allocated_since_commit.lock().unwrap();
+        unpersisted.extend(allocated_since_commit.drain());
+        allocated_since_commit.shrink_to_fit();
+        self.storage.write_barrier()?;
 
-            let mut state = self.state.lock().unwrap();
-            let secondary = state.header.secondary_slot_mut();
-            secondary.transaction_id = transaction_id;
-            secondary.user_root = data_root;
-            secondary.system_root = system_root;
-            state.read_from_secondary = true;
+        let mut state = self.state.lock().unwrap();
+        let secondary = state.header.secondary_slot_mut();
+        secondary.transaction_id = transaction_id;
+        secondary.user_root = data_root;
+        secondary.system_root = system_root;
+        state.read_from_secondary = true;
 
-            Ok(())
-        })
+        Ok(())
     }
 
     pub(crate) fn rollback_uncommitted_writes(&self) -> Result {
-        self.mark_recovery_on_err(|| self.rollback_uncommitted_writes_inner())
-    }
-
-    fn rollback_uncommitted_writes_inner(&self) -> Result {
         #[cfg(debug_assertions)]
         {
             let dirty_pages = self.open_dirty_pages.lock().unwrap();
@@ -787,7 +739,7 @@ impl TransactionalMemory {
                 "Dirty pages outstanding: {dirty_pages:?}"
             );
         }
-        assert!(!self.needs_recovery.load(Ordering::Acquire));
+        self.storage.check_io_errors()?;
         let mut state = self.state.lock().unwrap();
         let mut guard = self.allocated_since_commit.lock().unwrap();
         for page_number in guard.iter() {
@@ -1230,7 +1182,7 @@ impl TransactionalMemory {
         );
         assert!(new_layout.len() >= layout.len());
 
-        self.mark_recovery_on_err(|| self.storage.resize(new_layout.len()))?;
+        self.storage.resize(new_layout.len())?;
 
         state.allocators.resize_to(new_layout);
         state.header.set_layout(new_layout);
@@ -1286,7 +1238,7 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn close(&self) -> Result {
-        if !self.needs_recovery.load(Ordering::Acquire) && !thread::panicking() {
+        if self.storage.check_io_errors().is_ok() && !thread::panicking() {
             let mut state = self.state.lock()?;
             if self.storage.flush().is_ok() {
                 state.header.recovery_required = false;
