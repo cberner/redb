@@ -31,6 +31,11 @@ fix the underlying issue — do not bypass checks.
 If you are touching workspace crates beyond the main `redb` crate, run
 `just test_all` instead, which also builds and tests the full workspace.
 
+## Style guide
+- Comments should be brief and focus on important invariants, architectural details, or other
+  long-term relevant information. They should not contain minor implementation details of the current
+  commit.
+
 ## Release notes
 
 Changes that are significant to users should be documented in `CHANGELOG.md`. Entries should be

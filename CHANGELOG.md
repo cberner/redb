@@ -2,6 +2,7 @@
 
 ## Unreleased
 * Optimize `Table::pop_first()` and `Table::pop_last()` to be about 2x faster.
+* Enable file space reclamation during non-durable transactions performed while a savepoint exists.
 
 ## 4.1.0 - 2026-04-19
 **This release contains a large number of bug fixes discovered by AI coding agents**
