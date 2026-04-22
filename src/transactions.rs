@@ -1820,7 +1820,9 @@ impl WriteTransaction {
                 continue;
             }
             let old_page = self.mem.get_page(path.page_number(), PageHint::None)?;
-            let mut new_page = self.mem.allocate_lowest(old_page.memory().len())?;
+            let mut new_page = self
+                .mem
+                .allocate_lowest(old_page.memory().len(), &mut PageTrackerPolicy::Ignore)?;
             let new_page_number = new_page.get_page_number();
             // We have to copy at least the page type into the new page.
             // Otherwise its cache priority will be calculated incorrectly
@@ -1834,7 +1836,10 @@ impl WriteTransaction {
                         continue;
                     }
                     let old_parent = self.mem.get_page(*parent, PageHint::None)?;
-                    let mut new_page = self.mem.allocate_lowest(old_parent.memory().len())?;
+                    let mut new_page = self.mem.allocate_lowest(
+                        old_parent.memory().len(),
+                        &mut PageTrackerPolicy::Ignore,
+                    )?;
                     let new_page_number = new_page.get_page_number();
                     // We have to copy at least the page type into the new page.
                     // Otherwise its cache priority will be calculated incorrectly
