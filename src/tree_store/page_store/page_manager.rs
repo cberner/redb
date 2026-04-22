@@ -1221,8 +1221,16 @@ impl TransactionalMemory {
         result
     }
 
-    pub(crate) fn allocate_lowest<'txn>(&self, allocation_size: usize) -> Result<PageMut<'txn>> {
-        self.allocate_helper(allocation_size, true, true)
+    pub(crate) fn allocate_lowest<'txn>(
+        &self,
+        allocation_size: usize,
+        allocated: &mut PageTrackerPolicy,
+    ) -> Result<PageMut<'txn>> {
+        let result = self.allocate_helper(allocation_size, true, true);
+        if let Ok(ref page) = result {
+            allocated.insert(page.get_page_number());
+        }
+        result
     }
 
     pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
