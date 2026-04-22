@@ -6,8 +6,8 @@ use crate::tree_store::multimap_btree::{
     finalize_tree_and_subtree_checksums, verify_tree_and_subtree_checksums,
 };
 use crate::tree_store::{
-    Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageHint, PageNumber,
-    PageTrackerPolicy, RawBtree, TableType, TransactionalMemory, multimap_btree_stats,
+    AllocationPolicy, Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageHint,
+    PageNumber, PageTrackerPolicy, RawBtree, TableType, TransactionalMemory, multimap_btree_stats,
 };
 use crate::types::{Key, Value};
 use crate::{DatabaseStats, Result};
@@ -218,6 +218,7 @@ pub(crate) struct TableTreeMut<'txn> {
     pending_table_updates: HashMap<String, (Option<BtreeHeader>, u64, bool)>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+    allocation_policy: AllocationPolicy,
 }
 
 impl TableTreeMut<'_> {
@@ -227,6 +228,7 @@ impl TableTreeMut<'_> {
         mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+        allocation_policy: AllocationPolicy,
     ) -> Self {
         Self {
             tree: BtreeMut::new(
@@ -235,13 +237,24 @@ impl TableTreeMut<'_> {
                 mem.clone(),
                 freed_pages.clone(),
                 allocated_pages.clone(),
+                allocation_policy,
             ),
             guard,
             mem,
             pending_table_updates: HashMap::default(),
             freed_pages,
             allocated_pages,
+            allocation_policy,
         }
+    }
+
+    pub(crate) fn set_allocation_policy(&mut self, policy: AllocationPolicy) {
+        self.allocation_policy = policy;
+        self.tree.set_allocation_policy(policy);
+    }
+
+    pub(crate) fn allocation_policy(&self) -> AllocationPolicy {
+        self.allocation_policy
     }
 
     pub(crate) fn set_root(&mut self, root: Option<BtreeHeader>) {
@@ -408,6 +421,7 @@ impl TableTreeMut<'_> {
             self.mem.clone(),
             self.freed_pages.clone(),
             self.allocated_pages.clone(),
+            self.allocation_policy,
         );
         f(&mut tree)?;
 
@@ -448,6 +462,7 @@ impl TableTreeMut<'_> {
             self.mem.clone(),
             self.freed_pages.clone(),
             self.allocated_pages.clone(),
+            self.allocation_policy,
         );
         f(self, &mut tree)?;
 

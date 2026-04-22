@@ -7,7 +7,7 @@ use crate::tree_store::btree_mutator::DeletionResult::{
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
-    AccessGuardMutInPlace, BtreeHeader, PageHint, PageNumber, PageTrackerPolicy,
+    AccessGuardMutInPlace, AllocationPolicy, BtreeHeader, PageHint, PageNumber, PageTrackerPolicy,
     TransactionalMemory,
 };
 use crate::types::{Key, Value};
@@ -74,6 +74,7 @@ pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
     _lifetime: PhantomData<&'a ()>,
+    allocation_policy: AllocationPolicy,
 }
 
 impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
@@ -82,6 +83,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         mem: Arc<TransactionalMemory>,
         freed: &'b mut Vec<PageNumber>,
         allocated: Arc<Mutex<PageTrackerPolicy>>,
+        allocation_policy: AllocationPolicy,
     ) -> Self {
         Self {
             root,
@@ -92,6 +94,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             _key_type: PhantomData,
             _value_type: PhantomData,
             _lifetime: PhantomData,
+            allocation_policy,
         }
     }
 
@@ -102,6 +105,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         mem: Arc<TransactionalMemory>,
         freed: &'b mut Vec<PageNumber>,
         allocated: Arc<Mutex<PageTrackerPolicy>>,
+        allocation_policy: AllocationPolicy,
     ) -> Self {
         Self {
             root,
@@ -112,6 +116,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             _key_type: PhantomData,
             _value_type: PhantomData,
             _lifetime: PhantomData,
+            allocation_policy,
         }
     }
 
@@ -173,6 +178,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         accessor.num_pairs() - 1,
                         K::fixed_width(),
                         V::fixed_width(),
+                        self.allocation_policy,
                     );
                     builder.push_all_except(&accessor, Some(deleted_pair));
                     let page = builder.build()?;
@@ -189,6 +195,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         &self.allocated,
                         children.len(),
                         K::fixed_width(),
+                        self.allocation_policy,
                     );
                     for (child, child_checksum) in children {
                         builder.push_child(child, child_checksum);
@@ -240,8 +247,13 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             };
 
             let new_root = if let Some((key, page2, page2_checksum)) = result.additional_sibling {
-                let mut builder =
-                    BranchBuilder::new(&self.mem, &self.allocated, 2, K::fixed_width());
+                let mut builder = BranchBuilder::new(
+                    &self.mem,
+                    &self.allocated,
+                    2,
+                    K::fixed_width(),
+                    self.allocation_policy,
+                );
                 builder.push_child(result.new_root, result.root_checksum);
                 builder.push_key(&key);
                 builder.push_child(page2, page2_checksum);
@@ -262,6 +274,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 1,
                 K::fixed_width(),
                 V::fixed_width(),
+                self.allocation_policy,
             );
             builder.push(key_bytes, value_bytes);
             let page = builder.build()?;
@@ -300,6 +313,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         1,
                         K::fixed_width(),
                         V::fixed_width(),
+                        self.allocation_policy,
                     );
                     builder.push(key, value);
                     let new_page = builder.build()?;
@@ -392,6 +406,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     accessor.num_pairs() + 1,
                     K::fixed_width(),
                     V::fixed_width(),
+                    self.allocation_policy,
                 );
                 for i in 0..accessor.num_pairs() {
                     if i == position {
@@ -550,6 +565,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     &self.allocated,
                     accessor.count_children() + 1,
                     K::fixed_width(),
+                    self.allocation_policy,
                 );
                 if child_index == 0 {
                     builder.push_child(sub_result.new_root, sub_result.root_checksum);
@@ -738,6 +754,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 accessor.num_pairs() - 1,
                 K::fixed_width(),
                 V::fixed_width(),
+                self.allocation_policy,
             );
             for i in 0..accessor.num_pairs() {
                 if i == position {
@@ -839,6 +856,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         &self.allocated,
                         accessor.count_children(),
                         K::fixed_width(),
+                        self.allocation_policy,
                     );
                     builder.push_all(&accessor);
                     builder.replace_child(child_index, new_child, DEFERRED);
@@ -855,6 +873,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             &self.allocated,
             accessor.count_children(),
             K::fixed_width(),
+            self.allocation_policy,
         );
 
         let final_result = match result {
@@ -912,6 +931,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         partial_child_accessor.num_pairs() - 1,
                         K::fixed_width(),
                         V::fixed_width(),
+                        self.allocation_policy,
                     );
                     child_builder.push_all_except(&partial_child_accessor, Some(deleted_pair));
                     let new_page = child_builder.build()?;
@@ -942,6 +962,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                                 + merge_with_accessor.num_pairs(),
                             K::fixed_width(),
                             V::fixed_width(),
+                            self.allocation_policy,
                         );
                         if child_index < merge_with {
                             child_builder
@@ -1003,6 +1024,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                             &self.allocated,
                             merge_with_accessor.count_children() + 1,
                             K::fixed_width(),
+                            self.allocation_policy,
                         );
                         let separator_key = accessor.key(min(child_index, merge_with)).unwrap();
                         if child_index < merge_with {
@@ -1065,6 +1087,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                             &self.allocated,
                             merge_with_accessor.count_children() + partial_children.len(),
                             K::fixed_width(),
+                            self.allocation_policy,
                         );
                         let separator_key = accessor.key(min(child_index, merge_with)).unwrap();
                         if child_index < merge_with {

@@ -4,7 +4,7 @@ use crate::tree_store::btree_base::{BranchAccessor, LeafAccessor};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageHint, PageImpl, TransactionalMemory};
-use crate::tree_store::{BtreeHeader, PageNumber, PageTrackerPolicy};
+use crate::tree_store::{AllocationPolicy, BtreeHeader, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, Value};
 use Bound::{Excluded, Included, Unbounded};
 use std::borrow::Borrow;
@@ -265,6 +265,7 @@ pub(crate) struct BtreeExtractIf<
     master_free_list: Arc<Mutex<Vec<PageNumber>>>,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
     mem: Arc<TransactionalMemory>,
+    allocation_policy: AllocationPolicy,
 }
 
 impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>
@@ -277,6 +278,7 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
         master_free_list: Arc<Mutex<Vec<PageNumber>>>,
         allocated: Arc<Mutex<PageTrackerPolicy>>,
         mem: Arc<TransactionalMemory>,
+        allocation_policy: AllocationPolicy,
     ) -> Self {
         Self {
             root,
@@ -286,6 +288,7 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
             master_free_list,
             allocated,
             mem,
+            allocation_policy,
         }
     }
 }
@@ -304,6 +307,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
                     self.mem.clone(),
                     &mut self.free_on_drop,
                     self.allocated.clone(),
+                    self.allocation_policy,
                 );
                 match operation.delete(&entry.key()) {
                     Ok(x) => {
@@ -333,6 +337,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
                     self.mem.clone(),
                     &mut self.free_on_drop,
                     self.allocated.clone(),
+                    self.allocation_policy,
                 );
                 match operation.delete(&entry.key()) {
                     Ok(x) => {

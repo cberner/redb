@@ -21,7 +21,7 @@ pub(crate) use base::{
 };
 pub(crate) use header::PAGE_SIZE;
 pub(crate) use page_manager::{
-    FILE_FORMAT_VERSION3, ShrinkPolicy, TransactionalMemory, xxh3_checksum,
+    AllocationPolicy, FILE_FORMAT_VERSION3, ShrinkPolicy, TransactionalMemory, xxh3_checksum,
 };
 pub use savepoint::Savepoint;
 pub(crate) use savepoint::SerializedSavepoint;

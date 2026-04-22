@@ -15,8 +15,9 @@ pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeExtractIf, BtreeRange
 pub(crate) use multimap_btree::{DynamicCollection, DynamicCollectionType, multimap_btree_stats};
 pub(crate) use page_store::ReadOnlyBackend;
 pub(crate) use page_store::{
-    FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE, Page, PageHint, PageNumber,
-    PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy, TransactionalMemory,
+    AllocationPolicy, FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE, Page,
+    PageHint, PageNumber, PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy,
+    TransactionalMemory,
 };
 pub use page_store::{InMemoryBackend, Savepoint, file_backend};
 pub(crate) use table_tree::{PageListMut, TableTree, TableTreeMut};

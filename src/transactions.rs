@@ -5,9 +5,9 @@ use crate::sealed::Sealed;
 use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
-    Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page,
-    PageHint, PageListMut, PageNumber, PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy,
-    TableTree, TableTreeMut, TableType, TransactionalMemory,
+    AllocationPolicy, Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH,
+    MAX_VALUE_LENGTH, Page, PageHint, PageListMut, PageNumber, PageTrackerPolicy,
+    SerializedSavepoint, ShrinkPolicy, TableTree, TableTreeMut, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -392,6 +392,7 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
         guard: Arc<TransactionGuard>,
         mem: Arc<TransactionalMemory>,
         namespace: &'s mut SystemNamespace<'db>,
+        allocation_policy: AllocationPolicy,
     ) -> SystemTable<'db, 's, K, V> {
         // No need to track allocations in the system tree. Savepoint restoration only relies on
         // freeing in the data tree
@@ -399,7 +400,14 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
         SystemTable {
             name: name.to_string(),
             namespace,
-            tree: BtreeMut::new(table_root, guard.clone(), mem, freed_pages, ignore),
+            tree: BtreeMut::new(
+                table_root,
+                guard.clone(),
+                mem,
+                freed_pages,
+                ignore,
+                allocation_policy,
+            ),
             transaction_guard: guard,
         }
     }
@@ -517,6 +525,7 @@ impl<'db> SystemNamespace<'db> {
                 mem,
                 freed_pages.clone(),
                 ignore,
+                AllocationPolicy::Default,
             ),
             freed_pages,
             transaction_guard: guard.clone(),
@@ -540,6 +549,7 @@ impl<'db> SystemNamespace<'db> {
             })?;
         transaction.dirty.store(true, Ordering::Release);
 
+        let allocation_policy = self.table_tree.allocation_policy();
         Ok(SystemTable::new(
             definition.name(),
             root,
@@ -547,6 +557,7 @@ impl<'db> SystemNamespace<'db> {
             self.transaction_guard.clone(),
             transaction.mem.clone(),
             self,
+            allocation_policy,
         ))
     }
 
@@ -584,6 +595,7 @@ impl TableNamespace<'_> {
             // These are separated from the system freed pages
             freed_pages.clone(),
             allocated.clone(),
+            AllocationPolicy::Default,
         );
         Self {
             open_tables: HashMap::default(),
@@ -645,6 +657,7 @@ impl TableNamespace<'_> {
             self.allocated_pages.clone(),
             transaction.mem.clone(),
             transaction,
+            self.table_tree.allocation_policy(),
         ))
     }
 
@@ -666,6 +679,7 @@ impl TableNamespace<'_> {
             self.allocated_pages.clone(),
             transaction.mem.clone(),
             transaction,
+            self.table_tree.allocation_policy(),
         ))
     }
 
@@ -871,6 +885,19 @@ impl WriteTransaction {
 
     pub(crate) fn set_shrink_policy(&mut self, shrink_policy: ShrinkPolicy) {
         self.shrink_policy = shrink_policy;
+    }
+
+    pub(crate) fn set_allocation_policy(&mut self, policy: AllocationPolicy) {
+        self.tables
+            .lock()
+            .unwrap()
+            .table_tree
+            .set_allocation_policy(policy);
+        self.system_tables
+            .lock()
+            .unwrap()
+            .table_tree
+            .set_allocation_policy(policy);
     }
 
     pub(crate) fn pending_free_pages(&self) -> Result<bool> {

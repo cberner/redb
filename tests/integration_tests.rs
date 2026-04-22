@@ -2038,6 +2038,43 @@ fn compaction() {
     assert!(file_size2 < file_size);
 }
 
+// Regression test for https://github.com/cberner/redb/issues/1165: a packed
+// database used to grow rather than shrink after compact().
+#[test]
+fn compact_does_not_grow_file() {
+    let tmpfile = create_tempfile();
+    let def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let value = vec![0u8; 3500];
+        for batch in 0..200 {
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(def).unwrap();
+                for i in 0..25u64 {
+                    let k = batch * 1000 + i;
+                    t.insert(&k, value.as_slice()).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+        }
+    }
+
+    let before = tmpfile.as_file().metadata().unwrap().len();
+
+    {
+        let mut db = Database::open(tmpfile.path()).unwrap();
+        db.compact().unwrap();
+    }
+
+    let after = tmpfile.as_file().metadata().unwrap().len();
+    assert!(
+        after <= before,
+        "compact() grew the file from {before} -> {after} bytes"
+    );
+}
+
 fn require_send<T: Send>(_: &T) {}
 fn require_sync<T: Sync + Send>(_: &T) {}
 
