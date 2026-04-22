@@ -522,17 +522,38 @@ impl PagedCachedFile {
         }
     }
 
-    // If overwrite is true, the page is initialized to zero
-    // cache_policy takes the existing data as an argument and returns the priority. The priority should be stable and not change after WritablePage is dropped
-    pub(super) fn write(&self, offset: u64, len: usize, overwrite: bool) -> Result<WritablePage> {
+    // If overwrite is true, the page is initialized to zero.
+    // If is_dirty is true, the caller asserts that the page is not in the
+    // read cache (e.g. because it was freshly allocated, or because the page
+    // is part of the current write transaction's uncommitted state and no
+    // concurrent reader can hold a reference to it).  When set, write() skips
+    // the read-cache stripe write lock that would otherwise be acquired to
+    // evict any cached copy.  Violating this hint is a logic error that can
+    // leave stale data in the read cache visible to PageHint::Clean reads.
+    pub(super) fn write(
+        &self,
+        offset: u64,
+        len: usize,
+        overwrite: bool,
+        is_dirty: bool,
+    ) -> Result<WritablePage> {
         assert_eq!(0, offset % self.page_size);
         let mut lock = self.write_buffer.lock().unwrap();
 
-        // TODO: allow hint that page is known to be dirty and will not be in the read cache
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
-        let existing = {
-            let mut lock = self.read_cache[cache_slot].write().unwrap();
-            if let Some(removed) = lock.remove(offset) {
+        let existing = if is_dirty {
+            #[cfg(debug_assertions)]
+            {
+                let read_lock = self.read_cache[cache_slot].read().unwrap();
+                debug_assert!(
+                    read_lock.get(offset).is_none(),
+                    "is_dirty hint violated: offset {offset} is in the read cache"
+                );
+            }
+            None
+        } else {
+            let mut read_lock = self.read_cache[cache_slot].write().unwrap();
+            if let Some(removed) = read_lock.remove(offset) {
                 assert_eq!(
                     len,
                     removed.len(),

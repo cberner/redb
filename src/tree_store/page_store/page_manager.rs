@@ -213,7 +213,7 @@ impl TransactionalMemory {
             header.recovery_required = false;
             header.two_phase_commit = true;
             storage
-                .write(0, DB_HEADER_SIZE, true)?
+                .write(0, DB_HEADER_SIZE, true, false)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(false));
 
@@ -221,7 +221,7 @@ impl TransactionalMemory {
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
             storage
-                .write(0, DB_HEADER_SIZE, true)?
+                .write(0, DB_HEADER_SIZE, true, false)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true));
             storage.flush()?;
@@ -250,7 +250,7 @@ impl TransactionalMemory {
         let (header, _) = unrepaired.finalize()?;
         if needs_recovery {
             storage
-                .write(0, DB_HEADER_SIZE, true)?
+                .write(0, DB_HEADER_SIZE, true, false)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true));
             storage.flush()?;
@@ -340,7 +340,7 @@ impl TransactionalMemory {
                 was_clean = false;
             }
             self.storage
-                .write(0, DB_HEADER_SIZE, true)?
+                .write(0, DB_HEADER_SIZE, true, false)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(true));
             self.storage.flush()?;
@@ -399,7 +399,7 @@ impl TransactionalMemory {
 
     fn write_header(&self, header: &DatabaseHeader) -> Result {
         self.storage
-            .write(0, DB_HEADER_SIZE, true)?
+            .write(0, DB_HEADER_SIZE, true, false)?
             .mem_mut()
             .copy_from_slice(&header.to_bytes(true));
 
@@ -801,7 +801,11 @@ impl TransactionalMemory {
         let len: usize = (address_range.end - address_range.start)
             .try_into()
             .unwrap();
-        let mem = self.storage.write(address_range.start, len, false)?;
+        // Caller contract (documented above) guarantees the read cache has
+        // been invalidated, and the page is part of the current write
+        // transaction's uncommitted state so no concurrent reader holds a
+        // reference to this offset.
+        let mem = self.storage.write(address_range.start, len, false, true)?;
 
         #[cfg(debug_assertions)]
         {
@@ -989,8 +993,12 @@ impl TransactionalMemory {
             .try_into()
             .unwrap();
 
+        // The page is freshly allocated: if it was ever previously used, it
+        // was freed via free_helper which invalidated the read cache for
+        // this offset, and no reader can still hold a reference to a freed
+        // page.  So the page cannot be in the read cache.
         #[allow(unused_mut)]
-        let mut mem = self.storage.write(address_range.start, len, true)?;
+        let mut mem = self.storage.write(address_range.start, len, true, true)?;
         debug_assert!(mem.mem().len() >= allocation_size);
 
         #[cfg(debug_assertions)]
