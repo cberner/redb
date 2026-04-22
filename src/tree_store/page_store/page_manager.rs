@@ -403,11 +403,24 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn begin_writable(&self) -> Result {
-        let mut state = self.state.lock().unwrap();
-        assert!(!state.header.recovery_required);
-        state.header.recovery_required = true;
-        self.write_header(&state.header)?;
-        self.storage.flush()
+        self.mark_recovery_on_err(|| {
+            let mut state = self.state.lock().unwrap();
+            assert!(!state.header.recovery_required);
+            state.header.recovery_required = true;
+            self.write_header(&state.header)?;
+            self.storage.flush()
+        })
+    }
+
+    // If `f` returns an error, set `needs_recovery` so that any partial on-disk
+    // state is repaired on the next open, and so that in-memory state (which may
+    // now be out of sync with disk) is not trusted by later operations.
+    fn mark_recovery_on_err<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let result = f();
+        if result.is_err() {
+            self.needs_recovery.store(true, Ordering::Release);
+        }
+        result
     }
 
     pub(crate) fn used_two_phase_commit(&self) -> bool {
@@ -456,13 +469,14 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn end_repair(&self) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        state.header.recovery_required = false;
-        self.write_header(&state.header)?;
-        let result = self.storage.flush();
-        self.needs_recovery.store(false, Ordering::Release);
-
-        result
+        self.mark_recovery_on_err(|| {
+            let mut state = self.state.lock().unwrap();
+            state.header.recovery_required = false;
+            self.write_header(&state.header)?;
+            self.storage.flush()?;
+            self.needs_recovery.store(false, Ordering::Release);
+            Ok(())
+        })
     }
 
     pub(crate) fn reserve_allocator_state(
@@ -624,17 +638,15 @@ impl TransactionalMemory {
         two_phase: bool,
         shrink_policy: ShrinkPolicy,
     ) -> Result {
-        let result = self.commit_inner(
-            data_root,
-            system_root,
-            transaction_id,
-            two_phase,
-            shrink_policy,
-        );
-        if result.is_err() {
-            self.needs_recovery.store(true, Ordering::Release);
-        }
-        result
+        self.mark_recovery_on_err(|| {
+            self.commit_inner(
+                data_root,
+                system_root,
+                transaction_id,
+                two_phase,
+                shrink_policy,
+            )
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -687,13 +699,7 @@ impl TransactionalMemory {
         self.storage.flush()?;
 
         if shrunk {
-            let result = self.storage.resize(header.layout().len());
-            if result.is_err() {
-                // TODO: it would be nice to have a more cohesive approach to setting this.
-                // we do it in commit() & rollback() on failure, but there are probably other places that need it
-                self.needs_recovery.store(true, Ordering::Release);
-                return result;
-            }
+            self.storage.resize(header.layout().len())?;
         }
         let mut allocated_since_commit = self.allocated_since_commit.lock().unwrap();
         allocated_since_commit.clear();
@@ -727,37 +733,35 @@ impl TransactionalMemory {
         system_root: Option<BtreeHeader>,
         transaction_id: TransactionId,
     ) -> Result {
-        // All mutable pages must be dropped, this ensures that when a transaction completes
-        // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
-        // to future read transactions
-        #[cfg(debug_assertions)]
-        debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
-        assert!(!self.needs_recovery.load(Ordering::Acquire));
+        self.mark_recovery_on_err(|| {
+            // All mutable pages must be dropped, this ensures that when a transaction completes
+            // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
+            // to future read transactions
+            #[cfg(debug_assertions)]
+            debug_assert!(self.open_dirty_pages.lock().unwrap().is_empty());
+            assert!(!self.needs_recovery.load(Ordering::Acquire));
 
-        let mut unpersisted = self.unpersisted.lock().unwrap();
-        let mut allocated_since_commit = self.allocated_since_commit.lock().unwrap();
-        unpersisted.extend(allocated_since_commit.drain());
-        allocated_since_commit.shrink_to_fit();
-        self.storage.write_barrier()?;
+            let mut unpersisted = self.unpersisted.lock().unwrap();
+            let mut allocated_since_commit = self.allocated_since_commit.lock().unwrap();
+            unpersisted.extend(allocated_since_commit.drain());
+            allocated_since_commit.shrink_to_fit();
+            self.storage.write_barrier()?;
 
-        let mut state = self.state.lock().unwrap();
-        let secondary = state.header.secondary_slot_mut();
-        secondary.transaction_id = transaction_id;
-        secondary.user_root = data_root;
-        secondary.system_root = system_root;
+            let mut state = self.state.lock().unwrap();
+            let secondary = state.header.secondary_slot_mut();
+            secondary.transaction_id = transaction_id;
+            secondary.user_root = data_root;
+            secondary.system_root = system_root;
 
-        // TODO: maybe we can remove this flag and just update the in-memory DatabaseHeader state?
-        self.read_from_secondary.store(true, Ordering::Release);
+            // TODO: maybe we can remove this flag and just update the in-memory DatabaseHeader state?
+            self.read_from_secondary.store(true, Ordering::Release);
 
-        Ok(())
+            Ok(())
+        })
     }
 
     pub(crate) fn rollback_uncommitted_writes(&self) -> Result {
-        let result = self.rollback_uncommitted_writes_inner();
-        if result.is_err() {
-            self.needs_recovery.store(true, Ordering::Release);
-        }
-        result
+        self.mark_recovery_on_err(|| self.rollback_uncommitted_writes_inner())
     }
 
     fn rollback_uncommitted_writes_inner(&self) -> Result {
@@ -1228,13 +1232,7 @@ impl TransactionalMemory {
         );
         assert!(new_layout.len() >= layout.len());
 
-        let result = self.storage.resize(new_layout.len());
-        if result.is_err() {
-            // TODO: it would be nice to have a more cohesive approach to setting this.
-            // we do it in commit() & rollback() on failure, but there are probably other places that need it
-            self.needs_recovery.store(true, Ordering::Release);
-            return result;
-        }
+        self.mark_recovery_on_err(|| self.storage.resize(new_layout.len()))?;
 
         state.allocators.resize_to(new_layout);
         state.header.set_layout(new_layout);

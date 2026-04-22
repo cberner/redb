@@ -5,6 +5,9 @@
 * Enable file space reclamation during non-durable transactions performed while a savepoint exists.
 * Fix a bug where calling `compact()` on a database could cause the file to grow
   rather than shrink in some cases.
+* Fix a bug where a transient I/O error during certain transaction and recovery
+  operations could silently corrupt the database: the next time it was opened,
+  recovery would not run even though it was needed.
 
 ## 4.1.0 - 2026-04-19
 **This release contains a large number of bug fixes discovered by AI coding agents**
