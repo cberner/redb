@@ -528,7 +528,6 @@ impl PagedCachedFile {
         assert_eq!(0, offset % self.page_size);
         let mut lock = self.write_buffer.lock().unwrap();
 
-        // TODO: allow hint that page is known to be dirty and will not be in the read cache
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         let existing = {
             let mut lock = self.read_cache[cache_slot].write().unwrap();
