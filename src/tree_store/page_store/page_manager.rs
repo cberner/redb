@@ -289,27 +289,15 @@ impl TransactionalMemory {
             storage.flush()?;
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
-        let mut unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes)?;
+        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes)?;
 
         assert_eq!(unrepaired.page_size() as usize, page_size);
-        assert!(storage.raw_file_len()? >= unrepaired.layout().len());
-        let needs_recovery = unrepaired.recovery_required()
-            || unrepaired.layout().len() != storage.raw_file_len()?;
-        if needs_recovery {
-            if read_only {
-                return Err(DatabaseError::RepairAborted);
-            }
-            let layout = unrepaired.layout();
-            let region_max_pages = layout.full_region_layout().num_pages();
-            let region_header_pages = layout.full_region_layout().get_header_pages();
-            unrepaired.set_layout(DatabaseLayout::recalculate(
-                storage.raw_file_len()?,
-                region_header_pages,
-                region_max_pages,
-                page_size.try_into().unwrap(),
-            ));
+        let file_len = storage.raw_file_len()?;
+        let needs_recovery = unrepaired.recovery_required(file_len);
+        if needs_recovery && read_only {
+            return Err(DatabaseError::RepairAborted);
         }
-        let (header, _) = unrepaired.finalize()?;
+        let (header, _) = unrepaired.finalize(file_len)?;
         if needs_recovery {
             storage
                 .write(0, DB_HEADER_SIZE, true)?
@@ -392,15 +380,8 @@ impl TransactionalMemory {
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
         let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes)?;
-        // TODO: This ends up always being true because this is called from check_integrity() once the db is already open
-        // TODO: Also we should recheck the layout
-        let was_recovery_required = unrepaired.recovery_required();
-        let (header, kept_primary) = unrepaired.finalize()?;
-        let mut was_clean = true;
-        if was_recovery_required {
-            if !kept_primary {
-                was_clean = false;
-            }
+        let (header, was_clean) = unrepaired.finalize(self.storage.raw_file_len()?)?;
+        if !was_clean {
             self.storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()

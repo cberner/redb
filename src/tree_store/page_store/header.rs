@@ -151,23 +151,48 @@ impl UnrepairedDatabaseHeader {
         self.inner.page_size
     }
 
-    pub(super) fn layout(&self) -> DatabaseLayout {
-        self.inner.layout()
+    // Returns true if the header needs to be repaired before use: either the recovery_required
+    // flag is set on disk, or the stored layout no longer matches the current file length (e.g.
+    // the file was truncated or extended externally). Callers must pass the actual file length
+    // so both conditions are always checked together.
+    pub(super) fn recovery_required(&self, file_len: u64) -> bool {
+        self.inner.recovery_required || self.inner.layout().len() != file_len
     }
 
-    pub(super) fn recovery_required(&self) -> bool {
-        self.inner.recovery_required
+    // Consume self, reconcile the layout against the actual file length, and select a primary slot
+    // (repairing if necessary). Returns the usable DatabaseHeader along with a `clean` flag that is
+    // true only when nothing had to be reconciled: the primary was kept and the stored layout
+    // already matched `file_len`.
+    pub(super) fn finalize(mut self, file_len: u64) -> Result<(DatabaseHeader, bool)> {
+        // The backing file may have been truncated or extended since the header was last written
+        // (e.g. externally, or by a prior crashed resize). Re-derive the layout from the actual
+        // file length so callers always see a layout consistent with the file. Truncation below
+        // the stored layout is always corruption -- redb shrinks the file only after writing a
+        // smaller layout -- and must be rejected before `recalculate` runs, since its arithmetic
+        // assumes at least one page of file length.
+        let stored_len = self.inner.layout().len();
+        if file_len < stored_len {
+            return Err(StorageError::Corrupted(format!(
+                "File truncated below stored layout: file_len={file_len}, layout_len={stored_len}"
+            )));
+        }
+        let layout_stale = stored_len != file_len;
+        if layout_stale {
+            let layout = self.inner.layout();
+            let region_max_pages = layout.full_region_layout().num_pages();
+            let region_header_pages = layout.full_region_layout().get_header_pages();
+            self.inner.set_layout(DatabaseLayout::recalculate(
+                file_len,
+                region_header_pages,
+                region_max_pages,
+                self.inner.page_size,
+            ));
+        }
+        let kept_primary = self.select_primary_slot()?;
+        Ok((self.inner, kept_primary && !layout_stale))
     }
 
-    pub(super) fn set_layout(&mut self, layout: DatabaseLayout) {
-        self.inner.set_layout(layout);
-    }
-
-    // Consume self, select a primary slot (repairing if necessary), and return the
-    // usable DatabaseHeader.
-    // The bool is true if the original primary was kept, or false if it was swapped with the
-    // secondary.
-    pub(super) fn finalize(mut self) -> Result<(DatabaseHeader, bool)> {
+    fn select_primary_slot(&mut self) -> Result<bool> {
         // If the primary was written using 2-phase commit, it's guaranteed to be valid. Don't look
         // at the secondary; even if it happens to have a valid checksum, Durability::Paranoid means
         // we can't trust it
@@ -177,7 +202,7 @@ impl UnrepairedDatabaseHeader {
                     "Primary is corrupted despite 2-phase commit".to_string(),
                 ));
             }
-            return Ok((self.inner, true));
+            return Ok(true);
         }
 
         // Pick whichever slot is newer, assuming it has a valid checksum. This handles an edge case
@@ -191,17 +216,17 @@ impl UnrepairedDatabaseHeader {
                 ));
             }
             self.inner.swap_primary_slot();
-            return Ok((self.inner, false));
+            return Ok(false);
         }
 
         let secondary_newer =
             self.inner.secondary_slot().transaction_id > self.inner.primary_slot().transaction_id;
         if secondary_newer && !self.secondary_corrupted {
             self.inner.swap_primary_slot();
-            return Ok((self.inner, false));
+            return Ok(false);
         }
 
-        Ok((self.inner, true))
+        Ok(true)
     }
 }
 
@@ -588,6 +613,28 @@ mod test {
                 DatabaseError::Storage(StorageError::Corrupted(_))
             ));
         }
+    }
+
+    // If the file is externally truncated below the stored layout, both open and check_integrity
+    // should report corruption rather than panicking in the layout recalculation.
+    #[test]
+    fn truncated_file_is_rejected() {
+        let tmpfile = crate::create_tempfile();
+        let mut db = Database::builder().create(tmpfile.path()).unwrap();
+        assert!(db.check_integrity().unwrap());
+        drop(db);
+
+        let file = OpenOptions::new().write(true).open(tmpfile.path()).unwrap();
+        // Truncate to just the header (no page data) -- this is less than one page on any
+        // supported page size, so recalculate() would underflow without the guard.
+        file.set_len(crate::tree_store::page_store::header::DB_HEADER_SIZE as u64)
+            .unwrap();
+
+        let err = Database::open(tmpfile.path()).unwrap_err();
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
     }
 
     #[test]
