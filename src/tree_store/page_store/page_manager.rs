@@ -6,7 +6,7 @@ use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::fast_hash::{PageNumberHashMap, PageNumberHashSet};
 use crate::tree_store::page_store::header::{
-    DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER, UnrepairedDatabaseHeader,
+    DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER, TransactionHeader, UnrepairedDatabaseHeader,
 };
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
@@ -114,12 +114,20 @@ struct InMemoryState {
     header: DatabaseHeader,
     // TODO: we should make this an Option because it is only valid after the Database initializes it
     allocators: Allocators,
+    // True if a non-durable commit has updated the secondary slot and that data should be served
+    // to readers until a durable commit promotes it to the primary slot on disk. Protected by the
+    // enclosing Mutex so updates happen atomically with the header changes they describe.
+    read_from_secondary: bool,
 }
 
 impl InMemoryState {
     fn new(header: DatabaseHeader) -> Self {
         let allocators = Allocators::new(header.layout());
-        Self { header, allocators }
+        Self {
+            header,
+            allocators,
+            read_from_secondary: false,
+        }
     }
 
     fn get_region(&self, region: u32) -> &BuddyAllocator {
@@ -132,6 +140,16 @@ impl InMemoryState {
 
     fn get_region_tracker_mut(&mut self) -> &mut RegionTracker {
         &mut self.allocators.region_tracker
+    }
+
+    // Slot that reads should be served from: the secondary when a non-durable commit is pending,
+    // otherwise the primary.
+    fn latest_slot(&self) -> &TransactionHeader {
+        if self.read_from_secondary {
+            self.header.secondary_slot()
+        } else {
+            self.header.primary_slot()
+        }
     }
 }
 
@@ -168,8 +186,6 @@ pub(crate) struct TransactionalMemory {
     // Set of all allocated pages for debugging assertions
     #[cfg(debug_assertions)]
     allocated_pages: Arc<Mutex<PageNumberHashSet>>,
-    // Indicates that a non-durable commit has been made, so reads should be served from the secondary meta page
-    read_from_secondary: AtomicBool,
     page_size: u32,
     // We store these separately from the layout because they're static, and accessed on the get_page()
     // code path where there is no locking
@@ -325,7 +341,6 @@ impl TransactionalMemory {
             read_page_ref_counts: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(debug_assertions)]
             allocated_pages: Arc::new(Mutex::new(PageNumberHashSet::default())),
-            read_from_secondary: AtomicBool::new(false),
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,
@@ -718,9 +733,7 @@ impl TransactionalMemory {
             old_transaction_id
         );
         state.header = header;
-        self.read_from_secondary.store(false, Ordering::Release);
-        // Hold lock until read_from_secondary is set to false, so that the new primary state is read.
-        // TODO: maybe we can remove the whole read_from_secondary flag?
+        state.read_from_secondary = false;
         drop(state);
 
         Ok(())
@@ -752,9 +765,7 @@ impl TransactionalMemory {
             secondary.transaction_id = transaction_id;
             secondary.user_root = data_root;
             secondary.system_root = system_root;
-
-            // TODO: maybe we can remove this flag and just update the in-memory DatabaseHeader state?
-            self.read_from_secondary.store(true, Ordering::Release);
+            state.read_from_secondary = true;
 
             Ok(())
         })
@@ -876,38 +887,22 @@ impl TransactionalMemory {
 
     pub(crate) fn get_version(&self) -> u8 {
         let state = self.state.lock().unwrap();
-        if self.read_from_secondary.load(Ordering::Acquire) {
-            state.header.secondary_slot().version
-        } else {
-            state.header.primary_slot().version
-        }
+        state.latest_slot().version
     }
 
     pub(crate) fn get_data_root(&self) -> Option<BtreeHeader> {
         let state = self.state.lock().unwrap();
-        if self.read_from_secondary.load(Ordering::Acquire) {
-            state.header.secondary_slot().user_root
-        } else {
-            state.header.primary_slot().user_root
-        }
+        state.latest_slot().user_root
     }
 
     pub(crate) fn get_system_root(&self) -> Option<BtreeHeader> {
         let state = self.state.lock().unwrap();
-        if self.read_from_secondary.load(Ordering::Acquire) {
-            state.header.secondary_slot().system_root
-        } else {
-            state.header.primary_slot().system_root
-        }
+        state.latest_slot().system_root
     }
 
     pub(crate) fn get_last_committed_transaction_id(&self) -> Result<TransactionId> {
         let state = self.state.lock()?;
-        if self.read_from_secondary.load(Ordering::Acquire) {
-            Ok(state.header.secondary_slot().transaction_id)
-        } else {
-            Ok(state.header.primary_slot().transaction_id)
-        }
+        Ok(state.latest_slot().transaction_id)
     }
 
     pub(crate) fn get_last_durable_transaction_id(&self) -> Result<TransactionId> {
