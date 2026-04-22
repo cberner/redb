@@ -528,7 +528,28 @@ impl PagedCachedFile {
         assert_eq!(0, offset % self.page_size);
         let mut lock = self.write_buffer.lock().unwrap();
 
-        // TODO: allow hint that page is known to be dirty and will not be in the read cache
+        // Fast path: if the page is already in the write buffer it cannot also
+        // be in the read cache (the two caches are mutually exclusive: write()
+        // removes from read_cache before inserting, and flush_write_buffer
+        // clears the write buffer before transferring entries to read_cache),
+        // so we can skip acquiring the read-cache stripe's write lock. This
+        // mirrors the existing fast path in read() and avoids blocking
+        // concurrent readers on the stripe when the same page is written
+        // repeatedly within a transaction.
+        if let Some(removed) = lock.take_value(offset) {
+            debug_assert_eq!(removed.len(), len);
+            #[cfg(feature = "cache_metrics")]
+            {
+                self.writes_hits.fetch_add(1, Ordering::AcqRel);
+                self.writes_total.fetch_add(1, Ordering::AcqRel);
+            }
+            return Ok(WritablePage {
+                buffer: self.write_buffer.clone(),
+                offset,
+                data: removed,
+            });
+        }
+
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         let existing = {
             let mut lock = self.read_cache[cache_slot].write().unwrap();
@@ -547,11 +568,7 @@ impl PagedCachedFile {
             }
         };
 
-        let data = if let Some(removed) = lock.take_value(offset) {
-            #[cfg(feature = "cache_metrics")]
-            self.writes_hits.fetch_add(1, Ordering::AcqRel);
-            removed
-        } else {
+        let data = {
             let previous = self.write_buffer_bytes.fetch_add(len, Ordering::AcqRel);
             let mut write_bytes = previous + len;
             let half = self.max_cache_size / 2;
