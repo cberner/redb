@@ -36,8 +36,11 @@ const NO_HEADER: u32 = 0;
 // Regions have a maximum size of 4GiB. A `4GiB - overhead` value is the largest that can be represented,
 // because the leaf node format uses 32bit offsets
 const MAX_USABLE_REGION_SPACE: u64 = 4 * 1024 * 1024 * 1024;
-// TODO: remove this constant?
-pub(crate) const MAX_MAX_PAGE_ORDER: u8 = 20;
+// A region holds at most `MAX_PAGE_INDEX + 1` pages (the page index within a region is 20 bits),
+// so the largest buddy-allocator order any region can have is log2(MAX_PAGE_INDEX + 1).
+// `u32::ilog2` is always <= 31, so the cast to u8 is lossless.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) const MAX_MAX_PAGE_ORDER: u8 = (MAX_PAGE_INDEX + 1).ilog2() as u8;
 pub(super) const MIN_USABLE_PAGES: u32 = 10;
 const MIN_DESIRED_USABLE_BYTES: u64 = 1024 * 1024;
 
