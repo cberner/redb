@@ -801,11 +801,11 @@ impl TransactionalMemory {
         let len: usize = (address_range.end - address_range.start)
             .try_into()
             .unwrap();
-        // Caller contract (documented above) guarantees the read cache has
-        // been invalidated, and the page is part of the current write
-        // transaction's uncommitted state so no concurrent reader holds a
-        // reference to this offset.
-        let mem = self.storage.write(address_range.start, len, false, true)?;
+        // is_dirty=false: the page may be in the read cache if it was
+        // previously evicted from the write buffer (rule 1) and then read
+        // back into the read cache by a subsequent read() within this
+        // transaction.  write() must evict any such stale entry.
+        let mem = self.storage.write(address_range.start, len, false, false)?;
 
         #[cfg(debug_assertions)]
         {

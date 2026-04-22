@@ -524,12 +524,19 @@ impl PagedCachedFile {
 
     // If overwrite is true, the page is initialized to zero.
     // If is_dirty is true, the caller asserts that the page is not in the
-    // read cache (e.g. because it was freshly allocated, or because the page
-    // is part of the current write transaction's uncommitted state and no
-    // concurrent reader can hold a reference to it).  When set, write() skips
-    // the read-cache stripe write lock that would otherwise be acquired to
-    // evict any cached copy.  Violating this hint is a logic error that can
-    // leave stale data in the read cache visible to PageHint::Clean reads.
+    // read cache.  When set, write() skips the read-cache stripe write lock
+    // that would otherwise be acquired to evict any cached copy.  Violating
+    // this hint is a logic error that leaves stale data in the read cache,
+    // which can then be returned by subsequent reads.
+    //
+    // Safe usage is narrower than it may first appear: an uncommitted page
+    // can be pulled into the read cache mid-transaction if it is evicted
+    // from the write buffer under cache pressure and then re-read via
+    // read().  The only caller that can soundly set is_dirty=true is one
+    // handing out a freshly allocated page from the buddy allocator: the
+    // allocator guarantees the offset is either a fresh region extension
+    // (never cached) or was freed via free_helper (which invalidated the
+    // cache), and no reader can hold a reference to a freed page.
     pub(super) fn write(
         &self,
         offset: u64,
