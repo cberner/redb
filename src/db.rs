@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
-    BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber, ReadOnlyBackend,
-    ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
+    ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -1051,6 +1051,11 @@ impl Database {
         let mut tx = self.begin_write()?;
         tx.set_quick_repair(true);
         tx.set_shrink_policy(ShrinkPolicy::Maximum);
+        // If compact() left no free pages, the default allocator lands this
+        // commit's writes at high page indices (see AllocationPolicy::Lowest)
+        // and try_shrink can't reclaim the growth. See
+        // https://github.com/cberner/redb/issues/1165
+        tx.set_allocation_policy(AllocationPolicy::Lowest);
         tx.commit()?;
 
         Ok(())

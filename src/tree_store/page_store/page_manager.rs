@@ -66,6 +66,38 @@ pub(crate) enum ShrinkPolicy {
     Never,
 }
 
+/// Controls how `allocate()` picks a free page.
+#[derive(Copy, Clone)]
+pub(crate) enum AllocationPolicy {
+    /// Find a free block at the requested order, or recursively split from a
+    /// higher order. Cheaper than `Lowest`, but after `grow()` has appended
+    /// buddy-aligned free blocks at high page indices this can allocate at
+    /// high absolute pages.
+    Default,
+    /// Pick the lowest-page-number allocation across all orders. More
+    /// expensive, but keeps trailing pages free so `try_shrink()` can
+    /// reclaim recently-grown space.
+    Lowest,
+}
+
+impl AllocationPolicy {
+    // TODO: all callers should go through this helper rather than calling
+    // `TransactionalMemory::allocate` / `allocate_lowest` directly; once
+    // that's done those methods can be file-private and only reachable via
+    // `AllocationPolicy`.
+    pub(crate) fn allocate<'a>(
+        self,
+        mem: &TransactionalMemory,
+        allocation_size: usize,
+        allocated: &mut PageTrackerPolicy,
+    ) -> Result<PageMut<'a>> {
+        match self {
+            AllocationPolicy::Default => mem.allocate(allocation_size, allocated),
+            AllocationPolicy::Lowest => mem.allocate_lowest(allocation_size, allocated),
+        }
+    }
+}
+
 fn ceil_log2(x: usize) -> u8 {
     if x.is_power_of_two() {
         x.trailing_zeros().try_into().unwrap()

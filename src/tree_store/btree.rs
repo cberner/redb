@@ -7,8 +7,8 @@ use crate::tree_store::btree_iters::BtreeExtractIf;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::{
-    AccessGuardMutInPlace, AllPageNumbersBtreeIter, BtreeRangeIter, PageHint, PageNumber,
-    PageTrackerPolicy,
+    AccessGuardMutInPlace, AllPageNumbersBtreeIter, AllocationPolicy, BtreeRangeIter, PageHint,
+    PageNumber, PageTrackerPolicy,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result};
@@ -330,6 +330,7 @@ pub(crate) struct BtreeMut<'a, K: Key + 'static, V: Value + 'static> {
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
     _lifetime: PhantomData<&'a ()>,
+    allocation_policy: AllocationPolicy,
 }
 
 impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
@@ -339,6 +340,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         mem: Arc<TransactionalMemory>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+        allocation_policy: AllocationPolicy,
     ) -> Self {
         Self {
             mem,
@@ -349,7 +351,12 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             _key_type: PhantomData,
             _value_type: PhantomData,
             _lifetime: PhantomData,
+            allocation_policy,
         }
+    }
+
+    pub(crate) fn set_allocation_policy(&mut self, policy: AllocationPolicy) {
+        self.allocation_policy = policy;
     }
 
     pub(crate) fn finalize_dirty_checksums(&mut self) -> Result<Option<BtreeHeader>> {
@@ -431,6 +438,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.mem.clone(),
             freed_pages.as_mut(),
             self.allocated_pages.clone(),
+            self.allocation_policy,
         );
         let (old_value, _) = operation.insert(key, value)?;
         Ok(old_value)
@@ -452,6 +460,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.mem.clone(),
             fake_freed_pages.as_mut(),
             fake_allocated_pages,
+            self.allocation_policy,
         );
         operation.insert_inplace(key, value)?;
         assert!(fake_freed_pages.is_empty());
@@ -487,6 +496,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.mem.clone(),
             freed_pages.as_mut(),
             self.allocated_pages.clone(),
+            self.allocation_policy,
         );
         let result = operation.delete(key)?;
         Ok(result)
@@ -500,6 +510,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.mem.clone(),
             freed_pages.as_mut(),
             self.allocated_pages.clone(),
+            self.allocation_policy,
         );
         operation.pop_first()
     }
@@ -512,6 +523,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.mem.clone(),
             freed_pages.as_mut(),
             self.allocated_pages.clone(),
+            self.allocation_policy,
         );
         operation.pop_last()
     }
@@ -561,7 +573,9 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                     .page_size_bytes(self.mem.get_page_size().try_into().unwrap())
                     .try_into()
                     .unwrap();
-                let mut new_page = self.mem.allocate(required, &mut allocated)?;
+                let mut new_page =
+                    self.allocation_policy
+                        .allocate(&self.mem, required, &mut allocated)?;
                 let old_page = self.mem.get_page(root.root, PageHint::None)?;
                 new_page.memory_mut().copy_from_slice(old_page.memory());
                 drop(old_page);
@@ -619,7 +633,9 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                         .page_size_bytes(self.mem.get_page_size().try_into().unwrap())
                         .try_into()
                         .unwrap();
-                    let mut new_page = self.mem.allocate(required, &mut allocated)?;
+                    let mut new_page =
+                        self.allocation_policy
+                            .allocate(&self.mem, required, &mut allocated)?;
                     let old_child_page = self.mem.get_page(child_page, PageHint::None)?;
                     new_page
                         .memory_mut()
@@ -682,6 +698,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.freed_pages.clone(),
             self.allocated_pages.clone(),
             self.mem.clone(),
+            self.allocation_policy,
         );
 
         Ok(result)
@@ -704,6 +721,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             self.mem.clone(),
             &mut freed,
             self.allocated_pages.clone(),
+            self.allocation_policy,
         );
         for entry in iter {
             let entry = entry?;
@@ -749,6 +767,7 @@ impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
             self.mem.clone(),
             freed_pages.as_mut(),
             self.allocated_pages.clone(),
+            self.allocation_policy,
         );
         let (_, guard) = operation.insert(key, &V::from_bytes(&value))?;
         Ok(guard)

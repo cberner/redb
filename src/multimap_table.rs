@@ -3,8 +3,8 @@ use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
 use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, BRANCH, Btree, BtreeHeader, BtreeMut, BtreeRangeIter,
-    DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
+    AllPageNumbersBtreeIter, AllocationPolicy, BRANCH, Btree, BtreeHeader, BtreeMut,
+    BtreeRangeIter, DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
     MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PageTrackerPolicy, RawBtree, RawLeafBuilder,
     TransactionalMemory, multimap_btree_stats,
 };
@@ -355,6 +355,7 @@ pub struct MultimapTable<'txn, K: Key + 'static, V: Key + 'static> {
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
     tree: BtreeMut<'txn, K, &'static DynamicCollection<V>>,
     mem: Arc<TransactionalMemory>,
+    allocation_policy: AllocationPolicy,
     _value_type: PhantomData<V>,
 }
 
@@ -365,6 +366,7 @@ impl<K: Key + 'static, V: Key + 'static> MultimapTableHandle for MultimapTable<'
 }
 
 impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         name: &str,
         table_root: Option<BtreeHeader>,
@@ -373,6 +375,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
         allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
         mem: Arc<TransactionalMemory>,
         transaction: &'txn WriteTransaction,
+        allocation_policy: AllocationPolicy,
     ) -> MultimapTable<'txn, K, V> {
         MultimapTable {
             name: name.to_string(),
@@ -386,8 +389,10 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 mem.clone(),
                 freed_pages,
                 allocated_pages,
+                allocation_policy,
             ),
             mem,
+            allocation_policy,
             _value_type: PhantomData,
         }
     }
@@ -476,7 +481,11 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     } else {
                         // convert into a subtree
                         let mut allocated = self.allocated_pages.lock().unwrap();
-                        let mut page = self.mem.allocate(leaf_data.len(), &mut allocated)?;
+                        let mut page = self.allocation_policy.allocate(
+                            &self.mem,
+                            leaf_data.len(),
+                            &mut allocated,
+                        )?;
                         drop(allocated);
                         page.memory_mut()[..leaf_data.len()].copy_from_slice(leaf_data);
                         let page_number = page.get_page_number();
@@ -490,6 +499,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                             self.mem.clone(),
                             self.freed_pages.clone(),
                             self.allocated_pages.clone(),
+                            self.allocation_policy,
                         );
                         let existed = subtree.insert(value.borrow(), &())?.is_some();
                         assert_eq!(existed, found);
@@ -508,6 +518,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                         self.mem.clone(),
                         self.freed_pages.clone(),
                         self.allocated_pages.clone(),
+                        self.allocation_policy,
                     );
                     drop(guard);
                     let existed = subtree.insert(value.borrow(), &())?.is_some();
@@ -548,6 +559,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     self.mem.clone(),
                     self.freed_pages.clone(),
                     self.allocated_pages.clone(),
+                    self.allocation_policy,
                 );
                 subtree.insert(value.borrow(), &())?;
                 let subtree_data =
@@ -635,6 +647,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     self.mem.clone(),
                     self.freed_pages.clone(),
                     self.allocated_pages.clone(),
+                    self.allocation_policy,
                 );
                 drop(guard);
                 let existed = subtree.remove(value.borrow())?.is_some();
