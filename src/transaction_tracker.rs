@@ -96,29 +96,6 @@ pub(crate) struct TransactionTracker {
     live_write_transaction_available: Condvar,
 }
 
-// RAII guard held by the write-transaction commit path to freeze `register_read_transaction` and
-// related operations across a block that must observe and act on the live-reader set
-// atomically. While this guard is held no other code can claim the tracker state lock, so a
-// reader can neither register at the current primary nor advance past a newly-committed one.
-// Drop the guard as soon as the protected section finishes: anything else that needs the tracker
-// state (for example `clear_pending_non_durable_commits`) will otherwise deadlock.
-pub(crate) struct TrackerStateGuard<'a> {
-    state: std::sync::MutexGuard<'a, State>,
-}
-
-impl TrackerStateGuard<'_> {
-    pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
-        self.state.live_read_transactions.keys().next().copied()
-    }
-
-    pub(crate) fn oldest_savepoint(&self) -> Option<(SavepointId, TransactionId)> {
-        self.state
-            .valid_savepoints
-            .first_key_value()
-            .map(|x| (*x.0, *x.1))
-    }
-}
-
 impl TransactionTracker {
     pub(crate) fn new(next_transaction_id: TransactionId) -> Self {
         Self {
@@ -323,14 +300,6 @@ impl TransactionTracker {
             .keys()
             .next()
             .copied()
-    }
-
-    // Acquire the tracker state lock to make a block of operations atomic with
-    // `register_read_transaction`. See `TrackerStateGuard` for usage constraints.
-    pub(crate) fn lock_state(&self) -> TrackerStateGuard<'_> {
-        TrackerStateGuard {
-            state: self.state.lock().unwrap(),
-        }
     }
 
     // Returns the transaction id of the oldest non-durable transaction which has not been processed
