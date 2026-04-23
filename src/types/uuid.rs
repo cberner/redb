@@ -1,5 +1,5 @@
 use crate::{Key, TypeName, Value};
-use std::cmp::Ordering;
+use core::cmp::Ordering;
 use uuid::Uuid;
 
 impl Value for Uuid {

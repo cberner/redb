@@ -1,5 +1,9 @@
 use crate::db::TransactionGuard;
 use crate::error::TableError;
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
+use crate::std_compat::{Arc, Mutex};
+use crate::std_compat::{HashMap, HashSet};
 use crate::tree_store::btree::{PagePath, UntypedBtreeMut, btree_stats};
 use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::multimap_btree::{
@@ -11,12 +15,11 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{DatabaseStats, Result};
-use std::cmp::max;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::mem::size_of;
-use std::ops::RangeFull;
-use std::sync::{Arc, Mutex};
-use std::{mem, thread};
+use alloc::collections::BTreeMap;
+use core::cmp::max;
+use core::mem;
+use core::mem::size_of;
+use core::ops::RangeFull;
 
 #[derive(Debug)]
 #[repr(transparent)]
@@ -263,7 +266,7 @@ impl TableTreeMut<'_> {
         self.pending_table_updates.clear();
     }
 
-    #[cfg_attr(not(debug_assertions), expect(dead_code))]
+    #[cfg_attr(any(not(debug_assertions), not(feature = "std")), allow(dead_code))]
     pub(crate) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
     where
         F: FnMut(&PagePath) -> Result,
@@ -764,7 +767,7 @@ impl TableTreeMut<'_> {
 
 impl Drop for TableTreeMut<'_> {
     fn drop(&mut self) {
-        if thread::panicking() {
+        if crate::std_compat::thread_panicking() {
             return;
         }
         assert!(self.allocated_pages.lock().unwrap().is_empty());

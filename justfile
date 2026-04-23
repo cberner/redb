@@ -45,6 +45,11 @@ test_wasi:
     cargo +nightly-2025-07-26 test -p $(cargo pkgid) --target=wasm32-wasip1-threads -- --nocapture
     cargo +nightly-2025-07-26 test -p redb-derive --target=wasm32-wasip1-threads -- --nocapture
 
+# Verify the crate builds on a no_std target. Uses `cargo pkgid` because "redb" is ambiguous with the dev-dep.
+test_nostd:
+    rustup target add thumbv7em-none-eabi
+    cargo check -p $(cargo pkgid) --target thumbv7em-none-eabi --no-default-features
+
 bench bench='redb_benchmark': pre
     cargo bench -p redb-bench --bench {{bench}}
 

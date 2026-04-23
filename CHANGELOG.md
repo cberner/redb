@@ -5,6 +5,12 @@
 * Enable file space reclamation during non-durable transactions performed while a savepoint exists.
 * Fix a bug where calling `compact()` on a database could cause the file to grow
   rather than shrink in some cases.
+* Add a `std` feature (enabled by default). With `--no-default-features` the crate builds as
+  `no_std` and provides the full `Database` API against a user-supplied `StorageBackend`.
+  `FileBackend` and the path-based `Database::create`/`Database::open` constructors require
+  the `std` feature. A new `Builder::open_read_only_with_backend` mirrors `create_with_backend`
+  for `ReadOnlyDatabase`. In `no_std` mode `Condvar::wait` is unimplemented, so concurrent
+  writers are not supported.
 
 ## 4.1.0 - 2026-04-19
 **This release contains a large number of bug fixes discovered by AI coding agents**

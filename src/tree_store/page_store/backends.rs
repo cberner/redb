@@ -1,7 +1,9 @@
 use crate::StorageBackend;
-use std::io;
-use std::io::Error;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use crate::std_compat::io;
+use crate::std_compat::io::Error;
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
+use crate::std_compat::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Debug)]
 pub(crate) struct ReadOnlyBackend {

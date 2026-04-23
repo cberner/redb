@@ -1,4 +1,7 @@
 use crate::Result;
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
+use crate::std_compat::{Arc, Mutex};
 use crate::tree_store::btree_base::{BRANCH, LEAF};
 use crate::tree_store::btree_base::{BranchAccessor, LeafAccessor};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
@@ -7,11 +10,10 @@ use crate::tree_store::page_store::{Page, PageHint, PageImpl, TransactionalMemor
 use crate::tree_store::{AllocationPolicy, BtreeHeader, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, Value};
 use Bound::{Excluded, Included, Unbounded};
-use std::borrow::Borrow;
-use std::collections::Bound;
-use std::marker::PhantomData;
-use std::ops::{Range, RangeBounds};
-use std::sync::{Arc, Mutex};
+use core::borrow::Borrow;
+use core::marker::PhantomData;
+use core::ops::Bound;
+use core::ops::{Range, RangeBounds};
 
 #[derive(Debug, Clone)]
 pub enum RangeIterState {

@@ -1,14 +1,15 @@
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
+use crate::std_compat::{Arc, Mutex};
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory, xxh3_checksum};
 use crate::tree_store::{AllocationPolicy, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
-use std::borrow::Borrow;
-use std::cmp::Ordering;
-use std::marker::PhantomData;
-use std::mem::size_of;
-use std::ops::Range;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use core::borrow::Borrow;
+use core::cmp::Ordering;
+use core::marker::PhantomData;
+use core::mem::size_of;
+use core::ops::Range;
 
 pub(crate) const LEAF: u8 = 1;
 pub(crate) const BRANCH: u8 = 2;
@@ -240,7 +241,7 @@ impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
                     let mut mutator =
                         LeafMutator::new(mut_page.memory_mut(), fixed_key_size, V::fixed_width());
                     mutator.remove(position);
-                } else if !thread::panicking() {
+                } else if !crate::std_compat::thread_panicking() {
                     unreachable!();
                 }
             }
@@ -446,6 +447,7 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
+    #[cfg(feature = "std")]
     pub(super) fn print_node<K: Key, V: Value>(&self, include_value: bool) {
         let mut i = 0;
         while let Some(entry) = self.entry(i) {
@@ -932,7 +934,7 @@ impl<'a> RawLeafBuilder<'a> {
 
 impl Drop for RawLeafBuilder<'_> {
     fn drop(&mut self) {
-        if !thread::panicking() {
+        if !crate::std_compat::thread_panicking() {
             assert_eq!(self.pairs_written, self.num_pairs);
             assert_eq!(
                 self.key_section_start() + self.provisioned_key_bytes,
@@ -1327,6 +1329,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         }
     }
 
+    #[cfg(feature = "std")]
     pub(super) fn print_node<K: Key>(&self) {
         eprint!(
             "Internal[ (page={:?}), child_0={:?}",
@@ -1749,7 +1752,7 @@ impl<'b> RawBranchBuilder<'b> {
 
 impl Drop for RawBranchBuilder<'_> {
     fn drop(&mut self) {
-        if !thread::panicking() {
+        if !crate::std_compat::thread_panicking() {
             assert_eq!(self.keys_written, self.num_keys);
         }
     }

@@ -1,10 +1,12 @@
+#[cfg(test)]
+use crate::std_compat::HashSet;
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
 use crate::tree_store::PageNumber;
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
-use std::cmp::min;
-#[cfg(test)]
-use std::collections::HashSet;
-use std::mem::size_of;
+use core::cmp::min;
+use core::mem::size_of;
 
 const MAX_ORDER_OFFSET: usize = 0;
 const PADDING: usize = 3;
@@ -191,7 +193,7 @@ impl BuddyAllocator {
         free_pages
     }
 
-    #[cfg_attr(not(debug_assertions), expect(dead_code))]
+    #[cfg_attr(any(not(debug_assertions), not(feature = "std")), allow(dead_code))]
     #[cfg_attr(not(test), expect(clippy::unused_self))]
     #[cfg_attr(not(test), expect(unused_variables))]
     pub(crate) fn check_allocated_pages(&self, region: u32, allocated_pages: &[PageNumber]) {

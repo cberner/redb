@@ -1,5 +1,8 @@
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
+use crate::std_compat::{Arc, Mutex};
 use crate::tree_store::{
     AccessGuardMutInPlace, AllocationPolicy, Btree, BtreeExtractIf, BtreeHeader, BtreeMut,
     BtreeRangeIter, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageHint, PageNumber, PageTrackerPolicy,
@@ -8,11 +11,10 @@ use crate::tree_store::{
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, AccessGuardMut, StorageError, WriteTransaction};
 use crate::{Result, TableHandle};
-use std::borrow::Borrow;
-use std::fmt::{Debug, Formatter};
-use std::marker::PhantomData;
-use std::ops::RangeBounds;
-use std::sync::{Arc, Mutex};
+use core::borrow::Borrow;
+use core::fmt::{Debug, Formatter};
+use core::marker::PhantomData;
+use core::ops::RangeBounds;
 
 /// Informational storage stats about a table
 #[derive(Debug)]
@@ -95,6 +97,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         }
     }
 
+    #[cfg(feature = "std")]
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.tree.print_debug(include_values)
@@ -290,7 +293,7 @@ fn debug_helper<K: Key + 'static, V: Value + 'static>(
     len: Result<u64>,
     first: Result<Option<(AccessGuard<K>, AccessGuard<V>)>>,
     last: Result<Option<(AccessGuard<K>, AccessGuard<V>)>>,
-) -> std::fmt::Result {
+) -> core::fmt::Result {
     write!(f, "Table [ name: \"{name}\", ")?;
     if let Ok(len) = len {
         if len == 0 {
@@ -328,7 +331,7 @@ fn debug_helper<K: Key + 'static, V: Value + 'static>(
 }
 
 impl<K: Key + 'static, V: Value + 'static> Debug for Table<'_, K, V> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         debug_helper(f, &self.name, self.len(), self.first(), self.last())
     }
 }
@@ -536,7 +539,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
 impl<K: Key, V: Value> Sealed for ReadOnlyTable<K, V> {}
 
 impl<K: Key + 'static, V: Value + 'static> Debug for ReadOnlyTable<K, V> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         debug_helper(f, &self.name, self.len(), self.first(), self.last())
     }
 }

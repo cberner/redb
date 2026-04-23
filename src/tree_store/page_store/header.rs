@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
@@ -5,7 +7,7 @@ use crate::tree_store::page_store::page_manager::{
     FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, xxh3_checksum,
 };
 use crate::{DatabaseError, Result, StorageError};
-use std::mem::size_of;
+use core::mem::size_of;
 
 // Database layout:
 //
@@ -418,9 +420,9 @@ mod test {
     };
     use crate::{Database, DatabaseError, ReadableTable, StorageBackend};
     use crate::{ReadableDatabase, StorageError};
+    use core::mem::size_of;
     use std::fs::OpenOptions;
     use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
-    use std::mem::size_of;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -706,7 +708,7 @@ mod test {
         // Test that magic number is not valid utf-8
         #[allow(invalid_from_utf8)]
         {
-            assert!(std::str::from_utf8(&MAGICNUMBER).is_err());
+            assert!(core::str::from_utf8(&MAGICNUMBER).is_err());
         }
         // Test there is a octet with high-bit set
         assert!(MAGICNUMBER.iter().any(|x| *x & 0x80 != 0));

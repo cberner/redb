@@ -2,6 +2,10 @@ use crate::db::TransactionGuard;
 use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
 use crate::sealed::Sealed;
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
+use crate::std_compat::{Arc, Mutex};
+use crate::std_compat::{HashMap, HashSet};
 use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
@@ -17,18 +21,20 @@ use crate::{
     TableError, TableHandle, TransactionError, TypeName, UntypedMultimapTableHandle,
     UntypedTableHandle,
 };
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::cmp::min;
+use core::fmt::{Debug, Display, Formatter};
+use core::marker::PhantomData;
+use core::mem::size_of;
+use core::ops::RangeBounds;
+use core::panic;
+use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "logging")]
 use log::{debug, warn};
-use std::borrow::Borrow;
-use std::cmp::min;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fmt::{Debug, Display, Formatter};
-use std::marker::PhantomData;
-use std::mem::size_of;
-use std::ops::RangeBounds;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::{panic, thread};
 
 const MAX_PAGES_PER_COMPACTION: usize = 1_000_000;
 const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), SavepointId> =
@@ -126,7 +132,7 @@ impl MutInPlaceValue for PageList<'_> {
     }
 
     fn from_bytes_mut(data: &mut [u8]) -> &mut Self::BaseRefType {
-        unsafe { &mut *(std::ptr::from_mut::<[u8]>(data) as *mut PageListMut) }
+        unsafe { &mut *(core::ptr::from_mut::<[u8]>(data) as *mut PageListMut) }
     }
 }
 
@@ -178,14 +184,14 @@ impl Value for TransactionIdWithPagination {
 }
 
 impl Key for TransactionIdWithPagination {
-    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+    fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
         let value1 = Self::from_bytes(data1);
         let value2 = Self::from_bytes(data2);
 
         match value1.transaction_id.cmp(&value2.transaction_id) {
-            std::cmp::Ordering::Greater => std::cmp::Ordering::Greater,
-            std::cmp::Ordering::Equal => value1.pagination_id.cmp(&value2.pagination_id),
-            std::cmp::Ordering::Less => std::cmp::Ordering::Less,
+            core::cmp::Ordering::Greater => core::cmp::Ordering::Greater,
+            core::cmp::Ordering::Equal => value1.pagination_id.cmp(&value2.pagination_id),
+            core::cmp::Ordering::Less => core::cmp::Ordering::Less,
         }
     }
 }
@@ -251,7 +257,7 @@ impl Value for AllocatorStateKey {
 }
 
 impl Key for AllocatorStateKey {
-    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+    fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
         Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
     }
 }
@@ -290,7 +296,7 @@ impl<K: Key + 'static, V: Value + 'static> Clone for SystemTableDefinition<'_, K
 impl<K: Key + 'static, V: Value + 'static> Copy for SystemTableDefinition<'_, K, V> {}
 
 impl<K: Key + 'static, V: Value + 'static> Display for SystemTableDefinition<'_, K, V> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "{}<{}, {}>",
@@ -808,7 +814,7 @@ impl SavepointTransactionState {
         // deallocate_savepoint above has already removed them; for ephemeral,
         // the user's Savepoint handle still owns the live_read_transactions
         // refcount and will release it on drop.
-        tracker.invalidate_savepoints(std::mem::take(&mut self.invalidated));
+        tracker.invalidate_savepoints(core::mem::take(&mut self.invalidated));
         // Persistent savepoints created during this transaction stay live:
         // drop them from our bookkeeping without releasing tracker state.
         self.created_persistent.clear();
@@ -922,7 +928,7 @@ impl WriteTransaction {
         Ok(false)
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "std"))]
     pub fn print_allocated_page_debug(&self) {
         let mut all_allocated: HashSet<PageNumber> =
             HashSet::from_iter(self.mem.all_allocated_pages());
@@ -1168,7 +1174,7 @@ impl WriteTransaction {
     /// Calling this method invalidates all [`Savepoint`]s created after savepoint
     pub fn restore_savepoint(&mut self, savepoint: &Savepoint) -> Result<(), SavepointError> {
         // Reject a Savepoint that is from a different Database
-        if std::ptr::from_ref(self.transaction_tracker.as_ref()) != savepoint.db_address() {
+        if core::ptr::from_ref(self.transaction_tracker.as_ref()) != savepoint.db_address() {
             return Err(SavepointError::InvalidSavepoint);
         }
 
@@ -2112,6 +2118,7 @@ impl WriteTransaction {
         })
     }
 
+    #[cfg(feature = "std")]
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self) -> Result {
         // Flush any pending updates to make sure we get the latest root
@@ -2158,7 +2165,8 @@ impl WriteTransaction {
 
 impl Drop for WriteTransaction {
     fn drop(&mut self) {
-        if !self.completed && !thread::panicking() && !self.mem.storage_failure() {
+        if !self.completed && !crate::std_compat::thread_panicking() && !self.mem.storage_failure()
+        {
             #[allow(unused_variables)]
             if let Err(error) = self.abort_inner() {
                 #[cfg(feature = "logging")]
@@ -2331,7 +2339,7 @@ impl ReadTransaction {
 }
 
 impl Debug for ReadTransaction {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.write_str("ReadTransaction")
     }
 }

@@ -22,7 +22,7 @@
 
 // Copied from xxh3 crate, commit hash e91f09d1e930e179c11d5cfda6d14284bfb006f8
 
-use std::mem::size_of;
+use core::mem::size_of;
 
 const STRIPE_LENGTH: usize = 64;
 const SECRET_CONSUME_RATE: usize = 8;

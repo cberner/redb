@@ -123,6 +123,38 @@ fn in_memory() {
     assert_eq!(table.len().unwrap(), 3);
 }
 
+// Exercises only the APIs that are available under `--no-default-features` (no_std). The crate's
+// no_std build itself is smoke-tested by the `thumbv7em-none-eabi` CI job; this test catches
+// runtime regressions in the same code paths that the no_std build relies on (custom
+// StorageBackend + builder-based open, without any file/path APIs).
+#[test]
+fn nostd_api_surface() {
+    let db = Database::builder()
+        .create_with_backend(InMemoryBackend::new())
+        .unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(i, i * 2).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 10);
+    assert_eq!(table.get(&5).unwrap().unwrap().value(), 10);
+
+    // Smoke-test that the backend-based ReadOnlyDatabase constructor is callable; it returns an
+    // error on an empty backend (which is the expected shape of the no_std use case).
+    assert!(
+        Database::builder()
+            .open_read_only_with_backend(InMemoryBackend::new())
+            .is_err()
+    );
+}
+
 #[test]
 fn first_last() {
     let tmpfile = create_tempfile();

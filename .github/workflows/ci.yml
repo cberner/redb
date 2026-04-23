@@ -97,6 +97,13 @@ jobs:
             $command --no-default-features
             rustup target remove wasm32-unknown-unknown
 
+      - name: Compile no_std (`thumbv7em-none-eabi`)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+            rustup target add thumbv7em-none-eabi
+            cargo check -p $(cargo pkgid) --target thumbv7em-none-eabi --no-default-features
+            rustup target remove thumbv7em-none-eabi
+
       - name: Clippy
         run: cargo clippy --all --all-targets -- -Dwarnings
 

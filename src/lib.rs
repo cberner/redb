@@ -1,3 +1,4 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 #![deny(clippy::all, clippy::pedantic, clippy::disallowed_methods)]
 #![allow(
     clippy::if_not_else,
@@ -60,6 +61,8 @@
 //! [lmdb]: https://www.lmdb.tech/doc/
 //! [design]: https://github.com/cberner/redb/blob/master/docs/design.md
 
+extern crate alloc;
+
 pub use db::{
     Builder, CacheStats, Database, MultimapTableDefinition, MultimapTableHandle, ReadOnlyDatabase,
     ReadableDatabase, RepairSession, StorageBackend, TableDefinition, TableHandle,
@@ -81,7 +84,7 @@ pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransact
 pub use tree_store::{AccessGuard, AccessGuardMut, AccessGuardMutInPlace, Savepoint};
 pub use types::{Key, MutInPlaceValue, TypeName, Value};
 
-pub type Result<T = (), E = StorageError> = std::result::Result<T, E>;
+pub type Result<T = (), E = StorageError> = core::result::Result<T, E>;
 
 pub mod backends;
 mod complex_types;
@@ -89,6 +92,7 @@ mod db;
 mod error;
 mod multimap_table;
 mod sealed;
+mod std_compat;
 mod table;
 mod transaction_tracker;
 mod transactions;

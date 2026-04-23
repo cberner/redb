@@ -1,10 +1,12 @@
+use crate::std_compat::HashMap;
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
+use crate::std_compat::{Arc, Mutex};
 use crate::tree_store::btree::{PagePath, UntypedBtree, UntypedBtreeMut};
 use crate::tree_store::multimap_btree::{UntypedMultiBtree, relocate_subtrees};
 use crate::tree_store::{BtreeHeader, PageHint, PageNumber, TransactionalMemory};
 use crate::{Key, Result, TableError, TypeName, Value};
-use std::collections::HashMap;
-use std::mem::size_of;
-use std::sync::{Arc, Mutex};
+use core::mem::size_of;
 
 // Forward compatibility feature in case alignment can be supported in the future
 // See https://github.com/cberner/redb/issues/360

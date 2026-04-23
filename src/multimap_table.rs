@@ -1,6 +1,9 @@
 use crate::db::TransactionGuard;
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
+use crate::std_compat::{Arc, Mutex};
 use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, AllocationPolicy, BRANCH, Btree, BtreeHeader, BtreeMut,
@@ -10,11 +13,10 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
-use std::borrow::Borrow;
-use std::marker::PhantomData;
-use std::mem;
-use std::ops::{RangeBounds, RangeFull};
-use std::sync::{Arc, Mutex};
+use core::borrow::Borrow;
+use core::marker::PhantomData;
+use core::mem;
+use core::ops::{RangeBounds, RangeFull};
 
 pub(crate) struct LeafKeyIter<'a, V: Key + 'static> {
     inline_collection: AccessGuard<'a, &'static DynamicCollection<V>>,
@@ -397,6 +399,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
         }
     }
 
+    #[cfg(feature = "std")]
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.tree.print_debug(include_values)

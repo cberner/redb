@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
@@ -8,13 +10,18 @@ use crate::{
     CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError, TableError,
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
-use std::fmt::{Debug, Display, Formatter};
+use core::fmt::{Debug, Display, Formatter};
 
+use crate::std_compat::Arc;
+use crate::std_compat::io;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use core::marker::PhantomData;
+#[cfg(feature = "std")]
 use std::fs::{File, OpenOptions};
-use std::marker::PhantomData;
+#[cfg(feature = "std")]
 use std::path::Path;
-use std::sync::Arc;
-use std::{io, thread};
 
 use crate::error::TransactionError;
 use crate::sealed::Sealed;
@@ -23,6 +30,7 @@ use crate::transactions::{
     DATA_FREED_TABLE, PageList, SYSTEM_FREED_TABLE, SystemTableDefinition,
     TransactionIdWithPagination,
 };
+#[cfg(feature = "std")]
 use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
 use log::{debug, info, warn};
@@ -31,29 +39,29 @@ use log::{debug, info, warn};
 /// Implements persistent storage for a database.
 pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Gets the current length of the storage.
-    fn len(&self) -> std::result::Result<u64, io::Error>;
+    fn len(&self) -> core::result::Result<u64, io::Error>;
 
     /// Reads the specified array of bytes from the storage.
     ///
     /// If `out.len()` + `offset` exceeds the length of the storage an appropriate `Error` must be returned.
-    fn read(&self, offset: u64, out: &mut [u8]) -> std::result::Result<(), io::Error>;
+    fn read(&self, offset: u64, out: &mut [u8]) -> core::result::Result<(), io::Error>;
 
     /// Sets the length of the storage.
     ///
     /// New positions in the storage must be initialized to zero.
-    fn set_len(&self, len: u64) -> std::result::Result<(), io::Error>;
+    fn set_len(&self, len: u64) -> core::result::Result<(), io::Error>;
 
     /// Syncs all buffered data with the persistent storage.
-    fn sync_data(&self) -> std::result::Result<(), io::Error>;
+    fn sync_data(&self) -> core::result::Result<(), io::Error>;
 
     /// Writes the specified array to the storage.
-    fn write(&self, offset: u64, data: &[u8]) -> std::result::Result<(), io::Error>;
+    fn write(&self, offset: u64, data: &[u8]) -> core::result::Result<(), io::Error>;
 
     /// Release any resources held by the backend
     ///
     /// Note: redb will not access the backend after calling this method and will call it exactly
     /// once when the [`Database`] is dropped
-    fn close(&self) -> std::result::Result<(), io::Error> {
+    fn close(&self) -> core::result::Result<(), io::Error> {
         Ok(())
     }
 }
@@ -153,7 +161,7 @@ impl<K: Key + 'static, V: Value + 'static> Clone for TableDefinition<'_, K, V> {
 impl<K: Key + 'static, V: Value + 'static> Copy for TableDefinition<'_, K, V> {}
 
 impl<K: Key + 'static, V: Value + 'static> Display for TableDefinition<'_, K, V> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "{}<{}, {}>",
@@ -213,7 +221,7 @@ impl<K: Key + 'static, V: Key + 'static> Clone for MultimapTableDefinition<'_, K
 impl<K: Key + 'static, V: Key + 'static> Copy for MultimapTableDefinition<'_, K, V> {}
 
 impl<K: Key + 'static, V: Key + 'static> Display for MultimapTableDefinition<'_, K, V> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "{}<{}, {}>",
@@ -427,6 +435,7 @@ impl ReadableDatabase for ReadOnlyDatabase {
 
 impl ReadOnlyDatabase {
     /// Opens an existing redb database.
+    #[cfg(feature = "std")]
     pub fn open(path: impl AsRef<Path>) -> Result<ReadOnlyDatabase, DatabaseError> {
         Builder::new().open_read_only(path)
     }
@@ -529,11 +538,13 @@ impl Database {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
+    #[cfg(feature = "std")]
     pub fn create(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().create(path)
     }
 
     /// Opens an existing redb database.
+    #[cfg(feature = "std")]
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
     }
@@ -1064,7 +1075,9 @@ impl Database {
 
 impl Drop for Database {
     fn drop(&mut self) {
-        if !thread::panicking() && self.ensure_allocator_state_table_and_trim().is_err() {
+        if !crate::std_compat::thread_panicking()
+            && self.ensure_allocator_state_table_and_trim().is_err()
+        {
             #[cfg(feature = "logging")]
             warn!("Failed to write allocator state table. Repair may be required at restart.");
         }
@@ -1156,7 +1169,7 @@ impl Builder {
     #[cfg(any(fuzzing, test))]
     pub fn set_page_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
-        self.page_size = std::cmp::max(size, 512);
+        self.page_size = core::cmp::max(size, 512);
         self
     }
 
@@ -1177,6 +1190,7 @@ impl Builder {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
+    #[cfg(feature = "std")]
     pub fn create(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new()
             .read(true)
@@ -1196,6 +1210,7 @@ impl Builder {
     }
 
     /// Opens an existing redb database.
+    #[cfg(feature = "std")]
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
@@ -1214,6 +1229,7 @@ impl Builder {
     /// If the file has been opened for writing (i.e. as a [`Database`]) [`DatabaseError::DatabaseAlreadyOpen`]
     /// will be returned on platforms which support file locks (macOS, Windows, Linux). On other platforms,
     /// the caller MUST avoid calling this method when the database is open for writing.
+    #[cfg(feature = "std")]
     pub fn open_read_only(
         &self,
         path: impl AsRef<Path>,
@@ -1231,6 +1247,7 @@ impl Builder {
     /// Open an existing or create a new database in the given `file`.
     ///
     /// The file must be empty or contain a valid database.
+    #[cfg(feature = "std")]
     pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
         Database::new(
             Box::new(FileBackend::new(file)?),
@@ -1256,10 +1273,18 @@ impl Builder {
             &self.repair_callback,
         )
     }
+
+    /// Open an existing read-only database using the given backend.
+    pub fn open_read_only_with_backend(
+        &self,
+        backend: impl StorageBackend,
+    ) -> Result<ReadOnlyDatabase, DatabaseError> {
+        ReadOnlyDatabase::new(Box::new(backend), self.page_size, None, self.cache_size)
+    }
 }
 
-impl std::fmt::Debug for Database {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Database {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Database").finish()
     }
 }

@@ -1,4 +1,8 @@
 use crate::db::TransactionGuard;
+use crate::std_compat::HashMap;
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
+use crate::std_compat::{Arc, Mutex};
 use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
     LeafAccessor, LeafPageMut, branch_checksum, leaf_checksum,
@@ -12,14 +16,12 @@ use crate::tree_store::{
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result};
+use core::borrow::Borrow;
+use core::cmp::max;
+use core::marker::PhantomData;
+use core::ops::RangeBounds;
 #[cfg(feature = "logging")]
 use log::trace;
-use std::borrow::Borrow;
-use std::cmp::max;
-use std::collections::HashMap;
-use std::marker::PhantomData;
-use std::ops::RangeBounds;
-use std::sync::{Arc, Mutex};
 
 pub(crate) struct BtreeStats {
     pub(crate) tree_height: u32,
@@ -528,6 +530,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         operation.pop_last()
     }
 
+    #[cfg(feature = "std")]
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.read_tree()?.print_debug(include_values)
@@ -1060,6 +1063,7 @@ impl<K: Key, V: Value> Btree<K, V> {
         )
     }
 
+    #[cfg(feature = "std")]
     #[allow(dead_code)]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         if let Some(p) = self.root.map(|x| x.root) {

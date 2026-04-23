@@ -1,17 +1,17 @@
+use crate::std_compat::Arc;
+#[cfg(debug_assertions)]
+use crate::std_compat::HashMap;
+use crate::std_compat::HashSet;
+#[cfg(debug_assertions)]
+use crate::std_compat::Mutex;
 use crate::tree_store::page_store::cached_file::WritablePage;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
-use std::cmp::Ordering;
-#[cfg(debug_assertions)]
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::fmt::{Debug, Formatter};
-use std::hash::{Hash, Hasher};
-use std::marker::PhantomData;
-use std::mem;
-use std::ops::Range;
-use std::sync::Arc;
-#[cfg(debug_assertions)]
-use std::sync::Mutex;
+use core::cmp::Ordering;
+use core::fmt::{Debug, Formatter};
+use core::hash::{Hash, Hasher};
+use core::marker::PhantomData;
+use core::mem;
+use core::ops::Range;
 
 pub(crate) const MAX_VALUE_LENGTH: usize = 3 * 1024 * 1024 * 1024;
 pub(crate) const MAX_PAIR_LENGTH: usize = 3 * 1024 * 1024 * 1024 + 768 * 1024 * 1024;
@@ -161,7 +161,7 @@ impl PageNumber {
 }
 
 impl Debug for PageNumber {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "r{}.{}/{}",
@@ -190,7 +190,7 @@ impl PageImpl {
 }
 
 impl Debug for PageImpl {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.write_fmt(format_args!("PageImpl: page_number={:?}", self.page_number))
     }
 }

@@ -13,12 +13,15 @@ pub use btree_base::{AccessGuard, AccessGuardMut, AccessGuardMutInPlace};
 pub(crate) use btree_base::{BRANCH, LEAF, LeafAccessor, RawLeafBuilder};
 pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeExtractIf, BtreeRangeIter};
 pub(crate) use multimap_btree::{DynamicCollection, DynamicCollectionType, multimap_btree_stats};
+pub use page_store::InMemoryBackend;
 pub(crate) use page_store::ReadOnlyBackend;
+pub use page_store::Savepoint;
+#[cfg(feature = "std")]
+pub use page_store::file_backend;
 pub(crate) use page_store::{
     AllocationPolicy, FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE, Page,
     PageHint, PageNumber, PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy,
     TransactionalMemory,
 };
-pub use page_store::{InMemoryBackend, Savepoint, file_backend};
 pub(crate) use table_tree::{PageListMut, TableTree, TableTreeMut};
 pub(crate) use table_tree_base::{InternalTableDefinition, TableType};

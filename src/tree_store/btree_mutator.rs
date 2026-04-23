@@ -1,3 +1,6 @@
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
+use crate::std_compat::{Arc, Mutex};
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
     LeafBuilder, LeafMutator, RawLeafBuilder,
@@ -12,9 +15,8 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
-use std::cmp::{max, min};
-use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use core::cmp::{max, min};
+use core::marker::PhantomData;
 
 // Describes which entry to delete. `Key` navigates via key comparison; `First`
 // and `Last` navigate to the leftmost or rightmost entry, and also cause the

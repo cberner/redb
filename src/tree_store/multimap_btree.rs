@@ -1,4 +1,8 @@
 use crate::Result;
+use crate::std_compat::HashMap;
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
+use crate::std_compat::{Arc, Mutex};
 use crate::tree_store::btree::{PagePath, UntypedBtree, UntypedBtreeMut, btree_stats};
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor, LeafPageMut,
@@ -9,11 +13,9 @@ use crate::tree_store::{
     PageTrackerPolicy, RawBtree, TransactionalMemory,
 };
 use crate::types::{Key, TypeName, Value};
-use std::cmp::max;
-use std::collections::HashMap;
-use std::marker::PhantomData;
-use std::mem::size_of;
-use std::sync::{Arc, Mutex};
+use core::cmp::max;
+use core::marker::PhantomData;
+use core::mem::size_of;
 
 pub(crate) fn multimap_btree_stats(
     root: Option<PageNumber>,
@@ -480,8 +482,8 @@ pub(crate) struct DynamicCollection<V: Key> {
     data: [u8],
 }
 
-impl<V: Key> std::fmt::Debug for DynamicCollection<V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<V: Key> core::fmt::Debug for DynamicCollection<V> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DynamicCollection")
             .field("data", &&self.data)
             .finish()
@@ -523,7 +525,7 @@ impl<V: Key> Value for &DynamicCollection<V> {
 
 impl<V: Key> DynamicCollection<V> {
     pub(crate) fn new(data: &[u8]) -> &Self {
-        unsafe { &*(std::ptr::from_ref::<[u8]>(data) as *const DynamicCollection<V>) }
+        unsafe { &*(core::ptr::from_ref::<[u8]>(data) as *const DynamicCollection<V>) }
     }
 
     pub(crate) fn collection_type(&self) -> DynamicCollectionType {
@@ -592,7 +594,7 @@ impl UntypedDynamicCollection {
     }
 
     fn new(data: &[u8]) -> &Self {
-        unsafe { &*(std::ptr::from_ref::<[u8]>(data) as *const UntypedDynamicCollection) }
+        unsafe { &*(core::ptr::from_ref::<[u8]>(data) as *const UntypedDynamicCollection) }
     }
 
     fn make_subtree_data(header: BtreeHeader) -> Vec<u8> {

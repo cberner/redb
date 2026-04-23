@@ -130,7 +130,7 @@ fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result
             libc::pread(
                 file.as_raw_fd(),
                 buf.as_mut_ptr() as _,
-                std::cmp::min(buf.len(), libc::ssize_t::MAX as _),
+                core::cmp::min(buf.len(), libc::ssize_t::MAX as _),
                 offset as _,
             )
         };
@@ -166,7 +166,7 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> 
             libc::pwrite(
                 file.as_raw_fd(),
                 buf.as_ptr() as _,
-                std::cmp::min(buf.len(), libc::ssize_t::MAX as _),
+                core::cmp::min(buf.len(), libc::ssize_t::MAX as _),
                 offset as _,
             )
         };

@@ -1,3 +1,13 @@
+#[cfg(debug_assertions)]
+use crate::std_compat::Arc;
+#[cfg(debug_assertions)]
+use crate::std_compat::HashMap;
+#[cfg(debug_assertions)]
+use crate::std_compat::HashSet;
+use crate::std_compat::Mutex;
+use crate::std_compat::io::ErrorKind;
+#[allow(unused_imports)]
+use crate::std_compat::prelude::*;
 use crate::transaction_tracker::TransactionId;
 use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateTreeMut};
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
@@ -14,20 +24,11 @@ use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
 use crate::tree_store::{Page, PageNumber, PageTrackerPolicy};
 use crate::{CacheStats, StorageBackend};
 use crate::{DatabaseError, Result, StorageError};
-use std::cmp::{max, min};
-use std::collections::BTreeMap;
-#[cfg(debug_assertions)]
-use std::collections::HashMap;
-#[cfg(debug_assertions)]
-use std::collections::HashSet;
-use std::convert::TryInto;
-use std::io::ErrorKind;
-use std::marker::PhantomData;
-#[cfg(debug_assertions)]
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use alloc::collections::BTreeMap;
+use core::cmp::{max, min};
+use core::convert::TryInto;
+use core::marker::PhantomData;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 // The region header is optional in the v3 file format
 // It's an artifact of the v2 file format, so we initialize new databases without headers to save space
@@ -345,7 +346,7 @@ impl TransactionalMemory {
         assert!(self.allocated_pages.lock().unwrap().insert(page));
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "std"))]
     pub(crate) fn all_allocated_pages(&self) -> Vec<PageNumber> {
         self.allocated_pages
             .lock()
@@ -355,7 +356,7 @@ impl TransactionalMemory {
             .collect()
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "std"))]
     pub(crate) fn debug_check_allocator_consistency(&self) {
         let state = self.state.lock().unwrap();
         let mut region_pages = vec![vec![]; state.allocators.region_allocators.len()];
@@ -1019,7 +1020,7 @@ impl TransactionalMemory {
         &self,
     ) -> BTreeMap<TransactionId, PageNumberHashSet> {
         self.unpersisted_allocation_txn.lock().unwrap().clear();
-        std::mem::take(&mut *self.unpersisted_allocations.lock().unwrap())
+        core::mem::take(&mut *self.unpersisted_allocations.lock().unwrap())
     }
 
     // Returns all unpersisted data-tree pages allocated strictly after `transaction_id`. Used
@@ -1290,7 +1291,7 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn close(&self) -> Result {
-        if !self.needs_recovery.load(Ordering::Acquire) && !thread::panicking() {
+        if !self.needs_recovery.load(Ordering::Acquire) && !crate::std_compat::thread_panicking() {
             let mut state = self.state.lock()?;
             if self.storage.flush().is_ok() {
                 state.header.recovery_required = false;

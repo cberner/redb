@@ -58,7 +58,7 @@ impl Value for NaiveDate {
     }
 }
 impl Key for NaiveDate {
-    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+    fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
         let date1 = date_from_bytes(data1);
         let date2 = date_from_bytes(data2);
         date1.cmp(&date2)
@@ -115,7 +115,7 @@ impl Value for NaiveTime {
     }
 }
 impl Key for NaiveTime {
-    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+    fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
         let time1 = time_from_bytes(data1);
         let time2 = time_from_bytes(data2);
         time1.cmp(&time2)
@@ -186,7 +186,7 @@ impl Value for NaiveDateTime {
     }
 }
 impl Key for NaiveDateTime {
-    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+    fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
         let date_time1 = NaiveDateTime::from_bytes(data1);
         let date_time2 = NaiveDateTime::from_bytes(data2);
         date_time1.cmp(&date_time2)
@@ -265,7 +265,7 @@ impl Value for DateTime<FixedOffset> {
     }
 }
 impl Key for DateTime<FixedOffset> {
-    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+    fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
         let datetime1 = DateTime::<FixedOffset>::from_bytes(data1);
         let datetime2 = DateTime::<FixedOffset>::from_bytes(data2);
         datetime1.cmp(&datetime2)
@@ -311,7 +311,7 @@ impl Value for FixedOffset {
     }
 }
 impl Key for FixedOffset {
-    fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
+    fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
         let offset1 = FixedOffset::from_bytes(data1);
         let offset2 = FixedOffset::from_bytes(data2);
         offset1.local_minus_utc().cmp(&offset2.local_minus_utc())
@@ -363,7 +363,7 @@ mod tests {
         );
         assert_eq!(
             NaiveDate::compare(&bytes, &bytes),
-            std::cmp::Ordering::Equal,
+            core::cmp::Ordering::Equal,
             "Bytes should compare equal to themselves"
         );
         let date_from_bytes = NaiveDate::from_bytes(&bytes);
@@ -380,7 +380,7 @@ mod tests {
         );
         assert_eq!(
             NaiveTime::compare(&bytes, &bytes),
-            std::cmp::Ordering::Equal,
+            core::cmp::Ordering::Equal,
             "Bytes should compare equal to themselves"
         );
         let time_from_bytes = NaiveTime::from_bytes(&bytes);
@@ -399,7 +399,7 @@ mod tests {
         );
         assert_eq!(
             NaiveDateTime::compare(&bytes, &bytes),
-            std::cmp::Ordering::Equal,
+            core::cmp::Ordering::Equal,
             "Bytes should compare equal to themselves"
         );
         let datetime_from_bytes = NaiveDateTime::from_bytes(&bytes);
@@ -416,7 +416,7 @@ mod tests {
         );
         assert_eq!(
             FixedOffset::compare(&bytes, &bytes),
-            std::cmp::Ordering::Equal,
+            core::cmp::Ordering::Equal,
             "Bytes should compare equal to themselves"
         );
         let offset_from_bytes = FixedOffset::from_bytes(&bytes);
@@ -438,7 +438,7 @@ mod tests {
             );
             assert_eq!(
                 DateTime::<FixedOffset>::compare(&bytes, &bytes),
-                std::cmp::Ordering::Equal,
+                core::cmp::Ordering::Equal,
                 "Bytes should compare equal to themselves"
             );
             let datetime_from_bytes = DateTime::<FixedOffset>::from_bytes(&bytes);
