@@ -19,6 +19,7 @@ pub(crate) use backends::ReadOnlyBackend;
 pub(crate) use base::{
     MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PageTrackerPolicy,
 };
+pub(crate) use fast_hash::PageNumberHashSet;
 pub(crate) use header::PAGE_SIZE;
 pub(crate) use page_manager::{
     AllocationPolicy, FILE_FORMAT_VERSION3, ShrinkPolicy, TransactionalMemory, xxh3_checksum,

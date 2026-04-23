@@ -7,12 +7,13 @@ use crate::tree_store::multimap_btree::{
 };
 use crate::tree_store::{
     AllocationPolicy, Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageHint,
-    PageNumber, PageTrackerPolicy, RawBtree, TableType, TransactionalMemory, multimap_btree_stats,
+    PageNumber, PageNumberHashSet, PageTrackerPolicy, RawBtree, TableType, TransactionalMemory,
+    multimap_btree_stats,
 };
 use crate::types::{Key, Value};
 use crate::{DatabaseStats, Result};
 use std::cmp::max;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::mem::size_of;
 use std::ops::RangeFull;
 use std::sync::{Arc, Mutex};
@@ -312,7 +313,7 @@ impl TableTreeMut<'_> {
 
     pub(crate) fn flush_and_close(
         &mut self,
-    ) -> Result<(Option<BtreeHeader>, HashSet<PageNumber>, Vec<PageNumber>)> {
+    ) -> Result<(Option<BtreeHeader>, PageNumberHashSet, Vec<PageNumber>)> {
         match self.flush_inner() {
             Ok(header) => {
                 let allocated = self.allocated_pages.lock()?.close();
