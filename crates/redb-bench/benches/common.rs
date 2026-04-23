@@ -3,7 +3,7 @@ use redb::{AccessGuard, Durability, ReadableDatabase, ReadableTableMetadata, Tab
 use rocksdb::{
     Direction, IteratorMode, OptimisticTransactionDB, OptimisticTransactionOptions, WriteOptions,
 };
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, Statement, Transaction};
 use std::fs::File;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -205,7 +205,7 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
             let start = Instant::now();
             let mut checksum = 0u64;
             let mut expected_checksum = 0u64;
-            let reader = txn.get_reader();
+            let mut reader = txn.get_reader();
             for _ in 0..NUM_READS {
                 let (key, value) = random_pair(&mut rng);
                 let result = reader.get(&key).unwrap();
@@ -227,7 +227,7 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
         for _ in 0..SCAN_ITERATIONS {
             let mut rng = make_rng();
             let start = Instant::now();
-            let reader = txn.get_reader();
+            let mut reader = txn.get_reader();
             let mut value_sum = 0;
             for _ in 0..NUM_SCANS {
                 let (key, _value) = random_pair(&mut rng);
@@ -273,7 +273,7 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
                     let txn = connection.read_transaction();
                     let mut checksum = 0u64;
                     let mut expected_checksum = 0u64;
-                    let reader = txn.get_reader();
+                    let mut reader = txn.get_reader();
                     let mut rng = rng.clone();
                     for _ in 0..(elements / num_threads) {
                         let (key, value) = random_pair(&mut rng);
@@ -461,11 +461,11 @@ pub trait BenchReader {
     where
         Self: 'out;
 
-    fn get<'a>(&'a self, key: &[u8]) -> Option<Self::Output<'a>>;
+    fn get<'a>(&'a mut self, key: &[u8]) -> Option<Self::Output<'a>>;
 
-    fn range_from<'a>(&'a self, start: &'a [u8]) -> Self::Iterator<'a>;
+    fn range_from<'a>(&'a mut self, start: &'a [u8]) -> Self::Iterator<'a>;
 
-    fn len(&self) -> u64;
+    fn len(&mut self) -> u64;
 }
 
 pub trait BenchIterator {
@@ -574,16 +574,16 @@ impl BenchReader for RedbBenchReader {
     where
         Self: 'out;
 
-    fn get<'a>(&'a self, key: &[u8]) -> Option<Self::Output<'a>> {
+    fn get<'a>(&'a mut self, key: &[u8]) -> Option<Self::Output<'a>> {
         self.table.get(key).unwrap().map(RedbAccessGuard::new)
     }
 
-    fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
+    fn range_from<'a>(&'a mut self, key: &'a [u8]) -> Self::Iterator<'a> {
         let iter = self.table.range(key..).unwrap();
         RedbBenchIterator { iter }
     }
 
-    fn len(&self) -> u64 {
+    fn len(&mut self) -> u64 {
         self.table.len().unwrap()
     }
 }
@@ -749,16 +749,16 @@ impl BenchReader for SledBenchReader<'_> {
     where
         Self: 'out;
 
-    fn get(&self, key: &[u8]) -> Option<sled::IVec> {
+    fn get(&mut self, key: &[u8]) -> Option<sled::IVec> {
         self.db.get(key).unwrap()
     }
 
-    fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
+    fn range_from<'a>(&'a mut self, key: &'a [u8]) -> Self::Iterator<'a> {
         let iter = self.db.range(key..);
         SledBenchIterator { iter }
     }
 
-    fn len(&self) -> u64 {
+    fn len(&mut self) -> u64 {
         self.db.len() as u64
     }
 }
@@ -1028,18 +1028,18 @@ impl BenchReader for HeedBenchReader<'_, '_> {
     where
         Self: 'out;
 
-    fn get(&self, key: &[u8]) -> Option<&[u8]> {
+    fn get(&mut self, key: &[u8]) -> Option<&[u8]> {
         self.db.get(self.txn, key).unwrap()
     }
 
-    fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
+    fn range_from<'a>(&'a mut self, key: &'a [u8]) -> Self::Iterator<'a> {
         let range = (Bound::Included(key), Bound::Unbounded);
         let iter = self.db.range(self.txn, &range).unwrap();
 
         Self::Iterator { iter }
     }
 
-    fn len(&self) -> u64 {
+    fn len(&mut self) -> u64 {
         self.db.stat(self.txn).unwrap().entries as u64
     }
 }
@@ -1231,11 +1231,11 @@ impl BenchReader for RocksdbBenchReader<'_, '_> {
     where
         Self: 'out;
 
-    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+    fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         self.snapshot.get(key).unwrap()
     }
 
-    fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
+    fn range_from<'a>(&'a mut self, key: &'a [u8]) -> Self::Iterator<'a> {
         let iter = self
             .snapshot
             .iterator(IteratorMode::From(key, Direction::Forward));
@@ -1243,7 +1243,7 @@ impl BenchReader for RocksdbBenchReader<'_, '_> {
         RocksdbBenchIterator { iter }
     }
 
-    fn len(&self) -> u64 {
+    fn len(&mut self) -> u64 {
         self.snapshot.iterator(IteratorMode::Start).count() as u64
     }
 }
@@ -1369,18 +1369,18 @@ impl BenchReader for FjallBenchReader<'_> {
     where
         Self: 'out;
 
-    fn get<'a>(&'a self, key: &[u8]) -> Option<Self::Output<'a>> {
+    fn get<'a>(&'a mut self, key: &[u8]) -> Option<Self::Output<'a>> {
         self.txn.get(self.part, key).unwrap()
     }
 
-    fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
+    fn range_from<'a>(&'a mut self, key: &'a [u8]) -> Self::Iterator<'a> {
         let iter = self.txn.range(self.part, key..);
         FjallBenchIterator {
             iter: Box::new(iter),
         }
     }
 
-    fn len(&self) -> u64 {
+    fn len(&mut self) -> u64 {
         self.txn.len(self.part).unwrap().try_into().unwrap()
     }
 }
@@ -1577,12 +1577,27 @@ impl<'db> BenchReadTransaction for SqliteBenchReadTransaction<'db> {
         Self: 'txn;
 
     fn get_reader(&self) -> Self::T<'_> {
-        SqliteBenchReader { conn: self.conn }
+        let get_stmt = self
+            .conn
+            .prepare("SELECT value FROM kv WHERE key = ?")
+            .unwrap();
+        let range_stmt = self
+            .conn
+            .prepare("SELECT key, value FROM kv WHERE key >= ? ORDER BY key")
+            .unwrap();
+        let len_stmt = self.conn.prepare("SELECT COUNT(*) FROM kv").unwrap();
+        SqliteBenchReader {
+            get_stmt,
+            range_stmt,
+            len_stmt,
+        }
     }
 }
 
 pub struct SqliteBenchReader<'db> {
-    conn: &'db Connection,
+    get_stmt: Statement<'db>,
+    range_stmt: Statement<'db>,
+    len_stmt: Statement<'db>,
 }
 
 impl BenchReader for SqliteBenchReader<'_> {
@@ -1591,63 +1606,41 @@ impl BenchReader for SqliteBenchReader<'_> {
     where
         Self: 'out;
     type Iterator<'out>
-        = SqliteBenchIterator
+        = SqliteBenchIterator<'out>
     where
         Self: 'out;
 
-    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT value FROM kv WHERE key = ?")
-            .unwrap();
-        stmt.query_row([key], |row| row.get(0)).ok()
+    fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        self.get_stmt.query_row([key], |row| row.get(0)).ok()
     }
 
-    fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT key, value FROM kv WHERE key >= ? ORDER BY key")
-            .unwrap();
-        let rows = stmt
-            .query_map([key], |row| {
-                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .unwrap();
-
-        let mut results = Vec::new();
-        for row in rows {
-            if let Ok(kv) = row {
-                results.push(kv);
-            }
-            // TODO: this is kind of cheating, but I don't feel like refactoring the benchmark
-            // to handle rusqlite's Statement & MappedRows lifetimes
-            if results.len() > SCAN_LEN {
-                break;
-            }
-        }
-
-        SqliteBenchIterator {
-            results: results.into_iter(),
-        }
+    fn range_from<'a>(&'a mut self, key: &'a [u8]) -> Self::Iterator<'a> {
+        let rows = self.range_stmt.query([key]).unwrap();
+        SqliteBenchIterator { rows }
     }
 
-    fn len(&self) -> u64 {
-        let mut stmt = self.conn.prepare("SELECT COUNT(*) FROM kv").unwrap();
-        stmt.query_row([], |row| row.get::<_, i64>(0)).unwrap() as u64
+    fn len(&mut self) -> u64 {
+        self.len_stmt
+            .query_row([], |row| row.get::<_, i64>(0))
+            .unwrap() as u64
     }
 }
 
-pub struct SqliteBenchIterator {
-    results: std::vec::IntoIter<(Vec<u8>, Vec<u8>)>,
+pub struct SqliteBenchIterator<'stmt> {
+    rows: rusqlite::Rows<'stmt>,
 }
 
-impl BenchIterator for SqliteBenchIterator {
+impl BenchIterator for SqliteBenchIterator<'_> {
     type Output<'out>
         = Vec<u8>
     where
         Self: 'out;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
-        self.results.next()
+        let row = self.rows.next().unwrap()?;
+        Some((
+            row.get::<_, Vec<u8>>(0).unwrap(),
+            row.get::<_, Vec<u8>>(1).unwrap(),
+        ))
     }
 }
