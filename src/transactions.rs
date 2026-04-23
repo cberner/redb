@@ -1499,7 +1499,23 @@ impl WriteTransaction {
         let (user_root, allocated_pages, data_freed) =
             self.tables.lock().unwrap().table_tree.flush_and_close()?;
 
-        self.store_data_freed_pages(data_freed)?;
+        // If no earlier read/savepoint is still alive, this transaction's freed pages are
+        // unreachable for any other observer as soon as the commit is durable. We can skip the
+        // round-trip through DATA_FREED_TABLE and hand them to `durable_commit` to free in the
+        // in-memory allocator right after fsync, keeping the freed tree empty so the pages are
+        // available to the next write transaction. If a reader does block, we fall back to the
+        // normal persistent bookkeeping.
+        let blocked_by_readers = self
+            .transaction_tracker
+            .oldest_live_read_transaction()
+            .is_some_and(|oldest| oldest < self.transaction_id);
+        let data_freed_post_commit =
+            if blocked_by_readers || matches!(self.durability, InternalDurability::None) {
+                self.store_data_freed_pages(data_freed)?;
+                Vec::new()
+            } else {
+                data_freed
+            };
 
         #[cfg(feature = "logging")]
         debug!(
@@ -1509,7 +1525,9 @@ impl WriteTransaction {
         let allocated_pages: Vec<PageNumber> = allocated_pages.into_iter().collect();
         match self.durability {
             InternalDurability::None => self.non_durable_commit(user_root, allocated_pages)?,
-            InternalDurability::Immediate => self.durable_commit(user_root, allocated_pages)?,
+            InternalDurability::Immediate => {
+                self.durable_commit(user_root, allocated_pages, data_freed_post_commit)?;
+            }
         }
 
         self.savepoint_state
@@ -1685,6 +1703,7 @@ impl WriteTransaction {
         &mut self,
         user_root: Option<BtreeHeader>,
         allocated_pages: Vec<PageNumber>,
+        data_freed_post_commit: Vec<PageNumber>,
     ) -> Result {
         let free_until_transaction = self
             .transaction_tracker
@@ -1758,6 +1777,18 @@ impl WriteTransaction {
         // Immediately free the pages that were freed from the system-tree. These are only
         // accessed by write transactions, so it's safe to free them as soon as the commit is done.
         for page in system_freed_pages.lock().unwrap().drain(..) {
+            self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+        }
+        drop(system_tables);
+
+        // Return this transaction's newly-freed data pages to the allocator so the next write
+        // transaction can reuse them. These pages were deliberately NOT stored in
+        // DATA_FREED_TABLE because no earlier reader/savepoint references them, so no other
+        // observer could see them. Doing the free after the last fsync means an abort earlier
+        // in the commit path would leave the pages allocated -- safe -- and a crash before the
+        // fsync would roll back to the previous transaction, which still references them.
+        for page in data_freed_post_commit {
+            debug_assert!(!self.mem.unpersisted(page));
             self.mem.free(page, &mut PageTrackerPolicy::Ignore);
         }
 
