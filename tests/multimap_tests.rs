@@ -293,6 +293,34 @@ fn delete() {
     assert_eq!(empty, get_vec(&table, "hello"));
 }
 
+// Regression test: remove_all on a key whose values live in an uncommitted subtree must
+// return guards that remain valid after the iterator is dropped (and therefore after the
+// subtree pages have been freed). Previously the subtree iteration handed out AccessGuards
+// that held references to the page bytes; dropping the iterator then freed those pages
+// via free_if_uncommitted while the collected guards were still outstanding, tripping
+// the read_page_ref_counts debug assertion.
+#[test]
+fn remove_all_uncommitted_subtree_collect() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        // Enough distinct values that the collection is promoted to a subtree of
+        // uncommitted pages before we remove_all in the same transaction.
+        for v in 0..2000u64 {
+            table.insert(&0u64, &v).unwrap();
+        }
+        let iter = table.remove_all(&0u64).unwrap();
+        let values: Vec<_> = iter.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(values.len(), 2000);
+        for (i, guard) in values.iter().enumerate() {
+            assert_eq!(guard.value(), i as u64);
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
 #[test]
 fn wrong_types() {
     let tmpfile = create_tempfile();

@@ -13,11 +13,16 @@ use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransac
 use std::borrow::Borrow;
 use std::marker::PhantomData;
 use std::mem;
-use std::ops::{RangeBounds, RangeFull};
+use std::ops::{Range, RangeBounds, RangeFull};
 use std::sync::{Arc, Mutex};
 
 pub(crate) struct LeafKeyIter<'a, V: Key + 'static> {
-    inline_collection: AccessGuard<'a, &'static DynamicCollection<V>>,
+    // Kept alive so any Drop side-effects on `data` (e.g. `remove_on_drop`) still run.
+    _inline_collection: AccessGuard<'a, &'static DynamicCollection<V>>,
+    // Arc-backed view of the page holding the inline collection.
+    page_data: Arc<[u8]>,
+    // Byte range in `page_data` holding the inline leaf data for the collection.
+    inline_range: Range<usize>,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
     start_entry: isize, // inclusive
@@ -30,11 +35,18 @@ impl<'a, V: Key> LeafKeyIter<'a, V> {
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
     ) -> Self {
-        let accessor =
-            LeafAccessor::new(data.value().as_inline(), fixed_key_size, fixed_value_size);
+        let (page_data, value_range) = data.arc_view();
+        let inline_range = DynamicCollection::<V>::inline_range_within(value_range);
+        let accessor = LeafAccessor::new(
+            &page_data[inline_range.clone()],
+            fixed_key_size,
+            fixed_value_size,
+        );
         let end_entry = isize::try_from(accessor.num_pairs()).unwrap() - 1;
         Self {
-            inline_collection: data,
+            _inline_collection: data,
+            page_data,
+            inline_range,
             fixed_key_size,
             fixed_value_size,
             start_entry: 0,
@@ -42,34 +54,45 @@ impl<'a, V: Key> LeafKeyIter<'a, V> {
         }
     }
 
-    fn next_key(&mut self) -> Option<&[u8]> {
-        if self.end_entry < self.start_entry {
-            return None;
-        }
-        let accessor = LeafAccessor::new(
-            self.inline_collection.value().as_inline(),
-            self.fixed_key_size,
-            self.fixed_value_size,
-        );
-        self.start_entry += 1;
-        accessor
-            .entry((self.start_entry - 1).try_into().unwrap())
-            .map(|e| e.key())
+    fn inline_bytes(&self) -> &[u8] {
+        &self.page_data[self.inline_range.clone()]
     }
 
-    fn next_key_back(&mut self) -> Option<&[u8]> {
-        if self.end_entry < self.start_entry {
-            return None;
-        }
+    fn num_values(&self) -> u64 {
         let accessor = LeafAccessor::new(
-            self.inline_collection.value().as_inline(),
+            self.inline_bytes(),
             self.fixed_key_size,
             self.fixed_value_size,
         );
+        accessor.num_pairs() as u64
+    }
+
+    fn key_at(&self, n: usize) -> Option<AccessGuard<'static, V>> {
+        let accessor = LeafAccessor::new(
+            self.inline_bytes(),
+            self.fixed_key_size,
+            self.fixed_value_size,
+        );
+        let (key_range, _) = accessor.entry_ranges(n)?;
+        let absolute =
+            (self.inline_range.start + key_range.start)..(self.inline_range.start + key_range.end);
+        Some(AccessGuard::with_arc_page(self.page_data.clone(), absolute))
+    }
+
+    fn next_key(&mut self) -> Option<AccessGuard<'static, V>> {
+        if self.end_entry < self.start_entry {
+            return None;
+        }
+        self.start_entry += 1;
+        self.key_at((self.start_entry - 1).try_into().unwrap())
+    }
+
+    fn next_key_back(&mut self) -> Option<AccessGuard<'static, V>> {
+        if self.end_entry < self.start_entry {
+            return None;
+        }
         self.end_entry -= 1;
-        accessor
-            .entry((self.end_entry + 1).try_into().unwrap())
-            .map(|e| e.key())
+        self.key_at((self.end_entry + 1).try_into().unwrap())
     }
 }
 
@@ -129,7 +152,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
     }
 
     fn new_inline(inner: LeafKeyIter<'a, V>, guard: Arc<TransactionGuard>) -> Self {
-        let remaining = inner.inline_collection.value().get_num_values();
+        let remaining = inner.num_values();
         Self {
             inner: Some(ValueIterState::InlineLeaf(inner)),
             remaining,
@@ -221,35 +244,53 @@ impl<'a, V: Key + 'static> Iterator for MultimapValue<'a, V> {
     type Item = Result<AccessGuard<'a, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // TODO: optimize out this copy
-        let bytes = match self.inner.as_mut().unwrap() {
+        // If `free_on_drop` is non-empty, the subtree pages backing the iteration will be
+        // freed when this `MultimapValue` is dropped (the `remove_all` path). Yielded
+        // guards may outlive the iterator (e.g. via `collect`), so in that case we must
+        // return owned copies rather than references into soon-to-be-freed pages.
+        let copy_values = !self.free_on_drop.is_empty();
+        let guard = match self.inner.as_mut().unwrap() {
             ValueIterState::Subtree(iter) => match iter.next()? {
-                Ok(e) => e.key_data(),
+                Ok(e) => {
+                    if copy_values {
+                        AccessGuard::with_owned_value(e.key_data())
+                    } else {
+                        let (page, key_range, _) = e.into_raw();
+                        AccessGuard::with_page(page, key_range)
+                    }
+                }
                 Err(err) => {
                     return Some(Err(err));
                 }
             },
-            ValueIterState::InlineLeaf(iter) => iter.next_key()?.to_vec(),
+            ValueIterState::InlineLeaf(iter) => iter.next_key()?,
         };
         self.remaining -= 1;
-        Some(Ok(AccessGuard::with_owned_value(bytes)))
+        Some(Ok(guard))
     }
 }
 
 impl<V: Key + 'static> DoubleEndedIterator for MultimapValue<'_, V> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        // TODO: optimize out this copy
-        let bytes = match self.inner.as_mut().unwrap() {
+        let copy_values = !self.free_on_drop.is_empty();
+        let guard = match self.inner.as_mut().unwrap() {
             ValueIterState::Subtree(iter) => match iter.next_back()? {
-                Ok(e) => e.key_data(),
+                Ok(e) => {
+                    if copy_values {
+                        AccessGuard::with_owned_value(e.key_data())
+                    } else {
+                        let (page, key_range, _) = e.into_raw();
+                        AccessGuard::with_page(page, key_range)
+                    }
+                }
                 Err(err) => {
                     return Some(Err(err));
                 }
             },
-            ValueIterState::InlineLeaf(iter) => iter.next_key_back()?.to_vec(),
+            ValueIterState::InlineLeaf(iter) => iter.next_key_back()?,
         };
         self.remaining -= 1;
-        Some(Ok(AccessGuard::with_owned_value(bytes)))
+        Some(Ok(guard))
     }
 }
 

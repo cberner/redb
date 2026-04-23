@@ -226,6 +226,21 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
     pub fn value(&self) -> V::SelfType<'_> {
         V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
     }
+
+    pub(crate) fn arc_view(&self) -> (Arc<[u8]>, Range<usize>) {
+        match &self.page {
+            EitherPage::Immutable(page) => (page.to_arc(), self.offset..(self.offset + self.len)),
+            EitherPage::ArcMemory(arc) => (arc.clone(), self.offset..(self.offset + self.len)),
+            EitherPage::OwnedMemory(vec) => {
+                let bytes = &vec[self.offset..(self.offset + self.len)];
+                (Arc::from(bytes), 0..self.len)
+            }
+            EitherPage::Mutable(page) => {
+                let bytes = &page.memory()[self.offset..(self.offset + self.len)];
+                (Arc::from(bytes), 0..self.len)
+            }
+        }
+    }
 }
 
 impl<V: Value + 'static> Drop for AccessGuard<'_, V> {

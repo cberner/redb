@@ -13,6 +13,7 @@ use std::cmp::max;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::mem::size_of;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 pub(crate) fn multimap_btree_stats(
@@ -533,6 +534,14 @@ impl<V: Key> DynamicCollection<V> {
     pub(crate) fn as_inline(&self) -> &[u8] {
         debug_assert!(matches!(self.collection_type(), Inline));
         &self.data[1..]
+    }
+
+    /// Given the byte range of a serialized inline-variant collection within a larger
+    /// buffer, returns the sub-range that holds the inline leaf data (i.e. what
+    /// `as_inline` would return if the collection were deserialized).
+    pub(crate) fn inline_range_within(collection_range: Range<usize>) -> Range<usize> {
+        // `as_inline` skips the one-byte type tag at `data[0]`.
+        (collection_range.start + 1)..collection_range.end
     }
 
     pub(crate) fn as_subtree(&self) -> BtreeHeader {
