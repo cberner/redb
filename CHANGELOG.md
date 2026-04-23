@@ -9,6 +9,11 @@
 * Enable file space reclamation during non-durable transactions performed while a savepoint exists.
 * Fix a bug where calling `compact()` on a database could cause the file to grow
   rather than shrink in some cases.
+* Reuse pages freed by a durable write transaction in the next write transaction when no
+  live read transaction or savepoint still needs them. Previously a freed page only became
+  reusable two commits later: the commit that freed it persisted the page into
+  `DATA_FREED_TABLE`, and the next commit had to extract the entry and return the page to
+  the allocator before any subsequent commit could allocate from it.
 
 ## 4.1.0 - 2026-04-19
 **This release contains a large number of bug fixes discovered by AI coding agents**
