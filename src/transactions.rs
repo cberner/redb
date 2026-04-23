@@ -1509,13 +1509,19 @@ impl WriteTransaction {
             .transaction_tracker
             .oldest_live_read_transaction()
             .is_some_and(|oldest| oldest < self.transaction_id);
-        let data_freed_post_commit =
-            if blocked_by_readers || matches!(self.durability, InternalDurability::None) {
-                self.store_data_freed_pages(data_freed)?;
-                Vec::new()
-            } else {
-                data_freed
-            };
+        // With quick-repair we need to keep the usual persistent bookkeeping so that a partial
+        // commit remains recoverable: if we skipped the store and crashed mid-commit after the
+        // allocator state table was partially written, the on-disk metadata could diverge from
+        // the pages the aborted transaction still references.
+        let data_freed_post_commit = if blocked_by_readers
+            || matches!(self.durability, InternalDurability::None)
+            || self.quick_repair
+        {
+            self.store_data_freed_pages(data_freed)?;
+            Vec::new()
+        } else {
+            data_freed
+        };
 
         #[cfg(feature = "logging")]
         debug!(
@@ -1781,12 +1787,15 @@ impl WriteTransaction {
         }
         drop(system_tables);
 
-        // Return this transaction's newly-freed data pages to the allocator so the next write
-        // transaction can reuse them. These pages were deliberately NOT stored in
-        // DATA_FREED_TABLE because no earlier reader/savepoint references them, so no other
-        // observer could see them. Doing the free after the last fsync means an abort earlier
-        // in the commit path would leave the pages allocated -- safe -- and a crash before the
-        // fsync would roll back to the previous transaction, which still references them.
+        // Return this transaction's newly-freed data pages to the in-memory allocator so the
+        // next write transaction can reuse them. These pages were deliberately NOT stored in
+        // DATA_FREED_TABLE because no earlier reader/savepoint references them. Freeing must
+        // happen AFTER `mem.commit`: during the commit the pages are still reachable from the
+        // previous primary slot, and the allocator state save and allocator-serving routines
+        // could otherwise hand them out for new writes whose content would clobber the pre-
+        // commit data and break a rollback on commit failure. Skipping this branch with
+        // quick-repair (see `commit_inner`) avoids leaking pages on a clean reopen, because
+        // the allocator state saved before `mem.commit` does not reflect these frees.
         for page in data_freed_post_commit {
             debug_assert!(!self.mem.unpersisted(page));
             self.mem.free(page, &mut PageTrackerPolicy::Ignore);
