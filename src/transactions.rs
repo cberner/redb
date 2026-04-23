@@ -8,6 +8,7 @@ use crate::tree_store::{
     AllocationPolicy, Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH,
     MAX_VALUE_LENGTH, Page, PageHint, PageListMut, PageNumber, PageTrackerPolicy,
     SerializedSavepoint, ShrinkPolicy, TableTree, TableTreeMut, TableType, TransactionalMemory,
+    WriteMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -390,9 +391,8 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
         table_root: Option<BtreeHeader>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        write_mem: WriteMemory,
         namespace: &'s mut SystemNamespace<'db>,
-        allocation_policy: AllocationPolicy,
     ) -> SystemTable<'db, 's, K, V> {
         // No need to track allocations in the system tree. Savepoint restoration only relies on
         // freeing in the data tree
@@ -400,14 +400,7 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
         SystemTable {
             name: name.to_string(),
             namespace,
-            tree: BtreeMut::new(
-                table_root,
-                guard.clone(),
-                mem,
-                freed_pages,
-                ignore,
-                allocation_policy,
-            ),
+            tree: BtreeMut::new(table_root, guard.clone(), write_mem, freed_pages, ignore),
             transaction_guard: guard,
         }
     }
@@ -512,7 +505,7 @@ impl<'db> SystemNamespace<'db> {
     fn new(
         root_page: Option<BtreeHeader>,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        mem: &WriteMemory,
     ) -> Self {
         // No need to track allocations in the system tree. Savepoint restoration only relies on
         // freeing in the data tree
@@ -522,10 +515,9 @@ impl<'db> SystemNamespace<'db> {
             table_tree: TableTreeMut::new(
                 root_page,
                 guard.clone(),
-                mem,
+                mem.clone(),
                 freed_pages.clone(),
                 ignore,
-                AllocationPolicy::Default,
             ),
             freed_pages,
             transaction_guard: guard.clone(),
@@ -549,15 +541,13 @@ impl<'db> SystemNamespace<'db> {
             })?;
         transaction.dirty.store(true, Ordering::Release);
 
-        let allocation_policy = self.table_tree.allocation_policy();
         Ok(SystemTable::new(
             definition.name(),
             root,
             self.freed_pages.clone(),
             self.transaction_guard.clone(),
-            transaction.mem.clone(),
+            transaction.write_mem.clone(),
             self,
-            allocation_policy,
         ))
     }
 
@@ -583,19 +573,18 @@ impl TableNamespace<'_> {
     fn new(
         root_page: Option<BtreeHeader>,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        mem: &WriteMemory,
     ) -> Self {
         let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
         let freed_pages = Arc::new(Mutex::new(vec![]));
         let table_tree = TableTreeMut::new(
             root_page,
             guard,
-            mem,
+            mem.clone(),
             // Committed pages which are no longer reachable and will be queued for free'ing
             // These are separated from the system freed pages
             freed_pages.clone(),
             allocated.clone(),
-            AllocationPolicy::Default,
         );
         Self {
             open_tables: HashMap::default(),
@@ -655,9 +644,8 @@ impl TableNamespace<'_> {
             length,
             self.freed_pages.clone(),
             self.allocated_pages.clone(),
-            transaction.mem.clone(),
+            transaction.write_mem.clone(),
             transaction,
-            self.table_tree.allocation_policy(),
         ))
     }
 
@@ -677,9 +665,8 @@ impl TableNamespace<'_> {
             root,
             self.freed_pages.clone(),
             self.allocated_pages.clone(),
-            transaction.mem.clone(),
+            transaction.write_mem.clone(),
             transaction,
-            self.table_tree.allocation_policy(),
         ))
     }
 
@@ -836,6 +823,7 @@ impl SavepointTransactionState {
 pub struct WriteTransaction {
     transaction_tracker: Arc<TransactionTracker>,
     mem: Arc<TransactionalMemory>,
+    write_mem: WriteMemory,
     transaction_guard: Arc<TransactionGuard>,
     transaction_id: TransactionId,
     tables: Mutex<TableNamespace<'static>>,
@@ -863,12 +851,14 @@ impl WriteTransaction {
         let root_page = mem.get_data_root();
         let system_page = mem.get_system_root();
 
-        let tables = TableNamespace::new(root_page, guard.clone(), mem.clone());
-        let system_tables = SystemNamespace::new(system_page, guard.clone(), mem.clone());
+        let write_mem = WriteMemory::new(mem.clone(), AllocationPolicy::Default);
+        let tables = TableNamespace::new(root_page, guard.clone(), &write_mem);
+        let system_tables = SystemNamespace::new(system_page, guard.clone(), &write_mem);
 
         Ok(Self {
             transaction_tracker,
-            mem: mem.clone(),
+            mem,
+            write_mem,
             transaction_guard: guard.clone(),
             transaction_id,
             tables: Mutex::new(tables),
@@ -888,6 +878,7 @@ impl WriteTransaction {
     }
 
     pub(crate) fn set_allocation_policy(&mut self, policy: AllocationPolicy) {
+        self.write_mem.set_policy(policy);
         self.tables
             .lock()
             .unwrap()
@@ -1237,9 +1228,9 @@ impl WriteTransaction {
         {
             let tables = self.tables.lock().unwrap();
             for page in tables.allocated_pages.lock().unwrap().reset() {
-                debug_assert!(self.mem.uncommitted(page));
+                debug_assert!(self.write_mem.uncommitted(page));
                 debug_assert!(self.mem.is_allocated(page));
-                self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                self.write_mem.free(page, &mut PageTrackerPolicy::Ignore);
             }
             let mut data_freed_pages = tables.freed_pages.lock().unwrap();
             data_freed_pages.clear();
@@ -1566,7 +1557,10 @@ impl WriteTransaction {
                     self.mem.is_allocated(page),
                     "Page is not allocated: {page:?}"
                 );
-                debug_assert!(!self.mem.uncommitted(page), "Page is uncommitted: {page:?}");
+                debug_assert!(
+                    !self.write_mem.uncommitted(page),
+                    "Page is uncommitted: {page:?}"
+                );
                 access_guard.as_mut().push_back(page);
             }
 
@@ -1589,7 +1583,10 @@ impl WriteTransaction {
                 self.mem.is_allocated(*page),
                 "Page is not allocated: {page:?}"
             );
-            debug_assert!(self.mem.uncommitted(*page), "Page is committed: {page:?}");
+            debug_assert!(
+                self.write_mem.uncommitted(*page),
+                "Page is committed: {page:?}"
+            );
         }
 
         let unpersisted = self.mem.take_unpersisted_allocations();
@@ -1675,7 +1672,8 @@ impl WriteTransaction {
             .lock()
             .unwrap()
             .apply_on_abort(&self.transaction_tracker);
-        self.mem.rollback_uncommitted_writes()?;
+        self.mem
+            .rollback_uncommitted_writes(self.write_mem.allocated_since_commit())?;
         #[cfg(feature = "logging")]
         debug!("Finished abort of transaction id={:?}", self.transaction_id);
         Ok(())
@@ -1750,6 +1748,7 @@ impl WriteTransaction {
             self.transaction_id,
             self.two_phase_commit,
             self.shrink_policy,
+            self.write_mem.allocated_since_commit(),
         )?;
 
         // Mark any pending non-durable commits as fully committed.
@@ -1758,7 +1757,7 @@ impl WriteTransaction {
         // Immediately free the pages that were freed from the system-tree. These are only
         // accessed by write transactions, so it's safe to free them as soon as the commit is done.
         for page in system_freed_pages.lock().unwrap().drain(..) {
-            self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+            self.write_mem.free(page, &mut PageTrackerPolicy::Ignore);
         }
 
         Ok(())
@@ -1804,8 +1803,12 @@ impl WriteTransaction {
                 .finalize_dirty_checksums()?
         };
 
-        self.mem
-            .non_durable_commit(user_root, system_root, self.transaction_id)?;
+        self.mem.non_durable_commit(
+            user_root,
+            system_root,
+            self.transaction_id,
+            self.write_mem.allocated_since_commit(),
+        )?;
         // Record the data-tree pages allocated in this transaction in the in-memory map.
         self.mem
             .record_unpersisted_allocations(self.transaction_id, allocated_pages);
@@ -1840,7 +1843,11 @@ impl WriteTransaction {
         let system_table_tree = &mut system_tables.table_tree;
         system_table_tree.highest_index_pages(MAX_PAGES_PER_COMPACTION, &mut highest_pages)?;
 
-        // Calculate how many of them can be relocated to lower pages, starting from the last page
+        // Calculate how many of them can be relocated to lower pages, starting from the last page.
+        // Temporarily force the Lowest allocation policy so that probe allocations find the
+        // smallest page numbers, regardless of the write transaction's normal policy.
+        let saved_policy = self.write_mem.policy();
+        self.write_mem.set_policy(AllocationPolicy::Lowest);
         let mut relocation_map = HashMap::new();
         for path in highest_pages.into_values().rev() {
             if relocation_map.contains_key(&path.page_number()) {
@@ -1848,8 +1855,8 @@ impl WriteTransaction {
             }
             let old_page = self.mem.get_page(path.page_number(), PageHint::None)?;
             let mut new_page = self
-                .mem
-                .allocate_lowest(old_page.memory().len(), &mut PageTrackerPolicy::Ignore)?;
+                .write_mem
+                .allocate(old_page.memory().len(), &mut PageTrackerPolicy::Ignore)?;
             let new_page_number = new_page.get_page_number();
             // We have to copy at least the page type into the new page.
             // Otherwise its cache priority will be calculated incorrectly
@@ -1863,10 +1870,9 @@ impl WriteTransaction {
                         continue;
                     }
                     let old_parent = self.mem.get_page(*parent, PageHint::None)?;
-                    let mut new_page = self.mem.allocate_lowest(
-                        old_parent.memory().len(),
-                        &mut PageTrackerPolicy::Ignore,
-                    )?;
+                    let mut new_page = self
+                        .write_mem
+                        .allocate(old_parent.memory().len(), &mut PageTrackerPolicy::Ignore)?;
                     let new_page_number = new_page.get_page_number();
                     // We have to copy at least the page type into the new page.
                     // Otherwise its cache priority will be calculated incorrectly
@@ -1875,11 +1881,12 @@ impl WriteTransaction {
                     relocation_map.insert(*parent, new_page_number);
                 }
             } else {
-                self.mem
+                self.write_mem
                     .free(new_page_number, &mut PageTrackerPolicy::Ignore);
                 break;
             }
         }
+        self.write_mem.set_policy(saved_policy);
 
         if !relocation_map.is_empty() {
             progress = true;
@@ -1915,7 +1922,7 @@ impl WriteTransaction {
                     // result, no entry whose pages are still unpersisted is eligible for
                     // processing here.
                     debug_assert!(!self.mem.unpersisted(page));
-                    self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                    self.write_mem.free(page, &mut PageTrackerPolicy::Ignore);
                 }
             }
         }
@@ -1932,7 +1939,7 @@ impl WriteTransaction {
                 for i in 0..page_list.value().len() {
                     let page = page_list.value().get(i);
                     debug_assert!(!self.mem.unpersisted(page));
-                    self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                    self.write_mem.free(page, &mut PageTrackerPolicy::Ignore);
                 }
             }
         }

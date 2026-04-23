@@ -1,8 +1,10 @@
 use crate::tree_store::page_store::cached_file::WritablePage;
+use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 use std::cmp::Ordering;
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
+#[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
@@ -279,13 +281,13 @@ pub(crate) enum PageHint {
 
 pub(crate) enum PageTrackerPolicy {
     Ignore,
-    Track(HashSet<PageNumber>),
+    Track(PageNumberHashSet),
     Closed,
 }
 
 impl PageTrackerPolicy {
     pub(crate) fn new_tracking() -> Self {
-        PageTrackerPolicy::Track(HashSet::new())
+        PageTrackerPolicy::Track(PageNumberHashSet::default())
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -295,12 +297,30 @@ impl PageTrackerPolicy {
         }
     }
 
+    pub(crate) fn contains(&self, page: PageNumber) -> bool {
+        match self {
+            PageTrackerPolicy::Ignore | PageTrackerPolicy::Closed => false,
+            PageTrackerPolicy::Track(x) => x.contains(&page),
+        }
+    }
+
     pub(super) fn remove(&mut self, page: PageNumber) {
         match self {
             PageTrackerPolicy::Ignore => {}
             PageTrackerPolicy::Track(x) => {
                 assert!(x.remove(&page));
             }
+            PageTrackerPolicy::Closed => {
+                panic!("Page tracker is closed");
+            }
+        }
+    }
+
+    // Like `remove`, but does not assert that the page was present. Returns whether it was removed.
+    pub(crate) fn remove_if_present(&mut self, page: PageNumber) -> bool {
+        match self {
+            PageTrackerPolicy::Ignore => false,
+            PageTrackerPolicy::Track(x) => x.remove(&page),
             PageTrackerPolicy::Closed => {
                 panic!("Page tracker is closed");
             }
@@ -319,10 +339,10 @@ impl PageTrackerPolicy {
         }
     }
 
-    pub(crate) fn close(&mut self) -> HashSet<PageNumber> {
+    pub(crate) fn close(&mut self) -> PageNumberHashSet {
         let old = mem::replace(self, PageTrackerPolicy::Closed);
         match old {
-            PageTrackerPolicy::Ignore => HashSet::new(),
+            PageTrackerPolicy::Ignore => PageNumberHashSet::default(),
             PageTrackerPolicy::Track(x) => x,
             PageTrackerPolicy::Closed => {
                 panic!("Page tracker is closed");
@@ -330,13 +350,13 @@ impl PageTrackerPolicy {
         }
     }
 
-    pub(crate) fn reset(&mut self) -> HashSet<PageNumber> {
+    pub(crate) fn reset(&mut self) -> PageNumberHashSet {
         if matches!(self, PageTrackerPolicy::Ignore) {
-            return HashSet::new();
+            return PageNumberHashSet::default();
         }
-        let old = mem::replace(self, PageTrackerPolicy::Track(HashSet::new()));
+        let old = mem::replace(self, PageTrackerPolicy::Track(PageNumberHashSet::default()));
         match old {
-            PageTrackerPolicy::Ignore => HashSet::new(),
+            PageTrackerPolicy::Ignore => PageNumberHashSet::default(),
             PageTrackerPolicy::Track(x) => x,
             PageTrackerPolicy::Closed => {
                 panic!("Page tracker is closed");

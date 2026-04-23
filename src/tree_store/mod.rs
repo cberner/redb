@@ -17,7 +17,7 @@ pub(crate) use page_store::ReadOnlyBackend;
 pub(crate) use page_store::{
     AllocationPolicy, FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE, Page,
     PageHint, PageNumber, PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy,
-    TransactionalMemory,
+    TransactionalMemory, WriteMemory,
 };
 pub use page_store::{InMemoryBackend, Savepoint, file_backend};
 pub(crate) use table_tree::{PageListMut, TableTree, TableTreeMut};

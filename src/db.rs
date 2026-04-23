@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
-    ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    PageTrackerPolicy, ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -9,6 +9,7 @@ use crate::{
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Debug, Display, Formatter};
+use std::sync::Mutex;
 
 use std::fs::{File, OpenOptions};
 use std::marker::PhantomData;
@@ -602,6 +603,7 @@ impl Database {
                 next_transaction_id,
                 true,
                 ShrinkPolicy::Never,
+                &Mutex::new(PageTrackerPolicy::new_tracking()),
             )?;
         }
 
@@ -946,6 +948,7 @@ impl Database {
                 next_transaction_id,
                 true,
                 ShrinkPolicy::Never,
+                &Mutex::new(PageTrackerPolicy::new_tracking()),
             )?;
         }
 

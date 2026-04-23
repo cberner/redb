@@ -23,7 +23,6 @@ use std::collections::HashSet;
 use std::convert::TryInto;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
-#[cfg(debug_assertions)]
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -83,20 +82,88 @@ pub(crate) enum AllocationPolicy {
 }
 
 impl AllocationPolicy {
-    // TODO: all callers should go through this helper rather than calling
-    // `TransactionalMemory::allocate` / `allocate_lowest` directly; once
-    // that's done those methods can be file-private and only reachable via
-    // `AllocationPolicy`.
-    pub(crate) fn allocate<'a>(
+    fn allocate<'a>(
         self,
         mem: &TransactionalMemory,
         allocation_size: usize,
+        allocated_since_commit: &Mutex<PageTrackerPolicy>,
         allocated: &mut PageTrackerPolicy,
     ) -> Result<PageMut<'a>> {
         match self {
-            AllocationPolicy::Default => mem.allocate(allocation_size, allocated),
-            AllocationPolicy::Lowest => mem.allocate_lowest(allocation_size, allocated),
+            AllocationPolicy::Default => {
+                mem.allocate(allocation_size, allocated_since_commit, allocated)
+            }
+            AllocationPolicy::Lowest => {
+                mem.allocate_lowest(allocation_size, allocated_since_commit, allocated)
+            }
         }
+    }
+}
+
+/// Per-write-transaction view of the storage layer. Bundles the shared
+/// `TransactionalMemory`, the allocation policy for this transaction, and the
+/// set of pages allocated since the last commit. Btree mutation code
+/// allocates and frees pages through this handle.
+#[derive(Clone)]
+pub(crate) struct WriteMemory {
+    mem: Arc<TransactionalMemory>,
+    policy: AllocationPolicy,
+    allocated_since_commit: Arc<Mutex<PageTrackerPolicy>>,
+}
+
+impl WriteMemory {
+    pub(crate) fn new(mem: Arc<TransactionalMemory>, policy: AllocationPolicy) -> Self {
+        Self {
+            mem,
+            policy,
+            allocated_since_commit: Arc::new(Mutex::new(PageTrackerPolicy::new_tracking())),
+        }
+    }
+
+    pub(crate) fn mem(&self) -> &Arc<TransactionalMemory> {
+        &self.mem
+    }
+
+    pub(crate) fn policy(&self) -> AllocationPolicy {
+        self.policy
+    }
+
+    pub(crate) fn set_policy(&mut self, policy: AllocationPolicy) {
+        self.policy = policy;
+    }
+
+    // For WriteTransaction commit/abort paths that need to drain the set.
+    pub(crate) fn allocated_since_commit(&self) -> &Arc<Mutex<PageTrackerPolicy>> {
+        &self.allocated_since_commit
+    }
+
+    // Allocate through the configured policy and record the new page in
+    // allocated_since_commit. `allocated` is the per-subtree `PageTrackerPolicy`
+    // the caller already passes around.
+    pub(crate) fn allocate<'a>(
+        &self,
+        size: usize,
+        allocated: &mut PageTrackerPolicy,
+    ) -> Result<PageMut<'a>> {
+        self.policy
+            .allocate(&self.mem, size, &self.allocated_since_commit, allocated)
+    }
+
+    pub(crate) fn free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
+        self.mem.free(page, &self.allocated_since_commit, allocated);
+    }
+
+    pub(crate) fn free_if_uncommitted(
+        &self,
+        page: PageNumber,
+        allocated: &mut PageTrackerPolicy,
+    ) -> bool {
+        self.mem
+            .free_if_uncommitted(page, &self.allocated_since_commit, allocated)
+    }
+
+    pub(crate) fn uncommitted(&self, page: PageNumber) -> bool {
+        self.allocated_since_commit.lock().unwrap().contains(page)
     }
 }
 
@@ -156,9 +223,6 @@ impl InMemoryState {
 }
 
 pub(crate) struct TransactionalMemory {
-    // Pages allocated since the last commit
-    // TODO: maybe this should be moved to WriteTransaction?
-    allocated_since_commit: Mutex<PageNumberHashSet>,
     // TODO: Maybe we should move all this unpersisted stuff to another transaction layer.
     // There are durable commits which support persistent and ephemeral savepoints.
     // And then non-durable commits which support only ephemeral savepoints, and basically
@@ -315,7 +379,6 @@ impl TransactionalMemory {
         assert!(page_size >= DB_HEADER_SIZE);
 
         Ok(Self {
-            allocated_since_commit: Mutex::new(PageNumberHashSet::default()),
             unpersisted: Mutex::new(PageNumberHashSet::default()),
             unpersisted_allocations: Mutex::new(BTreeMap::new()),
             unpersisted_allocation_txn: Mutex::new(PageNumberHashMap::default()),
@@ -373,8 +436,6 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool, DatabaseError> {
-        assert!(self.allocated_since_commit.lock().unwrap().is_empty());
-
         self.storage.flush()?;
         self.storage.invalidate_cache_all();
 
@@ -614,6 +675,27 @@ impl TransactionalMemory {
         transaction_id: TransactionId,
         two_phase: bool,
         shrink_policy: ShrinkPolicy,
+        allocated_since_commit: &Mutex<PageTrackerPolicy>,
+    ) -> Result {
+        self.commit_inner(
+            data_root,
+            system_root,
+            transaction_id,
+            two_phase,
+            shrink_policy,
+            allocated_since_commit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_inner(
+        &self,
+        data_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+        transaction_id: TransactionId,
+        two_phase: bool,
+        shrink_policy: ShrinkPolicy,
+        allocated_since_commit: &Mutex<PageTrackerPolicy>,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
@@ -658,9 +740,7 @@ impl TransactionalMemory {
         if shrunk {
             self.storage.resize(header.layout().len())?;
         }
-        let mut allocated_since_commit = self.allocated_since_commit.lock().unwrap();
-        allocated_since_commit.clear();
-        allocated_since_commit.shrink_to_fit();
+        drop(allocated_since_commit.lock().unwrap().reset());
         let mut unpersisted = self.unpersisted.lock().unwrap();
         unpersisted.clear();
         unpersisted.shrink_to_fit();
@@ -687,6 +767,7 @@ impl TransactionalMemory {
         data_root: Option<BtreeHeader>,
         system_root: Option<BtreeHeader>,
         transaction_id: TransactionId,
+        allocated_since_commit: &Mutex<PageTrackerPolicy>,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
@@ -696,9 +777,8 @@ impl TransactionalMemory {
         self.storage.check_io_errors()?;
 
         let mut unpersisted = self.unpersisted.lock().unwrap();
-        let mut allocated_since_commit = self.allocated_since_commit.lock().unwrap();
-        unpersisted.extend(allocated_since_commit.drain());
-        allocated_since_commit.shrink_to_fit();
+        let drained = allocated_since_commit.lock().unwrap().reset();
+        unpersisted.extend(drained);
         self.storage.write_barrier()?;
 
         let mut state = self.state.lock().unwrap();
@@ -711,7 +791,17 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn rollback_uncommitted_writes(&self) -> Result {
+    pub(crate) fn rollback_uncommitted_writes(
+        &self,
+        allocated_since_commit: &Mutex<PageTrackerPolicy>,
+    ) -> Result {
+        self.rollback_uncommitted_writes_inner(allocated_since_commit)
+    }
+
+    fn rollback_uncommitted_writes_inner(
+        &self,
+        allocated_since_commit: &Mutex<PageTrackerPolicy>,
+    ) -> Result {
         #[cfg(debug_assertions)]
         {
             let dirty_pages = self.open_dirty_pages.lock().unwrap();
@@ -722,8 +812,8 @@ impl TransactionalMemory {
         }
         self.storage.check_io_errors()?;
         let mut state = self.state.lock().unwrap();
-        let mut guard = self.allocated_since_commit.lock().unwrap();
-        for page_number in guard.iter() {
+        let drained = allocated_since_commit.lock().unwrap().reset();
+        for page_number in &drained {
             let region_index = page_number.region;
             state
                 .get_region_tracker_mut()
@@ -744,8 +834,6 @@ impl TransactionalMemory {
             self.storage.invalidate_cache(address.start, len);
             self.storage.cancel_pending_write(address.start, len);
         }
-        guard.clear();
-        guard.shrink_to_fit();
 
         Ok(())
     }
@@ -846,8 +934,16 @@ impl TransactionalMemory {
         Ok(state.header.primary_slot().transaction_id)
     }
 
-    pub(crate) fn free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
-        self.allocated_since_commit.lock().unwrap().remove(&page);
+    pub(crate) fn free(
+        &self,
+        page: PageNumber,
+        allocated_since_commit: &Mutex<PageTrackerPolicy>,
+        allocated: &mut PageTrackerPolicy,
+    ) {
+        allocated_since_commit
+            .lock()
+            .unwrap()
+            .remove_if_present(page);
         self.free_helper(page, allocated);
     }
 
@@ -975,9 +1071,14 @@ impl TransactionalMemory {
     pub(crate) fn free_if_uncommitted(
         &self,
         page: PageNumber,
+        allocated_since_commit: &Mutex<PageTrackerPolicy>,
         allocated: &mut PageTrackerPolicy,
     ) -> bool {
-        if self.allocated_since_commit.lock().unwrap().remove(&page) {
+        if allocated_since_commit
+            .lock()
+            .unwrap()
+            .remove_if_present(page)
+        {
             self.free_helper(page, allocated);
             true
         } else {
@@ -985,20 +1086,15 @@ impl TransactionalMemory {
         }
     }
 
-    // Page has not been committed
-    pub(crate) fn uncommitted(&self, page: PageNumber) -> bool {
-        self.allocated_since_commit.lock().unwrap().contains(&page)
-    }
-
     pub(crate) fn unpersisted(&self, page: PageNumber) -> bool {
         self.unpersisted.lock().unwrap().contains(&page)
     }
 
-    pub(crate) fn allocate_helper<'txn>(
+    fn allocate_helper<'txn>(
         &self,
         allocation_size: usize,
         lowest: bool,
-        transactional: bool,
+        allocated_since_commit: &Mutex<PageTrackerPolicy>,
     ) -> Result<PageMut<'txn>> {
         let required_pages = allocation_size.div_ceil(self.get_page_size());
         let required_order = ceil_log2(required_pages);
@@ -1028,12 +1124,7 @@ impl TransactionalMemory {
             assert!(!self.open_dirty_pages.lock().unwrap().contains(&page_number));
         }
 
-        if transactional {
-            self.allocated_since_commit
-                .lock()
-                .unwrap()
-                .insert(page_number);
-        }
+        allocated_since_commit.lock().unwrap().insert(page_number);
 
         let address_range = page_number.address_range(
             self.page_size.into(),
@@ -1170,24 +1261,26 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn allocate<'txn>(
+    fn allocate<'txn>(
         &self,
         allocation_size: usize,
+        allocated_since_commit: &Mutex<PageTrackerPolicy>,
         allocated: &mut PageTrackerPolicy,
     ) -> Result<PageMut<'txn>> {
-        let result = self.allocate_helper(allocation_size, false, true);
+        let result = self.allocate_helper(allocation_size, false, allocated_since_commit);
         if let Ok(ref page) = result {
             allocated.insert(page.get_page_number());
         }
         result
     }
 
-    pub(crate) fn allocate_lowest<'txn>(
+    fn allocate_lowest<'txn>(
         &self,
         allocation_size: usize,
+        allocated_since_commit: &Mutex<PageTrackerPolicy>,
         allocated: &mut PageTrackerPolicy,
     ) -> Result<PageMut<'txn>> {
-        let result = self.allocate_helper(allocation_size, true, true);
+        let result = self.allocate_helper(allocation_size, true, allocated_since_commit);
         if let Ok(ref page) = result {
             allocated.insert(page.get_page_number());
         }

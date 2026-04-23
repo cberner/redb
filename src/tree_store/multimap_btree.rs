@@ -4,6 +4,7 @@ use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor, LeafPageMut,
 };
 use crate::tree_store::multimap_btree::DynamicCollectionType::{Inline, SubtreeV2};
+use crate::tree_store::page_store::WriteMemory;
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeHeader, BtreeStats, Page, PageHint, PageNumber,
     PageTrackerPolicy, RawBtree, TransactionalMemory,
@@ -204,13 +205,13 @@ pub(super) fn relocate_subtrees(
     root: (PageNumber, Checksum),
     key_size: Option<usize>,
     value_size: Option<usize>,
-    mem: Arc<TransactionalMemory>,
+    write_mem: WriteMemory,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     relocation_map: &HashMap<PageNumber, PageNumber>,
 ) -> Result<(PageNumber, Checksum)> {
-    let old_page = mem.get_page(root.0, PageHint::None)?;
+    let old_page = write_mem.mem().get_page(root.0, PageHint::None)?;
     let mut new_page = if let Some(new_page_number) = relocation_map.get(&root.0) {
-        mem.get_page_mut(*new_page_number)?
+        write_mem.mem().get_page_mut(*new_page_number)?
     } else {
         return Ok(root);
     };
@@ -236,7 +237,7 @@ pub(super) fn relocate_subtrees(
                     let sub_root = collection.as_subtree();
                     let mut tree = UntypedBtreeMut::new(
                         Some(sub_root),
-                        mem.clone(),
+                        write_mem.clone(),
                         freed_pages.clone(),
                         value_size,
                         <() as Value>::fixed_width(),
@@ -260,7 +261,7 @@ pub(super) fn relocate_subtrees(
                         (child, child_checksum),
                         key_size,
                         value_size,
-                        mem.clone(),
+                        write_mem.clone(),
                         freed_pages.clone(),
                         relocation_map,
                     )?;
@@ -276,7 +277,7 @@ pub(super) fn relocate_subtrees(
     // No need to track allocations, because this method is only called during compaction when
     // there can't be any savepoints
     let mut ignore = PageTrackerPolicy::Ignore;
-    if !mem.free_if_uncommitted(old_page_number, &mut ignore) {
+    if !write_mem.free_if_uncommitted(old_page_number, &mut ignore) {
         freed_pages.lock().unwrap().push(old_page_number);
     }
     Ok((new_page_number, DEFERRED))
@@ -288,12 +289,12 @@ pub(super) fn finalize_tree_and_subtree_checksums(
     root: Option<BtreeHeader>,
     key_size: Option<usize>,
     value_size: Option<usize>,
-    mem: Arc<TransactionalMemory>,
+    write_mem: WriteMemory,
 ) -> Result<Option<BtreeHeader>> {
     let freed_pages = Arc::new(Mutex::new(vec![]));
     let mut tree = UntypedBtreeMut::new(
         root,
-        mem.clone(),
+        write_mem.clone(),
         freed_pages.clone(),
         key_size,
         DynamicCollection::<()>::fixed_width_with(value_size),
@@ -306,10 +307,10 @@ pub(super) fn finalize_tree_and_subtree_checksums(
             let collection = <&DynamicCollection<()>>::from_bytes(entry.value());
             if matches!(collection.collection_type(), SubtreeV2) {
                 let sub_root = collection.as_subtree();
-                if mem.uncommitted(sub_root.root) {
+                if write_mem.uncommitted(sub_root.root) {
                     let mut subtree = UntypedBtreeMut::new(
                         Some(sub_root),
-                        mem.clone(),
+                        write_mem.clone(),
                         freed_pages.clone(),
                         value_size,
                         <()>::fixed_width(),
