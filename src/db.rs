@@ -657,18 +657,11 @@ impl Database {
                 txn.abort()?;
             }
 
-            // Double commit to free up the relocated pages for reuse
+            // Second commit is needed to drain the data freed table: the first commit records
+            // the pages relocated by compact_pages() as pending frees, and this one processes
+            // them so the space becomes reusable and the file can be shrunk.
             let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
             txn.set_two_phase_commit(true);
-            // Also shrink the database file by the maximum amount
-            txn.set_shrink_policy(ShrinkPolicy::Maximum);
-            txn.commit().map_err(|e| e.into_storage_error())?;
-            // Triple commit to free up the relocated pages for reuse
-            // TODO: this really shouldn't be necessary, but the data freed tree is a system table
-            // and so free'ing up its pages causes more deletes from the system tree
-            let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-            txn.set_two_phase_commit(true);
-            // Also shrink the database file by the maximum amount
             txn.set_shrink_policy(ShrinkPolicy::Maximum);
             txn.commit().map_err(|e| e.into_storage_error())?;
             let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
