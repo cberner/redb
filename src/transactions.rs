@@ -1496,6 +1496,11 @@ impl WriteTransaction {
             self.two_phase_commit = true;
         }
 
+        // Persist any pages deferred by a prior skip-store commit whose post-commit re-check
+        // caught a racing reader. Flushing now folds them into the current commit's writes so
+        // the standard `process_freed_pages` path can reclaim them once readers permit.
+        self.flush_deferred_data_freed()?;
+
         let (user_root, allocated_pages, data_freed) =
             self.tables.lock().unwrap().table_tree.flush_and_close()?;
 
@@ -1597,6 +1602,37 @@ impl WriteTransaction {
             pagination_counter += 1;
         }
 
+        Ok(())
+    }
+
+    // Persist any pages parked in `deferred_data_freed` by a prior racing commit. Each deferred
+    // entry is written under the transaction id that produced the pages so `process_freed_pages`
+    // applies the standard live-reader gating when it's safe to reclaim them.
+    fn flush_deferred_data_freed(&self) -> Result {
+        let deferred = self.mem.take_deferred_data_freed();
+        if deferred.is_empty() {
+            return Ok(());
+        }
+        let mut system_tables = self.system_tables.lock().unwrap();
+        let mut freed_table = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
+        for (txn_id, mut pages) in deferred {
+            let mut pagination_counter = 0;
+            while !pages.is_empty() {
+                let chunk_size = 400;
+                let buffer_size = PageList::required_bytes(chunk_size);
+                let key = TransactionIdWithPagination {
+                    transaction_id: txn_id.raw_id(),
+                    pagination_id: pagination_counter,
+                };
+                let mut access_guard = freed_table.insert_reserve(&key, buffer_size)?;
+                let len = pages.len();
+                access_guard.as_mut().clear();
+                for page in pages.drain(len - min(len, chunk_size)..) {
+                    access_guard.as_mut().push_back(page);
+                }
+                pagination_counter += 1;
+            }
+        }
         Ok(())
     }
 
@@ -1789,16 +1825,34 @@ impl WriteTransaction {
 
         // Return this transaction's newly-freed data pages to the in-memory allocator so the
         // next write transaction can reuse them. These pages were deliberately NOT stored in
-        // DATA_FREED_TABLE because no earlier reader/savepoint references them. Freeing must
-        // happen AFTER `mem.commit`: during the commit the pages are still reachable from the
-        // previous primary slot, and the allocator state save and allocator-serving routines
-        // could otherwise hand them out for new writes whose content would clobber the pre-
-        // commit data and break a rollback on commit failure. Skipping this branch with
-        // quick-repair (see `commit_inner`) avoids leaking pages on a clean reopen, because
-        // the allocator state saved before `mem.commit` does not reflect these frees.
-        for page in data_freed_post_commit {
-            debug_assert!(!self.mem.unpersisted(page));
-            self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+        // DATA_FREED_TABLE because no earlier reader/savepoint references them at the
+        // `commit_inner` check. Freeing happens AFTER `mem.commit`: during the commit the
+        // pages are still reachable from the previous primary slot, so handing them out for
+        // new writes would clobber the pre-commit data and break a rollback on commit failure.
+        //
+        // Re-check `oldest_live_read_transaction` before freeing: a `begin_read` that raced in
+        // between our initial check and `mem.commit` could have registered at the old primary
+        // and read `data_root_{T-1}`, which still references these pages. Because
+        // `register_read_transaction` holds the tracker state lock across its read of the
+        // primary, any such racing reader is guaranteed to be visible here (same lock, issued
+        // after the racing registration completed). If so, defer the free via the in-memory
+        // queue so the next commit persists them into DATA_FREED_TABLE, where the standard
+        // live-reader gating applies. A clean shutdown or crash in between is safe: deferred
+        // pages are not referenced by any on-disk data root, so full repair reclaims them.
+        if !data_freed_post_commit.is_empty() {
+            let racing_reader = self
+                .transaction_tracker
+                .oldest_live_read_transaction()
+                .is_some_and(|oldest| oldest < self.transaction_id);
+            if racing_reader {
+                self.mem
+                    .defer_data_freed(self.transaction_id, data_freed_post_commit);
+            } else {
+                for page in data_freed_post_commit {
+                    debug_assert!(!self.mem.unpersisted(page));
+                    self.mem.free(page, &mut PageTrackerPolicy::Ignore);
+                }
+            }
         }
 
         Ok(())

@@ -174,6 +174,13 @@ pub(crate) struct TransactionalMemory {
     unpersisted_allocations: Mutex<BTreeMap<TransactionId, PageNumberHashSet>>,
     // Reverse index into `unpersisted_allocations`
     unpersisted_allocation_txn: Mutex<PageNumberHashMap<TransactionId>>,
+    // Pages that a durable commit opted out of persisting into DATA_FREED_TABLE (the skip-store
+    // optimization for issue #829), but where a post-commit re-check caught a reader that had
+    // raced in at the pre-commit primary. The pages are unsafe to free in memory because that
+    // reader may walk them, so they're parked here and written to DATA_FREED_TABLE by the next
+    // commit. Keyed by the transaction id that produced them so `process_freed_pages` can apply
+    // the usual live-reader gating once they're persisted.
+    deferred_data_freed: Mutex<Vec<(TransactionId, Vec<PageNumber>)>>,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
     // The number of PageMut which are outstanding
@@ -331,6 +338,7 @@ impl TransactionalMemory {
             unpersisted: Mutex::new(PageNumberHashSet::default()),
             unpersisted_allocations: Mutex::new(BTreeMap::new()),
             unpersisted_allocation_txn: Mutex::new(PageNumberHashMap::default()),
+            deferred_data_freed: Mutex::new(Vec::new()),
             storage,
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
@@ -974,6 +982,22 @@ impl TransactionalMemory {
     ) -> BTreeMap<TransactionId, PageNumberHashSet> {
         self.unpersisted_allocation_txn.lock().unwrap().clear();
         std::mem::take(&mut *self.unpersisted_allocations.lock().unwrap())
+    }
+
+    // Park `pages` so the next commit can persist them into DATA_FREED_TABLE under `txn_id`.
+    // Used by the skip-store optimization's post-`mem.commit` re-check when a reader raced in.
+    pub(crate) fn defer_data_freed(&self, txn_id: TransactionId, pages: Vec<PageNumber>) {
+        if pages.is_empty() {
+            return;
+        }
+        self.deferred_data_freed
+            .lock()
+            .unwrap()
+            .push((txn_id, pages));
+    }
+
+    pub(crate) fn take_deferred_data_freed(&self) -> Vec<(TransactionId, Vec<PageNumber>)> {
+        std::mem::take(&mut *self.deferred_data_freed.lock().unwrap())
     }
 
     // Returns all unpersisted data-tree pages allocated strictly after `transaction_id`. Used
