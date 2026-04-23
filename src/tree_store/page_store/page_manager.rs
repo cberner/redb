@@ -270,6 +270,9 @@ pub(crate) struct TransactionalMemory {
     unpersisted_allocations: Mutex<BTreeMap<TransactionId, PageNumberHashSet>>,
     // Reverse index into `unpersisted_allocations`
     unpersisted_allocation_txn: Mutex<PageNumberHashMap<TransactionId>>,
+    // Data-tree pages from a durable commit that could not be freed after fsync because a read
+    // transaction raced in while the commit was in progress.
+    deferred_data_freed: Mutex<BTreeMap<TransactionId, Vec<PageNumber>>>,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
     // The number of PageMut which are outstanding
@@ -414,6 +417,7 @@ impl TransactionalMemory {
             unpersisted: Mutex::new(PageNumberHashSet::default()),
             unpersisted_allocations: Mutex::new(BTreeMap::new()),
             unpersisted_allocation_txn: Mutex::new(PageNumberHashMap::default()),
+            deferred_data_freed: Mutex::new(BTreeMap::new()),
             storage,
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
@@ -532,6 +536,9 @@ impl TransactionalMemory {
     pub(crate) fn begin_repair(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         state.allocators = Allocators::new(state.header.layout());
+        // Full repair rebuilds the allocator from roots and freed tables, so any in-memory
+        // deferred frees from a prior racing reader have already been accounted for.
+        self.deferred_data_freed.lock().unwrap().clear();
         #[cfg(debug_assertions)]
         self.allocated_pages.lock().unwrap().clear();
 
@@ -607,17 +614,50 @@ impl TransactionalMemory {
         &self,
         tree: &mut AllocatorStateTreeMut,
         num_regions: u32,
+        pending_free_pages: &[PageNumber],
     ) -> Result<bool> {
-        // Has the number of regions changed since reserve_allocator_state() was called?
-        let state = self.state.lock().unwrap();
-        if num_regions != state.header.layout().num_regions() {
-            return Ok(false);
-        }
+        let (region_bytes, region_tracker_bytes) = {
+            let state = self.state.lock().unwrap();
+            if num_regions != state.header.layout().num_regions() {
+                return Ok(false);
+            }
 
-        for i in 0..num_regions {
-            let region_bytes = &state.allocators.region_allocators[i as usize].to_vec();
+            // Serialize pending frees into the saved quick-repair state without exposing them to
+            // the live allocator until the commit's final fsync has succeeded.
+            let mut modified_allocators = BTreeMap::new();
+            let mut modified_region_tracker = if pending_free_pages.is_empty() {
+                None
+            } else {
+                Some(state.allocators.region_tracker.clone())
+            };
+            for page in pending_free_pages {
+                debug_assert!((page.region as usize) < state.allocators.region_allocators.len());
+                let allocator = modified_allocators.entry(page.region).or_insert_with(|| {
+                    state.allocators.region_allocators[page.region as usize].clone()
+                });
+                allocator.free(page.page_index, page.page_order);
+                modified_region_tracker
+                    .as_mut()
+                    .unwrap()
+                    .mark_free(page.page_order, page.region);
+            }
+
+            let mut region_bytes = Vec::with_capacity(num_regions as usize);
+            for i in 0..num_regions {
+                region_bytes.push(modified_allocators.remove(&i).map_or_else(
+                    || state.allocators.region_allocators[i as usize].to_vec(),
+                    |x| x.to_vec(),
+                ));
+            }
+            let region_tracker_bytes = modified_region_tracker
+                .map_or_else(|| state.allocators.region_tracker.to_vec(), |x| x.to_vec());
+
+            (region_bytes, region_tracker_bytes)
+        };
+
+        for (i, region_bytes) in region_bytes.iter().enumerate() {
             if tree
-                .get(&AllocatorStateKey::Region(i))?
+                .get(&AllocatorStateKey::Region(i.try_into().unwrap()))?
                 .unwrap()
                 .value()
                 .len()
@@ -626,10 +666,12 @@ impl TransactionalMemory {
                 // The allocator state grew too much since we reserved space
                 return Ok(false);
             }
-            tree.insert_inplace(&AllocatorStateKey::Region(i), &region_bytes.as_ref())?;
+            tree.insert_inplace(
+                &AllocatorStateKey::Region(i.try_into().unwrap()),
+                &region_bytes.as_ref(),
+            )?;
         }
 
-        let region_tracker_bytes = state.allocators.region_tracker.to_vec();
         if tree
             .get(&AllocatorStateKey::RegionTracker)?
             .unwrap()
@@ -1016,6 +1058,34 @@ impl TransactionalMemory {
     ) -> BTreeMap<TransactionId, PageNumberHashSet> {
         self.unpersisted_allocation_txn.lock().unwrap().clear();
         std::mem::take(&mut *self.unpersisted_allocations.lock().unwrap())
+    }
+
+    pub(crate) fn defer_data_freed(&self, transaction_id: TransactionId, pages: Vec<PageNumber>) {
+        if pages.is_empty() {
+            return;
+        }
+        self.deferred_data_freed
+            .lock()
+            .unwrap()
+            .entry(transaction_id)
+            .or_default()
+            .extend(pages);
+    }
+
+    pub(crate) fn deferred_data_freed_to_store(&self) -> Vec<(TransactionId, Vec<PageNumber>)> {
+        self.deferred_data_freed
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(transaction_id, pages)| (*transaction_id, pages.clone()))
+            .collect()
+    }
+
+    pub(crate) fn clear_deferred_data_freed(&self, transaction_ids: &[TransactionId]) {
+        let mut deferred = self.deferred_data_freed.lock().unwrap();
+        for transaction_id in transaction_ids {
+            deferred.remove(transaction_id);
+        }
     }
 
     // Returns all unpersisted data-tree pages allocated strictly after `transaction_id`. Used
