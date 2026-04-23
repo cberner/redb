@@ -3,7 +3,9 @@ use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
 use crate::sealed::Sealed;
 use crate::table::ReadOnlyUntypedTable;
-use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
+use crate::transaction_tracker::{
+    SavepointId, TrackerStateGuard, TransactionId, TransactionTracker,
+};
 use crate::tree_store::{
     AllocationPolicy, Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH,
     MAX_VALUE_LENGTH, Page, PageHint, PageListMut, PageNumber, PageTrackerPolicy,
@@ -1505,21 +1507,34 @@ impl WriteTransaction {
         // in-memory allocator right after fsync, keeping the freed tree empty so the pages are
         // available to the next write transaction. If a reader does block, we fall back to the
         // normal persistent bookkeeping.
-        let blocked_by_readers = self
-            .transaction_tracker
+        //
+        // Lock the tracker state to take the snapshot. If we decide to skip the store, we keep
+        // the guard held through `mem.commit` so a concurrent `register_read_transaction` can't
+        // squeeze in at the pre-commit primary between our decision and the fsync that advances
+        // it -- which would leave that reader referencing pages our post-commit free is about
+        // to reclaim. Cloning the `Arc` lets the guard outlive the `&mut self` calls below.
+        let tracker = self.transaction_tracker.clone();
+        let tracker_guard = tracker.lock_state();
+        let blocked_by_readers = tracker_guard
             .oldest_live_read_transaction()
             .is_some_and(|oldest| oldest < self.transaction_id);
         // With quick-repair we need to keep the usual persistent bookkeeping so that a partial
         // commit remains recoverable: if we skipped the store and crashed mid-commit after the
         // allocator state table was partially written, the on-disk metadata could diverge from
         // the pages the aborted transaction still references.
+        let mut tracker_guard = Some(tracker_guard);
         let data_freed_post_commit = if blocked_by_readers
             || matches!(self.durability, InternalDurability::None)
             || self.quick_repair
         {
+            // Store path: we don't need the tracker state lock during the commit, because the
+            // pages stay allocated and tracked through DATA_FREED_TABLE.
+            tracker_guard = None;
             self.store_data_freed_pages(data_freed)?;
             Vec::new()
         } else {
+            // Skip-store path: keep the guard and hand it to `durable_commit`, which drops it
+            // once `mem.commit` has advanced the primary slot.
             data_freed
         };
 
@@ -1530,9 +1545,17 @@ impl WriteTransaction {
         );
         let allocated_pages: Vec<PageNumber> = allocated_pages.into_iter().collect();
         match self.durability {
-            InternalDurability::None => self.non_durable_commit(user_root, allocated_pages)?,
+            InternalDurability::None => {
+                debug_assert!(tracker_guard.is_none());
+                self.non_durable_commit(user_root, allocated_pages)?;
+            }
             InternalDurability::Immediate => {
-                self.durable_commit(user_root, allocated_pages, data_freed_post_commit)?;
+                self.durable_commit(
+                    user_root,
+                    allocated_pages,
+                    data_freed_post_commit,
+                    tracker_guard,
+                )?;
             }
         }
 
@@ -1604,7 +1627,11 @@ impl WriteTransaction {
     // previously unpersisted allocations that are now becoming durable. Must be called AFTER
     // `process_freed_pages` so that pages reclaimed during this commit are already dropped from
     // the in-memory `unpersisted_allocations` map and not written to disk as stale records.
-    fn flush_data_allocated_pages(&self, data_allocated_pages: Vec<PageNumber>) -> Result {
+    fn flush_data_allocated_pages(
+        &self,
+        data_allocated_pages: Vec<PageNumber>,
+        tracker_guard: Option<&TrackerStateGuard<'_>>,
+    ) -> Result {
         // Catch scenarios like a page getting allocated and then deallocated within the same
         // transaction, but errantly left in the allocated pages list.
         #[cfg(debug_assertions)]
@@ -1632,10 +1659,14 @@ impl WriteTransaction {
             data_allocated_pages,
         )?;
 
-        // Purge any transactions that are no longer referenced
-        let oldest = self
-            .transaction_tracker
-            .oldest_savepoint()
+        // Purge any transactions that are no longer referenced. If `tracker_guard` is held
+        // (skip-store optimization path), read through the guard to avoid re-locking the same
+        // mutex and deadlocking.
+        let oldest = tracker_guard
+            .map_or_else(
+                || self.transaction_tracker.oldest_savepoint(),
+                |guard| guard.oldest_savepoint(),
+            )
             .map_or(u64::MAX, |(_, x)| x.raw_id());
         let key = TransactionIdWithPagination {
             transaction_id: oldest,
@@ -1710,16 +1741,20 @@ impl WriteTransaction {
         user_root: Option<BtreeHeader>,
         allocated_pages: Vec<PageNumber>,
         data_freed_post_commit: Vec<PageNumber>,
+        tracker_guard: Option<TrackerStateGuard<'_>>,
     ) -> Result {
-        let free_until_transaction = self
-            .transaction_tracker
-            .oldest_live_read_transaction()
+        let free_until_transaction = tracker_guard
+            .as_ref()
+            .map_or_else(
+                || self.transaction_tracker.oldest_live_read_transaction(),
+                |guard| guard.oldest_live_read_transaction(),
+            )
             .map_or(self.transaction_id, |x| x.next());
         self.process_freed_pages(free_until_transaction)?;
         // Flush allocated pages (including previously unpersisted allocations that are now
         // becoming durable) AFTER process_freed_pages, so that any pages reclaimed here have
         // already been dropped from the in-memory `unpersisted_allocations` map.
-        self.flush_data_allocated_pages(allocated_pages)?;
+        self.flush_data_allocated_pages(allocated_pages, tracker_guard.as_ref())?;
 
         let mut system_tables = self.system_tables.lock().unwrap();
         let system_freed_pages = system_tables.system_freed_pages();
@@ -1776,6 +1811,10 @@ impl WriteTransaction {
             self.two_phase_commit,
             self.shrink_policy,
         )?;
+        // Primary slot is advanced; any reader that registers now pins the new transaction and
+        // cannot observe the pages we're about to free. Release the tracker guard (if held)
+        // before touching anything that needs the tracker state lock.
+        drop(tracker_guard);
 
         // Mark any pending non-durable commits as fully committed.
         self.transaction_tracker.clear_pending_non_durable_commits();
