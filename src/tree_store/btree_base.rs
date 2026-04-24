@@ -1,5 +1,5 @@
-use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory, xxh3_checksum};
-use crate::tree_store::{AllocationPolicy, PageAllocator, PageNumber, PageTrackerPolicy};
+use crate::tree_store::page_store::{Page, PageImpl, PageMut, xxh3_checksum};
+use crate::tree_store::{PageAllocator, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
 use std::borrow::Borrow;
@@ -269,7 +269,7 @@ pub struct AccessGuardMut<'a, V: Value + 'static> {
     len: usize,
     entry_index: usize,
     parent: Option<(PageMut<'a>, usize)>,
-    mem: Arc<TransactionalMemory>,
+    page_allocator: PageAllocator,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
     root_ref: &'a mut BtreeHeader,
     key_width: Option<usize>,
@@ -284,14 +284,14 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
         len: usize,
         entry_index: usize,
         parent: Option<(PageMut<'a>, usize)>,
-        mem: Arc<TransactionalMemory>,
+        page_allocator: PageAllocator,
         allocated: Arc<Mutex<PageTrackerPolicy>>,
         root_ref: &'a mut BtreeHeader,
         key_width: Option<usize>,
     ) -> Self {
-        assert!(mem.uncommitted(page.get_page_number()));
+        assert!(page_allocator.uncommitted(page.get_page_number()));
         if let Some((ref parent_page, _)) = parent {
-            assert!(mem.uncommitted(parent_page.get_page_number()));
+            assert!(page_allocator.uncommitted(parent_page.get_page_number()));
         }
         AccessGuardMut {
             page,
@@ -299,7 +299,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             len,
             entry_index,
             parent,
-            mem,
+            page_allocator,
             allocated,
             root_ref,
             key_width,
@@ -328,9 +328,8 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             mutator.replace(self.entry_index, value_bytes.as_ref());
         } else {
             let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
-            let page_allocator = PageAllocator::new(self.mem.clone(), AllocationPolicy::Default);
             let mut builder = LeafBuilder::new(
-                &page_allocator,
+                &self.page_allocator,
                 &self.allocated,
                 accessor.num_pairs(),
                 self.key_width,
@@ -361,7 +360,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             self.page = new_page;
             let mut allocated = self.allocated.lock().unwrap();
             assert!(
-                self.mem
+                self.page_allocator
                     .free_if_uncommitted(old_page_number, &mut allocated)
             );
         }

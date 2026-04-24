@@ -7,8 +7,8 @@ use crate::tree_store::btree_iters::BtreeExtractIf;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::{
-    AccessGuardMutInPlace, AllPageNumbersBtreeIter, AllocationPolicy, BtreeRangeIter,
-    PageAllocator, PageHint, PageNumber, PageTrackerPolicy,
+    AccessGuardMutInPlace, AllPageNumbersBtreeIter, BtreeRangeIter, PageAllocator, PageHint,
+    PageNumber, PageTrackerPolicy,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result};
@@ -127,7 +127,7 @@ impl UntypedBtree {
 }
 
 pub(super) struct UntypedBtreeMut {
-    mem: Arc<TransactionalMemory>,
+    page_allocator: PageAllocator,
     root: Option<BtreeHeader>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     key_width: Option<usize>,
@@ -137,13 +137,13 @@ pub(super) struct UntypedBtreeMut {
 impl UntypedBtreeMut {
     pub(super) fn new(
         root: Option<BtreeHeader>,
-        mem: Arc<TransactionalMemory>,
+        page_allocator: PageAllocator,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         key_width: Option<usize>,
         value_width: Option<usize>,
     ) -> Self {
         Self {
-            mem,
+            page_allocator,
             root,
             freed_pages,
             key_width,
@@ -164,7 +164,7 @@ impl UntypedBtreeMut {
             length: _,
         }) = root
         {
-            if !self.mem.uncommitted(*p) {
+            if !self.page_allocator.uncommitted(*p) {
                 // root page is clean
                 return Ok(root);
             }
@@ -177,8 +177,8 @@ impl UntypedBtreeMut {
     }
 
     fn finalize_dirty_checksums_helper(&mut self, page_number: PageNumber) -> Result<Checksum> {
-        assert!(self.mem.uncommitted(page_number));
-        let mut page = self.mem.get_page_mut(page_number)?;
+        assert!(self.page_allocator.uncommitted(page_number));
+        let mut page = self.page_allocator.get_page_mut(page_number)?;
 
         match page.memory()[0] {
             LEAF => leaf_checksum(&page, self.key_width, self.value_width),
@@ -187,7 +187,7 @@ impl UntypedBtreeMut {
                 let mut new_children = vec![];
                 for i in 0..accessor.count_children() {
                     let child_page = accessor.child_page(i).unwrap();
-                    if self.mem.uncommitted(child_page) {
+                    if self.page_allocator.uncommitted(child_page) {
                         let new_checksum = self.finalize_dirty_checksums_helper(child_page)?;
                         new_children.push(Some((i, child_page, new_checksum)));
                     } else {
@@ -214,12 +214,12 @@ impl UntypedBtreeMut {
         F: for<'a> Fn(LeafPageMut<'a>) -> Result,
     {
         if let Some(page_number) = self.root.map(|x| x.root) {
-            if !self.mem.uncommitted(page_number) {
+            if !self.page_allocator.uncommitted(page_number) {
                 // root page is clean
                 return Ok(());
             }
 
-            let page = self.mem.get_page_mut(page_number)?;
+            let page = self.page_allocator.get_page_mut(page_number)?;
             match page.memory()[0] {
                 LEAF => {
                     visitor(LeafPageMut::new(page, self.key_width, self.value_width))?;
@@ -239,8 +239,8 @@ impl UntypedBtreeMut {
     where
         F: for<'a> Fn(LeafPageMut<'a>) -> Result,
     {
-        assert!(self.mem.uncommitted(page_number));
-        let page = self.mem.get_page_mut(page_number)?;
+        assert!(self.page_allocator.uncommitted(page_number));
+        let page = self.page_allocator.get_page_mut(page_number)?;
 
         match page.memory()[0] {
             LEAF => {
@@ -250,7 +250,7 @@ impl UntypedBtreeMut {
                 let accessor = BranchAccessor::new(&page, self.key_width);
                 for i in 0..accessor.count_children() {
                     let child_page = accessor.child_page(i).unwrap();
-                    if self.mem.uncommitted(child_page) {
+                    if self.page_allocator.uncommitted(child_page) {
                         self.dirty_leaf_visitor_helper(child_page, visitor)?;
                     }
                 }
@@ -281,9 +281,9 @@ impl UntypedBtreeMut {
         page_number: PageNumber,
         relocation_map: &HashMap<PageNumber, PageNumber>,
     ) -> Result<Option<(PageNumber, Checksum)>> {
-        let old_page = self.mem.get_page(page_number, PageHint::None)?;
+        let old_page = self.page_allocator.get_page(page_number, PageHint::None)?;
         let mut new_page = if let Some(new_page_number) = relocation_map.get(&page_number) {
-            self.mem.get_page_mut(*new_page_number)?
+            self.page_allocator.get_page_mut(*new_page_number)?
         } else {
             return Ok(None);
         };
@@ -313,7 +313,10 @@ impl UntypedBtreeMut {
         // No need to track allocations, because this method is only called during compaction when
         // there can't be any savepoints
         let mut ignore = PageTrackerPolicy::Ignore;
-        if !self.mem.free_if_uncommitted(page_number, &mut ignore) {
+        if !self
+            .page_allocator
+            .free_if_uncommitted(page_number, &mut ignore)
+        {
             freed_pages.push(page_number);
         }
 
@@ -352,14 +355,10 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         }
     }
 
-    pub(crate) fn set_allocation_policy(&mut self, policy: AllocationPolicy) {
-        self.page_allocator = PageAllocator::new(self.page_allocator.mem().clone(), policy);
-    }
-
     pub(crate) fn finalize_dirty_checksums(&mut self) -> Result<Option<BtreeHeader>> {
         let mut tree = UntypedBtreeMut::new(
             self.get_root(),
-            self.page_allocator.mem().clone(),
+            self.page_allocator.clone(),
             self.freed_pages.clone(),
             K::fixed_width(),
             V::fixed_width(),
@@ -404,7 +403,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     ) -> Result<bool> {
         let mut tree = UntypedBtreeMut::new(
             self.get_root(),
-            self.page_allocator.mem().clone(),
+            self.page_allocator.clone(),
             self.freed_pages.clone(),
             K::fixed_width(),
             V::fixed_width(),
@@ -555,19 +554,18 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
         if let Some(ref mut root) = self.root {
             let key_bytes = K::as_bytes(key);
             let query = key_bytes.as_ref();
-            let mem = self.page_allocator.mem();
-            let page_mut = if mem.uncommitted(root.root) {
-                mem.get_page_mut(root.root)?
+            let page_mut = if self.page_allocator.uncommitted(root.root) {
+                self.page_allocator.get_page_mut(root.root)?
             } else {
                 let mut freed_pages = self.freed_pages.lock().unwrap();
                 let mut allocated = self.allocated_pages.lock().unwrap();
                 let required: usize = root
                     .root
-                    .page_size_bytes(mem.get_page_size().try_into().unwrap())
+                    .page_size_bytes(self.page_allocator.get_page_size().try_into().unwrap())
                     .try_into()
                     .unwrap();
                 let mut new_page = self.page_allocator.allocate(required, &mut allocated)?;
-                let old_page = mem.get_page(root.root, PageHint::None)?;
+                let old_page = self.page_allocator.get_page(root.root, PageHint::None)?;
                 new_page.memory_mut().copy_from_slice(old_page.memory());
                 drop(old_page);
                 freed_pages.push(root.root);
@@ -600,7 +598,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                         end - start,
                         entry_index,
                         parent,
-                        self.page_allocator.mem().clone(),
+                        self.page_allocator.clone(),
                         self.allocated_pages.clone(),
                         self.root.as_mut().unwrap(),
                         K::fixed_width(),
@@ -615,18 +613,18 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
                     let accessor = BranchAccessor::new(&page, K::fixed_width());
                     accessor.child_for_key::<K>(query)
                 };
-                let mem = self.page_allocator.mem();
-                let child_page_mut = if mem.uncommitted(child_page) {
-                    mem.get_page_mut(child_page)?
+                let child_page_mut = if self.page_allocator.uncommitted(child_page) {
+                    self.page_allocator.get_page_mut(child_page)?
                 } else {
                     let mut freed_pages = self.freed_pages.lock().unwrap();
                     let mut allocated = self.allocated_pages.lock().unwrap();
                     let required: usize = child_page
-                        .page_size_bytes(mem.get_page_size().try_into().unwrap())
+                        .page_size_bytes(self.page_allocator.get_page_size().try_into().unwrap())
                         .try_into()
                         .unwrap();
                     let mut new_page = self.page_allocator.allocate(required, &mut allocated)?;
-                    let old_child_page = mem.get_page(child_page, PageHint::None)?;
+                    let old_child_page =
+                        self.page_allocator.get_page(child_page, PageHint::None)?;
                     new_page
                         .memory_mut()
                         .copy_from_slice(old_child_page.memory());
