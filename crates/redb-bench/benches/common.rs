@@ -5,7 +5,7 @@ use rocksdb::{
 };
 use rusqlite::{Connection, Statement, Transaction};
 use std::fs::File;
-use std::ops::Bound;
+use std::ops::{Bound, RangeBounds};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -325,6 +325,41 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
     );
     results.push(("removals".to_string(), ResultType::Duration(duration)));
 
+    // Drain benchmark: delete every entry in the table, commit the transaction, and then
+    // repopulate with the same number of random entries so downstream phases (uncompacted
+    // size, compaction) see a table of similar shape.
+    let start = Instant::now();
+    let drained = {
+        let mut txn = connection.write_transaction();
+        let mut inserter = txn.get_inserter();
+        let removed = inserter.drain(..).unwrap();
+        drop(inserter);
+        txn.commit().unwrap();
+        removed
+    };
+    let end = Instant::now();
+    let duration = end - start;
+    println!(
+        "{}: Drained {} items in {}ms",
+        T::db_type_name(),
+        drained,
+        duration.as_millis()
+    );
+    results.push(("drain".to_string(), ResultType::Duration(duration)));
+
+    // Repopulate with `drained` fresh random entries so subsequent phases operate on a
+    // table comparable in size to the pre-drain state.
+    {
+        let mut txn = connection.write_transaction();
+        let mut inserter = txn.get_inserter();
+        for _ in 0..drained {
+            let (key, value) = random_pair(&mut rng);
+            inserter.insert(&key, &value).unwrap();
+        }
+        drop(inserter);
+        txn.commit().unwrap();
+    }
+
     let uncompacted_size = database_size(path);
     results.push((
         "uncompacted size".to_string(),
@@ -442,6 +477,11 @@ pub trait BenchInserter {
 
     #[allow(clippy::result_unit_err)]
     fn remove(&mut self, key: &[u8]) -> Result<(), ()>;
+
+    // Removes every entry whose key falls in the given byte range. Returns the number of
+    // entries removed.
+    #[allow(clippy::result_unit_err)]
+    fn drain<'a>(&mut self, range: impl RangeBounds<&'a [u8]> + 'a) -> Result<u64, ()>;
 }
 
 pub trait BenchReadTransaction {
@@ -654,6 +694,19 @@ impl BenchInserter for RedbBenchInserter<'_> {
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
         self.table.remove(key).map(|_| ()).map_err(|_| ())
     }
+
+    fn drain<'a>(&mut self, range: impl RangeBounds<&'a [u8]> + 'a) -> Result<u64, ()> {
+        let iter = self
+            .table
+            .extract_from_if(range, |_, _| true)
+            .map_err(|_| ())?;
+        let mut count = 0u64;
+        for entry in iter {
+            entry.map_err(|_| ())?;
+            count += 1;
+        }
+        Ok(count)
+    }
 }
 
 pub struct SledBenchDatabase<'a> {
@@ -825,6 +878,19 @@ impl BenchInserter for SledBenchInserter<'_> {
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
         self.db.remove(key).map(|_| ()).map_err(|_| ())
     }
+
+    fn drain<'a>(&mut self, range: impl RangeBounds<&'a [u8]> + 'a) -> Result<u64, ()> {
+        let mut keys: Vec<sled::IVec> = Vec::new();
+        for entry in self.db.range(range) {
+            let (k, _v) = entry.map_err(|_| ())?;
+            keys.push(k);
+        }
+        let count = keys.len() as u64;
+        for key in keys {
+            self.db.remove(&key).map_err(|_| ())?;
+        }
+        Ok(count)
+    }
 }
 
 pub struct HeedBenchDatabase {
@@ -991,6 +1057,18 @@ impl BenchInserter for HeedBenchInserter<'_, '_> {
 
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
         self.db.delete(self.txn, key).map(|_| ()).map_err(|_| ())
+    }
+
+    fn drain<'a>(&mut self, range: impl RangeBounds<&'a [u8]> + 'a) -> Result<u64, ()> {
+        // heed has a native cursor-based delete_range; use it directly so the benchmark
+        // reflects LMDB's best effort, not a user-space iterate + delete loop.
+        let heed_range: (Bound<&[u8]>, Bound<&[u8]>) =
+            (range.start_bound().cloned(), range.end_bound().cloned());
+        let deleted = self
+            .db
+            .delete_range(self.txn, &heed_range)
+            .map_err(|_| ())?;
+        Ok(deleted as u64)
     }
 }
 
@@ -1197,6 +1275,46 @@ impl BenchInserter for RocksdbBenchInserter<'_, '_> {
             self.counter = 0;
         }
         self.txn.txn.delete(key).map_err(|_| ())
+    }
+
+    fn drain<'a>(&mut self, range: impl RangeBounds<&'a [u8]> + 'a) -> Result<u64, ()> {
+        // RocksDB's Transaction API doesn't support delete_range, so we iterate and delete.
+        // `IteratorMode::From(s, Forward)` seeks to the first key >= s, so we only need to
+        // filter out an exact match with an excluded lower bound (which, if present, can
+        // only be the very first key yielded).
+        let start_mode = match range.start_bound() {
+            Bound::Included(s) | Bound::Excluded(s) => IteratorMode::From(s, Direction::Forward),
+            Bound::Unbounded => IteratorMode::Start,
+        };
+        let excluded_start: Option<&[u8]> = match range.start_bound() {
+            Bound::Excluded(s) => Some(*s),
+            _ => None,
+        };
+        let end_bound: Bound<&[u8]> = range.end_bound().cloned();
+        let mut keys: Vec<Box<[u8]>> = Vec::new();
+        {
+            let iter = self.txn.txn.iterator(start_mode);
+            for entry in iter {
+                let (k, _v) = entry.map_err(|_| ())?;
+                if matches!(excluded_start, Some(s) if k.as_ref() == s) {
+                    continue;
+                }
+                let past_end = match end_bound {
+                    Bound::Included(e) => k.as_ref() > e,
+                    Bound::Excluded(e) => k.as_ref() >= e,
+                    Bound::Unbounded => false,
+                };
+                if past_end {
+                    break;
+                }
+                keys.push(k);
+            }
+        }
+        let count = keys.len() as u64;
+        for key in &keys {
+            self.remove(key)?;
+        }
+        Ok(count)
     }
 }
 
@@ -1449,6 +1567,22 @@ impl BenchInserter for FjallBenchInserter<'_, '_> {
         self.txn.remove(self.part, key);
         Ok(())
     }
+
+    fn drain<'a>(&mut self, range: impl RangeBounds<&'a [u8]> + 'a) -> Result<u64, ()> {
+        let mut keys: Vec<fjall::Slice> = Vec::new();
+        {
+            let iter = self.txn.range(self.part, range);
+            for entry in iter {
+                let (k, _v) = entry.map_err(|_| ())?;
+                keys.push(k);
+            }
+        }
+        let count = keys.len() as u64;
+        for key in keys {
+            self.txn.remove(self.part, key);
+        }
+        Ok(count)
+    }
 }
 
 pub struct SqliteBenchDatabase {
@@ -1563,6 +1697,43 @@ impl BenchInserter for SqliteBenchInserter<'_, '_> {
             .execute("DELETE FROM kv WHERE key = ?", [key])
             .map(|_| ())
             .map_err(|_| ())
+    }
+
+    fn drain<'a>(&mut self, range: impl RangeBounds<&'a [u8]> + 'a) -> Result<u64, ()> {
+        let mut where_clauses: Vec<&str> = Vec::new();
+        let mut params: Vec<&[u8]> = Vec::new();
+        match range.start_bound() {
+            Bound::Included(s) => {
+                where_clauses.push("key >= ?");
+                params.push(s);
+            }
+            Bound::Excluded(s) => {
+                where_clauses.push("key > ?");
+                params.push(s);
+            }
+            Bound::Unbounded => {}
+        }
+        match range.end_bound() {
+            Bound::Included(e) => {
+                where_clauses.push("key <= ?");
+                params.push(e);
+            }
+            Bound::Excluded(e) => {
+                where_clauses.push("key < ?");
+                params.push(e);
+            }
+            Bound::Unbounded => {}
+        }
+        let sql = if where_clauses.is_empty() {
+            "DELETE FROM kv".to_string()
+        } else {
+            format!("DELETE FROM kv WHERE {}", where_clauses.join(" AND "))
+        };
+        let deleted = self
+            .txn
+            .execute(&sql, rusqlite::params_from_iter(params))
+            .map_err(|_| ())?;
+        Ok(deleted as u64)
     }
 }
 
