@@ -23,7 +23,6 @@ use std::collections::HashSet;
 use std::convert::TryInto;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
-#[cfg(debug_assertions)]
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -82,21 +81,75 @@ pub(crate) enum AllocationPolicy {
     Lowest,
 }
 
-impl AllocationPolicy {
-    // TODO: all callers should go through this helper rather than calling
-    // `TransactionalMemory::allocate` / `allocate_lowest` directly; once
-    // that's done those methods can be file-private and only reachable via
-    // `AllocationPolicy`.
+/// Per-write-transaction handle through which btree mutation code allocates
+/// and frees pages. Bundles the shared `TransactionalMemory` with the write
+/// transaction's `AllocationPolicy`.
+#[derive(Clone)]
+pub(crate) struct PageAllocator {
+    mem: Arc<TransactionalMemory>,
+    policy: AllocationPolicy,
+}
+
+impl PageAllocator {
+    pub(crate) fn new(mem: Arc<TransactionalMemory>, policy: AllocationPolicy) -> Self {
+        Self { mem, policy }
+    }
+
+    // TODO: migrate remaining callers off of this and make it private. Btree
+    // mutation code should interact with `TransactionalMemory` exclusively
+    // through `PageAllocator`.
+    pub(crate) fn mem(&self) -> &Arc<TransactionalMemory> {
+        &self.mem
+    }
+
     pub(crate) fn allocate<'a>(
-        self,
-        mem: &TransactionalMemory,
-        allocation_size: usize,
+        &self,
+        size: usize,
         allocated: &mut PageTrackerPolicy,
     ) -> Result<PageMut<'a>> {
-        match self {
-            AllocationPolicy::Default => mem.allocate(allocation_size, allocated),
-            AllocationPolicy::Lowest => mem.allocate_lowest(allocation_size, allocated),
+        match self.policy {
+            AllocationPolicy::Default => self.mem.allocate(size, allocated),
+            AllocationPolicy::Lowest => self.mem.allocate_lowest(size, allocated),
         }
+    }
+
+    // Always allocates at the lowest free page, ignoring `self.policy`. Used
+    // by compaction's probe loop where the point is specifically to test
+    // whether a page can land below its current position.
+    pub(crate) fn allocate_lowest<'a>(
+        &self,
+        size: usize,
+        allocated: &mut PageTrackerPolicy,
+    ) -> Result<PageMut<'a>> {
+        self.mem.allocate_lowest(size, allocated)
+    }
+
+    pub(crate) fn free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
+        self.mem.free(page, allocated);
+    }
+
+    pub(crate) fn free_if_uncommitted(
+        &self,
+        page: PageNumber,
+        allocated: &mut PageTrackerPolicy,
+    ) -> bool {
+        self.mem.free_if_uncommitted(page, allocated)
+    }
+
+    pub(crate) fn uncommitted(&self, page: PageNumber) -> bool {
+        self.mem.uncommitted(page)
+    }
+
+    pub(crate) fn get_page(&self, page_number: PageNumber, hint: PageHint) -> Result<PageImpl> {
+        self.mem.get_page(page_number, hint)
+    }
+
+    pub(crate) fn get_page_mut<'a>(&self, page_number: PageNumber) -> Result<PageMut<'a>> {
+        self.mem.get_page_mut(page_number)
+    }
+
+    pub(crate) fn get_page_size(&self) -> usize {
+        self.mem.get_page_size()
     }
 }
 
@@ -1170,7 +1223,7 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn allocate<'txn>(
+    fn allocate<'txn>(
         &self,
         allocation_size: usize,
         allocated: &mut PageTrackerPolicy,
@@ -1182,7 +1235,7 @@ impl TransactionalMemory {
         result
     }
 
-    pub(crate) fn allocate_lowest<'txn>(
+    fn allocate_lowest<'txn>(
         &self,
         allocation_size: usize,
         allocated: &mut PageTrackerPolicy,

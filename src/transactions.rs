@@ -6,7 +6,7 @@ use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllocationPolicy, Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH,
-    MAX_VALUE_LENGTH, Page, PageHint, PageListMut, PageNumber, PageTrackerPolicy,
+    MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageListMut, PageNumber, PageTrackerPolicy,
     SerializedSavepoint, ShrinkPolicy, TableTree, TableTreeMut, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
@@ -390,9 +390,8 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
         table_root: Option<BtreeHeader>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        page_allocator: PageAllocator,
         namespace: &'s mut SystemNamespace<'db>,
-        allocation_policy: AllocationPolicy,
     ) -> SystemTable<'db, 's, K, V> {
         // No need to track allocations in the system tree. Savepoint restoration only relies on
         // freeing in the data tree
@@ -403,10 +402,9 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
             tree: BtreeMut::new(
                 table_root,
                 guard.clone(),
-                mem,
+                page_allocator,
                 freed_pages,
                 ignore,
-                allocation_policy,
             ),
             transaction_guard: guard,
         }
@@ -512,7 +510,7 @@ impl<'db> SystemNamespace<'db> {
     fn new(
         root_page: Option<BtreeHeader>,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        page_allocator: PageAllocator,
     ) -> Self {
         // No need to track allocations in the system tree. Savepoint restoration only relies on
         // freeing in the data tree
@@ -522,10 +520,9 @@ impl<'db> SystemNamespace<'db> {
             table_tree: TableTreeMut::new(
                 root_page,
                 guard.clone(),
-                mem,
+                page_allocator,
                 freed_pages.clone(),
                 ignore,
-                AllocationPolicy::Default,
             ),
             freed_pages,
             transaction_guard: guard.clone(),
@@ -549,15 +546,14 @@ impl<'db> SystemNamespace<'db> {
             })?;
         transaction.dirty.store(true, Ordering::Release);
 
-        let allocation_policy = self.table_tree.allocation_policy();
+        let page_allocator = self.table_tree.page_allocator().clone();
         Ok(SystemTable::new(
             definition.name(),
             root,
             self.freed_pages.clone(),
             self.transaction_guard.clone(),
-            transaction.mem.clone(),
+            page_allocator,
             self,
-            allocation_policy,
         ))
     }
 
@@ -583,19 +579,18 @@ impl TableNamespace<'_> {
     fn new(
         root_page: Option<BtreeHeader>,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        page_allocator: PageAllocator,
     ) -> Self {
         let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
         let freed_pages = Arc::new(Mutex::new(vec![]));
         let table_tree = TableTreeMut::new(
             root_page,
             guard,
-            mem,
+            page_allocator,
             // Committed pages which are no longer reachable and will be queued for free'ing
             // These are separated from the system freed pages
             freed_pages.clone(),
             allocated.clone(),
-            AllocationPolicy::Default,
         );
         Self {
             open_tables: HashMap::default(),
@@ -655,9 +650,8 @@ impl TableNamespace<'_> {
             length,
             self.freed_pages.clone(),
             self.allocated_pages.clone(),
-            transaction.mem.clone(),
+            self.table_tree.page_allocator().clone(),
             transaction,
-            self.table_tree.allocation_policy(),
         ))
     }
 
@@ -677,9 +671,8 @@ impl TableNamespace<'_> {
             root,
             self.freed_pages.clone(),
             self.allocated_pages.clone(),
-            transaction.mem.clone(),
+            self.table_tree.page_allocator().clone(),
             transaction,
-            self.table_tree.allocation_policy(),
         ))
     }
 
@@ -863,8 +856,9 @@ impl WriteTransaction {
         let root_page = mem.get_data_root();
         let system_page = mem.get_system_root();
 
-        let tables = TableNamespace::new(root_page, guard.clone(), mem.clone());
-        let system_tables = SystemNamespace::new(system_page, guard.clone(), mem.clone());
+        let page_allocator = PageAllocator::new(mem.clone(), AllocationPolicy::Default);
+        let tables = TableNamespace::new(root_page, guard.clone(), page_allocator.clone());
+        let system_tables = SystemNamespace::new(system_page, guard.clone(), page_allocator);
 
         Ok(Self {
             transaction_tracker,
@@ -1840,15 +1834,16 @@ impl WriteTransaction {
         let system_table_tree = &mut system_tables.table_tree;
         system_table_tree.highest_index_pages(MAX_PAGES_PER_COMPACTION, &mut highest_pages)?;
 
+        let page_allocator = table_tree.page_allocator().clone();
+
         // Calculate how many of them can be relocated to lower pages, starting from the last page
         let mut relocation_map = HashMap::new();
         for path in highest_pages.into_values().rev() {
             if relocation_map.contains_key(&path.page_number()) {
                 continue;
             }
-            let old_page = self.mem.get_page(path.page_number(), PageHint::None)?;
-            let mut new_page = self
-                .mem
+            let old_page = page_allocator.get_page(path.page_number(), PageHint::None)?;
+            let mut new_page = page_allocator
                 .allocate_lowest(old_page.memory().len(), &mut PageTrackerPolicy::Ignore)?;
             let new_page_number = new_page.get_page_number();
             // We have to copy at least the page type into the new page.
@@ -1862,8 +1857,8 @@ impl WriteTransaction {
                     if relocation_map.contains_key(parent) {
                         continue;
                     }
-                    let old_parent = self.mem.get_page(*parent, PageHint::None)?;
-                    let mut new_page = self.mem.allocate_lowest(
+                    let old_parent = page_allocator.get_page(*parent, PageHint::None)?;
+                    let mut new_page = page_allocator.allocate_lowest(
                         old_parent.memory().len(),
                         &mut PageTrackerPolicy::Ignore,
                     )?;
@@ -1875,8 +1870,7 @@ impl WriteTransaction {
                     relocation_map.insert(*parent, new_page_number);
                 }
             } else {
-                self.mem
-                    .free(new_page_number, &mut PageTrackerPolicy::Ignore);
+                page_allocator.free(new_page_number, &mut PageTrackerPolicy::Ignore);
                 break;
             }
         }
