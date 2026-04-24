@@ -3427,3 +3427,172 @@ fn multimap_table_definition_new_panics_on_empty_name() {
     let name = String::new();
     let _def: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new(&name);
 }
+
+// Regression tests for issue #1072: dropping a `Database` while a transaction
+// derived from it is still alive used to deadlock, because `Database::drop`
+// called `ensure_allocator_state_table_and_trim()` -> `begin_write()`, which
+// blocked on a condvar waiting for the outstanding write slot to be released.
+// Each scenario below runs on a worker thread with a 10s timeout so a
+// regression fails the test instead of hanging CI.
+mod drop_database_with_outstanding_transactions {
+    use super::*;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    const TABLE: TableDefinition<u32, u32> = TableDefinition::new("deadlock_regression");
+    const DEADLOCK_TIMEOUT: Duration = Duration::from_secs(10);
+
+    fn run_with_timeout<F>(body: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            body();
+            let _ = tx.send(());
+        });
+        match rx.recv_timeout(DEADLOCK_TIMEOUT) {
+            Ok(()) => handle
+                .join()
+                .expect("worker thread panicked after signaling completion"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("deadlock detected: worker did not finish within {DEADLOCK_TIMEOUT:?}");
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                handle.join().expect("worker thread panicked");
+                panic!("worker dropped the sender without signaling completion");
+            }
+        }
+    }
+
+    // Reproduction of the exact scenario in issue #1072: a helper function
+    // owns a `Database` and returns a `WriteTransaction` derived from it.
+    // The caller commits afterwards. Before the fix this deadlocked inside
+    // the helper's `Database::drop`.
+    #[test]
+    fn returning_write_txn_from_function_does_not_deadlock() {
+        let tmpfile = create_tempfile();
+        let path = tmpfile.path().to_path_buf();
+
+        run_with_timeout(move || {
+            fn begin_from_owned_db(path: &std::path::Path) -> redb::WriteTransaction {
+                let db = Database::create(path).unwrap();
+                db.begin_write().unwrap()
+                // `db` is dropped here while `wtxn` is still alive.
+            }
+
+            let wtxn = begin_from_owned_db(&path);
+            {
+                let mut table = wtxn.open_table(TABLE).unwrap();
+                table.insert(&1u32, &100u32).unwrap();
+            }
+            wtxn.commit().unwrap();
+
+            let db = Database::open(&path).unwrap();
+            let rtxn = db.begin_read().unwrap();
+            let table = rtxn.open_table(TABLE).unwrap();
+            assert_eq!(table.get(&1u32).unwrap().unwrap().value(), 100);
+        });
+    }
+
+    // Drop `Database` first, then commit the outstanding write afterwards.
+    // The commit must succeed and the data must be visible on reopen.
+    #[test]
+    fn drop_database_before_write_txn_commits() {
+        let tmpfile = create_tempfile();
+        let path = tmpfile.path().to_path_buf();
+
+        run_with_timeout(move || {
+            let db = Database::create(&path).unwrap();
+            let wtxn = db.begin_write().unwrap();
+            {
+                let mut table = wtxn.open_table(TABLE).unwrap();
+                table.insert(&7u32, &42u32).unwrap();
+            }
+            drop(db);
+            wtxn.commit().unwrap();
+
+            let db = Database::open(&path).unwrap();
+            let rtxn = db.begin_read().unwrap();
+            let table = rtxn.open_table(TABLE).unwrap();
+            assert_eq!(table.get(&7u32).unwrap().unwrap().value(), 42);
+        });
+    }
+
+    // Drop `Database` first, then drop the write transaction without
+    // committing. The database must still close cleanly.
+    #[test]
+    fn drop_database_before_write_txn_aborts() {
+        let tmpfile = create_tempfile();
+        let path = tmpfile.path().to_path_buf();
+
+        // Seed the database with some committed state so we can verify the
+        // aborted transaction's changes are absent after reopen.
+        {
+            let db = Database::create(&path).unwrap();
+            let wtxn = db.begin_write().unwrap();
+            {
+                let mut table = wtxn.open_table(TABLE).unwrap();
+                table.insert(&1u32, &1u32).unwrap();
+            }
+            wtxn.commit().unwrap();
+        }
+
+        run_with_timeout(move || {
+            let db = Database::open(&path).unwrap();
+            let wtxn = db.begin_write().unwrap();
+            {
+                let mut table = wtxn.open_table(TABLE).unwrap();
+                table.insert(&2u32, &2u32).unwrap();
+            }
+            drop(db);
+            drop(wtxn); // aborts without committing
+
+            let db = Database::open(&path).unwrap();
+            let rtxn = db.begin_read().unwrap();
+            let table = rtxn.open_table(TABLE).unwrap();
+            assert_eq!(table.get(&1u32).unwrap().unwrap().value(), 1);
+            assert!(table.get(&2u32).unwrap().is_none());
+        });
+    }
+
+    // Dropping `Database` while a read transaction is alive must not
+    // deadlock. Reads do not keep the database alive, so subsequent
+    // operations on the read transaction return `DatabaseClosed` when the
+    // read goes to the backend. (`set_cache_size(0)` ensures that, matching
+    // the pattern in `header::test::close_on_drop`.)
+    #[test]
+    fn drop_database_before_read_txn() {
+        let tmpfile = create_tempfile();
+        let path = tmpfile.path().to_path_buf();
+
+        {
+            let db = Database::builder().set_cache_size(0).create(&path).unwrap();
+            let wtxn = db.begin_write().unwrap();
+            {
+                let mut table = wtxn.open_table(TABLE).unwrap();
+                table.insert(&5u32, &55u32).unwrap();
+            }
+            wtxn.commit().unwrap();
+        }
+
+        run_with_timeout(move || {
+            let db = Database::builder().set_cache_size(0).open(&path).unwrap();
+            let rtxn = db.begin_read().unwrap();
+            drop(db);
+            let err = rtxn.open_table(TABLE).err().expect("expected error");
+            assert!(
+                matches!(err, TableError::Storage(StorageError::DatabaseClosed)),
+                "expected DatabaseClosed, got: {err:?}"
+            );
+            drop(rtxn);
+
+            // The database closed cleanly (no repair required), and reopens.
+            let db = Database::open(&path).unwrap();
+            let rtxn = db.begin_read().unwrap();
+            let table = rtxn.open_table(TABLE).unwrap();
+            assert_eq!(table.get(&5u32).unwrap().unwrap().value(), 55);
+        });
+    }
+}

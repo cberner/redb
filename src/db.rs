@@ -354,6 +354,11 @@ pub trait ReadableDatabase {
     ///
     /// Returns a [`ReadTransaction`] which may be used to read from the database. Read transactions
     /// may exist concurrently with writes
+    ///
+    /// For [`Database`] instances, dropping the database while the returned transaction is still
+    /// alive is safe but causes subsequent operations on the transaction to return
+    /// [`StorageError::DatabaseClosed`]. See the "Lifetime of transactions" section in
+    /// [`Database`] for details.
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError>;
 
     /// Information regarding the usage of the in-memory cache
@@ -481,6 +486,18 @@ impl ReadOnlyDatabase {
 /// Multiple reads may be performed concurrently, with each other, and with writes. Only a single write
 /// may be in progress at a time.
 ///
+/// # Lifetime of transactions
+///
+/// A [`WriteTransaction`] keeps the underlying storage alive: dropping the
+/// `Database` while a `WriteTransaction` is still in flight is safe (it
+/// does not deadlock), and the database is flushed and closed only when
+/// the last `WriteTransaction` is committed or dropped.
+///
+/// A [`ReadTransaction`], by contrast, does not keep the storage alive. If
+/// the `Database` is dropped while a read transaction is alive, subsequent
+/// operations on that transaction return [`StorageError::DatabaseClosed`].
+/// See issue #1072.
+///
 /// # Examples
 ///
 /// Basic usage:
@@ -507,20 +524,81 @@ impl ReadOnlyDatabase {
 /// # }
 /// ```
 pub struct Database {
+    shutdown: Arc<DatabaseShutdown>,
+}
+
+/// Owns the database's flush-and-close responsibilities. Held via `Arc` by the
+/// [`Database`] and by every transaction derived from it. When the last
+/// reference drops -- i.e. after the `Database` and all its transactions have
+/// been dropped, in any order -- the `Drop` impl runs the quick-repair commit
+/// and closes the underlying storage. This resolves the deadlock that would
+/// otherwise occur if `Database::drop` tried to start a write transaction
+/// while the user still held an outstanding `WriteTransaction`.
+pub(crate) struct DatabaseShutdown {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
 }
 
+impl DatabaseShutdown {
+    // Build a quick-repair commit that updates the allocator state table.
+    // Constructs the `WriteTransaction` directly (rather than going through
+    // `Database::begin_write`, which is unreachable from here) so it carries
+    // `_shutdown: None` -- otherwise committing it would decrement our own
+    // Arc from inside `DatabaseShutdown::drop`.
+    fn ensure_allocator_state_table_and_trim(&self) -> Result<(), Error> {
+        #[cfg(feature = "logging")]
+        debug!("Writing allocator state table");
+        self.mem.check_io_errors()?;
+        let guard = TransactionGuard::new_write(
+            self.transaction_tracker.start_write_transaction(),
+            self.transaction_tracker.clone(),
+        );
+        // If compact() left no free pages, the default allocator lands this
+        // commit's writes at high page indices (see `AllocationPolicy::Lowest`)
+        // and try_shrink can't reclaim the growth. See issue #1165.
+        let mut tx = WriteTransaction::new(
+            guard,
+            self.transaction_tracker.clone(),
+            self.mem.clone(),
+            AllocationPolicy::Lowest,
+            None,
+        )?;
+        tx.set_quick_repair(true);
+        tx.disable_post_commit_free();
+        tx.set_shrink_policy(ShrinkPolicy::Maximum);
+        tx.commit()?;
+
+        Ok(())
+    }
+}
+
+impl Drop for DatabaseShutdown {
+    fn drop(&mut self) {
+        if !thread::panicking() && self.ensure_allocator_state_table_and_trim().is_err() {
+            #[cfg(feature = "logging")]
+            warn!("Failed to write allocator state table. Repair may be required at restart.");
+        }
+
+        if self.mem.close().is_err() {
+            #[cfg(feature = "logging")]
+            warn!("Failed to flush database file. Repair may be required at restart.");
+        }
+    }
+}
+
 impl ReadableDatabase for Database {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
-        let guard = TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
+        let guard = TransactionGuard::allocate_read(
+            self.shutdown.transaction_tracker.clone(),
+            &self.shutdown.mem,
+        )?;
         #[cfg(feature = "logging")]
         debug!("Beginning read transaction id={:?}", guard.id());
         ReadTransaction::new(self.get_memory(), guard)
     }
 
     fn cache_stats(&self) -> CacheStats {
-        self.mem.cache_stats()
+        self.shutdown.mem.cache_stats()
     }
 }
 
@@ -539,7 +617,7 @@ impl Database {
     }
 
     pub(crate) fn get_memory(&self) -> Arc<TransactionalMemory> {
-        self.mem.clone()
+        self.shutdown.mem.clone()
     }
 
     pub(crate) fn verify_primary_checksums(mem: Arc<TransactionalMemory>) -> Result<bool> {
@@ -578,25 +656,29 @@ impl Database {
     /// Returns [`DatabaseError::TransactionInProgress`] if any read or write transaction is still
     /// alive when this method is called.
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
-        let allocator_hash = self.mem.allocator_hash();
-        let mem = Arc::get_mut(&mut self.mem).ok_or(DatabaseError::TransactionInProgress)?;
+        // `Arc::get_mut` on the shutdown handle fails when a `ReadTransaction`
+        // or `WriteTransaction` (which each hold a clone) is still alive.
+        let shutdown =
+            Arc::get_mut(&mut self.shutdown).ok_or(DatabaseError::TransactionInProgress)?;
+        let allocator_hash = shutdown.mem.allocator_hash();
+        let mem = Arc::get_mut(&mut shutdown.mem).ok_or(DatabaseError::TransactionInProgress)?;
         let mut was_clean = mem.clear_cache_and_reload()?;
 
-        let old_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
+        let old_roots = [shutdown.mem.get_data_root(), shutdown.mem.get_system_root()];
 
-        let new_roots = Self::do_repair(&mut self.mem, &|_| {}).map_err(|err| match err {
+        let new_roots = Self::do_repair(&mut shutdown.mem, &|_| {}).map_err(|err| match err {
             DatabaseError::Storage(storage_err) => storage_err,
             _ => unreachable!(),
         })?;
 
-        if old_roots != new_roots || allocator_hash != self.mem.allocator_hash() {
+        if old_roots != new_roots || allocator_hash != shutdown.mem.allocator_hash() {
             was_clean = false;
         }
 
         if !was_clean {
-            let next_transaction_id = self.mem.get_last_committed_transaction_id()?.next();
+            let next_transaction_id = shutdown.mem.get_last_committed_transaction_id()?.next();
             let [data_root, system_root] = new_roots;
-            self.mem.commit(
+            shutdown.mem.commit(
                 data_root,
                 system_root,
                 next_transaction_id,
@@ -605,7 +687,7 @@ impl Database {
             )?;
         }
 
-        self.mem.begin_writable()?;
+        shutdown.mem.begin_writable()?;
 
         Ok(was_clean)
     }
@@ -614,7 +696,11 @@ impl Database {
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
     pub fn compact(&mut self) -> Result<bool, CompactionError> {
-        if self.transaction_tracker.any_user_read_reference_exists() {
+        if self
+            .shutdown
+            .transaction_tracker
+            .any_user_read_reference_exists()
+        {
             return Err(CompactionError::TransactionInProgress);
         }
         // Commit to free up any pending free pages
@@ -625,7 +711,7 @@ impl Database {
         if txn.list_persistent_savepoints()?.next().is_some() {
             return Err(CompactionError::PersistentSavepointExists);
         }
-        if self.transaction_tracker.any_savepoint_exists() {
+        if self.shutdown.transaction_tracker.any_savepoint_exists() {
             return Err(CompactionError::EphemeralSavepointExists);
         }
         txn.abort()?;
@@ -942,15 +1028,18 @@ impl Database {
         mem.begin_writable()?;
         let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
 
-        let db = Database {
+        let transaction_tracker = Arc::new(TransactionTracker::new(next_transaction_id));
+        let shutdown = Arc::new(DatabaseShutdown {
             mem,
-            transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
-        };
+            transaction_tracker,
+        });
+        let db = Database { shutdown };
 
         // Restore the tracker state for any persistent savepoints
         let txn = db.begin_write().map_err(|e| e.into_storage_error())?;
         if let Some(next_id) = txn.next_persistent_savepoint_id()? {
-            db.transaction_tracker
+            db.shutdown
+                .transaction_tracker
                 .restore_savepoint_counter_state(next_id);
         }
         for id in txn.list_persistent_savepoints()? {
@@ -964,7 +1053,8 @@ impl Database {
                     }
                 },
             };
-            db.transaction_tracker
+            db.shutdown
+                .transaction_tracker
                 .register_persistent_savepoint(&savepoint);
         }
         txn.abort()?;
@@ -1023,6 +1113,9 @@ impl Database {
     /// Returns a [`WriteTransaction`] which may be used to read/write to the database. Only a single
     /// write may be in progress at a time. If a write is in progress, this function will block
     /// until it completes.
+    ///
+    /// The returned transaction may outlive the `Database` it was created from; see the
+    /// "Lifetime of transactions" section in [`Database`] for details.
     pub fn begin_write(&self) -> Result<WriteTransaction, TransactionError> {
         self.begin_write_with_allocation_policy(AllocationPolicy::Default)
     }
@@ -1034,51 +1127,31 @@ impl Database {
         allocation_policy: AllocationPolicy,
     ) -> Result<WriteTransaction, TransactionError> {
         // Fail early if there has been an I/O error -- nothing can be committed in that case
-        self.mem.check_io_errors()?;
+        self.shutdown.mem.check_io_errors()?;
         let guard = TransactionGuard::new_write(
-            self.transaction_tracker.start_write_transaction(),
-            self.transaction_tracker.clone(),
+            self.shutdown.transaction_tracker.start_write_transaction(),
+            self.shutdown.transaction_tracker.clone(),
         );
         WriteTransaction::new(
             guard,
-            self.transaction_tracker.clone(),
-            self.mem.clone(),
+            self.shutdown.transaction_tracker.clone(),
+            self.shutdown.mem.clone(),
             allocation_policy,
+            Some(self.shutdown.clone()),
         )
         .map_err(|e| e.into())
     }
-
-    fn ensure_allocator_state_table_and_trim(&self) -> Result<(), Error> {
-        // Make a new quick-repair commit to update the allocator state table
-        #[cfg(feature = "logging")]
-        debug!("Writing allocator state table");
-        // If compact() left no free pages, the default allocator lands this
-        // commit's writes at high page indices (see AllocationPolicy::Lowest)
-        // and try_shrink can't reclaim the growth. See
-        // https://github.com/cberner/redb/issues/1165
-        let mut tx = self.begin_write_with_allocation_policy(AllocationPolicy::Lowest)?;
-        tx.set_quick_repair(true);
-        tx.disable_post_commit_free();
-        tx.set_shrink_policy(ShrinkPolicy::Maximum);
-        tx.commit()?;
-
-        Ok(())
-    }
 }
 
-impl Drop for Database {
-    fn drop(&mut self) {
-        if !thread::panicking() && self.ensure_allocator_state_table_and_trim().is_err() {
-            #[cfg(feature = "logging")]
-            warn!("Failed to write allocator state table. Repair may be required at restart.");
-        }
-
-        if self.mem.close().is_err() {
-            #[cfg(feature = "logging")]
-            warn!("Failed to flush database file. Repair may be required at restart.");
-        }
-    }
-}
+// `Database` does not have a `Drop` impl: the database's flush-and-close work
+// lives on `DatabaseShutdown`, which is held via `Arc` by both the `Database`
+// and every transaction derived from it. When the last reference drops -- in
+// whatever order the `Database` and its transactions are dropped -- the
+// shutdown runs. This prevents the deadlock that would otherwise occur if
+// `Database::drop` tried to start a write transaction (for the quick-repair
+// commit) while the user still held an outstanding `WriteTransaction`.
+//
+// See issue #1072.
 
 pub struct RepairSession {
     progress: f64,

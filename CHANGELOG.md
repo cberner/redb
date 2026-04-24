@@ -13,6 +13,11 @@
 * Reuse pages freed by a durable write transaction in the next write transaction when no
   live read transaction or savepoint still needs them. Previously, pages were not reused for one
   additional transaction.
+* Fix a deadlock when a `Database` was dropped while a `WriteTransaction` derived from it was
+  still alive (issue #1072). The database's flush-and-close work now happens when both the
+  `Database` and any outstanding `WriteTransaction` have been dropped, so the in-flight
+  transaction continues to work normally and no repair is required on next open. Read
+  transactions still receive `DatabaseClosed` if the `Database` is dropped before they are.
 
 ## 4.1.0 - 2026-04-19
 **This release contains a large number of bug fixes discovered by AI coding agents**

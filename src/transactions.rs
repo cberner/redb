@@ -1,4 +1,4 @@
-use crate::db::TransactionGuard;
+use crate::db::{DatabaseShutdown, TransactionGuard};
 use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
 use crate::sealed::Sealed;
@@ -865,6 +865,11 @@ pub struct WriteTransaction {
     // All transaction-local savepoint lifecycle state. See
     // `SavepointTransactionState` for the commit/abort contract.
     savepoint_state: Mutex<SavepointTransactionState>,
+    // Keeps the `DatabaseShutdown` alive so the database's flush-and-close runs
+    // only after the last transaction has dropped. `None` for the internal
+    // transaction used by `DatabaseShutdown::drop` itself, to avoid resurrecting
+    // the Arc during its own Drop.
+    _shutdown: Option<Arc<DatabaseShutdown>>,
 }
 
 impl WriteTransaction {
@@ -873,6 +878,7 @@ impl WriteTransaction {
         transaction_tracker: Arc<TransactionTracker>,
         mem: Arc<TransactionalMemory>,
         allocation_policy: AllocationPolicy,
+        shutdown: Option<Arc<DatabaseShutdown>>,
     ) -> Result<Self> {
         let transaction_id = guard.id();
         let guard = Arc::new(guard);
@@ -899,6 +905,7 @@ impl WriteTransaction {
             post_commit_free: PostCommitFree::Enabled,
             shrink_policy: ShrinkPolicy::Default,
             savepoint_state: Mutex::new(SavepointTransactionState::default()),
+            _shutdown: shutdown,
         })
     }
 
