@@ -457,7 +457,15 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     }
                 } else {
                     let (new_page1, split_key, new_page2) = builder.build_split()?;
-                    let split_key = split_key.to_vec();
+                    let right_accessor = LeafAccessor::new(
+                        new_page2.memory(),
+                        K::fixed_width(),
+                        V::fixed_width(),
+                    );
+                    let split_key = K::shortest_separator(
+                        split_key,
+                        right_accessor.entry(0).unwrap().key(),
+                    );
                     let page_number = page.get_page_number();
                     let existing_value = if found {
                         let (start, end) = accessor.value_range(position).unwrap();

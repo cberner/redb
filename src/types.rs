@@ -155,6 +155,86 @@ pub trait Key: Value {
     ///
     /// The implementation must ensure there is a total order
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering;
+
+    /// Compute a short separator key S where `left <= S < right` according
+    /// to this type's ordering. The separator is stored in B-tree branch nodes
+    /// to route searches; shorter separators increase branch fan-out and
+    /// improve read performance.
+    ///
+    /// The returned bytes must be a valid serialized form for comparisons via
+    /// [`Key::compare`]. The result S must satisfy:
+    /// - `Self::compare(left, &S)` is `Equal` or `Less`
+    /// - `Self::compare(&S, right)` is `Less`
+    ///
+    /// The default returns the full `left` key (always correct, no compression).
+    ///
+    /// For types whose byte serialization uses lexicographic ordering,
+    /// override this using the provided [`byte_key_shortest_separator`] helper
+    /// to get significant B-tree performance improvements.
+    fn shortest_separator(left: &[u8], _right: &[u8]) -> Vec<u8> {
+        left.to_vec()
+    }
+}
+
+/// Compute the shortest separator for key types with lexicographic byte ordering.
+///
+/// Use this in your [`Key::shortest_separator`] implementation when the type's
+/// serialized byte form is compared lexicographically (e.g., raw byte slices).
+///
+/// Returns the shortest byte string S such that `left <= S < right`.
+pub fn byte_key_shortest_separator(left: &[u8], right: &[u8]) -> Vec<u8> {
+    let common_len = left
+        .iter()
+        .zip(right.iter())
+        .position(|(a, b)| a != b)
+        .unwrap_or(left.len().min(right.len()));
+
+    if common_len >= left.len() {
+        return left.to_vec();
+    }
+    if common_len + 1 < right.len() {
+        return right[..common_len + 1].to_vec();
+    }
+    if left[common_len] + 1 < right[common_len] {
+        let mut sep = left[..common_len].to_vec();
+        sep.push(left[common_len] + 1);
+        return sep;
+    }
+    left.to_vec()
+}
+
+/// Compute the shortest separator for UTF-8 string key types.
+///
+/// Like [`byte_key_shortest_separator`], but ensures the result is valid UTF-8.
+/// UTF-8 strings compare lexicographically by byte value, but the separator must
+/// remain valid UTF-8 since [`Key::compare`] will decode it.
+pub fn str_key_shortest_separator(left: &[u8], right: &[u8]) -> Vec<u8> {
+    let common_len = left
+        .iter()
+        .zip(right.iter())
+        .position(|(a, b)| a != b)
+        .unwrap_or(left.len().min(right.len()));
+
+    if common_len >= left.len() {
+        return left.to_vec();
+    }
+
+    // For valid UTF-8, the divergence point is always at a character boundary.
+    // Include the full first differing character from `right` so the result
+    // remains valid UTF-8.
+    let char_len = match right[common_len] {
+        0..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1,
+    };
+    let end = common_len + char_len;
+    if end < right.len() {
+        return right[..end].to_vec();
+    }
+
+    left.to_vec()
 }
 
 impl Value for () {
@@ -346,6 +426,10 @@ impl Key for &[u8] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         data1.cmp(data2)
     }
+
+    fn shortest_separator(left: &[u8], right: &[u8]) -> Vec<u8> {
+        byte_key_shortest_separator(left, right)
+    }
 }
 
 impl<const N: usize> Value for &[u8; N] {
@@ -522,6 +606,10 @@ impl Key for &str {
         let str2 = Self::from_bytes(data2);
         str1.cmp(str2)
     }
+
+    fn shortest_separator(left: &[u8], right: &[u8]) -> Vec<u8> {
+        str_key_shortest_separator(left, right)
+    }
 }
 
 impl Value for String {
@@ -562,6 +650,10 @@ impl Key for String {
         let str1 = std::str::from_utf8(data1).unwrap();
         let str2 = std::str::from_utf8(data2).unwrap();
         str1.cmp(str2)
+    }
+
+    fn shortest_separator(left: &[u8], right: &[u8]) -> Vec<u8> {
+        str_key_shortest_separator(left, right)
     }
 }
 
