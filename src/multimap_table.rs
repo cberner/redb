@@ -3,10 +3,10 @@ use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
 use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, AllocationPolicy, BRANCH, Btree, BtreeHeader, BtreeMut,
-    BtreeRangeIter, DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
-    MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PageTrackerPolicy, RawBtree, RawLeafBuilder,
-    TransactionalMemory, multimap_btree_stats,
+    AllPageNumbersBtreeIter, BRANCH, Btree, BtreeHeader, BtreeMut, BtreeRangeIter,
+    DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
+    MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageNumber, PageTrackerPolicy, RawBtree,
+    RawLeafBuilder, TransactionalMemory, multimap_btree_stats,
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
@@ -108,7 +108,7 @@ pub struct MultimapValue<'a, V: Key + 'static> {
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
     free_on_drop: Vec<PageNumber>,
     _transaction_guard: Arc<TransactionGuard>,
-    mem: Option<Arc<TransactionalMemory>>,
+    page_allocator: Option<PageAllocator>,
     _value_type: PhantomData<V>,
 }
 
@@ -125,7 +125,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
             allocated_pages: Arc::new(Mutex::new(PageTrackerPolicy::Closed)),
             free_on_drop: vec![],
             _transaction_guard: guard,
-            mem: None,
+            page_allocator: None,
             _value_type: PhantomData,
         }
     }
@@ -137,7 +137,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
         allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
         pages: Vec<PageNumber>,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        page_allocator: PageAllocator,
     ) -> Self {
         Self {
             inner: Some(ValueIterState::Subtree(inner)),
@@ -146,7 +146,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
             free_on_drop: pages,
             allocated_pages,
             _transaction_guard: guard,
-            mem: Some(mem),
+            page_allocator: Some(page_allocator),
             _value_type: PhantomData,
         }
     }
@@ -160,7 +160,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
             allocated_pages: Arc::new(Mutex::new(PageTrackerPolicy::Closed)),
             free_on_drop: vec![],
             _transaction_guard: guard,
-            mem: None,
+            page_allocator: None,
             _value_type: PhantomData,
         }
     }
@@ -198,7 +198,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        page_allocator: PageAllocator,
     ) -> Result<Self> {
         let num_values = collection.value().get_num_values();
         Ok(match collection.value().collection_type() {
@@ -212,7 +212,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
                 let inner = BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     Some(root),
-                    mem.clone(),
+                    page_allocator.mem().clone(),
                     PageHint::None,
                 )?;
                 Self::new_subtree_free_on_drop(
@@ -222,7 +222,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
                     allocated_pages,
                     pages,
                     guard,
-                    mem,
+                    page_allocator,
                 )
             }
         })
@@ -303,7 +303,7 @@ impl<V: Key + 'static> Drop for MultimapValue<'_, V> {
             let mut allocated_pages = self.allocated_pages.lock().unwrap();
             for page in &self.free_on_drop {
                 if !self
-                    .mem
+                    .page_allocator
                     .as_ref()
                     .unwrap()
                     .free_if_uncommitted(*page, &mut allocated_pages)
@@ -395,8 +395,7 @@ pub struct MultimapTable<'txn, K: Key + 'static, V: Key + 'static> {
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
     tree: BtreeMut<'txn, K, &'static DynamicCollection<V>>,
-    mem: Arc<TransactionalMemory>,
-    allocation_policy: AllocationPolicy,
+    page_allocator: PageAllocator,
     _value_type: PhantomData<V>,
 }
 
@@ -414,9 +413,8 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
         num_values: u64,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
-        mem: Arc<TransactionalMemory>,
+        page_allocator: PageAllocator,
         transaction: &'txn WriteTransaction,
-        allocation_policy: AllocationPolicy,
     ) -> MultimapTable<'txn, K, V> {
         MultimapTable {
             name: name.to_string(),
@@ -427,13 +425,11 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
             tree: BtreeMut::new(
                 table_root,
                 transaction.transaction_guard(),
-                mem.clone(),
+                page_allocator.clone(),
                 freed_pages,
                 allocated_pages,
-                allocation_policy,
             ),
-            mem,
-            allocation_policy,
+            page_allocator,
             _value_type: PhantomData,
         }
     }
@@ -494,7 +490,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                         <() as Value>::fixed_width(),
                     );
 
-                    if required_inline_bytes < self.mem.get_page_size() / 2 {
+                    if required_inline_bytes < self.page_allocator.get_page_size() / 2 {
                         let mut data = vec![0; required_inline_bytes];
                         let mut builder = RawLeafBuilder::new(
                             &mut data,
@@ -522,11 +518,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     } else {
                         // convert into a subtree
                         let mut allocated = self.allocated_pages.lock().unwrap();
-                        let mut page = self.allocation_policy.allocate(
-                            &self.mem,
-                            leaf_data.len(),
-                            &mut allocated,
-                        )?;
+                        let mut page = self
+                            .page_allocator
+                            .allocate(leaf_data.len(), &mut allocated)?;
                         drop(allocated);
                         page.memory_mut()[..leaf_data.len()].copy_from_slice(leaf_data);
                         let page_number = page.get_page_number();
@@ -537,10 +531,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                         let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
                             Some(BtreeHeader::new(page_number, 0, num_pairs as u64)),
                             self.transaction.transaction_guard(),
-                            self.mem.clone(),
+                            self.page_allocator.clone(),
                             self.freed_pages.clone(),
                             self.allocated_pages.clone(),
-                            self.allocation_policy,
                         );
                         let existed = subtree.insert(value.borrow(), &())?.is_some();
                         assert_eq!(existed, found);
@@ -556,10 +549,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
                         Some(guard.value().as_subtree()),
                         self.transaction.transaction_guard(),
-                        self.mem.clone(),
+                        self.page_allocator.clone(),
                         self.freed_pages.clone(),
                         self.allocated_pages.clone(),
-                        self.allocation_policy,
                     );
                     drop(guard);
                     let existed = subtree.insert(value.borrow(), &())?.is_some();
@@ -579,7 +571,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 V::fixed_width(),
                 <() as Value>::fixed_width(),
             );
-            if required_inline_bytes < self.mem.get_page_size() / 2 {
+            if required_inline_bytes < self.page_allocator.get_page_size() / 2 {
                 let mut data = vec![0; required_inline_bytes];
                 let mut builder = RawLeafBuilder::new(
                     &mut data,
@@ -597,10 +589,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
                     None,
                     self.transaction.transaction_guard(),
-                    self.mem.clone(),
+                    self.page_allocator.clone(),
                     self.freed_pages.clone(),
                     self.allocated_pages.clone(),
-                    self.allocation_policy,
                 );
                 subtree.insert(value.borrow(), &())?;
                 let subtree_data =
@@ -685,10 +676,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 let mut subtree: BtreeMut<V, ()> = BtreeMut::new(
                     Some(v.as_subtree()),
                     self.transaction.transaction_guard(),
-                    self.mem.clone(),
+                    self.page_allocator.clone(),
                     self.freed_pages.clone(),
                     self.allocated_pages.clone(),
-                    self.allocation_policy,
                 );
                 drop(guard);
                 let existed = subtree.remove(value.borrow())?.is_some();
@@ -699,7 +689,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     length: new_length,
                 }) = subtree.get_root()
                 {
-                    let page = self.mem.get_page(new_root, PageHint::None)?;
+                    let page = self.page_allocator.get_page(new_root, PageHint::None)?;
                     match page.memory()[0] {
                         LEAF => {
                             let accessor = LeafAccessor::new(
@@ -708,14 +698,17 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                                 <() as Value>::fixed_width(),
                             );
                             let len = accessor.total_length();
-                            if len < self.mem.get_page_size() / 2 {
+                            if len < self.page_allocator.get_page_size() / 2 {
                                 let inline_data =
                                     DynamicCollection::<V>::make_inline_data(&page.memory()[..len]);
                                 self.tree
                                     .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                                 drop(page);
                                 let mut allocated_pages = self.allocated_pages.lock().unwrap();
-                                if !self.mem.free_if_uncommitted(new_root, &mut allocated_pages) {
+                                if !self
+                                    .page_allocator
+                                    .free_if_uncommitted(new_root, &mut allocated_pages)
+                                {
                                     (*self.freed_pages).lock().unwrap().push(new_root);
                                 }
                             } else {
@@ -771,7 +764,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     root,
                     V::fixed_width(),
                     <() as Value>::fixed_width(),
-                    self.mem.clone(),
+                    self.page_allocator.mem().clone(),
                     PageHint::None,
                 )?;
                 for page in all_pages {
@@ -787,14 +780,14 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 self.freed_pages.clone(),
                 self.allocated_pages.clone(),
                 self.transaction.transaction_guard(),
-                self.mem.clone(),
+                self.page_allocator.clone(),
             )?
         } else {
             MultimapValue::new_subtree(
                 BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     None,
-                    self.mem.clone(),
+                    self.page_allocator.mem().clone(),
                     PageHint::None,
                 )?,
                 0,
@@ -810,7 +803,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableTableMetadata for MultimapTable
     fn stats(&self) -> Result<TableStats> {
         let tree_stats = multimap_btree_stats(
             self.tree.get_root().map(|x| x.root),
-            &self.mem,
+            self.page_allocator.mem(),
             K::fixed_width(),
             V::fixed_width(),
             PageHint::None,
@@ -836,13 +829,13 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'_, V>> {
         let guard = self.transaction.transaction_guard();
         let iter = if let Some(collection) = self.tree.get(key.borrow())? {
-            MultimapValue::from_collection(collection, guard, self.mem.clone())?
+            MultimapValue::from_collection(collection, guard, self.page_allocator.mem().clone())?
         } else {
             MultimapValue::new_subtree(
                 BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     None,
-                    self.mem.clone(),
+                    self.page_allocator.mem().clone(),
                     PageHint::None,
                 )?,
                 0,
@@ -861,7 +854,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
         Ok(MultimapRange::new(
             inner,
             self.transaction.transaction_guard(),
-            self.mem.clone(),
+            self.page_allocator.mem().clone(),
         ))
     }
 }

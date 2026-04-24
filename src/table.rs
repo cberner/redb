@@ -1,8 +1,8 @@
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
 use crate::tree_store::{
-    AccessGuardMutInPlace, AllocationPolicy, Btree, BtreeExtractIf, BtreeHeader, BtreeMut,
-    BtreeRangeIter, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageHint, PageNumber, PageTrackerPolicy,
+    AccessGuardMutInPlace, Btree, BtreeExtractIf, BtreeHeader, BtreeMut, BtreeRangeIter,
+    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageAllocator, PageHint, PageNumber, PageTrackerPolicy,
     RawBtree, TransactionalMemory,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
@@ -77,9 +77,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         table_root: Option<BtreeHeader>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
-        mem: Arc<TransactionalMemory>,
+        page_allocator: PageAllocator,
         transaction: &'txn WriteTransaction,
-        allocation_policy: AllocationPolicy,
     ) -> Table<'txn, K, V> {
         Table {
             name: name.to_string(),
@@ -87,10 +86,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
             tree: BtreeMut::new(
                 table_root,
                 transaction.transaction_guard(),
-                mem,
+                page_allocator,
                 freed_pages,
                 allocated_pages,
-                allocation_policy,
             ),
         }
     }

@@ -7,8 +7,7 @@ use crate::tree_store::btree_mutator::DeletionResult::{
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
-    AccessGuardMutInPlace, AllocationPolicy, BtreeHeader, PageHint, PageNumber, PageTrackerPolicy,
-    TransactionalMemory,
+    AccessGuardMutInPlace, BtreeHeader, PageAllocator, PageHint, PageNumber, PageTrackerPolicy,
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
@@ -68,33 +67,30 @@ struct InsertionResult<'a, V: Value + 'static> {
 pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
     root: &'b mut Option<BtreeHeader>,
     modify_uncommitted: bool,
-    mem: Arc<TransactionalMemory>,
+    page_allocator: PageAllocator,
     freed: &'b mut Vec<PageNumber>,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
     _lifetime: PhantomData<&'a ()>,
-    allocation_policy: AllocationPolicy,
 }
 
 impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     pub(crate) fn new(
         root: &'b mut Option<BtreeHeader>,
-        mem: Arc<TransactionalMemory>,
+        page_allocator: PageAllocator,
         freed: &'b mut Vec<PageNumber>,
         allocated: Arc<Mutex<PageTrackerPolicy>>,
-        allocation_policy: AllocationPolicy,
     ) -> Self {
         Self {
             root,
             modify_uncommitted: true,
-            mem,
+            page_allocator,
             freed,
             allocated,
             _key_type: PhantomData,
             _value_type: PhantomData,
             _lifetime: PhantomData,
-            allocation_policy,
         }
     }
 
@@ -102,28 +98,29 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     // It will still queue pages for future freeing in the freed vec
     pub(crate) fn new_do_not_modify(
         root: &'b mut Option<BtreeHeader>,
-        mem: Arc<TransactionalMemory>,
+        page_allocator: PageAllocator,
         freed: &'b mut Vec<PageNumber>,
         allocated: Arc<Mutex<PageTrackerPolicy>>,
-        allocation_policy: AllocationPolicy,
     ) -> Self {
         Self {
             root,
             modify_uncommitted: false,
-            mem,
+            page_allocator,
             freed,
             allocated,
             _key_type: PhantomData,
             _value_type: PhantomData,
             _lifetime: PhantomData,
-            allocation_policy,
         }
     }
 
     fn conditional_free(&mut self, page_number: PageNumber) {
         if self.modify_uncommitted {
             let mut allocated = self.allocated.lock().unwrap();
-            if !self.mem.free_if_uncommitted(page_number, &mut allocated) {
+            if !self
+                .page_allocator
+                .free_if_uncommitted(page_number, &mut allocated)
+            {
                 self.freed.push(page_number);
             }
         } else {
@@ -159,8 +156,11 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             root: p, length, ..
         }) = *self.root
         {
-            let (deletion_result, found) =
-                self.delete_helper(self.mem.get_page(p, PageHint::None)?, target, found_key)?;
+            let (deletion_result, found) = self.delete_helper(
+                self.page_allocator.get_page(p, PageHint::None)?,
+                target,
+                found_key,
+            )?;
             if found.is_none() {
                 // The tree was not modified; leave *self.root untouched so that any clean
                 // root page keeps its already-valid checksum.
@@ -173,12 +173,11 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 PartialLeaf { page, deleted_pair } => {
                     let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
                     let mut builder = LeafBuilder::new(
-                        &self.mem,
+                        &self.page_allocator,
                         &self.allocated,
                         accessor.num_pairs() - 1,
                         K::fixed_width(),
                         V::fixed_width(),
-                        self.allocation_policy,
                     );
                     builder.push_all_except(&accessor, Some(deleted_pair));
                     let page = builder.build()?;
@@ -191,11 +190,10 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 }
                 PartialBranch { children, keys } => {
                     let mut builder = BranchBuilder::new(
-                        &self.mem,
+                        &self.page_allocator,
                         &self.allocated,
                         children.len(),
                         K::fixed_width(),
-                        self.allocation_policy,
                     );
                     for (child, child_checksum) in children {
                         builder.push_child(child, child_checksum);
@@ -234,7 +232,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         }) = *self.root
         {
             let result = self.insert_helper(
-                self.mem.get_page(p, PageHint::None)?,
+                self.page_allocator.get_page(p, PageHint::None)?,
                 checksum,
                 K::as_bytes(key).as_ref(),
                 V::as_bytes(value).as_ref(),
@@ -247,13 +245,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             };
 
             let new_root = if let Some((key, page2, page2_checksum)) = result.additional_sibling {
-                let mut builder = BranchBuilder::new(
-                    &self.mem,
-                    &self.allocated,
-                    2,
-                    K::fixed_width(),
-                    self.allocation_policy,
-                );
+                let mut builder =
+                    BranchBuilder::new(&self.page_allocator, &self.allocated, 2, K::fixed_width());
                 builder.push_child(result.new_root, result.root_checksum);
                 builder.push_key(&key);
                 builder.push_child(page2, page2_checksum);
@@ -269,12 +262,11 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             let key_bytes = key_bytes.as_ref();
             let value_bytes = value_bytes.as_ref();
             let mut builder = LeafBuilder::new(
-                &self.mem,
+                &self.page_allocator,
                 &self.allocated,
                 1,
                 K::fixed_width(),
                 V::fixed_width(),
-                self.allocation_policy,
             );
             builder.push(key_bytes, value_bytes);
             let page = builder.build()?;
@@ -305,15 +297,14 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
                 // Fast-path to avoid re-building and splitting pages with a single large value
                 let single_large_value = accessor.num_pairs() == 1
-                    && accessor.total_length() >= self.mem.get_page_size();
+                    && accessor.total_length() >= self.page_allocator.get_page_size();
                 if !found && single_large_value {
                     let mut builder = LeafBuilder::new(
-                        &self.mem,
+                        &self.page_allocator,
                         &self.allocated,
                         1,
                         K::fixed_width(),
                         V::fixed_width(),
-                        self.allocation_policy,
                     );
                     builder.push(key, value);
                     let new_page = builder.build()?;
@@ -367,7 +358,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         )
                     }
                 };
-                if self.mem.uncommitted(page.get_page_number())
+                if self.page_allocator.uncommitted(page.get_page_number())
                     && self.modify_uncommitted
                     && has_inplace_space()
                 {
@@ -379,7 +370,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         None
                     };
                     drop(page);
-                    let mut page_mut = self.mem.get_page_mut(page_number)?;
+                    let mut page_mut = self.page_allocator.get_page_mut(page_number)?;
                     let mut mutator =
                         LeafMutator::new(page_mut.memory_mut(), K::fixed_width(), V::fixed_width());
                     if found {
@@ -401,12 +392,11 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 }
 
                 let mut builder = LeafBuilder::new(
-                    &self.mem,
+                    &self.page_allocator,
                     &self.allocated,
                     accessor.num_pairs() + 1,
                     K::fixed_width(),
                     V::fixed_width(),
-                    self.allocation_policy,
                 );
                 for i in 0..accessor.num_pairs() {
                     if i == position {
@@ -426,11 +416,11 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let page_number = page.get_page_number();
                     let existing_value = if found {
                         let (start, end) = accessor.value_range(position).unwrap();
-                        if self.modify_uncommitted && self.mem.uncommitted(page_number) {
+                        if self.modify_uncommitted && self.page_allocator.uncommitted(page_number) {
                             let arc = page.to_arc();
                             drop(page);
                             let mut allocated = self.allocated.lock().unwrap();
-                            self.mem.free(page_number, &mut allocated);
+                            self.page_allocator.free(page_number, &mut allocated);
                             Some(AccessGuard::with_arc_page(arc, start..end))
                         } else {
                             self.freed.push(page_number);
@@ -461,11 +451,11 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let page_number = page.get_page_number();
                     let existing_value = if found {
                         let (start, end) = accessor.value_range(position).unwrap();
-                        if self.modify_uncommitted && self.mem.uncommitted(page_number) {
+                        if self.modify_uncommitted && self.page_allocator.uncommitted(page_number) {
                             let arc = page.to_arc();
                             drop(page);
                             let mut allocated = self.allocated.lock().unwrap();
-                            self.mem.free(page_number, &mut allocated);
+                            self.page_allocator.free(page_number, &mut allocated);
                             Some(AccessGuard::with_arc_page(arc, start..end))
                         } else {
                             self.freed.push(page_number);
@@ -514,7 +504,9 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
                 let child_checksum = accessor.child_checksum(child_index).unwrap();
                 let sub_result = self.insert_helper(
-                    self.mem.get_page(child_page, PageHint::None)?,
+                    self.page_allocator
+                        .mem()
+                        .get_page(child_page, PageHint::None)?,
                     child_checksum,
                     key,
                     value,
@@ -539,11 +531,11 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
                 if sub_result.additional_sibling.is_none()
                     && self.modify_uncommitted
-                    && self.mem.uncommitted(page.get_page_number())
+                    && self.page_allocator.uncommitted(page.get_page_number())
                 {
                     let page_number = page.get_page_number();
                     drop(page);
-                    let mut mutpage = self.mem.get_page_mut(page_number)?;
+                    let mut mutpage = self.page_allocator.get_page_mut(page_number)?;
                     let mut mutator = BranchMutator::new(mutpage.memory_mut());
                     mutator.write_child_page(
                         child_index,
@@ -561,11 +553,10 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
                 // A child was added, or we couldn't use the fast-path above
                 let mut builder = BranchBuilder::new(
-                    &self.mem,
+                    &self.page_allocator,
                     &self.allocated,
                     accessor.count_children() + 1,
                     K::fixed_width(),
-                    self.allocation_policy,
                 );
                 if child_index == 0 {
                     builder.push_child(sub_result.new_root, sub_result.root_checksum);
@@ -645,7 +636,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         assert!(self.modify_uncommitted);
         let header = self.root.expect("Key not found (tree is empty)");
         self.insert_inplace_helper(
-            self.mem.get_page_mut(header.root)?,
+            self.page_allocator.get_page_mut(header.root)?,
             K::as_bytes(key).as_ref(),
             V::as_bytes(value).as_ref(),
         )?;
@@ -654,7 +645,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     }
 
     fn insert_inplace_helper(&mut self, mut page: PageMut, key: &[u8], value: &[u8]) -> Result<()> {
-        assert!(self.mem.uncommitted(page.get_page_number()));
+        assert!(self.page_allocator.uncommitted(page.get_page_number()));
 
         let node_mem = page.memory();
         match node_mem[0] {
@@ -671,7 +662,11 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
-                self.insert_inplace_helper(self.mem.get_page_mut(child_page)?, key, value)?;
+                self.insert_inplace_helper(
+                    self.page_allocator.get_page_mut(child_page)?,
+                    key,
+                    value,
+                )?;
                 let mut mutator = BranchMutator::new(page.memory_mut());
                 mutator.write_child_page(child_index, child_page, DEFERRED);
             }
@@ -706,14 +701,14 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             K::fixed_width(),
             V::fixed_width(),
         );
-        let uncommitted = self.mem.uncommitted(page.get_page_number());
+        let uncommitted = self.page_allocator.uncommitted(page.get_page_number());
 
         // Fast-path for dirty pages: perform in-place removal without allocating a new page.
         // The threshold matches the merge threshold (page_size/3) so that we use in-place
         // removal for all cases where the page won't need merging with a sibling.
         if uncommitted
             && self.modify_uncommitted
-            && new_required_bytes >= self.mem.get_page_size() / 3
+            && new_required_bytes >= self.page_allocator.get_page_size() / 3
             && accessor.num_pairs() > 1
         {
             let (start, end) = accessor.value_range(position).unwrap();
@@ -726,7 +721,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             }
             let page_number = page.get_page_number();
             drop(page);
-            let page_mut = self.mem.get_page_mut(page_number)?;
+            let page_mut = self.page_allocator.get_page_mut(page_number)?;
 
             let guard = AccessGuard::remove_on_drop(
                 page_mut,
@@ -740,7 +735,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
         let result = if accessor.num_pairs() == 1 {
             DeletedLeaf
-        } else if new_required_bytes < self.mem.get_page_size() / 3 {
+        } else if new_required_bytes < self.page_allocator.get_page_size() / 3 {
             // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
             // full pages, so we use 33% instead of 50% to avoid oscillating
             PartialLeaf {
@@ -749,12 +744,11 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             }
         } else {
             let mut builder = LeafBuilder::new(
-                &self.mem,
+                &self.page_allocator,
                 &self.allocated,
                 accessor.num_pairs() - 1,
                 K::fixed_width(),
                 V::fixed_width(),
-                self.allocation_policy,
             );
             for i in 0..accessor.num_pairs() {
                 if i == position {
@@ -772,7 +766,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             let arc = page.to_arc();
             drop(page);
             let mut allocated = self.allocated.lock().unwrap();
-            self.mem.free(page_number, &mut allocated);
+            self.page_allocator.free(page_number, &mut allocated);
             if want_key {
                 *found_key = Some(AccessGuard::with_arc_page(arc.clone(), key_range));
             }
@@ -826,7 +820,9 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         };
         let child_checksum = accessor.child_checksum(child_index).unwrap();
         let (result, found) = self.delete_helper(
-            self.mem.get_page(child_page_number, PageHint::None)?,
+            self.page_allocator
+                .mem()
+                .get_page(child_page_number, PageHint::None)?,
             target,
             found_key,
         )?;
@@ -843,37 +839,39 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 return Ok((Subtree(original_page_number), found));
             }
 
-            let result_page =
-                if self.mem.uncommitted(original_page_number) && self.modify_uncommitted {
-                    drop(page);
-                    let mut mutpage = self.mem.get_page_mut(original_page_number)?;
-                    let mut mutator = BranchMutator::new(mutpage.memory_mut());
-                    mutator.write_child_page(child_index, new_child, DEFERRED);
-                    original_page_number
-                } else {
-                    let mut builder = BranchBuilder::new(
-                        &self.mem,
-                        &self.allocated,
-                        accessor.count_children(),
-                        K::fixed_width(),
-                        self.allocation_policy,
-                    );
-                    builder.push_all(&accessor);
-                    builder.replace_child(child_index, new_child, DEFERRED);
-                    let new_page = builder.build()?;
-                    self.conditional_free(original_page_number);
-                    new_page.get_page_number()
-                };
+            let result_page = if self.page_allocator.uncommitted(original_page_number)
+                && self.modify_uncommitted
+            {
+                drop(page);
+                let mut mutpage = self
+                    .page_allocator
+                    .mem()
+                    .get_page_mut(original_page_number)?;
+                let mut mutator = BranchMutator::new(mutpage.memory_mut());
+                mutator.write_child_page(child_index, new_child, DEFERRED);
+                original_page_number
+            } else {
+                let mut builder = BranchBuilder::new(
+                    &self.page_allocator,
+                    &self.allocated,
+                    accessor.count_children(),
+                    K::fixed_width(),
+                );
+                builder.push_all(&accessor);
+                builder.replace_child(child_index, new_child, DEFERRED);
+                let new_page = builder.build()?;
+                self.conditional_free(original_page_number);
+                new_page.get_page_number()
+            };
             return Ok((Subtree(result_page), found));
         }
 
         // Child is requesting to be merged with a sibling
         let mut builder = BranchBuilder::new(
-            &self.mem,
+            &self.page_allocator,
             &self.allocated,
             accessor.count_children(),
             K::fixed_width(),
-            self.allocation_policy,
         );
 
         let final_result = match result {
@@ -903,7 +901,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     }
                     builder.push_key(accessor.key(i).unwrap());
                 }
-                Self::finalize_branch_builder(builder, self.mem.get_page_size())?
+                Self::finalize_branch_builder(builder, self.page_allocator.get_page_size())?
             }
             PartialLeaf {
                 page: partial_child_page,
@@ -916,29 +914,32 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 debug_assert!(merge_with < accessor.count_children());
                 let merge_with_page = self
-                    .mem
+                    .page_allocator
+                    .mem()
                     .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
                 let merge_with_accessor =
                     LeafAccessor::new(merge_with_page.memory(), K::fixed_width(), V::fixed_width());
 
                 let single_large_value = merge_with_accessor.num_pairs() == 1
-                    && merge_with_accessor.total_length() >= self.mem.get_page_size();
+                    && merge_with_accessor.total_length() >= self.page_allocator.get_page_size();
                 // Don't try to merge or rebalance, if the sibling contains a single large value
                 if single_large_value {
                     let mut child_builder = LeafBuilder::new(
-                        &self.mem,
+                        &self.page_allocator,
                         &self.allocated,
                         partial_child_accessor.num_pairs() - 1,
                         K::fixed_width(),
                         V::fixed_width(),
-                        self.allocation_policy,
                     );
                     child_builder.push_all_except(&partial_child_accessor, Some(deleted_pair));
                     let new_page = child_builder.build()?;
                     builder.push_all(&accessor);
                     builder.replace_child(child_index, new_page.get_page_number(), DEFERRED);
 
-                    let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
+                    let result = Self::finalize_branch_builder(
+                        builder,
+                        self.page_allocator.get_page_size(),
+                    )?;
 
                     drop(page);
                     self.conditional_free(original_page_number);
@@ -956,13 +957,12 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
                         let mut child_builder = LeafBuilder::new(
-                            &self.mem,
+                            &self.page_allocator,
                             &self.allocated,
                             partial_child_accessor.num_pairs() - 1
                                 + merge_with_accessor.num_pairs(),
                             K::fixed_width(),
                             V::fixed_width(),
-                            self.allocation_policy,
                         );
                         if child_index < merge_with {
                             child_builder
@@ -995,7 +995,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     }
                 }
 
-                let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
+                let result =
+                    Self::finalize_branch_builder(builder, self.page_allocator.get_page_size())?;
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
@@ -1008,7 +1009,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             DeletedBranch(only_grandchild, grandchild_checksum) => {
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 let merge_with_page = self
-                    .mem
+                    .page_allocator
+                    .mem()
                     .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
                 debug_assert!(merge_with < accessor.count_children());
@@ -1020,11 +1022,10 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
                         let mut child_builder = BranchBuilder::new(
-                            &self.mem,
+                            &self.page_allocator,
                             &self.allocated,
                             merge_with_accessor.count_children() + 1,
                             K::fixed_width(),
-                            self.allocation_policy,
                         );
                         let separator_key = accessor.key(min(child_index, merge_with)).unwrap();
                         if child_index < merge_with {
@@ -1057,7 +1058,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         }
                     }
                 }
-                let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
+                let result =
+                    Self::finalize_branch_builder(builder, self.page_allocator.get_page_size())?;
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
@@ -1071,7 +1073,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             } => {
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 let merge_with_page = self
-                    .mem
+                    .page_allocator
+                    .mem()
                     .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
                 debug_assert!(merge_with < accessor.count_children());
@@ -1083,11 +1086,10 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
                         let mut child_builder = BranchBuilder::new(
-                            &self.mem,
+                            &self.page_allocator,
                             &self.allocated,
                             merge_with_accessor.count_children() + partial_children.len(),
                             K::fixed_width(),
-                            self.allocation_policy,
                         );
                         let separator_key = accessor.key(min(child_index, merge_with)).unwrap();
                         if child_index < merge_with {
@@ -1130,7 +1132,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         }
                     }
                 }
-                let result = Self::finalize_branch_builder(builder, self.mem.get_page_size())?;
+                let result =
+                    Self::finalize_branch_builder(builder, self.page_allocator.get_page_size())?;
 
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);

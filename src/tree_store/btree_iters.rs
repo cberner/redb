@@ -4,7 +4,7 @@ use crate::tree_store::btree_base::{BranchAccessor, LeafAccessor};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageHint, PageImpl, TransactionalMemory};
-use crate::tree_store::{AllocationPolicy, BtreeHeader, PageNumber, PageTrackerPolicy};
+use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, Value};
 use Bound::{Excluded, Included, Unbounded};
 use std::borrow::Borrow;
@@ -264,8 +264,7 @@ pub(crate) struct BtreeExtractIf<
     free_on_drop: Vec<PageNumber>,
     master_free_list: Arc<Mutex<Vec<PageNumber>>>,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
-    mem: Arc<TransactionalMemory>,
-    allocation_policy: AllocationPolicy,
+    page_allocator: PageAllocator,
 }
 
 impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>
@@ -277,8 +276,7 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
         predicate: F,
         master_free_list: Arc<Mutex<Vec<PageNumber>>>,
         allocated: Arc<Mutex<PageTrackerPolicy>>,
-        mem: Arc<TransactionalMemory>,
-        allocation_policy: AllocationPolicy,
+        page_allocator: PageAllocator,
     ) -> Self {
         Self {
             root,
@@ -287,8 +285,7 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
             free_on_drop: vec![],
             master_free_list,
             allocated,
-            mem,
-            allocation_policy,
+            page_allocator,
         }
     }
 }
@@ -304,10 +301,9 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
             if (self.predicate)(entry.key(), entry.value()) {
                 let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new_do_not_modify(
                     self.root,
-                    self.mem.clone(),
+                    self.page_allocator.clone(),
                     &mut self.free_on_drop,
                     self.allocated.clone(),
-                    self.allocation_policy,
                 );
                 match operation.delete(&entry.key()) {
                     Ok(x) => {
@@ -334,10 +330,9 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
             if (self.predicate)(entry.key(), entry.value()) {
                 let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new_do_not_modify(
                     self.root,
-                    self.mem.clone(),
+                    self.page_allocator.clone(),
                     &mut self.free_on_drop,
                     self.allocated.clone(),
-                    self.allocation_policy,
                 );
                 match operation.delete(&entry.key()) {
                     Ok(x) => {
@@ -363,7 +358,10 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
         let mut master_free_list = self.master_free_list.lock().unwrap();
         let mut allocated = self.allocated.lock().unwrap();
         for page in self.free_on_drop.drain(..) {
-            if !self.mem.free_if_uncommitted(page, &mut allocated) {
+            if !self
+                .page_allocator
+                .free_if_uncommitted(page, &mut allocated)
+            {
                 master_free_list.push(page);
             }
         }
