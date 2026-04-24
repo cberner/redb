@@ -1,6 +1,6 @@
 use crate::tree_store::btree::{PagePath, UntypedBtree, UntypedBtreeMut};
 use crate::tree_store::multimap_btree::{UntypedMultiBtree, relocate_subtrees};
-use crate::tree_store::{BtreeHeader, PageHint, PageNumber, TransactionalMemory};
+use crate::tree_store::{BtreeHeader, PageAllocator, PageHint, PageNumber, TransactionalMemory};
 use crate::{Key, Result, TableError, TypeName, Value};
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -222,7 +222,7 @@ impl InternalTableDefinition {
 
     pub(crate) fn relocate_tree(
         &mut self,
-        mem: Arc<TransactionalMemory>,
+        page_allocator: PageAllocator,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         relocation_map: &HashMap<PageNumber, PageNumber>,
     ) -> Result<Option<BtreeHeader>> {
@@ -240,7 +240,7 @@ impl InternalTableDefinition {
                         (header.root, header.checksum),
                         *fixed_key_size,
                         *fixed_value_size,
-                        mem.clone(),
+                        page_allocator.clone(),
                         freed_pages.clone(),
                         relocation_map,
                     )?;
@@ -252,7 +252,7 @@ impl InternalTableDefinition {
         };
         let mut tree = UntypedBtreeMut::new(
             relocated_root,
-            mem,
+            page_allocator,
             freed_pages,
             self.private_get_fixed_key_size(),
             self.private_get_fixed_value_size(),

@@ -309,6 +309,23 @@ impl PageTrackerPolicy {
         }
     }
 
+    /// Removes `page` if present. Returns whether it was in the set.
+    pub(crate) fn remove_if_present(&mut self, page: PageNumber) -> bool {
+        match self {
+            PageTrackerPolicy::Ignore => false,
+            PageTrackerPolicy::Track(x) => x.remove(&page),
+            PageTrackerPolicy::Closed => panic!("Page tracker is closed"),
+        }
+    }
+
+    pub(crate) fn contains(&self, page: PageNumber) -> bool {
+        match self {
+            PageTrackerPolicy::Ignore => false,
+            PageTrackerPolicy::Track(x) => x.contains(&page),
+            PageTrackerPolicy::Closed => panic!("Page tracker is closed"),
+        }
+    }
+
     pub(super) fn insert(&mut self, page: PageNumber) {
         match self {
             PageTrackerPolicy::Ignore => {}

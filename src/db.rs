@@ -1027,28 +1027,41 @@ impl Database {
     /// write may be in progress at a time. If a write is in progress, this function will block
     /// until it completes.
     pub fn begin_write(&self) -> Result<WriteTransaction, TransactionError> {
+        self.begin_write_with_allocation_policy(AllocationPolicy::Default)
+    }
+
+    // The allocation policy is fixed for the lifetime of the transaction; every page allocation
+    // this transaction makes goes through it.
+    pub(crate) fn begin_write_with_allocation_policy(
+        &self,
+        allocation_policy: AllocationPolicy,
+    ) -> Result<WriteTransaction, TransactionError> {
         // Fail early if there has been an I/O error -- nothing can be committed in that case
         self.mem.check_io_errors()?;
         let guard = TransactionGuard::new_write(
             self.transaction_tracker.start_write_transaction(),
             self.transaction_tracker.clone(),
         );
-        WriteTransaction::new(guard, self.transaction_tracker.clone(), self.mem.clone())
-            .map_err(|e| e.into())
+        WriteTransaction::new(
+            guard,
+            self.transaction_tracker.clone(),
+            self.mem.clone(),
+            allocation_policy,
+        )
+        .map_err(|e| e.into())
     }
 
     fn ensure_allocator_state_table_and_trim(&self) -> Result<(), Error> {
         // Make a new quick-repair commit to update the allocator state table
         #[cfg(feature = "logging")]
         debug!("Writing allocator state table");
-        let mut tx = self.begin_write()?;
-        tx.set_quick_repair(true);
-        tx.set_shrink_policy(ShrinkPolicy::Maximum);
         // If compact() left no free pages, the default allocator lands this
         // commit's writes at high page indices (see AllocationPolicy::Lowest)
         // and try_shrink can't reclaim the growth. See
         // https://github.com/cberner/redb/issues/1165
-        tx.set_allocation_policy(AllocationPolicy::Lowest);
+        let mut tx = self.begin_write_with_allocation_policy(AllocationPolicy::Lowest)?;
+        tx.set_quick_repair(true);
+        tx.set_shrink_policy(ShrinkPolicy::Maximum);
         tx.commit()?;
 
         Ok(())

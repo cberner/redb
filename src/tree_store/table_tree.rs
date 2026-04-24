@@ -6,9 +6,9 @@ use crate::tree_store::multimap_btree::{
     finalize_tree_and_subtree_checksums, verify_tree_and_subtree_checksums,
 };
 use crate::tree_store::{
-    AllocationPolicy, Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageAllocator,
-    PageHint, PageNumber, PageNumberHashSet, PageTrackerPolicy, RawBtree, TableType,
-    TransactionalMemory, multimap_btree_stats,
+    Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageAllocator, PageHint, PageNumber,
+    PageNumberHashSet, PageTrackerPolicy, RawBtree, TableType, TransactionalMemory,
+    multimap_btree_stats,
 };
 use crate::types::{Key, Value};
 use crate::{DatabaseStats, Result};
@@ -245,11 +245,6 @@ impl TableTreeMut<'_> {
         }
     }
 
-    pub(crate) fn set_allocation_policy(&mut self, policy: AllocationPolicy) {
-        self.page_allocator = PageAllocator::new(self.page_allocator.mem().clone(), policy);
-        self.tree.set_allocation_policy(policy);
-    }
-
     pub(crate) fn page_allocator(&self) -> &PageAllocator {
         &self.page_allocator
     }
@@ -365,7 +360,7 @@ impl TableTreeMut<'_> {
                 } => {
                     let mut tree = UntypedBtreeMut::new(
                         new_root,
-                        self.page_allocator.mem().clone(),
+                        self.page_allocator.clone(),
                         self.freed_pages.clone(),
                         fixed_key_size,
                         fixed_value_size,
@@ -384,7 +379,7 @@ impl TableTreeMut<'_> {
                         new_root,
                         fixed_key_size,
                         fixed_value_size,
-                        self.page_allocator.mem().clone(),
+                        self.page_allocator.clone(),
                     )?;
                     *table_length = new_length;
                 }
@@ -685,7 +680,7 @@ impl TableTreeMut<'_> {
             }
 
             if let Some(new_root) = definition.relocate_tree(
-                self.page_allocator.mem().clone(),
+                self.page_allocator.clone(),
                 self.freed_pages.clone(),
                 relocation_map,
             )? {
