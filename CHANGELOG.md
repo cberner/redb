@@ -4,8 +4,9 @@
 * Optimize `Table::pop_first()` and `Table::pop_last()` to be about 2x faster.
 * Enable file space reclamation during non-durable transactions performed while a savepoint exists.
 * Reuse pages freed by the previous durable transaction in the next write transaction, instead of
-  waiting an extra commit. This roughly halves the peak disk usage of write-heavy workloads with
-  no concurrent readers.
+  waiting an extra commit. Applies to both quick-repair and 1PC+C commits when no reader or
+  savepoint still references the pages. Roughly halves the peak disk usage of write-heavy
+  workloads with no concurrent readers.
 * Fix a bug where calling `compact()` on a database could cause the file to grow
   rather than shrink in some cases.
 

@@ -8,6 +8,7 @@ use std::mem::size_of;
 
 // Tracks the page orders that MAY BE free in each region. This data structure is optimistic, so
 // a region may not actually have a page free for a given order
+#[derive(Clone)]
 pub(crate) struct RegionTracker {
     order_trackers: Vec<BtreeBitmap>,
 }

@@ -1506,27 +1506,28 @@ impl WriteTransaction {
 
         // If no earlier read/savepoint is still alive, this transaction's freed pages are
         // unreachable for any other observer as soon as the commit is durable. We can skip the
-        // round-trip through DATA_FREED_TABLE and hand them to `durable_commit` to free in the
+        // round-trip through DATA_FREED_TABLE and have `durable_commit` free them in the
         // in-memory allocator right after fsync, keeping the freed tree empty so the pages are
-        // available to the next write transaction. If a reader does block, we fall back to the
-        // normal persistent bookkeeping.
+        // available to the next write transaction. Quick-repair commits take the same path:
+        // `try_save_allocator_state` records the pending-free pages into the on-disk allocator
+        // state before the fsync, without mutating the live allocator, so a crash that rolls
+        // back the commit also rolls back the speculative free.
+        //
+        // `blocked_by_readers` is sampled now and re-sampled after `mem.commit`. The re-check
+        // is what makes the skip-store path race-safe: a `begin_read` that registers at T-1
+        // between this check and the fsync shows up in the post-commit re-check, and we fall
+        // back to the deferred queue rather than reusing the pages.
         let blocked_by_readers = self
             .transaction_tracker
             .oldest_live_read_transaction()
             .is_some_and(|oldest| oldest < self.transaction_id);
-        // With quick-repair we need to keep the usual persistent bookkeeping so that a partial
-        // commit remains recoverable: if we skipped the store and crashed mid-commit after the
-        // allocator state table was partially written, the on-disk metadata could diverge from
-        // the pages the aborted transaction still references.
-        let data_freed_post_commit = if blocked_by_readers
-            || matches!(self.durability, InternalDurability::None)
-            || self.quick_repair
-        {
-            self.store_data_freed_pages(data_freed)?;
-            Vec::new()
-        } else {
-            data_freed
-        };
+        let data_freed_post_commit =
+            if blocked_by_readers || matches!(self.durability, InternalDurability::None) {
+                self.store_data_freed_pages(data_freed)?;
+                Vec::new()
+            } else {
+                data_freed
+            };
 
         #[cfg(feature = "logging")]
         debug!(
@@ -1775,9 +1776,8 @@ impl WriteTransaction {
                             .mem
                             .reserve_allocator_state(tree, self.transaction_id)?;
 
-                        // We can't free pages after the commit, because that would invalidate our
-                        // saved allocator state. Everything needs to go through the transactional
-                        // free mechanism
+                        // System-tree frees still go through SYSTEM_FREED_TABLE so the saved
+                        // allocator state stays consistent on a partial commit.
                         self.store_system_freed_pages(
                             system_tree_ref,
                             system_freed_pages.clone(),
@@ -1785,7 +1785,15 @@ impl WriteTransaction {
                             &mut pagination_counter,
                         )?;
 
-                        if self.mem.try_save_allocator_state(tree, num_regions)? {
+                        // Speculatively record this transaction's skip-store pages as free in
+                        // the on-disk allocator state. The live allocator is NOT mutated here;
+                        // we only publish it after `mem.commit` succeeds (and only if the
+                        // post-commit race re-check confirms no reader squeezed in).
+                        if self.mem.try_save_allocator_state(
+                            tree,
+                            num_regions,
+                            &data_freed_post_commit,
+                        )? {
                             return Ok(());
                         }
 

@@ -4,6 +4,7 @@ use std::mem::size_of;
 const HEIGHT_OFFSET: usize = 0;
 const END_OFFSETS: usize = HEIGHT_OFFSET + size_of::<u32>();
 
+#[derive(Clone)]
 pub(super) struct BtreeBitmap {
     heights: Vec<U64GroupedBitmap>,
 }
@@ -227,6 +228,7 @@ fn bits_in_range(lo: u32, hi: u32) -> u64 {
 }
 
 // A bitmap which groups consecutive groups of 64bits together
+#[derive(Clone)]
 pub(crate) struct U64GroupedBitmap {
     len: u32,
     data: Vec<u64>,

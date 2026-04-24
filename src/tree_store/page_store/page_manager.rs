@@ -522,11 +522,19 @@ impl TransactionalMemory {
         Ok(num_regions)
     }
 
-    // Returns true on success, or false if the number of regions has changed
+    // Returns true on success, or false if the number of regions has changed.
+    //
+    // `pending_free_pages` are pages whose freeing commit has not yet mutated the live
+    // allocator -- see the skip-store path in `durable_commit`. They are serialized into the
+    // saved allocator state as free so that a quick-repair reopen observes them as reclaimable,
+    // without touching the live allocator until `mem.commit` confirms the fsync succeeded. On an
+    // aborted commit the saved state is never swapped in, so the live allocator remains the
+    // authoritative view.
     pub(crate) fn try_save_allocator_state(
         &self,
         tree: &mut AllocatorStateTreeMut,
         num_regions: u32,
+        pending_free_pages: &[PageNumber],
     ) -> Result<bool> {
         // Has the number of regions changed since reserve_allocator_state() was called?
         let state = self.state.lock().unwrap();
@@ -534,8 +542,33 @@ impl TransactionalMemory {
             return Ok(false);
         }
 
+        // If any pending pages exist, clone the affected region allocators and the region
+        // tracker, apply the frees to the clones, and serialize the clones. The live allocator
+        // is deliberately untouched.
+        let mut overlay_regions: BTreeMap<u32, BuddyAllocator> = BTreeMap::new();
+        let mut overlay_tracker: Option<RegionTracker> = if pending_free_pages.is_empty() {
+            None
+        } else {
+            Some(state.allocators.region_tracker.clone())
+        };
+        for page in pending_free_pages {
+            let region_index = page.region;
+            debug_assert!((region_index as usize) < state.allocators.region_allocators.len());
+            let allocator = overlay_regions.entry(region_index).or_insert_with(|| {
+                state.allocators.region_allocators[region_index as usize].clone()
+            });
+            allocator.free(page.page_index, page.page_order);
+            overlay_tracker
+                .as_mut()
+                .unwrap()
+                .mark_free(page.page_order, region_index);
+        }
+
         for i in 0..num_regions {
-            let region_bytes = &state.allocators.region_allocators[i as usize].to_vec();
+            let region_bytes = match overlay_regions.get(&i) {
+                Some(overlay) => overlay.to_vec(),
+                None => state.allocators.region_allocators[i as usize].to_vec(),
+            };
             if tree
                 .get(&AllocatorStateKey::Region(i))?
                 .unwrap()
@@ -549,7 +582,9 @@ impl TransactionalMemory {
             tree.insert_inplace(&AllocatorStateKey::Region(i), &region_bytes.as_ref())?;
         }
 
-        let region_tracker_bytes = state.allocators.region_tracker.to_vec();
+        let region_tracker_bytes = overlay_tracker
+            .as_ref()
+            .map_or_else(|| state.allocators.region_tracker.to_vec(), |t| t.to_vec());
         if tree
             .get(&AllocatorStateKey::RegionTracker)?
             .unwrap()
