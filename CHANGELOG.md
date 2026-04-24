@@ -1,6 +1,8 @@
 # redb - Changelog
 
 ## Unreleased
+* Optimize `Table::retain()` and `Table::retain_in()` to be roughly an order of magnitude
+  faster on large operations.
 * Optimize `Table::pop_first()` and `Table::pop_last()` to be about 2x faster.
 * Enable file space reclamation during non-durable transactions performed while a savepoint exists.
 * Fix a bug where calling `compact()` on a database could cause the file to grow
