@@ -701,6 +701,59 @@ impl<'a, K: Key + 'static, V: Value + 'static> Entry<'a, K, V> {
             Entry::Vacant(entry) => entry.insert(default),
         }
     }
+
+    /// Ensures a value is in the entry by inserting the result of `default` if empty,
+    /// and returns a mutable accessor to the value in the entry.
+    ///
+    /// Unlike [`or_insert`](Self::or_insert), the default value is only computed if the
+    /// entry is vacant.
+    pub fn or_insert_with<'v, F, B>(self, default: F) -> Result<AccessGuardMut<'a, V>>
+    where
+        F: FnOnce() -> B,
+        B: Borrow<V::SelfType<'v>>,
+    {
+        match self {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(default()),
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting, if empty, the result of the `default`
+    /// function, which is given a view of the key.
+    pub fn or_insert_with_key<'v, F, B>(self, default: F) -> Result<AccessGuardMut<'a, V>>
+    where
+        F: FnOnce(&K::SelfType<'a>) -> B,
+        B: Borrow<V::SelfType<'v>>,
+    {
+        match self {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let value = default(&entry.key);
+                entry.insert(value)
+            }
+        }
+    }
+
+    /// Provides in-place mutable access to an occupied entry before any potential inserts
+    /// into the table.
+    ///
+    /// The closure receives an [`AccessGuardMut`] and may replace the stored value via
+    /// [`AccessGuardMut::insert`]. Any errors returned by the closure are propagated.
+    pub fn and_modify<F>(self, f: F) -> Result<Self>
+    where
+        F: FnOnce(&mut AccessGuardMut<'_, V>) -> Result<()>,
+    {
+        match self {
+            Entry::Occupied(mut entry) => {
+                {
+                    let mut guard = entry.get_mut()?;
+                    f(&mut guard)?;
+                }
+                Ok(Entry::Occupied(entry))
+            }
+            Entry::Vacant(entry) => Ok(Entry::Vacant(entry)),
+        }
+    }
 }
 
 /// A view into an occupied entry in a [`Table`]. It is part of the [`Entry`] enum.
@@ -715,6 +768,24 @@ impl<'a, K: Key + 'static, V: Value + 'static> OccupiedEntry<'a, K, V> {
         &self.key
     }
 
+    /// Returns a view of this entry's value.
+    pub fn get(&self) -> Result<AccessGuard<'_, V>> {
+        self.tree.get(&self.key)?.ok_or_else(|| {
+            StorageError::Corrupted(
+                "entry for key disappeared while OccupiedEntry was live".to_string(),
+            )
+        })
+    }
+
+    /// Returns a mutable accessor to the value in the entry.
+    pub fn get_mut(&mut self) -> Result<AccessGuardMut<'_, V>> {
+        self.tree.get_mut(&self.key)?.ok_or_else(|| {
+            StorageError::Corrupted(
+                "entry for key disappeared while OccupiedEntry was live".to_string(),
+            )
+        })
+    }
+
     /// Converts the entry into a mutable accessor to the value in the entry with a lifetime
     /// bound to the table itself.
     pub fn into_mut(self) -> Result<AccessGuardMut<'a, V>> {
@@ -723,6 +794,46 @@ impl<'a, K: Key + 'static, V: Value + 'static> OccupiedEntry<'a, K, V> {
                 "entry for key disappeared while OccupiedEntry was live".to_string(),
             )
         })
+    }
+
+    /// Replaces the value of the entry with the supplied value, and returns the old value.
+    pub fn insert<'v>(
+        &mut self,
+        value: impl Borrow<V::SelfType<'v>>,
+    ) -> Result<AccessGuard<'_, V>> {
+        let value_len = V::as_bytes(value.borrow()).as_ref().len();
+        if value_len > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len));
+        }
+        let key_len = K::as_bytes(&self.key).as_ref().len();
+        if value_len + key_len > MAX_PAIR_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len + key_len));
+        }
+        self.tree.insert(&self.key, value.borrow())?.ok_or_else(|| {
+            StorageError::Corrupted(
+                "entry for key disappeared while OccupiedEntry was live".to_string(),
+            )
+        })
+    }
+
+    /// Takes the value out of the entry, and returns it.
+    pub fn remove(self) -> Result<AccessGuard<'a, V>> {
+        self.tree.remove(&self.key)?.ok_or_else(|| {
+            StorageError::Corrupted(
+                "entry for key disappeared while OccupiedEntry was live".to_string(),
+            )
+        })
+    }
+
+    /// Takes the entry out of the table, returning the key and the value.
+    pub fn remove_entry(self) -> Result<(K::SelfType<'a>, AccessGuard<'a, V>)> {
+        let OccupiedEntry { tree, key } = self;
+        let value = tree.remove(&key)?.ok_or_else(|| {
+            StorageError::Corrupted(
+                "entry for key disappeared while OccupiedEntry was live".to_string(),
+            )
+        })?;
+        Ok((key, value))
     }
 }
 
@@ -736,6 +847,11 @@ impl<'a, K: Key + 'static, V: Value + 'static> VacantEntry<'a, K, V> {
     /// Returns a view of this entry's key.
     pub fn key(&self) -> &K::SelfType<'a> {
         &self.key
+    }
+
+    /// Consumes the entry and returns the key that was used to construct it.
+    pub fn into_key(self) -> K::SelfType<'a> {
+        self.key
     }
 
     /// Inserts `value` with the entry's key and returns a mutable accessor to it.

@@ -1120,6 +1120,188 @@ fn entry_borrowed_key_in_loop() {
 }
 
 #[test]
+fn entry_or_insert_with() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // or_insert_with is lazy: closure runs only for vacant entries.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.entry(1).unwrap().or_insert_with(|| 42).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 42);
+    drop(read_txn);
+
+    // or_insert_with_key exposes the key to the default function.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let value = table
+            .entry(3)
+            .unwrap()
+            .or_insert_with_key(|k| k * 2)
+            .unwrap();
+        assert_eq!(value.value(), 6);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(3).unwrap().unwrap().value(), 6);
+}
+
+#[test]
+fn entry_and_modify() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1, 10).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    // and_modify updates an occupied entry; or_insert after it is a no-op.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table
+            .entry(1)
+            .unwrap()
+            .and_modify(|guard| guard.insert(guard.value() + 5))
+            .unwrap()
+            .or_insert(0)
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 15);
+    drop(read_txn);
+
+    // and_modify is a no-op on vacant entries; or_insert then provides the default.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let value = table
+            .entry(2)
+            .unwrap()
+            .and_modify(|guard| guard.insert(0))
+            .unwrap()
+            .or_insert(7)
+            .unwrap();
+        assert_eq!(value.value(), 7);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(2).unwrap().unwrap().value(), 7);
+}
+
+#[test]
+fn entry_occupied_methods() {
+    use redb::Entry;
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1, 10).unwrap();
+        table.insert(2, 20).unwrap();
+        table.insert(3, 30).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    // OccupiedEntry::get / get_mut / insert.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let entry = table.entry(1).unwrap();
+        match entry {
+            Entry::Occupied(mut occupied) => {
+                assert_eq!(*occupied.key(), 1);
+                assert_eq!(occupied.get().unwrap().value(), 10);
+                let mut guard = occupied.get_mut().unwrap();
+                assert_eq!(guard.value(), 10);
+                guard.insert(&11).unwrap();
+                drop(guard);
+                let old = occupied.insert(&100).unwrap();
+                assert_eq!(old.value(), 11);
+            }
+            Entry::Vacant(_) => panic!("expected Occupied"),
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 100);
+    drop(read_txn);
+
+    // OccupiedEntry::remove.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        match table.entry(2).unwrap() {
+            Entry::Occupied(occupied) => {
+                let removed = occupied.remove().unwrap();
+                assert_eq!(removed.value(), 20);
+            }
+            Entry::Vacant(_) => panic!("expected Occupied"),
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // OccupiedEntry::remove_entry returns key and value.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        match table.entry(3).unwrap() {
+            Entry::Occupied(occupied) => {
+                let (key, value) = occupied.remove_entry().unwrap();
+                assert_eq!(key, 3);
+                assert_eq!(value.value(), 30);
+            }
+            Entry::Vacant(_) => panic!("expected Occupied"),
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert!(table.get(2).unwrap().is_none());
+    assert!(table.get(3).unwrap().is_none());
+}
+
+#[test]
+fn entry_vacant_into_key() {
+    use redb::Entry;
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        match table.entry(42).unwrap() {
+            Entry::Vacant(vacant) => {
+                let key = vacant.into_key();
+                assert_eq!(key, 42);
+            }
+            Entry::Occupied(_) => panic!("expected Vacant"),
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
 fn delete() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
