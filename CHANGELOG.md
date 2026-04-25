@@ -1,6 +1,9 @@
 # redb - Changelog
 
 ## Unreleased
+* Add `Table::entry()` and the associated `Entry`, `OccupiedEntry`, and `VacantEntry`
+  types, mirroring `std::collections::BTreeMap::entry`. Currently supports `or_insert`;
+  additional methods will follow.
 * Optimize `Table::pop_first()` and `Table::pop_last()` to be about 2x faster.
 * Enable file space reclamation during non-durable transactions performed while a savepoint exists.
 * Fix a bug where calling `compact()` on a database could cause the file to grow

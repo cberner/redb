@@ -201,6 +201,28 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     ) -> Result<Option<AccessGuard<'_, V>>> {
         self.tree.remove(key.borrow())
     }
+
+    /// Gets the given key's corresponding entry in the table for in-place manipulation.
+    ///
+    /// This is analogous to [`std::collections::BTreeMap::entry`], and avoids the double
+    /// lookup that a `get` followed by `insert` would require when updating a value.
+    pub fn entry<'a>(&'a mut self, key: K::SelfType<'a>) -> Result<Entry<'a, K, V>> {
+        let key_len = K::as_bytes(&key).as_ref().len();
+        if key_len > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(key_len));
+        }
+        if self.tree.get(&key)?.is_some() {
+            Ok(Entry::Occupied(OccupiedEntry {
+                tree: &mut self.tree,
+                key,
+            }))
+        } else {
+            Ok(Entry::Vacant(VacantEntry {
+                tree: &mut self.tree,
+                key,
+            }))
+        }
+    }
 }
 
 impl<K: Key + 'static, V: MutInPlaceValue + 'static> Table<'_, K, V> {
@@ -639,6 +661,98 @@ impl<K: Key + 'static, V: Value + 'static> DoubleEndedIterator for Range<'_, K, 
                 let value = AccessGuard::with_page(page, value_range);
                 (key, value)
             })
+        })
+    }
+}
+
+/// A view into a single entry in a [`Table`], which may either be vacant or occupied.
+///
+/// This `enum` is constructed from the [`entry`] method on [`Table`], and mirrors
+/// [`std::collections::btree_map::Entry`] as closely as the redb data model allows.
+///
+/// Unlike the in-memory `BTreeMap`, redb values are stored serialized, so methods that
+/// produce a "reference to the value" return an [`AccessGuardMut`] instead of `&mut V`.
+///
+/// [`entry`]: Table::entry
+pub enum Entry<'a, K: Key + 'static, V: Value + 'static> {
+    /// An occupied entry.
+    Occupied(OccupiedEntry<'a, K, V>),
+    /// A vacant entry.
+    Vacant(VacantEntry<'a, K, V>),
+}
+
+impl<'a, K: Key + 'static, V: Value + 'static> Entry<'a, K, V> {
+    /// Returns a view of this entry's key.
+    pub fn key(&self) -> &K::SelfType<'a> {
+        match self {
+            Entry::Occupied(entry) => entry.key(),
+            Entry::Vacant(entry) => entry.key(),
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the provided `default` if empty,
+    /// and returns a mutable accessor to the value in the entry.
+    pub fn or_insert<'v>(
+        self,
+        default: impl Borrow<V::SelfType<'v>>,
+    ) -> Result<AccessGuardMut<'a, V>> {
+        match self {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(default),
+        }
+    }
+}
+
+/// A view into an occupied entry in a [`Table`]. It is part of the [`Entry`] enum.
+pub struct OccupiedEntry<'a, K: Key + 'static, V: Value + 'static> {
+    tree: &'a mut BtreeMut<K, V>,
+    key: K::SelfType<'a>,
+}
+
+impl<'a, K: Key + 'static, V: Value + 'static> OccupiedEntry<'a, K, V> {
+    /// Returns a view of this entry's key.
+    pub fn key(&self) -> &K::SelfType<'a> {
+        &self.key
+    }
+
+    /// Converts the entry into a mutable accessor to the value in the entry with a lifetime
+    /// bound to the table itself.
+    pub fn into_mut(self) -> Result<AccessGuardMut<'a, V>> {
+        self.tree.get_mut(&self.key)?.ok_or_else(|| {
+            StorageError::Corrupted(
+                "entry for key disappeared while OccupiedEntry was live".to_string(),
+            )
+        })
+    }
+}
+
+/// A view into a vacant entry in a [`Table`]. It is part of the [`Entry`] enum.
+pub struct VacantEntry<'a, K: Key + 'static, V: Value + 'static> {
+    tree: &'a mut BtreeMut<K, V>,
+    key: K::SelfType<'a>,
+}
+
+impl<'a, K: Key + 'static, V: Value + 'static> VacantEntry<'a, K, V> {
+    /// Returns a view of this entry's key.
+    pub fn key(&self) -> &K::SelfType<'a> {
+        &self.key
+    }
+
+    /// Inserts `value` with the entry's key and returns a mutable accessor to it.
+    pub fn insert<'v>(self, value: impl Borrow<V::SelfType<'v>>) -> Result<AccessGuardMut<'a, V>> {
+        let value_len = V::as_bytes(value.borrow()).as_ref().len();
+        if value_len > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len));
+        }
+        let key_len = K::as_bytes(&self.key).as_ref().len();
+        if value_len + key_len > MAX_PAIR_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len + key_len));
+        }
+        self.tree.insert(&self.key, value.borrow())?;
+        self.tree.get_mut(&self.key)?.ok_or_else(|| {
+            StorageError::Corrupted(
+                "inserted entry not found after VacantEntry::insert".to_string(),
+            )
         })
     }
 }
