@@ -10,9 +10,18 @@ classifier = ["Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Rust"]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "hypothesis>=6.0",
+]
+
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
 compatibility = "manylinux2014"
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
