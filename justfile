@@ -28,10 +28,11 @@ publish_py: test_py
     MATURIN_PYPI_TOKEN=$(cat ~/.pypi/redb_token) docker run -it --rm -e "MATURIN_PYPI_TOKEN" -v `pwd`:/redb-ro:ro quay.io/pypa/manylinux2014_x86_64 /redb-ro/crates/redb-python/py_publish.sh
 
 test_py: install_py
-    python3 -m unittest discover --start-directory=./crates/redb-python
+    python3 -m pytest ./crates/redb-python/test
 
 install_py: pre
     maturin develop --manifest-path=./crates/redb-python/Cargo.toml
+    python3 -m pip install pytest hypothesis
 
 test: pre
     RUST_BACKTRACE=1 cargo test --all-features
