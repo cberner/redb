@@ -986,6 +986,140 @@ fn get_mut() {
 }
 
 #[test]
+fn entry_or_insert() {
+    use redb::Entry;
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // or_insert on a vacant entry inserts the default and returns an accessor to it.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let entry = table.entry(1).unwrap();
+        assert!(matches!(entry, Entry::Vacant(_)));
+        let value = entry.or_insert(10).unwrap();
+        assert_eq!(value.value(), 10);
+    }
+    write_txn.commit().unwrap();
+
+    // or_insert on an occupied entry returns the existing value, unchanged.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let entry = table.entry(1).unwrap();
+        assert!(matches!(entry, Entry::Occupied(_)));
+        let value = entry.or_insert(999).unwrap();
+        assert_eq!(value.value(), 10);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 10);
+    drop(read_txn);
+
+    // key() returns the key for both variants.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(*table.entry(1).unwrap().key(), 1);
+        assert_eq!(*table.entry(2).unwrap().key(), 2);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn entry_borrowed_key() {
+    // Exercises the ergonomics of `entry()` with a borrowed key type (`&[u8]`).
+    // The single `'a` lifetime on `entry<'a>(&'a mut self, key: K::SelfType<'a>)`
+    // means the key just needs to live across the `entry()` call; it does not need
+    // to outlive the table.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Key materialized inside the transaction scope, with a lifetime shorter than the table.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        let key_owned: Vec<u8> = vec![1, 2, 3];
+        let value = table
+            .entry(key_owned.as_slice())
+            .unwrap()
+            .or_insert(b"hello".as_slice())
+            .unwrap();
+        assert_eq!(value.value(), b"hello");
+    }
+    write_txn.commit().unwrap();
+
+    // The key Vec is dropped at the end of the previous scope, demonstrating that
+    // the entry guard does not require the key to outlive the table.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(SLICE_TABLE).unwrap();
+    assert_eq!(
+        table.get([1u8, 2, 3].as_slice()).unwrap().unwrap().value(),
+        b"hello"
+    );
+    drop(read_txn);
+
+    // String literal (`&'static [u8]`) also works: the lifetime is shortened to fit `'a`.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table
+            .entry(b"static_key".as_slice())
+            .unwrap()
+            .or_insert(b"world".as_slice())
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(SLICE_TABLE).unwrap();
+    assert_eq!(
+        table
+            .get(b"static_key".as_slice())
+            .unwrap()
+            .unwrap()
+            .value(),
+        b"world"
+    );
+}
+
+#[test]
+fn entry_borrowed_key_in_loop() {
+    // Each loop iteration constructs a fresh borrowed key whose lifetime is bounded
+    // by the iteration. Without a single-lifetime API, the borrow checker would
+    // complain that the key does not outlive the table.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let inputs: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i, i + 1, i + 2]).collect();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        for (i, key) in inputs.iter().enumerate() {
+            let value = vec![i as u8];
+            table
+                .entry(key.as_slice())
+                .unwrap()
+                .or_insert(value.as_slice())
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(SLICE_TABLE).unwrap();
+    for (i, key) in inputs.iter().enumerate() {
+        assert_eq!(
+            table.get(key.as_slice()).unwrap().unwrap().value(),
+            &[i as u8]
+        );
+    }
+}
+
+#[test]
 fn delete() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
