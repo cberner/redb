@@ -210,8 +210,8 @@ impl TableTree {
     }
 }
 
-pub(crate) struct TableTreeMut<'txn> {
-    tree: BtreeMut<'txn, &'static str, InternalTableDefinition>,
+pub(crate) struct TableTreeMut {
+    tree: BtreeMut<&'static str, InternalTableDefinition>,
     guard: Arc<TransactionGuard>,
     page_allocator: PageAllocator,
     // Cached updates from tables that have been closed. These must be flushed to the btree.
@@ -221,7 +221,7 @@ pub(crate) struct TableTreeMut<'txn> {
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
 }
 
-impl TableTreeMut<'_> {
+impl TableTreeMut {
     pub(crate) fn new(
         master_root: Option<BtreeHeader>,
         guard: Arc<TransactionGuard>,
@@ -771,7 +771,7 @@ impl TableTreeMut<'_> {
     }
 }
 
-impl Drop for TableTreeMut<'_> {
+impl Drop for TableTreeMut {
     fn drop(&mut self) {
         if thread::panicking() {
             return;

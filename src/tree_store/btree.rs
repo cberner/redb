@@ -324,7 +324,7 @@ impl UntypedBtreeMut {
     }
 }
 
-pub(crate) struct BtreeMut<'a, K: Key + 'static, V: Value + 'static> {
+pub(crate) struct BtreeMut<K: Key + 'static, V: Value + 'static> {
     page_allocator: PageAllocator,
     transaction_guard: Arc<TransactionGuard>,
     root: Option<BtreeHeader>,
@@ -332,10 +332,9 @@ pub(crate) struct BtreeMut<'a, K: Key + 'static, V: Value + 'static> {
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
-    _lifetime: PhantomData<&'a ()>,
 }
 
-impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
+impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
     pub(crate) fn new(
         root: Option<BtreeHeader>,
         guard: Arc<TransactionGuard>,
@@ -351,7 +350,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
             allocated_pages,
             _key_type: PhantomData,
             _value_type: PhantomData,
-            _lifetime: PhantomData,
         }
     }
 
@@ -734,7 +732,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<'_, K, V> {
     }
 }
 
-impl<'a, K: Key + 'a, V: MutInPlaceValue + 'a> BtreeMut<'a, K, V> {
+impl<K: Key + 'static, V: MutInPlaceValue + 'static> BtreeMut<K, V> {
     /// Reserve space to insert a key-value pair
     /// The returned reference will have length equal to `value_length`
     // Return type has the same lifetime as &self, because the tree must not be modified until the mutable guard is dropped

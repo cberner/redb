@@ -53,8 +53,8 @@ pub(crate) const SYSTEM_FREED_TABLE: SystemTableDefinition<TransactionIdWithPagi
 // raw btree operations rather than open_system_table(), so there's no SystemTableDefinition
 pub(crate) const ALLOCATOR_STATE_TABLE_NAME: &str = "allocator_state";
 pub(crate) type AllocatorStateTree = Btree<AllocatorStateKey, &'static [u8]>;
-pub(crate) type AllocatorStateTreeMut<'a> = BtreeMut<'a, AllocatorStateKey, &'static [u8]>;
-pub(crate) type SystemFreedTree<'a> = BtreeMut<'a, TransactionIdWithPagination, PageList<'static>>;
+pub(crate) type AllocatorStateTreeMut = BtreeMut<AllocatorStateKey, &'static [u8]>;
+pub(crate) type SystemFreedTree = BtreeMut<TransactionIdWithPagination, PageList<'static>>;
 
 // Format:
 // 2 bytes: length
@@ -377,22 +377,22 @@ enum InternalDurability {
 }
 
 // Like a Table but only one may be open at a time to avoid possible races
-pub struct SystemTable<'db, 's, K: Key + 'static, V: Value + 'static> {
+pub struct SystemTable<'s, K: Key + 'static, V: Value + 'static> {
     name: String,
-    namespace: &'s mut SystemNamespace<'db>,
-    tree: BtreeMut<'s, K, V>,
+    namespace: &'s mut SystemNamespace,
+    tree: BtreeMut<K, V>,
     transaction_guard: Arc<TransactionGuard>,
 }
 
-impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
+impl<'s, K: Key + 'static, V: Value + 'static> SystemTable<'s, K, V> {
     fn new(
         name: &str,
         table_root: Option<BtreeHeader>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         guard: Arc<TransactionGuard>,
         page_allocator: PageAllocator,
-        namespace: &'s mut SystemNamespace<'db>,
-    ) -> SystemTable<'db, 's, K, V> {
+        namespace: &'s mut SystemNamespace,
+    ) -> SystemTable<'s, K, V> {
         // No need to track allocations in the system tree. Savepoint restoration only relies on
         // freeing in the data tree
         let ignore = Arc::new(Mutex::new(PageTrackerPolicy::Ignore));
@@ -470,7 +470,7 @@ impl<'db, 's, K: Key + 'static, V: Value + 'static> SystemTable<'db, 's, K, V> {
     }
 }
 
-impl<K: Key + 'static, V: MutInPlaceValue + 'static> SystemTable<'_, '_, K, V> {
+impl<K: Key + 'static, V: MutInPlaceValue + 'static> SystemTable<'_, K, V> {
     pub fn insert_reserve<'a>(
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
@@ -490,7 +490,7 @@ impl<K: Key + 'static, V: MutInPlaceValue + 'static> SystemTable<'_, '_, K, V> {
     }
 }
 
-impl<K: Key + 'static, V: Value + 'static> Drop for SystemTable<'_, '_, K, V> {
+impl<K: Key + 'static, V: Value + 'static> Drop for SystemTable<'_, K, V> {
     fn drop(&mut self) {
         self.namespace.close_table(
             &self.name,
@@ -500,13 +500,13 @@ impl<K: Key + 'static, V: Value + 'static> Drop for SystemTable<'_, '_, K, V> {
     }
 }
 
-struct SystemNamespace<'db> {
-    table_tree: TableTreeMut<'db>,
+struct SystemNamespace {
+    table_tree: TableTreeMut,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     transaction_guard: Arc<TransactionGuard>,
 }
 
-impl<'db> SystemNamespace<'db> {
+impl SystemNamespace {
     fn new(
         root_page: Option<BtreeHeader>,
         guard: Arc<TransactionGuard>,
@@ -533,11 +533,11 @@ impl<'db> SystemNamespace<'db> {
         self.freed_pages.clone()
     }
 
-    fn open_system_table<'txn, 's, K: Key + 'static, V: Value + 'static>(
+    fn open_system_table<'s, K: Key + 'static, V: Value + 'static>(
         &'s mut self,
-        transaction: &'txn WriteTransaction,
+        transaction: &WriteTransaction,
         definition: SystemTableDefinition<K, V>,
-    ) -> Result<SystemTable<'db, 's, K, V>> {
+    ) -> Result<SystemTable<'s, K, V>> {
         let (root, _) = self
             .table_tree
             .get_or_create_table::<K, V>(definition.name(), TableType::Normal)
@@ -568,14 +568,14 @@ impl<'db> SystemNamespace<'db> {
     }
 }
 
-struct TableNamespace<'db> {
+struct TableNamespace {
     open_tables: HashMap<String, &'static panic::Location<'static>>,
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-    table_tree: TableTreeMut<'db>,
+    table_tree: TableTreeMut,
 }
 
-impl TableNamespace<'_> {
+impl TableNamespace {
     fn new(
         root_page: Option<BtreeHeader>,
         guard: Arc<TransactionGuard>,
@@ -831,8 +831,8 @@ pub struct WriteTransaction {
     mem: Arc<TransactionalMemory>,
     transaction_guard: Arc<TransactionGuard>,
     transaction_id: TransactionId,
-    tables: Mutex<TableNamespace<'static>>,
-    system_tables: Mutex<SystemNamespace<'static>>,
+    tables: Mutex<TableNamespace>,
+    system_tables: Mutex<SystemNamespace>,
     completed: bool,
     dirty: AtomicBool,
     durability: InternalDurability,
@@ -1632,7 +1632,7 @@ impl WriteTransaction {
     }
 
     fn write_allocated_pages_entry(
-        allocated_table: &mut SystemTable<'_, '_, TransactionIdWithPagination, PageList<'static>>,
+        allocated_table: &mut SystemTable<'_, TransactionIdWithPagination, PageList<'static>>,
         transaction_id: TransactionId,
         mut pages: Vec<PageNumber>,
     ) -> Result {

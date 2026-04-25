@@ -394,7 +394,7 @@ pub struct MultimapTable<'txn, K: Key + 'static, V: Key + 'static> {
     transaction: &'txn WriteTransaction,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
-    tree: BtreeMut<'txn, K, &'static DynamicCollection<V>>,
+    tree: BtreeMut<K, &'static DynamicCollection<V>>,
     page_allocator: PageAllocator,
     _value_type: PhantomData<V>,
 }
@@ -528,7 +528,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                         drop(guard);
 
                         // Don't bother computing the checksum, since we're about to modify the tree
-                        let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
+                        let mut subtree: BtreeMut<V, ()> = BtreeMut::new(
                             Some(BtreeHeader::new(page_number, 0, num_pairs as u64)),
                             self.transaction.transaction_guard(),
                             self.page_allocator.clone(),
@@ -546,7 +546,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     found
                 }
                 SubtreeV2 => {
-                    let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
+                    let mut subtree: BtreeMut<V, ()> = BtreeMut::new(
                         Some(guard.value().as_subtree()),
                         self.transaction.transaction_guard(),
                         self.page_allocator.clone(),
@@ -586,7 +586,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 self.tree
                     .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
             } else {
-                let mut subtree: BtreeMut<'_, V, ()> = BtreeMut::new(
+                let mut subtree: BtreeMut<V, ()> = BtreeMut::new(
                     None,
                     self.transaction.transaction_guard(),
                     self.page_allocator.clone(),

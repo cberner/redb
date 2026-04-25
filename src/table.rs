@@ -62,7 +62,7 @@ impl TableStats {
 pub struct Table<'txn, K: Key + 'static, V: Value + 'static> {
     name: String,
     transaction: &'txn WriteTransaction,
-    tree: BtreeMut<'txn, K, V>,
+    tree: BtreeMut<K, V>,
 }
 
 impl<K: Key + 'static, V: Value + 'static> TableHandle for Table<'_, K, V> {
