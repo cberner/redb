@@ -270,22 +270,11 @@ pub(crate) struct TransactionalMemory {
     unpersisted_allocations: Mutex<BTreeMap<TransactionId, PageNumberHashSet>>,
     // Reverse index into `unpersisted_allocations`
     unpersisted_allocation_txn: Mutex<PageNumberHashMap<TransactionId>>,
-    // Pages that the post-commit epilogue has already returned to the live allocator, but whose
-    // entries still sit in DATA_FREED_TABLE/SYSTEM_FREED_TABLE on disk. The next durable commit's
-    // `process_freed_pages` consults this set so it removes the tree entries without
-    // double-freeing the pages. In-memory only: lost on close, which is fine because the on-disk
-    // freed trees are the source of truth and a fresh `process_freed_pages` after reopen will
-    // reclaim those pages.
-    epilogue_freed_pages: Mutex<PageNumberHashSet>,
-    // Data-tree pages from a durable commit that the epilogue couldn't return to the allocator
-    // because a read transaction raced in between the commit_inner bypass decision and mem.commit
-    // making the new root visible. Held in memory keyed by the freeing txn id; the next durable
-    // commit pulls these out and stores them in DATA_FREED_TABLE under their original txn ids,
-    // where a normal `process_freed_pages` will reclaim them once readers are gone. Lost on
-    // crash: full repair walks the trees and considers any page not reachable from a tree as
-    // free, so the pages re-enter the allocator at next reopen with a full repair (quick-repair
-    // inherits the saved-allocator-state view, which marks them allocated -- minor delay until
-    // the next compact()).
+    // Data-tree pages whose post-commit free was blocked by a racing reader. Keyed by the
+    // freeing txn id. The next durable commit drains this map and persists each entry to
+    // DATA_FREED_TABLE under its original key. Lost on crash; recovery reclaims them via full
+    // repair (unreachable pages become free automatically). Under quick-repair the saved
+    // snapshot still marks them allocated -- they're reclaimed at the next `compact()`.
     deferred_data_freed: Mutex<BTreeMap<TransactionId, Vec<PageNumber>>>,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
@@ -431,7 +420,6 @@ impl TransactionalMemory {
             unpersisted: Mutex::new(PageNumberHashSet::default()),
             unpersisted_allocations: Mutex::new(BTreeMap::new()),
             unpersisted_allocation_txn: Mutex::new(PageNumberHashMap::default()),
-            epilogue_freed_pages: Mutex::new(PageNumberHashSet::default()),
             deferred_data_freed: Mutex::new(BTreeMap::new()),
             storage,
             state: Mutex::new(state),
@@ -518,11 +506,8 @@ impl TransactionalMemory {
         let mut state = self.state.lock().unwrap();
         state.header = header;
         drop(state);
-        // The reloaded header is the on-disk truth; the epilogue's freed-page set tracked
-        // pages whose underlying tree entries are still on disk, so the post-reopen
-        // `process_freed_pages` will need to free them again. Same for any deferred frees that
-        // hadn't been pushed back into DATA_FREED_TABLE by a subsequent commit.
-        self.epilogue_freed_pages.lock().unwrap().clear();
+        // Drop the in-memory deferred-frees: they're a soft mirror of pages that haven't been
+        // persisted to DATA_FREED_TABLE yet, and the reloaded on-disk view is the authority now.
         self.deferred_data_freed.lock().unwrap().clear();
 
         Ok(was_clean)
@@ -559,9 +544,8 @@ impl TransactionalMemory {
     pub(crate) fn begin_repair(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         state.allocators = Allocators::new(state.header.layout());
-        // Full repair walks every tree from scratch and rebuilds the allocator, so any deferred
-        // post-commit frees that hadn't been folded back into DATA_FREED_TABLE are accounted for
-        // by walking the data tree (pages no tree references end up free).
+        // Full repair rebuilds the allocator from the trees; any pages parked in
+        // `deferred_data_freed` will land in the rebuilt allocator's free list automatically.
         self.deferred_data_freed.lock().unwrap().clear();
         #[cfg(debug_assertions)]
         self.allocated_pages.lock().unwrap().clear();
@@ -640,48 +624,47 @@ impl TransactionalMemory {
         num_regions: u32,
         pending_free_pages: &[PageNumber],
     ) -> Result<bool> {
-        // Build the saved snapshot with `pending_free_pages` already marked free, even though
-        // the live allocator hasn't released them yet. The caller (durable_commit, with the
-        // bypass set from `data_freed_post_commit`) will free those pages immediately after
-        // `mem.commit` succeeds; we have to commit the saved state before mem.commit, so we
-        // simulate the freeing in a copy. On a quick-repair reopen the saved snapshot becomes
-        // the live allocator -- without this simulation, those pages would be marked allocated
-        // forever even though they aren't reachable from any tree.
+        // The saved snapshot must include `pending_free_pages` as already free even though the
+        // live allocator still has them allocated -- the caller releases them immediately after
+        // `mem.commit` succeeds, but the snapshot has to land BEFORE `mem.commit`. Simulate the
+        // frees in a region-local copy. On quick-repair reopen the saved snapshot becomes the
+        // live allocator; without this simulation those pages would be allocated forever even
+        // though no tree references them.
         let (region_bytes, region_tracker_bytes) = {
             let state = self.state.lock().unwrap();
             if num_regions != state.header.layout().num_regions() {
                 return Ok(false);
             }
 
-            let mut modified_allocators: BTreeMap<u32, BuddyAllocator> = BTreeMap::new();
-            let mut modified_region_tracker = if pending_free_pages.is_empty() {
-                None
+            if pending_free_pages.is_empty() {
+                let region_bytes = (0..num_regions)
+                    .map(|i| state.allocators.region_allocators[i as usize].to_vec())
+                    .collect::<Vec<_>>();
+                let region_tracker_bytes = state.allocators.region_tracker.to_vec();
+                (region_bytes, region_tracker_bytes)
             } else {
-                Some(state.allocators.region_tracker.clone())
-            };
-            for page in pending_free_pages {
-                debug_assert!((page.region as usize) < state.allocators.region_allocators.len());
-                let allocator = modified_allocators.entry(page.region).or_insert_with(|| {
-                    state.allocators.region_allocators[page.region as usize].clone()
-                });
-                allocator.free(page.page_index, page.page_order);
-                modified_region_tracker
-                    .as_mut()
-                    .unwrap()
-                    .mark_free(page.page_order, page.region);
-            }
+                let mut modified_allocators: BTreeMap<u32, BuddyAllocator> = BTreeMap::new();
+                let mut modified_region_tracker = state.allocators.region_tracker.clone();
+                for page in pending_free_pages {
+                    debug_assert!(
+                        (page.region as usize) < state.allocators.region_allocators.len()
+                    );
+                    let allocator = modified_allocators.entry(page.region).or_insert_with(|| {
+                        state.allocators.region_allocators[page.region as usize].clone()
+                    });
+                    allocator.free(page.page_index, page.page_order);
+                    modified_region_tracker.mark_free(page.page_order, page.region);
+                }
 
-            let mut region_bytes = Vec::with_capacity(num_regions as usize);
-            for i in 0..num_regions {
-                region_bytes.push(modified_allocators.remove(&i).map_or_else(
-                    || state.allocators.region_allocators[i as usize].to_vec(),
-                    |x| x.to_vec(),
-                ));
+                let mut region_bytes = Vec::with_capacity(num_regions as usize);
+                for i in 0..num_regions {
+                    region_bytes.push(modified_allocators.remove(&i).map_or_else(
+                        || state.allocators.region_allocators[i as usize].to_vec(),
+                        |x| x.to_vec(),
+                    ));
+                }
+                (region_bytes, modified_region_tracker.to_vec())
             }
-            let region_tracker_bytes = modified_region_tracker
-                .map_or_else(|| state.allocators.region_tracker.to_vec(), |x| x.to_vec());
-
-            (region_bytes, region_tracker_bytes)
         };
 
         for (i, region_bytes) in region_bytes.iter().enumerate() {
@@ -967,33 +950,9 @@ impl TransactionalMemory {
         state.latest_slot().system_root
     }
 
-    /// Mark `pages` as already-freed by the post-commit epilogue. The pages were returned to
-    /// the live allocator immediately, but their corresponding entries are still in
-    /// `DATA_FREED_TABLE` / `SYSTEM_FREED_TABLE` on disk. The next durable commit's
-    /// `process_freed_pages` consults `take_epilogue_freed` and (a) extracts the entry from
-    /// the tree as usual but (b) skips the second `free` call, because the page is already in
-    /// the allocator's free list.
-    pub(crate) fn record_epilogue_freed(&self, pages: &[PageNumber]) {
-        if pages.is_empty() {
-            return;
-        }
-        let mut set = self.epilogue_freed_pages.lock().unwrap();
-        for page in pages {
-            set.insert(*page);
-        }
-    }
-
-    /// Returns true if `page` was freed by a previous post-commit epilogue and consumes the
-    /// entry. The next freed-tree drain calls this for every page it would otherwise return to
-    /// the allocator; a true return means "tree entry exists but the page is already free, just
-    /// drop the tree entry."
-    pub(crate) fn take_epilogue_freed(&self, page: PageNumber) -> bool {
-        self.epilogue_freed_pages.lock().unwrap().remove(&page)
-    }
-
-    /// Stash data-tree pages that the post-commit epilogue couldn't release because a read
-    /// transaction raced in. The next durable commit drains these via `take_deferred_data_freed`
-    /// and stores them in `DATA_FREED_TABLE` under their original txn ids.
+    /// Park `pages` keyed by `transaction_id` (the txn that originally freed them) until the
+    /// next durable commit drains them via `take_deferred_data_freed`. See the field comment
+    /// on `deferred_data_freed` for the lifecycle.
     pub(crate) fn defer_data_freed(&self, transaction_id: TransactionId, pages: Vec<PageNumber>) {
         if pages.is_empty() {
             return;
@@ -1006,13 +965,13 @@ impl TransactionalMemory {
             .extend(pages);
     }
 
-    /// Drain the deferred-frees map into a vec of `(freeing_txn_id, pages)`. Called by the
-    /// next durable commit's `commit_inner` to hand the pages to `durable_commit`, which
-    /// stores them in `DATA_FREED_TABLE` under their original txn ids before `mem.commit`.
-    pub(crate) fn take_deferred_data_freed(&self) -> Vec<(TransactionId, Vec<PageNumber>)> {
-        std::mem::take(&mut *self.deferred_data_freed.lock().unwrap())
-            .into_iter()
-            .collect()
+    /// Drain the deferred-frees map.
+    pub(crate) fn take_deferred_data_freed(&self) -> BTreeMap<TransactionId, Vec<PageNumber>> {
+        let mut guard = self.deferred_data_freed.lock().unwrap();
+        if guard.is_empty() {
+            return BTreeMap::new();
+        }
+        std::mem::take(&mut *guard)
     }
 
     pub(crate) fn get_last_committed_transaction_id(&self) -> Result<TransactionId> {

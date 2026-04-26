@@ -13,8 +13,10 @@ use std::fs;
 use std::io::{ErrorKind, Write};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
+use std::thread;
+use std::time::Duration;
 
 const ELEMENTS: usize = 100;
 
@@ -213,10 +215,360 @@ fn page_reuse() {
     test_page_reuse(true);
 }
 
+#[test]
+fn page_reuse_with_racing_reader() {
+    test_page_reuse_with_racing_reader(false);
+    test_page_reuse_with_racing_reader(true);
+}
+
+#[test]
+fn page_reuse_after_unclean_reopen() {
+    test_page_reuse_after_unclean_reopen(false);
+    test_page_reuse_after_unclean_reopen(true);
+}
+
+#[test]
+fn check_integrity_clears_deferred_page_reuse() {
+    test_check_integrity_clears_deferred_page_reuse(false);
+    test_check_integrity_clears_deferred_page_reuse(true);
+}
+
 fn begin_page_reuse_write(db: &Database, quick_repair: bool) -> WriteTransaction {
     let mut txn = db.begin_write().unwrap();
     txn.set_quick_repair(quick_repair);
     txn
+}
+
+#[derive(Debug)]
+struct BlockingSyncState {
+    block_next: AtomicBool,
+    blocked: Mutex<bool>,
+    blocked_cvar: Condvar,
+    release: Mutex<bool>,
+    release_cvar: Condvar,
+}
+
+impl BlockingSyncState {
+    fn new() -> Self {
+        Self {
+            block_next: AtomicBool::new(false),
+            blocked: Mutex::new(false),
+            blocked_cvar: Condvar::new(),
+            release: Mutex::new(false),
+            release_cvar: Condvar::new(),
+        }
+    }
+
+    fn block_next_sync(&self) {
+        *self.blocked.lock().unwrap() = false;
+        *self.release.lock().unwrap() = false;
+        self.block_next.store(true, Ordering::SeqCst);
+    }
+
+    fn wait_until_blocked(&self) {
+        let mut blocked = self.blocked.lock().unwrap();
+        while !*blocked {
+            let (next, timeout) = self
+                .blocked_cvar
+                .wait_timeout(blocked, Duration::from_secs(10))
+                .unwrap();
+            blocked = next;
+            assert!(!timeout.timed_out(), "timed out waiting for sync_data()");
+        }
+    }
+
+    fn release(&self) {
+        *self.release.lock().unwrap() = true;
+        self.release_cvar.notify_all();
+    }
+
+    fn maybe_block(&self) {
+        if !self.block_next.swap(false, Ordering::SeqCst) {
+            return;
+        }
+
+        *self.blocked.lock().unwrap() = true;
+        self.blocked_cvar.notify_all();
+
+        let mut release = self.release.lock().unwrap();
+        while !*release {
+            release = self.release_cvar.wait(release).unwrap();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BlockingSyncBackend {
+    inner: FileBackend,
+    state: Arc<BlockingSyncState>,
+}
+
+impl StorageBackend for BlockingSyncBackend {
+    fn len(&self) -> Result<u64, std::io::Error> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        self.inner.read(offset, out)
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        self.inner.set_len(len)
+    }
+
+    fn sync_data(&self) -> Result<(), std::io::Error> {
+        self.state.maybe_block();
+        self.inner.sync_data()
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        self.inner.write(offset, data)
+    }
+
+    fn close(&self) -> Result<(), std::io::Error> {
+        self.inner.close()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct SharedInMemoryBackend {
+    inner: Arc<RwLock<Vec<u8>>>,
+}
+
+impl StorageBackend for SharedInMemoryBackend {
+    fn len(&self) -> Result<u64, std::io::Error> {
+        Ok(self.inner.read().unwrap().len() as u64)
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        let offset = usize::try_from(offset).unwrap();
+        let end = offset + out.len();
+        let guard = self.inner.read().unwrap();
+        if end > guard.len() {
+            return Err(std::io::Error::from(ErrorKind::UnexpectedEof));
+        }
+
+        out.copy_from_slice(&guard[offset..end]);
+        Ok(())
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        self.inner
+            .write()
+            .unwrap()
+            .resize(len.try_into().unwrap(), 0);
+        Ok(())
+    }
+
+    fn sync_data(&self) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        let offset = usize::try_from(offset).unwrap();
+        let end = offset + data.len();
+        let mut guard = self.inner.write().unwrap();
+        if end > guard.len() {
+            return Err(std::io::Error::from(ErrorKind::UnexpectedEof));
+        }
+
+        guard[offset..end].copy_from_slice(data);
+        Ok(())
+    }
+}
+
+// Verifies the racing-reader path: when a `begin_read` registers between the bypass decision in
+// `commit_inner` and `mem.commit` swapping the new root in, the post-commit epilogue must defer
+// this commit's freed pages instead of returning them to the live allocator. The next durable
+// commit (after the reader is gone) drains the side list back into DATA_FREED_TABLE under the
+// original txn id, where a normal `process_freed_pages` reclaims them.
+fn test_page_reuse_with_racing_reader(quick_repair: bool) {
+    let tmpfile = create_tempfile();
+    let sync_state = Arc::new(BlockingSyncState::new());
+    let backend = BlockingSyncBackend {
+        inner: FileBackend::new(tmpfile.into_file()).unwrap(),
+        state: sync_state.clone(),
+    };
+    let db = Arc::new(Database::builder().create_with_backend(backend).unwrap());
+
+    let txn = begin_page_reuse_write(db.as_ref(), quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(db.as_ref(), quick_repair);
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(db.as_ref(), quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 1).unwrap();
+    }
+
+    sync_state.block_next_sync();
+    let commit_handle = thread::spawn(move || txn.commit().unwrap());
+    sync_state.wait_until_blocked();
+
+    // Reader registers while the writer is parked inside fsync, between the bypass decision
+    // and the new root becoming visible. It must observe the previous root.
+    let db_for_read = db.clone();
+    let (read_started, read_started_rx) = mpsc::channel();
+    let (check_read, check_read_rx) = mpsc::channel();
+    let (read_checked, read_checked_rx) = mpsc::channel();
+    let (drop_read, drop_read_rx) = mpsc::channel();
+    let read_handle = thread::spawn(move || {
+        let read_txn = db_for_read.begin_read().unwrap();
+        let value = {
+            let table = read_txn.open_table(U64_TABLE).unwrap();
+            table.get(&0).unwrap().unwrap().value()
+        };
+        read_started.send(value).unwrap();
+        check_read_rx.recv().unwrap();
+        let value = {
+            let table = read_txn.open_table(U64_TABLE).unwrap();
+            table.get(&0).unwrap().unwrap().value()
+        };
+        read_checked.send(value).unwrap();
+        drop_read_rx.recv().unwrap();
+        drop(read_txn);
+    });
+
+    let read_value = read_started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("begin_read() blocked during sync_data()");
+    assert_eq!(0, read_value, "quick_repair={quick_repair}");
+
+    sync_state.release();
+    commit_handle.join().unwrap();
+
+    // A subsequent commit while the reader is still alive must not corrupt the reader's view
+    // (the deferred pages stay parked in memory; DATA_FREED_TABLE doesn't grow under their
+    // original txn id yet).
+    let txn = begin_page_reuse_write(db.as_ref(), quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 1..1000 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    check_read.send(()).unwrap();
+    let read_value = read_checked_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("read transaction blocked after racing with commit");
+    assert_eq!(0, read_value, "quick_repair={quick_repair}");
+
+    drop_read.send(()).unwrap();
+    read_handle.join().unwrap();
+
+    // After the reader is gone, the next durable commit's `commit_inner` drains the deferred
+    // map and stores those pages in DATA_FREED_TABLE under their original txn ids. The commit
+    // after that drains them via `process_freed_pages`.
+    for _ in 0..3 {
+        let txn = begin_page_reuse_write(db.as_ref(), quick_repair);
+        txn.commit().unwrap();
+    }
+}
+
+// On unclean shutdown (no `Database::drop` -> `ensure_allocator_state_table_and_trim` run),
+// the in-memory deferred frees and epilogue-freed-page set are lost. Recovery must still
+// produce a consistent allocator: full repair walks the trees from scratch and re-counts the
+// allocated pages, so the reopen sees the same `allocated_pages()` it would have seen before
+// the crash.
+fn test_page_reuse_after_unclean_reopen(quick_repair: bool) {
+    let backend = SharedInMemoryBackend::default();
+
+    let db = Database::builder()
+        .create_with_backend(backend.clone())
+        .unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 1).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    let allocated_pages = txn.stats().unwrap().allocated_pages();
+    drop(txn);
+    // Skip Drop -> skip the shutdown commit; simulates a process death.
+    std::mem::forget(db);
+
+    let db = Database::builder().create_with_backend(backend).unwrap();
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    assert_eq!(
+        allocated_pages,
+        txn.stats().unwrap().allocated_pages(),
+        "after unclean reopen, quick_repair={quick_repair}"
+    );
+}
+
+// `check_integrity` calls `clear_cache_and_reload` which clears the in-memory
+// `epilogue_freed_pages` set and `deferred_data_freed` map. After that, the on-disk
+// freed-tree entries and the live allocator must still agree: a subsequent
+// `process_freed_pages` re-frees the previously-recorded pages without panicking on
+// double-free, because the reload also reset the live allocator state to the on-disk view.
+fn test_check_integrity_clears_deferred_page_reuse(quick_repair: bool) {
+    let tmpfile = create_tempfile();
+    let sync_state = Arc::new(BlockingSyncState::new());
+    let backend = BlockingSyncBackend {
+        inner: FileBackend::new(tmpfile.into_file()).unwrap(),
+        state: sync_state.clone(),
+    };
+    let mut db = Database::builder().create_with_backend(backend).unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 1).unwrap();
+    }
+
+    sync_state.block_next_sync();
+    let commit_handle = thread::spawn(move || txn.commit().unwrap());
+    sync_state.wait_until_blocked();
+
+    let read_txn = db.begin_read().unwrap();
+    {
+        let table = read_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(0, table.get(&0).unwrap().unwrap().value());
+    }
+
+    sync_state.release();
+    commit_handle.join().unwrap();
+    drop(read_txn);
+
+    assert!(!db.check_integrity().unwrap());
+
+    // Three commits is enough to drive both the deferred map and the freed-tree drain back to
+    // empty. None of them should panic on double-free or assert on a stale tracker entry.
+    for _ in 0..3 {
+        let txn = begin_page_reuse_write(&db, quick_repair);
+        txn.commit().unwrap();
+    }
 }
 
 fn test_page_reuse(quick_repair: bool) {
