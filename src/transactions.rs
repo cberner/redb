@@ -1494,7 +1494,35 @@ impl WriteTransaction {
         let (user_root, allocated_pages, data_freed) =
             self.tables.lock().unwrap().table_tree.flush_and_close()?;
 
-        self.store_data_freed_pages(data_freed)?;
+        // Bypass DATA_FREED_TABLE for this transaction's frees when no live reader can
+        // observe the about-to-be-replaced root. Those pages are freed directly to the live
+        // allocator after `mem.commit` (see `commit_epilogue`), so the next commit can reuse
+        // them without first paying for a freed-tree round trip. Under quick-repair the saved
+        // allocator state writes them out as already-free (`try_save_allocator_state` takes
+        // `data_freed_post_commit` as `pending_free_pages`), so a clean reopen sees the same
+        // post-bypass page count.
+        //
+        // A reader registered between here and `mem.commit` is detected post-commit and its
+        // pages get deferred via `defer_data_freed`; the next durable commit's `commit_inner`
+        // (this same code path) drains that side list via `take_deferred_data_freed` and
+        // writes the pages to `DATA_FREED_TABLE` under their original txn ids before THAT
+        // commit's `mem.commit`, where freed-tree mutations are safe.
+        let data_freed_post_commit = if matches!(self.durability, InternalDurability::Immediate)
+            && self
+                .transaction_tracker
+                .oldest_live_read_transaction()
+                .is_none_or(|oldest| oldest >= self.transaction_id)
+        {
+            data_freed
+        } else {
+            self.store_data_freed_pages(self.transaction_id, data_freed)?;
+            vec![]
+        };
+        let deferred_data_freed = if matches!(self.durability, InternalDurability::Immediate) {
+            self.mem.take_deferred_data_freed()
+        } else {
+            vec![]
+        };
 
         #[cfg(feature = "logging")]
         debug!(
@@ -1504,7 +1532,14 @@ impl WriteTransaction {
         let allocated_pages: Vec<PageNumber> = allocated_pages.into_iter().collect();
         match self.durability {
             InternalDurability::None => self.non_durable_commit(user_root, allocated_pages)?,
-            InternalDurability::Immediate => self.durable_commit(user_root, allocated_pages)?,
+            InternalDurability::Immediate => {
+                self.durable_commit(
+                    user_root,
+                    allocated_pages,
+                    data_freed_post_commit,
+                    deferred_data_freed,
+                )?;
+            }
         }
 
         self.savepoint_state
@@ -1540,7 +1575,11 @@ impl WriteTransaction {
         Ok(())
     }
 
-    fn store_data_freed_pages(&self, mut freed_pages: Vec<PageNumber>) -> Result {
+    fn store_data_freed_pages(
+        &self,
+        transaction_id: TransactionId,
+        mut freed_pages: Vec<PageNumber>,
+    ) -> Result {
         let mut system_tables = self.system_tables.lock().unwrap();
         let mut freed_table = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
         let mut pagination_counter = 0;
@@ -1550,7 +1589,7 @@ impl WriteTransaction {
             let chunk_size = 400;
             let buffer_size = PageList::required_bytes(chunk_size);
             let key = TransactionIdWithPagination {
-                transaction_id: self.transaction_id.raw_id(),
+                transaction_id: transaction_id.raw_id(),
                 pagination_id: pagination_counter,
             };
             let mut access_guard = freed_table.insert_reserve(&key, buffer_size)?;
@@ -1693,12 +1732,21 @@ impl WriteTransaction {
         &mut self,
         user_root: Option<BtreeHeader>,
         allocated_pages: Vec<PageNumber>,
+        data_freed_post_commit: Vec<PageNumber>,
+        deferred_data_freed: Vec<(TransactionId, Vec<PageNumber>)>,
     ) -> Result {
-        let free_until_transaction = self
-            .transaction_tracker
-            .oldest_live_read_transaction()
-            .map_or(self.transaction_id, |x| x.next());
+        let oldest_live_read_at_start = self.transaction_tracker.oldest_live_read_transaction();
+        let free_until_transaction =
+            oldest_live_read_at_start.map_or(self.transaction_id, |x| x.next());
         self.process_freed_pages(free_until_transaction)?;
+
+        // Persist any pages that the previous commit's epilogue had to defer because a reader
+        // raced in. They go into DATA_FREED_TABLE under their original (older) txn ids; the
+        // `process_freed_pages` call above doesn't touch them because the reader still pins
+        // those ids. A future commit, after the reader is gone, will reclaim them.
+        for (transaction_id, pages) in deferred_data_freed {
+            self.store_data_freed_pages(transaction_id, pages)?;
+        }
         // Flush allocated pages (including previously unpersisted allocations that are now
         // becoming durable) AFTER process_freed_pages, so that any pages reclaimed here have
         // already been dropped from the in-memory `unpersisted_allocations` map.
@@ -1722,9 +1770,12 @@ impl WriteTransaction {
                             .mem
                             .reserve_allocator_state(tree, self.transaction_id)?;
 
-                        // We can't free pages after the commit, because that would invalidate our
-                        // saved allocator state. Everything needs to go through the transactional
-                        // free mechanism
+                        // System-tree frees go through the freed-table so the saved allocator
+                        // state matches the post-commit live state. Data-tree frees from the
+                        // bypass path (`data_freed_post_commit`) are passed straight to
+                        // `try_save_allocator_state`, which simulates them as already-free in
+                        // the saved snapshot -- the live allocator releases them in the
+                        // epilogue, after `mem.commit`.
                         self.store_system_freed_pages(
                             system_tree_ref,
                             system_freed_pages.clone(),
@@ -1732,7 +1783,11 @@ impl WriteTransaction {
                             &mut pagination_counter,
                         )?;
 
-                        if self.mem.try_save_allocator_state(tree, num_regions)? {
+                        if self.mem.try_save_allocator_state(
+                            tree,
+                            num_regions,
+                            &data_freed_post_commit,
+                        )? {
                             return Ok(());
                         }
 
@@ -1769,6 +1824,116 @@ impl WriteTransaction {
         // Immediately free the pages that were freed from the system-tree. These are only
         // accessed by write transactions, so it's safe to free them as soon as the commit is done.
         for page in system_freed_pages.lock().unwrap().drain(..) {
+            page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
+        }
+        drop(system_tables);
+
+        self.commit_epilogue(free_until_transaction, data_freed_post_commit)?;
+
+        Ok(())
+    }
+
+    // After a durable commit becomes visible on disk, return to the live allocator the data
+    // pages that this transaction freed (the `data_freed_post_commit` set, which bypassed
+    // `DATA_FREED_TABLE` entirely on the no-racing-reader common path) plus any older entries
+    // in DATA_FREED_TABLE / SYSTEM_FREED_TABLE whose readers have expired since the start of
+    // this commit. The next commit can immediately reuse all of these pages -- this is the
+    // optimization that closes issue #829.
+    //
+    // Crash safety vs. the on-disk secondary slot: the data pages we free here are referenced
+    // by the on-disk secondary slot (the previous primary). If the next write reuses one and
+    // crashes before its own `mem.commit`, recovery from primary still succeeds (primary does
+    // not reference these pages) and only secondary-fallback is at risk -- the same trade-off
+    // the existing `system_freed_pages` drain in `durable_commit` already accepts.
+    //
+    // No freed-tree mutation here. Doing extract-from-tree post-commit would displace
+    // freed-tree internal nodes belonging to the just-committed primary slot's system tree;
+    // those node pages would be returned to the live allocator and the next write could
+    // reallocate and overwrite them on disk before its own `mem.commit` lands, leaving the
+    // on-disk primary tree corrupted on a crash. Instead, the entries we leave in the tree are
+    // marked through `record_epilogue_freed` so the next `process_freed_pages` removes them
+    // without a double-free.
+    //
+    // Reader race: by the time this runs, `mem.commit` has updated `last_committed` to the
+    // current transaction id, so any `begin_read` that registers from now on lands at this
+    // transaction (or later) and cannot observe the data we're about to free. A `begin_read`
+    // that squeezed in *before* `mem.commit` made the new root visible registered against the
+    // previous root and shows up here as `oldest_live_read_transaction() < self.transaction_id`,
+    // gating both `data_freed_post_commit` (skipped) and the freed-tree drain (via `free_until`).
+    fn commit_epilogue(
+        &mut self,
+        free_until_main_commit: TransactionId,
+        data_freed_post_commit: Vec<PageNumber>,
+    ) -> Result {
+        let oldest_read = self.transaction_tracker.oldest_live_read_transaction();
+        let free_until = oldest_read.unwrap_or(self.transaction_id).next();
+
+        let mut bypass_to_free = data_freed_post_commit;
+        // If a reader registered between the bypass decision in `commit_inner` and now, this
+        // transaction's frees are observable by that reader through the previous root and must
+        // not be returned to the allocator. Defer them to a side list keyed by this txn id;
+        // the next durable commit's `commit_inner` pulls them out and writes them to
+        // DATA_FREED_TABLE under those original ids (during that commit's normal pre-`mem.commit`
+        // window, where freed-tree mutations are safe). Doing the tree mutation HERE would
+        // displace freed-tree internal nodes belonging to the just-committed primary slot's
+        // system tree -- exactly the safety hazard the bypass was designed to avoid.
+        if oldest_read.is_some_and(|oldest| oldest < self.transaction_id) {
+            let pending = std::mem::take(&mut bypass_to_free);
+            self.mem.defer_data_freed(self.transaction_id, pending);
+        }
+
+        // Drain any older freed-tree entries whose readers have expired since this commit's
+        // start-of-commit `process_freed_pages`. Pages collected here are STILL referenced by
+        // entries that remain on disk; we mark them through `record_epilogue_freed` so the
+        // next `process_freed_pages` extracts the entries without a double-free. Pages from
+        // the bypass path are NOT added to that set: their entries never went into the tree,
+        // so a future `process_freed_pages` can't encounter them and the recording would be
+        // dead state that incorrectly suppresses an unrelated future free of the same page
+        // number after it gets reallocated.
+        let mut tree_to_free = vec![];
+        if free_until > free_until_main_commit {
+            let mut system_tables = self.system_tables.lock().unwrap();
+            {
+                let data_freed = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
+                let key = TransactionIdWithPagination {
+                    transaction_id: free_until.raw_id(),
+                    pagination_id: 0,
+                };
+                for entry in data_freed.range::<TransactionIdWithPagination>(..key)? {
+                    let (_, page_list) = entry?;
+                    for i in 0..page_list.value().len() {
+                        tree_to_free.push(page_list.value().get(i));
+                    }
+                }
+            }
+            {
+                let system_freed = system_tables.open_system_table(self, SYSTEM_FREED_TABLE)?;
+                let key = TransactionIdWithPagination {
+                    transaction_id: free_until.raw_id(),
+                    pagination_id: 0,
+                };
+                for entry in system_freed.range::<TransactionIdWithPagination>(..key)? {
+                    let (_, page_list) = entry?;
+                    for i in 0..page_list.value().len() {
+                        tree_to_free.push(page_list.value().get(i));
+                    }
+                }
+            }
+        }
+
+        let page_allocator = self.page_allocator();
+        if !tree_to_free.is_empty() {
+            // Record before freeing, so a concurrent `take_epilogue_freed` from the next commit
+            // either sees the page (and skips the redundant free) or doesn't (and frees it
+            // itself, exactly once -- the buddy allocator panics on double-free).
+            self.mem.record_epilogue_freed(&tree_to_free);
+            for page in tree_to_free {
+                debug_assert!(!self.mem.unpersisted(page));
+                page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
+            }
+        }
+        for page in bypass_to_free {
+            debug_assert!(!self.mem.unpersisted(page));
             page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
         }
 
@@ -1932,6 +2097,14 @@ impl WriteTransaction {
                     // result, no entry whose pages are still unpersisted is eligible for
                     // processing here.
                     debug_assert!(!self.mem.unpersisted(page));
+                    // The previous commit's `commit_epilogue` may have already returned this
+                    // page to the live allocator. The on-disk entry persisted because the
+                    // epilogue intentionally didn't mutate the freed tree (see
+                    // `commit_epilogue` for why); here we just drop the entry without a
+                    // double-free.
+                    if self.mem.take_epilogue_freed(page) {
+                        continue;
+                    }
                     page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
                 }
             }
@@ -1949,6 +2122,9 @@ impl WriteTransaction {
                 for i in 0..page_list.value().len() {
                     let page = page_list.value().get(i);
                     debug_assert!(!self.mem.unpersisted(page));
+                    if self.mem.take_epilogue_freed(page) {
+                        continue;
+                    }
                     page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
                 }
             }

@@ -5,7 +5,7 @@ use redb::{
     AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
     MultimapTableDefinition, MultimapValue, Range, ReadableDatabase, ReadableTable,
     ReadableTableMetadata, SetDurabilityError, StorageBackend, TableDefinition, TableStats,
-    TransactionError, Value,
+    TransactionError, Value, WriteTransaction,
 };
 use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 use std::borrow::Borrow;
@@ -205,6 +205,82 @@ fn immediate_free() {
 #[test]
 fn nondurable_free() {
     test_free(Durability::None);
+}
+
+#[test]
+fn page_reuse() {
+    test_page_reuse(false);
+    test_page_reuse(true);
+}
+
+fn begin_page_reuse_write(db: &Database, quick_repair: bool) -> WriteTransaction {
+    let mut txn = db.begin_write().unwrap();
+    txn.set_quick_repair(quick_repair);
+    txn
+}
+
+fn test_page_reuse(quick_repair: bool) {
+    let tmpfile = create_tempfile();
+
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Allocates a page to store 0 -> 0.
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Clear the freed tree.
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    txn.commit().unwrap();
+
+    // Allocates a page to store 0 -> 1, and frees the page for 0 -> 0.
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 1).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Should reuse the page for 0 -> 0.
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    let allocated_pages = txn.stats().unwrap().allocated_pages();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 2).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Clear the freed tree.
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    assert_eq!(
+        allocated_pages,
+        txn.stats().unwrap().allocated_pages(),
+        "quick_repair={quick_repair}"
+    );
+    drop(txn);
+    drop(db);
+
+    // Under quick-repair the shutdown commit's quick-repair save runs while its own
+    // freed-tree entries (system tree internal nodes etc.) are still pending, so the on-disk
+    // saved allocator state captures them as allocated. The first post-reopen commit drains
+    // those entries and the page count returns to baseline.
+    if quick_repair {
+        let db = Database::open(tmpfile.path()).unwrap();
+        let txn = begin_page_reuse_write(&db, quick_repair);
+        txn.commit().unwrap();
+        let txn = begin_page_reuse_write(&db, quick_repair);
+        assert_eq!(
+            allocated_pages,
+            txn.stats().unwrap().allocated_pages(),
+            "after reopen, quick_repair={quick_repair}"
+        );
+    }
 }
 
 fn test_free(durability: Durability) {

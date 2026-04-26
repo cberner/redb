@@ -27,6 +27,7 @@ fn buddy_page(page_number: u32) -> u32 {
 // Handles allocation of dynamically sized pages, supports pages of up to page_size * 2^max_order bytes
 //
 // Pages are marked free at only a single order, and it must always be the largest order
+#[derive(Clone)]
 pub(crate) struct BuddyAllocator {
     free: Vec<BtreeBitmap>,
     len: u32,
