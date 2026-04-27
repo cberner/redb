@@ -16,6 +16,7 @@ Cargo.lock
 
 **/__pycache__
 **/*.pyc
+.venv/
 
 # Profiling
 perf.data*
