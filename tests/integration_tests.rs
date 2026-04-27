@@ -2038,6 +2038,24 @@ fn compaction() {
     assert!(file_size2 < file_size);
 }
 
+#[test]
+fn compact_after_non_durable_commit() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let definition: TableDefinition<u32, &[u8]> = TableDefinition::new("x");
+
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None).unwrap();
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        table.insert(&0, [0; 1024].as_slice()).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // The pending non-durable root pins its durable ancestor internally.
+    db.compact().unwrap();
+}
+
 // Regression test for https://github.com/cberner/redb/issues/1165: a packed
 // database used to grow rather than shrink after compact().
 #[test]

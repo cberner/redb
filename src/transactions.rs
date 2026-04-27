@@ -1980,6 +1980,10 @@ impl WriteTransaction {
         free_until: TransactionId,
         mut process_page: impl FnMut(PageNumber),
     ) -> Result {
+        if system_tables.get_system_table_root(definition)?.is_none() {
+            return Ok(());
+        }
+
         let mut freed = system_tables.open_system_table(self, definition)?;
         let key = TransactionIdWithPagination {
             transaction_id: free_until.raw_id(),
@@ -1987,8 +1991,9 @@ impl WriteTransaction {
         };
         for entry in freed.extract_from_if(..key, |_, _| true)? {
             let (_, page_list) = entry?;
-            for i in 0..page_list.value().len() {
-                process_page(page_list.value().get(i));
+            let page_list = page_list.value();
+            for i in 0..page_list.len() {
+                process_page(page_list.get(i));
             }
         }
 
@@ -2102,6 +2107,9 @@ impl WriteTransaction {
         pagination_counter: &mut u64,
     ) -> Result {
         assert_eq!(PageNumber::serialized_size(), 8); // We assume below that PageNumber is length 8
+        if system_freed_pages.lock().unwrap().is_empty() {
+            return Ok(());
+        }
 
         system_tree.open_table_and_flush_table_root(
             SYSTEM_FREED_TABLE.name(),
