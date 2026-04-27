@@ -5,6 +5,8 @@ use pyo3::prelude::*;
 create_exception!(redb, Error, PyException);
 create_exception!(redb, DatabaseError, Error);
 create_exception!(redb, StorageError, Error);
+create_exception!(redb, TransactionError, Error);
+create_exception!(redb, CommitError, Error);
 
 create_exception!(redb, DatabaseAlreadyOpen, DatabaseError);
 create_exception!(redb, RepairAborted, DatabaseError);
@@ -17,6 +19,9 @@ create_exception!(redb, Io, StorageError);
 create_exception!(redb, PreviousIo, StorageError);
 create_exception!(redb, DatabaseClosed, StorageError);
 create_exception!(redb, LockPoisoned, StorageError);
+
+create_exception!(redb, ReadTransactionStillInUse, TransactionError);
+create_exception!(redb, TransactionCompleted, TransactionError);
 
 pub(crate) fn map_database_error(err: ::redb::DatabaseError) -> PyErr {
     let msg = format!("{err}");
@@ -46,10 +51,34 @@ pub(crate) fn map_storage_error(err: ::redb::StorageError) -> PyErr {
     }
 }
 
+pub(crate) fn map_transaction_error(err: ::redb::TransactionError) -> PyErr {
+    let msg = format!("{err}");
+    match err {
+        ::redb::TransactionError::Storage(storage) => map_storage_error(storage),
+        ::redb::TransactionError::ReadTransactionStillInUse(_) => {
+            ReadTransactionStillInUse::new_err(msg)
+        }
+        // redb::TransactionError is #[non_exhaustive]; fall back to the
+        // abstract parent class for unknown future variants.
+        _ => TransactionError::new_err(msg),
+    }
+}
+
+pub(crate) fn map_commit_error(err: ::redb::CommitError) -> PyErr {
+    let msg = format!("{err}");
+    match err {
+        ::redb::CommitError::Storage(storage) => map_storage_error(storage),
+        // redb::CommitError is #[non_exhaustive]; see comment above.
+        _ => CommitError::new_err(msg),
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("Error", m.py().get_type::<Error>())?;
     m.add("DatabaseError", m.py().get_type::<DatabaseError>())?;
     m.add("StorageError", m.py().get_type::<StorageError>())?;
+    m.add("TransactionError", m.py().get_type::<TransactionError>())?;
+    m.add("CommitError", m.py().get_type::<CommitError>())?;
     m.add(
         "DatabaseAlreadyOpen",
         m.py().get_type::<DatabaseAlreadyOpen>(),
@@ -66,5 +95,13 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PreviousIo", m.py().get_type::<PreviousIo>())?;
     m.add("DatabaseClosed", m.py().get_type::<DatabaseClosed>())?;
     m.add("LockPoisoned", m.py().get_type::<LockPoisoned>())?;
+    m.add(
+        "ReadTransactionStillInUse",
+        m.py().get_type::<ReadTransactionStillInUse>(),
+    )?;
+    m.add(
+        "TransactionCompleted",
+        m.py().get_type::<TransactionCompleted>(),
+    )?;
     Ok(())
 }
