@@ -634,7 +634,7 @@ impl Database {
         }
         txn.set_two_phase_commit(true);
         txn.commit().map_err(|e| e.into_storage_error())?;
-        // Repeat, just in case executing list_persistent_savepoints() created a new table
+        // Repeat to make pages freed by the first empty commit reusable before compaction.
         let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
         txn.set_two_phase_commit(true);
         txn.commit().map_err(|e| e.into_storage_error())?;

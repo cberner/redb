@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::mem::size_of;
-use std::ops::RangeBounds;
+use std::ops::{RangeBounds, RangeFull};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{panic, thread};
@@ -557,6 +557,22 @@ impl SystemNamespace {
         ))
     }
 
+    fn get_system_table_root<K: Key + 'static, V: Value + 'static>(
+        &self,
+        definition: SystemTableDefinition<K, V>,
+    ) -> Result<Option<BtreeHeader>> {
+        let table = self
+            .table_tree
+            .get_table::<K, V>(definition.name(), TableType::Normal)
+            .map_err(|e| {
+                e.into_storage_error_or_corrupted("Internal error. System table is corrupted")
+            })?;
+        Ok(table.and_then(|definition| match definition {
+            InternalTableDefinition::Normal { table_root, .. } => table_root,
+            InternalTableDefinition::Multimap { .. } => unreachable!(),
+        }))
+    }
+
     fn close_table<K: Key + 'static, V: Value + 'static>(
         &mut self,
         name: &str,
@@ -894,26 +910,32 @@ impl WriteTransaction {
             .clone()
     }
 
-    pub(crate) fn pending_free_pages(&self) -> Result<bool> {
-        let mut system_tables = self.system_tables.lock().unwrap();
-        if system_tables
-            .open_system_table(self, DATA_FREED_TABLE)?
-            .tree
-            .get_root()
-            .is_some()
-        {
-            return Ok(true);
-        }
-        if system_tables
-            .open_system_table(self, SYSTEM_FREED_TABLE)?
-            .tree
-            .get_root()
-            .is_some()
-        {
-            return Ok(true);
-        }
+    fn read_existing_system_table<K: Key + 'static, V: Value + 'static, T>(
+        &self,
+        definition: SystemTableDefinition<K, V>,
+        read: impl FnOnce(&Btree<K, V>) -> Result<T>,
+    ) -> Result<Option<T>> {
+        let system_tables = self.system_tables.lock().unwrap();
+        let Some(root) = system_tables.get_system_table_root(definition)? else {
+            return Ok(None);
+        };
+        let table = Btree::new(
+            Some(root),
+            PageHint::None,
+            self.transaction_guard.clone(),
+            self.mem.clone(),
+        )?;
+        read(&table).map(Some)
+    }
 
-        Ok(false)
+    pub(crate) fn pending_free_pages(&self) -> Result<bool> {
+        let system_tables = self.system_tables.lock().unwrap();
+        Ok(system_tables
+            .get_system_table_root(DATA_FREED_TABLE)?
+            .is_some()
+            || system_tables
+                .get_system_table_root(SYSTEM_FREED_TABLE)?
+                .is_some())
     }
 
     #[cfg(debug_assertions)]
@@ -1063,25 +1085,26 @@ impl WriteTransaction {
     }
 
     pub(crate) fn next_persistent_savepoint_id(&self) -> Result<Option<SavepointId>> {
-        let mut system_tables = self.system_tables.lock().unwrap();
-        let next_table = system_tables.open_system_table(self, NEXT_SAVEPOINT_TABLE)?;
-        let value = next_table.get(())?;
-        if let Some(next_id) = value {
-            Ok(Some(next_id.value()))
-        } else {
-            Ok(None)
-        }
+        let Some(value) = self.read_existing_system_table(NEXT_SAVEPOINT_TABLE, |next_table| {
+            let value = next_table.get(&())?;
+            Ok(value.map(|next_id| next_id.value()))
+        })?
+        else {
+            return Ok(None);
+        };
+        Ok(value)
     }
 
     /// Get a persistent savepoint given its id
     pub fn get_persistent_savepoint(&self, id: u64) -> Result<Savepoint, SavepointError> {
-        let mut system_tables = self.system_tables.lock().unwrap();
-        let table = system_tables.open_system_table(self, SAVEPOINT_TABLE)?;
-        let value = table.get(SavepointId(id))?;
-
-        value
-            .map(|x| x.value().to_savepoint(self.transaction_tracker.clone()))
-            .ok_or(SavepointError::InvalidSavepoint)
+        let Some(value) = self.read_existing_system_table(SAVEPOINT_TABLE, |table| {
+            let value = table.get(&SavepointId(id))?;
+            Ok(value.map(|x| x.value().to_savepoint(self.transaction_tracker.clone())))
+        })?
+        else {
+            return Err(SavepointError::InvalidSavepoint);
+        };
+        value.ok_or(SavepointError::InvalidSavepoint)
     }
 
     /// Delete the given persistent savepoint.
@@ -1096,6 +1119,12 @@ impl WriteTransaction {
             return Err(SavepointError::ImmediateDurabilityRequired);
         }
         let mut system_tables = self.system_tables.lock().unwrap();
+        if system_tables
+            .get_system_table_root(SAVEPOINT_TABLE)?
+            .is_none()
+        {
+            return Ok(false);
+        }
         let mut table = system_tables.open_system_table(self, SAVEPOINT_TABLE)?;
         let savepoint = table.remove(SavepointId(id))?;
         if let Some(serialized) = savepoint {
@@ -1114,12 +1143,16 @@ impl WriteTransaction {
 
     /// List all persistent savepoints
     pub fn list_persistent_savepoints(&self) -> Result<impl Iterator<Item = u64>> {
-        let mut system_tables = self.system_tables.lock().unwrap();
-        let table = system_tables.open_system_table(self, SAVEPOINT_TABLE)?;
-        let mut savepoints = vec![];
-        for savepoint in table.range::<SavepointId>(..)? {
-            savepoints.push(savepoint?.0.value().0);
-        }
+        let Some(savepoints) = self.read_existing_system_table(SAVEPOINT_TABLE, |table| {
+            let mut savepoints = vec![];
+            for savepoint in table.range::<RangeFull, SavepointId>(&..)? {
+                savepoints.push(savepoint?.key().0);
+            }
+            Ok(savepoints)
+        })?
+        else {
+            return Ok(vec![].into_iter());
+        };
         Ok(savepoints.into_iter())
     }
 
@@ -1914,43 +1947,48 @@ impl WriteTransaction {
         assert_eq!(PageNumber::serialized_size(), 8);
 
         let page_allocator = self.page_allocator();
-        // Handle the data freed tree
-        let mut system_tables = self.system_tables.lock().unwrap();
-        {
-            let mut data_freed = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
-            let key = TransactionIdWithPagination {
-                transaction_id: free_until.raw_id(),
-                pagination_id: 0,
-            };
-            for entry in data_freed.extract_from_if(..key, |_, _| true)? {
-                let (_, page_list) = entry?;
-                for i in 0..page_list.value().len() {
-                    let page = page_list.value().get(i);
-                    // These pages cannot be unpersisted: free_until is bounded by
-                    // oldest_live_read_transaction, which pins back to the durable_ancestor of
-                    // every pending non-durable commit (see register_non_durable_commit). As a
-                    // result, no entry whose pages are still unpersisted is eligible for
-                    // processing here.
-                    debug_assert!(!self.mem.unpersisted(page));
-                    page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
-                }
-            }
-        }
+        let mut free_page = |page| {
+            // These pages cannot be unpersisted: free_until is bounded by
+            // oldest_live_read_transaction, which pins back to the durable_ancestor of every
+            // pending non-durable commit (see register_non_durable_commit). As a result, no entry
+            // whose pages are still unpersisted is eligible for processing here.
+            debug_assert!(!self.mem.unpersisted(page));
+            page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
+        };
 
-        // Handle the system freed tree
-        {
-            let mut system_freed = system_tables.open_system_table(self, SYSTEM_FREED_TABLE)?;
-            let key = TransactionIdWithPagination {
-                transaction_id: free_until.raw_id(),
-                pagination_id: 0,
-            };
-            for entry in system_freed.extract_from_if(..key, |_, _| true)? {
-                let (_, page_list) = entry?;
-                for i in 0..page_list.value().len() {
-                    let page = page_list.value().get(i);
-                    debug_assert!(!self.mem.unpersisted(page));
-                    page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
-                }
+        let mut system_tables = self.system_tables.lock().unwrap();
+        self.extract_freed_pages(
+            &mut system_tables,
+            DATA_FREED_TABLE,
+            free_until,
+            &mut free_page,
+        )?;
+        self.extract_freed_pages(
+            &mut system_tables,
+            SYSTEM_FREED_TABLE,
+            free_until,
+            &mut free_page,
+        )?;
+
+        Ok(())
+    }
+
+    fn extract_freed_pages(
+        &self,
+        system_tables: &mut SystemNamespace,
+        definition: SystemTableDefinition<TransactionIdWithPagination, PageList>,
+        free_until: TransactionId,
+        mut process_page: impl FnMut(PageNumber),
+    ) -> Result {
+        let mut freed = system_tables.open_system_table(self, definition)?;
+        let key = TransactionIdWithPagination {
+            transaction_id: free_until.raw_id(),
+            pagination_id: 0,
+        };
+        for entry in freed.extract_from_if(..key, |_, _| true)? {
+            let (_, page_list) = entry?;
+            for i in 0..page_list.value().len() {
+                process_page(page_list.value().get(i));
             }
         }
 
