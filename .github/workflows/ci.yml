@@ -28,9 +28,14 @@ jobs:
                 ~/.cargo/registry/index/
                 ~/.cargo/registry/cache/
                 ~/.cargo/git/db/
-                target/
+                target/.rustc_info.json
+                target/debug/.fingerprint/
+                target/debug/build/
+                target/debug/deps/
                 fuzz/target/
             key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '.github/workflows/*.yml', 'rust-toolchain') }}
+            restore-keys: |
+                ${{ runner.os }}-${{ runner.arch }}-
 
       - name: Non ASCII characters
         if: startsWith(matrix.os, 'ubuntu')
