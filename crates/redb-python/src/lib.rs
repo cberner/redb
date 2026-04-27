@@ -16,6 +16,7 @@
 
 mod database;
 mod error;
+mod transaction;
 
 use pyo3::prelude::*;
 
@@ -23,5 +24,6 @@ use pyo3::prelude::*;
 pub fn redb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     database::register(m)?;
     error::register(m)?;
+    transaction::register(m)?;
     Ok(())
 }
