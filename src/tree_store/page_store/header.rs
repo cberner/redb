@@ -438,37 +438,132 @@ mod test {
     use crate::backends::FileBackend;
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::header::{
-        GOD_BYTE_OFFSET, MAGICNUMBER, PRIMARY_BIT, RECOVERY_REQUIRED, TRANSACTION_0_OFFSET,
-        TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT, USER_ROOT_OFFSET,
+        DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, PRIMARY_BIT, RECOVERY_REQUIRED,
+        TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT,
     };
-    use crate::{Database, DatabaseError, ReadableTable, StorageBackend};
+    use crate::{Database, DatabaseError, StorageBackend};
     use crate::{ReadableDatabase, StorageError};
     use std::fs::OpenOptions;
     use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
-    use std::mem::size_of;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
 
-    #[derive(Debug)]
+    fn primary_slot_offset(god_byte: u8) -> usize {
+        if god_byte & PRIMARY_BIT == 0 {
+            TRANSACTION_0_OFFSET
+        } else {
+            TRANSACTION_1_OFFSET
+        }
+    }
+
+    fn corrupt_slot_checksum(header: &mut [u8; DB_HEADER_SIZE], slot_offset: usize) {
+        let checksum_offset = slot_offset + super::SLOT_CHECKSUM_OFFSET;
+        header[checksum_offset] ^= 0xFF;
+    }
+
+    fn corrupt_primary_slot_checksum(header: &mut [u8; DB_HEADER_SIZE]) {
+        corrupt_slot_checksum(header, primary_slot_offset(header[GOD_BYTE_OFFSET]));
+    }
+
+    #[derive(Clone, Debug)]
     struct FailingBackend {
-        inner: FileBackend,
-        fail: Arc<AtomicBool>,
+        inner: Arc<FileBackend>,
+        operations_until_failure: Arc<AtomicU64>,
+        primary_bit_before_failure: Arc<AtomicU8>,
     }
 
     impl FailingBackend {
+        const DISABLED: u64 = u64::MAX;
+        const PRIMARY_BIT_DISABLED: u8 = 2;
+
         fn new(backend: FileBackend) -> Self {
             Self {
-                inner: backend,
-                fail: Arc::new(AtomicBool::new(false)),
+                inner: Arc::new(backend),
+                operations_until_failure: Arc::new(AtomicU64::new(Self::DISABLED)),
+                primary_bit_before_failure: Arc::new(AtomicU8::new(Self::PRIMARY_BIT_DISABLED)),
             }
         }
 
-        fn check_fail(&self) -> Result<(), std::io::Error> {
-            if self.fail.load(Ordering::SeqCst) {
-                return Err(std::io::Error::from(ErrorKind::Other));
+        fn read_header_directly(&self) -> Result<[u8; DB_HEADER_SIZE], std::io::Error> {
+            let mut header = [0; DB_HEADER_SIZE];
+            self.inner.read(0, &mut header)?;
+            Ok(header)
+        }
+
+        fn write_header_directly(
+            &self,
+            header: &[u8; DB_HEADER_SIZE],
+        ) -> Result<(), std::io::Error> {
+            self.inner.write(0, header)
+        }
+
+        fn fail_after_primary_swap(&self) -> Result<(), std::io::Error> {
+            let header = self.read_header_directly()?;
+            let primary_bit = header[GOD_BYTE_OFFSET] & PRIMARY_BIT;
+            assert_eq!(header[GOD_BYTE_OFFSET] & TWO_PHASE_COMMIT, 0);
+            self.primary_bit_before_failure
+                .store(primary_bit, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn arm_failure_if_primary_swapped(&self, offset: u64, data: &[u8]) {
+            if offset != 0 || data.len() < DB_HEADER_SIZE {
+                return;
             }
+
+            let primary_bit_before = self.primary_bit_before_failure.load(Ordering::SeqCst);
+            if primary_bit_before == Self::PRIMARY_BIT_DISABLED {
+                return;
+            }
+
+            if data[GOD_BYTE_OFFSET] & PRIMARY_BIT != primary_bit_before {
+                self.primary_bit_before_failure
+                    .store(Self::PRIMARY_BIT_DISABLED, Ordering::SeqCst);
+                // Fail before the next mutating operation or sync, so no cleanup
+                // writes can run after the primary switch reaches storage.
+                self.operations_until_failure.store(1, Ordering::SeqCst);
+            }
+        }
+
+        fn fail_if_armed(&self) -> Result<(), std::io::Error> {
+            let previous = self.operations_until_failure.fetch_update(
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                |x| {
+                    if x == Self::DISABLED {
+                        None
+                    } else {
+                        Some(x.saturating_sub(1))
+                    }
+                },
+            );
+
+            match previous {
+                Ok(1) => {
+                    self.corrupt_primary_slot_checksum()?;
+                    Err(std::io::Error::from(ErrorKind::Other))
+                }
+                Ok(0) => Err(std::io::Error::from(ErrorKind::Other)),
+                _ => Ok(()),
+            }
+        }
+
+        fn corrupt_primary_slot_checksum(&self) -> Result<(), std::io::Error> {
+            let mut header = self.read_header_directly()?;
+            header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+            corrupt_primary_slot_checksum(&mut header);
+            self.write_header_directly(&header)?;
+
+            Ok(())
+        }
+
+        fn corrupt_all_slot_checksums(&self) -> Result<(), std::io::Error> {
+            let mut header = self.read_header_directly()?;
+            corrupt_slot_checksum(&mut header, TRANSACTION_0_OFFSET);
+            corrupt_slot_checksum(&mut header, TRANSACTION_1_OFFSET);
+            self.write_header_directly(&header)?;
 
             Ok(())
         }
@@ -476,28 +571,28 @@ mod test {
 
     impl StorageBackend for FailingBackend {
         fn len(&self) -> Result<u64, std::io::Error> {
-            self.check_fail()?;
             self.inner.len()
         }
 
         fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
-            self.check_fail()?;
             self.inner.read(offset, out)
         }
 
         fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
-            self.check_fail()?;
+            self.fail_if_armed()?;
             self.inner.set_len(len)
         }
 
         fn sync_data(&self) -> Result<(), std::io::Error> {
-            self.check_fail()?;
+            self.fail_if_armed()?;
             self.inner.sync_data()
         }
 
         fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
-            self.check_fail()?;
-            self.inner.write(offset, data)
+            self.fail_if_armed()?;
+            self.inner.write(offset, data)?;
+            self.arm_failure_if_primary_swapped(offset, data);
+            Ok(())
         }
 
         fn close(&self) -> Result<(), Error> {
@@ -514,7 +609,7 @@ mod test {
             .open(tmpfile.path())
             .unwrap();
         let backend = FailingBackend::new(FileBackend::new(cloned).unwrap());
-        let fail = backend.fail.clone();
+        let backend_control = backend.clone();
         let db = Database::builder().create_with_backend(backend).unwrap();
         let write_txn = db.begin_write().unwrap();
         {
@@ -526,93 +621,61 @@ mod test {
         // Start a read to be sure the previous write isn't garbage collected
         let read_txn = db.begin_read().unwrap();
 
-        let mut write_txn = db.begin_write().unwrap();
+        let write_txn = db.begin_write().unwrap();
         {
-            write_txn.set_quick_repair(true);
             let mut table = write_txn.open_table(X).unwrap();
             table.insert("hello", "world2").unwrap();
         }
-        write_txn.commit().unwrap();
+
+        backend_control.fail_after_primary_swap().unwrap();
+        write_txn.commit().unwrap_err();
         drop(read_txn);
-        // We want our commit to be the last commit in the database, so block the Database drop()
-        // method from performing its own commit to trim the file
-        fail.store(true, Ordering::SeqCst);
         drop(db);
 
-        let mut file = tmpfile.as_file();
-
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        let mut buffer = [0u8; 1];
-        file.read_exact(&mut buffer).unwrap();
-        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-        buffer[0] |= RECOVERY_REQUIRED;
-        buffer[0] &= !TWO_PHASE_COMMIT;
-        file.write_all(&buffer).unwrap();
-
-        // Overwrite the primary checksum to simulate a failure during commit
-        let primary_slot_offset = if buffer[0] & PRIMARY_BIT == 0 {
-            TRANSACTION_0_OFFSET
-        } else {
-            TRANSACTION_1_OFFSET
-        };
-        file.seek(SeekFrom::Start(
-            (primary_slot_offset + USER_ROOT_OFFSET) as u64,
-        ))
-        .unwrap();
-        file.write_all(&[0; size_of::<u128>()]).unwrap();
-
-        #[allow(unused_mut)]
-        let mut db2 = Database::create(tmpfile.path()).unwrap();
+        let cloned = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let db2_backend = FailingBackend::new(FileBackend::new(cloned).unwrap());
+        let db2_backend_control = db2_backend.clone();
+        let mut db2 = Database::builder()
+            .create_with_backend(db2_backend)
+            .unwrap();
+        {
+            let read_txn = db2.begin_read().unwrap();
+            let table = read_txn.open_table(X).unwrap();
+            assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+        }
         let write_txn = db2.begin_write().unwrap();
         {
             let mut table = write_txn.open_table(X).unwrap();
-            assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
             table.insert("hello2", "world2").unwrap();
         }
         write_txn.commit().unwrap();
 
-        // Locks are exclusive on Windows, so we can't concurrently overwrite the file
-        #[cfg(not(target_os = "windows"))]
+        let mut header = db2_backend_control.read_header_directly().unwrap();
+        // Simulate a failed non-2PC commit where the primary bit reached disk, but
+        // the new primary slot did not. The old primary is now the valid secondary.
+        header[GOD_BYTE_OFFSET] ^= PRIMARY_BIT;
+        header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+        header[GOD_BYTE_OFFSET] &= !TWO_PHASE_COMMIT;
+        corrupt_primary_slot_checksum(&mut header);
+        db2_backend_control.write_header_directly(&header).unwrap();
+
+        assert!(!db2.check_integrity().unwrap());
         {
-            file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-            let mut buffer = [0u8; 1];
-            file.read_exact(&mut buffer).unwrap();
-
-            // Overwrite the primary checksum to simulate a failure during commit
-            let primary_slot_offset = if buffer[0] & PRIMARY_BIT == 0 {
-                TRANSACTION_0_OFFSET
-            } else {
-                TRANSACTION_1_OFFSET
-            };
-            file.seek(SeekFrom::Start(
-                (primary_slot_offset + USER_ROOT_OFFSET) as u64,
-            ))
-            .unwrap();
-            file.write_all(&[0; size_of::<u128>()]).unwrap();
-
-            assert!(!db2.check_integrity().unwrap());
-
-            // Overwrite both checksums to simulate corruption
-            file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
-            let mut buffer = [0u8; 1];
-            file.read_exact(&mut buffer).unwrap();
-
-            file.seek(SeekFrom::Start(
-                (TRANSACTION_0_OFFSET + USER_ROOT_OFFSET) as u64,
-            ))
-            .unwrap();
-            file.write_all(&[0; size_of::<u128>()]).unwrap();
-            file.seek(SeekFrom::Start(
-                (TRANSACTION_1_OFFSET + USER_ROOT_OFFSET) as u64,
-            ))
-            .unwrap();
-            file.write_all(&[0; size_of::<u128>()]).unwrap();
-
-            assert!(matches!(
-                db2.check_integrity().unwrap_err(),
-                DatabaseError::Storage(StorageError::Corrupted(_))
-            ));
+            let read_txn = db2.begin_read().unwrap();
+            let table = read_txn.open_table(X).unwrap();
+            assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+            assert_eq!(table.get("hello2").unwrap().unwrap().value(), "world2");
         }
+
+        db2_backend_control.corrupt_all_slot_checksums().unwrap();
+        assert!(matches!(
+            db2.check_integrity().unwrap_err(),
+            DatabaseError::Storage(StorageError::Corrupted(_))
+        ));
     }
 
     // If the file is externally truncated below the stored layout, both open and check_integrity
