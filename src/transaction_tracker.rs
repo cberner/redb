@@ -230,6 +230,23 @@ impl TransactionTracker {
         !self.state.lock().unwrap().valid_savepoints.is_empty()
     }
 
+    // Excludes internal read refs that only pin durable ancestors of pending
+    // non-durable commits.
+    pub(crate) fn any_user_read_reference_exists(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        for (id, count) in &state.live_read_transactions {
+            let pending_count = state
+                .pending_non_durable_commits
+                .values()
+                .filter(|ancestor| *ancestor == id)
+                .count() as u64;
+            if *count > pending_count {
+                return true;
+            }
+        }
+        false
+    }
+
     pub(crate) fn allocate_savepoint(&self, transaction_id: TransactionId) -> SavepointId {
         let mut state = self.state.lock().unwrap();
         let id = state.next_savepoint_id.next();

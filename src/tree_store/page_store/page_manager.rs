@@ -496,7 +496,16 @@ impl TransactionalMemory {
             self.storage.flush()?;
         }
 
-        self.state.lock().unwrap().header = header;
+        {
+            let mut state = self.state.lock().unwrap();
+            state.header = header;
+            state.read_from_secondary = false;
+        }
+        // Reloading from disk discards in-memory roots, so drop volatile allocation state
+        // that belonged only to those roots.
+        self.unpersisted.lock().unwrap().clear();
+        self.unpersisted_allocations.lock().unwrap().clear();
+        self.unpersisted_allocation_txn.lock().unwrap().clear();
 
         Ok(was_clean)
     }

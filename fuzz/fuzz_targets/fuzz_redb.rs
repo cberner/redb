@@ -873,13 +873,19 @@ fn exec_table_crash_support<T: Clone + Debug>(
 
     // Clear out the freed table
     let mut allocated_pages = db.begin_write().unwrap().stats().unwrap().allocated_pages();
+    // One cleanup commit can make another batch eligible without changing the allocation count.
+    let mut stable_commits = 0;
     loop {
         db.begin_write().unwrap().commit().unwrap();
         let new_allocated_pages = db.begin_write().unwrap().stats().unwrap().allocated_pages();
         if new_allocated_pages == allocated_pages {
-            break;
+            stable_commits += 1;
+            if stable_commits == 2 {
+                break;
+            }
         } else {
             allocated_pages = new_allocated_pages;
+            stable_commits = 0;
         }
     }
 

@@ -614,35 +614,22 @@ impl Database {
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
     pub fn compact(&mut self) -> Result<bool, CompactionError> {
-        if self
-            .transaction_tracker
-            .oldest_live_read_transaction()
-            .is_some()
-        {
+        if self.transaction_tracker.any_user_read_reference_exists() {
             return Err(CompactionError::TransactionInProgress);
         }
         // Commit to free up any pending free pages
         // Use 2-phase commit to avoid any possible security issues. Plus this compaction is going to be so slow that it doesn't matter.
         // Once https://github.com/cberner/redb/issues/829 is fixed, we should upgrade this to use quick-repair -- that way the user
         // can cancel the compaction without requiring a full repair afterwards
-        let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+        let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
         if txn.list_persistent_savepoints()?.next().is_some() {
             return Err(CompactionError::PersistentSavepointExists);
         }
         if self.transaction_tracker.any_savepoint_exists() {
             return Err(CompactionError::EphemeralSavepointExists);
         }
-        txn.set_two_phase_commit(true);
-        txn.commit().map_err(|e| e.into_storage_error())?;
-        // Repeat to make pages freed by the first empty commit reusable before compaction.
-        let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-        txn.set_two_phase_commit(true);
-        txn.commit().map_err(|e| e.into_storage_error())?;
-        // There can't be any outstanding transactions because we have a `&mut self`, so all pending free pages
-        // should have been cleared out by the above commit()
-        let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-        assert!(!txn.pending_free_pages()?);
         txn.abort()?;
+        self.drain_pending_free_pages(ShrinkPolicy::Maximum)?;
 
         let mut compacted = false;
         // Iteratively compact until no progress is made
@@ -657,16 +644,7 @@ impl Database {
                 txn.abort()?;
             }
 
-            // Second commit is needed to drain the data freed table: the first commit records
-            // the pages relocated by compact_pages() as pending frees, and this one processes
-            // them so the space becomes reusable and the file can be shrunk.
-            let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-            txn.set_two_phase_commit(true);
-            txn.set_shrink_policy(ShrinkPolicy::Maximum);
-            txn.commit().map_err(|e| e.into_storage_error())?;
-            let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-            assert!(!txn.pending_free_pages()?);
-            txn.abort()?;
+            self.drain_pending_free_pages(ShrinkPolicy::Maximum)?;
 
             if !progress {
                 break;
@@ -676,6 +654,23 @@ impl Database {
         }
 
         Ok(compacted)
+    }
+
+    fn drain_pending_free_pages(&self, shrink_policy: ShrinkPolicy) -> Result {
+        // Preserve compact()'s empty durable commit, which also publishes pending
+        // non-durable roots before checking for pending frees.
+        let mut force_commit = true;
+        loop {
+            let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            if !force_commit && !txn.pending_free_pages()? {
+                txn.abort()?;
+                return Ok(());
+            }
+            force_commit = false;
+            txn.set_two_phase_commit(true);
+            txn.set_shrink_policy(shrink_policy);
+            txn.commit().map_err(|e| e.into_storage_error())?;
+        }
     }
 
     #[cfg_attr(not(debug_assertions), expect(dead_code))]
