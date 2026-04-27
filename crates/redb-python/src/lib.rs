@@ -14,5 +14,14 @@
     clippy::unreadable_literal
 )]
 
-mod python;
-pub use crate::python::redb;
+mod database;
+mod error;
+
+use pyo3::prelude::*;
+
+#[pymodule]
+pub fn redb(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    database::register(m)?;
+    error::register(m)?;
+    Ok(())
+}
