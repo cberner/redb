@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 fn round_up_to_multiple_of(value: u64, multiple: u64) -> u64 {
-    if value % multiple == 0 {
+    if value.is_multiple_of(multiple) {
         value
     } else {
         value + multiple - value % multiple
