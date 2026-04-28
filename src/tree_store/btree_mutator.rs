@@ -180,26 +180,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         }
     }
 
-    // Creates a new mutator which will not modify any existing uncommitted pages, or free any existing pages.
-    // It will still queue pages for future freeing in the freed vec
-    pub(crate) fn new_do_not_modify(
-        root: &'b mut Option<BtreeHeader>,
-        page_allocator: PageAllocator,
-        freed: &'b mut Vec<PageNumber>,
-        allocated: Arc<Mutex<PageTrackerPolicy>>,
-    ) -> Self {
-        Self {
-            root,
-            modify_uncommitted: false,
-            page_allocator,
-            freed,
-            allocated,
-            _key_type: PhantomData,
-            _value_type: PhantomData,
-            _lifetime: PhantomData,
-        }
-    }
-
     fn conditional_free(&mut self, page_number: PageNumber) {
         if self.modify_uncommitted {
             let mut allocated = self.allocated.lock().unwrap();
