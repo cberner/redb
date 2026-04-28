@@ -23,6 +23,8 @@ create_exception!(redb, LockPoisoned, StorageError);
 create_exception!(redb, ReadTransactionStillInUse, TransactionError);
 create_exception!(redb, TransactionCompleted, TransactionError);
 
+create_exception!(redb, TableError, Error);
+
 pub(crate) fn map_database_error(err: ::redb::DatabaseError) -> PyErr {
     let msg = format!("{err}");
     match err {
@@ -61,6 +63,14 @@ pub(crate) fn map_transaction_error(err: ::redb::TransactionError) -> PyErr {
         // redb::TransactionError is #[non_exhaustive]; fall back to the
         // abstract parent class for unknown future variants.
         _ => TransactionError::new_err(msg),
+    }
+}
+
+pub(crate) fn map_table_error(err: ::redb::TableError) -> PyErr {
+    let msg = format!("{err}");
+    match err {
+        ::redb::TableError::Storage(storage) => map_storage_error(storage),
+        _ => TableError::new_err(msg),
     }
 }
 
@@ -103,5 +113,6 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "TransactionCompleted",
         m.py().get_type::<TransactionCompleted>(),
     )?;
+    m.add("TableError", m.py().get_type::<TableError>())?;
     Ok(())
 }
