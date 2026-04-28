@@ -644,6 +644,8 @@ impl Database {
                 txn.abort()?;
             }
 
+            // Drain pages freed by compact_pages(), including system pages queued by any
+            // post-commit cleanup root updates.
             self.drain_pending_free_pages(ShrinkPolicy::Maximum)?;
 
             if !progress {
@@ -1056,6 +1058,7 @@ impl Database {
         // https://github.com/cberner/redb/issues/1165
         let mut tx = self.begin_write_with_allocation_policy(AllocationPolicy::Lowest)?;
         tx.set_quick_repair(true);
+        tx.disable_post_commit_free();
         tx.set_shrink_policy(ShrinkPolicy::Maximum);
         tx.commit()?;
 

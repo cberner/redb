@@ -178,10 +178,26 @@ impl TransactionTracker {
             .entry(durable_ancestor)
             .and_modify(|x| *x += 1)
             .or_insert(1);
-        state
-            .pending_non_durable_commits
-            .insert(id, durable_ancestor);
+        assert!(
+            state
+                .pending_non_durable_commits
+                .insert(id, durable_ancestor)
+                .is_none()
+        );
         state.unprocessed_freed_non_durable_commits.insert(id);
+    }
+
+    // Reserve a transaction id that was created without starting a new write transaction.
+    // The caller must still register the resulting root if it is a non-durable commit.
+    pub(crate) fn reserve_transaction_id(
+        &self,
+        id: TransactionId,
+        live_write_transaction: TransactionId,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        assert_eq!(state.live_write_transaction, Some(live_write_transaction));
+        assert_eq!(id, state.next_transaction_id.next());
+        state.next_transaction_id = id;
     }
 
     pub(crate) fn restore_savepoint_counter_state(&self, next_savepoint: SavepointId) {
