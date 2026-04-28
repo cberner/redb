@@ -2,8 +2,8 @@ use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
 use crate::tree_store::{
     AccessGuardMutInPlace, Btree, BtreeExtractIf, BtreeHeader, BtreeMut, BtreeRangeIter,
-    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageAllocator, PageHint, PageNumber, PageTrackerPolicy,
-    RawBtree, TransactionalMemory,
+    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageAllocator, PageHint, PageNumber, PageResolver,
+    PageTrackerPolicy, RawBtree,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, AccessGuardMut, StorageError, WriteTransaction};
@@ -454,7 +454,7 @@ impl ReadOnlyUntypedTable {
         hint: PageHint,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
-        mem: Arc<TransactionalMemory>,
+        mem: PageResolver,
     ) -> Self {
         Self {
             tree: RawBtree::new(root_page, fixed_key_size, fixed_value_size, mem, hint),
@@ -481,7 +481,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         root_page: Option<BtreeHeader>,
         hint: PageHint,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        mem: PageResolver,
     ) -> Result<ReadOnlyTable<K, V>> {
         Ok(ReadOnlyTable {
             name,

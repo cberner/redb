@@ -1,6 +1,6 @@
 use crate::tree_store::btree::{PagePath, UntypedBtree, UntypedBtreeMut};
 use crate::tree_store::multimap_btree::{UntypedMultiBtree, relocate_subtrees};
-use crate::tree_store::{BtreeHeader, PageAllocator, PageHint, PageNumber, TransactionalMemory};
+use crate::tree_store::{BtreeHeader, PageAllocator, PageHint, PageNumber, PageResolver};
 use crate::{Key, Result, TableError, TypeName, Value};
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -182,7 +182,7 @@ impl InternalTableDefinition {
 
     pub(crate) fn visit_all_pages<'a, F>(
         &self,
-        mem: Arc<TransactionalMemory>,
+        mem: PageResolver,
         hint: PageHint,
         visitor: F,
     ) -> Result

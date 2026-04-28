@@ -6,8 +6,9 @@ use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllocationPolicy, Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH,
-    MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageListMut, PageNumber, PageTrackerPolicy,
-    SerializedSavepoint, ShrinkPolicy, TableTree, TableTreeMut, TableType, TransactionalMemory,
+    MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageListMut, PageNumber, PageResolver,
+    PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy, TableTree, TableTreeMut, TableType,
+    TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -931,7 +932,7 @@ impl WriteTransaction {
             Some(root),
             PageHint::None,
             self.transaction_guard.clone(),
-            self.mem.clone(),
+            PageResolver::new(self.mem.clone()),
         )?;
         read(&table).map(Some)
     }
@@ -2325,7 +2326,7 @@ impl WriteTransaction {
                 Some(page),
                 PageHint::None,
                 self.transaction_guard.clone(),
-                self.mem.clone(),
+                PageResolver::new(self.mem.clone()),
             )?;
             master_tree.print_debug(true)?;
         }
@@ -2344,7 +2345,7 @@ impl WriteTransaction {
                 Some(page),
                 PageHint::None,
                 self.transaction_guard.clone(),
-                self.mem.clone(),
+                PageResolver::new(self.mem.clone()),
             )?;
             master_tree.print_debug(true)?;
         }
@@ -2386,9 +2387,10 @@ impl ReadTransaction {
     ) -> Result<Self, TransactionError> {
         let root_page = mem.get_data_root();
         let guard = Arc::new(guard);
+        let resolver = PageResolver::new(mem.clone());
         Ok(Self {
-            mem: mem.clone(),
-            tree: TableTree::new(root_page, PageHint::Clean, guard, mem)
+            mem,
+            tree: TableTree::new(root_page, PageHint::Clean, guard, resolver)
                 .map_err(TransactionError::Storage)?,
         })
     }
@@ -2409,7 +2411,7 @@ impl ReadTransaction {
                 table_root,
                 PageHint::Clean,
                 self.tree.transaction_guard().clone(),
-                self.mem.clone(),
+                PageResolver::new(self.mem.clone()),
             )?),
             InternalTableDefinition::Multimap { .. } => unreachable!(),
         }
@@ -2436,7 +2438,7 @@ impl ReadTransaction {
                 PageHint::Clean,
                 fixed_key_size,
                 fixed_value_size,
-                self.mem.clone(),
+                PageResolver::new(self.mem.clone()),
             )),
             InternalTableDefinition::Multimap { .. } => unreachable!(),
         }
@@ -2463,7 +2465,7 @@ impl ReadTransaction {
                 table_length,
                 PageHint::Clean,
                 self.tree.transaction_guard().clone(),
-                self.mem.clone(),
+                PageResolver::new(self.mem.clone()),
             )?),
         }
     }
@@ -2492,7 +2494,7 @@ impl ReadTransaction {
                 PageHint::Clean,
                 fixed_key_size,
                 fixed_value_size,
-                self.mem.clone(),
+                PageResolver::new(self.mem.clone()),
             )),
         }
     }

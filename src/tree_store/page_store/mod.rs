@@ -22,8 +22,8 @@ pub(crate) use base::{
 pub(crate) use fast_hash::PageNumberHashSet;
 pub(crate) use header::PAGE_SIZE;
 pub(crate) use page_manager::{
-    AllocationPolicy, FILE_FORMAT_VERSION3, PageAllocator, ShrinkPolicy, TransactionalMemory,
-    xxh3_checksum,
+    AllocationPolicy, FILE_FORMAT_VERSION3, PageAllocator, PageResolver, ShrinkPolicy,
+    TransactionalMemory, xxh3_checksum,
 };
 pub use savepoint::Savepoint;
 pub(crate) use savepoint::SerializedSavepoint;

@@ -3,8 +3,8 @@ use crate::tree_store::btree_base::{BRANCH, LEAF};
 use crate::tree_store::btree_base::{BranchAccessor, LeafAccessor};
 use crate::tree_store::btree_iters::RangeIterState::{Internal, Leaf};
 use crate::tree_store::btree_mutator::MutateHelper;
-use crate::tree_store::page_store::{Page, PageHint, PageImpl, TransactionalMemory};
-use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageTrackerPolicy};
+use crate::tree_store::page_store::{Page, PageHint, PageImpl};
+use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageResolver, PageTrackerPolicy};
 use crate::types::{Key, Value};
 use Bound::{Excluded, Included, Unbounded};
 use std::borrow::Borrow;
@@ -41,7 +41,7 @@ impl RangeIterState {
     fn next(
         self,
         reverse: bool,
-        manager: &TransactionalMemory,
+        manager: &PageResolver,
         hint: PageHint,
     ) -> Result<Option<RangeIterState>> {
         match self {
@@ -186,7 +186,7 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
 
 pub(crate) struct AllPageNumbersBtreeIter {
     next: Option<RangeIterState>,
-    manager: Arc<TransactionalMemory>,
+    manager: PageResolver,
     hint: PageHint,
 }
 
@@ -195,7 +195,7 @@ impl AllPageNumbersBtreeIter {
         root: PageNumber,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
-        manager: Arc<TransactionalMemory>,
+        manager: PageResolver,
         hint: PageHint,
     ) -> Result<Self> {
         let root_page = manager.get_page(root, hint)?;
@@ -374,7 +374,7 @@ pub(crate) struct BtreeRangeIter<K: Key + 'static, V: Value + 'static> {
     right: Option<RangeIterState>, // Exclusive. The previous element returned
     include_left: bool,           // left is inclusive, instead of exclusive
     include_right: bool,          // right is inclusive, instead of exclusive
-    manager: Arc<TransactionalMemory>,
+    manager: PageResolver,
     hint: PageHint,
     // When Some, the right boundary is Unbounded and not yet computed.
     // Stores the tree root for lazy initialization on first next_back() call.
@@ -409,7 +409,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
     pub(crate) fn new<'a, T: RangeBounds<KR>, KR: Borrow<K::SelfType<'a>>>(
         query_range: &'_ T,
         table_root: Option<PageNumber>,
-        manager: Arc<TransactionalMemory>,
+        manager: PageResolver,
         hint: PageHint,
     ) -> Result<Self> {
         if range_is_empty::<K, KR, T>(query_range) {
@@ -672,7 +672,7 @@ fn find_iter_unbounded<K: Key, V: Value>(
     page: PageImpl,
     mut parent: Option<Box<RangeIterState>>,
     reverse: bool,
-    manager: &TransactionalMemory,
+    manager: &PageResolver,
     hint: PageHint,
 ) -> Result<Option<RangeIterState>> {
     let node_mem = page.memory();
@@ -720,7 +720,7 @@ fn find_iter_left<K: Key, V: Value>(
     mut parent: Option<Box<RangeIterState>>,
     query: &[u8],
     include_query: bool,
-    manager: &TransactionalMemory,
+    manager: &PageResolver,
     hint: PageHint,
 ) -> Result<(bool, Option<RangeIterState>)> {
     let node_mem = page.memory();
@@ -769,7 +769,7 @@ fn find_iter_right<K: Key, V: Value>(
     mut parent: Option<Box<RangeIterState>>,
     query: &[u8],
     include_query: bool,
-    manager: &TransactionalMemory,
+    manager: &PageResolver,
     hint: PageHint,
 ) -> Result<(bool, Option<RangeIterState>)> {
     let node_mem = page.memory();
