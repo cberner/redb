@@ -691,38 +691,22 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
 
     pub(crate) fn retain_in<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
-        mut predicate: F,
+        predicate: F,
         range: impl RangeBounds<KR> + 'a,
     ) -> Result
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        let iter = self.range(&range)?;
         let mut freed = vec![];
-        // Do not modify the existing tree, because we're iterating over it concurrently with the removals
-        // TODO: optimize this to iterate and remove at the same time
-        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new_do_not_modify(
+        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             &mut self.root,
             self.page_allocator.clone(),
             &mut freed,
             self.allocated_pages.clone(),
         );
-        for entry in iter {
-            let entry = entry?;
-            if !predicate(entry.key(), entry.value()) {
-                assert!(operation.delete(&entry.key())?.is_some());
-            }
-        }
+        operation.retain_in_range(&range, predicate)?;
         let mut freed_pages = self.freed_pages.lock().unwrap();
-        let mut allocated_pages = self.allocated_pages.lock().unwrap();
-        for page in freed {
-            if !self
-                .page_allocator
-                .free_if_uncommitted(page, &mut allocated_pages)
-            {
-                freed_pages.push(page);
-            }
-        }
+        freed_pages.extend(freed);
 
         Ok(())
     }
