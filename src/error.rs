@@ -468,12 +468,15 @@ impl std::error::Error for TransactionError {}
 pub enum CommitError {
     /// Error from underlying storage
     Storage(StorageError),
+    /// The transaction was poisoned by a panic and can no longer be committed
+    TransactionPoisoned,
 }
 
 impl CommitError {
     pub(crate) fn into_storage_error(self) -> StorageError {
         match self {
             CommitError::Storage(storage) => storage,
+            CommitError::TransactionPoisoned => unreachable!(),
         }
     }
 }
@@ -482,6 +485,7 @@ impl From<CommitError> for Error {
     fn from(err: CommitError) -> Error {
         match err {
             CommitError::Storage(storage) => storage.into(),
+            CommitError::TransactionPoisoned => Error::TransactionPoisoned,
         }
     }
 }
@@ -496,6 +500,9 @@ impl Display for CommitError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             CommitError::Storage(storage) => storage.fmt(f),
+            CommitError::TransactionPoisoned => {
+                write!(f, "Transaction was poisoned by a panic")
+            }
         }
     }
 }
@@ -525,6 +532,8 @@ pub enum Error {
     EphemeralSavepointExists,
     /// A transaction is still in-progress
     TransactionInProgress,
+    /// The transaction was poisoned by a panic and can no longer be committed
+    TransactionPoisoned,
     /// The Database is corrupted
     Corrupted(String),
     /// The database file is in an old file format and must be manually upgraded
@@ -673,6 +682,9 @@ impl Display for Error {
                     f,
                     "A transaction is still in progress. Operation cannot be performed."
                 )
+            }
+            Error::TransactionPoisoned => {
+                write!(f, "Transaction was poisoned by a panic")
             }
             Error::InvalidSavepoint => {
                 write!(f, "Savepoint is invalid or cannot be created.")

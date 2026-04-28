@@ -13,6 +13,7 @@ use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 /// Informational storage stats about a table
 #[derive(Debug)]
@@ -68,6 +69,32 @@ pub struct Table<'txn, K: Key + 'static, V: Value + 'static> {
 impl<K: Key + 'static, V: Value + 'static> TableHandle for Table<'_, K, V> {
     fn name(&self) -> &str {
         &self.name
+    }
+}
+
+struct RetainPanicGuard<'txn> {
+    transaction: &'txn WriteTransaction,
+    disarmed: bool,
+}
+
+impl<'txn> RetainPanicGuard<'txn> {
+    fn new(transaction: &'txn WriteTransaction) -> Self {
+        Self {
+            transaction,
+            disarmed: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for RetainPanicGuard<'_> {
+    fn drop(&mut self) {
+        if !self.disarmed && thread::panicking() {
+            self.transaction.poison();
+        }
     }
 }
 
@@ -147,15 +174,26 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// Applies `predicate` to all key-value pairs. All entries for which
     /// `predicate` evaluates to `false` are removed.
     ///
+    /// The predicate must not panic. If it panics, the write transaction is
+    /// poisoned and [`crate::WriteTransaction::commit`] will return
+    /// [`crate::CommitError::TransactionPoisoned`].
+    ///
     pub fn retain<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         predicate: F,
     ) -> Result {
-        self.tree.retain_in::<K::SelfType<'_>, F>(predicate, ..)
+        let mut panic_guard = RetainPanicGuard::new(self.transaction);
+        let result = self.tree.retain_in::<K::SelfType<'_>, F>(predicate, ..);
+        panic_guard.disarm();
+        result
     }
 
     /// Applies `predicate` to all key-value pairs in the range `start..end`. All entries for which
     /// `predicate` evaluates to `false` are removed.
+    ///
+    /// The predicate must not panic. If it panics, the write transaction is
+    /// poisoned and [`crate::WriteTransaction::commit`] will return
+    /// [`crate::CommitError::TransactionPoisoned`].
     ///
     pub fn retain_in<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
@@ -165,7 +203,10 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree.retain_in(predicate, range)
+        let mut panic_guard = RetainPanicGuard::new(self.transaction);
+        let result = self.tree.retain_in(predicate, range);
+        panic_guard.disarm();
+        result
     }
 
     /// Insert mapping of the given key to the given value
