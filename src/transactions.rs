@@ -1539,7 +1539,7 @@ impl WriteTransaction {
         let (user_root, allocated_pages, data_freed) =
             self.tables.lock().unwrap().table_tree.flush_and_close()?;
 
-        self.store_data_freed_pages(data_freed)?;
+        let stored_data_freed_pages = self.store_data_freed_pages(data_freed)?;
 
         #[cfg(feature = "logging")]
         debug!(
@@ -1549,7 +1549,7 @@ impl WriteTransaction {
         let allocated_pages: Vec<PageNumber> = allocated_pages.into_iter().collect();
         match self.durability {
             InternalDurability::None => {
-                self.non_durable_commit(user_root, allocated_pages)?;
+                self.non_durable_commit(user_root, allocated_pages, stored_data_freed_pages)?;
                 self.apply_savepoint_state_on_commit();
             }
             InternalDurability::Immediate => self.durable_commit(user_root, allocated_pages)?,
@@ -1590,7 +1590,8 @@ impl WriteTransaction {
             .apply_on_commit(&self.transaction_tracker);
     }
 
-    fn store_data_freed_pages(&self, mut freed_pages: Vec<PageNumber>) -> Result {
+    fn store_data_freed_pages(&self, mut freed_pages: Vec<PageNumber>) -> Result<bool> {
+        let stored_pages = !freed_pages.is_empty();
         let mut system_tables = self.system_tables.lock().unwrap();
         let mut freed_table = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
         let mut pagination_counter = 0;
@@ -1624,7 +1625,7 @@ impl WriteTransaction {
             pagination_counter += 1;
         }
 
-        Ok(())
+        Ok(stored_pages)
     }
 
     // Flushes this transaction's data-tree allocations to DATA_ALLOCATED_TABLE, along with any
@@ -1845,28 +1846,37 @@ impl WriteTransaction {
             .map_or(epilogue_transaction, |x| x.next());
 
         let mut freed_any = false;
-        let system_root = {
+        let (system_root, stored_system_freed_pages, extracted_data_transactions) = {
             let mut system_tables = self.system_tables.lock().unwrap();
             let system_freed_pages = system_tables.system_freed_pages();
-            self.extract_freed_pages(&mut system_tables, DATA_FREED_TABLE, free_until, |page| {
-                freed_any = true;
-                // See process_freed_pages(): free_until excludes pages that are still needed
-                // by a live reader or pending non-durable commit.
-                debug_assert!(!self.mem.unpersisted(page));
-                page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
-            })?;
+            let extracted_data_transactions = self.extract_freed_pages(
+                &mut system_tables,
+                DATA_FREED_TABLE,
+                free_until,
+                |page| {
+                    freed_any = true;
+                    // See process_freed_pages(): free_until excludes pages that are still needed
+                    // by a live reader or pending non-durable commit.
+                    debug_assert!(!self.mem.unpersisted(page));
+                    page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
+                },
+            )?;
             if !freed_any {
                 return Ok(());
             }
 
             let system_tree = system_tables.table_tree.flush_table_root_updates()?;
-            self.store_system_freed_pages(
+            let stored_system_freed_pages = self.store_system_freed_pages(
                 system_tree,
                 epilogue_transaction,
                 system_freed_pages,
                 None,
             )?;
-            system_tree.finalize_dirty_checksums()?
+            (
+                system_tree.finalize_dirty_checksums()?,
+                stored_system_freed_pages,
+                extracted_data_transactions,
+            )
         };
 
         let epilogue_allocations = page_allocator.take_allocated_since_commit();
@@ -1878,8 +1888,17 @@ impl WriteTransaction {
         )?;
         self.transaction_tracker
             .reserve_transaction_id(epilogue_transaction, self.transaction_id);
+        self.transaction_tracker.register_non_durable_commit(
+            epilogue_transaction,
+            self.transaction_id,
+            stored_system_freed_pages,
+        );
+        // The epilogue only extracts DATA_FREED_TABLE entries. It is still correct to clear these
+        // ids from the non-durable scan set: ordinary non-durable commits filter unpersisted
+        // system pages before writing SYSTEM_FREED_TABLE, and durable commits process any
+        // remaining persisted system entries without consulting this tracker.
         self.transaction_tracker
-            .register_non_durable_commit(epilogue_transaction, self.transaction_id);
+            .mark_non_durable_freed_pages_processed(extracted_data_transactions);
 
         Ok(())
     }
@@ -1889,6 +1908,7 @@ impl WriteTransaction {
         &mut self,
         user_root: Option<BtreeHeader>,
         allocated_pages: Vec<PageNumber>,
+        stored_data_freed_pages: bool,
     ) -> Result {
         let free_until_transaction = self
             .transaction_tracker
@@ -1898,7 +1918,7 @@ impl WriteTransaction {
 
         let mut post_commit_frees = vec![];
 
-        let system_root = {
+        let (system_root, stored_system_freed_pages) = {
             let mut system_tables = self.system_tables.lock().unwrap();
             let system_freed_pages = system_tables.system_freed_pages();
             system_tables.table_tree.flush_table_root_updates()?;
@@ -1911,17 +1931,18 @@ impl WriteTransaction {
             }
             // Store all freed pages for a future commit(), since we can't free pages during a
             // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
-            self.store_system_freed_pages(
+            let stored_system_freed_pages = self.store_system_freed_pages(
                 &mut system_tables.table_tree,
                 self.transaction_id,
                 system_freed_pages,
                 Some(&mut post_commit_frees),
             )?;
 
-            system_tables
+            let system_root = system_tables
                 .table_tree
                 .flush_table_root_updates()?
-                .finalize_dirty_checksums()?
+                .finalize_dirty_checksums()?;
+            (system_root, stored_system_freed_pages)
         };
 
         let newly_unpersisted = self.page_allocator().take_allocated_since_commit();
@@ -1934,11 +1955,13 @@ impl WriteTransaction {
         // Record the data-tree pages allocated in this transaction in the in-memory map.
         self.mem
             .record_unpersisted_allocations(self.transaction_id, allocated_pages);
-        // Register this as a non-durable transaction to ensure that the freed pages we just pushed
-        // are only processed after this has been persisted
+        let stored_freed_pages = stored_data_freed_pages || stored_system_freed_pages;
+        // Register this as a non-durable transaction to ensure that freed pages are only processed
+        // after this transaction has been persisted.
         self.transaction_tracker.register_non_durable_commit(
             self.transaction_id,
             self.mem.get_last_durable_transaction_id()?,
+            stored_freed_pages,
         );
 
         for page in post_commit_frees {
@@ -2032,19 +2055,24 @@ impl WriteTransaction {
             page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
         };
 
-        let mut system_tables = self.system_tables.lock().unwrap();
-        self.extract_freed_pages(
-            &mut system_tables,
-            DATA_FREED_TABLE,
-            free_until,
-            &mut free_page,
-        )?;
-        self.extract_freed_pages(
-            &mut system_tables,
-            SYSTEM_FREED_TABLE,
-            free_until,
-            &mut free_page,
-        )?;
+        let extracted_transactions = {
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let mut extracted_transactions = self.extract_freed_pages(
+                &mut system_tables,
+                DATA_FREED_TABLE,
+                free_until,
+                &mut free_page,
+            )?;
+            extracted_transactions.extend(self.extract_freed_pages(
+                &mut system_tables,
+                SYSTEM_FREED_TABLE,
+                free_until,
+                &mut free_page,
+            )?);
+            extracted_transactions
+        };
+        self.transaction_tracker
+            .mark_non_durable_freed_pages_processed(extracted_transactions);
 
         Ok(())
     }
@@ -2055,9 +2083,9 @@ impl WriteTransaction {
         definition: SystemTableDefinition<TransactionIdWithPagination, PageList>,
         free_until: TransactionId,
         mut process_page: impl FnMut(PageNumber),
-    ) -> Result {
+    ) -> Result<Vec<TransactionId>> {
         if system_tables.get_system_table_root(definition)?.is_none() {
-            return Ok(());
+            return Ok(vec![]);
         }
 
         let mut freed = system_tables.open_system_table(self, definition)?;
@@ -2065,15 +2093,20 @@ impl WriteTransaction {
             transaction_id: free_until.raw_id(),
             pagination_id: 0,
         };
+        let mut extracted_transactions = vec![];
         for entry in freed.extract_from_if(..key, |_, _| true)? {
-            let (_, page_list) = entry?;
+            let (key, page_list) = entry?;
+            let transaction_id = TransactionId::new(key.value().transaction_id);
+            if extracted_transactions.last().copied() != Some(transaction_id) {
+                extracted_transactions.push(transaction_id);
+            }
             let page_list = page_list.value();
             for i in 0..page_list.len() {
                 process_page(page_list.get(i));
             }
         }
 
-        Ok(())
+        Ok(extracted_transactions)
     }
 
     fn process_freed_pages_nondurable_helper(
@@ -2105,6 +2138,7 @@ impl WriteTransaction {
             if self
                 .transaction_tracker
                 .is_unprocessed_non_durable_commit(transaction_id)
+                && candidate_transactions.last().copied() != Some(transaction_id)
             {
                 candidate_transactions.push(transaction_id);
             }
@@ -2169,7 +2203,7 @@ impl WriteTransaction {
 
         for transaction_id in processed {
             self.transaction_tracker
-                .mark_unprocessed_non_durable_commit(transaction_id);
+                .mark_non_durable_freed_pages_processed([transaction_id]);
         }
 
         Ok(())
@@ -2181,11 +2215,12 @@ impl WriteTransaction {
         transaction_id: TransactionId,
         system_freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         mut unpersisted_pages: Option<&mut Vec<PageNumber>>,
-    ) -> Result {
+    ) -> Result<bool> {
         assert_eq!(PageNumber::serialized_size(), 8); // We assume below that PageNumber is length 8
         if system_freed_pages.lock().unwrap().is_empty() {
-            return Ok(());
+            return Ok(false);
         }
+        let mut stored_pages = false;
 
         system_tree.open_table_and_flush_table_root(
             SYSTEM_FREED_TABLE.name(),
@@ -2211,6 +2246,7 @@ impl WriteTransaction {
                             unpersisted_pages.push(page);
                         } else {
                             access_guard.as_mut().push_back(page);
+                            stored_pages = true;
                         }
                     }
                     drop(access_guard);
@@ -2221,7 +2257,7 @@ impl WriteTransaction {
             },
         )?;
 
-        Ok(())
+        Ok(stored_pages)
     }
 
     fn next_system_freed_pagination_id(

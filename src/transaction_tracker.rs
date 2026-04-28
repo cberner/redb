@@ -153,9 +153,14 @@ impl TransactionTracker {
         state.unprocessed_freed_non_durable_commits.contains(&id)
     }
 
-    pub(crate) fn mark_unprocessed_non_durable_commit(&self, id: TransactionId) {
+    pub(crate) fn mark_non_durable_freed_pages_processed(
+        &self,
+        ids: impl IntoIterator<Item = TransactionId>,
+    ) {
         let mut state = self.state.lock().unwrap();
-        state.unprocessed_freed_non_durable_commits.remove(&id);
+        for id in ids {
+            state.unprocessed_freed_non_durable_commits.remove(&id);
+        }
     }
 
     pub(crate) fn oldest_unprocessed_non_durable_commit(&self) -> Option<TransactionId> {
@@ -167,10 +172,14 @@ impl TransactionTracker {
             .copied()
     }
 
+    // `has_unprocessed_freed_pages` is true when a future non-durable commit should scan
+    // freed-table entries under this transaction id for pages that can be reclaimed before the
+    // id becomes durable.
     pub(crate) fn register_non_durable_commit(
         &self,
         id: TransactionId,
         durable_ancestor: TransactionId,
+        has_unprocessed_freed_pages: bool,
     ) {
         let mut state = self.state.lock().unwrap();
         state
@@ -184,7 +193,9 @@ impl TransactionTracker {
                 .insert(id, durable_ancestor)
                 .is_none()
         );
-        state.unprocessed_freed_non_durable_commits.insert(id);
+        if has_unprocessed_freed_pages {
+            state.unprocessed_freed_non_durable_commits.insert(id);
+        }
     }
 
     // Reserve a transaction id that was created without starting a new write transaction.
@@ -345,5 +356,24 @@ impl TransactionTracker {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn non_durable_commit_without_freed_pages_is_not_unprocessed() {
+        let tracker = TransactionTracker::new(TransactionId::new(0));
+
+        tracker.register_non_durable_commit(TransactionId::new(1), TransactionId::new(0), false);
+        assert_eq!(None, tracker.oldest_unprocessed_non_durable_commit());
+
+        tracker.register_non_durable_commit(TransactionId::new(2), TransactionId::new(0), true);
+        assert_eq!(
+            Some(TransactionId::new(2)),
+            tracker.oldest_unprocessed_non_durable_commit()
+        );
     }
 }
