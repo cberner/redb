@@ -1,6 +1,8 @@
 # redb - Changelog
 
 ## Unreleased
+* Optimize `Table::retain()` and `Table::retain_in()` by rebuilding affected B-tree pages
+  in a single pass instead of deleting matching entries one at a time.
 * `Table::retain()` and `Table::retain_in()` now poison the write transaction if their
   predicate panics, causing `WriteTransaction::commit()` to return
   `CommitError::TransactionPoisoned`.
