@@ -61,7 +61,13 @@ fn benchmark(values: &[u128], num_threads: usize) {
     }
 }
 
-// TODO: multi-threaded inserts are slower. Probably due to lock contention checking dirty pages
+// Multi-threaded inserts used to be slower than single-threaded because every
+// `BtreeMut::insert` held the transaction-wide `freed_pages` mutex for the
+// entire tree walk, serializing concurrent writers to different tables. Each
+// open table now gets its own `freed_pages` and `allocated_pages` (merged
+// back on close), and the page-storage `write_buffer` is sharded by offset so
+// concurrent writers to different pages don't all serialize on a single
+// mutex.
 fn main() {
     let mut rng = StdRng::seed_from_u64(RNG_SEED);
     let mut values = vec![];

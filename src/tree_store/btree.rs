@@ -395,6 +395,14 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         self.root = root;
     }
 
+    pub(crate) fn freed_pages(&self) -> &Arc<Mutex<Vec<PageNumber>>> {
+        &self.freed_pages
+    }
+
+    pub(crate) fn allocated_pages(&self) -> &Arc<Mutex<PageTrackerPolicy>> {
+        &self.allocated_pages
+    }
+
     pub(crate) fn relocate(
         &mut self,
         relocation_map: &HashMap<PageNumber, PageNumber>,

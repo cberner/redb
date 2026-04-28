@@ -234,8 +234,12 @@ pub(super) struct PagedCachedFile {
     #[cfg(feature = "cache_metrics")]
     evictions: AtomicU64,
     read_cache: Vec<RwLock<LRUCache<Arc<[u8]>>>>,
+    // Write buffer sharded by page offset so concurrent writers to different
+    // pages don't all serialize on a single mutex. Small caches use a single
+    // shard to preserve the strict "write buffer NEVER exceeds 50%" invariant
+    // when a single page already exceeds the per-shard share of that budget.
     // TODO: maybe move this cache to WriteTransaction?
-    write_buffer: Arc<Mutex<LRUWriteCache>>,
+    write_buffer: Vec<Arc<Mutex<LRUWriteCache>>>,
 }
 
 impl PagedCachedFile {
@@ -246,6 +250,11 @@ impl PagedCachedFile {
     ) -> Result<Self, DatabaseError> {
         let read_cache = (0..Self::lock_stripes())
             .map(|_| RwLock::new(LRUCache::new()))
+            .collect();
+
+        let num_shards = Self::write_buffer_shards_for(max_cache_size, page_size);
+        let write_buffer = (0..num_shards)
+            .map(|_| Arc::new(Mutex::new(LRUWriteCache::new())))
             .collect();
 
         Ok(Self {
@@ -266,7 +275,7 @@ impl PagedCachedFile {
             #[cfg(feature = "cache_metrics")]
             evictions: AtomicU64::default(),
             read_cache,
-            write_buffer: Arc::new(Mutex::new(LRUWriteCache::new())),
+            write_buffer,
         })
     }
 
@@ -319,6 +328,30 @@ impl PagedCachedFile {
         131
     }
 
+    // Number of write_buffer shards. More shards = less contention between
+    // concurrent writers, but sharded eviction only targets the local shard,
+    // so the "write buffer NEVER exceeds 50%" invariant can momentarily
+    // overshoot when writes cluster on one shard. Fall back to a single shard
+    // for small caches where a single page already exceeds an N-way share of
+    // the half-budget - there, strict enforcement matters more than
+    // contention.
+    const MAX_WRITE_BUFFER_SHARDS: usize = 8;
+
+    fn write_buffer_shards_for(max_cache_size: usize, page_size: u64) -> usize {
+        let half = max_cache_size / 2;
+        let per_shard = half / Self::MAX_WRITE_BUFFER_SHARDS;
+        if per_shard < 2 * page_size as usize {
+            1
+        } else {
+            Self::MAX_WRITE_BUFFER_SHARDS
+        }
+    }
+
+    fn write_buffer_shard(&self, offset: u64) -> &Arc<Mutex<LRUWriteCache>> {
+        let idx = ((offset / self.page_size) as usize) % self.write_buffer.len();
+        &self.write_buffer[idx]
+    }
+
     // Evict entries from the read cache to free at least `bytes_needed` bytes.
     // Iterates through cache stripes and pops lowest-priority entries.
     //
@@ -354,36 +387,48 @@ impl PagedCachedFile {
     }
 
     fn flush_write_buffer(&self) -> Result {
-        let mut write_buffer = self.write_buffer.lock().unwrap();
+        // Hold every shard for the duration of the flush so concurrent
+        // writers can't slip writes into a shard we're about to clear.
+        let mut shards: Vec<MutexGuard<'_, LRUWriteCache>> = self
+            .write_buffer
+            .iter()
+            .map(|shard| shard.lock().unwrap())
+            .collect();
 
-        for (offset, buffer) in write_buffer.cache.iter() {
-            self.file.write(*offset, buffer.as_ref().unwrap())?;
+        for shard in shards.iter() {
+            for (offset, buffer) in shard.cache.iter() {
+                self.file.write(*offset, buffer.as_ref().unwrap())?;
+            }
         }
         // Transfer flushed pages into the read cache so they are available
         // for subsequent reads without a file I/O.  The write buffer is being
         // drained, so the total check only considers the read cache size.
-        for (offset, buffer) in write_buffer.cache.iter_mut() {
-            let buffer = buffer.take().unwrap();
-            let cache_size = self
-                .read_cache_bytes
-                .fetch_add(buffer.len(), Ordering::AcqRel);
+        'outer: for shard in shards.iter_mut() {
+            for (offset, buffer) in shard.cache.iter_mut() {
+                let buffer = buffer.take().unwrap();
+                let cache_size = self
+                    .read_cache_bytes
+                    .fetch_add(buffer.len(), Ordering::AcqRel);
 
-            if cache_size + buffer.len() <= self.max_cache_size {
-                let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
-                let mut lock = self.read_cache[cache_slot].write().unwrap();
-                if let Some(replaced) = lock.insert(*offset, buffer) {
-                    // A race could cause us to replace an existing buffer
+                if cache_size + buffer.len() <= self.max_cache_size {
+                    let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
+                    let mut lock = self.read_cache[cache_slot].write().unwrap();
+                    if let Some(replaced) = lock.insert(*offset, buffer) {
+                        // A race could cause us to replace an existing buffer
+                        self.read_cache_bytes
+                            .fetch_sub(replaced.len(), Ordering::AcqRel);
+                    }
+                } else {
                     self.read_cache_bytes
-                        .fetch_sub(replaced.len(), Ordering::AcqRel);
+                        .fetch_sub(buffer.len(), Ordering::AcqRel);
+                    break 'outer;
                 }
-            } else {
-                self.read_cache_bytes
-                    .fetch_sub(buffer.len(), Ordering::AcqRel);
-                break;
             }
         }
         self.write_buffer_bytes.store(0, Ordering::Release);
-        write_buffer.clear();
+        for shard in shards.iter_mut() {
+            shard.clear();
+        }
 
         Ok(())
     }
@@ -433,7 +478,7 @@ impl PagedCachedFile {
         self.reads_total.fetch_add(1, Ordering::AcqRel);
 
         if !matches!(hint, PageHint::Clean) {
-            let lock = self.write_buffer.lock().unwrap();
+            let lock = self.write_buffer_shard(offset).lock().unwrap();
             if let Some(cached) = lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
@@ -493,7 +538,12 @@ impl PagedCachedFile {
     // Discard pending writes to the given range
     pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
         assert_eq!(0, offset % self.page_size);
-        if let Some(removed) = self.write_buffer.lock().unwrap().remove(offset) {
+        if let Some(removed) = self
+            .write_buffer_shard(offset)
+            .lock()
+            .unwrap()
+            .remove(offset)
+        {
             self.write_buffer_bytes
                 .fetch_sub(removed.len(), Ordering::Release);
         }
@@ -526,8 +576,15 @@ impl PagedCachedFile {
     // cache_policy takes the existing data as an argument and returns the priority. The priority should be stable and not change after WritablePage is dropped
     pub(super) fn write(&self, offset: u64, len: usize, overwrite: bool) -> Result<WritablePage> {
         assert_eq!(0, offset % self.page_size);
-        let mut lock = self.write_buffer.lock().unwrap();
 
+        // Evict any matching read-cache entry and speculatively allocate a
+        // zero-filled buffer before acquiring the write_buffer mutex. Each
+        // page is owned by at most one writer, so there is no race on this
+        // offset; doing these outside the write_buffer critical section keeps
+        // both the read-cache lock and the heap allocation - which can be
+        // slow under malloc contention - off the hot path shared with other
+        // writers.
+        // TODO: allow hint that page is known to be dirty and will not be in the read cache
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         let existing = {
             let mut lock = self.read_cache[cache_slot].write().unwrap();
@@ -545,6 +602,14 @@ impl PagedCachedFile {
                 None
             }
         };
+        let prealloc = if overwrite && existing.is_none() {
+            Some(zero_filled_arc(len))
+        } else {
+            None
+        };
+
+        let shard = self.write_buffer_shard(offset);
+        let mut lock = shard.lock().unwrap();
 
         let data = if let Some(removed) = lock.take_value(offset) {
             #[cfg(feature = "cache_metrics")]
@@ -555,7 +620,15 @@ impl PagedCachedFile {
             let mut write_bytes = previous + len;
             let half = self.max_cache_size / 2;
 
-            // Rule 1: write buffer NEVER exceeds 50%.  Flush excess to disk.
+            // Rule 1: flush excess to disk if the write buffer exceeds 50%.
+            // With a sharded write buffer we can only pop from the local
+            // shard; pages stored in other shards can't be evicted here
+            // without acquiring their mutexes, so the invariant is strict
+            // only when there is a single shard. For sharded caches it
+            // becomes a soft ceiling - concurrent writes distribute across
+            // shards, so each shard evicts as it fills. If a single shard is
+            // empty, this writer accepts the temporary overshoot and the
+            // next writer evicts on its way in.
             if write_bytes > half {
                 let excess = write_bytes - half;
                 let mut flushed = 0;
@@ -592,10 +665,10 @@ impl PagedCachedFile {
                 #[cfg(feature = "cache_metrics")]
                 self.writes_hits.fetch_add(1, Ordering::AcqRel);
                 data
-            } else if overwrite {
+            } else if let Some(zeroed) = prealloc {
                 #[cfg(feature = "cache_metrics")]
                 self.writes_hits.fetch_add(1, Ordering::AcqRel);
-                zero_filled_arc(len)
+                zeroed
             } else {
                 self.read_direct_into_arc(offset, len)?
             };
@@ -605,7 +678,7 @@ impl PagedCachedFile {
         #[cfg(feature = "cache_metrics")]
         self.writes_total.fetch_add(1, Ordering::AcqRel);
         Ok(WritablePage {
-            buffer: self.write_buffer.clone(),
+            buffer: shard.clone(),
             offset,
             data,
         })

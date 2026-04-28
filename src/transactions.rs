@@ -670,8 +670,8 @@ impl TableNamespace {
             definition.name(),
             root,
             length,
-            self.freed_pages.clone(),
-            self.allocated_pages.clone(),
+            Self::new_table_freed_pages(),
+            self.new_table_allocated_pages(),
             self.table_tree.page_allocator().clone(),
             transaction,
         ))
@@ -691,11 +691,29 @@ impl TableNamespace {
         Ok(Table::new(
             definition.name(),
             root,
-            self.freed_pages.clone(),
-            self.allocated_pages.clone(),
+            Self::new_table_freed_pages(),
+            self.new_table_allocated_pages(),
             self.table_tree.page_allocator().clone(),
             transaction,
         ))
+    }
+
+    // Allocate a fresh `freed_pages` vec for an individual table. Using a
+    // per-table mutex avoids serializing concurrent writes into different
+    // tables of the same transaction on a single shared lock. `close_table`
+    // merges the table's freed pages back into the transaction-wide vec.
+    fn new_table_freed_pages() -> Arc<Mutex<Vec<PageNumber>>> {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    // Allocate a fresh `allocated_pages` tracker for an individual table of
+    // the same kind as the transaction-wide tracker. When savepoints are not
+    // in use this is `Ignore` and effectively free, but having a private
+    // mutex still removes the cross-table contention on the shared one.
+    // `close_table` merges any tracked pages back into the shared tracker.
+    fn new_table_allocated_pages(&self) -> Arc<Mutex<PageTrackerPolicy>> {
+        let kind = self.allocated_pages.lock().unwrap().fresh_same_kind();
+        Arc::new(Mutex::new(kind))
     }
 
     #[track_caller]
@@ -778,8 +796,42 @@ impl TableNamespace {
         length: u64,
     ) {
         self.open_tables.remove(name).unwrap();
+        // Tables are handed private `freed_pages` and `allocated_pages` so
+        // concurrent inserts into different tables of the same write
+        // transaction don't contend on the shared mutexes. Merge each piece
+        // back into the transaction-wide state on close so commit can persist
+        // them.
+        self.merge_freed_pages(table.freed_pages());
+        self.merge_allocated_pages(table.allocated_pages());
         self.table_tree
             .stage_update_table_root(name, table.get_root(), length);
+    }
+
+    fn merge_freed_pages(&self, table_freed: &Arc<Mutex<Vec<PageNumber>>>) {
+        if Arc::ptr_eq(table_freed, &self.freed_pages) {
+            return;
+        }
+        let mut table_freed = table_freed.lock().unwrap();
+        if table_freed.is_empty() {
+            return;
+        }
+        let mut shared = self.freed_pages.lock().unwrap();
+        shared.append(&mut table_freed);
+    }
+
+    fn merge_allocated_pages(&self, table_allocated: &Arc<Mutex<PageTrackerPolicy>>) {
+        if Arc::ptr_eq(table_allocated, &self.allocated_pages) {
+            return;
+        }
+        let mut table_allocated = table_allocated.lock().unwrap();
+        let tracked = table_allocated.reset();
+        if tracked.is_empty() {
+            return;
+        }
+        let mut shared = self.allocated_pages.lock().unwrap();
+        for page in tracked {
+            shared.insert(page);
+        }
     }
 }
 

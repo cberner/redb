@@ -290,6 +290,18 @@ impl PageTrackerPolicy {
         PageTrackerPolicy::Track(PageNumberHashSet::default())
     }
 
+    /// Returns a fresh policy of the same variant as `self`. `Track` becomes
+    /// an empty new tracker; `Ignore` and `Closed` are preserved. Used to
+    /// hand each open table its own per-table tracker without losing the
+    /// transaction-wide policy choice.
+    pub(crate) fn fresh_same_kind(&self) -> Self {
+        match self {
+            PageTrackerPolicy::Ignore => PageTrackerPolicy::Ignore,
+            PageTrackerPolicy::Track(_) => PageTrackerPolicy::Track(PageNumberHashSet::default()),
+            PageTrackerPolicy::Closed => PageTrackerPolicy::Closed,
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         match self {
             PageTrackerPolicy::Ignore | PageTrackerPolicy::Closed => true,
@@ -326,7 +338,7 @@ impl PageTrackerPolicy {
         }
     }
 
-    pub(super) fn insert(&mut self, page: PageNumber) {
+    pub(crate) fn insert(&mut self, page: PageNumber) {
         match self {
             PageTrackerPolicy::Ignore => {}
             PageTrackerPolicy::Track(x) => {
