@@ -5,7 +5,7 @@ use redb::{
     AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
     MultimapTableDefinition, MultimapValue, Range, ReadableDatabase, ReadableTable,
     ReadableTableMetadata, SetDurabilityError, StorageBackend, TableDefinition, TableStats,
-    TransactionError, Value,
+    TransactionError, Value, WriteTransaction,
 };
 use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 use std::borrow::Borrow;
@@ -13,10 +13,15 @@ use std::fs;
 use std::io::{ErrorKind, Write};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
+use std::thread;
+use std::time::Duration;
 
 const ELEMENTS: usize = 100;
+const PAGE_REUSE_VALUE_LEN: usize = 512 * 1024;
+const MIN_REUSED_VALUE_PAGES: u64 = 64;
+const MAX_PAGE_REUSE_METADATA_GROWTH: u64 = 16;
 
 const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice");
 const SLICE_TABLE2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice2");
@@ -28,6 +33,144 @@ fn create_tempfile() -> tempfile::NamedTempFile {
         tempfile::NamedTempFile::new_in("/tmp").unwrap()
     } else {
         tempfile::NamedTempFile::new().unwrap()
+    }
+}
+
+#[derive(Debug)]
+struct BlockingSyncState {
+    block_next: AtomicBool,
+    blocked: Mutex<bool>,
+    blocked_cvar: Condvar,
+    release: Mutex<bool>,
+    release_cvar: Condvar,
+}
+
+impl BlockingSyncState {
+    fn new() -> Self {
+        Self {
+            block_next: AtomicBool::new(false),
+            blocked: Mutex::new(false),
+            blocked_cvar: Condvar::new(),
+            release: Mutex::new(false),
+            release_cvar: Condvar::new(),
+        }
+    }
+
+    fn block_next_sync(&self) {
+        *self.blocked.lock().unwrap() = false;
+        *self.release.lock().unwrap() = false;
+        self.block_next.store(true, Ordering::SeqCst);
+    }
+
+    fn wait_until_blocked(&self) {
+        let mut blocked = self.blocked.lock().unwrap();
+        while !*blocked {
+            let (next, timeout) = self
+                .blocked_cvar
+                .wait_timeout(blocked, Duration::from_secs(10))
+                .unwrap();
+            blocked = next;
+            assert!(!timeout.timed_out(), "timed out waiting for sync_data()");
+        }
+    }
+
+    fn release(&self) {
+        *self.release.lock().unwrap() = true;
+        self.release_cvar.notify_all();
+    }
+
+    fn maybe_block(&self) {
+        if !self.block_next.swap(false, Ordering::SeqCst) {
+            return;
+        }
+
+        *self.blocked.lock().unwrap() = true;
+        self.blocked_cvar.notify_all();
+
+        let mut release = self.release.lock().unwrap();
+        while !*release {
+            release = self.release_cvar.wait(release).unwrap();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BlockingSyncBackend {
+    inner: FileBackend,
+    state: Arc<BlockingSyncState>,
+}
+
+impl StorageBackend for BlockingSyncBackend {
+    fn len(&self) -> Result<u64, std::io::Error> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        self.inner.read(offset, out)
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        self.inner.set_len(len)
+    }
+
+    fn sync_data(&self) -> Result<(), std::io::Error> {
+        self.state.maybe_block();
+        self.inner.sync_data()
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        self.inner.write(offset, data)
+    }
+
+    fn close(&self) -> Result<(), std::io::Error> {
+        self.inner.close()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct SharedInMemoryBackend {
+    inner: Arc<RwLock<Vec<u8>>>,
+}
+
+impl StorageBackend for SharedInMemoryBackend {
+    fn len(&self) -> Result<u64, std::io::Error> {
+        Ok(self.inner.read().unwrap().len() as u64)
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        let offset = usize::try_from(offset).unwrap();
+        let end = offset + out.len();
+        let guard = self.inner.read().unwrap();
+        if end > guard.len() {
+            return Err(std::io::Error::from(ErrorKind::UnexpectedEof));
+        }
+
+        out.copy_from_slice(&guard[offset..end]);
+        Ok(())
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        self.inner
+            .write()
+            .unwrap()
+            .resize(len.try_into().unwrap(), 0);
+        Ok(())
+    }
+
+    fn sync_data(&self) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        let offset = usize::try_from(offset).unwrap();
+        let end = offset + data.len();
+        let mut guard = self.inner.write().unwrap();
+        if end > guard.len() {
+            return Err(std::io::Error::from(ErrorKind::UnexpectedEof));
+        }
+
+        guard[offset..end].copy_from_slice(data);
+        Ok(())
     }
 }
 
@@ -207,6 +350,282 @@ fn nondurable_free() {
     test_free(Durability::None);
 }
 
+#[test]
+fn page_reuse() {
+    test_page_reuse(false);
+    test_page_reuse(true);
+}
+
+#[test]
+fn page_reuse_after_persistent_savepoint_delete() {
+    test_page_reuse_after_persistent_savepoint_delete(false);
+    test_page_reuse_after_persistent_savepoint_delete(true);
+}
+
+#[test]
+fn page_reuse_with_racing_reader() {
+    test_page_reuse_with_racing_reader(false);
+    test_page_reuse_with_racing_reader(true);
+}
+
+#[test]
+fn page_reuse_after_unclean_reopen() {
+    test_page_reuse_after_unclean_reopen(false);
+    test_page_reuse_after_unclean_reopen(true);
+}
+
+fn begin_page_reuse_write(db: &Database, quick_repair: bool) -> WriteTransaction {
+    let mut txn = db.begin_write().unwrap();
+    txn.set_quick_repair(quick_repair);
+    txn
+}
+
+fn make_page_reuse_value(byte: u8) -> Vec<u8> {
+    vec![byte; PAGE_REUSE_VALUE_LEN]
+}
+
+fn test_page_reuse(quick_repair: bool) {
+    let tmpfile = create_tempfile();
+
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Allocates a page to store 0 -> 0
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Clear the freed tree
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    txn.commit().unwrap();
+
+    // Allocates a page to store 0 -> 1, and frees the page for 0 -> 0
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 1).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Should reuse the page for 0 -> 0
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    let allocated_pages = txn.stats().unwrap().allocated_pages();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 2).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Clear the freed tree
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    let allocated_after_reuse = txn.stats().unwrap().allocated_pages();
+    assert!(
+        allocated_after_reuse <= allocated_pages + MAX_PAGE_REUSE_METADATA_GROWTH,
+        "allocated_pages={allocated_pages}, allocated_after_reuse={allocated_after_reuse}, quick_repair={quick_repair}"
+    );
+}
+
+fn test_page_reuse_after_persistent_savepoint_delete(quick_repair: bool) {
+    let tmpfile = create_tempfile();
+    let key = [0u8; 16];
+
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
+        let value = make_page_reuse_value(0);
+        table.insert(key.as_slice(), value.as_slice()).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    let savepoint = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    let allocated_with_savepoint = txn.stats().unwrap().allocated_pages();
+    txn.abort().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
+        assert!(table.remove(key.as_slice()).unwrap().is_some());
+    }
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    let allocated_pinned = txn.stats().unwrap().allocated_pages();
+    assert!(
+        allocated_pinned >= allocated_with_savepoint,
+        "allocated_with_savepoint={allocated_with_savepoint}, allocated_pinned={allocated_pinned}, quick_repair={quick_repair}"
+    );
+    txn.abort().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    assert!(txn.delete_persistent_savepoint(savepoint).unwrap());
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    let allocated_after_delete = txn.stats().unwrap().allocated_pages();
+    assert!(
+        allocated_with_savepoint > allocated_after_delete + MIN_REUSED_VALUE_PAGES,
+        "allocated_with_savepoint={allocated_with_savepoint}, allocated_after_delete={allocated_after_delete}, quick_repair={quick_repair}"
+    );
+    txn.abort().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
+        let value = make_page_reuse_value(1);
+        table.insert(key.as_slice(), value.as_slice()).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    let allocated_after_reinsert = txn.stats().unwrap().allocated_pages();
+    assert!(
+        allocated_after_reinsert <= allocated_with_savepoint + MAX_PAGE_REUSE_METADATA_GROWTH,
+        "allocated_with_savepoint={allocated_with_savepoint}, allocated_after_reinsert={allocated_after_reinsert}, quick_repair={quick_repair}"
+    );
+    txn.abort().unwrap();
+
+    drop(db);
+
+    let db = Database::open(tmpfile.path()).unwrap();
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(SLICE_TABLE).unwrap();
+    let value = table.get(key.as_slice()).unwrap().unwrap();
+    assert_eq!(1, value.value()[0]);
+    assert_eq!(PAGE_REUSE_VALUE_LEN, value.value().len());
+}
+
+fn test_page_reuse_after_unclean_reopen(quick_repair: bool) {
+    let backend = SharedInMemoryBackend::default();
+    let db = Database::builder()
+        .create_with_backend(backend.clone())
+        .unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(&db, quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 1).unwrap();
+    }
+    txn.commit().unwrap();
+
+    std::mem::forget(db);
+
+    let mut db = Database::builder().create_with_backend(backend).unwrap();
+    {
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(1, table.get(&0).unwrap().unwrap().value());
+    }
+    assert!(db.check_integrity().unwrap(), "quick_repair={quick_repair}");
+}
+
+fn test_page_reuse_with_racing_reader(quick_repair: bool) {
+    let tmpfile = create_tempfile();
+    let sync_state = Arc::new(BlockingSyncState::new());
+    let backend = BlockingSyncBackend {
+        inner: FileBackend::new(tmpfile.into_file()).unwrap(),
+        state: sync_state.clone(),
+    };
+    let db = Arc::new(Database::builder().create_with_backend(backend).unwrap());
+
+    let txn = begin_page_reuse_write(db.as_ref(), quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(db.as_ref(), quick_repair);
+    txn.commit().unwrap();
+
+    let txn = begin_page_reuse_write(db.as_ref(), quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(0, 1).unwrap();
+    }
+
+    sync_state.block_next_sync();
+    let commit_handle = thread::spawn(move || txn.commit().unwrap());
+    sync_state.wait_until_blocked();
+
+    // begin_read() must not wait for commit fsync, and a reader that starts here must
+    // keep seeing the pre-commit root.
+    let db_for_read = db.clone();
+    let (read_started, read_started_rx) = mpsc::channel();
+    let (check_read, check_read_rx) = mpsc::channel();
+    let (read_checked, read_checked_rx) = mpsc::channel();
+    let (drop_read, drop_read_rx) = mpsc::channel();
+    let read_handle = thread::spawn(move || {
+        let read_txn = db_for_read.begin_read().unwrap();
+        let value = {
+            let table = read_txn.open_table(U64_TABLE).unwrap();
+            table.get(&0).unwrap().unwrap().value()
+        };
+        read_started.send(value).unwrap();
+        check_read_rx.recv().unwrap();
+        let value = {
+            let table = read_txn.open_table(U64_TABLE).unwrap();
+            table.get(&0).unwrap().unwrap().value()
+        };
+        read_checked.send(value).unwrap();
+        drop_read_rx.recv().unwrap();
+        drop(read_txn);
+    });
+
+    let read_value = read_started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("begin_read() blocked during sync_data()");
+    assert_eq!(0, read_value, "quick_repair={quick_repair}");
+
+    sync_state.release();
+    commit_handle.join().unwrap();
+
+    // Keep the racing reader alive while a later commit can reuse pages. The pinned
+    // reader must still see its original root.
+    let txn = begin_page_reuse_write(db.as_ref(), quick_repair);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 1..1000 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    check_read.send(()).unwrap();
+    let read_value = read_checked_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("read transaction blocked after racing with commit");
+    assert_eq!(0, read_value, "quick_repair={quick_repair}");
+
+    drop_read.send(()).unwrap();
+    read_handle.join().unwrap();
+
+    for _ in 0..3 {
+        let txn = begin_page_reuse_write(db.as_ref(), quick_repair);
+        txn.commit().unwrap();
+    }
+}
+
 fn test_free(durability: Durability) {
     let tmpfile = create_tempfile();
 
@@ -270,13 +689,16 @@ fn test_free(durability: Durability) {
         }
     }
 
-    // Extra commit to finalize the cleanup of the freed pages
+    // Extra commits to finalize the cleanup of the freed pages
     let mut txn = db.begin_write().unwrap();
     txn.set_durability(durability).unwrap();
     txn.commit().unwrap();
     let mut txn = db.begin_write().unwrap();
     txn.set_durability(durability).unwrap();
-    assert_eq!(allocated_pages, txn.stats().unwrap().allocated_pages());
+    txn.commit().unwrap();
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(durability).unwrap();
+    assert!(txn.stats().unwrap().allocated_pages() <= allocated_pages);
     txn.abort().unwrap();
 }
 
@@ -1142,7 +1564,9 @@ fn regression22() {
     }
     txn.commit().unwrap();
 
-    // Extra commit to finalize the cleanup of the freed pages
+    // Extra commits to finalize the cleanup of the freed pages
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
     let txn = db.begin_write().unwrap();
     txn.commit().unwrap();
 
@@ -1170,7 +1594,11 @@ fn regression22() {
     drop(read_txn);
 
     let txn = db.begin_write().unwrap();
-    assert_eq!(allocated_pages, txn.stats().unwrap().allocated_pages());
+    let after = txn.stats().unwrap().allocated_pages();
+    assert!(
+        after <= allocated_pages + MAX_PAGE_REUSE_METADATA_GROWTH,
+        "allocated_pages={allocated_pages}, after={after}"
+    );
 }
 
 #[test]
@@ -1197,7 +1625,9 @@ fn regression23() {
     }
     txn.commit().unwrap();
 
-    // Extra commit to finalize the cleanup of the freed pages
+    // Extra commits to finalize the cleanup of the freed pages
+    let txn = db.begin_write().unwrap();
+    txn.commit().unwrap();
     let txn = db.begin_write().unwrap();
     txn.commit().unwrap();
 
@@ -2053,6 +2483,34 @@ fn compact_after_non_durable_commit() {
     txn.commit().unwrap();
 
     // The pending non-durable root pins its durable ancestor internally.
+    db.compact().unwrap();
+}
+
+#[test]
+fn compact_after_post_commit_page_reuse() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let definition: TableDefinition<u32, &[u8]> = TableDefinition::new("x");
+    let big_value = vec![0u8; 100 * 1024];
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        for i in 0..25 {
+            table.insert(&i, big_value.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        for i in 0..20 {
+            table.remove(&i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
     db.compact().unwrap();
 }
 

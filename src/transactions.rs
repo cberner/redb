@@ -376,6 +376,12 @@ enum InternalDurability {
     Immediate,
 }
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum PostCommitFree {
+    Enabled,
+    Disabled,
+}
+
 // Like a Table but only one may be open at a time to avoid possible races
 pub struct SystemTable<'s, K: Key + 'static, V: Value + 'static> {
     name: String,
@@ -855,6 +861,7 @@ pub struct WriteTransaction {
     two_phase_commit: bool,
     shrink_policy: ShrinkPolicy,
     quick_repair: bool,
+    post_commit_free: PostCommitFree,
     // All transaction-local savepoint lifecycle state. See
     // `SavepointTransactionState` for the commit/abort contract.
     savepoint_state: Mutex<SavepointTransactionState>,
@@ -889,6 +896,7 @@ impl WriteTransaction {
             durability: InternalDurability::Immediate,
             two_phase_commit: false,
             quick_repair: false,
+            post_commit_free: PostCommitFree::Enabled,
             shrink_policy: ShrinkPolicy::Default,
             savepoint_state: Mutex::new(SavepointTransactionState::default()),
         })
@@ -1396,6 +1404,10 @@ impl WriteTransaction {
         self.quick_repair = enabled;
     }
 
+    pub(crate) fn disable_post_commit_free(&mut self) {
+        self.post_commit_free = PostCommitFree::Disabled;
+    }
+
     /// Open the given table
     ///
     /// The table will be created if it does not exist
@@ -1536,14 +1548,12 @@ impl WriteTransaction {
         );
         let allocated_pages: Vec<PageNumber> = allocated_pages.into_iter().collect();
         match self.durability {
-            InternalDurability::None => self.non_durable_commit(user_root, allocated_pages)?,
+            InternalDurability::None => {
+                self.non_durable_commit(user_root, allocated_pages)?;
+                self.apply_savepoint_state_on_commit();
+            }
             InternalDurability::Immediate => self.durable_commit(user_root, allocated_pages)?,
         }
-
-        self.savepoint_state
-            .lock()
-            .unwrap()
-            .apply_on_commit(&self.transaction_tracker);
 
         assert!(
             self.system_tables
@@ -1571,6 +1581,13 @@ impl WriteTransaction {
         );
 
         Ok(())
+    }
+
+    fn apply_savepoint_state_on_commit(&self) {
+        self.savepoint_state
+            .lock()
+            .unwrap()
+            .apply_on_commit(&self.transaction_tracker);
     }
 
     fn store_data_freed_pages(&self, mut freed_pages: Vec<PageNumber>) -> Result {
@@ -1739,51 +1756,51 @@ impl WriteTransaction {
 
         let mut system_tables = self.system_tables.lock().unwrap();
         let system_freed_pages = system_tables.system_freed_pages();
-        let system_tree = system_tables.table_tree.flush_table_root_updates()?;
-        system_tree
-            .delete_table(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
-            .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?;
+        let system_root = {
+            let system_tree = system_tables.table_tree.flush_table_root_updates()?;
+            system_tree
+                .delete_table(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
+                .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?;
 
-        if self.quick_repair {
-            system_tree.create_table_and_flush_table_root(
-                ALLOCATOR_STATE_TABLE_NAME,
-                |system_tree_ref, tree: &mut AllocatorStateTreeMut| {
-                    let mut pagination_counter = 0;
+            if self.quick_repair {
+                system_tree.create_table_and_flush_table_root(
+                    ALLOCATOR_STATE_TABLE_NAME,
+                    |system_tree_ref, tree: &mut AllocatorStateTreeMut| {
+                        loop {
+                            let num_regions = self
+                                .mem
+                                .reserve_allocator_state(tree, self.transaction_id)?;
 
-                    loop {
-                        let num_regions = self
-                            .mem
-                            .reserve_allocator_state(tree, self.transaction_id)?;
+                            // The allocator snapshot must match the committed system root. Pages
+                            // freed while building that root stay allocated in the snapshot and are
+                            // recorded in SYSTEM_FREED_TABLE before the allocator state is saved.
+                            self.store_system_freed_pages(
+                                system_tree_ref,
+                                self.transaction_id,
+                                system_freed_pages.clone(),
+                                None,
+                            )?;
 
-                        // We can't free pages after the commit, because that would invalidate our
-                        // saved allocator state. Everything needs to go through the transactional
-                        // free mechanism
-                        self.store_system_freed_pages(
-                            system_tree_ref,
-                            system_freed_pages.clone(),
-                            None,
-                            &mut pagination_counter,
-                        )?;
+                            if self.mem.try_save_allocator_state(tree, num_regions)? {
+                                return Ok(());
+                            }
 
-                        if self.mem.try_save_allocator_state(tree, num_regions)? {
-                            return Ok(());
+                            // Clear out the table before retrying, just in case the number of regions
+                            // has somehow shrunk. Don't use retain_in() for this, since it doesn't
+                            // free the pages immediately -- we need to reuse those pages to guarantee
+                            // that our retry loop will eventually terminate
+                            while let Some(guards) = tree.last()? {
+                                let key = guards.0.value();
+                                drop(guards);
+                                tree.remove(&key)?;
+                            }
                         }
+                    },
+                )?;
+            }
 
-                        // Clear out the table before retrying, just in case the number of regions
-                        // has somehow shrunk. Don't use retain_in() for this, since it doesn't
-                        // free the pages immediately -- we need to reuse those pages to guarantee
-                        // that our retry loop will eventually terminate
-                        while let Some(guards) = tree.last()? {
-                            let key = guards.0.value();
-                            drop(guards);
-                            tree.remove(&key)?;
-                        }
-                    }
-                },
-            )?;
-        }
-
-        let system_root = system_tree.finalize_dirty_checksums()?;
+            system_tree.finalize_dirty_checksums()?
+        };
 
         let page_allocator = self.page_allocator();
         self.mem.commit(
@@ -1804,6 +1821,65 @@ impl WriteTransaction {
         for page in system_freed_pages.lock().unwrap().drain(..) {
             page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
         }
+
+        drop(system_tables);
+
+        self.apply_savepoint_state_on_commit();
+
+        if self.post_commit_free == PostCommitFree::Enabled {
+            self.process_data_freed_pages_after_commit(user_root, &page_allocator)?;
+        }
+
+        Ok(())
+    }
+
+    fn process_data_freed_pages_after_commit(
+        &self,
+        user_root: Option<BtreeHeader>,
+        page_allocator: &PageAllocator,
+    ) -> Result {
+        let epilogue_transaction = self.transaction_id.next();
+        let free_until = self
+            .transaction_tracker
+            .oldest_live_read_transaction()
+            .map_or(epilogue_transaction, |x| x.next());
+
+        let mut freed_any = false;
+        let system_root = {
+            let mut system_tables = self.system_tables.lock().unwrap();
+            let system_freed_pages = system_tables.system_freed_pages();
+            self.extract_freed_pages(&mut system_tables, DATA_FREED_TABLE, free_until, |page| {
+                freed_any = true;
+                // See process_freed_pages(): free_until excludes pages that are still needed
+                // by a live reader or pending non-durable commit.
+                debug_assert!(!self.mem.unpersisted(page));
+                page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
+            })?;
+            if !freed_any {
+                return Ok(());
+            }
+
+            let system_tree = system_tables.table_tree.flush_table_root_updates()?;
+            self.store_system_freed_pages(
+                system_tree,
+                epilogue_transaction,
+                system_freed_pages,
+                None,
+            )?;
+            system_tree.finalize_dirty_checksums()?
+        };
+
+        let epilogue_allocations = page_allocator.take_allocated_since_commit();
+        self.mem.non_durable_commit(
+            user_root,
+            system_root,
+            epilogue_transaction,
+            epilogue_allocations,
+        )?;
+        self.transaction_tracker
+            .reserve_transaction_id(epilogue_transaction, self.transaction_id);
+        self.transaction_tracker
+            .register_non_durable_commit(epilogue_transaction, self.transaction_id);
 
         Ok(())
     }
@@ -1837,9 +1913,9 @@ impl WriteTransaction {
             // non-durable commit (it's non-durable, so could be rolled back anytime in the future)
             self.store_system_freed_pages(
                 &mut system_tables.table_tree,
+                self.transaction_id,
                 system_freed_pages,
                 Some(&mut post_commit_frees),
-                &mut 0,
             )?;
 
             system_tables
@@ -2102,9 +2178,9 @@ impl WriteTransaction {
     fn store_system_freed_pages(
         &self,
         system_tree: &mut TableTreeMut,
+        transaction_id: TransactionId,
         system_freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         mut unpersisted_pages: Option<&mut Vec<PageNumber>>,
-        pagination_counter: &mut u64,
     ) -> Result {
         assert_eq!(PageNumber::serialized_size(), 8); // We assume below that PageNumber is length 8
         if system_freed_pages.lock().unwrap().is_empty() {
@@ -2114,12 +2190,14 @@ impl WriteTransaction {
         system_tree.open_table_and_flush_table_root(
             SYSTEM_FREED_TABLE.name(),
             |system_freed_tree: &mut SystemFreedTree| {
+                let mut pagination_id =
+                    Self::next_system_freed_pagination_id(system_freed_tree, transaction_id)?;
                 while !system_freed_pages.lock().unwrap().is_empty() {
                     let chunk_size = 200;
                     let buffer_size = PageList::required_bytes(chunk_size);
                     let key = TransactionIdWithPagination {
-                        transaction_id: self.transaction_id.raw_id(),
-                        pagination_id: *pagination_counter,
+                        transaction_id: transaction_id.raw_id(),
+                        pagination_id,
                     };
                     let mut access_guard = system_freed_tree.insert_reserve(&key, buffer_size)?;
 
@@ -2137,13 +2215,33 @@ impl WriteTransaction {
                     }
                     drop(access_guard);
 
-                    *pagination_counter += 1;
+                    pagination_id += 1;
                 }
                 Ok(())
             },
         )?;
 
         Ok(())
+    }
+
+    fn next_system_freed_pagination_id(
+        system_freed_tree: &SystemFreedTree,
+        transaction_id: TransactionId,
+    ) -> Result<u64> {
+        let first_key = TransactionIdWithPagination {
+            transaction_id: transaction_id.raw_id(),
+            pagination_id: 0,
+        };
+        let next_transaction_key = TransactionIdWithPagination {
+            transaction_id: transaction_id.next().raw_id(),
+            pagination_id: 0,
+        };
+        let transaction_range = first_key..next_transaction_key;
+        let mut existing_entries = system_freed_tree.range(&transaction_range)?;
+        Ok(existing_entries
+            .next_back()
+            .transpose()?
+            .map_or(0, |entry| entry.key().pagination_id + 1))
     }
 
     /// Retrieves information about storage usage in the database
@@ -2404,6 +2502,7 @@ mod test {
     use crate::{Database, TableDefinition};
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
+    const BIG_VALUE: TableDefinition<u64, &[u8]> = TableDefinition::new("big_value");
 
     #[test]
     fn transaction_id_persistence() {
@@ -2421,5 +2520,30 @@ mod test {
         let db2 = Database::create(tmpfile.path()).unwrap();
         let write_txn = db2.begin_write().unwrap();
         assert!(write_txn.transaction_id > first_txn_id);
+    }
+
+    #[test]
+    fn post_commit_epilogue_reserves_transaction_id() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+        let value = vec![0; 512 * 1024];
+
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(BIG_VALUE).unwrap();
+            table.insert(0, value.as_slice()).unwrap();
+        }
+        write_txn.commit().unwrap();
+
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(BIG_VALUE).unwrap();
+            table.remove(0).unwrap();
+        }
+        let remove_txn_id = write_txn.transaction_id;
+        write_txn.commit().unwrap();
+
+        let write_txn = db.begin_write().unwrap();
+        assert!(write_txn.transaction_id > remove_txn_id.next());
     }
 }
