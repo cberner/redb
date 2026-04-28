@@ -1,6 +1,9 @@
 # redb - Changelog
 
 ## Unreleased
+* `Table::retain()` and `Table::retain_in()` now poison the write transaction if their
+  predicate panics, causing `WriteTransaction::commit()` to return
+  `CommitError::TransactionPoisoned`.
 * Add `Table::entry()` and the associated `Entry`, `OccupiedEntry`, and `VacantEntry`
   types, mirroring `std::collections::BTreeMap::entry`. Supports `or_insert`,
   `or_insert_with`, `or_insert_with_key`, `and_modify`, and the usual `OccupiedEntry`

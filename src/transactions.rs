@@ -782,6 +782,10 @@ impl TableNamespace {
         self.table_tree
             .stage_update_table_root(name, table.get_root(), length);
     }
+
+    pub(crate) fn close_table_without_update(&mut self, name: &str) {
+        self.open_tables.remove(name).unwrap();
+    }
 }
 
 // Transaction-local savepoint lifecycle state.
@@ -858,6 +862,7 @@ pub struct WriteTransaction {
     system_tables: Mutex<SystemNamespace>,
     completed: bool,
     dirty: AtomicBool,
+    poisoned: AtomicBool,
     durability: InternalDurability,
     two_phase_commit: bool,
     shrink_policy: ShrinkPolicy,
@@ -894,6 +899,7 @@ impl WriteTransaction {
             system_tables: Mutex::new(system_tables),
             completed: false,
             dirty: AtomicBool::new(false),
+            poisoned: AtomicBool::new(false),
             durability: InternalDurability::Immediate,
             two_phase_commit: false,
             quick_repair: false,
@@ -905,6 +911,14 @@ impl WriteTransaction {
 
     pub(crate) fn set_shrink_policy(&mut self, shrink_policy: ShrinkPolicy) {
         self.shrink_policy = shrink_policy;
+    }
+
+    pub(crate) fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+    }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
     }
 
     // A PageAllocator for this transaction. All clones share the same
@@ -1440,7 +1454,12 @@ impl WriteTransaction {
         table: &BtreeMut<K, V>,
         length: u64,
     ) {
-        self.tables.lock().unwrap().close_table(name, table, length);
+        let mut tables = self.tables.lock().unwrap();
+        if self.is_poisoned() {
+            tables.close_table_without_update(name);
+        } else {
+            tables.close_table(name, table, length);
+        }
     }
 
     /// Rename the given table
@@ -1525,9 +1544,16 @@ impl WriteTransaction {
     ///
     /// All writes performed in this transaction will be visible to future transactions, and are
     /// durable as consistent with the [`Durability`] level set by [`Self::set_durability`]
+    ///
+    /// Returns [`CommitError::TransactionPoisoned`] if a previous operation panicked and left the
+    /// transaction unable to commit.
     pub fn commit(mut self) -> Result<(), CommitError> {
         // Set completed flag first, so that we don't go through the abort() path on drop, if this fails
         self.completed = true;
+        if self.is_poisoned() {
+            self.abort_inner()?;
+            return Err(CommitError::TransactionPoisoned);
+        }
         self.commit_inner()
     }
 

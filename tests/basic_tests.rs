@@ -1,4 +1,6 @@
 use rand::random;
+#[cfg(not(target_os = "wasi"))]
+use redb::CommitError;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use redb::DatabaseError;
 use redb::backends::InMemoryBackend;
@@ -1895,6 +1897,53 @@ fn retain_in_empty() {
         assert_eq!(table.len().unwrap(), 1000);
     }
     write_txn.commit().unwrap();
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[test]
+fn retain_predicate_panic_poisons_transaction() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..4 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(4, 4).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            table
+                .retain(|key, _| {
+                    assert_ne!(key, 2, "retain predicate panic");
+                    key != 0
+                })
+                .unwrap();
+        }));
+        assert!(result.is_err());
+    }
+
+    assert!(matches!(
+        write_txn.commit(),
+        Err(CommitError::TransactionPoisoned)
+    ));
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(table.len().unwrap(), 4);
+    for i in 0u64..4 {
+        assert_eq!(table.get(i).unwrap().unwrap().value(), i);
+    }
+    assert!(table.get(4).unwrap().is_none());
 }
 
 #[test]
