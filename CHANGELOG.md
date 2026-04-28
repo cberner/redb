@@ -1,6 +1,8 @@
 # redb - Changelog
 
 ## Unreleased
+* Optimize `Table::retain()` and `Table::retain_in()`. Some benchmarks with large `retain()` operations
+  are now two orders of magnitude.
 * Add `Table::entry()` and the associated `Entry`, `OccupiedEntry`, and `VacantEntry`
   types, mirroring `std::collections::BTreeMap::entry`. Supports `or_insert`,
   `or_insert_with`, `or_insert_with_key`, `and_modify`, and the usual `OccupiedEntry`
