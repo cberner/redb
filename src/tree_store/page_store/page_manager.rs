@@ -213,8 +213,9 @@ pub(crate) fn xxh3_checksum(data: &[u8]) -> Checksum {
 
 struct InMemoryState {
     header: DatabaseHeader,
-    // TODO: we should make this an Option because it is only valid after the Database initializes it
-    allocators: Allocators,
+    // None until the Database finishes loading allocator state from disk or rebuilding it via
+    // repair.
+    allocators: Option<Allocators>,
     // True if a non-durable commit has updated the secondary slot and that data should be served
     // to readers until a durable commit promotes it to the primary slot on disk. Protected by the
     // enclosing Mutex so updates happen atomically with the header changes they describe.
@@ -223,24 +224,35 @@ struct InMemoryState {
 
 impl InMemoryState {
     fn new(header: DatabaseHeader) -> Self {
-        let allocators = Allocators::new(header.layout());
         Self {
             header,
-            allocators,
+            allocators: None,
             read_from_secondary: false,
         }
     }
 
+    fn allocators(&self) -> &Allocators {
+        self.allocators
+            .as_ref()
+            .expect("allocators have not been loaded yet")
+    }
+
+    fn allocators_mut(&mut self) -> &mut Allocators {
+        self.allocators
+            .as_mut()
+            .expect("allocators have not been loaded yet")
+    }
+
     fn get_region(&self, region: u32) -> &BuddyAllocator {
-        &self.allocators.region_allocators[region as usize]
+        &self.allocators().region_allocators[region as usize]
     }
 
     fn get_region_mut(&mut self, region: u32) -> &mut BuddyAllocator {
-        &mut self.allocators.region_allocators[region as usize]
+        &mut self.allocators_mut().region_allocators[region as usize]
     }
 
     fn get_region_tracker_mut(&mut self) -> &mut RegionTracker {
-        &mut self.allocators.region_tracker
+        &mut self.allocators_mut().region_tracker
     }
 
     // Slot that reads should be served from: the secondary when a non-durable commit is pending,
@@ -468,11 +480,12 @@ impl TransactionalMemory {
     #[cfg(debug_assertions)]
     pub(crate) fn debug_check_allocator_consistency(&self) {
         let state = self.state.lock().unwrap();
-        let mut region_pages = vec![vec![]; state.allocators.region_allocators.len()];
+        let allocators = state.allocators();
+        let mut region_pages = vec![vec![]; allocators.region_allocators.len()];
         for p in self.allocated_pages.lock().unwrap().iter() {
             region_pages[p.region as usize].push(*p);
         }
-        for (i, allocator) in state.allocators.region_allocators.iter().enumerate() {
+        for (i, allocator) in allocators.region_allocators.iter().enumerate() {
             allocator.check_allocated_pages(i.try_into().unwrap(), &region_pages[i]);
         }
     }
@@ -500,6 +513,10 @@ impl TransactionalMemory {
             let mut state = self.state.lock().unwrap();
             state.header = header;
             state.read_from_secondary = false;
+            // Drop the previous allocator state -- it described the layout that was in memory
+            // before the reload. The caller is required to repopulate it (via begin_repair or
+            // load_allocator_state) before any allocation/free path runs.
+            state.allocators = None;
         }
         // Reloading from disk discards in-memory roots, so drop volatile allocation state
         // that belonged only to those roots.
@@ -523,7 +540,7 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn allocator_hash(&self) -> u128 {
-        self.state.lock().unwrap().allocators.xxh3_hash()
+        self.state.lock().unwrap().allocators().xxh3_hash()
     }
 
     // Reports whether the backend has seen an I/O failure in this process.
@@ -540,7 +557,7 @@ impl TransactionalMemory {
 
     pub(crate) fn begin_repair(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
-        state.allocators = Allocators::new(state.header.layout());
+        state.allocators = Some(Allocators::new(state.header.layout()));
         #[cfg(debug_assertions)]
         self.allocated_pages.lock().unwrap().clear();
 
@@ -581,9 +598,9 @@ impl TransactionalMemory {
         let state = self.state.lock().unwrap();
         let layout = state.header.layout();
         let num_regions = layout.num_regions();
-        let region_tracker_len = state.allocators.region_tracker.to_vec().len();
-        let region_lens: Vec<usize> = state
-            .allocators
+        let allocators = state.allocators();
+        let region_tracker_len = allocators.region_tracker.to_vec().len();
+        let region_lens: Vec<usize> = allocators
             .region_allocators
             .iter()
             .map(|x| x.to_vec().len())
@@ -623,8 +640,9 @@ impl TransactionalMemory {
             return Ok(false);
         }
 
+        let allocators = state.allocators();
         for i in 0..num_regions {
-            let region_bytes = &state.allocators.region_allocators[i as usize].to_vec();
+            let region_bytes = &allocators.region_allocators[i as usize].to_vec();
             if tree
                 .get(&AllocatorStateKey::Region(i))?
                 .unwrap()
@@ -638,7 +656,7 @@ impl TransactionalMemory {
             tree.insert_inplace(&AllocatorStateKey::Region(i), &region_bytes.as_ref())?;
         }
 
-        let region_tracker_bytes = state.allocators.region_tracker.to_vec();
+        let region_tracker_bytes = allocators.region_tracker.to_vec();
         if tree
             .get(&AllocatorStateKey::RegionTracker)?
             .unwrap()
@@ -693,14 +711,14 @@ impl TransactionalMemory {
         );
 
         let mut state = self.state.lock().unwrap();
-        state.allocators = Allocators {
+        state.allocators = Some(Allocators {
             region_tracker,
             region_allocators,
-        };
+        });
 
         // Resize the allocators to match the current file size
         let layout = state.header.layout();
-        state.allocators.resize_to(layout);
+        state.allocators_mut().resize_to(layout);
         drop(state);
 
         self.state.lock().unwrap().header.recovery_required = false;
@@ -1162,7 +1180,7 @@ impl TransactionalMemory {
 
         let mut new_layout = layout;
         new_layout.reduce_last_region(reduce_by);
-        state.allocators.resize_to(new_layout);
+        state.allocators_mut().resize_to(new_layout);
         assert!(new_layout.len() <= layout.len());
         state.header.set_layout(new_layout);
 
@@ -1208,7 +1226,7 @@ impl TransactionalMemory {
 
         self.storage.resize(new_layout.len())?;
 
-        state.allocators.resize_to(new_layout);
+        state.allocators_mut().resize_to(new_layout);
         state.header.set_layout(new_layout);
         Ok(())
     }
