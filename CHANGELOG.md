@@ -10,6 +10,9 @@
 * Fix a bug where calling `compact()` on a database could cause the file to grow
   rather than shrink in some cases.
 * Python bindings: add `redb.Database.create(path)` for creating or opening a database file.
+* Python bindings: add `Database.begin_write()`, which returns a `WriteTransaction`
+  context manager. Exiting the `with` block commits the transaction on success
+  and aborts it if an exception propagates out of the block.
 * Reuse pages freed by a durable write transaction in the next write transaction when no
   live read transaction or savepoint still needs them. Previously, pages were not reused for one
   additional transaction.
