@@ -51,6 +51,15 @@ enum DeletionResult {
     DeletedBranch(PageNumber, Checksum),
 }
 
+// Result of merging an orphaned subtree into an adjacent sibling branch via
+// `MutateHelper::merge_branch_with_orphan`. If the merged branch overflowed,
+// `split_off` carries the separator key (owned, since it borrowed from a builder
+// that's gone by the time the function returns) and the right-half page.
+struct OrphanMergeOutcome {
+    primary: PageNumber,
+    split_off: Option<(Vec<u8>, PageNumber)>,
+}
+
 struct InsertionResult<'a, V: Value + 'static> {
     // the new root page
     new_root: PageNumber,
@@ -802,6 +811,52 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         Ok(result)
     }
 
+    // Combine `sibling` (an existing branch) with `orphan_page` (a sub-branch / leaf
+    // that lost its enclosing branch and needs absorbing) into one or two new branch
+    // pages. The orphan ends up as one extra child of the merged branch, with
+    // `separator_key` between it and `sibling`'s contents on the appropriate side.
+    //
+    // If the merged branch wouldn't fit in a single page, it splits and the caller
+    // gets back the second half plus the separator that goes between the two new
+    // pages. Caller is responsible for freeing `sibling`'s original page.
+    fn merge_branch_with_orphan<'sibling>(
+        &self,
+        sibling: &'sibling BranchAccessor<'sibling, '_, PageImpl>,
+        orphan_page: PageNumber,
+        orphan_checksum: Checksum,
+        separator_key: &'sibling [u8],
+        orphan_before_sibling: bool,
+    ) -> Result<OrphanMergeOutcome> {
+        let mut builder = BranchBuilder::new(
+            &self.page_allocator,
+            &self.allocated,
+            sibling.count_children() + 1,
+            K::fixed_width(),
+        );
+        if orphan_before_sibling {
+            builder.push_child(orphan_page, orphan_checksum);
+            builder.push_key(separator_key);
+            builder.push_all(sibling);
+        } else {
+            builder.push_all(sibling);
+            builder.push_key(separator_key);
+            builder.push_child(orphan_page, orphan_checksum);
+        }
+        if builder.should_split() {
+            let (new_page1, separator, new_page2) = builder.build_split()?;
+            Ok(OrphanMergeOutcome {
+                primary: new_page1.get_page_number(),
+                split_off: Some((separator.to_vec(), new_page2.get_page_number())),
+            })
+        } else {
+            let new_page = builder.build()?;
+            Ok(OrphanMergeOutcome {
+                primary: new_page.get_page_number(),
+                split_off: None,
+            })
+        }
+    }
+
     fn delete_branch_helper(
         &mut self,
         page: PageImpl,
@@ -1014,6 +1069,14 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
                 debug_assert!(merge_with < accessor.count_children());
+                let separator_key = accessor.key(min(child_index, merge_with)).unwrap();
+                let merge_outcome = self.merge_branch_with_orphan(
+                    &merge_with_accessor,
+                    only_grandchild,
+                    grandchild_checksum,
+                    separator_key,
+                    child_index < merge_with,
+                )?;
                 for i in 0..accessor.count_children() {
                     if i == child_index {
                         continue;
@@ -1021,32 +1084,11 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let page_number = accessor.child_page(i).unwrap();
                     let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
-                        let mut child_builder = BranchBuilder::new(
-                            &self.page_allocator,
-                            &self.allocated,
-                            merge_with_accessor.count_children() + 1,
-                            K::fixed_width(),
-                        );
-                        let separator_key = accessor.key(min(child_index, merge_with)).unwrap();
-                        if child_index < merge_with {
-                            child_builder.push_child(only_grandchild, grandchild_checksum);
-                            child_builder.push_key(separator_key);
+                        builder.push_child(merge_outcome.primary, DEFERRED);
+                        if let Some((sep, right)) = &merge_outcome.split_off {
+                            builder.push_key(sep);
+                            builder.push_child(*right, DEFERRED);
                         }
-                        child_builder.push_all(&merge_with_accessor);
-                        if child_index > merge_with {
-                            child_builder.push_key(separator_key);
-                            child_builder.push_child(only_grandchild, grandchild_checksum);
-                        }
-                        if child_builder.should_split() {
-                            let (new_page1, separator, new_page2) = child_builder.build_split()?;
-                            builder.push_child(new_page1.get_page_number(), DEFERRED);
-                            builder.push_key(separator);
-                            builder.push_child(new_page2.get_page_number(), DEFERRED);
-                        } else {
-                            let new_page = child_builder.build()?;
-                            builder.push_child(new_page.get_page_number(), DEFERRED);
-                        }
-
                         let merged_key_index = max(child_index, merge_with);
                         if merged_key_index < accessor.count_children() - 1 {
                             builder.push_key(accessor.key(merged_key_index).unwrap());
