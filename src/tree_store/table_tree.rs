@@ -7,8 +7,7 @@ use crate::tree_store::multimap_btree::{
 };
 use crate::tree_store::{
     Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageAllocator, PageHint, PageNumber,
-    PageNumberHashSet, PageTrackerPolicy, RawBtree, TableType, TransactionalMemory,
-    multimap_btree_stats,
+    PageNumberHashSet, PageResolver, PageTrackerPolicy, RawBtree, TableType, multimap_btree_stats,
 };
 use crate::types::{Key, Value};
 use crate::{DatabaseStats, Result};
@@ -67,7 +66,7 @@ impl Iterator for TableNameIter {
 
 pub(crate) struct TableTree {
     tree: Btree<&'static str, InternalTableDefinition>,
-    mem: Arc<TransactionalMemory>,
+    mem: PageResolver,
 }
 
 impl TableTree {
@@ -75,7 +74,7 @@ impl TableTree {
         master_root: Option<BtreeHeader>,
         page_hint: PageHint,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        mem: PageResolver,
     ) -> Result<Self> {
         Ok(Self {
             tree: Btree::new(master_root, page_hint, guard, mem.clone())?,
@@ -269,11 +268,9 @@ impl TableTreeMut {
                 .get_table_untyped(&entry, TableType::Normal)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
                 .unwrap();
-            definition.visit_all_pages(
-                self.page_allocator.mem().clone(),
-                PageHint::None,
-                |path| visitor(path),
-            )?;
+            definition.visit_all_pages(self.page_allocator.resolver(), PageHint::None, |path| {
+                visitor(path)
+            })?;
         }
 
         for entry in self.list_tables(TableType::Multimap)? {
@@ -281,11 +278,9 @@ impl TableTreeMut {
                 .get_table_untyped(&entry, TableType::Multimap)
                 .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
                 .unwrap();
-            definition.visit_all_pages(
-                self.page_allocator.mem().clone(),
-                PageHint::None,
-                |path| visitor(path),
-            )?;
+            definition.visit_all_pages(self.page_allocator.resolver(), PageHint::None, |path| {
+                visitor(path)
+            })?;
         }
 
         Ok(())
@@ -487,7 +482,7 @@ impl TableTreeMut {
             self.tree.get_root(),
             PageHint::None,
             self.guard.clone(),
-            self.page_allocator.mem().clone(),
+            self.page_allocator.resolver(),
         )?;
         tree.list_tables(table_type)
     }
@@ -501,7 +496,7 @@ impl TableTreeMut {
             self.tree.get_root(),
             PageHint::None,
             self.guard.clone(),
-            self.page_allocator.mem().clone(),
+            self.page_allocator.resolver(),
         )?;
         let mut result = tree.get_table_untyped(name, table_type);
 
@@ -524,7 +519,7 @@ impl TableTreeMut {
             self.tree.get_root(),
             PageHint::None,
             self.guard.clone(),
-            self.page_allocator.mem().clone(),
+            self.page_allocator.resolver(),
         )?;
         let mut result = tree.get_table::<K, V>(name, table_type);
 
@@ -569,14 +564,10 @@ impl TableTreeMut {
             // Collect all pages first, then free them. The walk reads each page to discover
             // its children, so we must not invalidate any page before the walk completes.
             let mut pages = vec![];
-            definition.visit_all_pages(
-                self.page_allocator.mem().clone(),
-                PageHint::None,
-                |path| {
-                    pages.push(path.page_number());
-                    Ok(())
-                },
-            )?;
+            definition.visit_all_pages(self.page_allocator.resolver(), PageHint::None, |path| {
+                pages.push(path.page_number());
+                Ok(())
+            })?;
             let mut freed_pages = self.freed_pages.lock().unwrap();
             let mut allocated_pages = self.allocated_pages.lock().unwrap();
             for page in pages {
@@ -642,17 +633,13 @@ impl TableTreeMut {
                 definition.set_header(*updated_root, *updated_length);
             }
 
-            definition.visit_all_pages(
-                self.page_allocator.mem().clone(),
-                PageHint::None,
-                |path| {
-                    output.insert(path.page_number(), path.clone());
-                    while output.len() > n {
-                        output.pop_first();
-                    }
-                    Ok(())
-                },
-            )?;
+            definition.visit_all_pages(self.page_allocator.resolver(), PageHint::None, |path| {
+                output.insert(path.page_number(), path.clone());
+                while output.len() > n {
+                    output.pop_first();
+                }
+                Ok(())
+            })?;
         }
 
         self.tree.visit_all_pages(|path| {
@@ -709,6 +696,7 @@ impl TableTreeMut {
             master_tree_stats.metadata_bytes + master_tree_stats.stored_leaf_bytes;
         let mut total_fragmented = master_tree_stats.fragmented_bytes;
 
+        let resolver = self.page_allocator.resolver();
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let mut definition = entry.value();
@@ -724,7 +712,7 @@ impl TableTreeMut {
                 } => {
                     let subtree_stats = btree_stats(
                         table_root.map(|x| x.root),
-                        self.page_allocator.mem(),
+                        &resolver,
                         fixed_key_size,
                         fixed_value_size,
                         PageHint::None,
@@ -744,7 +732,7 @@ impl TableTreeMut {
                 } => {
                     let subtree_stats = multimap_btree_stats(
                         table_root.map(|x| x.root),
-                        self.page_allocator.mem(),
+                        &resolver,
                         fixed_key_size,
                         fixed_value_size,
                         PageHint::None,
@@ -760,7 +748,7 @@ impl TableTreeMut {
         }
         Ok(DatabaseStats {
             tree_height: master_tree_stats.tree_height + max_subtree_height,
-            allocated_pages: self.page_allocator.mem().count_allocated_pages()?,
+            allocated_pages: resolver.count_allocated_pages()?,
             leaf_pages,
             branch_pages,
             stored_leaf_bytes: total_stored_bytes,

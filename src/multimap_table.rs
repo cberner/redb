@@ -5,8 +5,8 @@ use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BRANCH, Btree, BtreeHeader, BtreeMut, BtreeRangeIter,
     DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
-    MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageNumber, PageTrackerPolicy, RawBtree,
-    RawLeafBuilder, TransactionalMemory, multimap_btree_stats,
+    MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageNumber, PageResolver, PageTrackerPolicy,
+    RawBtree, RawLeafBuilder, multimap_btree_stats,
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
@@ -168,7 +168,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
     fn from_collection(
         collection: AccessGuard<'a, &'static DynamicCollection<V>>,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        mem: PageResolver,
     ) -> Result<Self> {
         Ok(match collection.value().collection_type() {
             Inline => {
@@ -212,7 +212,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
                 let inner = BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     Some(root),
-                    page_allocator.mem().clone(),
+                    page_allocator.resolver(),
                     PageHint::None,
                 )?;
                 Self::new_subtree_free_on_drop(
@@ -317,7 +317,7 @@ impl<V: Key + 'static> Drop for MultimapValue<'_, V> {
 
 pub struct MultimapRange<'a, K: Key + 'static, V: Key + 'static> {
     inner: BtreeRangeIter<K, &'static DynamicCollection<V>>,
-    mem: Arc<TransactionalMemory>,
+    mem: PageResolver,
     transaction_guard: Arc<TransactionGuard>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -328,7 +328,7 @@ impl<K: Key + 'static, V: Key + 'static> MultimapRange<'_, K, V> {
     fn new(
         inner: BtreeRangeIter<K, &'static DynamicCollection<V>>,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        mem: PageResolver,
     ) -> Self {
         Self {
             inner,
@@ -764,7 +764,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     root,
                     V::fixed_width(),
                     <() as Value>::fixed_width(),
-                    self.page_allocator.mem().clone(),
+                    self.page_allocator.resolver(),
                     PageHint::None,
                 )?;
                 for page in all_pages {
@@ -787,7 +787,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     None,
-                    self.page_allocator.mem().clone(),
+                    self.page_allocator.resolver(),
                     PageHint::None,
                 )?,
                 0,
@@ -803,7 +803,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableTableMetadata for MultimapTable
     fn stats(&self) -> Result<TableStats> {
         let tree_stats = multimap_btree_stats(
             self.tree.get_root().map(|x| x.root),
-            self.page_allocator.mem(),
+            &self.page_allocator.resolver(),
             K::fixed_width(),
             V::fixed_width(),
             PageHint::None,
@@ -829,13 +829,13 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'_, V>> {
         let guard = self.transaction.transaction_guard();
         let iter = if let Some(collection) = self.tree.get(key.borrow())? {
-            MultimapValue::from_collection(collection, guard, self.page_allocator.mem().clone())?
+            MultimapValue::from_collection(collection, guard, self.page_allocator.resolver())?
         } else {
             MultimapValue::new_subtree(
                 BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     None,
-                    self.page_allocator.mem().clone(),
+                    self.page_allocator.resolver(),
                     PageHint::None,
                 )?,
                 0,
@@ -854,7 +854,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
         Ok(MultimapRange::new(
             inner,
             self.transaction.transaction_guard(),
-            self.page_allocator.mem().clone(),
+            self.page_allocator.resolver(),
         ))
     }
 }
@@ -891,7 +891,7 @@ pub struct ReadOnlyUntypedMultimapTable {
     hint: PageHint,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
-    mem: Arc<TransactionalMemory>,
+    mem: PageResolver,
 }
 
 impl Sealed for ReadOnlyUntypedMultimapTable {}
@@ -929,7 +929,7 @@ impl ReadOnlyUntypedMultimapTable {
         hint: PageHint,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
-        mem: Arc<TransactionalMemory>,
+        mem: PageResolver,
     ) -> Self {
         Self {
             num_values,
@@ -952,7 +952,7 @@ impl ReadOnlyUntypedMultimapTable {
 pub struct ReadOnlyMultimapTable<K: Key + 'static, V: Key + 'static> {
     tree: Btree<K, &'static DynamicCollection<V>>,
     num_values: u64,
-    mem: Arc<TransactionalMemory>,
+    mem: PageResolver,
     transaction_guard: Arc<TransactionGuard>,
     _value_type: PhantomData<V>,
 }
@@ -963,7 +963,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
         num_values: u64,
         hint: PageHint,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        mem: PageResolver,
     ) -> Result<ReadOnlyMultimapTable<K, V>> {
         Ok(ReadOnlyMultimapTable {
             tree: Btree::new(root, hint, guard.clone(), mem.clone())?,

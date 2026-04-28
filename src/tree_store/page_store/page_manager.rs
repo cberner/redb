@@ -81,6 +81,33 @@ pub(crate) enum AllocationPolicy {
     Lowest,
 }
 
+/// Read-only view over `TransactionalMemory` exposing only the methods that
+/// btree read paths and stats helpers need. Cheap to clone -- a single
+/// `Arc<TransactionalMemory>` bump.
+///
+/// Construct one from `PageAllocator::resolver()` (write-transaction context)
+/// or `PageResolver::new(mem)` (read-transaction context). Read-only btree
+/// types accept `PageResolver` rather than `Arc<TransactionalMemory>` so that
+/// they cannot be used to bypass `PageAllocator`'s allocation tracking.
+#[derive(Clone)]
+pub(crate) struct PageResolver {
+    mem: Arc<TransactionalMemory>,
+}
+
+impl PageResolver {
+    pub(crate) fn new(mem: Arc<TransactionalMemory>) -> Self {
+        Self { mem }
+    }
+
+    pub(crate) fn get_page(&self, page_number: PageNumber, hint: PageHint) -> Result<PageImpl> {
+        self.mem.get_page(page_number, hint)
+    }
+
+    pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
+        self.mem.count_allocated_pages()
+    }
+}
+
 /// Per-write-transaction handle through which btree mutation code allocates
 /// and frees pages. Bundles the shared `TransactionalMemory` with the write
 /// transaction's `AllocationPolicy`.
@@ -100,11 +127,9 @@ impl PageAllocator {
         }
     }
 
-    // TODO: migrate remaining callers off of this and make it private. Btree
-    // mutation code should interact with `TransactionalMemory` exclusively
-    // through `PageAllocator`.
-    pub(crate) fn mem(&self) -> &Arc<TransactionalMemory> {
-        &self.mem
+    /// Returns a `PageResolver` for constructing read-only views of this transaction's pages.
+    pub(crate) fn resolver(&self) -> PageResolver {
+        PageResolver::new(self.mem.clone())
     }
 
     /// Drains the set of pages allocated since the last commit, returning

@@ -5,10 +5,10 @@ use crate::tree_store::btree_base::{
 };
 use crate::tree_store::btree_iters::BtreeExtractIf;
 use crate::tree_store::btree_mutator::MutateHelper;
-use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory};
+use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
     AccessGuardMutInPlace, AllPageNumbersBtreeIter, BtreeRangeIter, PageAllocator, PageHint,
-    PageNumber, PageTrackerPolicy,
+    PageNumber, PageResolver, PageTrackerPolicy,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result};
@@ -64,7 +64,7 @@ impl PagePath {
 }
 
 pub(super) struct UntypedBtree {
-    mem: Arc<TransactionalMemory>,
+    mem: PageResolver,
     root: Option<BtreeHeader>,
     hint: PageHint,
     key_width: Option<usize>,
@@ -74,7 +74,7 @@ pub(super) struct UntypedBtree {
 impl UntypedBtree {
     pub(super) fn new(
         root: Option<BtreeHeader>,
-        mem: Arc<TransactionalMemory>,
+        mem: PageResolver,
         hint: PageHint,
         key_width: Option<usize>,
         value_width: Option<usize>,
@@ -372,7 +372,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
                 root,
                 K::fixed_width(),
                 V::fixed_width(),
-                self.page_allocator.mem().clone(),
+                self.page_allocator.resolver(),
                 PageHint::None,
             )?))
         } else {
@@ -525,7 +525,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
     pub(crate) fn stats(&self) -> Result<BtreeStats> {
         btree_stats(
             self.get_root().map(|x| x.root),
-            self.page_allocator.mem(),
+            &self.page_allocator.resolver(),
             K::fixed_width(),
             V::fixed_width(),
             PageHint::None,
@@ -537,7 +537,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             self.get_root(),
             PageHint::None,
             self.transaction_guard.clone(),
-            self.page_allocator.mem().clone(),
+            self.page_allocator.resolver(),
         )
     }
 
@@ -761,7 +761,7 @@ impl<K: Key + 'static, V: MutInPlaceValue + 'static> BtreeMut<K, V> {
 }
 
 pub(crate) struct RawBtree {
-    mem: Arc<TransactionalMemory>,
+    mem: PageResolver,
     root: Option<BtreeHeader>,
     hint: PageHint,
     fixed_key_size: Option<usize>,
@@ -773,7 +773,7 @@ impl RawBtree {
         root: Option<BtreeHeader>,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
-        mem: Arc<TransactionalMemory>,
+        mem: PageResolver,
         hint: PageHint,
     ) -> Self {
         Self {
@@ -853,7 +853,7 @@ impl RawBtree {
 }
 
 pub(crate) struct Btree<K: Key + 'static, V: Value + 'static> {
-    mem: Arc<TransactionalMemory>,
+    mem: PageResolver,
     transaction_guard: Arc<TransactionGuard>,
     // Cache of the root page to avoid repeated lookups
     cached_root: Option<PageImpl>,
@@ -868,7 +868,7 @@ impl<K: Key, V: Value> Btree<K, V> {
         root: Option<BtreeHeader>,
         hint: PageHint,
         guard: Arc<TransactionGuard>,
-        mem: Arc<TransactionalMemory>,
+        mem: PageResolver,
     ) -> Result<Self> {
         let cached_root = if let Some(header) = root {
             Some(mem.get_page(header.root, hint)?)
@@ -1092,7 +1092,7 @@ impl<K: Key, V: Value> Drop for Btree<K, V> {
 
 pub(super) fn btree_stats(
     root: Option<PageNumber>,
-    mem: &TransactionalMemory,
+    mem: &PageResolver,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
     hint: PageHint,
@@ -1113,7 +1113,7 @@ pub(super) fn btree_stats(
 
 fn stats_helper(
     page_number: PageNumber,
-    mem: &TransactionalMemory,
+    mem: &PageResolver,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
     hint: PageHint,

@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
-    ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    PageResolver, ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -543,11 +543,12 @@ impl Database {
     }
 
     pub(crate) fn verify_primary_checksums(mem: Arc<TransactionalMemory>) -> Result<bool> {
+        let resolver = PageResolver::new(mem.clone());
         let table_tree = TableTree::new(
             mem.get_data_root(),
             PageHint::None,
             Arc::new(TransactionGuard::untracked()),
-            mem.clone(),
+            resolver.clone(),
         )?;
         if !table_tree.verify_checksums()? {
             return Ok(false);
@@ -556,7 +557,7 @@ impl Database {
             mem.get_system_root(),
             PageHint::None,
             Arc::new(TransactionGuard::untracked()),
-            mem.clone(),
+            resolver,
         )?;
         if !system_table_tree.verify_checksums()? {
             return Ok(false);
@@ -680,11 +681,12 @@ impl Database {
         system_root: Option<BtreeHeader>,
         mem: Arc<TransactionalMemory>,
     ) -> Result {
+        let resolver = PageResolver::new(mem.clone());
         let table_tree = TableTree::new(
             system_root,
             PageHint::None,
             Arc::new(TransactionGuard::untracked()),
-            mem.clone(),
+            resolver.clone(),
         )?;
         if let Some(table_def) = table_tree
             .get_table::<TransactionIdWithPagination, PageList>(
@@ -701,7 +703,7 @@ impl Database {
                 table_root,
                 PageHint::None,
                 Arc::new(TransactionGuard::untracked()),
-                mem.clone(),
+                resolver,
             )?;
             for result in table.range::<TransactionIdWithPagination>(..)? {
                 let (_, pages) = result?;
@@ -724,8 +726,13 @@ impl Database {
         F: FnMut(PageNumber) -> Result,
     {
         let untracked_guard = Arc::new(TransactionGuard::untracked());
-        let system_tree =
-            TableTree::new(system_root, PageHint::None, untracked_guard, mem.clone())?;
+        let resolver = PageResolver::new(mem.clone());
+        let system_tree = TableTree::new(
+            system_root,
+            PageHint::None,
+            untracked_guard,
+            resolver.clone(),
+        )?;
         let table_name = table_def.name();
         let result = match system_tree.get_table::<K, V>(table_name, TableType::Normal) {
             Ok(result) => result,
@@ -753,7 +760,7 @@ impl Database {
                     table_root,
                     PageHint::None,
                     Arc::new(TransactionGuard::untracked()),
-                    mem.clone(),
+                    resolver,
                 )?;
             for result in table.range::<TransactionIdWithPagination>(..)? {
                 let (_, page_list) = result?;
@@ -773,7 +780,12 @@ impl Database {
         let data_root = mem.get_data_root();
         {
             let untracked = Arc::new(TransactionGuard::untracked());
-            let tables = TableTree::new(data_root, PageHint::None, untracked, mem.clone())?;
+            let tables = TableTree::new(
+                data_root,
+                PageHint::None,
+                untracked,
+                PageResolver::new(mem.clone()),
+            )?;
             tables.visit_all_pages(|path| {
                 mem.mark_debug_allocated_page(path.page_number());
                 Ok(())
@@ -783,8 +795,12 @@ impl Database {
         let system_root = mem.get_system_root();
         {
             let untracked = Arc::new(TransactionGuard::untracked());
-            let system_tables =
-                TableTree::new(system_root, PageHint::None, untracked, mem.clone())?;
+            let system_tables = TableTree::new(
+                system_root,
+                PageHint::None,
+                untracked,
+                PageResolver::new(mem.clone()),
+            )?;
             system_tables.visit_all_pages(|path| {
                 mem.mark_debug_allocated_page(path.page_number());
                 Ok(())
@@ -844,7 +860,12 @@ impl Database {
         let data_root = mem.get_data_root();
         {
             let untracked = Arc::new(TransactionGuard::untracked());
-            let tables = TableTree::new(data_root, PageHint::None, untracked, mem.clone())?;
+            let tables = TableTree::new(
+                data_root,
+                PageHint::None,
+                untracked,
+                PageResolver::new(mem.clone()),
+            )?;
             tables.visit_all_pages(|path| {
                 mem.mark_page_allocated(path.page_number());
                 Ok(())
@@ -861,8 +882,12 @@ impl Database {
         let system_root = mem.get_system_root();
         {
             let untracked = Arc::new(TransactionGuard::untracked());
-            let system_tables =
-                TableTree::new(system_root, PageHint::None, untracked, mem.clone())?;
+            let system_tables = TableTree::new(
+                system_root,
+                PageHint::None,
+                untracked,
+                PageResolver::new(mem.clone()),
+            )?;
             system_tables.visit_all_pages(|path| {
                 mem.mark_page_allocated(path.page_number());
                 Ok(())
@@ -981,11 +1006,12 @@ impl Database {
         }
 
         // See if it's present in the system table tree
+        let resolver = PageResolver::new(mem.clone());
         let system_table_tree = TableTree::new(
             mem.get_system_root(),
             PageHint::None,
             Arc::new(TransactionGuard::untracked()),
-            mem.clone(),
+            resolver.clone(),
         )?;
         let Some(allocator_state_table) = system_table_tree
             .get_table::<AllocatorStateKey, &[u8]>(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
@@ -1002,7 +1028,7 @@ impl Database {
             table_root,
             PageHint::None,
             Arc::new(TransactionGuard::untracked()),
-            mem.clone(),
+            resolver,
         )?;
 
         // Make sure this isn't stale allocator state left over from a previous transaction

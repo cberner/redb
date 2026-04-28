@@ -513,9 +513,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
                 let child_checksum = accessor.child_checksum(child_index).unwrap();
                 let sub_result = self.insert_helper(
-                    self.page_allocator
-                        .mem()
-                        .get_page(child_page, PageHint::None)?,
+                    self.page_allocator.get_page(child_page, PageHint::None)?,
                     child_checksum,
                     key,
                     value,
@@ -876,7 +874,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         let child_checksum = accessor.child_checksum(child_index).unwrap();
         let (result, found) = self.delete_helper(
             self.page_allocator
-                .mem()
                 .get_page(child_page_number, PageHint::None)?,
             target,
             found_key,
@@ -898,10 +895,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 && self.modify_uncommitted
             {
                 drop(page);
-                let mut mutpage = self
-                    .page_allocator
-                    .mem()
-                    .get_page_mut(original_page_number)?;
+                let mut mutpage = self.page_allocator.get_page_mut(original_page_number)?;
                 let mut mutator = BranchMutator::new(mutpage.memory_mut());
                 mutator.write_child_page(child_index, new_child, DEFERRED);
                 original_page_number
@@ -970,7 +964,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 debug_assert!(merge_with < accessor.count_children());
                 let merge_with_page = self
                     .page_allocator
-                    .mem()
                     .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
                 let merge_with_accessor =
                     LeafAccessor::new(merge_with_page.memory(), K::fixed_width(), V::fixed_width());
@@ -1065,7 +1058,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 let merge_with_page = self
                     .page_allocator
-                    .mem()
                     .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
                 debug_assert!(merge_with < accessor.count_children());
@@ -1116,7 +1108,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 let merge_with_page = self
                     .page_allocator
-                    .mem()
                     .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
                 debug_assert!(merge_with < accessor.count_children());

@@ -6,7 +6,7 @@ use crate::tree_store::btree_base::{
 use crate::tree_store::multimap_btree::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeHeader, BtreeStats, Page, PageAllocator, PageHint, PageNumber,
-    PageTrackerPolicy, RawBtree, TransactionalMemory,
+    PageResolver, PageTrackerPolicy, RawBtree,
 };
 use crate::types::{Key, TypeName, Value};
 use std::cmp::max;
@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 pub(crate) fn multimap_btree_stats(
     root: Option<PageNumber>,
-    mem: &TransactionalMemory,
+    mem: &PageResolver,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
     hint: PageHint,
@@ -39,7 +39,7 @@ pub(crate) fn multimap_btree_stats(
 
 fn multimap_stats_helper(
     page_number: PageNumber,
-    mem: &TransactionalMemory,
+    mem: &PageResolver,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
     hint: PageHint,
@@ -154,7 +154,7 @@ pub(super) fn verify_tree_and_subtree_checksums(
     root: Option<BtreeHeader>,
     key_size: Option<usize>,
     value_size: Option<usize>,
-    mem: Arc<TransactionalMemory>,
+    mem: PageResolver,
     hint: PageHint,
 ) -> Result<bool> {
     if let Some(header) = root {
@@ -364,7 +364,7 @@ fn parse_subtree_roots<T: Page>(
 }
 
 pub(super) struct UntypedMultiBtree {
-    mem: Arc<TransactionalMemory>,
+    mem: PageResolver,
     root: Option<BtreeHeader>,
     hint: PageHint,
     key_width: Option<usize>,
@@ -374,7 +374,7 @@ pub(super) struct UntypedMultiBtree {
 impl UntypedMultiBtree {
     pub(super) fn new(
         root: Option<BtreeHeader>,
-        mem: Arc<TransactionalMemory>,
+        mem: PageResolver,
         hint: PageHint,
         key_width: Option<usize>,
         value_width: Option<usize>,
