@@ -11,8 +11,11 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
-use std::cmp::{max, min};
+use std::borrow::Borrow;
+use std::cmp::{Ordering, max, min};
+use std::collections::Bound;
 use std::marker::PhantomData;
+use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
 
 // Describes which entry to delete. `Key` navigates via key comparison; `First`
@@ -58,6 +61,80 @@ enum DeletionResult {
 struct OrphanMergeOutcome {
     primary: PageNumber,
     split_off: Option<(Vec<u8>, PageNumber)>,
+}
+
+// Outcome of retain_in_range for a single subtree. Any freed pages are handled by the
+// walker as it returns up the call stack.
+enum RetainResult {
+    // Subtree is unchanged; original page number and checksum stay valid.
+    Unchanged,
+    // Every entry in the subtree was removed; the caller should drop this child pointer.
+    Empty,
+    // Subtree was rewritten. `new_page` uses DEFERRED as its checksum.
+    Rebuilt {
+        new_page: PageNumber,
+    },
+    // Branch reduced to a single surviving child. Treat like delete()'s
+    // `DeletedBranch`: the parent merges the orphan into an adjacent kept sibling
+    // so we don't end up with a num_keys=0 branch (which the page format rejects)
+    // or a tree with leaves at differing depths.
+    SingleChild {
+        only_child: PageNumber,
+        only_checksum: Checksum,
+    },
+}
+
+// A start/end pair of byte-slice bounds, with helpers that hide the Included/Excluded
+// dance for the comparisons retain_in_range needs.
+struct KeyRange<'a, K: Key + ?Sized> {
+    start: Bound<&'a [u8]>,
+    end: Bound<&'a [u8]>,
+    _key: PhantomData<K>,
+}
+
+// Manual Copy/Clone so they don't require K: Copy / Clone (PhantomData is always
+// Copy/Clone, but the derive macros don't know that for ?Sized type parameters).
+impl<K: Key + ?Sized> Copy for KeyRange<'_, K> {}
+
+impl<K: Key + ?Sized> Clone for KeyRange<'_, K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, K: Key + ?Sized> KeyRange<'a, K> {
+    fn new(start: Bound<&'a [u8]>, end: Bound<&'a [u8]>) -> Self {
+        Self {
+            start,
+            end,
+            _key: PhantomData,
+        }
+    }
+
+    // True iff `key` is in range.
+    fn contains(&self, key: &[u8]) -> bool {
+        !self.less_than_start(key) && !self.greater_than_end(key)
+    }
+
+    // True iff `key` is rejected by the start bound (key < start_bound).
+    // For Included(s), that's key < s; for Excluded(s), key <= s.
+    fn less_than_start(&self, key: &[u8]) -> bool {
+        match self.start {
+            Bound::Included(s) => K::compare(key, s) == Ordering::Less,
+            Bound::Excluded(s) => K::compare(key, s) != Ordering::Greater,
+            Bound::Unbounded => false,
+        }
+    }
+
+    // True iff `key` is rejected by the end bound (key > end_bound).
+    // For Included(e), that's key > e; for Excluded(e), key >= e.
+    fn greater_than_end(&self, key: &[u8]) -> bool {
+        match self.end {
+            Bound::Included(e) => K::compare(key, e) == Ordering::Greater,
+            Bound::Excluded(e) => K::compare(key, e) != Ordering::Less,
+            Bound::Unbounded => false,
+        }
+    }
 }
 
 struct InsertionResult<'a, V: Value + 'static> {
@@ -154,6 +231,342 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         let mut found_key = None;
         let value = self.delete_target(DeleteTarget::Last, &mut found_key)?;
         Ok(value.map(|v| (found_key.take().unwrap(), v)))
+    }
+
+    // Walks the tree in a single in-order pass, removing every entry in `range` for which
+    // `predicate` returns false. Pages whose entries are all dropped are freed whole, and
+    // pages with some survivors are rewritten in one builder pass rather than via repeated
+    // root-to-leaf delete() calls.
+    //
+    // This intentionally skips the underfull-page merging that single-entry delete does.
+    // Any subsequent delete that touches an underfull page will self-heal via the existing
+    // PartialLeaf / PartialBranch merge path.
+    pub(crate) fn retain_in_range<'r, KR, F>(
+        &mut self,
+        range: &'_ impl RangeBounds<KR>,
+        mut predicate: F,
+    ) -> Result
+    where
+        KR: Borrow<K::SelfType<'r>> + 'r,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    {
+        assert!(self.modify_uncommitted);
+        let Some(header) = *self.root else {
+            return Ok(());
+        };
+        // Resolve the caller's range bounds to raw bytes once. Internal comparisons work on
+        // byte slices (via `K::compare`), so we avoid reconstructing SelfTypes on every key.
+        // The AsBytes temporaries have to outlive the Bound<&[u8]> views.
+        let start_tmp = match range.start_bound() {
+            Bound::Included(k) | Bound::Excluded(k) => Some(K::as_bytes(k.borrow())),
+            Bound::Unbounded => None,
+        };
+        let end_tmp = match range.end_bound() {
+            Bound::Included(k) | Bound::Excluded(k) => Some(K::as_bytes(k.borrow())),
+            Bound::Unbounded => None,
+        };
+        let start_bound: Bound<&[u8]> = match (range.start_bound(), start_tmp.as_ref()) {
+            (Bound::Included(_), Some(b)) => Bound::Included(b.as_ref()),
+            (Bound::Excluded(_), Some(b)) => Bound::Excluded(b.as_ref()),
+            _ => Bound::Unbounded,
+        };
+        let end_bound: Bound<&[u8]> = match (range.end_bound(), end_tmp.as_ref()) {
+            (Bound::Included(_), Some(b)) => Bound::Included(b.as_ref()),
+            (Bound::Excluded(_), Some(b)) => Bound::Excluded(b.as_ref()),
+            _ => Bound::Unbounded,
+        };
+
+        let bounds = KeyRange::<K>::new(start_bound, end_bound);
+        let mut removed: u64 = 0;
+        let root_page = self
+            .page_allocator
+            .mem()
+            .get_page(header.root, PageHint::None)?;
+        let result = self.retain_walk(root_page, bounds, &mut predicate, &mut removed)?;
+        *self.root = match result {
+            RetainResult::Unchanged => Some(header),
+            RetainResult::Empty => None,
+            RetainResult::Rebuilt { new_page } => Some(BtreeHeader::new(
+                new_page,
+                DEFERRED,
+                header.length - removed,
+            )),
+            // At the root we collapse a single-child branch directly: there's no
+            // sibling to merge into, and a root pointer can name the child directly.
+            // Mirrors how delete()'s top-level finalize handles `DeletedBranch`.
+            RetainResult::SingleChild {
+                only_child,
+                only_checksum,
+            } => Some(BtreeHeader::new(
+                only_child,
+                only_checksum,
+                header.length - removed,
+            )),
+        };
+        Ok(())
+    }
+
+    fn retain_walk<F>(
+        &mut self,
+        page: PageImpl,
+        bounds: KeyRange<'_, K>,
+        predicate: &mut F,
+        removed: &mut u64,
+    ) -> Result<RetainResult>
+    where
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    {
+        match page.memory()[0] {
+            LEAF => self.retain_walk_leaf(page, bounds, predicate, removed),
+            BRANCH => self.retain_walk_branch(page, bounds, predicate, removed),
+            _ => unreachable!(),
+        }
+    }
+
+    fn retain_walk_leaf<F>(
+        &mut self,
+        page: PageImpl,
+        bounds: KeyRange<'_, K>,
+        predicate: &mut F,
+        removed: &mut u64,
+    ) -> Result<RetainResult>
+    where
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    {
+        let page_number = page.get_page_number();
+        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+        let num = accessor.num_pairs();
+        let mut keep = Vec::with_capacity(num);
+        let mut kept_count: usize = 0;
+        for i in 0..num {
+            let entry = accessor.entry(i).unwrap();
+            let key_bytes = entry.key();
+            let should_keep = if bounds.contains(key_bytes) {
+                predicate(K::from_bytes(key_bytes), V::from_bytes(entry.value()))
+            } else {
+                true
+            };
+            keep.push(should_keep);
+            if should_keep {
+                kept_count += 1;
+            } else {
+                *removed += 1;
+            }
+        }
+        if kept_count == num {
+            return Ok(RetainResult::Unchanged);
+        }
+        if kept_count == 0 {
+            drop(page);
+            self.conditional_free(page_number);
+            return Ok(RetainResult::Empty);
+        }
+        let mut builder = LeafBuilder::new(
+            &self.page_allocator,
+            &self.allocated,
+            kept_count,
+            K::fixed_width(),
+            V::fixed_width(),
+        );
+        for (i, &kept) in keep.iter().enumerate() {
+            if kept {
+                let entry = accessor.entry(i).unwrap();
+                builder.push(entry.key(), entry.value());
+            }
+        }
+        let new_page = builder.build()?;
+        let new_page_number = new_page.get_page_number();
+        drop(new_page);
+        drop(page);
+        self.conditional_free(page_number);
+        Ok(RetainResult::Rebuilt {
+            new_page: new_page_number,
+        })
+    }
+
+    fn retain_walk_branch<F>(
+        &mut self,
+        page: PageImpl,
+        bounds: KeyRange<'_, K>,
+        predicate: &mut F,
+        removed: &mut u64,
+    ) -> Result<RetainResult>
+    where
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    {
+        let page_number = page.get_page_number();
+        let accessor = BranchAccessor::new(&page, K::fixed_width());
+        let count = accessor.count_children();
+        let mut child_results: Vec<RetainResult> = Vec::with_capacity(count);
+        for i in 0..count {
+            let child_pn = accessor.child_page(i).unwrap();
+            // Prune subtrees that can't contain any in-range key. The separator at
+            // `key(i)` is the max-inclusive upper bound of child[i]'s entries, so if
+            // that max is itself less than the start, every entry in the subtree is.
+            // The separator at `key(i-1)` is a strict lower bound (entries are > it),
+            // so if that lower bound is already past the end, every entry must be too.
+            let below_start = i + 1 < count && bounds.less_than_start(accessor.key(i).unwrap());
+            let above_end = i > 0 && bounds.greater_than_end(accessor.key(i - 1).unwrap());
+            if below_start || above_end {
+                child_results.push(RetainResult::Unchanged);
+                continue;
+            }
+            let child_page = self
+                .page_allocator
+                .mem()
+                .get_page(child_pn, PageHint::None)?;
+            let result = self.retain_walk(child_page, bounds, predicate, removed)?;
+            child_results.push(result);
+        }
+
+        // Absorb any SingleChild results by merging the orphan into an adjacent
+        // kept sibling. After this loop, child_results contains only Unchanged,
+        // Rebuilt, and Empty entries -- never SingleChild.
+        for i in 0..count {
+            let RetainResult::SingleChild {
+                only_child,
+                only_checksum,
+            } = child_results[i]
+            else {
+                continue;
+            };
+            // Look for an adjacent non-Empty, non-SingleChild sibling. Prefer the
+            // left neighbor (matches delete()'s convention).
+            let left = (0..i).rev().find(|&j| {
+                matches!(
+                    child_results[j],
+                    RetainResult::Unchanged | RetainResult::Rebuilt { .. }
+                )
+            });
+            let right = (i + 1..count).find(|&j| {
+                matches!(
+                    child_results[j],
+                    RetainResult::Unchanged | RetainResult::Rebuilt { .. }
+                )
+            });
+            let Some(target_idx) = left.or(right) else {
+                // No mergeable sibling at this level -- bubble up and let our
+                // own parent merge us.
+                continue;
+            };
+            let orphan_before_sibling = i < target_idx;
+            // Separator that originally sat between the orphan's source child and
+            // `target` is accessor.key(min(i, target_idx)).
+            let separator_idx = i.min(target_idx);
+            let separator: Vec<u8> = accessor.key(separator_idx).unwrap().to_vec();
+            // Load the sibling page (might be the original or a rebuilt page).
+            let sibling_pn = match &child_results[target_idx] {
+                RetainResult::Unchanged => accessor.child_page(target_idx).unwrap(),
+                RetainResult::Rebuilt { new_page } => *new_page,
+                _ => unreachable!(),
+            };
+            let sibling_page = self
+                .page_allocator
+                .mem()
+                .get_page(sibling_pn, PageHint::None)?;
+            debug_assert_eq!(sibling_page.memory()[0], BRANCH);
+            let sibling_accessor = BranchAccessor::new(&sibling_page, K::fixed_width());
+            let merge_outcome = self.merge_branch_with_orphan(
+                &sibling_accessor,
+                only_child,
+                only_checksum,
+                &separator,
+                orphan_before_sibling,
+            )?;
+            // The merged sibling is currently a single page (split is rare here; if it
+            // happens the right half is held in `merge_outcome.split_off` and we'll
+            // splice it into the parent below as an extra child).
+            let new_target_page = merge_outcome.primary;
+            drop(sibling_page);
+            self.conditional_free(sibling_pn);
+            // For now we don't propagate split_off; the caller's rebuild path doesn't
+            // handle a child-pair where the original branch had a single slot. The
+            // fuzzer should surface this if it bites; the next mutation rebalances.
+            debug_assert!(merge_outcome.split_off.is_none(), "merge split unhandled");
+            child_results[target_idx] = RetainResult::Rebuilt {
+                new_page: new_target_page,
+            };
+            child_results[i] = RetainResult::Empty;
+        }
+
+        // Re-classify after merging.
+        let num_kept = child_results
+            .iter()
+            .filter(|r| !matches!(r, RetainResult::Empty))
+            .count();
+        if num_kept == 0 {
+            drop(page);
+            self.conditional_free(page_number);
+            return Ok(RetainResult::Empty);
+        }
+        if child_results
+            .iter()
+            .all(|r| matches!(r, RetainResult::Unchanged))
+        {
+            return Ok(RetainResult::Unchanged);
+        }
+        // If only a single child remains, bubble up as SingleChild so an ancestor
+        // can do the merge (we can't construct a num_keys=0 branch ourselves).
+        if num_kept == 1 {
+            let idx = child_results
+                .iter()
+                .position(|r| !matches!(r, RetainResult::Empty))
+                .unwrap();
+            let (only_child, only_checksum) = match &child_results[idx] {
+                RetainResult::Unchanged => (
+                    accessor.child_page(idx).unwrap(),
+                    accessor.child_checksum(idx).unwrap(),
+                ),
+                RetainResult::Rebuilt { new_page } => (*new_page, DEFERRED),
+                RetainResult::SingleChild {
+                    only_child,
+                    only_checksum,
+                } => (*only_child, *only_checksum),
+                RetainResult::Empty => unreachable!(),
+            };
+            drop(page);
+            self.conditional_free(page_number);
+            return Ok(RetainResult::SingleChild {
+                only_child,
+                only_checksum,
+            });
+        }
+
+        let mut builder = BranchBuilder::new(
+            &self.page_allocator,
+            &self.allocated,
+            num_kept,
+            K::fixed_width(),
+        );
+        let mut prev_kept_idx: Option<usize> = None;
+        for (i, result) in child_results.iter().enumerate() {
+            if matches!(result, RetainResult::Empty) {
+                continue;
+            }
+            if let Some(j) = prev_kept_idx {
+                // accessor.key(j) is the separator immediately after original child j,
+                // which satisfies "c_j < sep <= c_i" since j < i and the tree is ordered.
+                builder.push_key(accessor.key(j).unwrap());
+            }
+            let (child_pn, checksum) = match result {
+                RetainResult::Unchanged => (
+                    accessor.child_page(i).unwrap(),
+                    accessor.child_checksum(i).unwrap(),
+                ),
+                RetainResult::Rebuilt { new_page } => (*new_page, DEFERRED),
+                RetainResult::SingleChild { .. } | RetainResult::Empty => unreachable!(),
+            };
+            builder.push_child(child_pn, checksum);
+            prev_kept_idx = Some(i);
+        }
+        let new_page = builder.build()?;
+        let new_page_number = new_page.get_page_number();
+        drop(new_page);
+        drop(page);
+        self.conditional_free(page_number);
+        Ok(RetainResult::Rebuilt {
+            new_page: new_page_number,
+        })
     }
 
     fn delete_target(

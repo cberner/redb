@@ -1897,6 +1897,54 @@ fn retain_in_empty() {
     write_txn.commit().unwrap();
 }
 
+// Drives a tree large enough to have multi-level branches, then retains exactly
+// one entry. Exercises the SingleChild merge path that arises when a branch
+// loses all children except one.
+#[test]
+fn retain_collapses_to_single_entry() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 200]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        // Big enough to span several leaves and at least one internal branch level.
+        for i in 0u64..10_000 {
+            table.insert(i, &[0u8; 200]).unwrap();
+        }
+        // Keep just one key, dropping everything else. Forces every leaf and most
+        // branches to collapse, with exactly one survivor.
+        table.retain(|k, _| k == 7777).unwrap();
+        assert_eq!(table.len().unwrap(), 1);
+        let mut iter = table.iter().unwrap();
+        let (k, _) = iter.next().unwrap().unwrap();
+        assert_eq!(k.value(), 7777);
+        assert!(iter.next().is_none());
+        assert!(table.get(&7776).unwrap().is_none());
+        assert!(table.get(&7778).unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+
+    // Reopen and verify durability + that subsequent inserts and deletes still
+    // work correctly on the post-retain tree.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        assert_eq!(table.len().unwrap(), 1);
+        for i in 0u64..1000 {
+            table.insert(i, &[1u8; 200]).unwrap();
+        }
+        assert_eq!(table.len().unwrap(), 1001);
+        for i in 0u64..1000 {
+            assert!(table.remove(i).unwrap().is_some());
+        }
+        assert_eq!(table.len().unwrap(), 1);
+    }
+    write_txn.commit().unwrap();
+}
+
 #[test]
 fn range_arc() {
     let tmpfile = create_tempfile();
