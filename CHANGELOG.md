@@ -1,24 +1,26 @@
 # redb - Changelog
 
-## Unreleased
-* `Table::retain()` and `Table::retain_in()` now poison the write transaction if their
-  predicate panics, causing `WriteTransaction::commit()` to return
-  `CommitError::TransactionPoisoned`.
+## 4.2.0 - 2026-XX-XX
 * Add `Table::entry()` and the associated `Entry`, `OccupiedEntry`, and `VacantEntry`
   types, mirroring `std::collections::BTreeMap::entry`. Supports `or_insert`,
   `or_insert_with`, `or_insert_with_key`, `and_modify`, and the usual `OccupiedEntry`
   / `VacantEntry` accessors.
+* `Table::retain()` and `Table::retain_in()` now poison the write transaction if their
+  predicate panics, causing `WriteTransaction::commit()` to return
+  `CommitError::TransactionPoisoned`.
 * Optimize `Table::pop_first()` and `Table::pop_last()` to be about 2x faster.
 * Enable file space reclamation during non-durable transactions performed while a savepoint exists.
-* Fix a bug where calling `compact()` on a database could cause the file to grow
-  rather than shrink in some cases.
-* Python bindings: add `redb.Database.create(path)` for creating or opening a database file.
-* Python bindings: add `Database.begin_write()`, which returns a `WriteTransaction`
-  context manager. Exiting the `with` block commits the transaction on success
-  and aborts it if an exception propagates out of the block.
 * Reuse pages freed by a durable write transaction in the next write transaction when no
   live read transaction or savepoint still needs them. Previously, pages were not reused for one
   additional transaction.
+* Fix a bug where calling `compact()` on a database could cause the file to grow
+  rather than shrink in some cases.
+
+### Python bindings
+* Add `Database.create(path)` for creating or opening a database file.
+* Add `Database.begin_write()`, which returns a `WriteTransaction`
+  context manager. Exiting the `with` block commits the transaction on success
+  and aborts it if an exception propagates out of the block.
 
 ## 4.1.0 - 2026-04-19
 **This release contains a large number of bug fixes discovered by AI coding agents**
