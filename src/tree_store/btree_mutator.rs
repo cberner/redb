@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
-    LeafBuilder, LeafMutator, RawLeafBuilder,
+    LeafBuilder, LeafMutator, RawBranchBuilder, RawLeafBuilder,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,
@@ -11,8 +11,11 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
-use std::cmp::{max, min};
+use std::borrow::Borrow;
+use std::cmp::{Ordering, max, min};
+use std::collections::Bound;
 use std::marker::PhantomData;
+use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
 
 // Describes which entry to delete. `Key` navigates via key comparison; `First`
@@ -58,6 +61,137 @@ enum DeletionResult {
 struct OrphanMergeOutcome {
     primary: PageNumber,
     split_off: Option<(Vec<u8>, PageNumber)>,
+}
+
+struct RetainNode {
+    page: PageNumber,
+    checksum: Checksum,
+    // Maximum key in this subtree. Parent branch separators are rebuilt from this.
+    max_key: Vec<u8>,
+}
+
+#[derive(Copy, Clone, Debug)]
+enum RetainMergeSide {
+    Left,
+    Right,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct RetainPartial {
+    // An underfilled rebuilt node only retries adjacent sides that have not
+    // already been repacked with this node. This prevents normalization from
+    // cycling on variable-sized entries that cannot be balanced further.
+    try_left: bool,
+    try_right: bool,
+}
+
+#[derive(Copy, Clone)]
+struct RetainMergeContext {
+    left_partial: Option<RetainPartial>,
+    right_partial: Option<RetainPartial>,
+}
+
+impl RetainPartial {
+    fn new() -> Self {
+        Self {
+            try_left: true,
+            try_right: true,
+        }
+    }
+
+    fn after_trying(mut self, side: RetainMergeSide) -> Self {
+        match side {
+            RetainMergeSide::Left => self.try_left = false,
+            RetainMergeSide::Right => self.try_right = false,
+        }
+        self
+    }
+
+    fn left_only(mut self) -> Option<Self> {
+        self.try_right = false;
+        self.try_left.then_some(self)
+    }
+
+    fn right_only(mut self) -> Option<Self> {
+        self.try_left = false;
+        self.try_right.then_some(self)
+    }
+}
+
+impl RetainMergeContext {
+    fn new(left: &RetainTree, right: &RetainTree) -> Self {
+        Self {
+            left_partial: left.partial,
+            right_partial: right.partial,
+        }
+    }
+}
+
+struct RetainTree {
+    node: RetainNode,
+    // Leaves are height zero.
+    height: u32,
+    // Some if this page is below the merge threshold and still has an adjacent
+    // side worth trying.
+    partial: Option<RetainPartial>,
+}
+
+struct RetainForest {
+    nodes: Vec<RetainTree>,
+    changed: bool,
+}
+
+struct KeyRange<'a, K: Key + ?Sized> {
+    start: Bound<&'a [u8]>,
+    end: Bound<&'a [u8]>,
+    _key: PhantomData<K>,
+}
+
+impl<K: Key + ?Sized> Copy for KeyRange<'_, K> {}
+
+impl<K: Key + ?Sized> Clone for KeyRange<'_, K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, K: Key + ?Sized> KeyRange<'a, K> {
+    fn new(start: Bound<&'a [u8]>, end: Bound<&'a [u8]>) -> Self {
+        Self {
+            start,
+            end,
+            _key: PhantomData,
+        }
+    }
+
+    fn contains(&self, key: &[u8]) -> bool {
+        !self.less_than_start(key) && !self.greater_than_end(key)
+    }
+
+    fn less_than_start(&self, key: &[u8]) -> bool {
+        match self.start {
+            Bound::Included(start) => K::compare(key, start) == Ordering::Less,
+            Bound::Excluded(start) => K::compare(key, start) != Ordering::Greater,
+            Bound::Unbounded => false,
+        }
+    }
+
+    fn greater_than_end(&self, key: &[u8]) -> bool {
+        match self.end {
+            Bound::Included(end) => K::compare(key, end) == Ordering::Greater,
+            Bound::Excluded(end) => K::compare(key, end) != Ordering::Less,
+            Bound::Unbounded => false,
+        }
+    }
+
+    fn child_lower_bound_is_past_end(&self, lower_bound: &[u8]) -> bool {
+        match self.end {
+            Bound::Included(end) | Bound::Excluded(end) => {
+                K::compare(lower_bound, end) != Ordering::Less
+            }
+            Bound::Unbounded => false,
+        }
+    }
 }
 
 struct InsertionResult<'a, V: Value + 'static> {
@@ -154,6 +288,804 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         let mut found_key = None;
         let value = self.delete_target(DeleteTarget::Last, &mut found_key)?;
         Ok(value.map(|v| (found_key.take().unwrap(), v)))
+    }
+
+    pub(crate) fn retain_in_range<'r, KR, F>(
+        &mut self,
+        range: &'_ impl RangeBounds<KR>,
+        mut predicate: F,
+    ) -> Result
+    where
+        KR: Borrow<K::SelfType<'r>> + 'r,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    {
+        assert!(self.modify_uncommitted);
+        let Some(header) = *self.root else {
+            return Ok(());
+        };
+
+        let start_tmp = match range.start_bound() {
+            Bound::Included(key) | Bound::Excluded(key) => Some(K::as_bytes(key.borrow())),
+            Bound::Unbounded => None,
+        };
+        let end_tmp = match range.end_bound() {
+            Bound::Included(key) | Bound::Excluded(key) => Some(K::as_bytes(key.borrow())),
+            Bound::Unbounded => None,
+        };
+        let start_bound = match (range.start_bound(), start_tmp.as_ref()) {
+            (Bound::Included(_), Some(bytes)) => Bound::Included(bytes.as_ref()),
+            (Bound::Excluded(_), Some(bytes)) => Bound::Excluded(bytes.as_ref()),
+            _ => Bound::Unbounded,
+        };
+        let end_bound = match (range.end_bound(), end_tmp.as_ref()) {
+            (Bound::Included(_), Some(bytes)) => Bound::Included(bytes.as_ref()),
+            (Bound::Excluded(_), Some(bytes)) => Bound::Excluded(bytes.as_ref()),
+            _ => Bound::Unbounded,
+        };
+        let bounds = KeyRange::<K>::new(start_bound, end_bound);
+
+        let root_page = self.page_allocator.get_page(header.root, PageHint::None)?;
+        let (root_height, root_max_key) = self.subtree_height_and_max(root_page)?;
+        if bounds.less_than_start(&root_max_key) {
+            return Ok(());
+        }
+
+        let mut removed = 0;
+        let root_page = self.page_allocator.get_page(header.root, PageHint::None)?;
+        let forest = self.retain_walk(
+            root_page,
+            header.checksum,
+            root_max_key,
+            root_height,
+            bounds,
+            &mut predicate,
+            &mut removed,
+        )?;
+
+        *self.root = if forest.nodes.is_empty() {
+            None
+        } else if forest.changed {
+            let root = self.build_root_from_forest(forest.nodes)?;
+            Some(BtreeHeader::new(
+                root.node.page,
+                root.node.checksum,
+                header.length - removed,
+            ))
+        } else {
+            Some(header)
+        };
+
+        Ok(())
+    }
+
+    fn subtree_height_and_max(&self, page: PageImpl) -> Result<(u32, Vec<u8>)> {
+        match page.memory()[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                Ok((0, accessor.last_entry().key().to_vec()))
+            }
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let child_page = accessor.child_page(accessor.count_children() - 1).unwrap();
+                let child_page = self.page_allocator.get_page(child_page, PageHint::None)?;
+                let (height, max_key) = self.subtree_height_and_max(child_page)?;
+                Ok((height + 1, max_key))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn retain_walk<F>(
+        &mut self,
+        page: PageImpl,
+        checksum: Checksum,
+        max_key: Vec<u8>,
+        height: u32,
+        bounds: KeyRange<'_, K>,
+        predicate: &mut F,
+        removed: &mut u64,
+    ) -> Result<RetainForest>
+    where
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    {
+        match page.memory()[0] {
+            LEAF => self.retain_walk_leaf(page, checksum, max_key, bounds, predicate, removed),
+            BRANCH => {
+                self.retain_walk_branch(page, checksum, max_key, height, bounds, predicate, removed)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn retain_walk_leaf<F>(
+        &mut self,
+        page: PageImpl,
+        checksum: Checksum,
+        max_key: Vec<u8>,
+        bounds: KeyRange<'_, K>,
+        predicate: &mut F,
+        removed: &mut u64,
+    ) -> Result<RetainForest>
+    where
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    {
+        let page_number = page.get_page_number();
+        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+        let num_pairs = accessor.num_pairs();
+        let mut keep = Vec::with_capacity(num_pairs);
+        let mut kept_count = 0;
+        for i in 0..num_pairs {
+            let entry = accessor.entry(i).unwrap();
+            let keep_entry = if bounds.contains(entry.key()) {
+                predicate(K::from_bytes(entry.key()), V::from_bytes(entry.value()))
+            } else {
+                true
+            };
+            keep.push(keep_entry);
+            if keep_entry {
+                kept_count += 1;
+            } else {
+                *removed += 1;
+            }
+        }
+
+        if kept_count == num_pairs {
+            return Ok(RetainForest {
+                nodes: vec![RetainTree {
+                    node: RetainNode {
+                        page: page_number,
+                        checksum,
+                        max_key,
+                    },
+                    height: 0,
+                    partial: None,
+                }],
+                changed: false,
+            });
+        }
+
+        if kept_count == 0 {
+            drop(page);
+            self.conditional_free(page_number);
+            return Ok(RetainForest {
+                nodes: vec![],
+                changed: true,
+            });
+        }
+
+        let mut builder = LeafBuilder::new(
+            &self.page_allocator,
+            &self.allocated,
+            kept_count,
+            K::fixed_width(),
+            V::fixed_width(),
+        );
+        let mut new_max_key = Vec::new();
+        let mut kept_bytes = 0;
+        for (i, kept) in keep.into_iter().enumerate() {
+            if kept {
+                let entry = accessor.entry(i).unwrap();
+                new_max_key.clear();
+                new_max_key.extend_from_slice(entry.key());
+                kept_bytes += entry.key().len() + entry.value().len();
+                builder.push(entry.key(), entry.value());
+            }
+        }
+        let required_bytes = RawLeafBuilder::required_bytes(
+            kept_count,
+            kept_bytes,
+            K::fixed_width(),
+            V::fixed_width(),
+        );
+        let partial = (required_bytes < self.page_allocator.get_page_size() / 3)
+            .then_some(RetainPartial::new());
+        let new_page = builder.build()?;
+        let new_page_number = new_page.get_page_number();
+        drop(new_page);
+        drop(page);
+        self.conditional_free(page_number);
+        Ok(RetainForest {
+            nodes: vec![RetainTree {
+                node: RetainNode {
+                    page: new_page_number,
+                    checksum: DEFERRED,
+                    max_key: new_max_key,
+                },
+                height: 0,
+                partial,
+            }],
+            changed: true,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn retain_walk_branch<F>(
+        &mut self,
+        page: PageImpl,
+        checksum: Checksum,
+        max_key: Vec<u8>,
+        height: u32,
+        bounds: KeyRange<'_, K>,
+        predicate: &mut F,
+        removed: &mut u64,
+    ) -> Result<RetainForest>
+    where
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    {
+        debug_assert!(height > 0);
+        let page_number = page.get_page_number();
+        let accessor = BranchAccessor::new(&page, K::fixed_width());
+        let child_height = height - 1;
+        let child_count = accessor.count_children();
+        let mut children = Vec::with_capacity(child_count);
+        let mut changed = false;
+        let page_resolver = self.page_allocator.resolver();
+
+        for i in 0..child_count {
+            let child_max_key = if i + 1 < child_count {
+                accessor.key(i).unwrap().to_vec()
+            } else {
+                max_key.clone()
+            };
+            let below_start = bounds.less_than_start(&child_max_key);
+            let above_end =
+                i > 0 && bounds.child_lower_bound_is_past_end(accessor.key(i - 1).unwrap());
+            if below_start || above_end {
+                children.push(RetainTree {
+                    node: RetainNode {
+                        page: accessor.child_page(i).unwrap(),
+                        checksum: accessor.child_checksum(i).unwrap(),
+                        max_key: child_max_key,
+                    },
+                    height: child_height,
+                    partial: None,
+                });
+                continue;
+            }
+
+            let child_page_number = accessor.child_page(i).unwrap();
+            let child_checksum = accessor.child_checksum(i).unwrap();
+            let child_page = page_resolver.get_page(child_page_number, PageHint::None)?;
+            let child = self.retain_walk(
+                child_page,
+                child_checksum,
+                child_max_key,
+                child_height,
+                bounds,
+                predicate,
+                removed,
+            )?;
+            changed |= child.changed;
+            children.extend(child.nodes);
+        }
+
+        if !changed {
+            return Ok(RetainForest {
+                nodes: vec![RetainTree {
+                    node: RetainNode {
+                        page: page_number,
+                        checksum,
+                        max_key,
+                    },
+                    height,
+                    partial: None,
+                }],
+                changed: false,
+            });
+        }
+
+        if children.is_empty() {
+            drop(page);
+            self.conditional_free(page_number);
+            return Ok(RetainForest {
+                nodes: vec![],
+                changed: true,
+            });
+        }
+
+        drop(page);
+        self.conditional_free(page_number);
+
+        let nodes = self.build_branch_from_children(children)?;
+        Ok(RetainForest {
+            nodes,
+            changed: true,
+        })
+    }
+
+    fn leaf_entries_required_bytes(entries: &[(Vec<u8>, Vec<u8>)]) -> usize {
+        let entries_bytes = entries
+            .iter()
+            .map(|(key, value)| key.len() + value.len())
+            .sum();
+        RawLeafBuilder::required_bytes(
+            entries.len(),
+            entries_bytes,
+            K::fixed_width(),
+            V::fixed_width(),
+        )
+    }
+
+    fn build_leaf_tree(
+        &mut self,
+        entries: Vec<(Vec<u8>, Vec<u8>)>,
+        partial: Option<RetainPartial>,
+    ) -> Result<RetainTree> {
+        debug_assert!(!entries.is_empty());
+        let max_key = entries.last().unwrap().0.clone();
+        let mut builder = LeafBuilder::new(
+            &self.page_allocator,
+            &self.allocated,
+            entries.len(),
+            K::fixed_width(),
+            V::fixed_width(),
+        );
+        for (key, value) in &entries {
+            builder.push(key, value);
+        }
+        let page = builder.build()?;
+        Ok(RetainTree {
+            node: RetainNode {
+                page: page.get_page_number(),
+                checksum: DEFERRED,
+                max_key,
+            },
+            height: 0,
+            partial,
+        })
+    }
+
+    fn build_leaf_trees_from_entries(
+        &mut self,
+        mut entries: Vec<(Vec<u8>, Vec<u8>)>,
+        merge_context: Option<RetainMergeContext>,
+    ) -> Result<Vec<RetainTree>> {
+        if entries.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let page_size = self.page_allocator.get_page_size();
+        let mut groups = vec![];
+        let mut current = vec![];
+        for entry in entries.drain(..) {
+            current.push(entry);
+            if current.len() > 1 && Self::leaf_entries_required_bytes(&current) > page_size {
+                let overflow = current.pop().unwrap();
+                groups.push(std::mem::take(&mut current));
+                current.push(overflow);
+            }
+        }
+        if !current.is_empty() {
+            groups.push(current);
+        }
+
+        let min_size = page_size / 3;
+        for i in (1..groups.len()).rev() {
+            while Self::leaf_entries_required_bytes(&groups[i]) < min_size
+                && groups[i - 1].len() > 1
+            {
+                let moved = groups[i - 1].pop().unwrap();
+                groups[i].insert(0, moved);
+                if Self::leaf_entries_required_bytes(&groups[i]) > page_size
+                    || Self::leaf_entries_required_bytes(&groups[i - 1]) < min_size
+                {
+                    let moved = groups[i].remove(0);
+                    groups[i - 1].push(moved);
+                    break;
+                }
+            }
+        }
+
+        let mut result = Vec::with_capacity(groups.len());
+        let group_count = groups.len();
+        for (i, group) in groups.into_iter().enumerate() {
+            let partial = if Self::leaf_entries_required_bytes(&group) < min_size {
+                Self::partial_for_rebuilt_group(i, group_count, merge_context)
+            } else {
+                None
+            };
+            let tree = self.build_leaf_tree(group, partial)?;
+            result.push(tree);
+        }
+        Ok(result)
+    }
+
+    fn partial_for_rebuilt_group(
+        index: usize,
+        group_count: usize,
+        merge_context: Option<RetainMergeContext>,
+    ) -> Option<RetainPartial> {
+        debug_assert!(index < group_count);
+        if group_count == 1 {
+            return Some(RetainPartial::new());
+        }
+
+        if index == 0 {
+            let partial = merge_context
+                .and_then(|context| context.left_partial)
+                .unwrap_or_else(RetainPartial::new)
+                .after_trying(RetainMergeSide::Right);
+            partial.left_only()
+        } else if index + 1 == group_count {
+            let partial = merge_context
+                .and_then(|context| context.right_partial)
+                .unwrap_or_else(RetainPartial::new)
+                .after_trying(RetainMergeSide::Left);
+            partial.right_only()
+        } else {
+            Some(RetainPartial::new())
+        }
+    }
+
+    fn branch_child_tree(
+        accessor: &BranchAccessor<'_, '_, PageImpl>,
+        parent_max_key: &[u8],
+        child_height: u32,
+        index: usize,
+    ) -> RetainTree {
+        let max_key = if index + 1 < accessor.count_children() {
+            accessor.key(index).unwrap().to_vec()
+        } else {
+            parent_max_key.to_vec()
+        };
+        RetainTree {
+            node: RetainNode {
+                page: accessor.child_page(index).unwrap(),
+                checksum: accessor.child_checksum(index).unwrap(),
+                max_key,
+            },
+            height: child_height,
+            partial: None,
+        }
+    }
+
+    fn normalize_retain_trees(&mut self, mut trees: Vec<RetainTree>) -> Result<Vec<RetainTree>> {
+        let mut iterations = 0;
+        loop {
+            iterations += 1;
+            debug_assert!(
+                iterations < 10_000,
+                "retain normalization did not converge: {:?}",
+                trees
+                    .iter()
+                    .map(|tree| (tree.height, tree.partial))
+                    .collect::<Vec<_>>()
+            );
+            if trees.len() <= 1 {
+                return Ok(trees);
+            }
+
+            if let Some(index) = trees
+                .windows(2)
+                .position(|pair| pair[0].height != pair[1].height)
+            {
+                let left = trees.remove(index);
+                let right = trees.remove(index);
+                let merged = self.merge_ordered_retain_trees(left, right)?;
+                trees.splice(index..index, merged);
+                continue;
+            }
+
+            if let Some(index) = trees.iter().position(|tree| tree.partial.is_some()) {
+                let partial = trees[index].partial.unwrap();
+                let start = if partial.try_right && index + 1 < trees.len() {
+                    index
+                } else if partial.try_left && index > 0 {
+                    index - 1
+                } else {
+                    trees[index].partial = None;
+                    continue;
+                };
+                let left = trees.remove(start);
+                let right = trees.remove(start);
+                let merged = self.merge_adjacent_retain_trees(left, right)?;
+                trees.splice(start..start, merged);
+                continue;
+            }
+
+            return Ok(trees);
+        }
+    }
+
+    fn merge_ordered_retain_trees(
+        &mut self,
+        left: RetainTree,
+        right: RetainTree,
+    ) -> Result<Vec<RetainTree>> {
+        match left.height.cmp(&right.height) {
+            Ordering::Equal => self.merge_adjacent_retain_trees(left, right),
+            Ordering::Less => self.merge_lower_tree_with_higher(left, right, true),
+            Ordering::Greater => self.merge_lower_tree_with_higher(right, left, false),
+        }
+    }
+
+    fn merge_lower_tree_with_higher(
+        &mut self,
+        lower: RetainTree,
+        higher: RetainTree,
+        lower_before_higher: bool,
+    ) -> Result<Vec<RetainTree>> {
+        debug_assert!(lower.height < higher.height);
+        let page = self
+            .page_allocator
+            .get_page(higher.node.page, PageHint::None)?;
+        debug_assert_eq!(page.memory()[0], BRANCH);
+        let accessor = BranchAccessor::new(&page, K::fixed_width());
+        let child_height = higher.height - 1;
+        let edge_index = if lower_before_higher {
+            0
+        } else {
+            accessor.count_children() - 1
+        };
+        let edge =
+            Self::branch_child_tree(&accessor, &higher.node.max_key, child_height, edge_index);
+        let mut children = Vec::with_capacity(accessor.count_children() + 1);
+
+        if lower_before_higher {
+            children.extend(self.merge_ordered_retain_trees(lower, edge)?);
+            for i in 1..accessor.count_children() {
+                children.push(Self::branch_child_tree(
+                    &accessor,
+                    &higher.node.max_key,
+                    child_height,
+                    i,
+                ));
+            }
+        } else {
+            for i in 0..edge_index {
+                children.push(Self::branch_child_tree(
+                    &accessor,
+                    &higher.node.max_key,
+                    child_height,
+                    i,
+                ));
+            }
+            children.extend(self.merge_ordered_retain_trees(edge, lower)?);
+        }
+
+        drop(page);
+        self.conditional_free(higher.node.page);
+        self.build_branch_from_children(children)
+    }
+
+    fn merge_adjacent_retain_trees(
+        &mut self,
+        left: RetainTree,
+        right: RetainTree,
+    ) -> Result<Vec<RetainTree>> {
+        debug_assert_eq!(left.height, right.height);
+        if left.height == 0 {
+            self.merge_leaf_trees(left, right)
+        } else {
+            self.merge_branch_trees(left, right)
+        }
+    }
+
+    fn merge_leaf_trees(&mut self, left: RetainTree, right: RetainTree) -> Result<Vec<RetainTree>> {
+        let merge_context = RetainMergeContext::new(&left, &right);
+        let mut entries = vec![];
+        for tree in [&left, &right] {
+            let page = self
+                .page_allocator
+                .get_page(tree.node.page, PageHint::None)?;
+            debug_assert_eq!(page.memory()[0], LEAF);
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+            for i in 0..accessor.num_pairs() {
+                let entry = accessor.entry(i).unwrap();
+                entries.push((entry.key().to_vec(), entry.value().to_vec()));
+            }
+        }
+        self.conditional_free(left.node.page);
+        self.conditional_free(right.node.page);
+        self.build_leaf_trees_from_entries(entries, Some(merge_context))
+    }
+
+    fn merge_branch_trees(
+        &mut self,
+        left: RetainTree,
+        right: RetainTree,
+    ) -> Result<Vec<RetainTree>> {
+        debug_assert!(left.height > 0);
+        let merge_context = RetainMergeContext::new(&left, &right);
+        let left_page = self
+            .page_allocator
+            .get_page(left.node.page, PageHint::None)?;
+        let right_page = self
+            .page_allocator
+            .get_page(right.node.page, PageHint::None)?;
+        debug_assert_eq!(left_page.memory()[0], BRANCH);
+        debug_assert_eq!(right_page.memory()[0], BRANCH);
+        let left_accessor = BranchAccessor::new(&left_page, K::fixed_width());
+        let right_accessor = BranchAccessor::new(&right_page, K::fixed_width());
+        let child_height = left.height - 1;
+        let mut children =
+            Vec::with_capacity(left_accessor.count_children() + right_accessor.count_children());
+        for i in 0..left_accessor.count_children() {
+            children.push(Self::branch_child_tree(
+                &left_accessor,
+                &left.node.max_key,
+                child_height,
+                i,
+            ));
+        }
+        for i in 0..right_accessor.count_children() {
+            children.push(Self::branch_child_tree(
+                &right_accessor,
+                &right.node.max_key,
+                child_height,
+                i,
+            ));
+        }
+        drop(left_page);
+        drop(right_page);
+        self.conditional_free(left.node.page);
+        self.conditional_free(right.node.page);
+        self.build_branch_from_children_with_context(children, Some(merge_context))
+    }
+
+    fn build_root_from_forest(&mut self, mut nodes: Vec<RetainTree>) -> Result<RetainTree> {
+        nodes = self.normalize_retain_trees(nodes)?;
+        while nodes.len() > 1 {
+            nodes = self.build_parent_level(nodes, None)?;
+            nodes = self.normalize_retain_trees(nodes)?;
+        }
+        Ok(nodes.pop().unwrap())
+    }
+
+    fn build_branch_from_children(&mut self, children: Vec<RetainTree>) -> Result<Vec<RetainTree>> {
+        self.build_branch_from_children_with_context(children, None)
+    }
+
+    fn build_branch_from_children_with_context(
+        &mut self,
+        children: Vec<RetainTree>,
+        merge_context: Option<RetainMergeContext>,
+    ) -> Result<Vec<RetainTree>> {
+        let children = self.normalize_retain_trees(children)?;
+        if children.len() <= 1 {
+            return Ok(children);
+        }
+        self.build_parent_level(children, merge_context)
+    }
+
+    fn build_parent_level(
+        &mut self,
+        children: Vec<RetainTree>,
+        merge_context: Option<RetainMergeContext>,
+    ) -> Result<Vec<RetainTree>> {
+        debug_assert!(children.len() > 1);
+        let child_height = children[0].height;
+        debug_assert!(children.iter().all(|child| child.height == child_height));
+
+        let page_size = self.page_allocator.get_page_size();
+        let mut groups: Vec<Vec<RetainTree>> = vec![];
+        let mut current = vec![];
+        for child in children {
+            current.push(child);
+            if current.len() > 2 && Self::branch_group_required_bytes(&current) > page_size {
+                let overflow = current.pop().unwrap();
+                groups.push(std::mem::take(&mut current));
+                current.push(overflow);
+            }
+        }
+        if !current.is_empty() {
+            groups.push(current);
+        }
+
+        if groups.len() > 1 && groups.last().unwrap().len() == 1 {
+            let last = groups.pop().unwrap().pop().unwrap();
+            let previous = groups.last_mut().unwrap();
+            previous.push(last);
+        }
+
+        let min_size = page_size / 3;
+        for i in (1..groups.len()).rev() {
+            while groups[i].len() > 1
+                && Self::branch_group_required_bytes(&groups[i]) < min_size
+                && groups[i - 1].len() > 2
+            {
+                let moved = groups[i - 1].pop().unwrap();
+                groups[i].insert(0, moved);
+                if Self::branch_group_required_bytes(&groups[i]) > page_size
+                    || Self::branch_group_required_bytes(&groups[i - 1]) < min_size
+                {
+                    let moved = groups[i].remove(0);
+                    groups[i - 1].push(moved);
+                    break;
+                }
+            }
+        }
+
+        let mut parents = vec![];
+        let group_count = groups.len();
+        let multiple_groups = group_count > 1;
+        for (i, group) in groups.into_iter().enumerate() {
+            if group.len() == 1 {
+                parents.extend(group);
+                continue;
+            }
+            let force_full = multiple_groups
+                && Self::branch_group_required_bytes(&group) < min_size
+                && group.len() == 2;
+            let partial = if !force_full && Self::branch_group_required_bytes(&group) < min_size {
+                Self::partial_for_rebuilt_group(i, group_count, merge_context)
+            } else {
+                None
+            };
+            let nodes = self.build_branch_nodes(&group, child_height, partial)?;
+            parents.extend(nodes);
+        }
+        Ok(parents)
+    }
+
+    fn branch_group_required_bytes(children: &[RetainTree]) -> usize {
+        debug_assert!(children.len() > 1);
+        let total_key_bytes = children
+            .iter()
+            .take(children.len() - 1)
+            .map(|child| child.node.max_key.len())
+            .sum();
+        RawBranchBuilder::required_bytes(children.len() - 1, total_key_bytes, K::fixed_width())
+    }
+
+    fn build_branch_nodes(
+        &mut self,
+        children: &[RetainTree],
+        child_height: u32,
+        partial: Option<RetainPartial>,
+    ) -> Result<Vec<RetainTree>> {
+        debug_assert!(children.len() > 1);
+        let mut builder = BranchBuilder::new(
+            &self.page_allocator,
+            &self.allocated,
+            children.len(),
+            K::fixed_width(),
+        );
+        for (i, child) in children.iter().enumerate() {
+            builder.push_child(child.node.page, child.node.checksum);
+            if i + 1 < children.len() {
+                builder.push_key(&child.node.max_key);
+            }
+        }
+
+        if builder.should_split() {
+            let (left, separator, right) = builder.build_split()?;
+            let separator = separator.to_vec();
+            let left_page = left.get_page_number();
+            let right_page = right.get_page_number();
+            Ok(vec![
+                RetainTree {
+                    node: RetainNode {
+                        page: left_page,
+                        checksum: DEFERRED,
+                        max_key: separator,
+                    },
+                    height: child_height + 1,
+                    partial: None,
+                },
+                RetainTree {
+                    node: RetainNode {
+                        page: right_page,
+                        checksum: DEFERRED,
+                        max_key: children.last().unwrap().node.max_key.clone(),
+                    },
+                    height: child_height + 1,
+                    partial: None,
+                },
+            ])
+        } else {
+            let page = builder.build()?;
+            Ok(vec![RetainTree {
+                node: RetainNode {
+                    page: page.get_page_number(),
+                    checksum: DEFERRED,
+                    max_key: children.last().unwrap().node.max_key.clone(),
+                },
+                height: child_height + 1,
+                partial,
+            }])
+        }
     }
 
     fn delete_target(

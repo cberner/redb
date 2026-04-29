@@ -2014,11 +2014,15 @@ fn retain_in_rebuilds_range_boundaries() {
         for i in 0u64..30_000 {
             table.insert(i, &[0u8; 200]).unwrap();
         }
+        let height_before = table.stats().unwrap().tree_height();
 
         table
             .retain_in(10_000..20_000, |key, _| key == 15_000)
             .unwrap();
         assert_eq!(table.len().unwrap(), 20_001);
+        let stats = table.stats().unwrap();
+        assert!(stats.tree_height() <= height_before);
+        assert!(stats.leaf_pages() < 2_100);
         assert!(table.get(&9999).unwrap().is_some());
         assert!(table.get(&10_000).unwrap().is_none());
         assert!(table.get(&14_999).unwrap().is_none());
@@ -2050,6 +2054,32 @@ fn retain_coalesces_sparse_survivors() {
         for i in 0u64..20_000 {
             let value = table.get(&i).unwrap();
             assert_eq!(value.is_some(), i % 100 == 0);
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn retain_variable_sized_sparse_survivors_terminates() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let large = vec![0u8; 3_600];
+    let small = vec![1u8; 600];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..3_000 {
+            let value = if i % 3 == 0 { &large } else { &small };
+            table.insert(i, value.as_slice()).unwrap();
+        }
+
+        table.retain(|key, _| key % 3 != 1).unwrap();
+        assert_eq!(table.len().unwrap(), 2_000);
+        for i in 0u64..3_000 {
+            assert_eq!(table.get(i).unwrap().is_some(), i % 3 != 1);
         }
     }
     write_txn.commit().unwrap();
