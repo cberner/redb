@@ -4,6 +4,7 @@ mod btree_iters;
 mod btree_mutator;
 mod multimap_btree;
 mod page_store;
+mod retain;
 mod table_tree;
 mod table_tree_base;
 
