@@ -367,6 +367,55 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
         txn.commit().unwrap();
     }
 
+    // Extract_if benchmark: walk a range covering ~1/3 of the keyspace and remove every other
+    // entry via a predicate. Keys are random uniform over [0, 2^192), so a first-byte range of
+    // [0x55, 0xAA) covers ~33% of all keys. After timing, repopulate with the same number of
+    // fresh random entries so downstream phases see a table of similar shape.
+    let extract_start: [u8; KEY_SIZE] = [0x55; KEY_SIZE];
+    let extract_end: [u8; KEY_SIZE] = [0xAA; KEY_SIZE];
+    let start = Instant::now();
+    let extracted = {
+        let mut txn = connection.write_transaction();
+        let mut inserter = txn.get_inserter();
+        let mut counter: u64 = 0;
+        let extracted = inserter
+            .extract_if(
+                (
+                    Bound::Included(&extract_start[..]),
+                    Bound::Excluded(&extract_end[..]),
+                ),
+                |_, _| {
+                    let extract = counter % 2 == 1;
+                    counter += 1;
+                    extract
+                },
+            )
+            .unwrap();
+        drop(inserter);
+        txn.commit().unwrap();
+        extracted
+    };
+    let end = Instant::now();
+    let duration = end - start;
+    println!(
+        "{}: extract_if removed {} items in {}ms",
+        T::db_type_name(),
+        extracted,
+        duration.as_millis()
+    );
+    results.push(("extract_if".to_string(), ResultType::Duration(duration)));
+
+    {
+        let mut txn = connection.write_transaction();
+        let mut inserter = txn.get_inserter();
+        for _ in 0..extracted {
+            let (key, value) = random_pair(&mut rng);
+            inserter.insert(&key, &value).unwrap();
+        }
+        drop(inserter);
+        txn.commit().unwrap();
+    }
+
     let uncompacted_size = database_size(path);
     results.push((
         "uncompacted size".to_string(),
@@ -489,6 +538,16 @@ pub trait BenchInserter {
     // Returns the number of entries removed.
     #[allow(clippy::result_unit_err)]
     fn retain<F: FnMut(&[u8], &[u8]) -> bool>(&mut self, predicate: F) -> Result<u64, ()>;
+
+    // Applies `predicate` to every entry within `range`; entries for which it returns `true`
+    // are removed (extracted). Modeled after `std::collections::BTreeMap::extract_if`.
+    // Returns the number of entries removed.
+    #[allow(clippy::result_unit_err)]
+    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
+        &mut self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+        predicate: F,
+    ) -> Result<u64, ()>;
 }
 
 pub trait BenchReadTransaction {
@@ -715,6 +774,25 @@ impl BenchInserter for RedbBenchInserter<'_> {
             .map_err(|_| ())?;
         Ok(removed)
     }
+
+    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
+        &mut self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+        mut predicate: F,
+    ) -> Result<u64, ()> {
+        // redb has a native cursor-based extract_from_if that removes entries lazily as the
+        // returned iterator is consumed.
+        let iter = self
+            .table
+            .extract_from_if::<&[u8], _>(range, |k, v| predicate(k, v))
+            .map_err(|_| ())?;
+        let mut removed = 0u64;
+        for entry in iter {
+            entry.map_err(|_| ())?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
 }
 
 pub struct SledBenchDatabase<'a> {
@@ -892,6 +970,27 @@ impl BenchInserter for SledBenchInserter<'_> {
         for entry in self.db.iter() {
             let (k, v) = entry.map_err(|_| ())?;
             if !predicate(&k, &v) {
+                keys.push(k);
+            }
+        }
+        let count = keys.len() as u64;
+        for key in keys {
+            self.db.remove(&key).map_err(|_| ())?;
+        }
+        Ok(count)
+    }
+
+    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
+        &mut self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+        mut predicate: F,
+    ) -> Result<u64, ()> {
+        // sled's range iterator scans only the requested range; no in-place delete API exists,
+        // so we collect the keys to extract and remove them in a second pass.
+        let mut keys: Vec<sled::IVec> = Vec::new();
+        for entry in self.db.range::<&[u8], _>(range) {
+            let (k, v) = entry.map_err(|_| ())?;
+            if predicate(&k, &v) {
                 keys.push(k);
             }
         }
@@ -1086,6 +1185,36 @@ impl BenchInserter for HeedBenchInserter<'_, '_> {
                 None => break,
                 Some(true) => {}
                 Some(false) => {
+                    // safety: no references into the db are held across this call.
+                    unsafe { iter.del_current().map_err(|_| ())? };
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
+        &mut self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+        mut predicate: F,
+    ) -> Result<u64, ()> {
+        // Use heed's cursor-based mutable range iterator with del_current so the benchmark
+        // reflects LMDB's best effort.
+        let mut iter = self.db.range_mut(self.txn, &range).map_err(|_| ())?;
+        let mut removed = 0u64;
+        loop {
+            let extract = match iter.next() {
+                Some(res) => {
+                    let (k, v) = res.map_err(|_| ())?;
+                    Some(predicate(k, v))
+                }
+                None => None,
+            };
+            match extract {
+                None => break,
+                Some(false) => {}
+                Some(true) => {
                     // safety: no references into the db are held across this call.
                     unsafe { iter.del_current().map_err(|_| ())? };
                     removed += 1;
@@ -1310,6 +1439,51 @@ impl BenchInserter for RocksdbBenchInserter<'_, '_> {
             for entry in iter {
                 let (k, v) = entry.map_err(|_| ())?;
                 if !predicate(&k, &v) {
+                    keys.push(k);
+                }
+            }
+        }
+        let count = keys.len() as u64;
+        for key in &keys {
+            self.remove(key)?;
+        }
+        Ok(count)
+    }
+
+    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
+        &mut self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+        mut predicate: F,
+    ) -> Result<u64, ()> {
+        // RocksDB's Transaction API has no cursor-based deletion. Position the iterator at the
+        // start bound, walk it until the end bound is exceeded, evaluate the predicate, then
+        // delete the collected keys.
+        let mut keys: Vec<Box<[u8]>> = Vec::new();
+        {
+            let mode = match range.0 {
+                Bound::Included(k) | Bound::Excluded(k) => {
+                    IteratorMode::From(k, Direction::Forward)
+                }
+                Bound::Unbounded => IteratorMode::Start,
+            };
+            let iter = self.txn.txn.iterator(mode);
+            for entry in iter {
+                let (k, v) = entry.map_err(|_| ())?;
+                let key_ref: &[u8] = &k;
+                if let Bound::Excluded(start) = range.0
+                    && key_ref == start
+                {
+                    continue;
+                }
+                let past_end = match range.1 {
+                    Bound::Included(end) => key_ref > end,
+                    Bound::Excluded(end) => key_ref >= end,
+                    Bound::Unbounded => false,
+                };
+                if past_end {
+                    break;
+                }
+                if predicate(&k, &v) {
                     keys.push(k);
                 }
             }
@@ -1589,6 +1763,30 @@ impl BenchInserter for FjallBenchInserter<'_, '_> {
         }
         Ok(count)
     }
+
+    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
+        &mut self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+        mut predicate: F,
+    ) -> Result<u64, ()> {
+        // fjall's range iterator scans only the requested range; collect-then-delete since the
+        // transaction API has no in-place cursor delete.
+        let mut keys: Vec<fjall::Slice> = Vec::new();
+        {
+            let iter = self.txn.range::<&[u8], _>(self.part, range);
+            for entry in iter {
+                let (k, v) = entry.map_err(|_| ())?;
+                if predicate(&k, &v) {
+                    keys.push(k);
+                }
+            }
+        }
+        let count = keys.len() as u64;
+        for key in keys {
+            self.txn.remove(self.part, key);
+        }
+        Ok(count)
+    }
 }
 
 pub struct SqliteBenchDatabase {
@@ -1717,6 +1915,69 @@ impl BenchInserter for SqliteBenchInserter<'_, '_> {
                 let k: Vec<u8> = row.get(0).map_err(|_| ())?;
                 let v: Vec<u8> = row.get(1).map_err(|_| ())?;
                 if !predicate(&k, &v) {
+                    to_delete.push(k);
+                }
+            }
+        }
+        let count = to_delete.len() as u64;
+        let mut delete_stmt = self
+            .txn
+            .prepare("DELETE FROM kv WHERE key = ?")
+            .map_err(|_| ())?;
+        for key in &to_delete {
+            delete_stmt.execute([key]).map_err(|_| ())?;
+        }
+        Ok(count)
+    }
+
+    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
+        &mut self,
+        range: (Bound<&[u8]>, Bound<&[u8]>),
+        mut predicate: F,
+    ) -> Result<u64, ()> {
+        // Push the range bound down into SQL so SQLite scans only the relevant portion of the
+        // index; predicate evaluation still happens in Rust.
+        let mut conds: Vec<&str> = Vec::new();
+        let mut params: Vec<&[u8]> = Vec::new();
+        match range.0 {
+            Bound::Included(s) => {
+                conds.push("key >= ?");
+                params.push(s);
+            }
+            Bound::Excluded(s) => {
+                conds.push("key > ?");
+                params.push(s);
+            }
+            Bound::Unbounded => {}
+        }
+        match range.1 {
+            Bound::Included(e) => {
+                conds.push("key <= ?");
+                params.push(e);
+            }
+            Bound::Excluded(e) => {
+                conds.push("key < ?");
+                params.push(e);
+            }
+            Bound::Unbounded => {}
+        }
+        let mut sql = String::from("SELECT key, value FROM kv");
+        if !conds.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conds.join(" AND "));
+        }
+        sql.push_str(" ORDER BY key");
+
+        let mut to_delete: Vec<Vec<u8>> = Vec::new();
+        {
+            let mut stmt = self.txn.prepare(&sql).map_err(|_| ())?;
+            let mut rows = stmt
+                .query(rusqlite::params_from_iter(params.iter()))
+                .map_err(|_| ())?;
+            while let Some(row) = rows.next().map_err(|_| ())? {
+                let k: Vec<u8> = row.get(0).map_err(|_| ())?;
+                let v: Vec<u8> = row.get(1).map_err(|_| ())?;
+                if predicate(&k, &v) {
                     to_delete.push(k);
                 }
             }
