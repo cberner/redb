@@ -7,6 +7,28 @@ on:
       - master
 
 jobs:
+  commit-authors:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Ban AI-authored commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags --no-recurse-submodules origin "$BASE_SHA"
+          offenders=$(git log --no-merges --pretty=format:'%H %an <%ae> committed by %cn <%ce>' "$BASE_SHA".."$HEAD_SHA" \
+            | grep -iE '(claude|codex)' || true)
+          if [ -n "$offenders" ]; then
+            echo "Commits authored or committed by Claude or Codex are not allowed:"
+            echo "$offenders"
+            exit 1
+          fi
+
   ci:
     strategy:
       matrix:
