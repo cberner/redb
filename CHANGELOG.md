@@ -1,6 +1,8 @@
 # redb - Changelog
 
 ## 4.2.0 - 2026-XX-XX
+* Optimize `Table::retain()` and `Table::retain_in()` by rebuilding affected B-tree pages
+  in a single pass instead of deleting matching entries one at a time.
 * Add `Table::entry()` and the associated `Entry`, `OccupiedEntry`, and `VacantEntry`
   types, mirroring `std::collections::BTreeMap::entry`. Supports `or_insert`,
   `or_insert_with`, `or_insert_with_key`, `and_modify`, and the usual `OccupiedEntry`
