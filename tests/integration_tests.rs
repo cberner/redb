@@ -3414,6 +3414,87 @@ fn multimap_value_next_back_does_not_update_len() {
     assert!(iter.next_back().is_none());
 }
 
+// Demonstrates a data-loss bug: extract_if() does not poison the write
+// transaction when its predicate panics, in contrast to retain() which does
+// (see commit d1b0428 "Poison transaction on retain predicate panic" and the
+// basic_tests::retain_predicate_panic_poisons_transaction regression test).
+//
+// Both extract_if() and retain() destructively delete entries from the tree
+// while iterating: each call to ExtractIf::next() applies the deletion to the
+// tree root before returning the entry. A panic mid-iteration therefore leaves
+// the table in a partially modified state. retain() guards against this by
+// poisoning the transaction from a Drop handler so that commit() returns
+// CommitError::TransactionPoisoned. extract_if() has no such guard, so a user
+// who catches the panic with catch_unwind() can still call commit(), and the
+// partial deletions become durable. Items the user never intended to delete
+// unconditionally are silently lost.
+#[cfg(not(target_os = "wasi"))]
+#[test]
+fn extract_if_predicate_panic_loses_data() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    // Populate the table with keys 0..4 and commit so the entries are durable.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..4 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Iterate via extract_if() with a predicate that panics when it reaches
+    // key 2. By that point the iterator has already deleted keys 0 and 1 from
+    // the in-progress tree. The panic is caught by the test, simulating user
+    // code that recovers from an unexpected panic in the predicate.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let iter = table
+                .extract_if(|key, _| {
+                    assert_ne!(key, 2, "extract_if predicate panic");
+                    true
+                })
+                .unwrap();
+            for item in iter {
+                let _ = item.unwrap();
+            }
+        }));
+        assert!(result.is_err(), "predicate should have panicked");
+    }
+
+    // BUG: the panic does NOT poison the transaction, so commit() succeeds and
+    // the partial deletions are made durable. With retain() this same scenario
+    // would produce CommitError::TransactionPoisoned and abort the transaction.
+    write_txn
+        .commit()
+        .expect("bug: extract_if predicate panic leaves transaction committable");
+
+    // Observe the data loss: keys 0 and 1 -- which the user never asked to
+    // delete unconditionally, because the predicate was supposed to abort
+    // before completing -- are now gone from the durable database.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert!(
+        table.get(0u64).unwrap().is_none(),
+        "data loss: key 0 was removed despite the predicate panic"
+    );
+    assert!(
+        table.get(1u64).unwrap().is_none(),
+        "data loss: key 1 was removed despite the predicate panic"
+    );
+    // Keys at and after the panicking key are still present, since the
+    // iterator never got to them.
+    assert_eq!(table.get(2u64).unwrap().unwrap().value(), 2);
+    assert_eq!(table.get(3u64).unwrap().unwrap().value(), 3);
+    assert_eq!(table.len().unwrap(), 2);
+}
+
 #[test]
 #[should_panic(expected = "assertion failed: !name.is_empty()")]
 fn table_definition_new_panics_on_empty_name() {
