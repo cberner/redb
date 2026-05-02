@@ -253,6 +253,58 @@ fn extract_if() {
     }
 }
 
+#[cfg(not(target_os = "wasi"))]
+#[test]
+fn extract_if_predicate_panic_poisons_transaction() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut extracted = table
+                .extract_if(|key, _| {
+                    assert_ne!(key, 2);
+                    key == 0
+                })
+                .unwrap();
+            assert_eq!(extracted.next().unwrap().unwrap().0.value(), 0);
+            let _ = extracted.next();
+        }));
+        assert!(result.is_err());
+    }
+    assert!(matches!(
+        write_txn.commit(),
+        Err(CommitError::TransactionPoisoned)
+    ));
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[test]
+fn extract_if_caller_panic_does_not_poison_transaction() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut extracted = table.extract_if(|key, _| key == 0).unwrap();
+            assert_eq!(extracted.next().unwrap().unwrap().0.value(), 0);
+            panic!("caller panic");
+        }));
+        assert!(result.is_err());
+    }
+    write_txn.commit().unwrap();
+}
+
 #[test]
 fn retain() {
     let tmpfile = create_tempfile();
