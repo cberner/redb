@@ -3,12 +3,11 @@ use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
     LeafAccessor, LeafPageMut, branch_checksum, leaf_checksum,
 };
-use crate::tree_store::btree_iters::BtreeExtractIf;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
-    AccessGuardMutInPlace, AllPageNumbersBtreeIter, BtreeRangeIter, PageAllocator, PageHint,
-    PageNumber, PageResolver, PageTrackerPolicy,
+    AccessGuardMutInPlace, AllPageNumbersBtreeIter, BtreeExtractIf, BtreeRangeIter, PageAllocator,
+    PageHint, PageNumber, PageResolver, PageTrackerPolicy,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result};
