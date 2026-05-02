@@ -261,6 +261,7 @@ pub(crate) struct BtreeExtractIf<
     root: &'a mut Option<BtreeHeader>,
     inner: BtreeRangeIter<K, V>,
     predicate: F,
+    predicate_running: bool,
     free_on_drop: Vec<PageNumber>,
     master_free_list: Arc<Mutex<Vec<PageNumber>>>,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
@@ -282,11 +283,24 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
             root,
             inner,
             predicate,
+            predicate_running: false,
             free_on_drop: vec![],
             master_free_list,
             allocated,
             page_allocator,
         }
+    }
+
+    pub(crate) fn predicate_panicked(&self) -> bool {
+        self.predicate_running
+    }
+
+    fn predicate_matches(&mut self, entry: &EntryGuard<K, V>) -> bool {
+        assert!(!self.predicate_running);
+        self.predicate_running = true;
+        let result = (self.predicate)(entry.key(), entry.value());
+        self.predicate_running = false;
+        result
     }
 }
 
@@ -298,7 +312,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
     fn next(&mut self) -> Option<Self::Item> {
         let mut item = self.inner.next();
         while let Some(Ok(ref entry)) = item {
-            if (self.predicate)(entry.key(), entry.value()) {
+            if self.predicate_matches(entry) {
                 let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new_do_not_modify(
                     self.root,
                     self.page_allocator.clone(),
@@ -327,7 +341,7 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
     fn next_back(&mut self) -> Option<Self::Item> {
         let mut item = self.inner.next_back();
         while let Some(Ok(ref entry)) = item {
-            if (self.predicate)(entry.key(), entry.value()) {
+            if self.predicate_matches(entry) {
                 let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new_do_not_modify(
                     self.root,
                     self.page_allocator.clone(),

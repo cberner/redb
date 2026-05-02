@@ -444,7 +444,7 @@ impl<'s, K: Key + 'static, V: Value + 'static> SystemTable<'s, K, V> {
     {
         self.tree
             .extract_from_if(&range, predicate)
-            .map(ExtractIf::new)
+            .map(|inner| ExtractIf::new(inner, None))
     }
 
     pub fn insert<'k, 'v>(

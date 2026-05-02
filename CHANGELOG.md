@@ -6,9 +6,9 @@
   types, mirroring `std::collections::BTreeMap::entry`. Supports `or_insert`,
   `or_insert_with`, `or_insert_with_key`, `and_modify`, and the usual `OccupiedEntry`
   / `VacantEntry` accessors.
-* `Table::retain()` and `Table::retain_in()` now poison the write transaction if their
-  predicate panics, causing `WriteTransaction::commit()` to return
-  `CommitError::TransactionPoisoned`.
+* `Table::retain()`, `Table::retain_in()`, `Table::extract_if()`, and `Table::extract_from_if()`
+  now poison the write transaction if their predicate panics, causing `WriteTransaction::commit()`
+  to return `CommitError::TransactionPoisoned`.
 * Optimize `Table::pop_first()` and `Table::pop_last()` to be about 2x faster.
 * Enable file space reclamation during non-durable transactions performed while a savepoint exists.
 * Reuse pages freed by a durable write transaction in the next write transaction when no
