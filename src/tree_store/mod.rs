@@ -2,6 +2,7 @@ mod btree;
 mod btree_base;
 mod btree_iters;
 mod btree_mutator;
+mod extract_if;
 mod multimap_btree;
 mod page_store;
 mod retain;
@@ -12,7 +13,8 @@ pub(crate) use btree::{Btree, BtreeMut, BtreeStats, RawBtree};
 pub(crate) use btree_base::BtreeHeader;
 pub use btree_base::{AccessGuard, AccessGuardMut, AccessGuardMutInPlace};
 pub(crate) use btree_base::{BRANCH, LEAF, LeafAccessor, RawLeafBuilder};
-pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeExtractIf, BtreeRangeIter};
+pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeRangeIter};
+pub(crate) use extract_if::BtreeExtractIf;
 pub(crate) use multimap_btree::{DynamicCollection, DynamicCollectionType, multimap_btree_stats};
 pub(crate) use page_store::ReadOnlyBackend;
 pub(crate) use page_store::{
