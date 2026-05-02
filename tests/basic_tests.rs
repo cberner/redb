@@ -306,6 +306,159 @@ fn extract_if_caller_panic_does_not_poison_transaction() {
 }
 
 #[test]
+fn extract_if_is_lazy_until_read() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let mut predicate_calls = 0;
+        drop(
+            table
+                .extract_if(|_, _| {
+                    predicate_calls += 1;
+                    true
+                })
+                .unwrap(),
+        );
+        assert_eq!(predicate_calls, 0);
+        assert_eq!(table.len().unwrap(), 10);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn extract_if_mixed_direction_removes_only_yielded_entries() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let mut extracted = table.extract_if(|key, _| key % 2 == 0).unwrap();
+        assert_eq!(extracted.next().unwrap().unwrap().0.value(), 0);
+        assert_eq!(extracted.next_back().unwrap().unwrap().0.value(), 8);
+        drop(extracted);
+
+        assert_eq!(table.len().unwrap(), 8);
+        assert!(table.get(&0).unwrap().is_none());
+        assert!(table.get(&8).unwrap().is_none());
+        for i in [2, 4, 6] {
+            assert_eq!(table.get(&i).unwrap().unwrap().value(), i);
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn extract_from_if_mixed_direction_early_drop_range() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..1000 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let mut extracted = table
+            .extract_from_if(200..800, |key, _| key % 5 == 0)
+            .unwrap();
+        assert_eq!(extracted.next().unwrap().unwrap().0.value(), 200);
+        assert_eq!(extracted.next_back().unwrap().unwrap().0.value(), 795);
+        drop(extracted);
+
+        assert_eq!(table.len().unwrap(), 998);
+        assert!(table.get(&200).unwrap().is_none());
+        assert!(table.get(&795).unwrap().is_none());
+        for i in [0, 205, 790, 800] {
+            assert_eq!(table.get(&i).unwrap().unwrap().value(), i);
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn extract_from_if_next_back_large_range() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    let n = 17_000u64;
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..n {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let expected = (n / 2..n)
+            .filter(|key| key % 7 == 0)
+            .rev()
+            .collect::<Vec<_>>();
+        let mut extracted = table
+            .extract_from_if(n / 2.., |key, _| key % 7 == 0)
+            .unwrap();
+        let mut removed = vec![];
+        while let Some(entry) = extracted.next_back() {
+            removed.push(entry.unwrap().0.value());
+        }
+        drop(extracted);
+
+        assert_eq!(removed, expected);
+        assert_eq!(table.len().unwrap(), n - expected.len() as u64);
+        for key in expected {
+            assert!(table.get(&key).unwrap().is_none());
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn extract_if_returned_guards_survive_finalize() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &(i * 10)).unwrap();
+        }
+
+        let mut extracted = table.extract_if(|key, _| key == 4).unwrap();
+        let (key, value) = extracted.next().unwrap().unwrap();
+        assert!(extracted.next().is_none());
+        assert_eq!(key.value(), 4);
+        assert_eq!(value.value(), 40);
+        drop((key, value, extracted));
+
+        assert_eq!(table.len().unwrap(), 9);
+        assert!(table.get(&4).unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut extracted = table.extract_if(|key, _| key == 5).unwrap();
+        let (key, value) = extracted.next().unwrap().unwrap();
+        drop(extracted);
+        assert_eq!(key.value(), 5);
+        assert_eq!(value.value(), 50);
+        drop((key, value));
+
+        assert_eq!(table.len().unwrap(), 8);
+        assert!(table.get(&5).unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
 fn retain() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
