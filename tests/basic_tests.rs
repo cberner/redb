@@ -253,6 +253,49 @@ fn extract_if() {
     }
 }
 
+#[test]
+fn extract_if_mixed_directions() {
+    // Mixing next() and next_back() must still queue every removed key for
+    // the deferred bulk delete, in spite of the keys arriving out of order.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..20u64 {
+            table.insert(&i, &i).unwrap();
+        }
+        let mut yielded = Vec::new();
+        {
+            let mut iter = table.extract_if(|_, _| true).unwrap();
+            // Alternate forward and back so the queue is unsorted on drop.
+            for step in 0..10 {
+                if step % 2 == 0 {
+                    let (k, _) = iter.next().unwrap().unwrap();
+                    yielded.push(k.value());
+                } else {
+                    let (k, _) = iter.next_back().unwrap().unwrap();
+                    yielded.push(k.value());
+                }
+            }
+        }
+        yielded.sort_unstable();
+        assert_eq!(yielded.len(), 10);
+        assert_eq!(table.len().unwrap(), 10);
+        // Surviving keys are exactly those not in `yielded`.
+        let mut survivors: Vec<u64> = table
+            .iter()
+            .unwrap()
+            .map(|r| r.unwrap().0.value())
+            .collect();
+        survivors.sort_unstable();
+        let mut all: Vec<u64> = (0..20u64).collect();
+        all.retain(|x| !yielded.contains(x));
+        assert_eq!(survivors, all);
+    }
+    write_txn.commit().unwrap();
+}
+
 #[cfg(not(target_os = "wasi"))]
 #[test]
 fn extract_if_predicate_panic_poisons_transaction() {

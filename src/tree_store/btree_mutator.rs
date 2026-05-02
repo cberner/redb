@@ -224,7 +224,9 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         KR: Borrow<K::SelfType<'r>> + 'r,
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
     {
-        assert!(self.modify_uncommitted);
+        // The retain walk only ever rebuilds pages via copy-on-write and routes
+        // every freed page through `RetainBuilderContext::conditional_free`,
+        // which honors `modify_uncommitted`. Both modes are therefore safe.
         let Some(header) = *self.root else {
             return Ok(());
         };

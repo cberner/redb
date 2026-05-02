@@ -8,6 +8,7 @@ use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageResolver, Pa
 use crate::types::{Key, Value};
 use Bound::{Excluded, Included, Unbounded};
 use std::borrow::Borrow;
+use std::cmp::Ordering;
 use std::collections::Bound;
 use std::marker::PhantomData;
 use std::ops::{Range, RangeBounds};
@@ -262,7 +263,11 @@ pub(crate) struct BtreeExtractIf<
     inner: BtreeRangeIter<K, V>,
     predicate: F,
     predicate_running: bool,
-    free_on_drop: Vec<PageNumber>,
+    // Keys that have been yielded via the iterator and need to be removed
+    // from the tree. Deletion is deferred until Drop so we can apply all
+    // removals in a single tree rebuild rather than per-key from the root.
+    pending_removals: Vec<Vec<u8>>,
+    pending_removals_sorted: bool,
     master_free_list: Arc<Mutex<Vec<PageNumber>>>,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
     page_allocator: PageAllocator,
@@ -284,7 +289,10 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
             inner,
             predicate,
             predicate_running: false,
-            free_on_drop: vec![],
+            pending_removals: vec![],
+            // Forward-only iteration produces sorted keys; tracking this lets
+            // us skip the sort in the common case.
+            pending_removals_sorted: true,
             master_free_list,
             allocated,
             page_allocator,
@@ -302,6 +310,24 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
         self.predicate_running = false;
         result
     }
+
+    fn queue_removal_forward(&mut self, key: Vec<u8>) {
+        if self.pending_removals_sorted
+            && let Some(last) = self.pending_removals.last()
+            && K::compare(last, &key).is_gt()
+        {
+            self.pending_removals_sorted = false;
+        }
+        self.pending_removals.push(key);
+    }
+
+    fn queue_removal_reverse(&mut self, key: Vec<u8>) {
+        // Reverse iteration produces keys in descending order; mixing with
+        // forward iteration breaks ordering, so bail out of the sorted
+        // fast-path the moment we touch this branch.
+        self.pending_removals_sorted = false;
+        self.pending_removals.push(key);
+    }
 }
 
 impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool> Iterator
@@ -310,28 +336,18 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
     type Item = Result<EntryGuard<K, V>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut item = self.inner.next();
-        while let Some(Ok(ref entry)) = item {
-            if self.predicate_matches(entry) {
-                let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new_do_not_modify(
-                    self.root,
-                    self.page_allocator.clone(),
-                    &mut self.free_on_drop,
-                    self.allocated.clone(),
-                );
-                match operation.delete(&entry.key()) {
-                    Ok(x) => {
-                        assert!(x.is_some());
-                    }
-                    Err(x) => {
-                        return Some(Err(x));
+        loop {
+            let item = self.inner.next();
+            match item {
+                Some(Ok(entry)) => {
+                    if self.predicate_matches(&entry) {
+                        self.queue_removal_forward(entry.key_data());
+                        return Some(Ok(entry));
                     }
                 }
-                break;
+                other => return other,
             }
-            item = self.inner.next();
         }
-        item
     }
 }
 
@@ -339,28 +355,18 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
     DoubleEndedIterator for BtreeExtractIf<'_, K, V, F>
 {
     fn next_back(&mut self) -> Option<Self::Item> {
-        let mut item = self.inner.next_back();
-        while let Some(Ok(ref entry)) = item {
-            if self.predicate_matches(entry) {
-                let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new_do_not_modify(
-                    self.root,
-                    self.page_allocator.clone(),
-                    &mut self.free_on_drop,
-                    self.allocated.clone(),
-                );
-                match operation.delete(&entry.key()) {
-                    Ok(x) => {
-                        assert!(x.is_some());
-                    }
-                    Err(x) => {
-                        return Some(Err(x));
+        loop {
+            let item = self.inner.next_back();
+            match item {
+                Some(Ok(entry)) => {
+                    if self.predicate_matches(&entry) {
+                        self.queue_removal_reverse(entry.key_data());
+                        return Some(Ok(entry));
                     }
                 }
-                break;
+                other => return other,
             }
-            item = self.inner.next_back();
         }
-        item
     }
 }
 
@@ -369,14 +375,62 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
 {
     fn drop(&mut self) {
         self.inner.close();
-        let mut master_free_list = self.master_free_list.lock().unwrap();
-        let mut allocated = self.allocated.lock().unwrap();
-        for page in self.free_on_drop.drain(..) {
-            if !self
-                .page_allocator
-                .free_if_uncommitted(page, &mut allocated)
+        // Predicate panic poisons the transaction, so the BtreeMut root is no
+        // longer trusted by the surrounding write transaction. Skip rebuild
+        // work and drop the queued removals on the floor; the transaction
+        // will be aborted by the caller.
+        if !self.predicate_running && !self.pending_removals.is_empty() {
+            // Mixed next()/next_back() can leave the queue unsorted; the
+            // bulk-removal walk consumes keys in tree order, so sort first.
+            if !self.pending_removals_sorted {
+                self.pending_removals.sort_by(|a, b| K::compare(a, b));
+            }
+            let to_remove = std::mem::take(&mut self.pending_removals);
+            // Narrow the retain walk to the affected range so subtrees that
+            // contain no removed keys are skipped without copying.
+            let first_key: &[u8] = to_remove.first().unwrap();
+            let last_key: &[u8] = to_remove.last().unwrap();
+            let range = (
+                Included(K::from_bytes(first_key)),
+                Included(K::from_bytes(last_key)),
+            );
+            let mut idx = 0usize;
+            let mut freed: Vec<PageNumber> = Vec::new();
             {
-                master_free_list.push(page);
+                let mut helper: MutateHelper<'_, '_, K, V> = MutateHelper::new_do_not_modify(
+                    self.root,
+                    self.page_allocator.clone(),
+                    &mut freed,
+                    self.allocated.clone(),
+                );
+                let _ = helper.retain_in_range::<K::SelfType<'_>, _>(&range, |k, _v| {
+                    let k_bytes = K::as_bytes(&k);
+                    let k_ref = k_bytes.as_ref();
+                    while idx < to_remove.len() {
+                        match K::compare(&to_remove[idx], k_ref) {
+                            Ordering::Less => idx += 1,
+                            Ordering::Equal => {
+                                idx += 1;
+                                return false;
+                            }
+                            Ordering::Greater => return true,
+                        }
+                    }
+                    true
+                });
+                debug_assert_eq!(idx, to_remove.len());
+            }
+            // Apply the page accounting that the original per-key delete
+            // path used (free_if_uncommitted, else queue on the master list).
+            let mut master_free_list = self.master_free_list.lock().unwrap();
+            let mut allocated = self.allocated.lock().unwrap();
+            for page in freed {
+                if !self
+                    .page_allocator
+                    .free_if_uncommitted(page, &mut allocated)
+                {
+                    master_free_list.push(page);
+                }
             }
         }
     }
