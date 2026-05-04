@@ -2020,6 +2020,29 @@ fn vec_vec_type() {
 }
 
 #[test]
+fn vec_long_string_element() {
+    // Vec elements with serialized length >= 254 bytes use the multi-byte varint path
+    // in complex_types.rs to encode and decode the element length.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u8, Vec<&str>> = TableDefinition::new("x");
+    let long_str = "a".repeat(254);
+    let value = vec![long_str.as_str(), "short"];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(0, &value).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(value, table.get(0).unwrap().unwrap().value());
+}
+
+#[test]
 fn range_lifetime() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
