@@ -445,3 +445,31 @@ fn multimap_signature_lifetimes() {
     }
     write_txn.commit().unwrap();
 }
+
+// Exercises DoubleEndedIterator::next_back() on MultimapValue when the values for a key
+// are stored in a subtree (rather than inline).
+#[test]
+fn multimap_value_next_back_subtree() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        // Enough distinct values to promote the collection from inline to a subtree.
+        for v in 0..1000u64 {
+            table.insert(&0u64, &v).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
+    let mut iter = table.get(&0u64).unwrap();
+    assert_eq!(iter.len(), 1000);
+    for expected in (0..1000u64).rev() {
+        let guard = iter.next_back().unwrap().unwrap();
+        assert_eq!(guard.value(), expected);
+    }
+    assert!(iter.next_back().is_none());
+    assert!(iter.is_empty());
+}
