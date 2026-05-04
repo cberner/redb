@@ -46,6 +46,13 @@ test_wasi:
     cargo +nightly-2025-07-26 test -p $(cargo pkgid) --target=wasm32-wasip1-threads -- --nocapture
     cargo +nightly-2025-07-26 test -p redb-derive --target=wasm32-wasip1-threads -- --nocapture
 
+coverage:
+    #!/usr/bin/env bash
+    set -euxo pipefail
+    cargo install --locked cargo-llvm-cov
+    rustup component add llvm-tools-preview
+    RUST_BACKTRACE=1 cargo llvm-cov --all-features
+
 bench bench='redb_benchmark': pre
     cargo bench -p redb-bench --bench {{bench}}
 
