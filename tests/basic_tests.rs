@@ -2701,6 +2701,34 @@ fn char_type() {
     assert!(iter.next().is_none());
 }
 
+// Opening a multimap table via open_table() returns TableIsMultimap for both
+// write and read transactions.
+#[test]
+fn open_multimap_table_as_regular() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let mm_def: MultimapTableDefinition<u32, u32> = MultimapTableDefinition::new("mm");
+    let regular_def: TableDefinition<u32, u32> = TableDefinition::new("mm");
+
+    let write_txn = db.begin_write().unwrap();
+    write_txn.open_multimap_table(mm_def).unwrap();
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    assert!(matches!(
+        write_txn.open_table(regular_def),
+        Err(TableError::TableIsMultimap(_))
+    ));
+    write_txn.abort().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    assert!(matches!(
+        read_txn.open_table(regular_def),
+        Err(TableError::TableIsMultimap(_))
+    ));
+}
+
 // Test that &[u8; N] and [u8; N] are effectively the same
 #[test]
 fn u8_array_serialization() {
