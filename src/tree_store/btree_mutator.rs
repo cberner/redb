@@ -257,7 +257,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 self.freed,
                 self.modify_uncommitted,
             );
-            let mut builder = RetainSubtreeBuilder::new();
+            let mut builder = RetainSubtreeBuilder::left_to_right();
             let root_page = retain_context.get_page(header.root)?;
             let retain_result = Self::retain_walk(
                 &mut retain_context,
@@ -429,7 +429,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             let child_page_number = accessor.child_page(i).unwrap();
             let child_checksum = accessor.child_checksum(i).unwrap();
             let child_page = retain_context.get_page(child_page_number)?;
-            let mut child_builder = RetainSubtreeBuilder::new();
+            let mut child_builder = RetainSubtreeBuilder::left_to_right();
             let child = Self::retain_walk(
                 retain_context,
                 child_page,
