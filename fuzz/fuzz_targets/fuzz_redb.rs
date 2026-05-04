@@ -660,6 +660,7 @@ fn exec_table_crash_support<T: Clone + Debug>(
         &mut BTreeMap<u64, T>,
         &FuzzTransaction,
         &mut SavepointManager<T>,
+        usize,
     ) -> Result<(), redb::Error>,
 ) -> Result<(), redb::Error> {
     let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
@@ -764,6 +765,7 @@ fn exec_table_crash_support<T: Clone + Debug>(
             &mut uncommitted_reference,
             transaction,
             &mut savepoint_manager,
+            config.page_size.value,
         );
         if result.is_err() {
             if is_simulated_io_error(result.as_ref().err().unwrap()) {
@@ -956,17 +958,105 @@ fn handle_savepoints<T: Clone>(
     }
 }
 
+// Minimum branch fanout based on the page layout. A branch stores per child:
+// 16 B checksum + 8 B page number + key bytes (+ 4 B key_end for variable-width
+// keys), with an 8 B page header and one extra child slot. The merge threshold
+// (page_size/3, integer division to match the check in btree_mutator) keeps
+// non-root branches at least that large.
+fn min_branch_fanout(page_size: usize, max_key_size: usize, fixed_width_key: bool) -> f64 {
+    let entry_size = 24 + max_key_size + if fixed_width_key { 0 } else { 4 };
+    // required_bytes(num_keys) = 32 + entry_size * num_keys, and a branch must
+    // satisfy required_bytes >= page_size/3 to avoid being merged.
+    let merge_threshold = page_size / 3;
+    let min_remaining = merge_threshold.saturating_sub(32);
+    let min_num_keys = (min_remaining as f64 / entry_size as f64).ceil() as usize;
+    (min_num_keys + 1).max(2) as f64
+}
+
+fn expected_max_height(num_entries: u64, fanout: f64) -> u32 {
+    // Use max(N, 1) so the .log() never returns -inf for empty trees.
+    let n = num_entries.max(1) as f64;
+    // The +2 slack absorbs the root level (which can have far fewer than F
+    // children) and leaves with a single multi-page value.
+    n.log(fanout).ceil() as u32 + 2
+}
+
+fn assert_balanced(tree_height: u32, num_entries: u64, page_size: usize) {
+    let fanout = min_branch_fanout(page_size, size_of::<u64>(), true);
+    let max_height = expected_max_height(num_entries, fanout);
+    assert!(
+        tree_height <= max_height,
+        "B-tree is not balanced: tree_height={}, num_entries={}, page_size={}, max_expected_height={}",
+        tree_height,
+        num_entries,
+        page_size,
+        max_height,
+    );
+}
+
+// The reported multimap tree_height is the outer height plus the deepest
+// inner-subtree height, so we bound those two separately and add them. We
+// always include an inner term because remove() leaves a single value as a
+// SubtreeV2 if its leaf is at least page_size/2 full (see
+// MultimapTable::remove in src/multimap_table.rs), so even a single-value
+// collection can live in a subtree. Inner subtree keys are the multimap
+// values (variable-width byte slices), so the inner fanout depends on the
+// largest value size observed.
+fn assert_balanced_multimap(
+    tree_height: u32,
+    num_keys: u64,
+    max_values_per_key: u64,
+    max_value_size: usize,
+    page_size: usize,
+) {
+    let outer_fanout = min_branch_fanout(page_size, size_of::<u64>(), true);
+    let outer = expected_max_height(num_keys, outer_fanout);
+    let inner_fanout = min_branch_fanout(page_size, max_value_size, false);
+    let inner = expected_max_height(max_values_per_key, inner_fanout);
+    let max_height = outer + inner;
+    assert!(
+        tree_height <= max_height,
+        "Multimap btree is not balanced: tree_height={}, num_keys={}, max_values_per_key={}, max_value_size={}, page_size={}, max_expected_height={}",
+        tree_height,
+        num_keys,
+        max_values_per_key,
+        max_value_size,
+        page_size,
+        max_height,
+    );
+}
+
 fn apply_crashable_transaction_multimap(
     txn: WriteTransaction,
     uncommitted_reference: &mut BTreeMap<u64, BTreeSet<usize>>,
     transaction: &FuzzTransaction,
     savepoints: &mut SavepointManager<BTreeSet<usize>>,
+    page_size: usize,
 ) -> Result<(), redb::Error> {
     {
         let mut table = txn.open_multimap_table(MULTIMAP_TABLE_DEF)?;
         for op in transaction.ops.iter() {
             handle_multimap_table_op(op, uncommitted_reference, &mut table)?;
         }
+        let stats = table.stats()?;
+        let num_keys = uncommitted_reference.len() as u64;
+        let max_values_per_key = uncommitted_reference
+            .values()
+            .map(|v| v.len() as u64)
+            .max()
+            .unwrap_or(0);
+        let max_value_size = uncommitted_reference
+            .values()
+            .flat_map(|v| v.iter().copied())
+            .max()
+            .unwrap_or(0);
+        assert_balanced_multimap(
+            stats.tree_height(),
+            num_keys,
+            max_values_per_key,
+            max_value_size,
+            page_size,
+        );
     }
 
     if transaction.commit {
@@ -986,12 +1076,19 @@ fn apply_crashable_transaction(
     uncommitted_reference: &mut BTreeMap<u64, usize>,
     transaction: &FuzzTransaction,
     savepoints: &mut SavepointManager<usize>,
+    page_size: usize,
 ) -> Result<(), redb::Error> {
     {
         let mut table = txn.open_table(TABLE_DEF)?;
         for op in transaction.ops.iter() {
             handle_table_op(op, uncommitted_reference, &mut table)?;
         }
+        let stats = table.stats()?;
+        assert_balanced(
+            stats.tree_height(),
+            uncommitted_reference.len() as u64,
+            page_size,
+        );
     }
 
     if transaction.commit {
