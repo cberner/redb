@@ -473,3 +473,50 @@ fn multimap_value_next_back_subtree() {
     assert!(iter.next_back().is_none());
     assert!(iter.is_empty());
 }
+
+#[test]
+fn multimap_remove_subtree_backed_key() {
+    // Exercises MultimapTable::remove() when the values for a key are stored in a B-tree
+    // subtree (SubtreeV2), and covers the missing-key and value-not-in-inline cases.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        // Enough values for key 0 to be promoted from inline to a subtree.
+        for v in 0..1000u64 {
+            table.insert(&0u64, &v).unwrap();
+        }
+        // Key 1 stays inline (only 2 values).
+        table.insert(&1u64, &100u64).unwrap();
+        table.insert(&1u64, &101u64).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 1002);
+
+        // Key does not exist; returns false without touching the tree.
+        assert!(!table.remove(&99u64, &0u64).unwrap());
+
+        // Key exists with an inline collection, but the value is absent.
+        assert!(!table.remove(&1u64, &999u64).unwrap());
+
+        // Key exists with a subtree-backed collection; remove a present value.
+        assert!(table.remove(&0u64, &500u64).unwrap());
+        assert_eq!(table.len().unwrap(), 1001);
+
+        // Removing the same value again returns false (no longer in the subtree).
+        assert!(!table.remove(&0u64, &500u64).unwrap());
+        assert_eq!(table.len().unwrap(), 1001);
+    }
+    write_txn.commit().unwrap();
+
+    // Confirm the removal persists and the subtree still has the remaining 999 values.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 1001);
+    assert_eq!(table.get(&0u64).unwrap().len(), 999);
+}
