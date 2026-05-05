@@ -12,21 +12,63 @@ use std::marker::PhantomData;
 use std::ops::{Range, RangeBounds};
 
 #[derive(Debug, Clone)]
-pub enum RangeIterState {
+enum RangeIterState {
     Leaf {
         page: PageImpl,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
         entry: usize,
+        entry_count: usize,
         parent: Option<Box<RangeIterState>>,
     },
     Internal {
         page: PageImpl,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
-        child: usize,
+        branch_state: BranchIterState,
         parent: Option<Box<RangeIterState>>,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BranchIterState {
+    // The branch page itself has not been yielded yet. The next step descends
+    // into `child`, so page-number iteration should still report this branch.
+    Descend { child: usize },
+    // A child has already been visited. The next step descends into the next
+    // sibling; when no sibling exists this state is not stored.
+    AfterChild { next_child: usize },
+}
+
+impl BranchIterState {
+    fn descend(child: usize) -> Self {
+        Self::Descend { child }
+    }
+
+    fn after_child(child: usize, child_count: usize, reverse: bool) -> Option<Self> {
+        let next_child = if reverse {
+            child.checked_sub(1)?
+        } else {
+            let next_child = child + 1;
+            if next_child >= child_count {
+                return None;
+            }
+            next_child
+        };
+
+        Some(Self::AfterChild { next_child })
+    }
+
+    fn child_to_visit(self) -> usize {
+        match self {
+            Self::Descend { child } => child,
+            Self::AfterChild { next_child } => next_child,
+        }
+    }
+
+    fn is_entering(self) -> bool {
+        matches!(self, Self::Descend { .. })
+    }
 }
 
 impl RangeIterState {
@@ -48,17 +90,18 @@ impl RangeIterState {
                 fixed_key_size,
                 fixed_value_size,
                 entry,
+                entry_count,
                 parent,
             } => {
-                let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
                 let direction = if reverse { -1 } else { 1 };
                 let next_entry = isize::try_from(entry).unwrap() + direction;
-                if 0 <= next_entry && next_entry < accessor.num_pairs().try_into().unwrap() {
+                if 0 <= next_entry && next_entry < entry_count.try_into().unwrap() {
                     Ok(Some(Leaf {
                         page,
                         fixed_key_size,
                         fixed_value_size,
                         entry: next_entry.try_into().unwrap(),
+                        entry_count,
                         parent,
                     }))
                 } else {
@@ -69,20 +112,22 @@ impl RangeIterState {
                 page,
                 fixed_key_size,
                 fixed_value_size,
-                child,
+                branch_state,
                 mut parent,
             } => {
+                let child = branch_state.child_to_visit();
                 let accessor = BranchAccessor::new(&page, fixed_key_size);
+                let child_count = accessor.count_children();
                 let child_page = accessor.child_page(child).unwrap();
                 let child_page = manager.get_page(child_page, hint)?;
-                let direction = if reverse { -1 } else { 1 };
-                let next_child = isize::try_from(child).unwrap() + direction;
-                if 0 <= next_child && next_child < accessor.count_children().try_into().unwrap() {
+                if let Some(branch_state) =
+                    BranchIterState::after_child(child, child_count, reverse)
+                {
                     parent = Some(Box::new(Internal {
                         page,
                         fixed_key_size,
                         fixed_value_size,
-                        child: next_child.try_into().unwrap(),
+                        branch_state,
                         parent,
                     }));
                 }
@@ -98,11 +143,13 @@ impl RangeIterState {
                         } else {
                             0
                         };
+                        let entry_count = child_accessor.num_pairs();
                         Ok(Some(Leaf {
                             page: child_page,
                             fixed_key_size,
                             fixed_value_size,
                             entry,
+                            entry_count,
                             parent,
                         }))
                     }
@@ -117,7 +164,7 @@ impl RangeIterState {
                             page: child_page,
                             fixed_key_size,
                             fixed_value_size,
-                            child,
+                            branch_state: BranchIterState::descend(child),
                             parent,
                         }))
                     }
@@ -199,18 +246,24 @@ impl AllPageNumbersBtreeIter {
         let root_page = manager.get_page(root, hint)?;
         let node_mem = root_page.memory();
         let start = match node_mem[0] {
-            LEAF => Leaf {
-                page: root_page,
-                fixed_key_size,
-                fixed_value_size,
-                entry: 0,
-                parent: None,
-            },
+            LEAF => {
+                let entry_count =
+                    LeafAccessor::new(root_page.memory(), fixed_key_size, fixed_value_size)
+                        .num_pairs();
+                Leaf {
+                    page: root_page,
+                    fixed_key_size,
+                    fixed_value_size,
+                    entry: 0,
+                    entry_count,
+                    parent: None,
+                }
+            }
             BRANCH => Internal {
                 page: root_page,
                 fixed_key_size,
                 fixed_value_size,
-                child: 0,
+                branch_state: BranchIterState::descend(0),
                 parent: None,
             },
             _ => unreachable!(),
@@ -233,7 +286,7 @@ impl Iterator for AllPageNumbersBtreeIter {
             // Only return each page number once
             let once = match state {
                 Leaf { entry, .. } => entry == 0,
-                Internal { child, .. } => child == 0,
+                Internal { branch_state, .. } => branch_state.is_entering(),
             };
             match state.next(false, &self.manager, self.hint) {
                 Ok(next) => {
@@ -561,34 +614,34 @@ fn find_iter_unbounded<K: Key, V: Value>(
     match node_mem[0] {
         LEAF => {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-            let entry = if reverse { accessor.num_pairs() - 1 } else { 0 };
+            let entry_count = accessor.num_pairs();
+            let entry = if reverse { entry_count - 1 } else { 0 };
             Ok(Some(Leaf {
                 page,
                 fixed_key_size: K::fixed_width(),
                 fixed_value_size: V::fixed_width(),
                 entry,
+                entry_count,
                 parent,
             }))
         }
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
-            let child_index = if reverse {
-                accessor.count_children() - 1
-            } else {
-                0
-            };
+            let child_count = accessor.count_children();
+            let child_index = if reverse { child_count - 1 } else { 0 };
             let child_page_number = accessor.child_page(child_index).unwrap();
             let child_page = manager.get_page(child_page_number, hint)?;
-            let direction = if reverse { -1isize } else { 1 };
-            parent = Some(Box::new(Internal {
-                page,
-                fixed_key_size: K::fixed_width(),
-                fixed_value_size: V::fixed_width(),
-                child: (isize::try_from(child_index).unwrap() + direction)
-                    .try_into()
-                    .unwrap(),
-                parent,
-            }));
+            if let Some(branch_state) =
+                BranchIterState::after_child(child_index, child_count, reverse)
+            {
+                parent = Some(Box::new(Internal {
+                    page,
+                    fixed_key_size: K::fixed_width(),
+                    fixed_value_size: V::fixed_width(),
+                    branch_state,
+                    parent,
+                }));
+            }
             find_iter_unbounded::<K, V>(child_page, parent, reverse, manager, hint)
         }
         _ => unreachable!(),
@@ -610,7 +663,8 @@ fn find_iter_left<K: Key, V: Value>(
         LEAF => {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
             let (mut position, found) = accessor.position::<K>(query);
-            let include = if position < accessor.num_pairs() {
+            let entry_count = accessor.num_pairs();
+            let include = if position < entry_count {
                 include_query || !found
             } else {
                 // Back up to the last valid position
@@ -623,20 +677,24 @@ fn find_iter_left<K: Key, V: Value>(
                 fixed_key_size: K::fixed_width(),
                 fixed_value_size: V::fixed_width(),
                 entry: position,
+                entry_count,
                 parent,
             };
             Ok((include, Some(result)))
         }
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
+            let child_count = accessor.count_children();
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
             let child_page = manager.get_page(child_page_number, hint)?;
-            if child_index < accessor.count_children() - 1 {
+            if let Some(branch_state) =
+                BranchIterState::after_child(child_index, child_count, false)
+            {
                 parent = Some(Box::new(Internal {
                     page,
                     fixed_key_size: K::fixed_width(),
                     fixed_value_size: V::fixed_width(),
-                    child: child_index + 1,
+                    branch_state,
                     parent,
                 }));
             }
@@ -659,7 +717,8 @@ fn find_iter_right<K: Key, V: Value>(
         LEAF => {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
             let (mut position, found) = accessor.position::<K>(query);
-            let include = if position < accessor.num_pairs() {
+            let entry_count = accessor.num_pairs();
+            let include = if position < entry_count {
                 include_query && found
             } else {
                 // Back up to the last valid position
@@ -672,20 +731,23 @@ fn find_iter_right<K: Key, V: Value>(
                 fixed_key_size: K::fixed_width(),
                 fixed_value_size: V::fixed_width(),
                 entry: position,
+                entry_count,
                 parent,
             };
             Ok((include, Some(result)))
         }
         BRANCH => {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
+            let child_count = accessor.count_children();
             let (child_index, child_page_number) = accessor.child_for_key::<K>(query);
             let child_page = manager.get_page(child_page_number, hint)?;
-            if child_index > 0 && accessor.child_page(child_index - 1).is_some() {
+            if let Some(branch_state) = BranchIterState::after_child(child_index, child_count, true)
+            {
                 parent = Some(Box::new(Internal {
                     page,
                     fixed_key_size: K::fixed_width(),
                     fixed_value_size: V::fixed_width(),
-                    child: child_index - 1,
+                    branch_state,
                     parent,
                 }));
             }
