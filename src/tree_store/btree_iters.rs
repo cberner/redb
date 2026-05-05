@@ -78,6 +78,10 @@ impl RangeIterState {
         }
     }
 
+    fn is_leaf(&self) -> bool {
+        matches!(self, Leaf { .. })
+    }
+
     fn next(
         self,
         reverse: bool,
@@ -515,8 +519,9 @@ impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
             }
 
             self.include_left = false;
-            if self.left.as_ref().unwrap().get_entry::<K, V>().is_some() {
-                return self.left.as_ref().map(|s| s.get_entry().unwrap()).map(Ok);
+            let state = self.left.as_ref().unwrap();
+            if state.is_leaf() {
+                return Some(Ok(state.get_entry().unwrap()));
             }
         }
     }
@@ -596,8 +601,9 @@ impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
             }
 
             self.include_right = false;
-            if self.right.as_ref().unwrap().get_entry::<K, V>().is_some() {
-                return self.right.as_ref().map(|s| s.get_entry().unwrap()).map(Ok);
+            let state = self.right.as_ref().unwrap();
+            if state.is_leaf() {
+                return Some(Ok(state.get_entry().unwrap()));
             }
         }
     }
