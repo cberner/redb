@@ -901,10 +901,9 @@ impl RetainSubtreeBuilder {
             frontier,
             mut leaf,
         } = child_builder;
-        assert_eq!(self.direction, direction);
 
-        match self.direction {
-            BuildDirection::LeftToRight => {
+        match (self.direction, direction) {
+            (BuildDirection::LeftToRight, BuildDirection::LeftToRight) => {
                 for subtree in frontier {
                     self.push_subtree(context, subtree)?;
                 }
@@ -914,7 +913,27 @@ impl RetainSubtreeBuilder {
                     }
                 }
             }
-            BuildDirection::RightToLeft => {
+            (BuildDirection::LeftToRight, BuildDirection::RightToLeft) => {
+                if let Some((entries, root_distance)) = leaf.take_entries() {
+                    for (key, value) in entries {
+                        self.push_leaf_entry(context, &key, &value, root_distance)?;
+                    }
+                }
+                for subtree in frontier {
+                    self.push_subtree(context, subtree)?;
+                }
+            }
+            (BuildDirection::RightToLeft, BuildDirection::LeftToRight) => {
+                if let Some((entries, root_distance)) = leaf.take_entries() {
+                    for (key, value) in entries.into_iter().rev() {
+                        self.push_leaf_entry(context, &key, &value, root_distance)?;
+                    }
+                }
+                for subtree in frontier.into_iter().rev() {
+                    self.push_subtree(context, subtree)?;
+                }
+            }
+            (BuildDirection::RightToLeft, BuildDirection::RightToLeft) => {
                 for subtree in frontier.into_iter().rev() {
                     self.push_subtree(context, subtree)?;
                 }
