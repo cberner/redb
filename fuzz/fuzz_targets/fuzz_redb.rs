@@ -406,9 +406,15 @@ fn handle_multimap_table_op(
                 assert_eq!(*ref_key, key.value());
                 assert_multimap_value_eq(value_iter, Some(ref_values))?;
             }
-            // This is basically assert!(iter.next().is_none()), but we also allow an Err such as a simulated IO error
-            if let Some(Ok((_, _))) = iter.next() {
-                panic!();
+            // This is basically assert!(iter.next().is_none()), but we need to
+            // propagate any I/O error so the crash-support harness can reopen
+            // the database before the next operation.
+            match iter.next() {
+                None => {}
+                Some(Ok((_, _))) => {
+                    panic!();
+                }
+                Some(Err(err)) => return Err(err.into()),
             }
         }
     }
@@ -624,9 +630,15 @@ fn handle_table_op(
                 assert_eq!(*ref_key, key.value());
                 assert_eq!(*ref_value_len, value.value().len());
             }
-            // This is basically assert!(iter.next().is_none()), but we also allow an Err such as a simulated IO error
-            if let Some(Ok((_, _))) = iter.next() {
-                panic!();
+            // This is basically assert!(iter.next().is_none()), but we need to
+            // propagate any I/O error so the crash-support harness can reopen
+            // the database before the next operation.
+            match iter.next() {
+                None => {}
+                Some(Ok((_, _))) => {
+                    panic!();
+                }
+                Some(Err(err)) => return Err(err.into()),
             }
         }
     }

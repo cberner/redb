@@ -2015,6 +2015,49 @@ fn range_query_reversed() {
 }
 
 #[test]
+fn range_mixed_direction_no_duplicates_multi_page() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..5_000u64 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let mut iter = table.range(100..4_900).unwrap();
+    let mut seen = vec![false; 5_000];
+    let mut count = 0;
+
+    for _ in 0..100 {
+        let (key, value) = iter.next_back().unwrap().unwrap();
+        assert_eq!(key.value(), value.value());
+        let key = key.value() as usize;
+        assert!(!seen[key], "duplicate key {key}");
+        seen[key] = true;
+        count += 1;
+    }
+
+    for item in iter {
+        let (key, value) = item.unwrap();
+        assert_eq!(key.value(), value.value());
+        let key = key.value() as usize;
+        assert!(!seen[key], "duplicate key {key}");
+        seen[key] = true;
+        count += 1;
+    }
+
+    assert_eq!(count, 4_800);
+    for (key, was_seen) in seen.iter().enumerate().take(4_900).skip(100) {
+        assert!(*was_seen, "missing key {key}");
+    }
+}
+
+#[test]
 fn alias_table() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
