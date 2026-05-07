@@ -1,6 +1,9 @@
 # redb - Changelog
 
 ## 4.2.0 - 2026-XX-XX
+* Speed up commits with `Durability::None` by adding a writeback layer to the page cache. Pages
+  modified by a non-durable commit are kept in memory and made visible to subsequent readers
+  without issuing any disk writes. The data is written to disk on the next durable `flush()`.
 * Optimize `Table::retain()` and `Table::retain_in()`. Some benchmarks on large tables show a 25x speedup.
 * Add `Table::entry()` and the associated `Entry`, `OccupiedEntry`, and `VacantEntry`
   types, mirroring `std::collections::BTreeMap::entry`. Supports `or_insert`,

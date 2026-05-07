@@ -65,3 +65,7 @@ harness = false
 [[bench]]
 name = "syscall_benchmark"
 harness = false
+
+[[bench]]
+name = "nosync_micro"
+harness = false

@@ -200,28 +200,36 @@ impl CheckedBackend {
 pub(super) struct PagedCachedFile {
     file: CheckedBackend,
     page_size: u64,
-    // Dynamic cache partitioning.  Three invariants:
+    // Dynamic cache partitioning.  Invariants:
     //
-    // 1. The write buffer NEVER exceeds 50% of max_cache_size.
-    //    Pages beyond this limit are flushed to disk immediately.
+    // 1. The combined "dirty" footprint (write_buffer + writeback) NEVER
+    //    exceeds 50% of max_cache_size.  When the write buffer would push
+    //    the total over the limit, pages are evicted to disk.  When a
+    //    `write_barrier` would push the writeback cache over the limit, the
+    //    overflow is flushed to disk.
     // 2. The write buffer evicts from the read cache only when
-    //    write < 50% AND read > 50% (fairness).
-    // 3. write + read never exceeds max_cache_size.
+    //    dirty < 50% AND read > 50% (fairness).
+    // 3. write_buffer + writeback + read never exceeds max_cache_size.
     //
     // Together these guarantee that the read cache can grow up to 100% when no
     // writes are in progress, while write-heavy workloads never starve readers
     // below 50%.
     //
-    // We track usage with two atomic counters and compute the total on the fly.
-    // The resulting read is not perfectly atomic (between loading the two
+    // We track usage with three atomic counters and compute the total on the
+    // fly. The resulting read is not perfectly atomic (between loading the
     // counters a concurrent operation could change one), but the budget is a
     // soft limit and momentary over-/under-counting by one page is harmless.
-    // A third "total" counter would add contention on every insert/remove for
-    // negligible accuracy gain.
+    // A consolidated "total" counter would add contention on every
+    // insert/remove for negligible accuracy gain.
     read_cache_bytes: AtomicUsize,
     write_buffer_bytes: AtomicUsize,
+    // Bytes held by the writeback cache.  These are dirty pages that have
+    // been "committed" by a non-durable transaction but have not yet been
+    // written to disk.  They are visible to all readers (including
+    // `read_direct`) but only persisted on the next `flush`.
+    writeback_bytes: AtomicUsize,
     max_cache_size: usize,
-    // Rotates the starting stripe for read-cache eviction
+    // Rotates the starting stripe for read-cache and writeback eviction
     next_eviction_stripe: AtomicUsize,
     #[cfg(feature = "cache_metrics")]
     reads_total: AtomicU64,
@@ -234,8 +242,16 @@ pub(super) struct PagedCachedFile {
     #[cfg(feature = "cache_metrics")]
     evictions: AtomicU64,
     read_cache: Vec<RwLock<LRUCache<Arc<[u8]>>>>,
+    // Holds in-progress writes for the active write transaction.  Pages move
+    // out of this buffer when the WritablePage is dropped, into either the
+    // read cache (durable commit) or the writeback cache (non-durable commit).
     // TODO: maybe move this cache to WriteTransaction?
     write_buffer: Arc<Mutex<LRUWriteCache>>,
+    // Holds dirty pages from non-durable commits.  Reads (including
+    // `read_direct`) hit this layer before going to disk so that readers see
+    // the latest committed state without a syscall on every commit.  Drained
+    // by `flush` (and proactively when the dirty budget overflows).
+    writeback_cache: Vec<RwLock<LRUCache<Arc<[u8]>>>>,
 }
 
 impl PagedCachedFile {
@@ -247,12 +263,16 @@ impl PagedCachedFile {
         let read_cache = (0..Self::lock_stripes())
             .map(|_| RwLock::new(LRUCache::new()))
             .collect();
+        let writeback_cache = (0..Self::lock_stripes())
+            .map(|_| RwLock::new(LRUCache::new()))
+            .collect();
 
         Ok(Self {
             file: CheckedBackend::new(file),
             page_size,
             read_cache_bytes: AtomicUsize::new(0),
             write_buffer_bytes: AtomicUsize::new(0),
+            writeback_bytes: AtomicUsize::new(0),
             max_cache_size,
             next_eviction_stripe: AtomicUsize::new(0),
             #[cfg(feature = "cache_metrics")]
@@ -267,6 +287,7 @@ impl PagedCachedFile {
             evictions: AtomicU64::default(),
             read_cache,
             write_buffer: Arc::new(Mutex::new(LRUWriteCache::new())),
+            writeback_cache,
         })
     }
 
@@ -292,13 +313,14 @@ impl PagedCachedFile {
             let write_total = self.writes_total.load(Ordering::Acquire);
             let read_bytes = self.read_cache_bytes.load(Ordering::Acquire);
             let write_bytes = self.write_buffer_bytes.load(Ordering::Acquire);
+            let writeback_bytes = self.writeback_bytes.load(Ordering::Acquire);
             CacheStats {
                 evictions: self.evictions.load(Ordering::Acquire),
                 read_hits,
                 read_misses: read_total - read_hits,
                 write_hits,
                 write_misses: write_total - write_hits,
-                used_bytes: read_bytes + write_bytes,
+                used_bytes: read_bytes + write_bytes + writeback_bytes,
             }
         }
     }
@@ -388,6 +410,135 @@ impl PagedCachedFile {
         Ok(())
     }
 
+    // Drain the writeback cache to disk and migrate evicted pages into the
+    // read cache so they remain available for subsequent reads. After this
+    // returns, all pages that were buffered by previous non-durable commits
+    // are durable on disk (modulo `sync_data`).
+    fn flush_writeback_cache(&self) -> Result {
+        // Fast path: skip 131 stripe locks when nothing has been buffered
+        // (the common case for workloads that don't use Durability::None).
+        if self.writeback_bytes.load(Ordering::Acquire) == 0 {
+            return Ok(());
+        }
+        for cache_slot in 0..self.writeback_cache.len() {
+            // Drain this stripe under its own lock so concurrent reads don't
+            // block on the (potentially long) disk writes that follow.
+            let entries: Vec<(u64, Arc<[u8]>)> = {
+                let mut wb_lock = self.writeback_cache[cache_slot].write().unwrap();
+                let mut v = Vec::with_capacity(wb_lock.len());
+                while let Some((offset, buffer)) = wb_lock.pop_lowest_priority() {
+                    v.push((offset, buffer));
+                }
+                v
+            };
+
+            let drained_bytes: usize = entries.iter().map(|(_, b)| b.len()).sum();
+            if drained_bytes == 0 {
+                continue;
+            }
+            self.writeback_bytes
+                .fetch_sub(drained_bytes, Ordering::AcqRel);
+
+            for (offset, buffer) in &entries {
+                let result = self.file.write(*offset, buffer);
+                if result.is_err() {
+                    // Restore the remaining entries so we don't lose data on
+                    // a partial flush.
+                    let mut wb_lock = self.writeback_cache[cache_slot].write().unwrap();
+                    for (off, buf) in entries {
+                        self.writeback_bytes.fetch_add(buf.len(), Ordering::AcqRel);
+                        wb_lock.insert(off, buf);
+                    }
+                    return result;
+                }
+            }
+
+            // Best-effort transfer to the read cache so subsequent reads
+            // don't have to hit disk.  Drop entries that would push the
+            // total over budget.
+            for (offset, buffer) in entries {
+                let len = buffer.len();
+                let prev = self.read_cache_bytes.fetch_add(len, Ordering::AcqRel);
+                let write_bytes = self.write_buffer_bytes.load(Ordering::Acquire);
+                let writeback_bytes = self.writeback_bytes.load(Ordering::Acquire);
+                if prev + len + write_bytes + writeback_bytes <= self.max_cache_size {
+                    let mut rc_lock = self.read_cache[cache_slot].write().unwrap();
+                    if let Some(replaced) = rc_lock.insert(offset, buffer) {
+                        self.read_cache_bytes
+                            .fetch_sub(replaced.len(), Ordering::AcqRel);
+                    }
+                } else {
+                    self.read_cache_bytes.fetch_sub(len, Ordering::AcqRel);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Evict from the writeback cache by flushing oldest entries to disk.
+    // Used to keep the dirty footprint within the cache budget.
+    //
+    // Caller must hold the write_buffer mutex to maintain the lock ordering
+    // invariant (write_buffer lock is always acquired before the per-stripe
+    // writeback / read-cache locks).
+    fn evict_writeback(
+        &self,
+        bytes_to_free: usize,
+        _write_lock: &MutexGuard<'_, LRUWriteCache>,
+    ) -> Result {
+        let num_stripes = self.writeback_cache.len();
+        let start = self.next_eviction_stripe.fetch_add(1, Ordering::Relaxed) % num_stripes;
+        let mut freed: usize = 0;
+        for i in 0..num_stripes {
+            if freed >= bytes_to_free {
+                break;
+            }
+            let stripe = (start + i) % num_stripes;
+            // Pop entries one at a time so we can release the writeback lock
+            // around the (potentially slow) disk write below.
+            loop {
+                if freed >= bytes_to_free {
+                    break;
+                }
+                let entry = {
+                    let mut wb_lock = self.writeback_cache[stripe].write().unwrap();
+                    wb_lock.pop_lowest_priority()
+                };
+                let Some((offset, buffer)) = entry else { break };
+                let len = buffer.len();
+                let result = self.file.write(offset, &buffer);
+                if result.is_err() {
+                    let mut wb_lock = self.writeback_cache[stripe].write().unwrap();
+                    wb_lock.insert(offset, buffer);
+                    return result;
+                }
+                self.writeback_bytes.fetch_sub(len, Ordering::AcqRel);
+                #[cfg(feature = "cache_metrics")]
+                {
+                    self.evictions.fetch_add(1, Ordering::Relaxed);
+                }
+                freed += len;
+
+                // Migrate the freshly-flushed page into the read cache so
+                // subsequent reads don't have to round-trip to disk.
+                let prev = self.read_cache_bytes.fetch_add(len, Ordering::AcqRel);
+                let write_bytes = self.write_buffer_bytes.load(Ordering::Acquire);
+                let writeback_bytes = self.writeback_bytes.load(Ordering::Acquire);
+                if prev + len + write_bytes + writeback_bytes <= self.max_cache_size {
+                    let mut rc_lock = self.read_cache[stripe].write().unwrap();
+                    if let Some(replaced) = rc_lock.insert(offset, buffer) {
+                        self.read_cache_bytes
+                            .fetch_sub(replaced.len(), Ordering::AcqRel);
+                    }
+                } else {
+                    self.read_cache_bytes.fetch_sub(len, Ordering::AcqRel);
+                }
+            }
+        }
+        Ok(())
+    }
+
     // Caller should invalidate all cached pages that are no longer valid
     pub(super) fn resize(&self, len: u64) -> Result {
         // Growing leaves all existing cached pages valid. Shrinking only
@@ -395,6 +546,7 @@ impl PagedCachedFile {
         let old_len = self.file.len()?;
         if len < old_len {
             self.invalidate_read_cache_above(len);
+            self.invalidate_writeback_above(len);
         }
 
         self.file.set_len(len)
@@ -417,21 +569,95 @@ impl PagedCachedFile {
         }
     }
 
+    // Drop cached writeback pages whose offset is at or beyond `threshold`.
+    // Pages past the new end-of-file can never be read back, so flushing them
+    // to disk would be wasted I/O.
+    fn invalidate_writeback_above(&self, threshold: u64) {
+        for cache_slot in 0..self.writeback_cache.len() {
+            let mut lock = self.writeback_cache[cache_slot].write().unwrap();
+            let stale: Vec<u64> = lock
+                .iter()
+                .filter_map(|(k, _)| (*k >= threshold).then_some(*k))
+                .collect();
+            for k in stale {
+                if let Some(removed) = lock.remove(k) {
+                    self.writeback_bytes
+                        .fetch_sub(removed.len(), Ordering::AcqRel);
+                }
+            }
+        }
+    }
+
     pub(super) fn flush(&self) -> Result {
+        // Flush the writeback cache first so that the on-disk image reflects
+        // every prior non-durable commit before we record the new write
+        // buffer state.
+        self.flush_writeback_cache()?;
         self.flush_write_buffer()?;
 
         self.file.sync_data()
     }
 
-    // Make writes visible to readers, but does not guarantee any durability
+    // Make writes visible to readers, but does not guarantee any durability.
+    // Moves the write buffer's contents into the writeback cache without any
+    // disk I/O.  Reads (including `read_direct`) consult the writeback cache,
+    // so the data remains visible to all readers until a durable `flush()`.
     pub(super) fn write_barrier(&self) -> Result {
-        // TODO: non-durable commits would be much faster, if this did not issues writes to disk,
-        // and instead just made the data visible to readers
-        self.flush_write_buffer()
+        let mut write_buffer = self.write_buffer.lock().unwrap();
+
+        // Drain the write buffer directly into the writeback cache. The
+        // combined dirty footprint is unchanged, so we don't need to evict
+        // here. Holding the write_buffer mutex while we acquire individual
+        // writeback stripe locks is consistent with the lock ordering
+        // already established by `write()` and `evict_from_read_cache`.
+        let mut moved_bytes: usize = 0;
+        let mut replaced_bytes: usize = 0;
+        for (offset, slot) in write_buffer.cache.iter_mut() {
+            let buffer = slot.take().unwrap();
+            moved_bytes += buffer.len();
+            let cache_slot: usize = (*offset % Self::lock_stripes()).try_into().unwrap();
+            let mut wb_lock = self.writeback_cache[cache_slot].write().unwrap();
+            if let Some(replaced) = wb_lock.insert(*offset, buffer) {
+                replaced_bytes += replaced.len();
+            }
+        }
+        self.write_buffer_bytes.store(0, Ordering::Release);
+        write_buffer.clear();
+
+        if moved_bytes > 0 {
+            self.writeback_bytes
+                .fetch_add(moved_bytes, Ordering::AcqRel);
+        }
+        if replaced_bytes > 0 {
+            self.writeback_bytes
+                .fetch_sub(replaced_bytes, Ordering::AcqRel);
+        }
+
+        // Invariant 1: dirty <= 50% of max_cache_size.  If the writeback
+        // cache exceeded the budget (because the previous transaction was
+        // unusually large), evict to disk so reads aren't squeezed out of
+        // the cache.
+        let half = self.max_cache_size / 2;
+        let writeback = self.writeback_bytes.load(Ordering::Acquire);
+        if writeback > half {
+            self.evict_writeback(writeback - half, &write_buffer)?;
+        }
+
+        Ok(())
     }
 
-    // Read directly from the file, ignoring any cached data
+    // Read directly from the file, ignoring any cached data.  Pages held by
+    // the writeback cache haven't been written to disk yet, so we still
+    // consult it to keep reads consistent with the latest committed state.
     pub(super) fn read_direct(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
+        if self.writeback_bytes.load(Ordering::Acquire) > 0 {
+            let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
+            let wb_lock = self.writeback_cache[cache_slot].read().unwrap();
+            if let Some(cached) = wb_lock.get(offset) {
+                debug_assert_eq!(cached.len(), len);
+                return Ok(cached.as_ref().to_vec());
+            }
+        }
         let mut buffer = vec![0; len];
         self.file.read(offset, &mut buffer)?;
         Ok(buffer)
@@ -441,6 +667,14 @@ impl PagedCachedFile {
     // `Vec<u8>` that is then copied into an `Arc`. The buffer is zero-filled
     // because `StorageBackend::read` takes `&mut [u8]`.
     fn read_direct_into_arc(&self, offset: u64, len: usize) -> Result<Arc<[u8]>> {
+        if self.writeback_bytes.load(Ordering::Acquire) > 0 {
+            let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
+            let wb_lock = self.writeback_cache[cache_slot].read().unwrap();
+            if let Some(cached) = wb_lock.get(offset) {
+                debug_assert_eq!(cached.len(), len);
+                return Ok(cached.clone());
+            }
+        }
         let mut arc = zero_filled_arc(len);
         self.file.read(offset, Arc::get_mut(&mut arc).unwrap())?;
         Ok(arc)
@@ -464,6 +698,20 @@ impl PagedCachedFile {
         }
 
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
+        // Check the writeback cache before the read cache.  After a non-durable
+        // commit, the most recently written pages live here and not on disk.
+        // Read transactions (PageHint::Clean) must consult this layer or they
+        // would observe stale on-disk data. Skip the lock when the cache is
+        // empty (the common case when nobody uses Durability::None).
+        if self.writeback_bytes.load(Ordering::Acquire) > 0 {
+            let wb_lock = self.writeback_cache[cache_slot].read().unwrap();
+            if let Some(cached) = wb_lock.get(offset) {
+                #[cfg(feature = "cache_metrics")]
+                self.reads_hits.fetch_add(1, Ordering::Release);
+                debug_assert_eq!(cached.len(), len);
+                return Ok(cached.clone());
+            }
+        }
         {
             let read_lock = self.read_cache[cache_slot].read().unwrap();
             if let Some(cached) = read_lock.get(offset) {
@@ -489,7 +737,8 @@ impl PagedCachedFile {
         // budget.  We evict exactly `len` bytes (one page) per miss to avoid
         // over-eviction spikes.
         let write_bytes = self.write_buffer_bytes.load(Ordering::Acquire);
-        let over_total = cache_size + len + write_bytes > self.max_cache_size;
+        let writeback_bytes = self.writeback_bytes.load(Ordering::Acquire);
+        let over_total = cache_size + len + write_bytes + writeback_bytes > self.max_cache_size;
         let mut removed = 0;
         if over_total {
             while removed < len {
@@ -518,6 +767,16 @@ impl PagedCachedFile {
             self.write_buffer_bytes
                 .fetch_sub(removed.len(), Ordering::Release);
         }
+        // The page may also have been buffered by a previous non-durable
+        // commit; drop it so a subsequent read goes back to disk.
+        if self.writeback_bytes.load(Ordering::Acquire) > 0 {
+            let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
+            let mut wb_lock = self.writeback_cache[cache_slot].write().unwrap();
+            if let Some(removed) = wb_lock.remove(offset) {
+                self.writeback_bytes
+                    .fetch_sub(removed.len(), Ordering::Release);
+            }
+        }
     }
 
     // Invalidate any caching of the given range. After this call overlapping reads of the range are allowed
@@ -525,10 +784,18 @@ impl PagedCachedFile {
     // NOTE: Invalidating a cached region in subsections is permitted, as long as all subsections are invalidated
     pub(super) fn invalidate_cache(&self, offset: u64, len: usize) {
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
-        let mut lock = self.read_cache[cache_slot].write().unwrap();
-        if let Some(removed) = lock.remove(offset) {
+        {
+            let mut lock = self.read_cache[cache_slot].write().unwrap();
+            if let Some(removed) = lock.remove(offset) {
+                assert_eq!(len, removed.len());
+                self.read_cache_bytes
+                    .fetch_sub(removed.len(), Ordering::AcqRel);
+            }
+        }
+        let mut wb_lock = self.writeback_cache[cache_slot].write().unwrap();
+        if let Some(removed) = wb_lock.remove(offset) {
             assert_eq!(len, removed.len());
-            self.read_cache_bytes
+            self.writeback_bytes
                 .fetch_sub(removed.len(), Ordering::AcqRel);
         }
     }
@@ -541,6 +808,13 @@ impl PagedCachedFile {
                     .fetch_sub(removed.len(), Ordering::AcqRel);
             }
         }
+        for cache_slot in 0..self.writeback_cache.len() {
+            let mut lock = self.writeback_cache[cache_slot].write().unwrap();
+            while let Some((_, removed)) = lock.pop_lowest_priority() {
+                self.writeback_bytes
+                    .fetch_sub(removed.len(), Ordering::AcqRel);
+            }
+        }
     }
 
     // If overwrite is true, the page is initialized to zero
@@ -550,7 +824,7 @@ impl PagedCachedFile {
         let mut lock = self.write_buffer.lock().unwrap();
 
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
-        let existing = {
+        let mut existing = {
             let mut lock = self.read_cache[cache_slot].write().unwrap();
             if let Some(removed) = lock.remove(offset) {
                 assert_eq!(
@@ -566,6 +840,25 @@ impl PagedCachedFile {
                 None
             }
         };
+        // A page that was buffered by a previous non-durable commit holds the
+        // most recent contents.  Reclaim it so the caller starts from the
+        // correct state, and so the writeback cache no longer references a
+        // page about to be overwritten. Skip the lock when the writeback
+        // cache is empty.
+        if existing.is_none() && self.writeback_bytes.load(Ordering::Acquire) > 0 {
+            let mut wb_lock = self.writeback_cache[cache_slot].write().unwrap();
+            if let Some(removed) = wb_lock.remove(offset) {
+                assert_eq!(
+                    len,
+                    removed.len(),
+                    "writeback cache inconsistency {len} != {} for offset {offset}",
+                    removed.len()
+                );
+                self.writeback_bytes
+                    .fetch_sub(removed.len(), Ordering::AcqRel);
+                existing = Some(removed);
+            }
+        }
 
         let data = if let Some(removed) = lock.take_value(offset) {
             #[cfg(feature = "cache_metrics")]
@@ -576,9 +869,19 @@ impl PagedCachedFile {
             let mut write_bytes = previous + len;
             let half = self.max_cache_size / 2;
 
-            // Rule 1: write buffer NEVER exceeds 50%.  Flush excess to disk.
-            if write_bytes > half {
-                let excess = write_bytes - half;
+            // Rule 1: combined dirty footprint NEVER exceeds 50%.  First
+            // evict from the writeback cache (which holds finalized
+            // committed pages and so is safe to flush at any time).  If
+            // dirty is still over budget, fall back to flushing the active
+            // write buffer.
+            let writeback_bytes = self.writeback_bytes.load(Ordering::Acquire);
+            if write_bytes + writeback_bytes > half {
+                let excess = write_bytes + writeback_bytes - half;
+                self.evict_writeback(excess, &lock)?;
+            }
+            let writeback_bytes = self.writeback_bytes.load(Ordering::Acquire);
+            if write_bytes + writeback_bytes > half {
+                let excess = write_bytes + writeback_bytes - half;
                 let mut flushed = 0;
                 while flushed < excess {
                     if let Some((offset, buffer)) = lock.pop_lowest_priority() {
@@ -602,12 +905,14 @@ impl PagedCachedFile {
                 write_bytes -= flushed;
             }
 
-            // Rules 2 + 3: after rule 1, write <= 50%.  If the total still
+            // Rules 2 + 3: after rule 1, dirty <= 50%.  If the total still
             // exceeds the budget then read must be > 50%, so evict from the
             // read cache (fairness: we only take from read when read > 50%).
             let read_bytes = self.read_cache_bytes.load(Ordering::Acquire);
-            if write_bytes + read_bytes > self.max_cache_size {
-                self.evict_from_read_cache(write_bytes + read_bytes - self.max_cache_size, &lock);
+            let writeback_bytes = self.writeback_bytes.load(Ordering::Acquire);
+            let total = write_bytes + writeback_bytes + read_bytes;
+            if total > self.max_cache_size {
+                self.evict_from_read_cache(total - self.max_cache_size, &lock);
             }
             let result = if let Some(data) = existing {
                 #[cfg(feature = "cache_metrics")]
