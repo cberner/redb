@@ -445,3 +445,27 @@ fn multimap_signature_lifetimes() {
     }
     write_txn.commit().unwrap();
 }
+
+#[test]
+fn remove_missing_and_last_value() {
+    // remove() returns false when the key or value is absent, and true when removing
+    // the sole remaining value for a key (which also deletes the key from the table).
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        table.insert("present", "val").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        assert!(!table.remove("absent", "val").unwrap());
+        assert!(!table.remove("present", "other").unwrap());
+        assert!(table.remove("present", "val").unwrap());
+        assert!(table.get("present").unwrap().next().is_none());
+    }
+    write_txn.commit().unwrap();
+}
