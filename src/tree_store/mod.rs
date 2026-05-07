@@ -6,6 +6,7 @@ mod extract_if;
 mod multimap_btree;
 mod page_store;
 mod retain;
+mod subtree_rebuild;
 mod table_tree;
 mod table_tree_base;
 

@@ -6,7 +6,8 @@ use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
-use crate::tree_store::retain::{Retain, RetainBuilderContext};
+use crate::tree_store::retain::Retain;
+use crate::tree_store::subtree_rebuild::RetainBuilderContext;
 use crate::tree_store::{
     AccessGuardMutInPlace, BtreeHeader, PageAllocator, PageHint, PageNumber, PageTrackerPolicy,
 };
