@@ -97,7 +97,7 @@ impl<'a, V: Key> LeafKeyIter<'a, V> {
 }
 
 enum ValueIterState<'a, V: Key + 'static> {
-    Subtree(BtreeRangeIter<V, ()>),
+    Subtree(Box<BtreeRangeIter<V, ()>>),
     InlineLeaf(LeafKeyIter<'a, V>),
 }
 
@@ -119,7 +119,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
         guard: Arc<TransactionGuard>,
     ) -> Self {
         Self {
-            inner: Some(ValueIterState::Subtree(inner)),
+            inner: Some(ValueIterState::Subtree(Box::new(inner))),
             remaining: num_values,
             freed_pages: None,
             allocated_pages: Arc::new(Mutex::new(PageTrackerPolicy::Closed)),
@@ -140,7 +140,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
         page_allocator: PageAllocator,
     ) -> Self {
         Self {
-            inner: Some(ValueIterState::Subtree(inner)),
+            inner: Some(ValueIterState::Subtree(Box::new(inner))),
             remaining: num_values,
             freed_pages: Some(freed_pages),
             free_on_drop: pages,

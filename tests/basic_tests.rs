@@ -2273,6 +2273,42 @@ fn retain_in_rebuilds_range_boundaries() {
 }
 
 #[test]
+fn retain_in_upper_boundary_does_not_duplicate_subtrees() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 200]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..30_000 {
+            table.insert(i, &[0u8; 200]).unwrap();
+        }
+
+        table.retain_in(0..1295, |_, _| false).unwrap();
+        assert_eq!(table.len().unwrap(), 30_000 - 1295);
+        assert!(table.get(&1294).unwrap().is_none());
+        assert!(table.get(&1295).unwrap().is_some());
+
+        let mut count = 0;
+        let mut previous = None;
+        for entry in table.iter().unwrap() {
+            let (key, _) = entry.unwrap();
+            let key = key.value();
+            assert!(key >= 1295);
+            if let Some(previous) = previous {
+                assert!(previous < key);
+            }
+            previous = Some(key);
+            count += 1;
+        }
+        assert_eq!(count, table.len().unwrap());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
 fn retain_coalesces_sparse_survivors() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();

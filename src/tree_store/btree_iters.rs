@@ -1,7 +1,7 @@
 use crate::Result;
-use crate::tree_store::btree_base::{BRANCH, LEAF};
+use crate::tree_store::btree_base::{BRANCH, BtreeHeader, Checksum, EntryAccessor, LEAF};
 use crate::tree_store::btree_base::{BranchAccessor, LeafAccessor};
-use crate::tree_store::btree_iters::RangeIterState::{BranchChild, Enter, Leaf};
+use crate::tree_store::btree_iters::RangeIterState::{BranchChild, Enter, Exit, Leaf};
 use crate::tree_store::page_store::{Page, PageHint, PageImpl};
 use crate::tree_store::{PageNumber, PageResolver};
 use crate::types::{Key, Value};
@@ -17,6 +17,7 @@ enum RangeIterState {
         page: PageImpl,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
+        subtree: Option<RangeSubtree>,
         parent: Option<Box<RangeIterState>>,
     },
     Leaf {
@@ -26,6 +27,7 @@ enum RangeIterState {
         entry: usize,
         start: usize,
         end: usize,
+        subtree: Option<RangeSubtree>,
         parent: Option<Box<RangeIterState>>,
     },
     BranchChild {
@@ -33,6 +35,13 @@ enum RangeIterState {
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
         child: usize,
+        first_range_child: usize,
+        last_range_child: usize,
+        subtree: Option<RangeSubtree>,
+        parent: Option<Box<RangeIterState>>,
+    },
+    Exit {
+        subtree: RangeSubtree,
         parent: Option<Box<RangeIterState>>,
     },
 }
@@ -90,12 +99,103 @@ fn leaf_entries<K: Key>(
     start..end
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum RangeVisit<'a> {
+    BranchEnter { branch: &'a RangeSubtree },
+    // A whole subtree outside the requested entry range, emitted in traversal order.
+    SkippedSubtree { subtree: &'a RangeSubtree },
+    LeafEntry { entry: RangeLeafEntry<'a> },
+    LeafExit { subtree: &'a RangeSubtree },
+    BranchExit { branch: &'a RangeSubtree },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RangeSubtree {
+    page: PageNumber,
+    checksum: Checksum,
+    upper_key: Option<Vec<u8>>,
+    root_distance: u32,
+}
+
+impl RangeSubtree {
+    pub(crate) fn root(header: BtreeHeader) -> Self {
+        Self {
+            page: header.root,
+            checksum: header.checksum,
+            upper_key: None,
+            root_distance: 0,
+        }
+    }
+
+    pub(super) fn child(&self, accessor: &BranchAccessor<'_, '_, PageImpl>, index: usize) -> Self {
+        let upper_key = if index + 1 < accessor.count_children() {
+            Some(accessor.key(index).unwrap().to_vec())
+        } else {
+            self.upper_key.clone()
+        };
+        Self {
+            page: accessor.child_page(index).unwrap(),
+            checksum: accessor.child_checksum(index).unwrap(),
+            upper_key,
+            root_distance: self.root_distance + 1,
+        }
+    }
+
+    pub(crate) fn page_number(&self) -> PageNumber {
+        self.page
+    }
+
+    pub(crate) fn root_distance(&self) -> u32 {
+        self.root_distance
+    }
+
+    pub(crate) fn into_parts(self) -> (PageNumber, Checksum, Option<Vec<u8>>, u32) {
+        (self.page, self.checksum, self.upper_key, self.root_distance)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RangeLeafEntry<'a> {
+    page: &'a PageImpl,
+    subtree: &'a RangeSubtree,
+    entry_index: usize,
+}
+
+impl RangeLeafEntry<'_> {
+    pub(crate) fn page_number(&self) -> PageNumber {
+        self.subtree.page_number()
+    }
+
+    pub(crate) fn page(&self) -> &PageImpl {
+        self.page
+    }
+
+    pub(crate) fn subtree(&self) -> &RangeSubtree {
+        self.subtree
+    }
+
+    pub(crate) fn entry_index(&self) -> usize {
+        self.entry_index
+    }
+
+    pub(crate) fn entry<K: Key, V: Value>(&self) -> EntryAccessor<'_> {
+        LeafAccessor::new(self.page.memory(), K::fixed_width(), V::fixed_width())
+            .entry(self.entry_index)
+            .expect("range iterator entry must exist")
+    }
+}
+
+fn ignore_range_event(_event: RangeVisit<'_>) -> Result {
+    Ok(())
+}
+
 impl RangeIterState {
     fn page_number(&self) -> PageNumber {
         match self {
             Enter { page, .. } | Leaf { page, .. } | BranchChild { page, .. } => {
                 page.get_page_number()
             }
+            Exit { subtree, .. } => subtree.page_number(),
         }
     }
 
@@ -110,12 +210,14 @@ impl RangeIterState {
         reverse: bool,
         manager: &PageResolver,
         hint: PageHint,
+        visitor: &mut impl for<'a> FnMut(RangeVisit<'a>) -> Result,
     ) -> Result<Option<RangeIterState>> {
         match self {
             Enter {
                 page,
                 fixed_key_size,
                 fixed_value_size,
+                subtree,
                 parent,
             } => match page.memory()[0] {
                 LEAF => {
@@ -138,6 +240,7 @@ impl RangeIterState {
                             entry,
                             start: entries.start,
                             end: entries.end,
+                            subtree,
                             parent,
                         })
                     } else if (!reverse && !matches!(right_bound, Unbounded) && entries.end == 0)
@@ -145,19 +248,46 @@ impl RangeIterState {
                             && !matches!(left_bound, Unbounded)
                             && entries.start == entry_count)
                     {
-                        None
+                        if let Some(subtree) = subtree.as_ref() {
+                            visitor(RangeVisit::SkippedSubtree { subtree })?;
+                            parent.map(|x| *x)
+                        } else {
+                            None
+                        }
                     } else {
+                        if let Some(subtree) = subtree.as_ref() {
+                            visitor(RangeVisit::SkippedSubtree { subtree })?;
+                        }
                         parent.map(|x| *x)
                     })
                 }
                 BRANCH => {
                     let accessor = BranchAccessor::new(&page, fixed_key_size);
+                    if let Some(subtree) = subtree.as_ref() {
+                        visitor(RangeVisit::BranchEnter { branch: subtree })?;
+                    }
                     let seek_bound = if reverse { right_bound } else { left_bound };
+                    let child_count = accessor.count_children();
+                    let (child, first_range_child, last_range_child) = if subtree.is_some() {
+                        let first_range_child = child_to_visit::<K>(&accessor, left_bound, false);
+                        let last_range_child = child_to_visit::<K>(&accessor, right_bound, true);
+                        let child = if reverse { child_count - 1 } else { 0 };
+                        (child, first_range_child, last_range_child)
+                    } else {
+                        (
+                            child_to_visit::<K>(&accessor, seek_bound, reverse),
+                            0,
+                            child_count - 1,
+                        )
+                    };
                     Ok(Some(BranchChild {
-                        child: child_to_visit::<K>(&accessor, seek_bound, reverse),
+                        child,
+                        first_range_child,
+                        last_range_child,
                         page,
                         fixed_key_size,
                         fixed_value_size,
+                        subtree,
                         parent,
                     }))
                 }
@@ -170,6 +300,7 @@ impl RangeIterState {
                 entry,
                 start,
                 end,
+                subtree,
                 parent,
             } => {
                 let next_entry = if reverse {
@@ -186,9 +317,16 @@ impl RangeIterState {
                         entry,
                         start,
                         end,
+                        subtree,
                         parent,
                     }))
                 } else {
+                    if let Some(subtree) = subtree {
+                        let page_number = page.get_page_number();
+                        drop(page);
+                        debug_assert_eq!(page_number, subtree.page_number());
+                        visitor(RangeVisit::LeafExit { subtree: &subtree })?;
+                    }
                     Ok(parent.map(|x| *x))
                 }
             }
@@ -197,38 +335,133 @@ impl RangeIterState {
                 fixed_key_size,
                 fixed_value_size,
                 child,
+                first_range_child,
+                last_range_child,
+                subtree,
                 mut parent,
             } => {
-                let (child_page, child_count) = {
+                let (child_page, child_subtree, child_count) = {
                     let accessor = BranchAccessor::new(&page, fixed_key_size);
-                    (
-                        manager.get_page(accessor.child_page(child).unwrap(), hint)?,
-                        accessor.count_children(),
-                    )
+                    let child_count = accessor.count_children();
+                    let child_subtree = subtree
+                        .as_ref()
+                        .map(|subtree| subtree.child(&accessor, child));
+                    if let Some(child_subtree) = child_subtree.as_ref()
+                        && (child < first_range_child || child > last_range_child)
+                    {
+                        visitor(RangeVisit::SkippedSubtree {
+                            subtree: child_subtree,
+                        })?;
+                        return Ok(Self::next_branch_child(
+                            BranchChild {
+                                page,
+                                fixed_key_size,
+                                fixed_value_size,
+                                child,
+                                first_range_child,
+                                last_range_child,
+                                subtree,
+                                parent,
+                            },
+                            child_count,
+                            reverse,
+                        )
+                        .map(|state| *state));
+                    }
+                    let child_page = manager.get_page(accessor.child_page(child).unwrap(), hint)?;
+                    (child_page, child_subtree, child_count)
                 };
-                let next_child = if reverse {
-                    child.checked_sub(1)
-                } else {
-                    let next_child = child + 1;
-                    (next_child < child_count).then_some(next_child)
-                };
-                if let Some(child) = next_child {
-                    parent = Some(Box::new(BranchChild {
+                parent = Self::next_branch_child(
+                    BranchChild {
                         page,
                         fixed_key_size,
                         fixed_value_size,
                         child,
+                        first_range_child,
+                        last_range_child,
+                        subtree,
                         parent,
-                    }));
-                }
+                    },
+                    child_count,
+                    reverse,
+                );
                 Ok(Some(Enter {
                     page: child_page,
                     fixed_key_size,
                     fixed_value_size,
+                    subtree: child_subtree,
                     parent,
                 }))
             }
+            Exit { subtree, parent } => {
+                visitor(RangeVisit::BranchExit { branch: &subtree })?;
+                Ok(parent.map(|x| *x))
+            }
         }
+    }
+
+    fn next_branch_child(
+        state: RangeIterState,
+        child_count: usize,
+        reverse: bool,
+    ) -> Option<Box<RangeIterState>> {
+        let BranchChild {
+            page,
+            fixed_key_size,
+            fixed_value_size,
+            child,
+            first_range_child,
+            last_range_child,
+            subtree,
+            parent,
+        } = state
+        else {
+            unreachable!("next branch child requires a branch child state");
+        };
+        let next_child = if reverse {
+            child.checked_sub(1)
+        } else {
+            let next_child = child + 1;
+            (next_child < child_count).then_some(next_child)
+        };
+        if let Some(child) = next_child {
+            Some(Box::new(BranchChild {
+                page,
+                fixed_key_size,
+                fixed_value_size,
+                child,
+                first_range_child,
+                last_range_child,
+                subtree,
+                parent,
+            }))
+        } else if let Some(subtree) = subtree {
+            Some(Box::new(Exit { subtree, parent }))
+        } else {
+            parent
+        }
+    }
+
+    fn visit_leaf_entry(
+        &self,
+        visitor: &mut impl for<'a> FnMut(RangeVisit<'a>) -> Result,
+    ) -> Result {
+        if let Leaf {
+            page,
+            entry,
+            subtree: Some(subtree),
+            ..
+        } = self
+        {
+            visitor(RangeVisit::LeafEntry {
+                entry: RangeLeafEntry {
+                    page,
+                    subtree,
+                    entry_index: *entry,
+                },
+            })?;
+        }
+        Ok(())
     }
 
     fn get_entry<K: Key, V: Value>(&self) -> Option<EntryGuard<K, V>> {
@@ -245,7 +478,7 @@ impl RangeIterState {
                         .entry_ranges(*entry)?;
                 Some(EntryGuard::new(page.clone(), key, value))
             }
-            Enter { .. } | BranchChild { .. } => None,
+            Enter { .. } | BranchChild { .. } | Exit { .. } => None,
         }
     }
 }
@@ -305,6 +538,7 @@ impl AllPageNumbersBtreeIter {
             page: root_page,
             fixed_key_size,
             fixed_value_size,
+            subtree: None,
             parent: None,
         };
         Ok(Self {
@@ -339,9 +573,17 @@ impl Iterator for AllPageNumbersBtreeIter {
                     _ => unreachable!(),
                 },
                 Leaf { entry, .. } => *entry == 0,
-                BranchChild { .. } => false,
+                BranchChild { .. } | Exit { .. } => false,
             };
-            match state.next::<()>(Unbounded, Unbounded, false, &self.manager, self.hint) {
+            let mut ignore_events = ignore_range_event;
+            match state.next::<()>(
+                Unbounded,
+                Unbounded,
+                false,
+                &self.manager,
+                self.hint,
+                &mut ignore_events,
+            ) {
                 Ok(next) => {
                     self.next = next;
                 }
@@ -401,6 +643,34 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
         manager: PageResolver,
         hint: PageHint,
     ) -> Result<Self> {
+        Self::new_inner(
+            query_range,
+            table_root.map(|root| (root, None)),
+            manager,
+            hint,
+        )
+    }
+
+    pub(crate) fn new_with_subtree_metadata<'a, T: RangeBounds<KR>, KR: Borrow<K::SelfType<'a>>>(
+        query_range: &'_ T,
+        table_root: Option<BtreeHeader>,
+        manager: PageResolver,
+        hint: PageHint,
+    ) -> Result<Self> {
+        Self::new_inner(
+            query_range,
+            table_root.map(|header| (header.root, Some(RangeSubtree::root(header)))),
+            manager,
+            hint,
+        )
+    }
+
+    fn new_inner<'a, T: RangeBounds<KR>, KR: Borrow<K::SelfType<'a>>>(
+        query_range: &'_ T,
+        table_root: Option<(PageNumber, Option<RangeSubtree>)>,
+        manager: PageResolver,
+        hint: PageHint,
+    ) -> Result<Self> {
         if range_is_empty::<K, KR, T>(query_range) {
             return Ok(Self {
                 left: None,
@@ -415,7 +685,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                 _value_type: PhantomData,
             });
         }
-        if let Some(root) = table_root {
+        if let Some((root, root_subtree)) = table_root {
             let root_page = manager.get_page(root, hint)?;
             let left_bound = query_range
                 .start_bound()
@@ -427,12 +697,14 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
                 page: root_page.clone(),
                 fixed_key_size: K::fixed_width(),
                 fixed_value_size: V::fixed_width(),
+                subtree: root_subtree.clone(),
                 parent: None,
             });
             let right = Some(Enter {
                 page: root_page,
                 fixed_key_size: K::fixed_width(),
                 fixed_value_size: V::fixed_width(),
+                subtree: root_subtree,
                 parent: None,
             });
             Ok(Self {
@@ -463,18 +735,33 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
         }
     }
 
-    pub(super) fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.left = None;
         self.right = None;
     }
 
-    fn advance(&self, current: RangeIterState, reverse: bool) -> Result<Option<RangeIterState>> {
+    pub(crate) fn next_with_visitor(
+        &mut self,
+        mut visitor: impl for<'a> FnMut(RangeVisit<'a>) -> Result,
+    ) -> Option<Result> {
+        self.right = None;
+        self.include_right = false;
+        self.next_state(&mut visitor)
+    }
+
+    fn advance(
+        &self,
+        current: RangeIterState,
+        reverse: bool,
+        visitor: &mut impl for<'a> FnMut(RangeVisit<'a>) -> Result,
+    ) -> Result<Option<RangeIterState>> {
         current.next::<K>(
             self.left_bound.as_ref().map(Vec::as_slice),
             self.right_bound.as_ref().map(Vec::as_slice),
             reverse,
             &self.manager,
             self.hint,
+            visitor,
         )
     }
 
@@ -529,17 +816,18 @@ impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
     }
 }
 
-impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
-    type Item = Result<EntryGuard<K, V>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+impl<K: Key + 'static, V: Value + 'static> BtreeRangeIter<K, V> {
+    fn next_state(
+        &mut self,
+        visitor: &mut impl for<'a> FnMut(RangeVisit<'a>) -> Result,
+    ) -> Option<Result> {
         loop {
             if !self.include_left || self.left.as_ref().is_some_and(|state| !state.is_leaf()) {
                 let Some(current) = self.left.take() else {
                     self.close();
                     return None;
                 };
-                match self.advance(current, false) {
+                match self.advance(current, false, visitor) {
                     Ok(left) => {
                         self.left = left;
                     }
@@ -567,21 +855,25 @@ impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
                     return None;
                 }
                 self.include_left = false;
-                return Some(Ok(state.get_entry().unwrap()));
+                if let Err(err) = state.visit_leaf_entry(visitor) {
+                    return Some(Err(err));
+                }
+                return Some(Ok(()));
             }
         }
     }
-}
 
-impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
-    fn next_back(&mut self) -> Option<Self::Item> {
+    fn next_back_state(
+        &mut self,
+        visitor: &mut impl for<'a> FnMut(RangeVisit<'a>) -> Result,
+    ) -> Option<Result> {
         loop {
             if !self.include_right || self.right.as_ref().is_some_and(|state| !state.is_leaf()) {
                 let Some(current) = self.right.take() else {
                     self.close();
                     return None;
                 };
-                match self.advance(current, true) {
+                match self.advance(current, true, visitor) {
                     Ok(right) => {
                         self.right = right;
                     }
@@ -609,8 +901,29 @@ impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
                     return None;
                 }
                 self.include_right = false;
-                return Some(Ok(state.get_entry().unwrap()));
+                if let Err(err) = state.visit_leaf_entry(visitor) {
+                    return Some(Err(err));
+                }
+                return Some(Ok(()));
             }
         }
+    }
+}
+
+impl<K: Key, V: Value> Iterator for BtreeRangeIter<K, V> {
+    type Item = Result<EntryGuard<K, V>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut ignore_events = ignore_range_event;
+        self.next_state(&mut ignore_events)
+            .map(|result| result.map(|()| self.left.as_ref().unwrap().get_entry().unwrap()))
+    }
+}
+
+impl<K: Key, V: Value> DoubleEndedIterator for BtreeRangeIter<K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let mut ignore_events = ignore_range_event;
+        self.next_back_state(&mut ignore_events)
+            .map(|result| result.map(|()| self.right.as_ref().unwrap().get_entry().unwrap()))
     }
 }

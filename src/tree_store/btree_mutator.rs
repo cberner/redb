@@ -6,15 +6,14 @@ use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
-use crate::tree_store::retain::{RetainBuilderContext, RetainSubtree, RetainSubtreeBuilder};
+use crate::tree_store::retain::{Retain, RetainBuilderContext};
 use crate::tree_store::{
     AccessGuardMutInPlace, BtreeHeader, PageAllocator, PageHint, PageNumber, PageTrackerPolicy,
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
 use std::borrow::Borrow;
-use std::cmp::{Ordering, max, min};
-use std::collections::Bound;
+use std::cmp::{max, min};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
@@ -53,70 +52,6 @@ enum DeletionResult {
     // Indicates that the branch node was deleted, and includes the only remaining child.
     // Checksum is retained for the same reason as `PartialBranch`.
     DeletedBranch(PageNumber, Checksum),
-}
-
-enum RetainWalkResult {
-    Unchanged(RetainSubtree),
-    Changed,
-}
-
-struct RetainWalkContext {
-    checksum: Checksum,
-    upper_key: Option<Vec<u8>>,
-    root_distance: u32,
-}
-
-struct KeyRange<'a, K: Key + ?Sized> {
-    start: Bound<&'a [u8]>,
-    end: Bound<&'a [u8]>,
-    _key: PhantomData<K>,
-}
-
-impl<K: Key + ?Sized> Copy for KeyRange<'_, K> {}
-
-impl<K: Key + ?Sized> Clone for KeyRange<'_, K> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<'a, K: Key + ?Sized> KeyRange<'a, K> {
-    fn new(start: Bound<&'a [u8]>, end: Bound<&'a [u8]>) -> Self {
-        Self {
-            start,
-            end,
-            _key: PhantomData,
-        }
-    }
-
-    fn contains(&self, key: &[u8]) -> bool {
-        !self.less_than_start(key) && !self.greater_than_end(key)
-    }
-
-    fn less_than_start(&self, key: &[u8]) -> bool {
-        match self.start {
-            Bound::Included(start) => K::compare(key, start) == Ordering::Less,
-            Bound::Excluded(start) => K::compare(key, start) != Ordering::Greater,
-            Bound::Unbounded => false,
-        }
-    }
-
-    fn greater_than_end(&self, key: &[u8]) -> bool {
-        match self.end {
-            Bound::Included(end) => K::compare(key, end) == Ordering::Greater,
-            Bound::Excluded(end) => K::compare(key, end) != Ordering::Less,
-            Bound::Unbounded => false,
-        }
-    }
-
-    fn child_lower_bound_is_past_end(&self, lower_bound: &[u8]) -> bool {
-        match self.end {
-            Bound::Included(end) | Bound::Excluded(end) => {
-                K::compare(lower_bound, end) != Ordering::Less
-            }
-            Bound::Unbounded => false,
-        }
-    }
 }
 
 struct InsertionResult<'a, V: Value + 'static> {
@@ -229,253 +164,24 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             return Ok(());
         };
 
-        let start_tmp = match range.start_bound() {
-            Bound::Included(key) | Bound::Excluded(key) => Some(K::as_bytes(key.borrow())),
-            Bound::Unbounded => None,
-        };
-        let end_tmp = match range.end_bound() {
-            Bound::Included(key) | Bound::Excluded(key) => Some(K::as_bytes(key.borrow())),
-            Bound::Unbounded => None,
-        };
-        let start_bound = match (range.start_bound(), start_tmp.as_ref()) {
-            (Bound::Included(_), Some(bytes)) => Bound::Included(bytes.as_ref()),
-            (Bound::Excluded(_), Some(bytes)) => Bound::Excluded(bytes.as_ref()),
-            _ => Bound::Unbounded,
-        };
-        let end_bound = match (range.end_bound(), end_tmp.as_ref()) {
-            (Bound::Included(_), Some(bytes)) => Bound::Included(bytes.as_ref()),
-            (Bound::Excluded(_), Some(bytes)) => Bound::Excluded(bytes.as_ref()),
-            _ => Bound::Unbounded,
-        };
-        let bounds = KeyRange::<K>::new(start_bound, end_bound);
-
-        let mut removed = 0;
-        let new_root = {
-            let mut retain_context = RetainBuilderContext::<K, V>::new(
-                &self.page_allocator,
-                &self.allocated,
-                self.freed,
-                self.modify_uncommitted,
-            );
-            let mut builder = RetainSubtreeBuilder::left_to_right();
-            let root_page = retain_context.get_page(header.root)?;
-            let retain_result = Self::retain_walk(
-                &mut retain_context,
-                root_page,
-                RetainWalkContext {
-                    checksum: header.checksum,
-                    upper_key: None,
-                    root_distance: 0,
-                },
-                bounds,
-                &mut predicate,
-                &mut removed,
-                &mut builder,
-            )?;
-
-            match retain_result {
-                RetainWalkResult::Unchanged(_) => Some(header),
-                RetainWalkResult::Changed => {
-                    if let Some((root, checksum)) = builder.finish_root(&mut retain_context)? {
-                        Some(BtreeHeader::new(root, checksum, header.length - removed))
-                    } else {
-                        None
-                    }
-                }
-            }
-        };
+        let mut retain_context = RetainBuilderContext::<K, V>::new(
+            &self.page_allocator,
+            &self.allocated,
+            self.freed,
+            self.modify_uncommitted,
+        );
+        let mut retain = Retain::new();
+        retain.execute(
+            &mut retain_context,
+            header,
+            range,
+            self.page_allocator.resolver(),
+            &mut predicate,
+        )?;
+        let new_root = retain.finish(&mut retain_context, header)?;
         *self.root = new_root;
 
         Ok(())
-    }
-
-    fn retain_walk<F>(
-        retain_context: &mut RetainBuilderContext<'_, K, V>,
-        page: PageImpl,
-        context: RetainWalkContext,
-        bounds: KeyRange<'_, K>,
-        predicate: &mut F,
-        removed: &mut u64,
-        builder: &mut RetainSubtreeBuilder,
-    ) -> Result<RetainWalkResult>
-    where
-        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    {
-        match page.memory()[0] {
-            LEAF => Self::retain_walk_leaf(
-                retain_context,
-                page,
-                context,
-                bounds,
-                predicate,
-                removed,
-                builder,
-            ),
-            BRANCH => Self::retain_walk_branch(
-                retain_context,
-                page,
-                context,
-                bounds,
-                predicate,
-                removed,
-                builder,
-            ),
-            _ => unreachable!(),
-        }
-    }
-
-    fn retain_walk_leaf<F>(
-        retain_context: &mut RetainBuilderContext<'_, K, V>,
-        page: PageImpl,
-        context: RetainWalkContext,
-        bounds: KeyRange<'_, K>,
-        predicate: &mut F,
-        removed: &mut u64,
-        builder: &mut RetainSubtreeBuilder,
-    ) -> Result<RetainWalkResult>
-    where
-        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    {
-        let page_number = page.get_page_number();
-        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-        let num_pairs = accessor.num_pairs();
-        let mut keep = Vec::with_capacity(num_pairs);
-        let mut kept_count = 0;
-        for i in 0..num_pairs {
-            let entry = accessor.entry(i).unwrap();
-            let keep_entry = if bounds.contains(entry.key()) {
-                predicate(K::from_bytes(entry.key()), V::from_bytes(entry.value()))
-            } else {
-                true
-            };
-            keep.push(keep_entry);
-            if keep_entry {
-                kept_count += 1;
-            } else {
-                *removed += 1;
-            }
-        }
-
-        if kept_count == num_pairs {
-            return Ok(RetainWalkResult::Unchanged(RetainSubtree::new(
-                page_number,
-                context.checksum,
-                context.upper_key,
-                context.root_distance,
-            )));
-        }
-
-        if kept_count == 0 {
-            drop(page);
-            retain_context.conditional_free(page_number);
-            return Ok(RetainWalkResult::Changed);
-        }
-
-        for (i, kept) in keep.into_iter().enumerate() {
-            if kept {
-                let entry = accessor.entry(i).unwrap();
-                builder.push_leaf_entry(
-                    retain_context,
-                    entry.key(),
-                    entry.value(),
-                    context.root_distance,
-                )?;
-            }
-        }
-        drop(page);
-        retain_context.conditional_free(page_number);
-        Ok(RetainWalkResult::Changed)
-    }
-
-    fn retain_walk_branch<F>(
-        retain_context: &mut RetainBuilderContext<'_, K, V>,
-        page: PageImpl,
-        context: RetainWalkContext,
-        bounds: KeyRange<'_, K>,
-        predicate: &mut F,
-        removed: &mut u64,
-        builder: &mut RetainSubtreeBuilder,
-    ) -> Result<RetainWalkResult>
-    where
-        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    {
-        let page_number = page.get_page_number();
-        let accessor = BranchAccessor::new(&page, K::fixed_width());
-        let child_count = accessor.count_children();
-        let mut pending_unchanged = Vec::new();
-        let child_root_distance = context.root_distance + 1;
-        let mut changed = false;
-
-        for i in 0..child_count {
-            let child_upper_key = if i + 1 < child_count {
-                Some(accessor.key(i).unwrap().to_vec())
-            } else {
-                context.upper_key.clone()
-            };
-            let below_start =
-                i + 1 < child_count && bounds.less_than_start(accessor.key(i).unwrap());
-            let above_end =
-                i > 0 && bounds.child_lower_bound_is_past_end(accessor.key(i - 1).unwrap());
-            if below_start || above_end {
-                pending_unchanged.push(RetainSubtree::branch_child(
-                    &accessor,
-                    context.upper_key.as_deref(),
-                    child_root_distance,
-                    i,
-                ));
-                continue;
-            }
-
-            let child_page_number = accessor.child_page(i).unwrap();
-            let child_checksum = accessor.child_checksum(i).unwrap();
-            let child_page = retain_context.get_page(child_page_number)?;
-            let mut child_builder = RetainSubtreeBuilder::left_to_right();
-            let child = Self::retain_walk(
-                retain_context,
-                child_page,
-                RetainWalkContext {
-                    checksum: child_checksum,
-                    upper_key: child_upper_key,
-                    root_distance: child_root_distance,
-                },
-                bounds,
-                predicate,
-                removed,
-                &mut child_builder,
-            )?;
-            match child {
-                RetainWalkResult::Unchanged(node) => {
-                    debug_assert!(child_builder.is_empty());
-                    debug_assert_eq!(node.root_distance(), child_root_distance);
-                    pending_unchanged.push(node);
-                }
-                RetainWalkResult::Changed => {
-                    changed = true;
-                    for subtree in pending_unchanged.drain(..) {
-                        builder.push_subtree(retain_context, subtree)?;
-                    }
-                    builder.append(retain_context, child_builder)?;
-                }
-            }
-        }
-
-        if !changed {
-            return Ok(RetainWalkResult::Unchanged(RetainSubtree::new(
-                page_number,
-                context.checksum,
-                context.upper_key,
-                context.root_distance,
-            )));
-        }
-
-        for subtree in pending_unchanged {
-            builder.push_subtree(retain_context, subtree)?;
-        }
-
-        drop(page);
-        retain_context.conditional_free(page_number);
-
-        Ok(RetainWalkResult::Changed)
     }
 
     fn delete_target(
@@ -1234,10 +940,10 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             } => {
                 let partial_child_accessor =
                     LeafAccessor::new(&partial_child_page, K::fixed_width(), V::fixed_width());
-                debug_assert!(partial_child_accessor.num_pairs() > 1);
+                assert!(partial_child_accessor.num_pairs() > 1);
 
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
-                debug_assert!(merge_with < accessor.count_children());
+                assert!(merge_with < accessor.count_children());
                 let merge_with_page = self
                     .page_allocator
                     .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
@@ -1336,7 +1042,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     .page_allocator
                     .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
-                debug_assert!(merge_with < accessor.count_children());
+                assert!(merge_with < accessor.count_children());
                 for i in 0..accessor.count_children() {
                     if i == child_index {
                         continue;
@@ -1399,7 +1105,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     .page_allocator
                     .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
                 let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
-                debug_assert!(merge_with < accessor.count_children());
+                assert!(merge_with < accessor.count_children());
                 for i in 0..accessor.count_children() {
                     if i == child_index {
                         continue;
