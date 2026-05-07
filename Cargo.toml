@@ -47,8 +47,33 @@ logging = ["dep:log"]
 # Enable cache hit metrics
 cache_metrics = []
 
+[profile.release]
+# Strip debuginfo from release artifacts (e.g. examples). Shaves ~250 KiB off a
+# release binary without affecting runtime behavior. Downstream library users
+# pick their own profile, so this only affects builds inside this workspace.
+strip = "debuginfo"
+# Whole-program LTO and a single codegen unit: smaller AND faster code, at the
+# cost of a slower release compile. Examples/benchmarks/release builds done in
+# this workspace are infrequent enough that the trade is worthwhile.
+lto = true
+codegen-units = 1
+
+# Profile tuned for minimum binary size, e.g.:
+#   cargo build --profile release-small --example int_keys
+# Adds panic=abort and opt-level=z on top of release (saves ~250 KiB more on the
+# examples). panic=abort is incompatible with `cargo test --release` because the
+# test suite uses `catch_unwind`, so it lives in a separate profile.
+[profile.release-small]
+inherits = "release"
+opt-level = "z"
+panic = "abort"
+strip = "symbols"
+
 [profile.bench]
 debug = true
+# Restore debuginfo (needed for profiling) that [profile.release]'s strip would
+# otherwise remove since bench inherits from release.
+strip = "none"
 
 [lints.clippy]
 big_endian_bytes = "deny"
