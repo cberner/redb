@@ -159,9 +159,6 @@ jobs:
 
   coverage:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v4
       - name: Install cargo-llvm-cov
@@ -174,4 +171,3 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           files: lcov.info
-          use_oidc: true
