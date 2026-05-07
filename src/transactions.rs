@@ -1282,6 +1282,12 @@ impl WriteTransaction {
             }
             // No need to process the system freed table, because it only rolls forward
         }
+        // Drop the deferred (in-memory) data-freed entries from any non-durable
+        // commit made after the savepoint -- they belong to transactions that
+        // are about to be rolled back.
+        let _ = self
+            .mem
+            .drain_unpersisted_data_freed_after(savepoint.get_transaction_id());
 
         // 2) queue all pages that became unreachable
         {
@@ -1566,7 +1572,20 @@ impl WriteTransaction {
         let (user_root, allocated_pages, data_freed) =
             self.tables.lock().unwrap().table_tree.flush_and_close()?;
 
-        let stored_data_freed_pages = self.store_data_freed_pages(data_freed)?;
+        // Non-durable commits defer data-tree freed-page tracking to memory
+        // instead of writing it through DATA_FREED_TABLE; the next non-durable
+        // commit (or the next durable commit) processes the queue.  Durable
+        // commits keep the original behavior because the entries must reach
+        // disk before the commit's `flush()`.
+        let stored_data_freed_pages = match self.durability {
+            InternalDurability::None => {
+                let stored_pages = !data_freed.is_empty();
+                self.mem
+                    .record_unpersisted_data_freed(self.transaction_id, data_freed);
+                stored_pages
+            }
+            InternalDurability::Immediate => self.store_data_freed_pages(data_freed)?,
+        };
 
         #[cfg(feature = "logging")]
         debug!(
@@ -1617,8 +1636,19 @@ impl WriteTransaction {
             .apply_on_commit(&self.transaction_tracker);
     }
 
-    fn store_data_freed_pages(&self, mut freed_pages: Vec<PageNumber>) -> Result<bool> {
-        let stored_pages = !freed_pages.is_empty();
+    fn store_data_freed_pages(&self, freed_pages: Vec<PageNumber>) -> Result<bool> {
+        if freed_pages.is_empty() {
+            return Ok(false);
+        }
+        self.store_data_freed_pages_for(self.transaction_id, freed_pages)?;
+        Ok(true)
+    }
+
+    fn store_data_freed_pages_for(
+        &self,
+        transaction_id: TransactionId,
+        mut freed_pages: Vec<PageNumber>,
+    ) -> Result {
         let mut system_tables = self.system_tables.lock().unwrap();
         let mut freed_table = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
         let mut pagination_counter = 0;
@@ -1628,7 +1658,7 @@ impl WriteTransaction {
             let chunk_size = 400;
             let buffer_size = PageList::required_bytes(chunk_size);
             let key = TransactionIdWithPagination {
-                transaction_id: self.transaction_id.raw_id(),
+                transaction_id: transaction_id.raw_id(),
                 pagination_id: pagination_counter,
             };
             let mut access_guard = freed_table.insert_reserve(&key, buffer_size)?;
@@ -1652,7 +1682,7 @@ impl WriteTransaction {
             pagination_counter += 1;
         }
 
-        Ok(stored_pages)
+        Ok(())
     }
 
     // Flushes this transaction's data-tree allocations to DATA_ALLOCATED_TABLE, along with any
@@ -1772,6 +1802,18 @@ impl WriteTransaction {
         user_root: Option<BtreeHeader>,
         allocated_pages: Vec<PageNumber>,
     ) -> Result {
+        // Flush any data-freed pages deferred by previous non-durable commits
+        // into DATA_FREED_TABLE so process_freed_pages can drain them via the
+        // normal path. We write under each transaction's id so the existing
+        // free_until/processed bookkeeping handles them correctly.
+        let deferred = self.mem.take_unpersisted_data_freed();
+        for (txn_id, pages) in deferred {
+            if pages.is_empty() {
+                continue;
+            }
+            self.store_data_freed_pages_for(txn_id, pages)?;
+        }
+
         let free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_transaction()
@@ -2144,6 +2186,12 @@ impl WriteTransaction {
         let mut processed = vec![];
         let mut system_tables = self.system_tables.lock().unwrap();
 
+        // Fast path: if the table has never been created, there's nothing to
+        // process and no point in incurring the get_or_create cost.
+        if system_tables.get_system_table_root(definition)?.is_none() {
+            return Ok(processed);
+        }
+
         let last_key = TransactionIdWithPagination {
             transaction_id: free_until.raw_id(),
             pagination_id: 0,
@@ -2220,9 +2268,20 @@ impl WriteTransaction {
         // We assume below that PageNumber is length 8
         assert_eq!(PageNumber::serialized_size(), 8);
 
-        // Handle the data freed tree
+        // Handle the data freed tree (now backed by an in-memory map populated
+        // by `record_unpersisted_data_freed` instead of DATA_FREED_TABLE).
+        // Mirror the range-based scan from the original code path so we don't
+        // revisit transactions whose pages we've already processed.
+        let oldest_unprocessed_id = self
+            .transaction_tracker
+            .oldest_unprocessed_non_durable_commit()
+            .unwrap_or(free_until);
         let mut processed =
-            self.process_freed_pages_nondurable_helper(free_until, DATA_FREED_TABLE)?;
+            self.mem
+                .process_unpersisted_data_freed(oldest_unprocessed_id, free_until, |page| {
+                    self.mem
+                        .free_if_unpersisted(page, &mut PageTrackerPolicy::Ignore)
+                });
 
         // Handle the system freed tree
         processed

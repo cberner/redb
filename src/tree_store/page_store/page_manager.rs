@@ -307,6 +307,15 @@ pub(crate) struct TransactionalMemory {
     unpersisted_allocations: Mutex<BTreeMap<TransactionId, PageNumberHashSet>>,
     // Reverse index into `unpersisted_allocations`
     unpersisted_allocation_txn: Mutex<PageNumberHashMap<TransactionId>>,
+    // Data-tree pages freed by non-durable commits.  Acts as the in-memory
+    // replacement for `DATA_FREED_TABLE` entries written by non-durable
+    // transactions: keeping them in memory lets non-durable commits skip the
+    // (otherwise mandatory) B-tree write that LMDB doesn't have.  Drained
+    // into DATA_FREED_TABLE at the start of `durable_commit`, and used by
+    // `process_freed_pages_nondurable` instead of querying the system table.
+    // Loss on crash is acceptable: every non-durable commit is also lost on
+    // crash, so the on-disk allocator state remains internally consistent.
+    unpersisted_data_freed: Mutex<BTreeMap<TransactionId, Vec<PageNumber>>>,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
     // The number of PageMut which are outstanding
@@ -451,6 +460,7 @@ impl TransactionalMemory {
             unpersisted: Mutex::new(PageNumberHashSet::default()),
             unpersisted_allocations: Mutex::new(BTreeMap::new()),
             unpersisted_allocation_txn: Mutex::new(PageNumberHashMap::default()),
+            unpersisted_data_freed: Mutex::new(BTreeMap::new()),
             storage,
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
@@ -548,6 +558,7 @@ impl TransactionalMemory {
         self.unpersisted.lock().unwrap().clear();
         self.unpersisted_allocations.lock().unwrap().clear();
         self.unpersisted_allocation_txn.lock().unwrap().clear();
+        self.unpersisted_data_freed.lock().unwrap().clear();
 
         Ok(was_clean)
     }
@@ -822,6 +833,10 @@ impl TransactionalMemory {
         // flushed to DATA_ALLOCATED_TABLE (see WriteTransaction::durable_commit).
         self.unpersisted_allocations.lock().unwrap().clear();
         self.unpersisted_allocation_txn.lock().unwrap().clear();
+        // Likewise the deferred data-freed map: durable_commit() wrote those
+        // entries to DATA_FREED_TABLE before kicking off process_freed_pages,
+        // so the in-memory copy is no longer needed.
+        self.unpersisted_data_freed.lock().unwrap().clear();
 
         let mut state = self.state.lock().unwrap();
         assert_eq!(
@@ -1086,6 +1101,80 @@ impl TransactionalMemory {
 
     pub(crate) fn unpersisted(&self, page: PageNumber) -> bool {
         self.unpersisted.lock().unwrap().contains(&page)
+    }
+
+    // Defer this transaction's freed data-tree pages until the next durable
+    // commit, instead of writing them to DATA_FREED_TABLE.  Entries are read
+    // by `take_unpersisted_data_freed_*` and drained by `durable_commit`.
+    pub(crate) fn record_unpersisted_data_freed(
+        &self,
+        transaction_id: TransactionId,
+        pages: Vec<PageNumber>,
+    ) {
+        if pages.is_empty() {
+            return;
+        }
+        let mut map = self.unpersisted_data_freed.lock().unwrap();
+        map.entry(transaction_id).or_default().extend(pages);
+    }
+
+    // Iterate transaction ids in the deferred data-freed map within
+    // `[start, end)`, dropping pages for which `process_page` returns true.
+    // Returns the list of transaction ids whose entries were touched (so they
+    // can be marked as processed in the transaction tracker). Mirrors the
+    // range-based scan that DATA_FREED_TABLE performs in the original
+    // (non-deferred) code path.
+    pub(crate) fn process_unpersisted_data_freed<F>(
+        &self,
+        start: TransactionId,
+        end: TransactionId,
+        mut process_page: F,
+    ) -> Vec<TransactionId>
+    where
+        F: FnMut(PageNumber) -> bool,
+    {
+        let mut map = self.unpersisted_data_freed.lock().unwrap();
+        let mut processed = vec![];
+        // Collect the ids first so we can mutate the map inside the loop.
+        let candidate_ids: Vec<TransactionId> = map.range(start..end).map(|(k, _)| *k).collect();
+        for id in candidate_ids {
+            let entry = map.get_mut(&id).unwrap();
+            entry.retain(|page| !process_page(*page));
+            let now_empty = entry.is_empty();
+            processed.push(id);
+            if now_empty {
+                map.remove(&id);
+            }
+        }
+        processed
+    }
+
+    // Drain the deferred data-freed map into a Vec of `(transaction_id, pages)`.
+    // Used by `durable_commit` to flush these entries into DATA_FREED_TABLE
+    // before processing.
+    pub(crate) fn take_unpersisted_data_freed(&self) -> BTreeMap<TransactionId, Vec<PageNumber>> {
+        std::mem::take(&mut *self.unpersisted_data_freed.lock().unwrap())
+    }
+
+    // Returns all deferred data-freed pages from transactions strictly after
+    // `transaction_id`, removing them from the map. Used by `restore_savepoint`
+    // to discard non-durable commits made after the savepoint.
+    pub(crate) fn drain_unpersisted_data_freed_after(
+        &self,
+        transaction_id: TransactionId,
+    ) -> Vec<PageNumber> {
+        let mut map = self.unpersisted_data_freed.lock().unwrap();
+        let stale_ids: Vec<TransactionId> = map
+            .range(transaction_id.next()..)
+            .map(|(k, _)| *k)
+            .collect();
+        let mut result = vec![];
+        for id in stale_ids {
+            if let Some(pages) = map.remove(&id) {
+                result.extend(pages);
+            }
+        }
+        result
     }
 
     pub(crate) fn allocate_helper<'txn>(
