@@ -3,13 +3,17 @@ use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, Checksum, DEFERRED, LEAF, LeafAccessor, LeafBuilder,
     RawBranchBuilder, RawLeafBuilder,
 };
+use crate::tree_store::btree_iters::{BtreeRangeIter, RangeLeafEntry, RangeSubtree, RangeVisit};
 use crate::tree_store::page_store::{Page, PageImpl};
-use crate::tree_store::{PageAllocator, PageHint, PageNumber, PageTrackerPolicy};
+use crate::tree_store::{
+    BtreeHeader, PageAllocator, PageHint, PageNumber, PageResolver, PageTrackerPolicy,
+};
 use crate::types::{Key, Value};
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
-use std::ops::Range;
+use std::ops::{Range, RangeBounds};
 use std::sync::Mutex;
 
 type RetainLeafEntry = (Vec<u8>, Vec<u8>);
@@ -124,6 +128,249 @@ impl<'a, K: Key, V: Value> RetainBuilderContext<'a, K, V> {
     }
 }
 
+pub(super) struct Retain {
+    builder: RetainSubtreeBuilder,
+    in_progress: InProgressSubtree,
+    current_leaf: Option<CurrentRetainLeaf>,
+    removed: u64,
+}
+
+struct CurrentRetainLeaf {
+    page: PageImpl,
+    subtree: RangeSubtree,
+    removed_indexes: Vec<usize>,
+}
+
+impl Retain {
+    pub(super) fn new() -> Self {
+        Self {
+            builder: RetainSubtreeBuilder::left_to_right(),
+            in_progress: InProgressSubtree::new(),
+            current_leaf: None,
+            removed: 0,
+        }
+    }
+
+    pub(super) fn execute<'r, K, V, KR, F>(
+        &mut self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+        header: BtreeHeader,
+        range: &'_ impl RangeBounds<KR>,
+        resolver: PageResolver,
+        predicate: &mut F,
+    ) -> Result
+    where
+        K: Key + 'static,
+        V: Value + 'static,
+        KR: Borrow<K::SelfType<'r>> + 'r,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    {
+        let mut iter = BtreeRangeIter::<K, V>::new_with_subtree_metadata(
+            range,
+            Some(header),
+            resolver,
+            PageHint::None,
+        )?;
+        while let Some(result) =
+            iter.next_with_visitor(|event| self.visit(context, event, predicate))
+        {
+            result?;
+        }
+        Ok(())
+    }
+
+    fn visit<K: Key, V: Value, F>(
+        &mut self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+        event: RangeVisit<'_>,
+        predicate: &mut F,
+    ) -> Result
+    where
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    {
+        match event {
+            RangeVisit::BranchEnter { branch } => {
+                self.in_progress.enter_branch(branch.clone());
+                Ok(())
+            }
+            RangeVisit::SkippedSubtree { subtree } => {
+                self.in_progress
+                    .push_subtree(RetainSubtree::from_range(subtree.clone()));
+                Ok(())
+            }
+            RangeVisit::LeafEntry { entry } => self.visit_leaf_entry(context, entry, predicate),
+            RangeVisit::LeafExit { subtree } => {
+                let page_number = subtree.page_number();
+                if self.current_leaf_page() == Some(page_number) {
+                    self.complete_current_leaf(context)?;
+                }
+                Ok(())
+            }
+            RangeVisit::BranchExit { branch } => {
+                if let Some(replaced_page) =
+                    self.in_progress
+                        .exit_branch_into(context, &mut self.builder, branch)?
+                {
+                    context.conditional_free(replaced_page);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub(super) fn finish<K: Key, V: Value>(
+        mut self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+        header: BtreeHeader,
+    ) -> Result<Option<BtreeHeader>> {
+        self.complete_current_leaf(context)?;
+        if self.removed == 0 {
+            return Ok(Some(header));
+        }
+
+        let replaced_pages = self.in_progress.finish_into(context, &mut self.builder)?;
+        for page in replaced_pages {
+            context.conditional_free(page);
+        }
+
+        if let Some((root, checksum)) = self.builder.finish_root(context)? {
+            Ok(Some(BtreeHeader::new(
+                root,
+                checksum,
+                header.length - self.removed,
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn visit_leaf_entry<K: Key, V: Value, F>(
+        &mut self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+        entry: RangeLeafEntry<'_>,
+        predicate: &mut F,
+    ) -> Result
+    where
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    {
+        assert!(
+            self.current_leaf_page()
+                .is_none_or(|page| page == entry.page_number())
+        );
+        let new_leaf = self.current_leaf.is_none();
+        if new_leaf {
+            self.current_leaf = Some(CurrentRetainLeaf::new(entry));
+        }
+
+        let entry_accessor = entry.entry::<K, V>();
+        let key = entry_accessor.key();
+
+        if !predicate(K::from_bytes(key), V::from_bytes(entry_accessor.value())) {
+            self.mark_removed::<K, V>(context, entry.entry_index())?;
+        }
+        Ok(())
+    }
+
+    fn mark_removed<K: Key, V: Value>(
+        &mut self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+        entry_index: usize,
+    ) -> Result {
+        let leaf = self
+            .current_leaf
+            .as_mut()
+            .expect("range visitor must set current leaf before predicate");
+        let first_removed_in_leaf = leaf.mark_removed(entry_index);
+        if first_removed_in_leaf {
+            self.in_progress.mark_changed();
+            self.in_progress.flush_into(context, &mut self.builder)?;
+        }
+        self.removed += 1;
+        Ok(())
+    }
+
+    fn complete_current_leaf<K: Key, V: Value>(
+        &mut self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+    ) -> Result {
+        if let Some(leaf) = self.current_leaf.take() {
+            leaf.complete_into(context, &mut self.in_progress, &mut self.builder)?;
+        }
+        Ok(())
+    }
+
+    fn current_leaf_page(&self) -> Option<PageNumber> {
+        self.current_leaf
+            .as_ref()
+            .map(CurrentRetainLeaf::page_number)
+    }
+}
+
+impl CurrentRetainLeaf {
+    fn new(entry: RangeLeafEntry<'_>) -> Self {
+        Self {
+            page: entry.page().clone(),
+            subtree: entry.subtree().clone(),
+            removed_indexes: vec![],
+        }
+    }
+
+    fn page_number(&self) -> PageNumber {
+        self.subtree.page_number()
+    }
+
+    fn root_distance(&self) -> u32 {
+        self.subtree.root_distance()
+    }
+
+    fn page(&self) -> &PageImpl {
+        &self.page
+    }
+
+    fn mark_removed(&mut self, index: usize) -> bool {
+        let first_removed = self.removed_indexes.is_empty();
+        assert!(
+            self.removed_indexes
+                .last()
+                .is_none_or(|last_index| *last_index < index)
+        );
+        self.removed_indexes.push(index);
+        first_removed
+    }
+
+    fn complete_into<K: Key, V: Value>(
+        self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+        in_progress: &mut InProgressSubtree,
+        builder: &mut RetainSubtreeBuilder,
+    ) -> Result {
+        if self.removed_indexes.is_empty() {
+            in_progress.push_subtree(self.into_subtree());
+            return Ok(());
+        }
+
+        let old_page = self.page_number();
+        let root_distance = self.root_distance();
+        {
+            let accessor =
+                LeafAccessor::new(self.page().memory(), K::fixed_width(), V::fixed_width());
+            builder.push_leaf_entries_except(
+                context,
+                &accessor,
+                root_distance,
+                &self.removed_indexes,
+            )?;
+        }
+        drop(self);
+        context.conditional_free(old_page);
+        Ok(())
+    }
+
+    fn into_subtree(self) -> RetainSubtree {
+        RetainSubtree::from_range(self.subtree)
+    }
+}
+
 // A sealed B-tree subtree, annotated with its distance from the original retain walk root.
 pub(super) struct RetainSubtree {
     page: PageNumber,
@@ -171,8 +418,9 @@ impl RetainSubtree {
         )
     }
 
-    pub(super) fn root_distance(&self) -> u32 {
-        self.root_distance
+    pub(super) fn from_range(subtree: RangeSubtree) -> Self {
+        let (page, checksum, upper_key, root_distance) = subtree.into_parts();
+        Self::new(page, checksum, upper_key, root_distance)
     }
 
     fn graft_ordered<K: Key, V: Value>(
@@ -456,6 +704,173 @@ impl RetainSubtree {
     }
 }
 
+// Tracks unchanged subtrees completed by the range traversal.
+//
+// `branch_stack` mirrors the active BranchEnter/BranchExit stack. Completed
+// unchanged subtrees are kept in their open parent BranchFrame, or in
+// `completed` when no branch is open. On BranchExit, an unchanged frame
+// collapses back to its original branch page; a changed frame flushes its
+// completed children into the replacement builder.
+pub(super) struct InProgressSubtree {
+    completed: Vec<RetainSubtree>,
+    branch_stack: Vec<BranchFrame>,
+}
+
+impl InProgressSubtree {
+    pub(super) fn new() -> Self {
+        Self {
+            completed: vec![],
+            branch_stack: vec![],
+        }
+    }
+
+    pub(super) fn enter_branch(&mut self, branch: RangeSubtree) {
+        assert!(
+            self.branch_stack
+                .last()
+                .is_none_or(|current| current.page_number() != branch.page_number()),
+            "range iterator emitted duplicate branch enter"
+        );
+        self.branch_stack.push(BranchFrame::new(branch));
+    }
+
+    // Attach a completed unchanged subtree to the nearest open parent branch.
+    // If there is no parent, it is ready to be flushed directly to the builder.
+    pub(super) fn push_subtree(&mut self, subtree: RetainSubtree) {
+        if let Some(branch) = self.branch_stack.last_mut() {
+            branch.push_child(subtree);
+        } else {
+            self.completed.push(subtree);
+        }
+    }
+
+    pub(super) fn mark_changed(&mut self) {
+        if let Some(branch) = self.branch_stack.last_mut() {
+            branch.mark_changed();
+        }
+    }
+
+    pub(super) fn exit_branch_into<K: Key, V: Value>(
+        &mut self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+        builder: &mut RetainSubtreeBuilder,
+        branch: &RangeSubtree,
+    ) -> Result<Option<PageNumber>> {
+        let frame = self
+            .branch_stack
+            .pop()
+            .expect("range iterator emitted branch exit without matching enter");
+        assert_eq!(
+            frame.page_number(),
+            branch.page_number(),
+            "range iterator emitted branch exit out of order"
+        );
+
+        self.finish_branch_frame(context, builder, frame)
+    }
+
+    // A changed leaf makes all previously completed unchanged subtrees part of
+    // the replacement stream. Keep the branch stack open for later exit events.
+    pub(super) fn flush_into<K: Key, V: Value>(
+        &mut self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+        builder: &mut RetainSubtreeBuilder,
+    ) -> Result<()> {
+        for subtree in self.completed.drain(..) {
+            builder.push_subtree(context, subtree)?;
+        }
+        for branch in &mut self.branch_stack {
+            branch.flush_children_into(context, builder)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_into<K: Key, V: Value>(
+        &mut self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+        builder: &mut RetainSubtreeBuilder,
+    ) -> Result<Vec<PageNumber>> {
+        let mut replaced_pages = vec![];
+        while let Some(frame) = self.branch_stack.pop() {
+            if let Some(page) = self.finish_branch_frame(context, builder, frame)? {
+                replaced_pages.push(page);
+            }
+        }
+        self.flush_into(context, builder)?;
+        Ok(replaced_pages)
+    }
+
+    fn finish_branch_frame<K: Key, V: Value>(
+        &mut self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+        builder: &mut RetainSubtreeBuilder,
+        mut frame: BranchFrame,
+    ) -> Result<Option<PageNumber>> {
+        // Unchanged frames collapse to their original branch page. Changed
+        // frames flush their unchanged children and cause the parent to rebuild.
+        if frame.is_changed() {
+            if let Some(parent) = self.branch_stack.last_mut() {
+                parent.mark_changed();
+            }
+            let old_page = frame.page_number();
+            frame.flush_children_into(context, builder)?;
+            Ok(Some(old_page))
+        } else {
+            self.push_subtree(frame.into_retain_subtree());
+            Ok(None)
+        }
+    }
+}
+
+// One open branch in the range traversal stack. Its `unchanged_children` can
+// still collapse back into `branch` if no change is found before BranchExit.
+struct BranchFrame {
+    branch: RangeSubtree,
+    unchanged_children: Vec<RetainSubtree>,
+    changed: bool,
+}
+
+impl BranchFrame {
+    fn new(branch: RangeSubtree) -> Self {
+        Self {
+            branch,
+            unchanged_children: vec![],
+            changed: false,
+        }
+    }
+
+    fn page_number(&self) -> PageNumber {
+        self.branch.page_number()
+    }
+
+    fn is_changed(&self) -> bool {
+        self.changed
+    }
+
+    fn mark_changed(&mut self) {
+        self.changed = true;
+    }
+
+    fn push_child(&mut self, subtree: RetainSubtree) {
+        self.unchanged_children.push(subtree);
+    }
+
+    fn flush_children_into<K: Key, V: Value>(
+        &mut self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+        builder: &mut RetainSubtreeBuilder,
+    ) -> Result<()> {
+        for subtree in self.unchanged_children.drain(..) {
+            builder.push_subtree(context, subtree)?;
+        }
+        Ok(())
+    }
+
+    fn into_retain_subtree(self) -> RetainSubtree {
+        RetainSubtree::from_range(self.branch)
+    }
+}
+
 // Retained leaf entries that have not yet been sealed into a page.
 struct InProgressLeaf {
     entries: RetainLeafEntries,
@@ -649,6 +1064,7 @@ impl RetainSubtreeBuilder {
         Self::new(BuildDirection::RightToLeft)
     }
 
+    #[allow(dead_code)]
     pub(super) fn is_empty(&self) -> bool {
         self.frontier.is_empty() && self.leaf.is_empty()
     }
@@ -668,7 +1084,7 @@ impl RetainSubtreeBuilder {
             let start = parent_range.start;
             let children: Vec<_> = self.frontier.drain(parent_range).collect();
             let child_root_distance = children[0].root_distance;
-            debug_assert!(
+            assert!(
                 children
                     .iter()
                     .all(|child| child.root_distance == child_root_distance)
@@ -871,6 +1287,49 @@ impl RetainSubtreeBuilder {
         Ok(())
     }
 
+    pub(super) fn push_leaf_entries_except<K: Key, V: Value>(
+        &mut self,
+        context: &mut RetainBuilderContext<'_, K, V>,
+        accessor: &LeafAccessor<'_>,
+        root_distance: u32,
+        removed_indexes: &[usize],
+    ) -> Result<()> {
+        match self.direction {
+            BuildDirection::LeftToRight => {
+                let mut removed_pos = 0;
+                for i in 0..accessor.num_pairs() {
+                    if removed_indexes
+                        .get(removed_pos)
+                        .is_some_and(|removed| *removed == i)
+                    {
+                        removed_pos += 1;
+                    } else {
+                        let entry = accessor.entry(i).unwrap();
+                        self.push_leaf_entry(context, entry.key(), entry.value(), root_distance)?;
+                    }
+                }
+                assert_eq!(removed_pos, removed_indexes.len());
+            }
+            BuildDirection::RightToLeft => {
+                let mut removed_pos = removed_indexes.len();
+                for i in (0..accessor.num_pairs()).rev() {
+                    if removed_pos > 0
+                        && removed_indexes
+                            .get(removed_pos - 1)
+                            .is_some_and(|removed| *removed == i)
+                    {
+                        removed_pos -= 1;
+                    } else {
+                        let entry = accessor.entry(i).unwrap();
+                        self.push_leaf_entry(context, entry.key(), entry.value(), root_distance)?;
+                    }
+                }
+                assert_eq!(removed_pos, 0);
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn push_subtree<K: Key, V: Value>(
         &mut self,
         context: &mut RetainBuilderContext<'_, K, V>,
@@ -891,6 +1350,7 @@ impl RetainSubtreeBuilder {
         self.normalize_frontier(context)
     }
 
+    #[allow(dead_code)]
     pub(super) fn append<K: Key, V: Value>(
         &mut self,
         context: &mut RetainBuilderContext<'_, K, V>,
@@ -992,7 +1452,7 @@ impl RetainSubtreeBuilder {
                 }
             }
             let child_root_distance = self.frontier[0].root_distance;
-            debug_assert!(
+            assert!(
                 self.frontier
                     .iter()
                     .all(|subtree| subtree.root_distance == child_root_distance)
