@@ -13,8 +13,8 @@ use std::marker::PhantomData;
 use std::ops::Range;
 use std::sync::Mutex;
 
-type RetainLeafEntry = (Vec<u8>, Vec<u8>);
-type RetainLeafEntries = VecDeque<RetainLeafEntry>;
+type BufferedLeafEntry = (Vec<u8>, Vec<u8>);
+type BufferedLeafEntries = VecDeque<BufferedLeafEntry>;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 enum BuildDirection {
@@ -24,23 +24,23 @@ enum BuildDirection {
 }
 
 impl BuildDirection {
-    fn leaf_entries_before_subtree_edge(self) -> RetainEdge {
+    fn leaf_entries_before_subtree_edge(self) -> SubtreeEdge {
         match self {
-            Self::LeftToRight => RetainEdge::Left,
-            Self::RightToLeft => RetainEdge::Right,
+            Self::LeftToRight => SubtreeEdge::Left,
+            Self::RightToLeft => SubtreeEdge::Right,
         }
     }
 
-    fn leaf_entries_after_subtree_edge(self) -> RetainEdge {
+    fn leaf_entries_after_subtree_edge(self) -> SubtreeEdge {
         match self {
-            Self::LeftToRight => RetainEdge::Right,
-            Self::RightToLeft => RetainEdge::Left,
+            Self::LeftToRight => SubtreeEdge::Right,
+            Self::RightToLeft => SubtreeEdge::Left,
         }
     }
 
     fn same_root_distance_edge_run(
         self,
-        frontier: &VecDeque<RetainSubtree>,
+        frontier: &VecDeque<SealedSubtree>,
     ) -> Option<Range<usize>> {
         if frontier.len() <= 1 {
             return None;
@@ -68,12 +68,12 @@ impl BuildDirection {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
-enum RetainEdge {
+enum SubtreeEdge {
     Left,
     Right,
 }
 
-impl RetainEdge {
+impl SubtreeEdge {
     fn child_index<T: Page>(self, accessor: &BranchAccessor<'_, '_, T>) -> usize {
         match self {
             Self::Left => 0,
@@ -82,7 +82,7 @@ impl RetainEdge {
     }
 }
 
-pub(super) struct RetainBuilderContext<'a, K: Key, V: Value> {
+pub(super) struct SubtreeRebuildContext<'a, K: Key, V: Value> {
     page_allocator: &'a PageAllocator,
     allocated: &'a Mutex<PageTrackerPolicy>,
     freed: &'a mut Vec<PageNumber>,
@@ -90,7 +90,7 @@ pub(super) struct RetainBuilderContext<'a, K: Key, V: Value> {
     _types: PhantomData<(K, V)>,
 }
 
-impl<'a, K: Key, V: Value> RetainBuilderContext<'a, K, V> {
+impl<'a, K: Key, V: Value> SubtreeRebuildContext<'a, K, V> {
     pub(super) fn new(
         page_allocator: &'a PageAllocator,
         allocated: &'a Mutex<PageTrackerPolicy>,
@@ -125,19 +125,19 @@ impl<'a, K: Key, V: Value> RetainBuilderContext<'a, K, V> {
     }
 }
 
-// A sealed B-tree subtree, annotated with its distance from the original retain walk root.
-pub(super) struct RetainSubtree {
+// A sealed B-tree subtree, annotated with its distance from the original traversal root.
+pub(super) struct SealedSubtree {
     page: PageNumber,
     checksum: Checksum,
     // Upper bound for this subtree. Parent branch separators are rebuilt from
     // it. Only the final subtree in an ordered list may use None; separator
-    // keys on older branch pages can be stale upper bounds, so retain must not
+    // keys on older branch pages can be stale upper bounds, so the rebuild must not
     // rely on this being the exact maximum key unless the node was just rebuilt.
     upper_key: Option<Vec<u8>>,
     root_distance: u32,
 }
 
-impl RetainSubtree {
+impl SealedSubtree {
     pub(super) fn new(
         page: PageNumber,
         checksum: Checksum,
@@ -178,32 +178,32 @@ impl RetainSubtree {
     }
 
     fn graft_ordered<K: Key, V: Value>(
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         left: Self,
         right: Self,
     ) -> Result<(Self, Option<Self>)> {
         match left.root_distance.cmp(&right.root_distance) {
             Ordering::Equal => Ok((left, Some(right))),
             Ordering::Greater => {
-                Self::graft_deeper_into_shallower(context, left, right, RetainEdge::Left)
+                Self::graft_deeper_into_shallower(context, left, right, SubtreeEdge::Left)
             }
             Ordering::Less => {
-                Self::graft_deeper_into_shallower(context, right, left, RetainEdge::Right)
+                Self::graft_deeper_into_shallower(context, right, left, SubtreeEdge::Right)
             }
         }
     }
 
     fn graft_deeper_into_shallower<K: Key, V: Value>(
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         deeper: Self,
         shallower: Self,
-        edge: RetainEdge,
+        edge: SubtreeEdge,
     ) -> Result<(Self, Option<Self>)> {
         assert!(deeper.root_distance > shallower.root_distance);
         let old_page = shallower.page;
         let branch_root_distance = shallower.root_distance;
         let branch_upper_key = shallower.upper_key;
-        assert!(edge == RetainEdge::Left || branch_upper_key.is_some());
+        assert!(edge == SubtreeEdge::Left || branch_upper_key.is_some());
         let page = context.get_page(old_page)?;
         assert_eq!(page.memory()[0], BRANCH);
         let accessor = BranchAccessor::new(&page, K::fixed_width());
@@ -216,8 +216,8 @@ impl RetainSubtree {
             edge_index,
         );
         let replacement = match edge {
-            RetainEdge::Left => Self::graft_ordered(context, deeper, edge_child)?,
-            RetainEdge::Right => Self::graft_ordered(context, edge_child, deeper)?,
+            SubtreeEdge::Left => Self::graft_ordered(context, deeper, edge_child)?,
+            SubtreeEdge::Right => Self::graft_ordered(context, edge_child, deeper)?,
         };
 
         let rebuilt = Self::replace_branch_child(
@@ -235,10 +235,10 @@ impl RetainSubtree {
 
     fn absorb_leaf_entries<K: Key, V: Value>(
         self,
-        context: &mut RetainBuilderContext<'_, K, V>,
-        entries: RetainLeafEntries,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
+        entries: BufferedLeafEntries,
         entry_root_distance: u32,
-        edge: RetainEdge,
+        edge: SubtreeEdge,
     ) -> Result<(Self, Option<Self>)> {
         match self.root_distance.cmp(&entry_root_distance) {
             Ordering::Equal => {
@@ -247,8 +247,8 @@ impl RetainSubtree {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                 assert!(!entries.is_empty());
                 let upper_key = match edge {
-                    RetainEdge::Left => self.upper_key.clone(),
-                    RetainEdge::Right => Some(entries.back().unwrap().0.clone()),
+                    SubtreeEdge::Left => self.upper_key.clone(),
+                    SubtreeEdge::Right => Some(entries.back().unwrap().0.clone()),
                 };
                 let mut builder = LeafBuilder::new(
                     context.page_allocator,
@@ -258,13 +258,13 @@ impl RetainSubtree {
                     V::fixed_width(),
                 );
                 match edge {
-                    RetainEdge::Left => {
+                    SubtreeEdge::Left => {
                         for (key, value) in &entries {
                             builder.push(key, value);
                         }
                         builder.push_all_except(&accessor, None);
                     }
-                    RetainEdge::Right => {
+                    SubtreeEdge::Right => {
                         builder.push_all_except(&accessor, None);
                         for (key, value) in &entries {
                             builder.push(key, value);
@@ -334,17 +334,17 @@ impl RetainSubtree {
                 Ok(rebuilt)
             }
             Ordering::Greater => {
-                unreachable!("retain leaf entries cannot be above the subtree they are joining")
+                unreachable!("buffered leaf entries cannot be above the subtree they are joining")
             }
         }
     }
 
     fn replace_branch_child<K: Key, V: Value>(
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         accessor: &BranchAccessor<'_, '_, PageImpl>,
         branch_root_distance: u32,
         branch_upper_key: Option<Vec<u8>>,
-        edge: RetainEdge,
+        edge: SubtreeEdge,
         replacement: (Self, Option<Self>),
     ) -> Result<(Self, Option<Self>)> {
         let child_root_distance = branch_root_distance + 1;
@@ -359,11 +359,11 @@ impl RetainSubtree {
             .as_ref()
             .map_or_else(|| left.upper_key.clone(), |right| right.upper_key.clone());
         let branch_upper_key = match edge {
-            RetainEdge::Left => {
+            SubtreeEdge::Left => {
                 assert_eq!(replacement_upper_key.as_deref(), accessor.key(child_index));
                 branch_upper_key
             }
-            RetainEdge::Right => replacement_upper_key,
+            SubtreeEdge::Right => replacement_upper_key,
         };
 
         let child_capacity = accessor.count_children() + usize::from(right.is_some());
@@ -379,23 +379,23 @@ impl RetainSubtree {
                 builder.push_all(accessor);
                 builder.replace_child(child_index, left.page, left.checksum);
             }
-            (RetainEdge::Left, Some(right)) => {
+            (SubtreeEdge::Left, Some(right)) => {
                 builder.push_child(left.page, left.checksum);
                 builder.push_key(
                     left.upper_key
                         .as_ref()
-                        .expect("non-final retain child must have an upper bound"),
+                        .expect("non-final subtree child must have an upper bound"),
                 );
                 builder.push_all(accessor);
                 builder.replace_child(1, right.page, right.checksum);
             }
-            (RetainEdge::Right, Some(right)) => {
+            (SubtreeEdge::Right, Some(right)) => {
                 builder.push_all(accessor);
                 builder.replace_child(child_index, left.page, left.checksum);
                 builder.push_key(
                     left.upper_key
                         .as_ref()
-                        .expect("non-final retain child must have an upper bound"),
+                        .expect("non-final subtree child must have an upper bound"),
                 );
                 builder.push_child(right.page, right.checksum);
             }
@@ -405,14 +405,14 @@ impl RetainSubtree {
     }
 
     fn build_parent_subtrees<K: Key, V: Value>(
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         children: &[Self],
         child_root_distance: u32,
     ) -> Result<(Self, Option<Self>)> {
         assert!(children.len() > 1);
         let root_distance = child_root_distance
             .checked_sub(1)
-            .expect("retain branch children must be below their parent");
+            .expect("branch children must be below their parent");
         let mut builder = BranchBuilder::new(
             context.page_allocator,
             context.allocated,
@@ -426,7 +426,7 @@ impl RetainSubtree {
                     child
                         .upper_key
                         .as_ref()
-                        .expect("non-final retain child must have an upper bound"),
+                        .expect("non-final subtree child must have an upper bound"),
                 );
             }
         }
@@ -466,7 +466,7 @@ impl RetainSubtree {
 // collapses back to its original branch page; a changed frame flushes its
 // completed children into the replacement builder.
 pub(super) struct InProgressSubtree {
-    completed: Vec<RetainSubtree>,
+    completed: Vec<SealedSubtree>,
     branch_stack: Vec<BranchFrame>,
 }
 
@@ -490,7 +490,7 @@ impl InProgressSubtree {
 
     // Attach a completed unchanged subtree to the nearest open parent branch.
     // If there is no parent, it is ready to be flushed directly to the builder.
-    pub(super) fn push_subtree(&mut self, subtree: RetainSubtree) {
+    pub(super) fn push_subtree(&mut self, subtree: SealedSubtree) {
         if let Some(branch) = self.branch_stack.last_mut() {
             branch.push_child(subtree);
         } else {
@@ -506,8 +506,8 @@ impl InProgressSubtree {
 
     pub(super) fn exit_branch_into<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
-        builder: &mut RetainSubtreeBuilder,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
+        builder: &mut SubtreeBuilder,
         branch: &RangeSubtree,
     ) -> Result<Option<PageNumber>> {
         let frame = self
@@ -527,8 +527,8 @@ impl InProgressSubtree {
     // the replacement stream. Keep the branch stack open for later exit events.
     pub(super) fn flush_into<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
-        builder: &mut RetainSubtreeBuilder,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
+        builder: &mut SubtreeBuilder,
     ) -> Result<()> {
         for subtree in self.completed.drain(..) {
             builder.push_subtree(context, subtree)?;
@@ -541,8 +541,8 @@ impl InProgressSubtree {
 
     pub(super) fn finish_into<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
-        builder: &mut RetainSubtreeBuilder,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
+        builder: &mut SubtreeBuilder,
     ) -> Result<Vec<PageNumber>> {
         let mut replaced_pages = vec![];
         while let Some(frame) = self.branch_stack.pop() {
@@ -556,8 +556,8 @@ impl InProgressSubtree {
 
     fn finish_branch_frame<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
-        builder: &mut RetainSubtreeBuilder,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
+        builder: &mut SubtreeBuilder,
         mut frame: BranchFrame,
     ) -> Result<Option<PageNumber>> {
         // Unchanged frames collapse to their original branch page. Changed
@@ -570,7 +570,7 @@ impl InProgressSubtree {
             frame.flush_children_into(context, builder)?;
             Ok(Some(old_page))
         } else {
-            self.push_subtree(frame.into_retain_subtree());
+            self.push_subtree(frame.into_sealed_subtree());
             Ok(None)
         }
     }
@@ -580,7 +580,7 @@ impl InProgressSubtree {
 // still collapse back into `branch` if no change is found before BranchExit.
 struct BranchFrame {
     branch: RangeSubtree,
-    unchanged_children: Vec<RetainSubtree>,
+    unchanged_children: Vec<SealedSubtree>,
     changed: bool,
 }
 
@@ -605,14 +605,14 @@ impl BranchFrame {
         self.changed = true;
     }
 
-    fn push_child(&mut self, subtree: RetainSubtree) {
+    fn push_child(&mut self, subtree: SealedSubtree) {
         self.unchanged_children.push(subtree);
     }
 
     fn flush_children_into<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
-        builder: &mut RetainSubtreeBuilder,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
+        builder: &mut SubtreeBuilder,
     ) -> Result<()> {
         for subtree in self.unchanged_children.drain(..) {
             builder.push_subtree(context, subtree)?;
@@ -620,14 +620,14 @@ impl BranchFrame {
         Ok(())
     }
 
-    fn into_retain_subtree(self) -> RetainSubtree {
-        RetainSubtree::from_range(self.branch)
+    fn into_sealed_subtree(self) -> SealedSubtree {
+        SealedSubtree::from_range(self.branch)
     }
 }
 
-// Retained leaf entries that have not yet been sealed into a page.
+// Buffered leaf entries that have not yet been sealed into a page.
 struct InProgressLeaf {
-    entries: RetainLeafEntries,
+    entries: BufferedLeafEntries,
     entries_bytes: usize,
     root_distance: Option<u32>,
 }
@@ -635,7 +635,7 @@ struct InProgressLeaf {
 impl InProgressLeaf {
     fn new() -> Self {
         Self {
-            entries: RetainLeafEntries::new(),
+            entries: BufferedLeafEntries::new(),
             entries_bytes: 0,
             root_distance: None,
         }
@@ -655,7 +655,7 @@ impl InProgressLeaf {
         )
     }
 
-    fn push_entry(&mut self, entry: RetainLeafEntry, direction: BuildDirection) {
+    fn push_entry(&mut self, entry: BufferedLeafEntry, direction: BuildDirection) {
         self.entries_bytes += entry.0.len() + entry.1.len();
         match direction {
             BuildDirection::LeftToRight => self.entries.push_back(entry),
@@ -663,7 +663,7 @@ impl InProgressLeaf {
         }
     }
 
-    fn pop_overflow_entry(&mut self, direction: BuildDirection) -> RetainLeafEntry {
+    fn pop_overflow_entry(&mut self, direction: BuildDirection) -> BufferedLeafEntry {
         let entry = match direction {
             BuildDirection::LeftToRight => self.entries.pop_back().unwrap(),
             BuildDirection::RightToLeft => self.entries.pop_front().unwrap(),
@@ -674,12 +674,12 @@ impl InProgressLeaf {
 
     fn push<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         key: &[u8],
         value: &[u8],
         root_distance: u32,
         direction: BuildDirection,
-    ) -> Result<Option<RetainSubtree>> {
+    ) -> Result<Option<SealedSubtree>> {
         let mut flushed = None;
         if let Some(leaf_root_distance) = self.root_distance {
             assert_eq!(leaf_root_distance, root_distance);
@@ -707,14 +707,14 @@ impl InProgressLeaf {
         Ok(flushed)
     }
 
-    fn is_full_enough<K: Key, V: Value>(&self, context: &RetainBuilderContext<'_, K, V>) -> bool {
+    fn is_full_enough<K: Key, V: Value>(&self, context: &SubtreeRebuildContext<'_, K, V>) -> bool {
         self.required_bytes::<K, V>() >= context.page_allocator.get_page_size() / 3
     }
 
     fn seal_if_sufficient<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
-    ) -> Result<Option<RetainSubtree>> {
+        context: &mut SubtreeRebuildContext<'_, K, V>,
+    ) -> Result<Option<SealedSubtree>> {
         if self.entries.is_empty() {
             self.root_distance = None;
             self.entries_bytes = 0;
@@ -730,8 +730,8 @@ impl InProgressLeaf {
 
     fn seal_unchecked<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
-    ) -> Result<Option<RetainSubtree>> {
+        context: &mut SubtreeRebuildContext<'_, K, V>,
+    ) -> Result<Option<SealedSubtree>> {
         if self.entries.is_empty() {
             self.root_distance = None;
             return Ok(None);
@@ -742,7 +742,7 @@ impl InProgressLeaf {
         let root_distance = self
             .root_distance
             .take()
-            .expect("retain leaf entries must have a root distance");
+            .expect("buffered leaf entries must have a root distance");
         let upper_key = entries.back().unwrap().0.clone();
         let mut builder = LeafBuilder::new(
             context.page_allocator,
@@ -755,7 +755,7 @@ impl InProgressLeaf {
             builder.push(key, value);
         }
         let page = builder.build()?;
-        Ok(Some(RetainSubtree::new(
+        Ok(Some(SealedSubtree::new(
             page.get_page_number(),
             DEFERRED,
             Some(upper_key),
@@ -763,7 +763,7 @@ impl InProgressLeaf {
         )))
     }
 
-    fn take_entries(&mut self) -> Option<(RetainLeafEntries, u32)> {
+    fn take_entries(&mut self) -> Option<(BufferedLeafEntries, u32)> {
         if self.entries.is_empty() {
             self.root_distance = None;
             self.entries_bytes = 0;
@@ -774,33 +774,33 @@ impl InProgressLeaf {
             let root_distance = self
                 .root_distance
                 .take()
-                .expect("retain leaf entries must have a root distance");
+                .expect("buffered leaf entries must have a root distance");
             Some((entries, root_distance))
         }
     }
 
     fn graft_to_subtree<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
-        subtree: RetainSubtree,
-        edge: RetainEdge,
-    ) -> Result<(RetainSubtree, Option<RetainSubtree>)> {
+        context: &mut SubtreeRebuildContext<'_, K, V>,
+        subtree: SealedSubtree,
+        edge: SubtreeEdge,
+    ) -> Result<(SealedSubtree, Option<SealedSubtree>)> {
         let (entries, root_distance) = self
             .take_entries()
-            .expect("retain leaf entries must exist before subtree grafting");
+            .expect("buffered leaf entries must exist before subtree grafting");
         subtree.absorb_leaf_entries(context, entries, root_distance, edge)
     }
 }
 
-pub(super) struct RetainSubtreeBuilder {
+pub(super) struct SubtreeBuilder {
     // In-progress replacement stream, always ordered left-to-right by key.
     // Direction only controls which end receives new stream items.
     direction: BuildDirection,
-    frontier: VecDeque<RetainSubtree>,
+    frontier: VecDeque<SealedSubtree>,
     leaf: InProgressLeaf,
 }
 
-impl RetainSubtreeBuilder {
+impl SubtreeBuilder {
     fn new(direction: BuildDirection) -> Self {
         Self {
             direction,
@@ -825,7 +825,7 @@ impl RetainSubtreeBuilder {
 
     fn normalize_frontier<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
     ) -> Result<()> {
         while let Some(index) = self.active_edge_descent() {
             self.graft_pair_at(context, index)?;
@@ -844,7 +844,7 @@ impl RetainSubtreeBuilder {
                     .all(|child| child.root_distance == child_root_distance)
             );
             let parents =
-                RetainSubtree::build_parent_subtrees(context, &children, child_root_distance)?;
+                SealedSubtree::build_parent_subtrees(context, &children, child_root_distance)?;
             let (parent, right_parent) = parents;
             self.frontier.insert(start, parent);
             if let Some(right_parent) = right_parent {
@@ -903,7 +903,7 @@ impl RetainSubtreeBuilder {
 
     fn same_root_distance_edge_ready_for_parent<K: Key, V: Value>(
         &self,
-        context: &RetainBuilderContext<'_, K, V>,
+        context: &SubtreeRebuildContext<'_, K, V>,
     ) -> Option<Range<usize>> {
         const MIN_CHILDREN_PER_SIDE: usize = 2;
 
@@ -958,12 +958,12 @@ impl RetainSubtreeBuilder {
 
     fn graft_pair_at<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         index: usize,
     ) -> Result<()> {
         let second = self.frontier.remove(index + 1).unwrap();
         let first = self.frontier.remove(index).unwrap();
-        let (grafted, right_grafted) = RetainSubtree::graft_ordered(context, first, second)?;
+        let (grafted, right_grafted) = SealedSubtree::graft_ordered(context, first, second)?;
         self.frontier.insert(index, grafted);
         if let Some(right_grafted) = right_grafted {
             self.frontier.insert(index + 1, right_grafted);
@@ -971,7 +971,7 @@ impl RetainSubtreeBuilder {
         Ok(())
     }
 
-    fn push_subtree_to_active_edge(&mut self, subtree: RetainSubtree) {
+    fn push_subtree_to_active_edge(&mut self, subtree: SealedSubtree) {
         match self.direction {
             BuildDirection::LeftToRight => self.frontier.push_back(subtree),
             BuildDirection::RightToLeft => self.frontier.push_front(subtree),
@@ -980,8 +980,8 @@ impl RetainSubtreeBuilder {
 
     fn push_ordered_pair_to_active_edge(
         &mut self,
-        left: RetainSubtree,
-        right: Option<RetainSubtree>,
+        left: SealedSubtree,
+        right: Option<SealedSubtree>,
     ) {
         match self.direction {
             BuildDirection::LeftToRight => {
@@ -999,7 +999,7 @@ impl RetainSubtreeBuilder {
         }
     }
 
-    fn pop_subtree_from_active_edge(&mut self) -> Option<RetainSubtree> {
+    fn pop_subtree_from_active_edge(&mut self) -> Option<SealedSubtree> {
         match self.direction {
             BuildDirection::LeftToRight => self.frontier.pop_back(),
             BuildDirection::RightToLeft => self.frontier.pop_front(),
@@ -1013,7 +1013,7 @@ impl RetainSubtreeBuilder {
                 self.frontier[index]
                     .upper_key
                     .as_ref()
-                    .expect("non-final retain child must have an upper bound")
+                    .expect("non-final subtree child must have an upper bound")
                     .len()
             })
             .sum();
@@ -1026,7 +1026,7 @@ impl RetainSubtreeBuilder {
 
     pub(super) fn push_leaf_entry<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         key: &[u8],
         value: &[u8],
         root_distance: u32,
@@ -1043,7 +1043,7 @@ impl RetainSubtreeBuilder {
 
     pub(super) fn push_leaf_entries_except<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         accessor: &LeafAccessor<'_>,
         root_distance: u32,
         removed_indexes: &[usize],
@@ -1086,8 +1086,8 @@ impl RetainSubtreeBuilder {
 
     pub(super) fn push_subtree<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
-        subtree: RetainSubtree,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
+        subtree: SealedSubtree,
     ) -> Result<()> {
         if let Some(leaf) = self.leaf.seal_if_sufficient(context)? {
             self.push_subtree_to_active_edge(leaf);
@@ -1107,10 +1107,10 @@ impl RetainSubtreeBuilder {
     #[allow(dead_code)]
     pub(super) fn append<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
-        child_builder: RetainSubtreeBuilder,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
+        child_builder: SubtreeBuilder,
     ) -> Result<()> {
-        let RetainSubtreeBuilder {
+        let SubtreeBuilder {
             direction,
             frontier,
             mut leaf,
@@ -1163,7 +1163,7 @@ impl RetainSubtreeBuilder {
 
     pub(super) fn finish_root<K: Key, V: Value>(
         mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
     ) -> Result<Option<(PageNumber, Checksum)>> {
         if let Some(leaf) = self.leaf.seal_if_sufficient(context)? {
             self.push_subtree_to_active_edge(leaf);
@@ -1186,7 +1186,7 @@ impl RetainSubtreeBuilder {
                 self.graft_pair_at(context, index)?;
                 assert!(
                     self.frontier.len() < old_len || self.root_distance_change_progressed(index),
-                    "retain root-distance graft did not progress"
+                    "subtree root-distance graft did not progress"
                 );
             }
 
@@ -1214,7 +1214,7 @@ impl RetainSubtreeBuilder {
             let old_len = self.frontier.len();
             let children: Vec<_> = self.frontier.drain(..).collect();
             let (parent, right_parent) =
-                RetainSubtree::build_parent_subtrees(context, &children, child_root_distance)?;
+                SealedSubtree::build_parent_subtrees(context, &children, child_root_distance)?;
             self.frontier.push_back(parent);
             if let Some(right_parent) = right_parent {
                 self.frontier.push_back(right_parent);

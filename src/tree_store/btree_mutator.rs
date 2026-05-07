@@ -7,7 +7,7 @@ use crate::tree_store::btree_mutator::DeletionResult::{
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::retain::Retain;
-use crate::tree_store::subtree_rebuild::RetainBuilderContext;
+use crate::tree_store::subtree_rebuild::SubtreeRebuildContext;
 use crate::tree_store::{
     AccessGuardMutInPlace, BtreeHeader, PageAllocator, PageHint, PageNumber, PageTrackerPolicy,
 };
@@ -165,7 +165,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             return Ok(());
         };
 
-        let mut retain_context = RetainBuilderContext::<K, V>::new(
+        let mut retain_context = SubtreeRebuildContext::<K, V>::new(
             &self.page_allocator,
             &self.allocated,
             self.freed,
