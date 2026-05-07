@@ -3,7 +3,7 @@ use crate::tree_store::btree_base::LeafAccessor;
 use crate::tree_store::btree_iters::{BtreeRangeIter, RangeLeafEntry, RangeSubtree, RangeVisit};
 use crate::tree_store::page_store::{Page, PageImpl};
 use crate::tree_store::subtree_rebuild::{
-    InProgressSubtree, RetainBuilderContext, RetainSubtree, RetainSubtreeBuilder,
+    InProgressSubtree, SealedSubtree, SubtreeBuilder, SubtreeRebuildContext,
 };
 use crate::tree_store::{BtreeHeader, PageHint, PageNumber, PageResolver};
 use crate::types::{Key, Value};
@@ -11,7 +11,7 @@ use std::borrow::Borrow;
 use std::ops::RangeBounds;
 
 pub(super) struct Retain {
-    builder: RetainSubtreeBuilder,
+    builder: SubtreeBuilder,
     in_progress: InProgressSubtree,
     current_leaf: Option<CurrentRetainLeaf>,
     removed: u64,
@@ -26,7 +26,7 @@ struct CurrentRetainLeaf {
 impl Retain {
     pub(super) fn new() -> Self {
         Self {
-            builder: RetainSubtreeBuilder::left_to_right(),
+            builder: SubtreeBuilder::left_to_right(),
             in_progress: InProgressSubtree::new(),
             current_leaf: None,
             removed: 0,
@@ -35,7 +35,7 @@ impl Retain {
 
     pub(super) fn execute<'r, K, V, KR, F>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         header: BtreeHeader,
         range: &'_ impl RangeBounds<KR>,
         resolver: PageResolver,
@@ -63,7 +63,7 @@ impl Retain {
 
     fn visit<K: Key, V: Value, F>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         event: RangeVisit<'_>,
         predicate: &mut F,
     ) -> Result
@@ -77,7 +77,7 @@ impl Retain {
             }
             RangeVisit::SkippedSubtree { subtree } => {
                 self.in_progress
-                    .push_subtree(RetainSubtree::from_range(subtree.clone()));
+                    .push_subtree(SealedSubtree::from_range(subtree.clone()));
                 Ok(())
             }
             RangeVisit::LeafEntry { entry } => self.visit_leaf_entry(context, entry, predicate),
@@ -102,7 +102,7 @@ impl Retain {
 
     pub(super) fn finish<K: Key, V: Value>(
         mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         header: BtreeHeader,
     ) -> Result<Option<BtreeHeader>> {
         self.complete_current_leaf(context)?;
@@ -128,7 +128,7 @@ impl Retain {
 
     fn visit_leaf_entry<K: Key, V: Value, F>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         entry: RangeLeafEntry<'_>,
         predicate: &mut F,
     ) -> Result
@@ -155,7 +155,7 @@ impl Retain {
 
     fn mark_removed<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         entry_index: usize,
     ) -> Result {
         let leaf = self
@@ -173,7 +173,7 @@ impl Retain {
 
     fn complete_current_leaf<K: Key, V: Value>(
         &mut self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
     ) -> Result {
         if let Some(leaf) = self.current_leaf.take() {
             leaf.complete_into(context, &mut self.in_progress, &mut self.builder)?;
@@ -222,9 +222,9 @@ impl CurrentRetainLeaf {
 
     fn complete_into<K: Key, V: Value>(
         self,
-        context: &mut RetainBuilderContext<'_, K, V>,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
         in_progress: &mut InProgressSubtree,
-        builder: &mut RetainSubtreeBuilder,
+        builder: &mut SubtreeBuilder,
     ) -> Result {
         if self.removed_indexes.is_empty() {
             in_progress.push_subtree(self.into_subtree());
@@ -248,7 +248,7 @@ impl CurrentRetainLeaf {
         Ok(())
     }
 
-    fn into_subtree(self) -> RetainSubtree {
-        RetainSubtree::from_range(self.subtree)
+    fn into_subtree(self) -> SealedSubtree {
+        SealedSubtree::from_range(self.subtree)
     }
 }
