@@ -55,6 +55,25 @@ impl<'a, K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) ->
         self.predicate_running = false;
         result
     }
+
+    pub(crate) fn close(&mut self) -> Result {
+        self.inner.close();
+        self.free_pending_pages();
+        Ok(())
+    }
+
+    fn free_pending_pages(&mut self) {
+        let mut master_free_list = self.master_free_list.lock().unwrap();
+        let mut allocated = self.allocated.lock().unwrap();
+        for page in self.free_on_drop.drain(..) {
+            if !self
+                .page_allocator
+                .free_if_uncommitted(page, &mut allocated)
+            {
+                master_free_list.push(page);
+            }
+        }
+    }
 }
 
 impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool> Iterator
@@ -121,16 +140,6 @@ impl<K: Key, V: Value, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> boo
     for BtreeExtractIf<'_, K, V, F>
 {
     fn drop(&mut self) {
-        self.inner.close();
-        let mut master_free_list = self.master_free_list.lock().unwrap();
-        let mut allocated = self.allocated.lock().unwrap();
-        for page in self.free_on_drop.drain(..) {
-            if !self
-                .page_allocator
-                .free_if_uncommitted(page, &mut allocated)
-            {
-                master_free_list.push(page);
-            }
-        }
+        let _ = self.close();
     }
 }

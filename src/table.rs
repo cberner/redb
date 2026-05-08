@@ -635,6 +635,16 @@ impl<
             poison_target,
         }
     }
+
+    /// Closes the iterator.
+    ///
+    /// Entries already returned by the iterator remain removed, and unread
+    /// entries are not tested by the predicate or removed. Dropping the iterator
+    /// also closes it, but this method returns any error encountered while
+    /// finalizing the iterator.
+    pub fn close(mut self) -> Result {
+        self.inner.close()
+    }
 }
 
 impl<
