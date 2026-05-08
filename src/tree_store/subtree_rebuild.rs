@@ -3,9 +3,9 @@ use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, Checksum, DEFERRED, LEAF, LeafAccessor, LeafBuilder,
     RawBranchBuilder, RawLeafBuilder,
 };
-use crate::tree_store::btree_iters::RangeSubtree;
+use crate::tree_store::btree_iters::{RangeLeafEntry, RangeSubtree};
 use crate::tree_store::page_store::{Page, PageImpl};
-use crate::tree_store::{PageAllocator, PageHint, PageNumber, PageTrackerPolicy};
+use crate::tree_store::{BtreeHeader, PageAllocator, PageHint, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, Value};
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -573,6 +573,94 @@ impl InProgressSubtree {
             self.push_subtree(frame.into_sealed_subtree());
             Ok(None)
         }
+    }
+}
+
+pub(super) fn finish_rebuilt_root<K: Key, V: Value>(
+    context: &mut SubtreeRebuildContext<'_, K, V>,
+    builder: SubtreeBuilder,
+    header: BtreeHeader,
+    removed: u64,
+) -> Result<Option<BtreeHeader>> {
+    let new_length = header
+        .length
+        .checked_sub(removed)
+        .expect("subtree rebuild removed more entries than the tree contains");
+    if let Some((root, checksum)) = builder.finish_root(context)? {
+        Ok(Some(BtreeHeader::new(root, checksum, new_length)))
+    } else {
+        Ok(None)
+    }
+}
+
+pub(super) struct LeafRewrite {
+    page: PageImpl,
+    subtree: RangeSubtree,
+    removed_indexes: Vec<usize>,
+}
+
+impl LeafRewrite {
+    pub(super) fn new(entry: RangeLeafEntry<'_>) -> Self {
+        Self {
+            page: entry.page().clone(),
+            subtree: entry.subtree().clone(),
+            removed_indexes: vec![],
+        }
+    }
+
+    pub(super) fn page_number(&self) -> PageNumber {
+        self.subtree.page_number()
+    }
+
+    fn root_distance(&self) -> u32 {
+        self.subtree.root_distance()
+    }
+
+    fn page(&self) -> &PageImpl {
+        &self.page
+    }
+
+    pub(super) fn mark_removed(&mut self, index: usize) -> bool {
+        let first_removed = self.removed_indexes.is_empty();
+        assert!(
+            self.removed_indexes
+                .last()
+                .is_none_or(|last_index| *last_index < index)
+        );
+        self.removed_indexes.push(index);
+        first_removed
+    }
+
+    pub(super) fn complete_into<K: Key, V: Value>(
+        self,
+        context: &mut SubtreeRebuildContext<'_, K, V>,
+        in_progress: &mut InProgressSubtree,
+        builder: &mut SubtreeBuilder,
+    ) -> Result {
+        if self.removed_indexes.is_empty() {
+            in_progress.push_subtree(self.into_subtree());
+            return Ok(());
+        }
+
+        let old_page = self.page_number();
+        let root_distance = self.root_distance();
+        {
+            let accessor =
+                LeafAccessor::new(self.page().memory(), K::fixed_width(), V::fixed_width());
+            builder.push_leaf_entries_except(
+                context,
+                &accessor,
+                root_distance,
+                &self.removed_indexes,
+            )?;
+        }
+        drop(self);
+        context.conditional_free(old_page);
+        Ok(())
+    }
+
+    fn into_subtree(self) -> SealedSubtree {
+        SealedSubtree::from_range(self.subtree)
     }
 }
 
