@@ -2788,6 +2788,73 @@ fn open_multimap_table_as_regular() {
     ));
 }
 
+// Exercises all four branches of debug_helper: empty table, single entry,
+// exactly two entries (no "more entries" label), and more than two entries.
+#[test]
+fn table_debug_fmt() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+
+        let s = format!("{table:?}");
+        assert!(s.contains("No entries"), "empty: {s}");
+
+        table.insert(&1u64, &100u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("One key-value"), "single: {s}");
+
+        table.insert(&2u64, &200u64).unwrap();
+        table.insert(&3u64, &300u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("more entries"), "multi: {s}");
+    }
+    write_txn.commit().unwrap();
+
+    // Remove one entry to reach exactly 2, which takes the else branch without
+    // printing "more entries".
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.remove(&3u64).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let s = format!("{table:?}");
+    assert!(
+        s.contains("first:") && !s.contains("more entries"),
+        "two entries: {s}"
+    );
+}
+
+// Verifies that DatabaseStats::page_size() and all CacheStats accessors are callable
+// and return values consistent with the database configuration.
+#[test]
+fn database_stats_page_size_and_cache_stats() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&1u64, &1u64).unwrap();
+    }
+    let stats = write_txn.stats().unwrap();
+    assert_eq!(stats.page_size(), 4096);
+    write_txn.commit().unwrap();
+
+    let cs = db.cache_stats();
+    let _ = cs.evictions();
+    let _ = cs.read_hits();
+    let _ = cs.read_misses();
+    let _ = cs.write_hits();
+    let _ = cs.write_misses();
+    let _ = cs.used_bytes();
+}
+
 // Test that &[u8; N] and [u8; N] are effectively the same
 #[test]
 fn u8_array_serialization() {
