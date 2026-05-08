@@ -1,9 +1,8 @@
 use crate::Result;
-use crate::tree_store::btree_base::LeafAccessor;
-use crate::tree_store::btree_iters::{BtreeRangeIter, RangeLeafEntry, RangeSubtree, RangeVisit};
-use crate::tree_store::page_store::{Page, PageImpl};
+use crate::tree_store::btree_iters::{BtreeRangeIter, RangeLeafEntry, RangeVisit};
 use crate::tree_store::subtree_rebuild::{
-    InProgressSubtree, SealedSubtree, SubtreeBuilder, SubtreeRebuildContext,
+    InProgressSubtree, LeafRewrite, SealedSubtree, SubtreeBuilder, SubtreeRebuildContext,
+    finish_rebuilt_root,
 };
 use crate::tree_store::{BtreeHeader, PageHint, PageNumber, PageResolver};
 use crate::types::{Key, Value};
@@ -13,14 +12,8 @@ use std::ops::RangeBounds;
 pub(super) struct Retain {
     builder: SubtreeBuilder,
     in_progress: InProgressSubtree,
-    current_leaf: Option<CurrentRetainLeaf>,
+    current_leaf: Option<LeafRewrite>,
     removed: u64,
-}
-
-struct CurrentRetainLeaf {
-    page: PageImpl,
-    subtree: RangeSubtree,
-    removed_indexes: Vec<usize>,
 }
 
 impl Retain {
@@ -115,15 +108,7 @@ impl Retain {
             context.conditional_free(page);
         }
 
-        if let Some((root, checksum)) = self.builder.finish_root(context)? {
-            Ok(Some(BtreeHeader::new(
-                root,
-                checksum,
-                header.length - self.removed,
-            )))
-        } else {
-            Ok(None)
-        }
+        finish_rebuilt_root(context, self.builder, header, self.removed)
     }
 
     fn visit_leaf_entry<K: Key, V: Value, F>(
@@ -141,7 +126,7 @@ impl Retain {
         );
         let new_leaf = self.current_leaf.is_none();
         if new_leaf {
-            self.current_leaf = Some(CurrentRetainLeaf::new(entry));
+            self.current_leaf = Some(LeafRewrite::new(entry));
         }
 
         let entry_accessor = entry.entry::<K, V>();
@@ -182,73 +167,6 @@ impl Retain {
     }
 
     fn current_leaf_page(&self) -> Option<PageNumber> {
-        self.current_leaf
-            .as_ref()
-            .map(CurrentRetainLeaf::page_number)
-    }
-}
-
-impl CurrentRetainLeaf {
-    fn new(entry: RangeLeafEntry<'_>) -> Self {
-        Self {
-            page: entry.page().clone(),
-            subtree: entry.subtree().clone(),
-            removed_indexes: vec![],
-        }
-    }
-
-    fn page_number(&self) -> PageNumber {
-        self.subtree.page_number()
-    }
-
-    fn root_distance(&self) -> u32 {
-        self.subtree.root_distance()
-    }
-
-    fn page(&self) -> &PageImpl {
-        &self.page
-    }
-
-    fn mark_removed(&mut self, index: usize) -> bool {
-        let first_removed = self.removed_indexes.is_empty();
-        assert!(
-            self.removed_indexes
-                .last()
-                .is_none_or(|last_index| *last_index < index)
-        );
-        self.removed_indexes.push(index);
-        first_removed
-    }
-
-    fn complete_into<K: Key, V: Value>(
-        self,
-        context: &mut SubtreeRebuildContext<'_, K, V>,
-        in_progress: &mut InProgressSubtree,
-        builder: &mut SubtreeBuilder,
-    ) -> Result {
-        if self.removed_indexes.is_empty() {
-            in_progress.push_subtree(self.into_subtree());
-            return Ok(());
-        }
-
-        let old_page = self.page_number();
-        let root_distance = self.root_distance();
-        {
-            let accessor =
-                LeafAccessor::new(self.page().memory(), K::fixed_width(), V::fixed_width());
-            builder.push_leaf_entries_except(
-                context,
-                &accessor,
-                root_distance,
-                &self.removed_indexes,
-            )?;
-        }
-        drop(self);
-        context.conditional_free(old_page);
-        Ok(())
-    }
-
-    fn into_subtree(self) -> SealedSubtree {
-        SealedSubtree::from_range(self.subtree)
+        self.current_leaf.as_ref().map(LeafRewrite::page_number)
     }
 }
