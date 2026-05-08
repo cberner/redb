@@ -511,15 +511,7 @@ fn handle_table_op(
             } else {
                 Box::new(reference.iter().take(take.value))
             };
-            let mut iter: Box<
-                dyn Iterator<
-                    Item = Result<(AccessGuard<u64>, AccessGuard<&[u8]>), redb::StorageError>,
-                >,
-            > = if *reversed {
-                Box::new(table.extract_if(|x, _| x % modulus == 0)?.rev())
-            } else {
-                Box::new(table.extract_if(|x, _| x % modulus == 0)?)
-            };
+            let mut iter = table.extract_if(|x, _| x % modulus == 0)?;
             let mut remaining = take.value;
             let mut remove_from_reference = vec![];
             while let Some((ref_key, ref_value_len)) = reference_iter.next() {
@@ -530,11 +522,17 @@ fn handle_table_op(
                     break;
                 }
                 remaining -= 1;
-                let (key, value) = iter.next().unwrap()?;
+                let next = if *reversed {
+                    iter.next_back()
+                } else {
+                    iter.next()
+                };
+                let (key, value) = next.unwrap()?;
                 remove_from_reference.push(*ref_key);
                 assert_eq!(*ref_key, key.value());
                 assert_eq!(*ref_value_len, value.value().len());
             }
+            iter.close()?;
             drop(reference_iter);
             for x in remove_from_reference {
                 reference.remove(&x);
@@ -555,19 +553,7 @@ fn handle_table_op(
             } else {
                 Box::new(reference.range(start..end).take(take.value))
             };
-            let mut iter: Box<
-                dyn Iterator<
-                    Item = Result<(AccessGuard<u64>, AccessGuard<&[u8]>), redb::StorageError>,
-                >,
-            > = if *reversed {
-                Box::new(
-                    table
-                        .extract_from_if(start..end, |x, _| x % modulus == 0)?
-                        .rev(),
-                )
-            } else {
-                Box::new(table.extract_from_if(start..end, |x, _| x % modulus == 0)?)
-            };
+            let mut iter = table.extract_from_if(start..end, |x, _| x % modulus == 0)?;
             let mut remaining = take.value;
             let mut remove_from_reference = vec![];
             while let Some((ref_key, ref_value_len)) = reference_iter.next() {
@@ -578,11 +564,17 @@ fn handle_table_op(
                     break;
                 }
                 remaining -= 1;
-                let (key, value) = iter.next().unwrap()?;
+                let next = if *reversed {
+                    iter.next_back()
+                } else {
+                    iter.next()
+                };
+                let (key, value) = next.unwrap()?;
                 remove_from_reference.push(*ref_key);
                 assert_eq!(*ref_key, key.value());
                 assert_eq!(*ref_value_len, value.value().len());
             }
+            iter.close()?;
             drop(reference_iter);
             for x in remove_from_reference {
                 reference.remove(&x);

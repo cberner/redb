@@ -203,7 +203,7 @@ fn extract_if() {
         // Test retain uncommitted data
         let mut extracted = table.extract_if(|k, _| k >= 5).unwrap();
         assert_eq!(extracted.next().unwrap().unwrap().0.value(), 5);
-        drop(extracted);
+        extracted.close().unwrap();
         assert_eq!(table.len().unwrap(), 9);
 
         let mut extracted = table.extract_from_if(5.., |k, _| k < 8).unwrap();

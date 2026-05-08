@@ -9,6 +9,8 @@
 * `Table::retain()`, `Table::retain_in()`, `Table::extract_if()`, and `Table::extract_from_if()`
   now poison the write transaction if their predicate panics, causing `WriteTransaction::commit()`
   to return `CommitError::TransactionPoisoned`.
+* Add `ExtractIf::close()` to explicitly finalize an extract iterator without removing unread
+  entries.
 * Optimize `Table::pop_first()` and `Table::pop_last()` to be about 2x faster.
 * Enable file space reclamation during non-durable transactions performed while a savepoint exists.
 * Reuse pages freed by a durable write transaction in the next write transaction when no
