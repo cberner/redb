@@ -520,3 +520,30 @@ fn multimap_remove_subtree_backed_key() {
     assert_eq!(table.len().unwrap(), 1001);
     assert_eq!(table.get(&0u64).unwrap().len(), 999);
 }
+
+#[test]
+fn remove_last_inline_value() {
+    // Removing the only value for a key via remove() should delete the key entirely.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        assert!(table.remove("hello", "world").unwrap());
+        assert_eq!(table.len().unwrap(), 0);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(STR_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 0);
+    assert!(table.get("hello").unwrap().next().is_none());
+}
