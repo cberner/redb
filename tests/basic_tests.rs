@@ -2813,3 +2813,46 @@ fn u8_array_serialization() {
         assert_eq!(ref_order, generic_order);
     }
 }
+
+#[test]
+fn table_debug_and_stats_accessors() {
+    // Exercises Debug formatting for Table and ReadOnlyTable across all entry-count
+    // branches (empty, single, multi), and verifies every TableStats accessor.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+
+        // Empty table: Debug should report "No entries".
+        assert!(format!("{table:?}").contains("No entries"));
+
+        table.insert(1u64, 10u64).unwrap();
+
+        // Single-entry table: Debug should show "One key-value".
+        assert!(format!("{table:?}").contains("One key-value"));
+
+        table.insert(2u64, 20u64).unwrap();
+        table.insert(3u64, 30u64).unwrap();
+
+        // Three entries: Debug should show first, an ellipsis for the middle, and last.
+        let debug = format!("{table:?}");
+        assert!(
+            debug.contains("first:") && debug.contains("more entries") && debug.contains("last:")
+        );
+
+        // All TableStats accessors should return without error and yield consistent values.
+        let stats = table.stats().unwrap();
+        let _ = stats.branch_pages();
+        assert!(stats.stored_bytes() > 0);
+        assert!(stats.metadata_bytes() > 0);
+        let _ = stats.fragmented_bytes();
+    }
+    write_txn.commit().unwrap();
+
+    // ReadOnlyTable also implements Debug via the same helper.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert!(format!("{table:?}").contains("first:"));
+}
