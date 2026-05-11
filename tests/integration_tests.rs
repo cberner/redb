@@ -2058,6 +2058,35 @@ fn range_mixed_direction_no_duplicates_multi_page() {
 }
 
 #[test]
+fn range_alternating_direction_meets_at_leaf_boundary() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let definition: TableDefinition<u64, [u8; 200]> = TableDefinition::new("x");
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..5_000u64 {
+            table.insert(i, &[0u8; 200]).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let definition: TableDefinition<u64, [u8; 200]> = TableDefinition::new("x");
+    let table = read_txn.open_table(definition).unwrap();
+    let mut iter = table.range(0..5_000).unwrap();
+    for i in 0..2_500u64 {
+        let (key, _) = iter.next().unwrap().unwrap();
+        assert_eq!(key.value(), i);
+
+        let (key, _) = iter.next_back().unwrap().unwrap();
+        assert_eq!(key.value(), 4_999 - i);
+    }
+    assert!(iter.next().is_none());
+    assert!(iter.next_back().is_none());
+}
+
+#[test]
 fn alias_table() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();

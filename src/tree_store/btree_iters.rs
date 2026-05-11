@@ -46,7 +46,7 @@ enum RangeIterState {
     },
 }
 
-fn lower_bound_entry<K: Key>(accessor: &LeafAccessor<'_>, bound: Bound<&[u8]>) -> usize {
+pub(super) fn lower_bound_entry<K: Key>(accessor: &LeafAccessor<'_>, bound: Bound<&[u8]>) -> usize {
     match bound {
         Included(query) | Excluded(query) => {
             let (mut position, found) = accessor.position::<K>(query);
@@ -72,7 +72,7 @@ fn upper_bound_entry<K: Key>(accessor: &LeafAccessor<'_>, bound: Bound<&[u8]>) -
     }
 }
 
-fn child_to_visit<K: Key>(
+pub(super) fn child_to_visit<K: Key>(
     accessor: &BranchAccessor<'_, '_, PageImpl>,
     bound: Bound<&[u8]>,
     reverse: bool,
@@ -492,7 +492,7 @@ pub(crate) struct EntryGuard<K: Key, V: Value> {
 }
 
 impl<K: Key, V: Value> EntryGuard<K, V> {
-    fn new(page: PageImpl, key_range: Range<usize>, value_range: Range<usize>) -> Self {
+    pub(super) fn new(page: PageImpl, key_range: Range<usize>, value_range: Range<usize>) -> Self {
         Self {
             page,
             key_range,
@@ -500,6 +500,10 @@ impl<K: Key, V: Value> EntryGuard<K, V> {
             _key_type: PhantomData,
             _value_type: PhantomData,
         }
+    }
+
+    pub(super) fn key_bytes(&self) -> &[u8] {
+        &self.page.memory()[self.key_range.clone()]
     }
 
     pub(crate) fn key_data(&self) -> Vec<u8> {
@@ -614,7 +618,12 @@ pub(crate) struct BtreeRangeIter<K: Key + 'static, V: Value + 'static> {
     _value_type: PhantomData<V>,
 }
 
-fn range_is_empty<'a, K: Key + 'static, KR: Borrow<K::SelfType<'a>>, T: RangeBounds<KR>>(
+pub(super) fn range_is_empty<
+    'a,
+    K: Key + 'static,
+    KR: Borrow<K::SelfType<'a>>,
+    T: RangeBounds<KR>,
+>(
     range: &T,
 ) -> bool {
     match (range.start_bound(), range.end_bound()) {
