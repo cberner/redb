@@ -430,7 +430,7 @@ impl<'s, K: Key + 'static, V: Value + 'static> SystemTable<'s, K, V> {
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
         self.tree
-            .range(&range)
+            .cursor_range(&range)
             .map(|x| Range::new(x, self.transaction_guard.clone()))
     }
 

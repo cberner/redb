@@ -1,7 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
 use crate::tree_store::{
-    AccessGuardMutInPlace, Btree, BtreeExtractIf, BtreeHeader, BtreeMut, BtreeRangeIter,
+    AccessGuardMutInPlace, Btree, BtreeCursorRange, BtreeExtractIf, BtreeHeader, BtreeMut,
     MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageAllocator, PageHint, PageNumber, PageResolver,
     PageTrackerPolicy, RawBtree,
 };
@@ -327,7 +327,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'_, K, 
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
         self.tree
-            .range(&range)
+            .cursor_range(&range)
             .map(|x| Range::new(x, self.transaction.transaction_guard()))
     }
 
@@ -554,7 +554,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         KR: Borrow<K::SelfType<'a>>,
     {
         self.tree
-            .range(&range)
+            .cursor_range(&range)
             .map(|x| Range::new(x, self.transaction_guard.clone()))
     }
 }
@@ -588,7 +588,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
         self.tree
-            .range(&range)
+            .cursor_range(&range)
             .map(|x| Range::new(x, self.transaction_guard.clone()))
     }
 
@@ -701,14 +701,14 @@ impl<
 
 #[derive(Clone)]
 pub struct Range<'a, K: Key + 'static, V: Value + 'static> {
-    inner: BtreeRangeIter<K, V>,
+    inner: BtreeCursorRange<K, V>,
     _transaction_guard: Arc<TransactionGuard>,
     // This lifetime is here so that `&` can be held on `Table` preventing concurrent mutation
     _lifetime: PhantomData<&'a ()>,
 }
 
 impl<K: Key + 'static, V: Value + 'static> Range<'_, K, V> {
-    pub(super) fn new(inner: BtreeRangeIter<K, V>, guard: Arc<TransactionGuard>) -> Self {
+    pub(super) fn new(inner: BtreeCursorRange<K, V>, guard: Arc<TransactionGuard>) -> Self {
         Self {
             inner,
             _transaction_guard: guard,
