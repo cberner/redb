@@ -106,6 +106,101 @@ fn table_stats() {
     assert_eq!(untyped_table.stats().unwrap().tree_height(), 1);
 }
 
+// TableStats exposes stored_bytes, branch_pages, metadata_bytes, and fragmented_bytes which
+// are useful for monitoring storage efficiency. Test them with a large table that forces
+// branch pages and with fragmentation created by deletions.
+#[test]
+fn table_stats_all_fields() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Insert enough u64 entries to span multiple leaf pages and create branch pages.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..500u64 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let stats = table.stats().unwrap();
+    assert!(stats.stored_bytes() > 0);
+    assert!(stats.metadata_bytes() > 0);
+    assert!(
+        stats.branch_pages() > 0,
+        "expected branch pages with 500 entries"
+    );
+    assert!(stats.leaf_pages() > 1);
+    drop(read_txn);
+
+    // Delete most entries to produce fragmentation.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..490u64 {
+            table.remove(i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert!(table.stats().unwrap().fragmented_bytes() > 0);
+}
+
+// The Debug impl for Table and ReadOnlyTable has branches for empty, single-entry, exactly-two,
+// and multi-entry tables. Verify each branch produces sensible output.
+#[test]
+fn table_debug_format() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Empty table.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(U64_TABLE).unwrap();
+        assert!(format!("{table:?}").contains("No entries"));
+    }
+    write_txn.abort().unwrap();
+
+    // Single entry.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 10u64).unwrap();
+        assert!(format!("{table:?}").contains("One key-value"));
+    }
+    write_txn.commit().unwrap();
+
+    // Exactly two entries (no "more entries" ellipsis).
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(2u64, 20u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("first:") && s.contains("last:") && !s.contains("more entries"));
+    }
+    write_txn.commit().unwrap();
+
+    // Three or more entries shows the "more entries" ellipsis.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(3u64, 30u64).unwrap();
+        assert!(format!("{table:?}").contains("more entries"));
+    }
+    write_txn.commit().unwrap();
+
+    // ReadOnlyTable Debug also goes through the same helper.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let s = format!("{table:?}");
+    assert!(s.contains("first:") && s.contains("more entries"));
+}
+
 #[test]
 fn in_memory() {
     let db = Database::builder()
