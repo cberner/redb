@@ -3,7 +3,7 @@ use redb::{AccessGuard, Durability, ReadableDatabase, ReadableTableMetadata, Tab
 use rocksdb::{
     Direction, IteratorMode, OptimisticTransactionDB, OptimisticTransactionOptions, WriteOptions,
 };
-use rusqlite::{Connection, Statement, Transaction};
+use rusqlite::{Connection, OptionalExtension, Statement, Transaction};
 use std::fs::File;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,7 @@ const SCAN_ITERATIONS: usize = 2;
 const NUM_READS: usize = 1_000_000;
 const NUM_SCANS: usize = 500_000;
 const SCAN_LEN: usize = 10;
+const POP_REMOVALS: usize = 500_000;
 const KEY_SIZE: usize = 24;
 const VALUE_SIZE: usize = 150;
 const RNG_SEED: u64 = 3;
@@ -416,6 +417,43 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
         txn.commit().unwrap();
     }
 
+    let (popped, duration) = {
+        let mut txn = connection.write_transaction();
+        let mut inserter = txn.get_inserter();
+        let start = Instant::now();
+        let mut popped = 0u64;
+        for i in 0..POP_REMOVALS {
+            if i % 2 == 0 {
+                inserter.pop_first()
+            } else {
+                inserter.pop_last()
+            }
+            .unwrap()
+            .unwrap();
+            popped += 1;
+        }
+        let duration = start.elapsed();
+        drop(inserter);
+        txn.commit().unwrap();
+        (popped, duration)
+    };
+    println!(
+        "{}: Popped {} items in {}ms",
+        T::db_type_name(),
+        popped,
+        duration.as_millis()
+    );
+    results.push(("pop".to_string(), ResultType::Duration(duration)));
+
+    let mut txn = connection.write_transaction();
+    let mut inserter = txn.get_inserter();
+    for _ in 0..popped {
+        let (key, value) = random_pair(&mut rng);
+        inserter.insert(&key, &value).unwrap();
+    }
+    drop(inserter);
+    txn.commit().unwrap();
+
     let uncompacted_size = database_size(path);
     results.push((
         "uncompacted size".to_string(),
@@ -527,12 +565,29 @@ pub trait BenchWriteTransaction {
     fn commit(self) -> Result<(), ()>;
 }
 
+type BenchPopEntry<'out, T> = (
+    <T as BenchInserter>::Output<'out>,
+    <T as BenchInserter>::Output<'out>,
+);
+
+type BenchPopResult<'out, T> = Result<Option<BenchPopEntry<'out, T>>, ()>;
+
 pub trait BenchInserter {
+    type Output<'out>: AsRef<[u8]> + 'out
+    where
+        Self: 'out;
+
     #[allow(clippy::result_unit_err)]
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()>;
 
     #[allow(clippy::result_unit_err)]
     fn remove(&mut self, key: &[u8]) -> Result<(), ()>;
+
+    #[allow(clippy::result_unit_err)]
+    fn pop_first(&mut self) -> BenchPopResult<'_, Self>;
+
+    #[allow(clippy::result_unit_err)]
+    fn pop_last(&mut self) -> BenchPopResult<'_, Self>;
 
     // Applies `predicate` to every entry; entries for which it returns `false` are removed.
     // Returns the number of entries removed.
@@ -753,12 +808,35 @@ pub struct RedbBenchInserter<'txn> {
 }
 
 impl BenchInserter for RedbBenchInserter<'_> {
+    type Output<'out>
+        = RedbAccessGuard<'out>
+    where
+        Self: 'out;
+
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.table.insert(key, value).map(|_| ()).map_err(|_| ())
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
         self.table.remove(key).map(|_| ()).map_err(|_| ())
+    }
+
+    fn pop_first(&mut self) -> BenchPopResult<'_, Self> {
+        self.table
+            .pop_first()
+            .map(|entry| {
+                entry.map(|(key, value)| (RedbAccessGuard::new(key), RedbAccessGuard::new(value)))
+            })
+            .map_err(|_| ())
+    }
+
+    fn pop_last(&mut self) -> BenchPopResult<'_, Self> {
+        self.table
+            .pop_last()
+            .map(|entry| {
+                entry.map(|(key, value)| (RedbAccessGuard::new(key), RedbAccessGuard::new(value)))
+            })
+            .map_err(|_| ())
     }
 
     fn retain<F: FnMut(&[u8], &[u8]) -> bool>(&mut self, mut predicate: F) -> Result<u64, ()> {
@@ -957,12 +1035,25 @@ pub struct SledBenchInserter<'a> {
 }
 
 impl BenchInserter for SledBenchInserter<'_> {
+    type Output<'out>
+        = sled::IVec
+    where
+        Self: 'out;
+
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.db.insert(key, value).map(|_| ()).map_err(|_| ())
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
         self.db.remove(key).map(|_| ()).map_err(|_| ())
+    }
+
+    fn pop_first(&mut self) -> BenchPopResult<'_, Self> {
+        self.db.pop_min().map_err(|_| ())
+    }
+
+    fn pop_last(&mut self) -> BenchPopResult<'_, Self> {
+        self.db.pop_max().map_err(|_| ())
     }
 
     fn retain<F: FnMut(&[u8], &[u8]) -> bool>(&mut self, mut predicate: F) -> Result<u64, ()> {
@@ -1160,12 +1251,45 @@ pub struct HeedBenchInserter<'txn, 'db> {
 }
 
 impl BenchInserter for HeedBenchInserter<'_, '_> {
+    type Output<'out>
+        = Vec<u8>
+    where
+        Self: 'out;
+
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.db.put(self.txn, key, value).map_err(|_| ())
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
         self.db.delete(self.txn, key).map(|_| ()).map_err(|_| ())
+    }
+
+    fn pop_first(&mut self) -> BenchPopResult<'_, Self> {
+        let mut iter = self.db.iter_mut(self.txn).map_err(|_| ())?;
+        let entry = iter
+            .next()
+            .transpose()
+            .map_err(|_| ())?
+            .map(|(key, value)| (key.to_vec(), value.to_vec()));
+        if entry.is_some() {
+            // safety: no references into the db are held across this call.
+            unsafe { iter.del_current().map_err(|_| ())? };
+        }
+        Ok(entry)
+    }
+
+    fn pop_last(&mut self) -> BenchPopResult<'_, Self> {
+        let mut iter = self.db.rev_iter_mut(self.txn).map_err(|_| ())?;
+        let entry = iter
+            .next()
+            .transpose()
+            .map_err(|_| ())?
+            .map(|(key, value)| (key.to_vec(), value.to_vec()));
+        if entry.is_some() {
+            // safety: no references into the db are held across this call.
+            unsafe { iter.del_current().map_err(|_| ())? };
+        }
+        Ok(entry)
     }
 
     fn retain<F: FnMut(&[u8], &[u8]) -> bool>(&mut self, mut predicate: F) -> Result<u64, ()> {
@@ -1410,6 +1534,11 @@ pub struct RocksdbBenchInserter<'a, 'b> {
 }
 
 impl BenchInserter for RocksdbBenchInserter<'_, '_> {
+    type Output<'out>
+        = Box<[u8]>
+    where
+        Self: 'out;
+
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.counter += 1;
         if self.counter == ROCKSDB_MAX_WRITES_PER_TXN {
@@ -1428,6 +1557,34 @@ impl BenchInserter for RocksdbBenchInserter<'_, '_> {
             self.counter = 0;
         }
         self.txn.txn.delete(key).map_err(|_| ())
+    }
+
+    fn pop_first(&mut self) -> BenchPopResult<'_, Self> {
+        let entry = self
+            .txn
+            .txn
+            .iterator(IteratorMode::Start)
+            .next()
+            .transpose()
+            .map_err(|_| ())?;
+        if let Some((key, _)) = &entry {
+            self.remove(key)?;
+        }
+        Ok(entry)
+    }
+
+    fn pop_last(&mut self) -> BenchPopResult<'_, Self> {
+        let entry = self
+            .txn
+            .txn
+            .iterator(IteratorMode::End)
+            .next()
+            .transpose()
+            .map_err(|_| ())?;
+        if let Some((key, _)) = &entry {
+            self.remove(key)?;
+        }
+        Ok(entry)
     }
 
     fn retain<F: FnMut(&[u8], &[u8]) -> bool>(&mut self, mut predicate: F) -> Result<u64, ()> {
@@ -1736,6 +1893,11 @@ pub struct FjallBenchInserter<'txn, 'db> {
 }
 
 impl BenchInserter for FjallBenchInserter<'_, '_> {
+    type Output<'out>
+        = fjall::Slice
+    where
+        Self: 'out;
+
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.txn.insert(self.part, key, value);
         Ok(())
@@ -1744,6 +1906,32 @@ impl BenchInserter for FjallBenchInserter<'_, '_> {
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
         self.txn.remove(self.part, key);
         Ok(())
+    }
+
+    fn pop_first(&mut self) -> BenchPopResult<'_, Self> {
+        let entry = self
+            .txn
+            .iter(self.part)
+            .next()
+            .transpose()
+            .map_err(|_| ())?;
+        if let Some((key, _)) = &entry {
+            self.txn.remove(self.part, key.as_ref());
+        }
+        Ok(entry)
+    }
+
+    fn pop_last(&mut self) -> BenchPopResult<'_, Self> {
+        let entry = self
+            .txn
+            .iter(self.part)
+            .next_back()
+            .transpose()
+            .map_err(|_| ())?;
+        if let Some((key, _)) = &entry {
+            self.txn.remove(self.part, key.as_ref());
+        }
+        Ok(entry)
     }
 
     fn retain<F: FnMut(&[u8], &[u8]) -> bool>(&mut self, mut predicate: F) -> Result<u64, ()> {
@@ -1885,7 +2073,39 @@ pub struct SqliteBenchInserter<'txn, 'db> {
     txn: &'txn Transaction<'db>,
 }
 
+type SqlitePopResult = Result<Option<(Vec<u8>, Vec<u8>)>, ()>;
+
+impl SqliteBenchInserter<'_, '_> {
+    fn pop_ordered(&self, direction: &str) -> SqlitePopResult {
+        let sql = format!("SELECT rowid, key, value FROM kv ORDER BY key {direction} LIMIT 1");
+        let entry = self
+            .txn
+            .query_row(&sql, [], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .optional()
+            .map_err(|_| ())?;
+        if let Some((rowid, key, value)) = entry {
+            self.txn
+                .execute("DELETE FROM kv WHERE rowid = ?", [rowid])
+                .map_err(|_| ())?;
+            Ok(Some((key, value)))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 impl BenchInserter for SqliteBenchInserter<'_, '_> {
+    type Output<'out>
+        = Vec<u8>
+    where
+        Self: 'out;
+
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.txn
             .execute(
@@ -1901,6 +2121,14 @@ impl BenchInserter for SqliteBenchInserter<'_, '_> {
             .execute("DELETE FROM kv WHERE key = ?", [key])
             .map(|_| ())
             .map_err(|_| ())
+    }
+
+    fn pop_first(&mut self) -> BenchPopResult<'_, Self> {
+        self.pop_ordered("ASC")
+    }
+
+    fn pop_last(&mut self) -> BenchPopResult<'_, Self> {
+        self.pop_ordered("DESC")
     }
 
     fn retain<F: FnMut(&[u8], &[u8]) -> bool>(&mut self, mut predicate: F) -> Result<u64, ()> {
