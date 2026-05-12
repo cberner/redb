@@ -716,23 +716,18 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         Ok(())
     }
 
-    fn delete_leaf_helper(
+    fn delete_leaf_at_position(
         &mut self,
         page: PageImpl,
-        target: DeleteTarget<'_>,
-        found_key: &mut Option<AccessGuard<'a, K>>,
-    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+        position: usize,
+        want_key: bool,
+    ) -> Result<(
+        DeletionResult,
+        Option<AccessGuard<'a, K>>,
+        AccessGuard<'a, V>,
+    )> {
         let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-        let (position, found) = match target {
-            DeleteTarget::Key(key) => accessor.position::<K>(key),
-            DeleteTarget::First => (0, true),
-            DeleteTarget::Last => (accessor.num_pairs() - 1, true),
-        };
-        if !found {
-            // Leaf is unchanged; caller short-circuits via `found.is_none()`.
-            return Ok((Subtree(page.get_page_number()), None));
-        }
-        let want_key = matches!(target, DeleteTarget::First | DeleteTarget::Last);
+        assert!(position < accessor.num_pairs());
         let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
             - accessor.length_of_pairs(position, position + 1);
         let new_required_bytes = RawLeafBuilder::required_bytes(
@@ -752,13 +747,15 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             && accessor.num_pairs() > 1
         {
             let (start, end) = accessor.value_range(position).unwrap();
-            // The returned value guard owns the mutable page and removes the entry on drop,
-            // so we can't hand the key back as a borrow into the same page. Copy it instead.
-            if want_key {
-                *found_key = Some(AccessGuard::with_owned_value(
+            let key_guard = if want_key {
+                // The returned value guard owns the mutable page and removes the entry on drop,
+                // so we can't hand the key back as a borrow into the same page. Copy it instead.
+                Some(AccessGuard::with_owned_value(
                     accessor.entry(position).unwrap().key().to_vec(),
-                ));
-            }
+                ))
+            } else {
+                None
+            };
             let page_number = page.get_page_number();
             drop(page);
             let page_mut = self.page_allocator.get_page_mut(page_number)?;
@@ -770,7 +767,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 position,
                 K::fixed_width(),
             );
-            return Ok((Subtree(page_number), Some(guard)));
+            return Ok((Subtree(page_number), key_guard, guard));
         }
 
         let result = if accessor.num_pairs() == 1 {
@@ -801,26 +798,49 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             Subtree(new_page.get_page_number())
         };
         let (key_range, value_range) = accessor.entry_ranges(position).unwrap();
-        let guard = if uncommitted && self.modify_uncommitted {
+        let (key_guard, value_guard) = if uncommitted && self.modify_uncommitted {
             let page_number = page.get_page_number();
             let arc = page.to_arc();
             drop(page);
             let mut allocated = self.allocated.lock().unwrap();
             self.page_allocator.free(page_number, &mut allocated);
-            if want_key {
-                *found_key = Some(AccessGuard::with_arc_page(arc.clone(), key_range));
-            }
-            Some(AccessGuard::with_arc_page(arc, value_range))
+            let key_guard = want_key.then(|| AccessGuard::with_arc_page(arc.clone(), key_range));
+            (key_guard, AccessGuard::with_arc_page(arc, value_range))
         } else {
             // Won't be freed until the end of the transaction, so returning the page
             // in the AccessGuard below is still safe
-            if want_key {
-                *found_key = Some(AccessGuard::with_page(page.clone(), key_range));
-            }
+            let key_guard = want_key.then(|| AccessGuard::with_page(page.clone(), key_range));
             self.freed.push(page.get_page_number());
-            Some(AccessGuard::with_page(page, value_range))
+            (key_guard, AccessGuard::with_page(page, value_range))
         };
-        Ok((result, guard))
+        Ok((result, key_guard, value_guard))
+    }
+
+    fn delete_leaf_helper(
+        &mut self,
+        page: PageImpl,
+        target: DeleteTarget<'_>,
+        found_key: &mut Option<AccessGuard<'a, K>>,
+    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+        let (position, found) = {
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+            match target {
+                DeleteTarget::Key(key) => accessor.position::<K>(key),
+                DeleteTarget::First => (0, true),
+                DeleteTarget::Last => (accessor.num_pairs() - 1, true),
+            }
+        };
+        if !found {
+            // Leaf is unchanged; caller short-circuits via `found.is_none()`.
+            return Ok((Subtree(page.get_page_number()), None));
+        }
+        let want_key = matches!(target, DeleteTarget::First | DeleteTarget::Last);
+        let (result, key_guard, value_guard) =
+            self.delete_leaf_at_position(page, position, want_key)?;
+        if want_key {
+            *found_key = Some(key_guard.expect("deleted key must be returned when requested"));
+        }
+        Ok((result, Some(value_guard)))
     }
 
     fn finalize_branch_builder(
