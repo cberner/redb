@@ -1,17 +1,64 @@
+use crate::AccessGuard;
 use crate::Result;
 use crate::tree_store::btree_base::{BRANCH, BranchAccessor, LEAF, LeafAccessor};
 use crate::tree_store::btree_iters::{EntryGuard, child_to_visit, lower_bound_entry};
+use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageHint, PageImpl};
-use crate::tree_store::{PageNumber, PageResolver};
+use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageResolver, PageTrackerPolicy};
 use crate::types::{Key, Value};
 use std::cmp::Ordering;
 use std::collections::Bound;
 use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 struct Branch {
     page: PageImpl,
     child_index: usize,
+}
+
+impl Branch {
+    fn new(page: PageImpl, child_index: usize) -> Self {
+        Self { page, child_index }
+    }
+
+    fn into_parts(self) -> (PageImpl, usize) {
+        (self.page, self.child_index)
+    }
+}
+
+fn descend_edge<K: Key + 'static, V: Value + 'static, F>(
+    page: PageImpl,
+    high_edge: bool,
+    path: &mut Vec<Branch>,
+    get_page: &mut F,
+) -> Result<(PageImpl, usize)>
+where
+    // TODO: introduce a trait for this that PageResolver can implement too.
+    F: FnMut(PageNumber) -> Result<PageImpl>,
+{
+    match page.memory()[0] {
+        LEAF => {
+            let len = {
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                accessor.num_pairs()
+            };
+            Ok((page, len))
+        }
+        BRANCH => {
+            let accessor = BranchAccessor::new(&page, K::fixed_width());
+            let child_index = if high_edge {
+                accessor.count_children() - 1
+            } else {
+                0
+            };
+            let child_page = accessor.child_page(child_index).unwrap();
+            path.push(Branch::new(page, child_index));
+            let child = get_page(child_page)?;
+            descend_edge::<K, V, F>(child, high_edge, path, get_page)
+        }
+        _ => unreachable!(),
+    }
 }
 
 #[derive(Clone)]
@@ -79,7 +126,7 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
                     let child_index = child_to_visit::<K>(&accessor, bound, false);
                     (child_index, accessor.child_page(child_index).unwrap())
                 };
-                self.path.push(Branch { page, child_index });
+                self.path.push(Branch::new(page, child_index));
                 let page = self.manager.get_page(child_page, self.hint)?;
                 self.descend_to_bound(page, bound)
             }
@@ -88,33 +135,13 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
     }
 
     fn descend_edge(&mut self, page: PageImpl, high_edge: bool) -> Result {
-        match page.memory()[0] {
-            LEAF => {
-                let (position, len) = {
-                    let accessor =
-                        LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-                    let len = accessor.num_pairs();
-                    (if high_edge { len } else { 0 }, len)
-                };
-                self.set_leaf(page, position, len);
-                Ok(())
-            }
-            BRANCH => {
-                let (child_index, child_page) = {
-                    let accessor = BranchAccessor::new(&page, K::fixed_width());
-                    let child_index = if high_edge {
-                        accessor.count_children() - 1
-                    } else {
-                        0
-                    };
-                    (child_index, accessor.child_page(child_index).unwrap())
-                };
-                self.path.push(Branch { page, child_index });
-                let page = self.manager.get_page(child_page, self.hint)?;
-                self.descend_edge(page, high_edge)
-            }
-            _ => unreachable!(),
-        }
+        let manager = &self.manager;
+        let hint = self.hint;
+        let mut get_page = |page| manager.get_page(page, hint);
+        let (page, len) = descend_edge::<K, V, _>(page, high_edge, &mut self.path, &mut get_page)?;
+        let position = if high_edge { len } else { 0 };
+        self.set_leaf(page, position, len);
+        Ok(())
     }
 
     fn set_leaf(&mut self, page: PageImpl, position: usize, len: usize) {
@@ -242,5 +269,110 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
                 .entry_ranges(entry)
                 .expect("cursor entry must exist");
         EntryGuard::new(leaf.page.clone(), key, value)
+    }
+}
+
+#[derive(Copy, Clone)]
+pub(super) enum CursorMutPosition {
+    Start,
+    End,
+}
+
+pub(super) struct CursorMut<'a, 'b, K: Key + 'static, V: Value + 'static> {
+    root: &'b mut Option<BtreeHeader>,
+    page_allocator: &'b PageAllocator,
+    freed: &'b mut Vec<PageNumber>,
+    allocated: &'b Arc<Mutex<PageTrackerPolicy>>,
+    path: Vec<Branch>,
+    leaf: Option<Leaf>,
+    _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
+    _lifetime: PhantomData<&'a ()>,
+}
+
+impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
+    pub(super) fn new(
+        root: &'b mut Option<BtreeHeader>,
+        page_allocator: &'b PageAllocator,
+        freed: &'b mut Vec<PageNumber>,
+        allocated: &'b Arc<Mutex<PageTrackerPolicy>>,
+    ) -> Self {
+        Self {
+            root,
+            page_allocator,
+            freed,
+            allocated,
+            path: vec![],
+            leaf: None,
+            _key_type: PhantomData,
+            _value_type: PhantomData,
+            _lifetime: PhantomData,
+        }
+    }
+
+    pub(super) fn seek_to(&mut self, position: CursorMutPosition) -> Result {
+        self.path.clear();
+        self.leaf = None;
+        let Some(header) = *self.root else {
+            return Ok(());
+        };
+        let root = self.page_allocator.get_page(header.root, PageHint::None)?;
+        let high_edge = matches!(position, CursorMutPosition::End);
+        let page_allocator = self.page_allocator;
+        let mut get_page = |page| page_allocator.get_page(page, PageHint::None);
+        let (page, len) = descend_edge::<K, V, _>(root, high_edge, &mut self.path, &mut get_page)?;
+        let position = if high_edge { len } else { 0 };
+        self.leaf = Some(Leaf {
+            page,
+            position,
+            len,
+        });
+        Ok(())
+    }
+
+    pub(super) fn remove_next(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        let Some(leaf) = self.leaf.take() else {
+            self.path.clear();
+            return Ok(None);
+        };
+        if leaf.position == leaf.len {
+            self.path.clear();
+            return Ok(None);
+        }
+        self.remove_leaf_entry(leaf.page, leaf.position)
+    }
+
+    pub(super) fn remove_prev(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        let Some(leaf) = self.leaf.take() else {
+            self.path.clear();
+            return Ok(None);
+        };
+        let Some(position) = leaf.position.checked_sub(1) else {
+            self.path.clear();
+            return Ok(None);
+        };
+        self.remove_leaf_entry(leaf.page, position)
+    }
+
+    fn remove_leaf_entry(
+        &mut self,
+        leaf: PageImpl,
+        position: usize,
+    ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        let path = std::mem::take(&mut self.path)
+            .into_iter()
+            .map(Branch::into_parts)
+            .collect();
+        let mut helper = MutateHelper::new(
+            &mut *self.root,
+            (*self.page_allocator).clone(),
+            &mut *self.freed,
+            Arc::clone(self.allocated),
+        );
+        Ok(Some(helper.pop_leaf_entry(leaf, path, position)?))
     }
 }

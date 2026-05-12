@@ -3,6 +3,7 @@ use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
     LeafAccessor, LeafPageMut, branch_checksum, leaf_checksum,
 };
+use crate::tree_store::btree_cursor::{CursorMut, CursorMutPosition};
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
@@ -495,25 +496,27 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
     // Removes and returns the leftmost entry in the tree, if any, in a single tree descent.
     pub(crate) fn pop_first(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         let mut freed_pages = self.freed_pages.lock().unwrap();
-        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
+        let mut cursor: CursorMut<'_, '_, K, V> = CursorMut::new(
             &mut self.root,
-            self.page_allocator.clone(),
+            &self.page_allocator,
             freed_pages.as_mut(),
-            self.allocated_pages.clone(),
+            &self.allocated_pages,
         );
-        operation.pop_first()
+        cursor.seek_to(CursorMutPosition::Start)?;
+        cursor.remove_next()
     }
 
     // Removes and returns the rightmost entry in the tree, if any, in a single tree descent.
     pub(crate) fn pop_last(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         let mut freed_pages = self.freed_pages.lock().unwrap();
-        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
+        let mut cursor: CursorMut<'_, '_, K, V> = CursorMut::new(
             &mut self.root,
-            self.page_allocator.clone(),
+            &self.page_allocator,
             freed_pages.as_mut(),
-            self.allocated_pages.clone(),
+            &self.allocated_pages,
         );
-        operation.pop_last()
+        cursor.seek_to(CursorMutPosition::End)?;
+        cursor.remove_prev()
     }
 
     #[allow(dead_code)]
