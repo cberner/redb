@@ -6,17 +6,13 @@ use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
-use crate::tree_store::retain::Retain;
-use crate::tree_store::subtree_rebuild::SubtreeRebuildContext;
 use crate::tree_store::{
     AccessGuardMutInPlace, BtreeHeader, PageAllocator, PageHint, PageNumber, PageTrackerPolicy,
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
-use std::borrow::Borrow;
 use std::cmp::{max, min};
 use std::marker::PhantomData;
-use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -123,40 +119,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
     pub(crate) fn delete(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
         self.delete_key(K::as_bytes(key).as_ref())
-    }
-
-    pub(crate) fn retain_in_range<'r, KR, F>(
-        &mut self,
-        range: &'_ impl RangeBounds<KR>,
-        mut predicate: F,
-    ) -> Result
-    where
-        KR: Borrow<K::SelfType<'r>> + 'r,
-        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
-    {
-        assert!(self.modify_uncommitted);
-        let Some(header) = *self.root else {
-            return Ok(());
-        };
-
-        let mut retain_context = SubtreeRebuildContext::<K, V>::new(
-            &self.page_allocator,
-            &self.allocated,
-            self.freed,
-            self.modify_uncommitted,
-        );
-        let mut retain = Retain::new();
-        retain.execute(
-            &mut retain_context,
-            header,
-            range,
-            self.page_allocator.resolver(),
-            &mut predicate,
-        )?;
-        let new_root = retain.finish(&mut retain_context, header)?;
-        *self.root = new_root;
-
-        Ok(())
     }
 
     fn delete_key(&mut self, key: &[u8]) -> Result<Option<AccessGuard<'a, V>>> {
