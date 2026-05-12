@@ -19,17 +19,6 @@ use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
 
-// Describes which entry to delete. `Key` navigates via key comparison; `First`
-// and `Last` navigate to the leftmost or rightmost entry, and also cause the
-// deleted key bytes to be captured so the caller can return them alongside the
-// value (used by pop_first / pop_last).
-#[derive(Copy, Clone)]
-enum DeleteTarget<'a> {
-    Key(&'a [u8]),
-    First,
-    Last,
-}
-
 #[derive(Debug)]
 enum DeletionResult {
     // A proper subtree
@@ -133,22 +122,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     }
 
     pub(crate) fn delete(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
-        let mut found_key = None;
-        self.delete_target(DeleteTarget::Key(K::as_bytes(key).as_ref()), &mut found_key)
-    }
-
-    // Deletes the leftmost entry in the tree and returns (key, value), or None if empty.
-    pub(crate) fn pop_first(&mut self) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
-        let mut found_key = None;
-        let value = self.delete_target(DeleteTarget::First, &mut found_key)?;
-        Ok(value.map(|v| (found_key.take().unwrap(), v)))
-    }
-
-    // Deletes the rightmost entry in the tree and returns (key, value), or None if empty.
-    pub(crate) fn pop_last(&mut self) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
-        let mut found_key = None;
-        let value = self.delete_target(DeleteTarget::Last, &mut found_key)?;
-        Ok(value.map(|v| (found_key.take().unwrap(), v)))
+        self.delete_key(K::as_bytes(key).as_ref())
     }
 
     pub(crate) fn retain_in_range<'r, KR, F>(
@@ -185,20 +159,13 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         Ok(())
     }
 
-    fn delete_target(
-        &mut self,
-        target: DeleteTarget<'_>,
-        found_key: &mut Option<AccessGuard<'a, K>>,
-    ) -> Result<Option<AccessGuard<'a, V>>> {
+    fn delete_key(&mut self, key: &[u8]) -> Result<Option<AccessGuard<'a, V>>> {
         if let Some(BtreeHeader {
             root: p, length, ..
         }) = *self.root
         {
-            let (deletion_result, found) = self.delete_helper(
-                self.page_allocator.get_page(p, PageHint::None)?,
-                target,
-                found_key,
-            )?;
+            let (deletion_result, found) =
+                self.delete_helper(self.page_allocator.get_page(p, PageHint::None)?, key)?;
             if found.is_none() {
                 // The tree was not modified; leave *self.root untouched so that any clean
                 // root page keeps its already-valid checksum.
@@ -259,6 +226,24 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         };
         *self.root = new_root;
         Ok(())
+    }
+
+    pub(super) fn pop_leaf_entry(
+        &mut self,
+        leaf: PageImpl,
+        path: Vec<(PageImpl, usize)>,
+        position: usize,
+    ) -> Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)> {
+        let length = self.root.expect("pop requires a root").length;
+        let (mut result, key, value) = self.delete_leaf_at_position(leaf, position, true)?;
+        for (page, child_index) in path.into_iter().rev() {
+            result = self.apply_child_deletion_result(page, child_index, result)?;
+        }
+        self.finish_deletion(result, length - 1)?;
+        Ok((
+            key.expect("deleted key must be returned when requested"),
+            value,
+        ))
     }
 
     #[allow(clippy::type_complexity)]
@@ -819,27 +804,19 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     fn delete_leaf_helper(
         &mut self,
         page: PageImpl,
-        target: DeleteTarget<'_>,
-        found_key: &mut Option<AccessGuard<'a, K>>,
+        key: &[u8],
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
         let (position, found) = {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-            match target {
-                DeleteTarget::Key(key) => accessor.position::<K>(key),
-                DeleteTarget::First => (0, true),
-                DeleteTarget::Last => (accessor.num_pairs() - 1, true),
-            }
+            accessor.position::<K>(key)
         };
         if !found {
             // Leaf is unchanged; caller short-circuits via `found.is_none()`.
             return Ok((Subtree(page.get_page_number()), None));
         }
-        let want_key = matches!(target, DeleteTarget::First | DeleteTarget::Last);
         let (result, key_guard, value_guard) =
-            self.delete_leaf_at_position(page, position, want_key)?;
-        if want_key {
-            *found_key = Some(key_guard.expect("deleted key must be returned when requested"));
-        }
+            self.delete_leaf_at_position(page, position, false)?;
+        assert!(key_guard.is_none());
         Ok((result, Some(value_guard)))
     }
 
@@ -865,26 +842,17 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     fn delete_branch_helper(
         &mut self,
         page: PageImpl,
-        target: DeleteTarget<'_>,
-        found_key: &mut Option<AccessGuard<'a, K>>,
+        key: &[u8],
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
         let original_page_number = page.get_page_number();
         let (child_index, child_page_number) = {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
-            match target {
-                DeleteTarget::Key(key) => accessor.child_for_key::<K>(key),
-                DeleteTarget::First => (0, accessor.child_page(0).unwrap()),
-                DeleteTarget::Last => {
-                    let idx = accessor.count_children() - 1;
-                    (idx, accessor.child_page(idx).unwrap())
-                }
-            }
+            accessor.child_for_key::<K>(key)
         };
         let (result, found) = self.delete_helper(
             self.page_allocator
                 .get_page(child_page_number, PageHint::None)?,
-            target,
-            found_key,
+            key,
         )?;
         if found.is_none() {
             // Subtree unchanged; caller identifies this via `found.is_none()`.
@@ -1013,8 +981,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
                     drop(page);
                     self.conditional_free(original_page_number);
-                    // child_page_number does not need to be freed, because it's a leaf and the
-                    // MutAccessGuard will free it
+                    // The leaf helper already handled the original child page lifetime.
 
                     return Ok(result);
                 }
@@ -1071,8 +1038,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 let page_number = merge_with_page.get_page_number();
                 drop(merge_with_page);
                 self.conditional_free(page_number);
-                // child_page_number does not need to be freed, because it's a leaf and the
-                // MutAccessGuard will free it
+                // The leaf helper already handled the original child page lifetime.
 
                 result
             }
@@ -1219,18 +1185,15 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
     // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
     // If key is not found, guaranteed not to modify the tree.
-    // When `target` is DeleteTarget::First or DeleteTarget::Last, `found_key` is populated
-    // with an AccessGuard for the deleted key.
     fn delete_helper(
         &mut self,
         page: PageImpl,
-        target: DeleteTarget<'_>,
-        found_key: &mut Option<AccessGuard<'a, K>>,
+        key: &[u8],
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
         let node_mem = page.memory();
         match node_mem[0] {
-            LEAF => self.delete_leaf_helper(page, target, found_key),
-            BRANCH => self.delete_branch_helper(page, target, found_key),
+            LEAF => self.delete_leaf_helper(page, key),
+            BRANCH => self.delete_branch_helper(page, key),
             _ => unreachable!(),
         }
     }
