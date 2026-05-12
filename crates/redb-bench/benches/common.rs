@@ -25,6 +25,8 @@ const NUM_READS: usize = 1_000_000;
 const NUM_SCANS: usize = 500_000;
 const SCAN_LEN: usize = 10;
 const POP_REMOVALS: usize = 500_000;
+const POP_SAMPLE_REMOVALS: usize = 5_000;
+const SLOW_POP_SAMPLE_LIMIT: Duration = Duration::from_secs(1);
 const KEY_SIZE: usize = 24;
 const VALUE_SIZE: usize = 150;
 const RNG_SEED: u64 = 3;
@@ -422,11 +424,16 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
         txn.commit().unwrap();
     }
 
-    let (popped, duration) = {
+    let pop_table_len = {
+        let txn = connection.read_transaction();
+        txn.get_reader().len() as usize
+    };
+    let (timed_pops, applied_pops, duration) = {
         let mut txn = connection.write_transaction();
         let mut inserter = txn.get_inserter();
         let start = Instant::now();
-        let mut popped = 0u64;
+        let mut duration = None;
+        let mut timed_pops = 0u64;
         for i in 0..POP_REMOVALS {
             if i % 2 == 0 {
                 inserter.pop_first()
@@ -435,24 +442,71 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
             }
             .unwrap()
             .unwrap();
-            popped += 1;
+            timed_pops += 1;
+            // Some backends are very inefficient at a BtreeMap-style pop API. If the first
+            // 1% already takes more than a second, estimate the full benchmark from that sample.
+            if i + 1 == POP_SAMPLE_REMOVALS {
+                let sample_duration = start.elapsed();
+                if sample_duration > SLOW_POP_SAMPLE_LIMIT {
+                    duration = Some(
+                        sample_duration
+                            .checked_mul((POP_REMOVALS / POP_SAMPLE_REMOVALS) as u32)
+                            .unwrap_or(Duration::MAX),
+                    );
+                    break;
+                }
+            }
         }
-        let duration = start.elapsed();
+        let duration = duration.unwrap_or_else(|| start.elapsed());
+        if timed_pops != POP_REMOVALS as u64 {
+            let timed_pops = timed_pops as usize;
+            let remaining_front_pops = POP_REMOVALS.div_ceil(2) - timed_pops.div_ceil(2);
+            let remaining_back_pops = POP_REMOVALS / 2 - timed_pops / 2;
+            let remaining_len = pop_table_len - timed_pops;
+            let mut index = 0usize;
+            let removed = inserter
+                .retain(|_, _| {
+                    // Apply the same edge removals as the remaining alternating pop calls,
+                    // without timing a different API as part of the pop benchmark.
+                    let keep = index >= remaining_front_pops
+                        && index < remaining_len - remaining_back_pops;
+                    index += 1;
+                    keep
+                })
+                .unwrap();
+            assert_eq!(index, remaining_len);
+            assert_eq!(removed as usize, remaining_front_pops + remaining_back_pops);
+        }
         drop(inserter);
         txn.commit().unwrap();
-        (popped, duration)
+        let applied_pops = if timed_pops == POP_REMOVALS as u64 {
+            timed_pops
+        } else {
+            POP_REMOVALS as u64
+        };
+        (timed_pops, applied_pops, duration)
     };
-    println!(
-        "{}: Popped {} items in {}ms",
-        T::db_type_name(),
-        popped,
-        duration.as_millis()
-    );
+    if timed_pops == POP_REMOVALS as u64 {
+        println!(
+            "{}: Popped {} items in {}ms",
+            T::db_type_name(),
+            timed_pops,
+            duration.as_millis()
+        );
+    } else {
+        println!(
+            "{}: Popped {} sampled items, estimated {} items in {}ms",
+            T::db_type_name(),
+            timed_pops,
+            POP_REMOVALS,
+            duration.as_millis()
+        );
+    }
     results.push(("pop".to_string(), ResultType::Duration(duration)));
 
     let mut txn = connection.write_transaction();
     let mut inserter = txn.get_inserter();
-    for _ in 0..popped {
+    for _ in 0..applied_pops {
         let (key, value) = random_pair(&mut rng);
         inserter.insert(&key, &value).unwrap();
     }
@@ -601,7 +655,8 @@ pub trait BenchInserter {
     #[allow(clippy::result_unit_err)]
     fn pop_last(&mut self) -> BenchPopResult<'_, Self>;
 
-    // Applies `predicate` to every entry; entries for which it returns `false` are removed.
+    // Applies `predicate` to every entry in sorted key order; entries for which it returns
+    // `false` are removed.
     // Returns the number of entries removed.
     #[allow(clippy::result_unit_err)]
     fn retain<F: FnMut(&[u8], &[u8]) -> bool>(&mut self, predicate: F) -> Result<u64, ()>;
@@ -2234,7 +2289,7 @@ impl BenchInserter for SqliteBenchInserter<'_, '_> {
         {
             let mut stmt = self
                 .txn
-                .prepare("SELECT key, value FROM kv")
+                .prepare("SELECT key, value FROM kv ORDER BY key")
                 .map_err(|_| ())?;
             let mut rows = stmt.query([]).map_err(|_| ())?;
             while let Some(row) = rows.next().map_err(|_| ())? {
