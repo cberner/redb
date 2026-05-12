@@ -4,7 +4,7 @@ build: pre
 
 build_all: pre_all
     cargo build --all --all-targets --all-features
-    cargo doc --all
+    cargo doc --all --no-deps
 
 pre:
     cargo deny --workspace --all-features check licenses
