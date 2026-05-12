@@ -2586,6 +2586,29 @@ fn compact_after_post_commit_page_reuse() {
     db.compact().unwrap();
 }
 
+// A live ephemeral savepoint pins a read-transaction snapshot, so compact()
+// rejects the request with TransactionInProgress until the savepoint is dropped.
+#[test]
+fn compact_blocked_by_ephemeral_savepoint() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    // Create an ephemeral savepoint (requires a clean, non-dirty transaction).
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    // The savepoint is still live, so compact() cannot safely reclaim its pages.
+    assert!(matches!(
+        db.compact().unwrap_err(),
+        CompactionError::TransactionInProgress
+    ));
+
+    drop(savepoint);
+    // After the savepoint is released, compact() succeeds.
+    db.compact().unwrap();
+}
+
 // Regression test for https://github.com/cberner/redb/issues/1165: a packed
 // database used to grow rather than shrink after compact().
 #[test]
