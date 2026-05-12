@@ -379,7 +379,7 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
         let mut txn = connection.write_transaction();
         let mut inserter = txn.get_inserter();
         let mut counter: u64 = 0;
-        let extracted = inserter
+        let mut extract_iter = inserter
             .extract_if(
                 (
                     Bound::Included(&extract_start[..]),
@@ -392,6 +392,11 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
                 },
             )
             .unwrap();
+        let mut extracted = 0u64;
+        while let Some((_key, _value)) = extract_iter.next() {
+            extracted += 1;
+        }
+        drop(extract_iter);
         drop(inserter);
         txn.commit().unwrap();
         extracted
@@ -572,10 +577,17 @@ type BenchPopEntry<'out, T> = (
 
 type BenchPopResult<'out, T> = Result<Option<BenchPopEntry<'out, T>>, ()>;
 
+type BenchExtractIfResult<'out, T, F> =
+    Result<<T as BenchInserter>::ExtractIfIterator<'out, F>, ()>;
+
 pub trait BenchInserter {
     type Output<'out>: AsRef<[u8]> + 'out
     where
         Self: 'out;
+    type ExtractIfIterator<'out, F>: BenchIterator
+    where
+        Self: 'out,
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'out;
 
     #[allow(clippy::result_unit_err)]
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()>;
@@ -596,13 +608,14 @@ pub trait BenchInserter {
 
     // Applies `predicate` to every entry within `range`; entries for which it returns `true`
     // are removed (extracted). Modeled after `std::collections::BTreeMap::extract_if`.
-    // Returns the number of entries removed.
     #[allow(clippy::result_unit_err)]
-    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
-        &mut self,
+    fn extract_if<'a, F>(
+        &'a mut self,
         range: (Bound<&[u8]>, Bound<&[u8]>),
         predicate: F,
-    ) -> Result<u64, ()>;
+    ) -> BenchExtractIfResult<'a, Self, F>
+    where
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'a;
 }
 
 pub trait BenchReadTransaction {
@@ -635,6 +648,29 @@ pub trait BenchIterator {
         Self: 'out;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)>;
+}
+
+pub struct VecBenchIterator<T> {
+    inner: std::vec::IntoIter<(T, T)>,
+}
+
+impl<T> VecBenchIterator<T> {
+    fn new(entries: Vec<(T, T)>) -> Self {
+        Self {
+            inner: entries.into_iter(),
+        }
+    }
+}
+
+impl<T: AsRef<[u8]>> BenchIterator for VecBenchIterator<T> {
+    type Output<'out>
+        = T
+    where
+        Self: 'out;
+
+    fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
+        self.inner.next()
+    }
 }
 
 pub struct RedbBenchDatabase<'a> {
@@ -767,6 +803,24 @@ impl BenchIterator for RedbBenchIterator<'_> {
     }
 }
 
+pub struct RedbExtractIfIterator<'a, F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool> {
+    iter: redb::ExtractIf<'a, &'static [u8], &'static [u8], F>,
+}
+
+impl<F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool> BenchIterator for RedbExtractIfIterator<'_, F> {
+    type Output<'a>
+        = RedbAccessGuard<'a>
+    where
+        Self: 'a;
+
+    fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
+        self.iter.next().map(|item| {
+            let (k, v) = item.unwrap();
+            (RedbAccessGuard::new(k), RedbAccessGuard::new(v))
+        })
+    }
+}
+
 pub struct RedbAccessGuard<'a> {
     inner: AccessGuard<'a, &'static [u8]>,
 }
@@ -812,6 +866,11 @@ impl BenchInserter for RedbBenchInserter<'_> {
         = RedbAccessGuard<'out>
     where
         Self: 'out;
+    type ExtractIfIterator<'out, F>
+        = RedbExtractIfIterator<'out, F>
+    where
+        Self: 'out,
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'out;
 
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.table.insert(key, value).map(|_| ()).map_err(|_| ())
@@ -853,23 +912,21 @@ impl BenchInserter for RedbBenchInserter<'_> {
         Ok(removed)
     }
 
-    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
-        &mut self,
+    fn extract_if<'a, F>(
+        &'a mut self,
         range: (Bound<&[u8]>, Bound<&[u8]>),
-        mut predicate: F,
-    ) -> Result<u64, ()> {
+        predicate: F,
+    ) -> BenchExtractIfResult<'a, Self, F>
+    where
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'a,
+    {
         // redb has a native cursor-based extract_from_if that removes entries lazily as the
         // returned iterator is consumed.
         let iter = self
             .table
-            .extract_from_if::<&[u8], _>(range, |k, v| predicate(k, v))
+            .extract_from_if::<&[u8], F>(range, predicate)
             .map_err(|_| ())?;
-        let mut removed = 0u64;
-        for entry in iter {
-            entry.map_err(|_| ())?;
-            removed += 1;
-        }
-        Ok(removed)
+        Ok(RedbExtractIfIterator { iter })
     }
 }
 
@@ -1039,6 +1096,11 @@ impl BenchInserter for SledBenchInserter<'_> {
         = sled::IVec
     where
         Self: 'out;
+    type ExtractIfIterator<'out, F>
+        = VecBenchIterator<sled::IVec>
+    where
+        Self: 'out,
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'out;
 
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.db.insert(key, value).map(|_| ()).map_err(|_| ())
@@ -1071,25 +1133,27 @@ impl BenchInserter for SledBenchInserter<'_> {
         Ok(count)
     }
 
-    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
-        &mut self,
+    fn extract_if<'a, F>(
+        &'a mut self,
         range: (Bound<&[u8]>, Bound<&[u8]>),
         mut predicate: F,
-    ) -> Result<u64, ()> {
+    ) -> BenchExtractIfResult<'a, Self, F>
+    where
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'a,
+    {
         // sled's range iterator scans only the requested range; no in-place delete API exists,
-        // so we collect the keys to extract and remove them in a second pass.
-        let mut keys: Vec<sled::IVec> = Vec::new();
+        // so we collect the entries to extract and remove them in a second pass.
+        let mut entries: Vec<(sled::IVec, sled::IVec)> = Vec::new();
         for entry in self.db.range::<&[u8], _>(range) {
             let (k, v) = entry.map_err(|_| ())?;
             if predicate(&k, &v) {
-                keys.push(k);
+                entries.push((k, v));
             }
         }
-        let count = keys.len() as u64;
-        for key in keys {
-            self.db.remove(&key).map_err(|_| ())?;
+        for (key, _) in &entries {
+            self.db.remove(key).map_err(|_| ())?;
         }
-        Ok(count)
+        Ok(VecBenchIterator::new(entries))
     }
 }
 
@@ -1250,11 +1314,40 @@ pub struct HeedBenchInserter<'txn, 'db> {
     txn: &'txn mut heed::RwTxn<'db>,
 }
 
+pub struct HeedExtractIfIterator<'txn, F> {
+    iter: heed::RwRange<'txn, heed::types::Bytes, heed::types::Bytes>,
+    predicate: F,
+}
+
+impl<F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool> BenchIterator for HeedExtractIfIterator<'_, F> {
+    type Output<'out>
+        = Vec<u8>
+    where
+        Self: 'out;
+
+    fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
+        loop {
+            let (key, value) = self.iter.next()?.unwrap();
+            if (self.predicate)(key, value) {
+                let entry = (key.to_vec(), value.to_vec());
+                // safety: key and value were copied before deleting the current entry.
+                unsafe { self.iter.del_current().unwrap() };
+                return Some(entry);
+            }
+        }
+    }
+}
+
 impl BenchInserter for HeedBenchInserter<'_, '_> {
     type Output<'out>
         = Vec<u8>
     where
         Self: 'out;
+    type ExtractIfIterator<'out, F>
+        = HeedExtractIfIterator<'out, F>
+    where
+        Self: 'out,
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'out;
 
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.db.put(self.txn, key, value).map_err(|_| ())
@@ -1318,34 +1411,18 @@ impl BenchInserter for HeedBenchInserter<'_, '_> {
         Ok(removed)
     }
 
-    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
-        &mut self,
+    fn extract_if<'a, F>(
+        &'a mut self,
         range: (Bound<&[u8]>, Bound<&[u8]>),
-        mut predicate: F,
-    ) -> Result<u64, ()> {
+        predicate: F,
+    ) -> BenchExtractIfResult<'a, Self, F>
+    where
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'a,
+    {
         // Use heed's cursor-based mutable range iterator with del_current so the benchmark
         // reflects LMDB's best effort.
-        let mut iter = self.db.range_mut(self.txn, &range).map_err(|_| ())?;
-        let mut removed = 0u64;
-        loop {
-            let extract = match iter.next() {
-                Some(res) => {
-                    let (k, v) = res.map_err(|_| ())?;
-                    Some(predicate(k, v))
-                }
-                None => None,
-            };
-            match extract {
-                None => break,
-                Some(false) => {}
-                Some(true) => {
-                    // safety: no references into the db are held across this call.
-                    unsafe { iter.del_current().map_err(|_| ())? };
-                    removed += 1;
-                }
-            }
-        }
-        Ok(removed)
+        let iter = self.db.range_mut(self.txn, &range).map_err(|_| ())?;
+        Ok(HeedExtractIfIterator { iter, predicate })
     }
 }
 
@@ -1533,11 +1610,18 @@ pub struct RocksdbBenchInserter<'a, 'b> {
     counter: u64,
 }
 
+type RocksdbEntry = (Box<[u8]>, Box<[u8]>);
+
 impl BenchInserter for RocksdbBenchInserter<'_, '_> {
     type Output<'out>
         = Box<[u8]>
     where
         Self: 'out;
+    type ExtractIfIterator<'out, F>
+        = VecBenchIterator<Box<[u8]>>
+    where
+        Self: 'out,
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'out;
 
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.counter += 1;
@@ -1607,15 +1691,18 @@ impl BenchInserter for RocksdbBenchInserter<'_, '_> {
         Ok(count)
     }
 
-    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
-        &mut self,
+    fn extract_if<'a, F>(
+        &'a mut self,
         range: (Bound<&[u8]>, Bound<&[u8]>),
         mut predicate: F,
-    ) -> Result<u64, ()> {
+    ) -> BenchExtractIfResult<'a, Self, F>
+    where
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'a,
+    {
         // RocksDB's Transaction API has no cursor-based deletion. Position the iterator at the
         // start bound, walk it until the end bound is exceeded, evaluate the predicate, then
-        // delete the collected keys.
-        let mut keys: Vec<Box<[u8]>> = Vec::new();
+        // delete the collected entries.
+        let mut entries: Vec<RocksdbEntry> = Vec::new();
         {
             let mode = match range.0 {
                 Bound::Included(k) | Bound::Excluded(k) => {
@@ -1641,15 +1728,14 @@ impl BenchInserter for RocksdbBenchInserter<'_, '_> {
                     break;
                 }
                 if predicate(&k, &v) {
-                    keys.push(k);
+                    entries.push((k, v));
                 }
             }
         }
-        let count = keys.len() as u64;
-        for key in &keys {
+        for (key, _) in &entries {
             self.remove(key)?;
         }
-        Ok(count)
+        Ok(VecBenchIterator::new(entries))
     }
 }
 
@@ -1897,6 +1983,11 @@ impl BenchInserter for FjallBenchInserter<'_, '_> {
         = fjall::Slice
     where
         Self: 'out;
+    type ExtractIfIterator<'out, F>
+        = VecBenchIterator<fjall::Slice>
+    where
+        Self: 'out,
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'out;
 
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.txn.insert(self.part, key, value);
@@ -1952,28 +2043,30 @@ impl BenchInserter for FjallBenchInserter<'_, '_> {
         Ok(count)
     }
 
-    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
-        &mut self,
+    fn extract_if<'a, F>(
+        &'a mut self,
         range: (Bound<&[u8]>, Bound<&[u8]>),
         mut predicate: F,
-    ) -> Result<u64, ()> {
+    ) -> BenchExtractIfResult<'a, Self, F>
+    where
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'a,
+    {
         // fjall's range iterator scans only the requested range; collect-then-delete since the
         // transaction API has no in-place cursor delete.
-        let mut keys: Vec<fjall::Slice> = Vec::new();
+        let mut entries: Vec<(fjall::Slice, fjall::Slice)> = Vec::new();
         {
             let iter = self.txn.range::<&[u8], _>(self.part, range);
             for entry in iter {
                 let (k, v) = entry.map_err(|_| ())?;
                 if predicate(&k, &v) {
-                    keys.push(k);
+                    entries.push((k, v));
                 }
             }
         }
-        let count = keys.len() as u64;
-        for key in keys {
-            self.txn.remove(self.part, key);
+        for (key, _) in &entries {
+            self.txn.remove(self.part, key.as_ref());
         }
-        Ok(count)
+        Ok(VecBenchIterator::new(entries))
     }
 }
 
@@ -2105,6 +2198,11 @@ impl BenchInserter for SqliteBenchInserter<'_, '_> {
         = Vec<u8>
     where
         Self: 'out;
+    type ExtractIfIterator<'out, F>
+        = VecBenchIterator<Vec<u8>>
+    where
+        Self: 'out,
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'out;
 
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.txn
@@ -2158,11 +2256,14 @@ impl BenchInserter for SqliteBenchInserter<'_, '_> {
         Ok(count)
     }
 
-    fn extract_if<F: FnMut(&[u8], &[u8]) -> bool>(
-        &mut self,
+    fn extract_if<'a, F>(
+        &'a mut self,
         range: (Bound<&[u8]>, Bound<&[u8]>),
         mut predicate: F,
-    ) -> Result<u64, ()> {
+    ) -> BenchExtractIfResult<'a, Self, F>
+    where
+        F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'a,
+    {
         // Push the range bound down into SQL so SQLite scans only the relevant portion of the
         // index; predicate evaluation still happens in Rust.
         let mut conds: Vec<&str> = Vec::new();
@@ -2196,7 +2297,7 @@ impl BenchInserter for SqliteBenchInserter<'_, '_> {
         }
         sql.push_str(" ORDER BY key");
 
-        let mut to_delete: Vec<Vec<u8>> = Vec::new();
+        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         {
             let mut stmt = self.txn.prepare(&sql).map_err(|_| ())?;
             let mut rows = stmt
@@ -2206,19 +2307,18 @@ impl BenchInserter for SqliteBenchInserter<'_, '_> {
                 let k: Vec<u8> = row.get(0).map_err(|_| ())?;
                 let v: Vec<u8> = row.get(1).map_err(|_| ())?;
                 if predicate(&k, &v) {
-                    to_delete.push(k);
+                    entries.push((k, v));
                 }
             }
         }
-        let count = to_delete.len() as u64;
         let mut delete_stmt = self
             .txn
             .prepare("DELETE FROM kv WHERE key = ?")
             .map_err(|_| ())?;
-        for key in &to_delete {
+        for (key, _) in &entries {
             delete_stmt.execute([key]).map_err(|_| ())?;
         }
-        Ok(count)
+        Ok(VecBenchIterator::new(entries))
     }
 }
 
