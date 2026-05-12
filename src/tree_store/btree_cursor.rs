@@ -9,6 +9,7 @@ use crate::types::{Key, Value};
 use std::cmp::Ordering;
 use std::collections::Bound;
 use std::marker::PhantomData;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -180,11 +181,58 @@ fn entry<K: Key + 'static, V: Value + 'static>(leaf: &Leaf, position: usize) -> 
     EntryGuard::new(leaf.page.clone(), key, value)
 }
 
+fn entry_ref<K: Key + 'static, V: Value + 'static>(
+    leaf: &Leaf,
+    position: usize,
+) -> EntryRef<'_, K, V> {
+    let (key_range, value_range) =
+        LeafAccessor::new(leaf.page.memory(), K::fixed_width(), V::fixed_width())
+            .entry_ranges(position)
+            .expect("cursor entry must exist");
+    EntryRef {
+        page: &leaf.page,
+        key_range,
+        value_range,
+        _key_type: PhantomData,
+        _value_type: PhantomData,
+    }
+}
+
+fn key_data<K: Key + 'static, V: Value + 'static>(leaf: &Leaf, position: usize) -> Vec<u8> {
+    LeafAccessor::new(leaf.page.memory(), K::fixed_width(), V::fixed_width())
+        .entry(position)
+        .expect("cursor entry must exist")
+        .key()
+        .to_vec()
+}
+
 #[derive(Clone)]
 struct Leaf {
     page: PageImpl,
     position: usize,
     len: usize,
+}
+
+pub(super) struct EntryRef<'a, K: Key + 'static, V: Value + 'static> {
+    page: &'a PageImpl,
+    key_range: Range<usize>,
+    value_range: Range<usize>,
+    _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
+}
+
+impl<K: Key + 'static, V: Value + 'static> EntryRef<'_, K, V> {
+    pub(super) fn key_bytes(&self) -> &[u8] {
+        &self.page.memory()[self.key_range.clone()]
+    }
+
+    pub(super) fn key(&self) -> K::SelfType<'_> {
+        K::from_bytes(&self.page.memory()[self.key_range.clone()])
+    }
+
+    pub(super) fn value(&self) -> V::SelfType<'_> {
+        V::from_bytes(&self.page.memory()[self.value_range.clone()])
+    }
 }
 
 #[derive(Clone)]
@@ -406,31 +454,87 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         Ok(())
     }
 
+    pub(super) fn seek_to_bound(&mut self, bound: Bound<&[u8]>) -> Result {
+        self.path.clear();
+        self.leaf = None;
+        let Some(header) = *self.root else {
+            return Ok(());
+        };
+        let root_page = self.page_allocator.get_page(header.root, PageHint::None)?;
+        let page_allocator = self.page_allocator;
+        let mut get_page = |page| page_allocator.get_page(page, PageHint::None);
+        self.leaf = Some(descend_to_bound::<K, V, _>(
+            root_page,
+            bound,
+            &mut self.path,
+            &mut get_page,
+        )?);
+        Ok(())
+    }
+
+    fn prepare_next(&mut self) -> Result<bool> {
+        let page_allocator = self.page_allocator;
+        let mut get_page = |page| page_allocator.get_page(page, PageHint::None);
+        prepare_leaf::<K, V, _>(&mut self.leaf, &mut self.path, true, &mut get_page)
+    }
+
+    fn prepare_prev(&mut self) -> Result<bool> {
+        let page_allocator = self.page_allocator;
+        let mut get_page = |page| page_allocator.get_page(page, PageHint::None);
+        prepare_leaf::<K, V, _>(&mut self.leaf, &mut self.path, false, &mut get_page)
+    }
+
+    pub(super) fn peek_next(&mut self) -> Result<Option<EntryRef<'_, K, V>>> {
+        if !self.prepare_next()? {
+            return Ok(None);
+        }
+        let leaf = self.leaf.as_ref().expect("cursor must be positioned");
+        Ok(Some(entry_ref(leaf, leaf.position)))
+    }
+
+    pub(super) fn next(&mut self) -> Result<bool> {
+        if !self.prepare_next()? {
+            return Ok(false);
+        }
+        self.leaf
+            .as_mut()
+            .expect("cursor must be positioned")
+            .position += 1;
+        Ok(true)
+    }
+
     pub(super) fn remove_next(
         &mut self,
     ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
-        let Some(leaf) = self.leaf.take() else {
-            self.path.clear();
-            return Ok(None);
-        };
-        if leaf.position == leaf.len {
-            self.path.clear();
+        if !self.prepare_next()? {
             return Ok(None);
         }
-        self.remove_leaf_entry(leaf.page, leaf.position)
+        let leaf = self.leaf.take().expect("cursor must be positioned");
+        let position = leaf.position;
+        self.remove_leaf_entry(leaf.page, position)
+    }
+
+    pub(super) fn remove_next_discard(&mut self) -> Result<bool> {
+        if !self.prepare_next()? {
+            return Ok(false);
+        }
+        let leaf = self.leaf.take().expect("cursor must be positioned");
+        let position = leaf.position;
+        let key = key_data::<K, V>(&leaf, position);
+        drop(self.remove_leaf_entry(leaf.page, position)?);
+        // TODO: advance from the edited leaf instead of reseeking from the root.
+        self.seek_to_bound(Bound::Excluded(&key))?;
+        Ok(true)
     }
 
     pub(super) fn remove_prev(
         &mut self,
     ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
-        let Some(leaf) = self.leaf.take() else {
-            self.path.clear();
+        if !self.prepare_prev()? {
             return Ok(None);
-        };
-        let Some(position) = leaf.position.checked_sub(1) else {
-            self.path.clear();
-            return Ok(None);
-        };
+        }
+        let leaf = self.leaf.take().expect("cursor must be positioned");
+        let position = leaf.position - 1;
         self.remove_leaf_entry(leaf.page, position)
     }
 

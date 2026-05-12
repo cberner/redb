@@ -4,6 +4,7 @@ use crate::tree_store::btree_base::{
     LeafAccessor, LeafPageMut, branch_checksum, leaf_checksum,
 };
 use crate::tree_store::btree_cursor::{CursorMut, CursorMutPosition};
+use crate::tree_store::btree_iters::range_is_empty;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
@@ -16,7 +17,7 @@ use crate::{AccessGuard, Result};
 use log::trace;
 use std::borrow::Borrow;
 use std::cmp::max;
-use std::collections::HashMap;
+use std::collections::{Bound, HashMap};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
@@ -426,6 +427,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             key,
             V::as_bytes(value).as_ref().len()
         );
+        // The cursor updates the root incrementally, so pages queued before an
+        // error still need to be recorded for commit.
         let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             &mut self.root,
@@ -703,24 +706,74 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
 
     pub(crate) fn retain_in<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
-        predicate: F,
+        mut predicate: F,
         range: impl RangeBounds<KR> + 'a,
     ) -> Result
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
+        if self.root.is_none() || range_is_empty::<K, KR, _>(&range) {
+            return Ok(());
+        }
+
+        let lower_bound = range
+            .start_bound()
+            .map(|key| K::as_bytes(key.borrow()).as_ref().to_vec());
+        let upper_bound = range
+            .end_bound()
+            .map(|key| K::as_bytes(key.borrow()).as_ref().to_vec());
         let mut freed = vec![];
-        let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
-            &mut self.root,
-            self.page_allocator.clone(),
+        let result = self.retain_in_helper(
+            lower_bound.as_ref().map(Vec::as_slice),
+            upper_bound.as_ref().map(Vec::as_slice),
+            &mut predicate,
             &mut freed,
-            self.allocated_pages.clone(),
         );
-        operation.retain_in_range(&range, predicate)?;
+
+        // The cursor updates the root incrementally, so pages queued before an
+        // error still need to be recorded for commit.
         let mut freed_pages = self.freed_pages.lock().unwrap();
         freed_pages.extend(freed);
 
+        result
+    }
+
+    fn retain_in_helper<F>(
+        &mut self,
+        lower_bound: Bound<&[u8]>,
+        upper_bound: Bound<&[u8]>,
+        predicate: &mut F,
+        freed: &mut Vec<PageNumber>,
+    ) -> Result
+    where
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    {
+        let mut cursor: CursorMut<'_, '_, K, V> = CursorMut::new(
+            &mut self.root,
+            &self.page_allocator,
+            freed,
+            &self.allocated_pages,
+        );
+        cursor.seek_to_bound(lower_bound)?;
+        while let Some(entry) = cursor.peek_next()? {
+            if !Self::before_upper_bound(upper_bound, entry.key_bytes()) {
+                break;
+            }
+            if predicate(entry.key(), entry.value()) {
+                cursor.next()?;
+            } else {
+                cursor.remove_next_discard()?;
+            }
+        }
         Ok(())
+    }
+
+    fn before_upper_bound(bound: Bound<&[u8]>, key: &[u8]) -> bool {
+        match bound {
+            Bound::Included(bound) => K::compare(key, bound).is_le(),
+            Bound::Excluded(bound) => K::compare(key, bound).is_lt(),
+            Bound::Unbounded => true,
+        }
     }
 
     pub(crate) fn len(&self) -> Result<u64> {
