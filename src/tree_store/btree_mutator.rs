@@ -204,57 +204,61 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 // root page keeps its already-valid checksum.
                 return Ok(None);
             }
-            let new_length = length - 1;
-            let new_root = match deletion_result {
-                Subtree(page) => Some(BtreeHeader::new(page, DEFERRED, new_length)),
-                DeletedLeaf => None,
-                PartialLeaf { page, deleted_pair } => {
-                    let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
-                    let mut builder = LeafBuilder::new(
-                        &self.page_allocator,
-                        &self.allocated,
-                        accessor.num_pairs() - 1,
-                        K::fixed_width(),
-                        V::fixed_width(),
-                    );
-                    builder.push_all_except(&accessor, Some(deleted_pair));
-                    let page = builder.build()?;
-                    assert_eq!(new_length, accessor.num_pairs() as u64 - 1);
-                    Some(BtreeHeader::new(
-                        page.get_page_number(),
-                        DEFERRED,
-                        new_length,
-                    ))
-                }
-                PartialBranch { children, keys } => {
-                    let mut builder = BranchBuilder::new(
-                        &self.page_allocator,
-                        &self.allocated,
-                        children.len(),
-                        K::fixed_width(),
-                    );
-                    for (child, child_checksum) in children {
-                        builder.push_child(child, child_checksum);
-                    }
-                    for key in &keys {
-                        builder.push_key(key);
-                    }
-                    let page = builder.build()?;
-                    Some(BtreeHeader::new(
-                        page.get_page_number(),
-                        DEFERRED,
-                        new_length,
-                    ))
-                }
-                DeletedBranch(remaining_child, checksum) => {
-                    Some(BtreeHeader::new(remaining_child, checksum, new_length))
-                }
-            };
-            *self.root = new_root;
+            self.finish_deletion(deletion_result, length - 1)?;
             Ok(found)
         } else {
             Ok(None)
         }
+    }
+
+    fn finish_deletion(&mut self, deletion_result: DeletionResult, new_length: u64) -> Result {
+        let new_root = match deletion_result {
+            Subtree(page) => Some(BtreeHeader::new(page, DEFERRED, new_length)),
+            DeletedLeaf => None,
+            PartialLeaf { page, deleted_pair } => {
+                let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+                let mut builder = LeafBuilder::new(
+                    &self.page_allocator,
+                    &self.allocated,
+                    accessor.num_pairs() - 1,
+                    K::fixed_width(),
+                    V::fixed_width(),
+                );
+                builder.push_all_except(&accessor, Some(deleted_pair));
+                let page = builder.build()?;
+                assert_eq!(new_length, accessor.num_pairs() as u64 - 1);
+                Some(BtreeHeader::new(
+                    page.get_page_number(),
+                    DEFERRED,
+                    new_length,
+                ))
+            }
+            PartialBranch { children, keys } => {
+                let mut builder = BranchBuilder::new(
+                    &self.page_allocator,
+                    &self.allocated,
+                    children.len(),
+                    K::fixed_width(),
+                );
+                for (child, child_checksum) in children {
+                    builder.push_child(child, child_checksum);
+                }
+                for key in &keys {
+                    builder.push_key(key);
+                }
+                let page = builder.build()?;
+                Some(BtreeHeader::new(
+                    page.get_page_number(),
+                    DEFERRED,
+                    new_length,
+                ))
+            }
+            DeletedBranch(remaining_child, checksum) => {
+                Some(BtreeHeader::new(remaining_child, checksum, new_length))
+            }
+        };
+        *self.root = new_root;
+        Ok(())
     }
 
     #[allow(clippy::type_complexity)]
@@ -844,17 +848,18 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         target: DeleteTarget<'_>,
         found_key: &mut Option<AccessGuard<'a, K>>,
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
-        let accessor = BranchAccessor::new(&page, K::fixed_width());
         let original_page_number = page.get_page_number();
-        let (child_index, child_page_number) = match target {
-            DeleteTarget::Key(key) => accessor.child_for_key::<K>(key),
-            DeleteTarget::First => (0, accessor.child_page(0).unwrap()),
-            DeleteTarget::Last => {
-                let idx = accessor.count_children() - 1;
-                (idx, accessor.child_page(idx).unwrap())
+        let (child_index, child_page_number) = {
+            let accessor = BranchAccessor::new(&page, K::fixed_width());
+            match target {
+                DeleteTarget::Key(key) => accessor.child_for_key::<K>(key),
+                DeleteTarget::First => (0, accessor.child_page(0).unwrap()),
+                DeleteTarget::Last => {
+                    let idx = accessor.count_children() - 1;
+                    (idx, accessor.child_page(idx).unwrap())
+                }
             }
         };
-        let child_checksum = accessor.child_checksum(child_index).unwrap();
         let (result, found) = self.delete_helper(
             self.page_allocator
                 .get_page(child_page_number, PageHint::None)?,
@@ -865,13 +870,27 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             // Subtree unchanged; caller identifies this via `found.is_none()`.
             return Ok((Subtree(original_page_number), None));
         }
+        let final_result = self.apply_child_deletion_result(page, child_index, result)?;
+        Ok((final_result, found))
+    }
+
+    fn apply_child_deletion_result(
+        &mut self,
+        page: PageImpl,
+        child_index: usize,
+        result: DeletionResult,
+    ) -> Result<DeletionResult> {
+        let accessor = BranchAccessor::new(&page, K::fixed_width());
+        let original_page_number = page.get_page_number();
+        let child_page_number = accessor.child_page(child_index).unwrap();
+        let child_checksum = accessor.child_checksum(child_index).unwrap();
         if let Subtree(new_child) = result {
             // Skip-path: the child's in-parent entry is already (child_page_number, DEFERRED)
             // and the mutated child kept its page number, so no write to this branch is needed.
             // This preserves the optimization from f8ccc39 without carrying a checksum on
             // `Subtree` (a modified `Subtree` always has checksum DEFERRED).
             if new_child == child_page_number && child_checksum == DEFERRED {
-                return Ok((Subtree(original_page_number), found));
+                return Ok(Subtree(original_page_number));
             }
 
             let result_page = if self.page_allocator.uncommitted(original_page_number)
@@ -895,7 +914,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 self.conditional_free(original_page_number);
                 new_page.get_page_number()
             };
-            return Ok((Subtree(result_page), found));
+            return Ok(Subtree(result_page));
         }
 
         // Child is requesting to be merged with a sibling
@@ -977,7 +996,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     // child_page_number does not need to be freed, because it's a leaf and the
                     // MutAccessGuard will free it
 
-                    return Ok((result, found));
+                    return Ok(result);
                 }
 
                 for i in 0..accessor.count_children() {
@@ -1175,7 +1194,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         drop(page);
         self.conditional_free(original_page_number);
 
-        Ok((final_result, found))
+        Ok(final_result)
     }
 
     // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
