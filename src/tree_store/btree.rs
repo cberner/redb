@@ -9,7 +9,7 @@ use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
     AccessGuardMutInPlace, AllPageNumbersBtreeIter, BtreeCursorRange, BtreeExtractIf,
-    BtreeRangeIter, PageAllocator, PageHint, PageNumber, PageResolver, PageTrackerPolicy,
+    PageAllocator, PageHint, PageNumber, PageResolver, PageTrackerPolicy,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result};
@@ -659,21 +659,11 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
     pub(crate) fn range<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
         &self,
         range: &'_ T,
-    ) -> Result<BtreeRangeIter<K, V>>
-    where
-        K: 'a0,
-    {
-        self.read_tree()?.range(range)
-    }
-
-    pub(crate) fn cursor_range<'a0, T: RangeBounds<KR> + 'a0, KR: Borrow<K::SelfType<'a0>> + 'a0>(
-        &self,
-        range: &'_ T,
     ) -> Result<BtreeCursorRange<K, V>>
     where
         K: 'a0,
     {
-        self.read_tree()?.cursor_range(range)
+        self.read_tree()?.range(range)
     }
 
     pub(crate) fn extract_from_if<
@@ -1076,18 +1066,6 @@ impl<K: Key, V: Value> Btree<K, V> {
     }
 
     pub(crate) fn range<'a0, T: RangeBounds<KR>, KR: Borrow<K::SelfType<'a0>>>(
-        &self,
-        range: &'_ T,
-    ) -> Result<BtreeRangeIter<K, V>> {
-        BtreeRangeIter::new(
-            range,
-            self.root.map(|x| x.root),
-            self.mem.clone(),
-            self.hint,
-        )
-    }
-
-    pub(crate) fn cursor_range<'a0, T: RangeBounds<KR>, KR: Borrow<K::SelfType<'a0>>>(
         &self,
         range: &'_ T,
     ) -> Result<BtreeCursorRange<K, V>> {

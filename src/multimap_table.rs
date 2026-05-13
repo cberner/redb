@@ -3,8 +3,8 @@ use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
 use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, BRANCH, Btree, BtreeHeader, BtreeMut, BtreeRangeIter,
-    DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
+    AllPageNumbersBtreeIter, BRANCH, Btree, BtreeCursorRange, BtreeHeader, BtreeMut,
+    BtreeRangeIter, DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
     MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageNumber, PageResolver, PageTrackerPolicy,
     RawBtree, RawLeafBuilder, multimap_btree_stats,
 };
@@ -316,7 +316,7 @@ impl<V: Key + 'static> Drop for MultimapValue<'_, V> {
 }
 
 pub struct MultimapRange<'a, K: Key + 'static, V: Key + 'static> {
-    inner: BtreeRangeIter<K, &'static DynamicCollection<V>>,
+    inner: BtreeCursorRange<K, &'static DynamicCollection<V>>,
     mem: PageResolver,
     transaction_guard: Arc<TransactionGuard>,
     _key_type: PhantomData<K>,
@@ -326,7 +326,7 @@ pub struct MultimapRange<'a, K: Key + 'static, V: Key + 'static> {
 
 impl<K: Key + 'static, V: Key + 'static> MultimapRange<'_, K, V> {
     fn new(
-        inner: BtreeRangeIter<K, &'static DynamicCollection<V>>,
+        inner: BtreeCursorRange<K, &'static DynamicCollection<V>>,
         guard: Arc<TransactionGuard>,
         mem: PageResolver,
     ) -> Self {

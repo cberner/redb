@@ -327,7 +327,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'_, K, 
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
         self.tree
-            .cursor_range(&range)
+            .range(&range)
             .map(|x| Range::new(x, self.transaction.transaction_guard()))
     }
 
@@ -554,7 +554,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         KR: Borrow<K::SelfType<'a>>,
     {
         self.tree
-            .cursor_range(&range)
+            .range(&range)
             .map(|x| Range::new(x, self.transaction_guard.clone()))
     }
 }
@@ -588,7 +588,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
         self.tree
-            .cursor_range(&range)
+            .range(&range)
             .map(|x| Range::new(x, self.transaction_guard.clone()))
     }
 
