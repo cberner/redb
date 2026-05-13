@@ -103,18 +103,11 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
-      - name: Compile (default features)
-        run: cargo check --all --all-targets
-
-      - name: Compile (all features)
-        run: cargo check --all --all-targets --all-features
-
-      - name: Compile (no features)
-        run: cargo check --all --all-targets --no-default-features
-
       - name: Compile (`wasm32-unknown-unknown`)
         if: matrix.os == 'ubuntu-latest'
         run: |
+            # Needed for 'cargo pkgid' to run
+            cargo generate-lockfile
             rustup target add wasm32-unknown-unknown
             # Not possible to set default members for specific a target:
             # https://github.com/rust-lang/cargo/issues/6179
@@ -124,7 +117,7 @@ jobs:
             $command --no-default-features
             rustup target remove wasm32-unknown-unknown
 
-      - name: Clippy
+      - name: Clippy (default features)
         run: cargo clippy --all --all-targets -- -Dwarnings
 
       - name: Fuzzer
